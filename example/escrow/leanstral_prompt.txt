@@ -1,0 +1,151 @@
+I need to formally verify a Solana escrow program in Lean 4.
+
+## Source Code
+
+The escrow program implements a trustless token exchange mechanism with three instructions:
+
+```rust
+// Initialize an escrow account
+pub fn initialize(
+    ctx: Context<Initialize>,
+    amount: u64,              // Amount initializer deposits
+    taker_amount: u64,        // Amount taker must provide
+) -> Result<()> {
+    let escrow = &mut ctx.accounts.escrow;
+
+    escrow.initializer = ctx.accounts.initializer.key();
+    escrow.initializer_token_account = ctx.accounts.initializer_deposit_token_account.key();
+    escrow.initializer_amount = amount;
+    escrow.taker_amount = taker_amount;
+    escrow.escrow_token_account = ctx.accounts.escrow_token_account.key();
+    escrow.bump = ctx.bumps.escrow;
+
+    // Transfer tokens from initializer to escrow
+    token::transfer(cpi_ctx, amount)?;
+
+    Ok(())
+}
+
+// Execute the escrow exchange
+pub fn exchange(ctx: Context<Exchange>) -> Result<()> {
+    let escrow = &ctx.accounts.escrow;
+
+    // Transfer taker's tokens to initializer
+    token::transfer(cpi_ctx_taker, escrow.taker_amount)?;
+
+    // Transfer initializer's tokens from escrow to taker
+    let seeds = &[
+        b"escrow".as_ref(),
+        escrow.initializer.as_ref(),
+        &[escrow.bump],
+    ];
+    let signer = &[&seeds[..]];
+    token::transfer(cpi_ctx_escrow, escrow.initializer_amount)?;
+
+    // Escrow account is closed automatically after this instruction
+
+    Ok(())
+}
+
+// Cancel the escrow and return tokens to initializer
+pub fn cancel(ctx: Context<Cancel>) -> Result<()> {
+    let escrow = &ctx.accounts.escrow;
+
+    // Transfer tokens back from escrow to initializer
+    let seeds = &[
+        b"escrow".as_ref(),
+        escrow.initializer.as_ref(),
+        &[escrow.bump],
+    ];
+    let signer = &[&seeds[..]];
+    token::transfer(cpi_ctx, escrow.initializer_amount)?;
+
+    // Escrow account is closed automatically
+
+    Ok(())
+}
+```
+
+Account constraints ensure:
+- `Initialize`: creates escrow PDA and escrow_token_account PDA
+- `Exchange`: requires correct escrow PDA, closes escrow account
+- `Cancel`: requires signer to be initializer, closes escrow account
+
+## Properties to Prove
+
+Please formalize and prove the following critical properties:
+
+### 1. Token Conservation
+**Property**: The total number of tokens across all accounts is constant after each instruction.
+
+- `initialize`: tokens(initializer_account) + tokens(escrow_account) + tokens(other_accounts) = constant
+- `exchange`: tokens(initializer) + tokens(taker) + tokens(escrow) = constant before and after
+- `cancel`: tokens(initializer_account) + tokens(escrow_account) = constant
+
+### 2. Access Control
+**Property**: Only the initializer can successfully call `cancel`.
+
+Formally: ∀ escrow, signer. cancel(escrow, signer) succeeds → signer = escrow.initializer
+
+### 3. Exchange Correctness
+**Property**: After a successful exchange:
+- taker receives exactly `escrow.initializer_amount` tokens
+- initializer receives exactly `escrow.taker_amount` tokens
+- No other token balances change
+
+Formally:
+```
+balance_taker_after = balance_taker_before + escrow.initializer_amount
+balance_initializer_after = balance_initializer_before + escrow.taker_amount
+balance_escrow_after = 0
+```
+
+### 4. State Machine Safety
+**Property**: An escrow can only be used once.
+
+After `exchange` or `cancel`, the escrow account is closed and cannot be reused.
+
+### 5. Arithmetic Safety
+**Property**: No arithmetic overflow or underflow can occur.
+
+For all valid inputs:
+- `amount <= u64::MAX`
+- `taker_amount <= u64::MAX`
+- All token transfer amounts are valid
+
+## Context
+
+**Solana Account Model**:
+- Accounts store data and SOL balance
+- PDAs (Program Derived Addresses) are deterministic addresses owned by programs
+- Token transfers are CPIs (Cross-Program Invocations) to the SPL Token Program
+- Accounts can be closed, recovering their rent
+
+**SPL Token Semantics**:
+- `token::transfer(from, to, authority, amount)` atomically moves `amount` tokens
+- Transfer fails if `from` has insufficient balance
+- Authority must sign the transfer (or be a PDA with correct seeds)
+
+**Escrow Mechanism**:
+- Initializer deposits tokens into escrow_token_account (a PDA)
+- Escrow account stores the terms (amounts, participants)
+- Taker can exchange by providing their tokens
+- Initializer can cancel before exchange
+- After exchange/cancel, escrow account is closed
+
+## Task
+
+Please:
+
+1. **Define Lean 4 types** that model:
+   - Account state (token balances, authorities)
+   - Escrow state
+   - Program instructions
+
+2. **State each theorem formally** in Lean 4 syntax
+
+3. **Prove each theorem** using appropriate tactics (induction, case analysis, simplification, omega for arithmetic)
+
+4. **Explain the proof strategy** for each property
+
+Focus on semantic correctness rather than low-level Rust details. The model should capture the essential properties of the escrow mechanism.
