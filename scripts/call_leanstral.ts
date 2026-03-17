@@ -21,13 +21,15 @@
  *
  * Output:
  *     Creates output-dir/ with:
- *         completion_0.lean      — first completion
- *         completion_1.lean      — second completion
- *         ...
- *         completion_N_raw.txt   — raw response with explanations
  *         best.lean              — best completion (fewest sorry markers)
  *         metadata.json          — timing, token usage, model info per completion
  *         prompt.txt             — the input prompt
+ *         attempts/              — all completion attempts
+ *             completion_0.lean      — first completion
+ *             completion_0_raw.txt   — raw response with explanations
+ *             completion_1.lean      — second completion
+ *             completion_1_raw.txt   — raw response with explanations
+ *             ...
  */
 
 import { parseArgs } from "util";
@@ -261,6 +263,8 @@ Environment:
 
   // Create output directory
   await mkdir(outputDir, { recursive: true });
+  const attemptsDir = join(outputDir, "attempts");
+  await mkdir(attemptsDir, { recursive: true });
 
   // Save the prompt for reference
   await writeFile(join(outputDir, "prompt.txt"), prompt, "utf-8");
@@ -300,13 +304,13 @@ Environment:
 
     // Save the raw completion (full response including explanations)
     await writeFile(
-      join(outputDir, `completion_${i}_raw.txt`),
+      join(attemptsDir, `completion_${i}_raw.txt`),
       content,
       "utf-8"
     );
     // Save just the extracted Lean code
     await writeFile(
-      join(outputDir, `completion_${i}.lean`),
+      join(attemptsDir, `completion_${i}.lean`),
       leanCode,
       "utf-8"
     );
@@ -341,14 +345,14 @@ Environment:
 
   // Copy best completion to a convenient location
   const bestLean = await readFile(
-    join(outputDir, `completion_${bestIdx}.lean`),
+    join(attemptsDir, `completion_${bestIdx}.lean`),
     "utf-8"
   );
   await writeFile(join(outputDir, "best.lean"), bestLean, "utf-8");
 
   console.error(`\nResults saved to ${outputDir}/`);
   console.error(
-    `Best completion: completion_${bestIdx}.lean (${bestSorryCount} sorry)`
+    `Best completion: attempts/completion_${bestIdx}.lean (${bestSorryCount} sorry)`
   );
 
   // Print the best completion to stdout for easy piping

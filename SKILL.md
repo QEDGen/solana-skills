@@ -81,6 +81,21 @@ bun /path/to/skill/scripts/call_leanstral.ts \
   --temperature 0.6
 ```
 
+**Output structure**:
+```
+output_dir/
+├── best.lean           # The best proof (fewest sorry markers)
+├── metadata.json       # Timing, token usage, and rankings
+├── prompt.txt          # The original prompt
+└── attempts/           # All completion attempts
+    ├── completion_0.lean
+    ├── completion_0_raw.txt
+    ├── completion_1.lean
+    └── ...
+```
+
+Use `best.lean` for your work. The `attempts/` directory contains all completion attempts for debugging or comparison.
+
 The script requires `MISTRAL_API_KEY` as an environment variable. If it's not set, tell the user to:
 1. Go to https://console.mistral.ai
 2. Create an API key (Leanstral is free/near-free during the labs period)

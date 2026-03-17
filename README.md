@@ -76,6 +76,25 @@ Prove that this Rust function cannot overflow for any valid input.
 Convert this Solana program into a Lean 4 model and prove that all state transitions are valid.
 ```
 
+## Output Structure
+
+The script generates an organized output directory:
+
+```
+output_dir/
+├── best.lean           # The best proof (fewest sorry markers)
+├── metadata.json       # Timing, token usage, and rankings
+├── prompt.txt          # The original verification prompt
+└── attempts/           # All completion attempts
+    ├── completion_0.lean
+    ├── completion_0_raw.txt
+    ├── completion_1.lean
+    ├── completion_1_raw.txt
+    └── ...
+```
+
+Use `best.lean` as your starting point. The `attempts/` directory contains all completions for debugging or comparison.
+
 ## What's Included
 
 - **SKILL.md** - Complete instructions for AI agents
@@ -83,6 +102,11 @@ Convert this Solana program into a Lean 4 model and prove that all state transit
   - Supports pass@N (multiple completions for higher success rates)
   - Automatic retry with exponential backoff
   - Extracts and ranks proofs by completeness
+  - Clean output organization with best proof highlighted
+- **example/escrow/** - Working Solana escrow program with formal verification
+  - Full Anchor 0.32.1 implementation with passing tests
+  - Lean 4 proofs for 5 critical security properties
+  - Example verification prompt and proof workflow
 
 ## Supported Agents
 
