@@ -67,14 +67,14 @@ For Solana-specific work, include context about the account model, CPIs, PDAs, e
 
 ### Step 3: Call the Leanstral API
 
-Run the script at `scripts/call_leanstral.py`. It handles:
+Run the script at `scripts/call_leanstral.ts`. It handles:
 
 - Sending the prompt to `labs-leanstral-2603` via the Mistral chat completions API
 - Running **pass@4** by default (4 independent completions) for higher proof success rates
 - Returning all completions so you can pick the best one
 
 ```bash
-python3 /path/to/skill/scripts/call_leanstral.py \
+bun /path/to/skill/scripts/call_leanstral.ts \
   --prompt-file /tmp/leanstral_prompt.txt \
   --output-dir /tmp/leanstral_output \
   --passes 4 \
@@ -137,4 +137,4 @@ Example: For a token vault program, you might prove:
 - **`MISTRAL_API_KEY` not set**: Instruct user to get a key from console.mistral.ai
 - **Rate limiting**: The labs endpoint may have rate limits. If you get 429 errors, wait and retry. The script has built-in exponential backoff.
 - **Empty or nonsensical output**: Try lowering temperature to 0.3, or rephrasing the prompt with more explicit Lean 4 context.
-- **Timeout**: Leanstral can take 30-90 seconds for complex proofs. The script has a 120-second timeout per completion.
+- **Timeout**: Leanstral can take 30-90 seconds for complex proofs. The script has a 180-second timeout per completion.

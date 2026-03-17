@@ -31,7 +31,7 @@ npx skills add leanstral-solana-skill
 
 1. Clone or download this repository
 2. Copy `SKILL.md` to your agent's skills directory
-3. Install Python 3.6+ (required for the API script)
+3. Install Bun 1.0+ (required for the API script)
 
 ## Setup
 
@@ -49,7 +49,7 @@ When you ask your AI coding agent to verify code or generate proofs, the skill:
 
 1. **Understands your verification goal** - What property needs to be proven?
 2. **Prepares a prompt** - Structures your code and specification for Leanstral
-3. **Calls the API** - Uses `scripts/call_leanstral.py` to generate proofs (pass@4 by default)
+3. **Calls the API** - Uses `scripts/call_leanstral.ts` to generate proofs (pass@4 by default)
 4. **Evaluates results** - Presents the best proof with explanations
 5. **Iterates if needed** - Fills in `sorry` markers, refines specifications, or adds helper lemmas
 
@@ -79,7 +79,7 @@ Convert this Solana program into a Lean 4 model and prove that all state transit
 ## What's Included
 
 - **SKILL.md** - Complete instructions for AI agents
-- **scripts/call_leanstral.py** - Python script for calling the Leanstral API
+- **scripts/call_leanstral.ts** - TypeScript/Bun script for calling the Leanstral API
   - Supports pass@N (multiple completions for higher success rates)
   - Automatic retry with exponential backoff
   - Extracts and ranks proofs by completeness
@@ -103,7 +103,7 @@ This skill works with any agent that implements the [Agent Skills spec](https://
 
 ## Requirements
 
-- Python 3.6 or higher (for the API script)
+- Bun 1.0 or higher (for the API script)
 - `MISTRAL_API_KEY` environment variable
 - Internet connection for API calls
 

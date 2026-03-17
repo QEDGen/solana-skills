@@ -19,7 +19,8 @@
     "scripts/"
   ],
   "scripts": {
-    "test": "python3 scripts/call_leanstral.py --help"
+    "test": "bun scripts/call_leanstral.ts --help",
+    "leanstral": "bun scripts/call_leanstral.ts"
   },
   "repository": {
     "type": "git",
@@ -29,7 +30,7 @@
   "license": "MIT",
   "homepage": "https://github.com/abishekk92/leanstral-solana-skill#readme",
   "engines": {
-    "python": ">=3.6"
+    "bun": ">=1.0.0"
   },
   "agentSkills": {
     "skills": [
