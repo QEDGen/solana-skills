@@ -1,0 +1,39 @@
+{
+  "name": "leanstral-solana-skill",
+  "version": "1.0.0",
+  "description": "Agent skill for generating formal Lean 4 proofs using Mistral's Leanstral model - perfect for verifying Solana programs, Rust code, and smart contracts",
+  "keywords": [
+    "agent-skill",
+    "lean4",
+    "formal-verification",
+    "leanstral",
+    "solana",
+    "rust",
+    "smart-contracts",
+    "proof-assistant",
+    "mistral"
+  ],
+  "main": "SKILL.md",
+  "files": [
+    "SKILL.md",
+    "scripts/"
+  ],
+  "scripts": {
+    "test": "python3 scripts/call_leanstral.py --help"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abishekk92/leanstral-solana-skill.git"
+  },
+  "author": "abishekk92",
+  "license": "MIT",
+  "homepage": "https://github.com/abishekk92/leanstral-solana-skill#readme",
+  "engines": {
+    "python": ">=3.6"
+  },
+  "agentSkills": {
+    "skills": [
+      "SKILL.md"
+    ]
+  }
+}
