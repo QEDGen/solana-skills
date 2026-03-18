@@ -1,0 +1,12 @@
+[package]
+name = "anchor-ir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-syn = "0.32.1"
+quote = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "1", features = ["full", "extra-traits", "parsing"] }

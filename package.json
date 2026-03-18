@@ -16,11 +16,14 @@
   "main": "SKILL.md",
   "files": [
     "SKILL.md",
-    "scripts/"
+    "scripts/",
+    "tools/"
   ],
   "scripts": {
     "test": "bun scripts/call_leanstral.ts --help",
-    "leanstral": "bun scripts/call_leanstral.ts"
+    "leanstral": "bun scripts/call_leanstral.ts",
+    "analyze-anchor": "cargo run --manifest-path tools/anchor-ir/Cargo.toml --",
+    "verify-solana": "bun scripts/verify_solana.ts"
   },
   "repository": {
     "type": "git",

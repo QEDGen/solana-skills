@@ -45,3 +45,8 @@ yarn.lock
 **/lean_proofs/*_raw.txt
 **/lean_proofs/metadata.json
 **/lean_proofs/prompt.txt
+**/.leanstral/
+
+# Local agent/editor state
+.agents/
+.claude/

@@ -30,8 +30,10 @@ npx skills add leanstral-solana-skill
 ### Manual Installation
 
 1. Clone or download this repository
-2. Copy `SKILL.md` to your agent's skills directory
-3. Install Bun 1.0+ (required for the API script)
+2. Install the entire skill directory, not just `SKILL.md`
+3. Ensure `scripts/`, `scripts/templates/`, and `tools/anchor-ir/` stay adjacent to `SKILL.md`
+4. Install Bun 1.0+ (required for the API script)
+5. Install a Rust toolchain as well if you want the analyzer-first Solana workflow
 
 ## Setup
 
@@ -47,11 +49,55 @@ That's it! The Leanstral API endpoint is currently free during Mistral's feedbac
 
 When you ask your AI coding agent to verify code or generate proofs, the skill:
 
-1. **Understands your verification goal** - What property needs to be proven?
-2. **Prepares a prompt** - Structures your code and specification for Leanstral
-3. **Calls the API** - Uses `scripts/call_leanstral.ts` to generate proofs (pass@4 by default)
-4. **Evaluates results** - Presents the best proof with explanations
-5. **Iterates if needed** - Fills in `sorry` markers, refines specifications, or adds helper lemmas
+1. **Analyzes the Solana program** - Extracts instructions, Anchor account constraints, PDA seeds, transfer patterns, and optional test signals
+2. **Ranks candidate properties** - Access control, conservation, state-machine safety, arithmetic bounds, and related invariants
+3. **Prepares one prompt per property** - Keeps each Lean task small and compilable
+4. **Calls the API** - Uses `scripts/call_leanstral.ts` to generate proofs (pass@N supported)
+5. **Evaluates and validates results** - Prefers locally-checkable output when `--validate` is enabled
+
+## Solana Analysis
+
+The repository now includes a Rust analyzer at `tools/anchor-ir/` that treats Anchor IDL as the first-class structural input and uses `anchor-syn` source analysis as an enrichment layer.
+
+Example:
+
+```bash
+npm run analyze-anchor -- \
+  --idl path/to/target/idl/my_program.json \
+  --input example/escrow/programs/escrow/src/lib.rs \
+  --tests example/escrow/tests/escrow.ts \
+  --output-dir /tmp/anchor-ir-escrow
+```
+
+This emits:
+- `analysis.json` with extracted instructions, accounts, constraints, test signals, and ranked property candidates
+- one prompt template per candidate property
+
+To run the full analyzer-to-Leanstral flow in one command:
+
+```bash
+npm run verify-solana -- \
+  --idl path/to/target/idl/my_program.json \
+  --input path/to/programs/my_program/src/lib.rs \
+  --tests path/to/tests/my_program.ts \
+  --analysis-dir /tmp/anchor-ir-escrow \
+  --output-dir /tmp/leanstral-proofs \
+  --top-k 3 \
+  --repair-rounds 1 \
+  --validate
+```
+
+Use `--analysis-only` when you want ranked property candidates and prompt files without calling Leanstral yet.
+Use `--repair-rounds` with `--validate` to feed Lean build errors back into a bounded retry loop when the first proof artifact does not compile.
+
+Recommended precedence:
+- IDL for instructions, args, signer/writable flags, and PDA seed metadata
+- Rust source for CPI semantics, transfer effects, close behavior, and custom checks
+- tests for property ranking hints
+
+## Prompting Guidance
+
+For best results, ask for one property at a time and constrain the model to return a single compilable Lean module. A reusable template is available at [scripts/templates/PROMPT_TEMPLATE.md](/Users/abishek/code/leanstral-solana-skill/scripts/templates/PROMPT_TEMPLATE.md).
 
 ## Examples
 
@@ -78,7 +124,7 @@ Convert this Solana program into a Lean 4 model and prove that all state transit
 
 ## Output Structure
 
-The script generates a **complete Lean 4 project** ready for verification:
+The script generates a Lean 4 project scaffold ready for local verification:
 
 ```
 output_dir/
@@ -101,24 +147,38 @@ output_dir/
 **To verify the proofs:**
 ```bash
 cd output_dir
-lake update  # Download dependencies (Mathlib)
 lake build   # Build and verify - if this succeeds, the proof is valid!
 ```
 
-No `sorry` markers = complete formal verification!
+For stricter selection, run the generator with `--validate` so it prefers a completion that passes `lake build Best` locally.
+
+Zero `sorry` markers do not guarantee that the file elaborates. Lean compilation is the real check.
+
+Validation now uses Lake's built-in cache path:
+- `lake --try-cache build Best` to fetch supported package artifacts
+- `LAKE_ARTIFACT_CACHE=true` to enable Lake's shared local artifact cache across workspaces
+- a persistent validation workspace, so repeated runs reuse the same `.lake/packages` checkout instead of recloning dependencies for every generated proof
+
+You can override the persistent workspace location with:
+
+```bash
+export LEANSTRAL_VALIDATION_WORKSPACE=/path/to/leanstral-validation-workspace
+```
 
 ## What's Included
 
 - **SKILL.md** - Complete instructions for AI agents
+- **tools/anchor-ir/** - Rust analyzer that parses Anchor programs into a reusable IR using `anchor-syn`
 - **scripts/call_leanstral.ts** - TypeScript/Bun script for calling the Leanstral API
   - Supports pass@N (multiple completions for higher success rates)
   - Automatic retry with exponential backoff
   - Extracts and ranks proofs by completeness
+  - Optional `--validate` mode that runs `lake build Best` and prefers a passing completion
   - Clean output organization with best proof highlighted
-- **example/escrow/** - Working Solana escrow program with formal verification
+- **example/escrow/** - Solana escrow program plus generated Lean proof artifacts
   - Full Anchor 0.32.1 implementation with passing tests
-  - Lean 4 proofs for 5 critical security properties
   - Example verification prompt and proof workflow
+  - Generated Lean output that may require repair unless revalidated
 
 ## Supported Agents
 
@@ -142,6 +202,14 @@ This skill works with any agent that implements the [Agent Skills spec](https://
 - Bun 1.0 or higher (for the API script)
 - `MISTRAL_API_KEY` environment variable
 - Internet connection for API calls
+- Lean 4 + Lake if you want to validate generated proofs locally
+
+## Notes on Lean Builds
+
+- The first `mathlib` build is expensive. On a typical laptop, expect roughly 15 to 45 minutes.
+- Later builds are much faster because Lake reuses compiled artifacts.
+- The validator reuses a persistent Lean workspace plus Lake's remote/local caches, so repeated proof checks should not reclone or recompile Mathlib from scratch once the workspace is warm.
+- If `lake build` fails with a corrupt `mathlib` checkout such as `could not resolve 'HEAD' to a commit`, remove `.lake/packages/mathlib` and rerun the build.
 
 ## License
 

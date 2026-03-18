@@ -20,9 +20,54 @@ The API endpoint is currently free during Mistral's feedback period.
 
 ## Workflow
 
-### Step 1: Understand what the user wants to prove
+### Step 1: Analyze the Solana project and infer candidate properties
 
-Before calling Leanstral, figure out what the user actually needs verified. This is the most important step — Leanstral is a proof engine, not a mind reader. You need to translate the user's intent into a clear formal specification.
+Before calling Leanstral, inspect the Solana project and infer what is worth proving. Leanstral is a proof engine, not a project analyzer. The skill should derive candidate properties from the program and tests before it asks for Lean code.
+
+Use the Rust analyzer at `tools/anchor-ir/` when working with Anchor programs.
+
+For Anchor projects, treat the IDL as the first-class structural source of truth and use Rust source as an enrichment layer for semantics that the IDL does not preserve.
+
+```bash
+npm run analyze-anchor -- \
+  --idl path/to/target/idl/my_program.json \
+  --input path/to/programs/my_program/src/lib.rs \
+  --tests path/to/tests/my_program.ts \
+  --output-dir /tmp/anchor-ir
+```
+
+This emits:
+- `analysis.json` with instructions, account constraints, PDA seeds, transfer patterns, and test-derived hints
+- one prompt template per candidate property
+
+When you want the full pipeline, run:
+
+```bash
+npm run verify-solana -- \
+  --idl path/to/target/idl/my_program.json \
+  --input path/to/programs/my_program/src/lib.rs \
+  --tests path/to/tests/my_program.ts \
+  --analysis-dir /tmp/anchor-ir \
+  --output-dir /tmp/leanstral-proofs \
+  --top-k 3 \
+  --repair-rounds 1 \
+  --validate
+```
+
+Use `--analysis-only` to stop after `analysis.json` and prompt generation. This is useful when you want to inspect the inferred properties before spending API calls.
+Use `--repair-rounds` with `--validate` when you want the workflow to retry with concrete Lean compiler errors instead of accepting the first non-compiling output.
+
+Evidence precedence:
+- `idl`: instruction/account graph, signer flags, writable flags, PDA seed metadata, type layout
+- `rust`: CPI behavior, transfer direction, close semantics, arithmetic and custom checks
+- `tests`: likely intended invariants and failure cases
+
+Prioritize:
+- access control from `Signer`, `has_one`, owner/address checks, and authority use
+- conservation from token/system transfers
+- state-machine properties from `close =`, terminal flags, and one-shot flows
+- arithmetic safety from fixed-width integer parameters and arithmetic-heavy code
+- account isolation from owner / seed / address constraints
 
 Common patterns for Solana/Rust programs:
 
@@ -45,7 +90,14 @@ Construct a clear prompt that includes:
 Structure the prompt like this:
 
 ```
-I need to formally verify the following program in Lean 4.
+I need a single Lean 4 module that compiles under Lean 4.15 + Mathlib 4.15.
+
+Return Lean code only.
+Do not duplicate theorem declarations.
+Do not leave theorem bodies empty after `:= by`.
+Do not invent helper APIs or namespaces unless you define them in the file.
+If a proof is incomplete, use `sorry` inside the proof body.
+Prefer a smaller explicit model that compiles over a larger broken one.
 
 ## Source Code
 <paste the relevant code here>
@@ -56,14 +108,19 @@ I need to formally verify the following program in Lean 4.
 ## Context
 <any domain-specific context Leanstral needs>
 
-Please:
-1. Define the relevant types and functions in Lean 4 that model this program
-2. State the theorem formally
-3. Prove the theorem
-4. Explain the proof strategy
+## Output Requirements
+1. Define the relevant types and executable state transition functions first
+2. Then state the theorem formally
+3. Then prove it
+4. Use only Lean/Mathlib names that exist in Lean 4.15 / Mathlib 4.15
+5. If several properties are hard, prove the easiest sound subset first
 ```
 
 For Solana-specific work, include context about the account model, CPIs, PDAs, etc. Leanstral was trained on realistic repositories and handles domain modeling well.
+
+Important: prefer one property at a time for nontrivial programs. Asking for 5 large theorems plus a new state model in one pass increases the chance of duplicate declarations, invented APIs, and non-compiling files.
+
+Prefer prompts generated from the analyzer output over ad hoc prose. The analyzer already narrows the proof surface and carries forward concrete evidence from the program/tests.
 
 ### Step 3: Call the Leanstral API
 
@@ -81,7 +138,7 @@ bun /path/to/skill/scripts/call_leanstral.ts \
   --temperature 0.6
 ```
 
-**Output structure** (complete Lean 4 project):
+**Output structure** (Lean 4 project scaffold):
 ```
 output_dir/
 ├── Best.lean           # The best proof (fewest sorry markers)
@@ -99,14 +156,16 @@ output_dir/
     └── ...
 ```
 
-**The output is a complete, buildable Lean 4 project.** Anyone can verify the proofs by running:
+The output is a Lean 4 project scaffold that can be checked locally. Anyone can verify the proofs by running:
 ```bash
 cd output_dir
-lake update  # Download Mathlib dependencies
 lake build   # Build and verify proofs
 ```
 
-If `lake build` succeeds with no errors, the proof is formally verified!
+If `lake build` succeeds with no errors, the proof is formally verified.
+
+If you want the script itself to prefer locally-checkable output, run it with `--validate`. In that mode it tries candidate completions with `lake build Best` and prefers the first successful build over a lower `sorry` count.
+The validator uses Lake's own cache mechanisms rather than copying dependency trees around: it runs `lake --try-cache build Best`, enables the shared local artifact cache with `LAKE_ARTIFACT_CACHE=true`, and reuses a persistent validation workspace so dependencies are not recloned for every attempt. You can override that workspace with `LEANSTRAL_VALIDATION_WORKSPACE`.
 
 The script requires `MISTRAL_API_KEY` as an environment variable. If it's not set, tell the user to:
 1. Go to https://console.mistral.ai
@@ -128,10 +187,11 @@ Leanstral returns Lean 4 code. For each completion:
 2. **Check the theorem statement** — does it actually capture the property the user wanted?
 3. **Review the proof strategy** — is the proof approach sound? (induction, case analysis, simplification, etc.)
 4. **Look for `sorry`** — any `sorry` in the proof means that part is unfinished. This is a known pattern with proof models; the structure may be correct but some lemmas need filling in.
+5. **Prefer actual builds over heuristics** — a proof with zero `sorry` can still fail to elaborate. If Lean is available, run `lake build Best` or use the script's `--validate` flag.
 
 Present the best completion to the user. If multiple completions succeed, pick the one with the clearest structure and fewest `sorry` markers.
 
-If the user has Lean 4 installed locally, they can verify the proof by saving it as a `.lean` file and running `lake build`. Offer to help set up a minimal Lean 4 project if needed.
+If the user has Lean 4 installed locally, they can verify the generated project by running `lake build`. Offer to help set up a minimal Lean 4 project if needed.
 
 ### Step 5: Iterate
 
@@ -141,6 +201,7 @@ Formal proofs rarely come out perfect on the first try. Common iteration pattern
 - **Specification refinement**: The user realizes the property they stated isn't quite right. Refine the theorem statement and re-prove.
 - **Auxiliary lemmas**: Sometimes Leanstral needs helper lemmas broken out separately. If a proof is struggling, try decomposing it.
 - **Tactic debugging**: If a specific tactic fails, ask Leanstral to diagnose why and suggest alternatives. It's particularly good at this (see the StackExchange case study — it diagnosed a `def` vs `abbrev` issue in Lean 4.29.0).
+- **Property splitting**: If the prompt asks for many theorems, rerun with one theorem at a time against the same model. This is often better than asking for a full verification suite in one completion.
 
 ## Tips for Solana/Rust verification
 
@@ -165,3 +226,5 @@ Example: For a token vault program, you might prove:
 - **Rate limiting**: The labs endpoint may have rate limits. If you get 429 errors, wait and retry. The script has built-in exponential backoff.
 - **Empty or nonsensical output**: Try lowering temperature to 0.3, or rephrasing the prompt with more explicit Lean 4 context.
 - **Timeout**: Leanstral can take 30-90 seconds for complex proofs. The script has a 180-second timeout per completion.
+- **Long first build**: The first `mathlib` build commonly takes 15-45 minutes on a laptop. That is normal.
+- **Corrupt Mathlib checkout**: If Lake reports that `.lake/packages/mathlib` cannot resolve `HEAD`, remove that directory and rerun the build.
