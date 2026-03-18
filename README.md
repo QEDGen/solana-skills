@@ -24,7 +24,7 @@ Leanstral is a 119B-parameter sparse model (6.5B active) specifically trained fo
 ### Using npx skills (recommended)
 
 ```bash
-npx skills add leanstral-solana-skill
+npx skills add github.com/abishekk92/leanstral-solana-skill
 ```
 
 ### Manual Installation
