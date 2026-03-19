@@ -556,10 +556,14 @@ fn build_prompt(
 		Return Lean code only.\n\
 		Do not duplicate declarations.\n\
 	Do not leave theorem bodies empty after `:= by`.\n\
-	Do not invent helper APIs or namespaces unless you define them in the file.\n\
+	Do not redefine any APIs listed in the Support API section below. You may define NEW helpers not listed there.\n\
 	If a proof is incomplete, use `sorry` inside the proof body.\n\
 	Prefer a smaller explicit model that compiles over a larger broken one.\n\n\
-You may import the following local support modules if they help:\n{support_modules}\n\n\
+IMPORTANT: The Support API section below lists definitions that are ALREADY IMPORTED from the support modules.\n\
+You MUST use these existing definitions. DO NOT redefine any function, type, or lemma listed in the Support API.\n\
+If you need a definition not in the Support API, you may define it yourself.\n\n\
+You MUST import the following support modules and use their definitions:\n{support_modules}\n\
+Write 'open Leanstral.Solana' at the top of your file.\n\n\
 ## Source Code\n\n```rust\n{source}\n```\n\n\
 ## Proof Obligation\n\n{title}\n\n\
 Category: {category}\n\
@@ -567,7 +571,9 @@ Theorem Shape: {theorem_shape}\n\
 Relevant Instructions: {relevant_instructions}\n\n\
 Evidence:\n{evidence}\n\n\
 	## Supported Semantic Surface\n\n{surface}\n\n\
-	## Support API\n\n```lean\n{support_api}\n```\n\n\
+	## Support API (Already Imported - DO NOT Redefine)\n\n\
+The following definitions are available after 'open Leanstral.Solana':\n\n\
+```lean\n{support_api}\n```\n\n\
 	## Context\n\n{hint}\n\n\
 		## Output Requirements\n\
 			1. Define the model types and executable transition functions first\n\
@@ -607,9 +613,19 @@ Evidence:\n{evidence}\n\n\
         "access_control" =>
 		                "Model only the authorization condition that matters for this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use one local program state structure, typically `EscrowState`, plus `Pubkey`; do not define extra local types like `AccountState`, `CancelPreState`, or helper state wrappers for this v1 access-control theorem. Define `cancelTransition : EscrowState -> Pubkey -> Option Unit` or an equally small transition. Define authorization as a direct `Prop` equality like `signer = preState.initializer`; do not define authorization as an existential over post-state reachability. In authorization predicates and theorem statements, use propositional equality `=` and never boolean equality `==`. Do not use `decide` for v1 access-control proofs. Do not mix propositional equality with boolean equality. In record updates, use Lean syntax `field := value`, never `field = value`. Prefer theorem statements of the exact form `cancelTransition preState signer ≠ none -> signer = preState.initializer` or an equivalent direct authorization predicate. When proving an `if`-based theorem, unfold the transition, split on the `if`, and use the equality hypothesis from the true branch directly with `exact` or `simpa`; do not use `rfl` unless both sides are definitionally equal. Avoid tactic combinators like `all_goals` and `try`.",
         "conservation" =>
-		                "Model only the three or four tracked balances touched by this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Prefer a direct theorem over numeric balances and `trackedTotal`, not a large account-state machine. Do not invent helpers like `transfer`, `transferWithSigner`, `state.accounts`, seed lists, or signer arrays unless you define them in the file. Do not redefine `trackedTotal`; use the support-library version. Do not wrap the conservation theorem in an `EscrowState` record update unless the theorem truly depends on a record field update. Prefer a shape like: given pre-balances and nonnegativity/precondition inequalities, define post-balances directly and prove `trackedTotal [pre accounts] = trackedTotal [post accounts]`. In record updates, use Lean syntax `field := value`, never `field = value`. If subtraction over `Nat` makes the goal awkward, state enough preconditions and prove the equality with a small explicit arithmetic argument rather than relying on `omega` or `ring` blindly.",
+		                "You MUST use 'trackedTotal' from Leanstral.Solana.Token - DO NOT redefine it.\nYou MUST use conservation lemmas from the support library: 'trackedTotal_map_id', 'transfer_preserves_total', etc.\nDO NOT prove your own versions of these lemmas.\n\n\
+IMPORTANT: Here is how to use transfer_preserves_total correctly with all required arguments:\n\n\
+The lemma signature is:\n\
+  transfer_preserves_total (p_accounts : List Account) (p_from_authority p_to_authority : Pubkey) (p_amount : Nat) (p_h_distinct : p_from_authority ≠ p_to_authority)\n\n\
+Example: If you need to prove conservation after transferring 100 tokens from authority A to authority B:\n\
+```lean\n\
+theorem example (p_accounts : List Account) (p_auth_from p_auth_to : Pubkey)\n    (h_distinct : p_auth_from ≠ p_auth_to) :\n    let post := p_accounts.map (fun acc =>\n      if acc.authority = p_auth_from then { acc with balance := acc.balance - 100 }\n      else if acc.authority = p_auth_to then { acc with balance := acc.balance + 100 }\n      else acc)\n    trackedTotal post = trackedTotal p_accounts := by\n  exact transfer_preserves_total p_accounts p_auth_from p_auth_to 100 h_distinct\n```\n\n\
+For TWO transfers (like in escrow exchange), apply twice using intermediate steps:\n\
+```lean\n\
+theorem two_transfers (p_accounts : List Account) :\n    ... := by\n  have h1 := transfer_preserves_total p_accounts auth1 auth2 amount1 (by ...)\n  have h2 := transfer_preserves_total (updated_after_first) auth3 auth4 amount2 (by ...)\n  rw [<- h1, <- h2]\n```\n\n\
+Model only the three or four tracked balances touched by this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `trackedTotal` function and conservation lemmas from the support library: `trackedTotal_map_id` for balance-preserving updates, `transfer_preserves_total` for two-account transfers. Do not redefine `trackedTotal` or basic lemmas. Prefer a direct theorem over numeric balances and `trackedTotal`, not a large account-state machine. Do not invent helpers like `transfer`, `transferWithSigner`, `state.accounts`, seed lists, or signer arrays unless you define them in the file. Do not wrap the conservation theorem in an `EscrowState` record update unless the theorem truly depends on a record field update. Prefer a shape like: given pre-balances and nonnegativity/precondition inequalities, define post-balances directly and prove `trackedTotal [pre accounts] = trackedTotal [post accounts]`. Apply the support library lemmas to simplify the proof. In record updates, use Lean syntax `field := value`, never `field = value`. If subtraction over `Nat` makes the goal awkward, state enough preconditions and prove the equality with a small explicit arithmetic argument rather than relying on `omega` or `ring` blindly.",
         "state_machine" =>
-		                "Model only the lifecycle flag or closed/open state that matters. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Define one small local state structure, typically `EscrowState`, with a `lifecycle : Lifecycle` field. Do not define a custom local `AccountState` when the theorem is really about lifecycle. Prefer a direct theorem shape like `(cancelTransition st).lifecycle = Lifecycle.closed` or `closes st.lifecycle (cancelTransition st).lifecycle`. Do not write theorem statements using placeholders like `some _`; introduce any post-state explicitly if needed.",
+		                "Model only the lifecycle flag or closed/open state that matters. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `Lifecycle` type and lemmas from the support library: `closes_is_closed`, `closes_was_open`, `closed_irreversible`. Define one small local state structure, typically `EscrowState`, with a `lifecycle : Lifecycle` field. Do not define a custom local `AccountState` when the theorem is really about lifecycle. Prefer a direct theorem shape like `(cancelTransition st).lifecycle = Lifecycle.closed` or `closes st.lifecycle (cancelTransition st).lifecycle`. Apply the support library lemmas to simplify the proof. Do not write theorem statements using placeholders like `some _`; introduce any post-state explicitly if needed.",
         "arithmetic_safety" =>
 	                "Model only the numeric parameters and bounds that matter for this obligation. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Avoid unrelated account semantics. Do not write theorem statements using placeholders like `some _`.",
         _ => "Keep the model small and explicit.",
@@ -628,10 +644,18 @@ fn support_api_for_modules(modules: &[String]) -> String {
             "U8 : Type".to_string(),
             "Account : Type".to_string(),
             "AccountState := Account".to_string(),
+            "Account.key : Pubkey".to_string(),
             "Account.authority : Pubkey".to_string(),
             "Account.balance : Nat".to_string(),
             "Account.writable : Bool".to_string(),
             "canWrite : Pubkey -> Account -> Prop".to_string(),
+            "findByKey : List Account -> Pubkey -> Option Account".to_string(),
+            "findByAuthority : List Account -> Pubkey -> Option Account".to_string(),
+            "-- Lemmas:".to_string(),
+            "find_map_update_other : find by authority after updating different account is unchanged".to_string(),
+            "find_map_update_same : find by authority after updating target account returns updated account".to_string(),
+            "find_by_key_map_update_other : find by key after updating different account is unchanged".to_string(),
+            "find_by_key_map_update_same : find by key after updating target account returns updated account".to_string(),
         ]);
     }
 
@@ -649,6 +673,13 @@ fn support_api_for_modules(modules: &[String]) -> String {
             "Mint : Type".to_string(),
             "Program : Type".to_string(),
             "trackedTotal : List Account -> Nat".to_string(),
+            "-- Lemmas:".to_string(),
+            "trackedTotal_nil : trackedTotal [] = 0".to_string(),
+            "trackedTotal_cons : cons preserves total".to_string(),
+            "trackedTotal_append : append distributes over total".to_string(),
+            "trackedTotal_map_id : mapping preserving balance preserves total".to_string(),
+            "balance_update_preserves_total : zero-delta update preserves total".to_string(),
+            "transfer_preserves_total : two-account transfer preserves total".to_string(),
         ]);
     }
 
@@ -657,6 +688,10 @@ fn support_api_for_modules(modules: &[String]) -> String {
             "-- State surface".to_string(),
             "Lifecycle : Type".to_string(),
             "closes : Lifecycle -> Lifecycle -> Prop".to_string(),
+            "-- Lemmas:".to_string(),
+            "closed_irreversible : closed cannot transition to open".to_string(),
+            "closes_is_closed : closes implies result is closed".to_string(),
+            "closes_was_open : closes implies original was open".to_string(),
         ]);
     }
 
