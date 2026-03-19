@@ -214,7 +214,8 @@ async fn call_mistral_api(
 
 fn extract_lean_code(content: &str) -> String {
     // Extract code from ```lean or ```lean4 blocks
-    let re = regex::Regex::new(r"```lean4?\s*\n(.*?)```").unwrap();
+    // (?s) enables dotall mode so . matches newlines
+    let re = regex::Regex::new(r"(?s)```lean4?\s*\n(.*?)```").unwrap();
     let mut extracted = Vec::new();
 
     for cap in re.captures_iter(content) {
@@ -425,4 +426,64 @@ pub async fn generate_proofs(
     println!("{}", best_lean);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_lean_code_multiline() {
+        let input = r#"Here is some Lean code:
+
+```lean4
+theorem add_comm (a b : Nat) : a + b = b + a := by
+  induction a with
+  | zero => simp
+  | succ a ih => simp [ih]
+```
+
+That's the proof."#;
+
+        let result = extract_lean_code(input);
+        assert!(result.contains("theorem add_comm"));
+        assert!(result.contains("induction a with"));
+        assert!(result.contains("| zero => simp"));
+        assert!(result.contains("| succ a ih => simp [ih]"));
+    }
+
+    #[test]
+    fn test_extract_lean_code_single_line() {
+        let input = r#"```lean
+def id (x : Nat) := x
+```"#;
+
+        let result = extract_lean_code(input);
+        assert_eq!(result.trim(), "def id (x : Nat) := x");
+    }
+
+    #[test]
+    fn test_extract_lean_code_no_blocks() {
+        let input = "Just some plain text without code blocks";
+        let result = extract_lean_code(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_extract_lean_code_multiple_blocks() {
+        let input = r#"First block:
+```lean4
+def foo := 1
+```
+
+Second block:
+```lean
+def bar := 2
+```"#;
+
+        let result = extract_lean_code(input);
+        assert!(result.contains("def foo := 1"));
+        assert!(result.contains("def bar := 2"));
+        assert!(result.contains("\n\n")); // Blocks should be joined with double newline
+    }
 }
