@@ -10,4 +10,5 @@ require leanstralSupport from
 
 @[default_target]
 lean_lib Best where
-  roots := #[`Best]
+  roots := #[\`Best\`]
+  moreLeanArgs := #["-DwarningAsError=false"]
