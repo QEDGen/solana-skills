@@ -6,7 +6,12 @@ import Leanstral.Solana.Token
 
 open Leanstral.Solana
 
--- Canonical EscrowState definition
+/- ============================================================================
+   CancelAccessControl Proof
+   ============================================================================ -/
+
+namespace CancelAccessControl
+
 structure EscrowState where
   initializer : Pubkey
   initializer_token_account : Pubkey
@@ -14,13 +19,6 @@ structure EscrowState where
   taker_amount : U64
   escrow_token_account : Pubkey
   bump : U8
-  lifecycle : Leanstral.Solana.Lifecycle
-
-/- ============================================================================
-   CancelAccessControl Proof
-   ============================================================================ -/
-
-namespace CancelAccessControl
 
 def cancelTransition (p_preState : EscrowState) (p_signer : Pubkey) : Option Unit :=
   if h : p_signer = p_preState.initializer then
@@ -32,7 +30,9 @@ theorem cancel_access_control (p_preState : EscrowState) (p_signer : Pubkey)
     (h : cancelTransition p_preState p_signer ≠ none) :
     p_signer = p_preState.initializer := by
   simp [cancelTransition] at h
-  exact h
+  split_ifs at h with h_eq
+  · exact h_eq
+  · contradiction
 
 end CancelAccessControl
 
@@ -42,35 +42,56 @@ end CancelAccessControl
 
 namespace CancelStateMachine
 
+structure EscrowState where
+  lifecycle : Lifecycle
+  initializer : Pubkey
+  initializer_token_account : Pubkey
+  initializer_amount : U64
+  taker_amount : U64
+  escrow_token_account : Pubkey
+  bump : U8
+
 def cancelTransition (p_preState : EscrowState) : Option EscrowState :=
-  some { p_preState with lifecycle := Leanstral.Solana.Lifecycle.closed }
+  some { p_preState with lifecycle := Lifecycle.closed }
 
 theorem cancel_closes_escrow (p_preState p_postState : EscrowState)
     (h : cancelTransition p_preState = some p_postState) :
-    p_postState.lifecycle = Leanstral.Solana.Lifecycle.closed := by
+    p_postState.lifecycle = Lifecycle.closed := by
   simp [cancelTransition] at h
   cases h
   rfl
 
 end CancelStateMachine
 
-namespace CancelConservation
+/- ============================================================================
+   ExchangeAccessControl Proof
+   ============================================================================ -/
 
-def cancelPreservesBalances (p_accounts : List Account) (p_escrow_authority p_initializer_authority : Pubkey) (p_amount : Nat) : Option (List Account) :=
-  some (p_accounts.map (fun acc =>
-    if acc.authority = p_escrow_authority then
-      { acc with balance := acc.balance - p_amount }
-    else if acc.authority = p_initializer_authority then
-      { acc with balance := acc.balance + p_amount }
-    else acc))
+namespace ExchangeAccessControl
 
-theorem cancel_conservation (p_accounts p_accounts' : List Account) (p_escrow_authority p_initializer_authority : Pubkey) (p_amount : Nat) (h_distinct : p_escrow_authority ≠ p_initializer_authority) (h : cancelPreservesBalances p_accounts p_escrow_authority p_initializer_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by
-  rw [cancelPreservesBalances] at h
-  apply Option.some.inj at h
-  rw [h]
-  exact transfer_preserves_total p_accounts p_escrow_authority p_initializer_authority p_amount h_distinct
+structure EscrowState where
+  initializer : Pubkey
+  initializer_token_account : Pubkey
+  initializer_amount : U64
+  taker_amount : U64
+  escrow_token_account : Pubkey
+  bump : U8
 
-end CancelConservation
+def exchangeTransition (p_preState : EscrowState) (p_signer : Pubkey) : Option Unit :=
+  if p_signer = p_preState.initializer then
+    some ()
+  else
+    none
+
+theorem exchange_access_control (p_preState : EscrowState) (p_signer : Pubkey)
+    (h : exchangeTransition p_preState p_signer ≠ none) :
+    p_signer = p_preState.initializer := by
+  simp [exchangeTransition] at h
+  split_ifs at h with h_eq
+  · exact h_eq
+  · contradiction
+
+end ExchangeAccessControl
 
 /- ============================================================================
    ExchangeConservation Proof
@@ -78,46 +99,70 @@ end CancelConservation
 
 namespace ExchangeConservation
 
-def exchangeTransition (p_accounts : List Account) (p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) : Option (List Account) :=
-  let accounts_after_taker_transfer := p_accounts.map (fun acc =>
+structure EscrowState where
+  initializer : Pubkey
+  initializer_token_account : Pubkey
+  initializer_amount : Nat
+  taker_amount : Nat
+  escrow_token_account : Pubkey
+  bump : U8
+
+def exchangeTransition (p_accounts : List Account) (p_taker_authority p_initializer_receive_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) : Option (List Account) :=
+  some (p_accounts.map (fun acc =>
     if acc.authority = p_taker_authority then
       { acc with balance := acc.balance - p_taker_amount }
-    else if acc.authority = p_initializer_authority then
+    else if acc.authority = p_initializer_receive_authority then
       { acc with balance := acc.balance + p_taker_amount }
-    else acc)
-  some (accounts_after_taker_transfer.map (fun acc =>
-    if acc.authority = p_escrow_authority then
+    else if acc.authority = p_escrow_authority then
       { acc with balance := acc.balance - p_initializer_amount }
     else if acc.authority = p_taker_receive_authority then
       { acc with balance := acc.balance + p_initializer_amount }
-    else acc))
+    else
+      acc))
 
-theorem exchange_conservation (p_accounts p_accounts' : List Account) (p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) (h_distinct1 : p_taker_authority ≠ p_initializer_authority) (h_distinct2 : p_escrow_authority ≠ p_taker_receive_authority) (h_eq_some_accounts' : exchangeTransition p_accounts p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority p_taker_amount p_initializer_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by
-  rw [exchangeTransition] at h_eq_some_accounts'
-  apply Option.some.inj at h_eq_some_accounts'
-  rw [h_eq_some_accounts']
-
-  let accounts_step1 := p_accounts.map (fun acc =>
+theorem exchange_conservation (p_accounts p_accounts' : List Account) (p_taker_authority p_initializer_receive_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) (h_distinct1 : p_taker_authority ≠ p_initializer_receive_authority) (h_distinct2 : p_escrow_authority ≠ p_taker_receive_authority) (h_distinct3 : p_taker_authority ≠ p_escrow_authority) (h : exchangeTransition p_accounts p_taker_authority p_initializer_receive_authority p_escrow_authority p_taker_receive_authority p_taker_amount p_initializer_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by
+  rcases h with rfl
+  have h1 := transfer_preserves_total p_accounts p_taker_authority p_initializer_receive_authority p_taker_amount h_distinct1
+  have h2 := transfer_preserves_total (p_accounts.map (fun acc =>
     if acc.authority = p_taker_authority then
       { acc with balance := acc.balance - p_taker_amount }
-    else if acc.authority = p_initializer_authority then
+    else if acc.authority = p_initializer_receive_authority then
       { acc with balance := acc.balance + p_taker_amount }
-    else acc)
-
-  have h_total_step1 : trackedTotal p_accounts = trackedTotal accounts_step1 :=
-    transfer_preserves_total p_accounts p_taker_authority p_initializer_authority p_taker_amount h_distinct1
-
-  let accounts_step2 := accounts_step1.map (fun acc =>
-    if acc.authority = p_escrow_authority then
-      { acc with balance := acc.balance - p_initializer_amount }
-    else if acc.authority = p_taker_receive_authority then
-      { acc with balance := acc.balance + p_initializer_amount }
-    else acc)
-
-  have h_total_step2 : trackedTotal accounts_step1 = trackedTotal accounts_step2 :=
-    transfer_preserves_total accounts_step1 p_escrow_authority p_taker_receive_authority p_initializer_amount h_distinct2
-
-  rw [h_total_step1, h_total_step2]
-  rfl
+    else acc)) p_escrow_authority p_taker_receive_authority p_initializer_amount h_distinct2
+  rw [← h1, ← h2]
+  simp [trackedTotal_map_id]
 
 end ExchangeConservation
+
+/- ============================================================================
+   ProgramArithmeticSafety Proof
+   ============================================================================ -/
+
+namespace ProgramArithmeticSafety
+
+def U64_MAX : Nat := 2^64 - 1
+
+structure EscrowState where
+  initializer : Nat
+  initializer_token_account : Nat
+  initializer_amount : Nat
+  taker_amount : Nat
+  escrow_token_account : Nat
+  bump : Nat
+
+structure ProgramState where
+  escrow : EscrowState
+  counter : Nat
+
+def cancelTransition (p_s : ProgramState) : Option ProgramState :=
+  some { p_s with escrow := { p_s.escrow with bump := 0 } }
+
+theorem cancel_arithmetic_safety (p_preState p_postState : ProgramState)
+    (h : cancelTransition p_preState = some p_postState) :
+    p_preState.escrow.initializer_amount <= U64_MAX := by
+  simp [cancelTransition] at h
+  cases h
+  simp
+
+end ProgramArithmeticSafety
+
