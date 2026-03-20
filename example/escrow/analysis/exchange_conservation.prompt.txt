@@ -1,0 +1,354 @@
+I need a single Lean 4 module that compiles under Lean 4.15 + Mathlib 4.15.
+
+IMPORTANT: A theorem skeleton with correct parameter declarations is provided below.
+Your task is to COMPLETE this theorem by:
+1. Defining any required types and transition functions referenced in the theorem signature
+2. Replacing the `sorry` placeholder with a complete proof
+
+Return Lean code only.
+Do not duplicate declarations.
+Do not modify the provided theorem signature - all parameters are already correctly declared.
+Do not redefine any APIs listed in the Support API section below. You may define NEW helpers not listed there.
+If a proof is incomplete, use `sorry` inside the proof body.
+Prefer a smaller explicit model that compiles over a larger broken one.
+
+IMPORTANT: The Support API section below lists definitions that are ALREADY IMPORTED from the support modules.
+You MUST use these existing definitions. DO NOT redefine any function, type, or lemma listed in the Support API.
+If you need a definition not in the Support API, you may define it yourself.
+
+You MUST import the following support modules and use their definitions:
+- import Leanstral.Solana.Account
+- import Leanstral.Solana.Token
+Write 'open Leanstral.Solana' at the top of your file.
+
+## Source Code
+
+```rust
+use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+
+declare_id!("FyeRokiKoSz9VxRdgDEuKVKwWuGsZLEbMkywgJQDXeFK");
+
+#[program]
+pub mod escrow {
+    use super::*;
+
+    /// Initialize an escrow account
+    ///
+    /// This creates an escrow state that defines the terms of the exchange:
+    /// - The initializer deposits token A
+    /// - The taker must provide token B to complete the exchange
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        amount: u64,
+        taker_amount: u64,
+    ) -> Result<()> {
+        let escrow = &mut ctx.accounts.escrow;
+
+        escrow.initializer = ctx.accounts.initializer.key();
+        escrow.initializer_token_account = ctx.accounts.initializer_deposit_token_account.key();
+        escrow.initializer_amount = amount;
+        escrow.taker_amount = taker_amount;
+        escrow.escrow_token_account = ctx.accounts.escrow_token_account.key();
+        escrow.bump = ctx.bumps.escrow;
+
+        // Transfer tokens from initializer to escrow
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.initializer_deposit_token_account.to_account_info(),
+            to: ctx.accounts.escrow_token_account.to_account_info(),
+            authority: ctx.accounts.initializer.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::transfer(cpi_ctx, amount)?;
+
+        msg!("Escrow initialized: {} tokens deposited", amount);
+        Ok(())
+    }
+
+    /// Execute the escrow exchange
+    ///
+    /// The taker deposits their tokens and receives the initializer's tokens.
+    /// The initializer receives the taker's tokens.
+    pub fn exchange(ctx: Context<Exchange>) -> Result<()> {
+        let escrow = &ctx.accounts.escrow;
+
+        // Transfer taker's tokens to initializer
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.taker_deposit_token_account.to_account_info(),
+            to: ctx.accounts.initializer_receive_token_account.to_account_info(),
+            authority: ctx.accounts.taker.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::transfer(cpi_ctx, escrow.taker_amount)?;
+
+        // Transfer initializer's tokens from escrow to taker
+        let seeds = &[
+            b"escrow".as_ref(),
+            escrow.initializer.as_ref(),
+            &[escrow.bump],
+        ];
+        let signer = &[&seeds[..]];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.escrow_token_account.to_account_info(),
+            to: ctx.accounts.taker_receive_token_account.to_account_info(),
+            authority: ctx.accounts.escrow.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+        token::transfer(cpi_ctx, escrow.initializer_amount)?;
+
+        msg!("Escrow exchange completed successfully");
+        Ok(())
+    }
+
+    /// Cancel the escrow and return tokens to initializer
+    pub fn cancel(ctx: Context<Cancel>) -> Result<()> {
+        let escrow = &ctx.accounts.escrow;
+
+        // Transfer tokens back from escrow to initializer
+        let seeds = &[
+            b"escrow".as_ref(),
+            escrow.initializer.as_ref(),
+            &[escrow.bump],
+        ];
+        let signer = &[&seeds[..]];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.escrow_token_account.to_account_info(),
+            to: ctx.accounts.initializer_deposit_token_account.to_account_info(),
+            authority: ctx.accounts.escrow.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+        token::transfer(cpi_ctx, escrow.initializer_amount)?;
+
+        msg!("Escrow cancelled, tokens returned to initializer");
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(mut)]
+    pub initializer: Signer<'info>,
+
+    #[account(
+        init,
+        payer = initializer,
+        space = 8 + EscrowState::INIT_SPACE,
+        seeds = [b"escrow", initializer.key().as_ref()],
+        bump
+    )]
+    pub escrow: Account<'info, EscrowState>,
+
+    #[account(mut)]
+    pub initializer_deposit_token_account: Account<'info, TokenAccount>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = initializer,
+        token::mint = mint,
+        token::authority = escrow,
+        seeds = [b"escrow_token", initializer.key().as_ref()],
+        bump
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct Exchange<'info> {
+    #[account(mut)]
+    pub taker: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow", escrow.initializer.as_ref()],
+        bump = escrow.bump,
+        close = initializer
+    )]
+    pub escrow: Account<'info, EscrowState>,
+
+    #[account(mut)]
+    pub taker_deposit_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub taker_receive_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub initializer_receive_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow_token", escrow.initializer.as_ref()],
+        bump
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: This is the initializer account that will receive rent
+    #[account(mut)]
+    pub initializer: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct Cancel<'info> {
+    #[account(mut)]
+    pub initializer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow", initializer.key().as_ref()],
+        bump = escrow.bump,
+        has_one = initializer,
+        close = initializer
+    )]
+    pub escrow: Account<'info, EscrowState>,
+
+    #[account(mut)]
+    pub initializer_deposit_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow_token", initializer.key().as_ref()],
+        bump
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct EscrowState {
+    pub initializer: Pubkey,
+    pub initializer_token_account: Pubkey,
+    pub initializer_amount: u64,
+    pub taker_amount: u64,
+    pub escrow_token_account: Pubkey,
+    pub bump: u8,
+}
+
+#[error_code]
+pub enum EscrowError {
+    #[msg("The provided amount must be greater than zero")]
+    InvalidAmount,
+}
+```
+
+## Proof Obligation
+
+exchange: token conservation
+
+Category: conservation
+Theorem Shape: direct_balance_equality_preserves_tracked_total
+Relevant Instructions: exchange
+
+Evidence:
+- transfer Some("taker_deposit_token_account") -> Some("initializer_receive_token_account") amount None
+- transfer Some("escrow_token_account") -> Some("taker_receive_token_account") amount None
+
+## Supported Semantic Surface
+
+- access_control
+- conservation
+- state_machine
+- arithmetic_safety
+
+## Support API (Already Imported - DO NOT Redefine)
+
+The following definitions are available after 'open Leanstral.Solana':
+
+```lean
+open Leanstral.Solana
+-- Account surface
+Pubkey : Type
+U64 : Type
+U8 : Type
+Account : Type
+AccountState := Account
+Account.key : Pubkey
+Account.authority : Pubkey
+Account.balance : Nat
+Account.writable : Bool
+canWrite : Pubkey -> Account -> Prop
+findByKey : List Account -> Pubkey -> Option Account
+findByAuthority : List Account -> Pubkey -> Option Account
+-- Lemmas:
+find_map_update_other : find by authority after updating different account is unchanged
+find_map_update_same : find by authority after updating target account returns updated account
+find_by_key_map_update_other : find by key after updating different account is unchanged
+find_by_key_map_update_same : find by key after updating target account returns updated account
+-- Token surface
+TokenAccount := Account
+Mint : Type
+Program : Type
+trackedTotal : List Account -> Nat
+-- Lemmas:
+trackedTotal_nil : trackedTotal [] = 0
+trackedTotal_cons : cons preserves total
+trackedTotal_append : append distributes over total
+trackedTotal_map_id : mapping preserving balance preserves total
+balance_update_preserves_total : zero-delta update preserves total
+transfer_preserves_total : two-account transfer preserves total
+```
+
+## Context
+
+You MUST use 'trackedTotal' from Leanstral.Solana.Token - DO NOT redefine it.
+You MUST use conservation lemmas from the support library: 'trackedTotal_map_id', 'transfer_preserves_total', etc.
+DO NOT prove your own versions of these lemmas.
+
+IMPORTANT: Here is how to use transfer_preserves_total correctly with all required arguments:
+
+The lemma signature is:
+transfer_preserves_total (p_accounts : List Account) (p_from_authority p_to_authority : Pubkey) (p_amount : Nat) (p_h_distinct : p_from_authority ≠ p_to_authority)
+
+Example: If you need to prove conservation after transferring 100 tokens from authority A to authority B:
+```lean
+theorem example (p_accounts : List Account) (p_auth_from p_auth_to : Pubkey)
+    (h_distinct : p_auth_from ≠ p_auth_to) :
+    let post := p_accounts.map (fun acc =>
+      if acc.authority = p_auth_from then { acc with balance := acc.balance - 100 }
+      else if acc.authority = p_auth_to then { acc with balance := acc.balance + 100 }
+      else acc)
+    trackedTotal post = trackedTotal p_accounts := by
+  exact transfer_preserves_total p_accounts p_auth_from p_auth_to 100 h_distinct
+```
+
+For TWO transfers (like in escrow exchange), apply twice using intermediate steps:
+```lean
+theorem two_transfers (p_accounts : List Account) :
+    ... := by
+  have h1 := transfer_preserves_total p_accounts auth1 auth2 amount1 (by ...)
+  have h2 := transfer_preserves_total (updated_after_first) auth3 auth4 amount2 (by ...)
+  rw [<- h1, <- h2]
+```
+
+Model only the three or four tracked balances touched by this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `trackedTotal` function and conservation lemmas from the support library: `trackedTotal_map_id` for balance-preserving updates, `transfer_preserves_total` for two-account transfers. Do not redefine `trackedTotal` or basic lemmas. Prefer a direct theorem over numeric balances and `trackedTotal`, not a large account-state machine. Do not invent helpers like `transfer`, `transferWithSigner`, `state.accounts`, seed lists, or signer arrays unless you define them in the file. Do not wrap the conservation theorem in an `EscrowState` record update unless the theorem truly depends on a record field update. Prefer a shape like: given pre-balances and nonnegativity/precondition inequalities, define post-balances directly and prove `trackedTotal [pre accounts] = trackedTotal [post accounts]`. Apply the support library lemmas to simplify the proof. In record updates, use Lean syntax `field := value`, never `field = value`. If subtraction over `Nat` makes the goal awkward, state enough preconditions and prove the equality with a small explicit arithmetic argument rather than relying on `omega` or `ring` blindly.
+
+## Theorem Skeleton (DO NOT MODIFY - Complete this exact signature)
+
+```lean
+theorem exchange_conservation (p_accounts p_accounts' : List Account) (p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) (h_distinct1 : p_taker_authority ≠ p_initializer_authority) (h_distinct2 : p_escrow_authority ≠ p_taker_receive_authority) (h : exchangePreservesBalances p_accounts p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority p_taker_amount p_initializer_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by
+  sorry
+```
+
+## Output Requirements
+1. Define the model types and executable transition functions first
+2. Import the listed support modules and write `open Leanstral.Solana`; use that surface consistently
+3. State the theorem only after the semantics are defined
+4. Use only Lean 4.15 / Mathlib 4.15 identifiers you are confident exist
+5. Prefer concrete definitions over placeholders
+6. Prove this one property only
+7. Do not name a declaration exactly `initialize`; use names like `initializeTransition`, `exchangeTransition`, or `cancelTransition` instead
+8. Do not define or use unqualified global aliases outside the `Leanstral.Solana` surface
+9. Do not use tactic combinators such as `all_goals`, `try`, `repeat`, `first |`, or `admit`; prefer short direct proofs with `simp`, `cases`, `rcases`, `constructor`, and `exact`

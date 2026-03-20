@@ -1,0 +1,63 @@
+{
+  "version": "1.0",
+  "queries": [
+    {
+      "id": "cancel_conservation",
+      "query_type": "conservation_parameters",
+      "instruction": "cancel",
+      "category": "conservation",
+      "transfers": [
+        {
+          "from": "escrow_token_account",
+          "to": "initializer_deposit_token_account",
+          "authority": "escrow",
+          "amount_expr": null,
+          "uses_pda_signer": true
+        }
+      ],
+      "rust_code_snippet": "pub fn cancel(ctx: Context<Cancel>) -> Result<()> {\n        let escrow = &ctx.accounts.escrow;\n\n        // Transfer tokens back from escrow to initializer\n        let seeds = &[\n            b\"escrow\".as_ref(),\n            escrow.initializer.as_ref(),\n            &[escrow.bump],\n        ];\n        let signer = &[&seeds[..]];\n\n        let cpi_accounts = Transfer {\n            from: ctx.accounts.escrow_token_account.to_account_info(),\n            to: ctx.accounts.initializer_deposit_token_account.to_account_info(),\n            authority: ctx.accounts.escrow.to_account_info(),\n        };\n        let cpi_program = ctx.accounts.token_program.to_account_info();\n        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);\n        token::transfer(cpi_ctx, escrow.initializer_amount)?;\n\n        msg!(\"Escrow cancelled, tokens returned to initializer\");\n        Ok(())\n    }",
+      "question": "This 'cancel' instruction performs 1 token transfer(s). Analyze the transfers and provide:\n1. Explicit parameter names for all Pubkey authorities involved (from/to for each transfer)\n2. Explicit parameter names for transfer amounts\n3. Any distinctness constraints between authorities (e.g., from ≠ to)\n4. The complete theorem signature with ALL parameters explicitly declared\n\nTransfer details:\n  Transfer 1: from=Some(\"escrow_token_account\"), to=Some(\"initializer_deposit_token_account\"), authority=Some(\"escrow\"), amount=None\n\nExample response format:\n{\n  \"query_id\": \"cancel_conservation\",\n  \"parameters\": [\n    {\"name\": \"p_from_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the from account\"},\n    {\"name\": \"p_to_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the to account\"},\n    {\"name\": \"p_amount\", \"param_type\": \"Nat\", \"description\": \"Transfer amount\"}\n  ],\n  \"distinctness_constraints\": [\"p_from_authority ≠ p_to_authority\"],\n  \"theorem_signature\": \"theorem cancel_conservation (p_accounts p_accounts' : List Account) (p_from_authority p_to_authority : Pubkey) (p_amount : Nat) (h_distinct : p_from_authority ≠ p_to_authority) (h : cancelPreservesBalances p_accounts p_from_authority p_to_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts'\"\n}"
+    },
+    {
+      "id": "exchange_conservation",
+      "query_type": "conservation_parameters",
+      "instruction": "exchange",
+      "category": "conservation",
+      "transfers": [
+        {
+          "from": "taker_deposit_token_account",
+          "to": "initializer_receive_token_account",
+          "authority": "taker",
+          "amount_expr": null,
+          "uses_pda_signer": false
+        },
+        {
+          "from": "escrow_token_account",
+          "to": "taker_receive_token_account",
+          "authority": "escrow",
+          "amount_expr": null,
+          "uses_pda_signer": true
+        }
+      ],
+      "rust_code_snippet": "pub fn exchange(ctx: Context<Exchange>) -> Result<()> {\n        let escrow = &ctx.accounts.escrow;\n\n        // Transfer taker's tokens to initializer\n        let cpi_accounts = Transfer {\n            from: ctx.accounts.taker_deposit_token_account.to_account_info(),\n            to: ctx.accounts.initializer_receive_token_account.to_account_info(),\n            authority: ctx.accounts.taker.to_account_info(),\n        };\n        let cpi_program = ctx.accounts.token_program.to_account_info();\n        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);\n        token::transfer(cpi_ctx, escrow.taker_amount)?;\n\n        // Transfer initializer's tokens from escrow to taker\n        let seeds = &[\n            b\"escrow\".as_ref(),\n            escrow.initializer.as_ref(),\n            &[escrow.bump],\n        ];\n        let signer = &[&seeds[..]];\n\n        let cpi_accounts = Transfer {\n            from: ctx.accounts.escrow_token_account.to_account_info(),\n            to: ctx.accounts.taker_receive_token_account.to_account_info(),\n            authority: ctx.accounts.escrow.to_account_info(),\n        };\n        let cpi_program = ctx.accounts.token_program.to_account_info();\n        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);\n        token::transfer(cpi_ctx, escrow.initializer_amount)?;\n\n        msg!(\"Escrow exchange completed successfully\");\n        Ok(())\n    }",
+      "question": "This 'exchange' instruction performs 2 token transfer(s). Analyze the transfers and provide:\n1. Explicit parameter names for all Pubkey authorities involved (from/to for each transfer)\n2. Explicit parameter names for transfer amounts\n3. Any distinctness constraints between authorities (e.g., from ≠ to)\n4. The complete theorem signature with ALL parameters explicitly declared\n\nTransfer details:\n  Transfer 1: from=Some(\"taker_deposit_token_account\"), to=Some(\"initializer_receive_token_account\"), authority=Some(\"taker\"), amount=None\n  Transfer 2: from=Some(\"escrow_token_account\"), to=Some(\"taker_receive_token_account\"), authority=Some(\"escrow\"), amount=None\n\nExample response format:\n{\n  \"query_id\": \"exchange_conservation\",\n  \"parameters\": [\n    {\"name\": \"p_from_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the from account\"},\n    {\"name\": \"p_to_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the to account\"},\n    {\"name\": \"p_amount\", \"param_type\": \"Nat\", \"description\": \"Transfer amount\"}\n  ],\n  \"distinctness_constraints\": [\"p_from_authority ≠ p_to_authority\"],\n  \"theorem_signature\": \"theorem exchange_conservation (p_accounts p_accounts' : List Account) (p_from_authority p_to_authority : Pubkey) (p_amount : Nat) (h_distinct : p_from_authority ≠ p_to_authority) (h : exchangePreservesBalances p_accounts p_from_authority p_to_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts'\"\n}"
+    },
+    {
+      "id": "initialize_conservation",
+      "query_type": "conservation_parameters",
+      "instruction": "initialize",
+      "category": "conservation",
+      "transfers": [
+        {
+          "from": "initializer_deposit_token_account",
+          "to": "escrow_token_account",
+          "authority": "initializer",
+          "amount_expr": "amount",
+          "uses_pda_signer": false
+        }
+      ],
+      "rust_code_snippet": "pub fn initialize(\n        ctx: Context<Initialize>,\n        amount: u64,\n        taker_amount: u64,\n    ) -> Result<()> {\n        let escrow = &mut ctx.accounts.escrow;\n\n        escrow.initializer = ctx.accounts.initializer.key();\n        escrow.initializer_token_account = ctx.accounts.initializer_deposit_token_account.key();\n        escrow.initializer_amount = amount;\n        escrow.taker_amount = taker_amount;\n        escrow.escrow_token_account = ctx.accounts.escrow_token_account.key();\n        escrow.bump = ctx.bumps.escrow;\n\n        // Transfer tokens from initializer to escrow\n        let cpi_accounts = Transfer {\n            from: ctx.accounts.initializer_deposit_token_account.to_account_info(),\n            to: ctx.accounts.escrow_token_account.to_account_info(),\n            authority: ctx.accounts.initializer.to_account_info(),\n        };\n        let cpi_program = ctx.accounts.token_program.to_account_info();\n        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);\n        token::transfer(cpi_ctx, amount)?;\n\n        msg!(\"Escrow initialized: {} tokens deposited\", amount);\n        Ok(())\n    }",
+      "question": "This 'initialize' instruction performs 1 token transfer(s). Analyze the transfers and provide:\n1. Explicit parameter names for all Pubkey authorities involved (from/to for each transfer)\n2. Explicit parameter names for transfer amounts\n3. Any distinctness constraints between authorities (e.g., from ≠ to)\n4. The complete theorem signature with ALL parameters explicitly declared\n\nTransfer details:\n  Transfer 1: from=Some(\"initializer_deposit_token_account\"), to=Some(\"escrow_token_account\"), authority=Some(\"initializer\"), amount=Some(\"amount\")\n\nExample response format:\n{\n  \"query_id\": \"initialize_conservation\",\n  \"parameters\": [\n    {\"name\": \"p_from_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the from account\"},\n    {\"name\": \"p_to_authority\", \"param_type\": \"Pubkey\", \"description\": \"Authority of the to account\"},\n    {\"name\": \"p_amount\", \"param_type\": \"Nat\", \"description\": \"Transfer amount\"}\n  ],\n  \"distinctness_constraints\": [\"p_from_authority ≠ p_to_authority\"],\n  \"theorem_signature\": \"theorem initialize_conservation (p_accounts p_accounts' : List Account) (p_from_authority p_to_authority : Pubkey) (p_amount : Nat) (h_distinct : p_from_authority ≠ p_to_authority) (h : initializePreservesBalances p_accounts p_from_authority p_to_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts'\"\n}"
+    }
+  ]
+}

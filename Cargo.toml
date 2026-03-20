@@ -1,5 +1,5 @@
 [workspace]
-members = ["tools/anchor-ir", "crates/leanstral"]
+members = ["crates/anchor-ir", "crates/leanstral"]
 resolver = "2"
 
 [workspace.dependencies]

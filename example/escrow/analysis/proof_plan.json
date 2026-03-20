@@ -1,0 +1,195 @@
+{
+  "supported_surface": {
+    "lean_support_modules": [
+      "Leanstral.Solana.Account",
+      "Leanstral.Solana.Authority",
+      "Leanstral.Solana.Token",
+      "Leanstral.Solana.State"
+    ],
+    "supported_property_categories": [
+      "access_control",
+      "conservation",
+      "state_machine",
+      "arithmetic_safety"
+    ],
+    "unsupported_reasons": [
+      "PDA signer semantics are approximated at the instruction level, not modeled from runtime semantics.",
+      "Unchecked AccountInfo fields require conservative assumptions unless explicit invariants are extracted."
+    ]
+  },
+  "obligations": [
+    {
+      "id": "cancel_access_control",
+      "title": "cancel: access control",
+      "category": "access_control",
+      "relevant_instructions": [
+        "cancel"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Authority"
+      ],
+      "theorem_shape": "transition_non_none_implies_signer_equals_initializer",
+      "theorem_skeleton": "theorem cancel_access_control (p_preState : EscrowState) (p_signer : Pubkey)\n    (h : cancelTransition p_preState p_signer ≠ none) :\n    p_signer = p_preState.initializer := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "authority: escrow",
+        "idl signer: initializer",
+        "mentions initializer"
+      ]
+    },
+    {
+      "id": "cancel_conservation",
+      "title": "cancel: token conservation",
+      "category": "conservation",
+      "relevant_instructions": [
+        "cancel"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Token"
+      ],
+      "theorem_shape": "direct_balance_equality_preserves_tracked_total",
+      "theorem_skeleton": "theorem cancel_conservation (p_accounts p_accounts' : List Account) (p_escrow_authority p_initializer_authority : Pubkey) (p_amount : Nat) (h_distinct : p_escrow_authority ≠ p_initializer_authority) (h : cancelPreservesBalances p_accounts p_escrow_authority p_initializer_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "transfer Some(\"escrow_token_account\") -> Some(\"initializer_deposit_token_account\") amount None"
+      ]
+    },
+    {
+      "id": "cancel_state_machine",
+      "title": "cancel: close / one-shot safety",
+      "category": "state_machine",
+      "relevant_instructions": [
+        "cancel"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.State"
+      ],
+      "theorem_shape": "cancel_transition_sets_lifecycle_closed",
+      "theorem_skeleton": "theorem cancel_closes_escrow (p_preState p_postState : EscrowState)\n    (h : cancelTransition p_preState = some p_postState) :\n    p_postState.lifecycle = Lifecycle.closed := by\n  sorry",
+      "status": "planned",
+      "notes": []
+    },
+    {
+      "id": "exchange_access_control",
+      "title": "exchange: access control",
+      "category": "access_control",
+      "relevant_instructions": [
+        "exchange"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Authority"
+      ],
+      "theorem_shape": "transition_non_none_implies_signer_equals_initializer",
+      "theorem_skeleton": "theorem exchange_access_control (p_preState : EscrowState) (p_signer : Pubkey)\n    (h : exchangeTransition p_preState p_signer ≠ none) :\n    p_signer = p_preState.initializer := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "authority: escrow",
+        "authority: taker",
+        "idl signer: taker",
+        "mentions initializer"
+      ]
+    },
+    {
+      "id": "exchange_conservation",
+      "title": "exchange: token conservation",
+      "category": "conservation",
+      "relevant_instructions": [
+        "exchange"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Token"
+      ],
+      "theorem_shape": "direct_balance_equality_preserves_tracked_total",
+      "theorem_skeleton": "theorem exchange_conservation (p_accounts p_accounts' : List Account) (p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority : Pubkey) (p_taker_amount p_initializer_amount : Nat) (h_distinct1 : p_taker_authority ≠ p_initializer_authority) (h_distinct2 : p_escrow_authority ≠ p_taker_receive_authority) (h : exchangePreservesBalances p_accounts p_taker_authority p_initializer_authority p_escrow_authority p_taker_receive_authority p_taker_amount p_initializer_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "transfer Some(\"taker_deposit_token_account\") -> Some(\"initializer_receive_token_account\") amount None",
+        "transfer Some(\"escrow_token_account\") -> Some(\"taker_receive_token_account\") amount None"
+      ]
+    },
+    {
+      "id": "exchange_state_machine",
+      "title": "exchange: close / one-shot safety",
+      "category": "state_machine",
+      "relevant_instructions": [
+        "exchange"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.State"
+      ],
+      "theorem_shape": "cancel_transition_sets_lifecycle_closed",
+      "theorem_skeleton": "theorem exchange_closes_escrow (p_preState p_postState : EscrowState)\n    (h : exchangeTransition p_preState = some p_postState) :\n    p_postState.lifecycle = Lifecycle.closed := by\n  sorry",
+      "status": "planned",
+      "notes": []
+    },
+    {
+      "id": "initialize_access_control",
+      "title": "initialize: access control",
+      "category": "access_control",
+      "relevant_instructions": [
+        "initialize"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Authority"
+      ],
+      "theorem_shape": "transition_non_none_implies_signer_equals_initializer",
+      "theorem_skeleton": "theorem initialize_access_control (p_preState : EscrowState) (p_signer : Pubkey)\n    (h : initializeTransition p_preState p_signer ≠ none) :\n    p_signer = p_preState.initializer := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "authority: initializer",
+        "idl signer: initializer",
+        "mentions initializer"
+      ]
+    },
+    {
+      "id": "initialize_conservation",
+      "title": "initialize: token conservation",
+      "category": "conservation",
+      "relevant_instructions": [
+        "initialize"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Account",
+        "Leanstral.Solana.Token"
+      ],
+      "theorem_shape": "direct_balance_equality_preserves_tracked_total",
+      "theorem_skeleton": "theorem initialize_conservation (p_accounts p_accounts' : List Account) (p_initializer_authority p_escrow_authority : Pubkey) (p_amount : Nat) (h_distinct : p_initializer_authority ≠ p_escrow_authority) (h : initializePreservesBalances p_accounts p_initializer_authority p_escrow_authority p_amount = some p_accounts') : trackedTotal p_accounts = trackedTotal p_accounts' := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "transfer Some(\"initializer_deposit_token_account\") -> Some(\"escrow_token_account\") amount Some(\"amount\")"
+      ]
+    },
+    {
+      "id": "program_arithmetic_safety",
+      "title": "Program arithmetic safety",
+      "category": "arithmetic_safety",
+      "relevant_instructions": [
+        "cancel",
+        "exchange",
+        "initialize"
+      ],
+      "lean_support_modules": [
+        "Leanstral.Solana.Token"
+      ],
+      "theorem_shape": "transition_preserves_numeric_bounds",
+      "theorem_skeleton": "theorem cancel_arithmetic_safety  (p_preState p_postState : ProgramState)\n    (h : cancelTransition p_preState  = some p_postState) :\n    p_amount <= U64_MAX := by\n  sorry",
+      "status": "planned",
+      "notes": [
+        "amount: u64",
+        "taker_amount: u64"
+      ]
+    }
+  ],
+  "coverage": {
+    "total_obligations": 9,
+    "supported_obligations": 9,
+    "unsupported_obligations": 0
+  }
+}
