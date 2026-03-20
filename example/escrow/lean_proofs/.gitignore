@@ -1,7 +1,0 @@
-/.lake
-/lake-manifest.json
-/lakefile.olean
-/lakefile.olean.trace
-*.olean
-*.trace
-.lake
