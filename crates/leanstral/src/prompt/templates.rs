@@ -2,32 +2,46 @@
 
 pub const COMMON_PATTERNS: &str = r#"## Common Tactic Patterns - READ CAREFULLY
 
-### Rewrite Direction After Option.some.inj
+### Working with Option types and cases
 
 When working with Option types and hypotheses of form `h : someFunc(...) = some result`:
 
-**CRITICAL**: After `apply Option.some.inj at h`, the hypothesis transforms to: `inner_expression = result`
+**Preferred approach**: Use `cases` after `unfold`:
+```lean
+-- Given: h : transition preState = some postState
+unfold transition at h
+cases h  -- Simplifies Option.some away and substitutes the inner value
+-- Now continue with the proof
+```
 
-- If your goal contains `result` (the right-hand side), use `rw [← h]` with the LEFTWARD arrow
-- If your goal contains `inner_expression` (the left-hand side), use `rw [h]` without arrow
+**Alternative (when Option.some.inj is needed)**:
+```lean
+apply Option.some.inj at h  -- h : inner_expression = result
+-- Then use rw [← h] to substitute result in goal
+```
+
+### Proving with if-then-else: Use unfold before split_ifs
+
+**CRITICAL**: When proving theorems about functions with if-then-else:
+- Use `unfold` to expand the function definition
+- Then use `split_ifs` to case-split on the condition
+- Do NOT use `simp` before `split_ifs` - simp may simplify away the if-then-else structure
 
 Example:
 ```lean
--- Given: h : cancelPreservesBalances p_accounts ... = some p_accounts'
--- Goal: trackedTotal p_accounts = trackedTotal p_accounts'
-
--- Step 1: Unfold and inject
-rw [cancelPreservesBalances] at h  -- h : some (p_accounts.map ...) = some p_accounts'
-apply Option.some.inj at h         -- h : (p_accounts.map ...) = p_accounts'
-
--- Step 2: Rewrite in goal
--- Goal contains p_accounts' (right side of h), so use LEFTWARD arrow
-rw [← h]  -- Replaces p_accounts' with (p_accounts.map ...)
-
--- Now goal is: trackedTotal p_accounts = trackedTotal (p_accounts.map ...)
+-- Given: transition defined with if-then-else
+-- Goal: theorem about transition
+unfold transition at h      -- Expand definition but preserve if-structure
+split_ifs at h with h_eq    -- Case split: h_eq available in true branch
+· exact h_eq                -- Use the equality from true branch
+· simp at h                 -- False branch leads to contradiction
 ```
 
-**REMEMBER**: After `Option.some.inj`, you almost always need `rw [← h]` (with arrow) to substitute the `some` result in your goal.
+**DON'T**:
+```lean
+simp [transition] at h   -- BAD: may eliminate if-then-else before split_ifs
+split_ifs at h           -- ERROR: no if-then-else to split!
+```
 
 ### If-Expressions with Proof Bindings
 
@@ -93,7 +107,7 @@ pub fn hint_for_category(category: &str) -> &'static str {
 const ACCESS_CONTROL_HINT: &str = r#"Model only the authorization condition that matters for this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use one local program state structure, typically `EscrowState`, plus `Pubkey`; do not define extra local types like `AccountState`, `CancelPreState`, or helper state wrappers for this v1 access-control theorem. Define `cancelTransition : EscrowState -> Pubkey -> Option Unit` or an equally small transition. Define authorization as a direct `Prop` equality like `signer = preState.initializer`; do not define authorization as an existential over post-state reachability. In authorization predicates and theorem statements, use propositional equality `=` and never boolean equality `==`. Do not use `decide` for v1 access-control proofs. Do not mix propositional equality with boolean equality. In record updates, use Lean syntax `field := value`, never `field = value`. Prefer theorem statements of the exact form `cancelTransition preState signer ≠ none -> signer = preState.initializer` or an equivalent direct authorization predicate. When proving an `if`-based theorem, unfold the transition, split on the `if`, and use the equality hypothesis from the true branch directly with `exact` or `simpa`; do not use `rfl` unless both sides are definitionally equal. Avoid tactic combinators like `all_goals` and `try`."#;
 
 const CONSERVATION_HINT: &str = r#"You MUST use 'trackedTotal' from Leanstral.Solana.Token - DO NOT redefine it.
-You MUST use conservation lemmas from the support library: 'trackedTotal_map_id', 'transfer_preserves_total', etc.
+You MUST use conservation lemmas from the support library: 'trackedTotal_map_id', 'transfer_preserves_total', 'four_way_transfer_preserves_total', etc.
 DO NOT prove your own versions of these lemmas.
 
 IMPORTANT: Here is how to use transfer_preserves_total correctly with all required arguments:
@@ -113,16 +127,27 @@ theorem example (p_accounts : List Account) (p_auth_from p_auth_to : Pubkey)
   exact transfer_preserves_total p_accounts p_auth_from p_auth_to 100 h_distinct
 ```
 
-For TWO transfers (like in escrow exchange), apply twice using intermediate steps:
+For FOUR-WAY transfers (like escrow exchange with two independent transfers), use four_way_transfer_preserves_total:
 ```lean
-theorem two_transfers (p_accounts : List Account) :
-    ... := by
-  have h1 := transfer_preserves_total p_accounts auth1 auth2 amount1 (by ...)
-  have h2 := transfer_preserves_total (updated_after_first) auth3 auth4 amount2 (by ...)
-  rw [<- h1, <- h2]
+theorem exchange (p_accounts : List Account)
+    (p_from1 p_to1 p_from2 p_to2 : Pubkey)
+    (p_amount1 p_amount2 : Nat)
+    (h_distinct1 : p_from1 ≠ p_to1)
+    (h_distinct2 : p_from2 ≠ p_to2)
+    (h_cross : p_from1 ≠ p_from2) :
+    trackedTotal (p_accounts.map (fun acc =>
+      if acc.authority = p_from1 then { acc with balance := acc.balance - p_amount1 }
+      else if acc.authority = p_to1 then { acc with balance := acc.balance + p_amount1 }
+      else if acc.authority = p_from2 then { acc with balance := acc.balance - p_amount2 }
+      else if acc.authority = p_to2 then { acc with balance := acc.balance + p_amount2 }
+      else acc)) = trackedTotal p_accounts := by
+  exact four_way_transfer_preserves_total p_accounts p_from1 p_to1 p_from2 p_to2
+    p_amount1 p_amount2 h_distinct1 h_distinct2 h_cross
 ```
 
-Model only the three or four tracked balances touched by this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `trackedTotal` function and conservation lemmas from the support library: `trackedTotal_map_id` for balance-preserving updates, `transfer_preserves_total` for two-account transfers. Do not redefine `trackedTotal` or basic lemmas. Prefer a direct theorem over numeric balances and `trackedTotal`, not a large account-state machine. Do not invent helpers like `transfer`, `transferWithSigner`, `state.accounts`, seed lists, or signer arrays unless you define them in the file. Do not wrap the conservation theorem in an `EscrowState` record update unless the theorem truly depends on a record field update. Prefer a shape like: given pre-balances and nonnegativity/precondition inequalities, define post-balances directly and prove `trackedTotal [pre accounts] = trackedTotal [post accounts]`. Apply the support library lemmas to simplify the proof. In record updates, use Lean syntax `field := value`, never `field = value`. If subtraction over `Nat` makes the goal awkward, state enough preconditions and prove the equality with a small explicit arithmetic argument rather than relying on `omega` or `ring` blindly."#;
+After applying the axiom, you may need `symm` to flip the equation direction.
+
+Model only the three or four tracked balances touched by this instruction. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `trackedTotal` function and conservation lemmas from the support library: `trackedTotal_map_id` for balance-preserving updates, `transfer_preserves_total` for two-account transfers, `four_way_transfer_preserves_total` for escrow-style exchanges with two independent transfers. Do not redefine `trackedTotal` or basic lemmas. Prefer a direct theorem over numeric balances and `trackedTotal`, not a large account-state machine. Do not invent helpers like `transfer`, `transferWithSigner`, `state.accounts`, seed lists, or signer arrays unless you define them in the file. Do not wrap the conservation theorem in an `EscrowState` record update unless the theorem truly depends on a record field update. Prefer a shape like: given pre-balances and nonnegativity/precondition inequalities, define post-balances directly and prove `trackedTotal [pre accounts] = trackedTotal [post accounts]`. Apply the support library lemmas to simplify the proof. In record updates, use Lean syntax `field := value`, never `field = value`. If subtraction over `Nat` makes the goal awkward, state enough preconditions and prove the equality with a small explicit arithmetic argument rather than relying on `omega` or `ring` blindly."#;
 
 const STATE_MACHINE_HINT: &str = r#"Model only the lifecycle flag or closed/open state that matters. Import the relevant support modules, write `open Leanstral.Solana`, and use that surface consistently. Use the `Lifecycle` type and lemmas from the support library: `closes_is_closed`, `closes_was_open`, `closed_irreversible`. Define one small local state structure, typically `EscrowState`, with a `lifecycle : Lifecycle` field. Do not define a custom local `AccountState` when the theorem is really about lifecycle. Prefer a direct theorem shape like `(cancelTransition st).lifecycle = Lifecycle.closed` or `closes st.lifecycle (cancelTransition st).lifecycle`. Apply the support library lemmas to simplify the proof. Do not write theorem statements using placeholders like `some _`; introduce any post-state explicitly if needed."#;
 
@@ -176,6 +201,7 @@ pub fn support_api_for_modules(modules: &[String]) -> String {
             "trackedTotal_map_id : mapping preserving balance preserves total".to_string(),
             "balance_update_preserves_total : zero-delta update preserves total".to_string(),
             "transfer_preserves_total : two-account transfer preserves total".to_string(),
+            "four_way_transfer_preserves_total : four-account transfer (two independent pairs) preserves total".to_string(),
         ]);
     }
 

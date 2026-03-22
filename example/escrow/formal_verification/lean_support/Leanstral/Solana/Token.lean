@@ -64,6 +64,26 @@ axiom transfer_preserves_total
       else acc)
     trackedTotal updated = trackedTotal p_accounts
 
+-- Four-way transfer preserves total when authorities form two distinct pairs
+-- This models an exchange: pair1 does a transfer, pair2 does a transfer
+axiom four_way_transfer_preserves_total
+    (p_accounts : List Account)
+    (p_from1 p_to1 p_from2 p_to2 : Pubkey)
+    (p_amount1 p_amount2 : Nat)
+    (h_pair1_distinct : p_from1 ≠ p_to1)
+    (h_pair2_distinct : p_from2 ≠ p_to2)
+    (h_cross_distinct : p_from1 ≠ p_from2) :
+    trackedTotal (p_accounts.map (fun acc =>
+      if acc.authority = p_from1 then
+        { acc with balance := acc.balance - p_amount1 }
+      else if acc.authority = p_to1 then
+        { acc with balance := acc.balance + p_amount1 }
+      else if acc.authority = p_from2 then
+        { acc with balance := acc.balance - p_amount2 }
+      else if acc.authority = p_to2 then
+        { acc with balance := acc.balance + p_amount2 }
+      else acc)) = trackedTotal p_accounts
+
 end Leanstral.Solana.Token
 
 namespace Leanstral.Solana
@@ -78,5 +98,6 @@ abbrev trackedTotal_append := Leanstral.Solana.Token.trackedTotal_append
 abbrev trackedTotal_map_id := Leanstral.Solana.Token.trackedTotal_map_id
 abbrev balance_update_preserves_total := Leanstral.Solana.Token.balance_update_preserves_total
 abbrev transfer_preserves_total := Leanstral.Solana.Token.transfer_preserves_total
+abbrev four_way_transfer_preserves_total := Leanstral.Solana.Token.four_way_transfer_preserves_total
 
 end Leanstral.Solana

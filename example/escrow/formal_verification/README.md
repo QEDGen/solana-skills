@@ -1,6 +1,6 @@
-# Solana Program Lean Proofs
+# Solana Escrow Program Formal Verification
 
-This directory contains formal verification proofs for the Solana program, generated using Leanstral.
+This directory contains formal verification proofs for the Solana escrow program, generated using the **leanstral tool** with LLM-based proof generation and interactive refinement.
 
 ## Building and Verifying
 
@@ -14,11 +14,27 @@ This will verify all theorems and ensure they compile correctly.
 
 ## Structure
 
-All proofs are contained in `EscrowProofs.lean`, organized into namespaces to avoid naming conflicts:
-- Each proof has its own namespace
-- Shared definitions from the Leanstral Solana library are imported at the top
-- The `lean_support` directory contains the Solana modeling framework
+- **EscrowProofs.lean**: All proofs organized into namespaces
+- **lean_support/**: Solana modeling framework (Account, Token, State, Authority)
+- **claude.md**: Interactive proof development workflow for Claude Code users
 
-## Generated Proofs
+## Proofs Included
 
-See `EscrowProofs.lean` for the complete list of theorems and their proofs.
+The following properties are formally verified:
+
+1. **Access Control**: Cancel and exchange operations require proper authorization
+2. **Token Conservation**: Token balances are preserved across transfers
+3. **State Machine**: Lifecycle transitions (open → closed) are correct
+4. **Arithmetic Safety**: Numeric operations stay within bounds
+
+See `EscrowProofs.lean` for complete theorem statements and proofs.
+
+## Interactive Development
+
+For details on the proof generation and refinement workflow, including:
+- How to regenerate proofs from Rust source
+- Common issues and fixes
+- Prompt engineering for better proofs
+- Future interactive mode with leanstral
+
+See **[claude.md](claude.md)**
