@@ -4,6 +4,17 @@ namespace Leanstral.Solana.Token
 
 open Leanstral.Solana.Account
 
+/- ============================================================================
+   Token API - Trust Boundary
+
+   These axioms model SPL Token operations as TRUSTED external dependencies.
+   We do NOT verify the SPL Token program implementation itself.
+   We verify that programs use these operations correctly.
+
+   Trust Assumption: SPL Token's transfer, mint, burn operations are correct
+   and preserve invariants (e.g., total supply, conservation).
+   ============================================================================ -/
+
 structure Mint where
   id : Nat := 0
   deriving Repr, DecidableEq, BEq

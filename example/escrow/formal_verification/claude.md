@@ -2,6 +2,9 @@
 
 This document describes the workflow for interactive formal verification using Claude Code and the leanstral tool.
 
+> **Important**: See [VERIFICATION_SCOPE.md](VERIFICATION_SCOPE.md) for the trust boundary.
+> We verify program business logic, NOT external dependencies (SPL Token, Solana runtime).
+
 ## Architecture
 
 The proof generation system uses:

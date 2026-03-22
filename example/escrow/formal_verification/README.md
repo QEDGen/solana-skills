@@ -17,6 +17,7 @@ This will verify all theorems and ensure they compile correctly.
 - **EscrowProofs.lean**: All proofs organized into namespaces
 - **lean_support/**: Solana modeling framework (Account, Token, State, Authority)
 - **claude.md**: Interactive proof development workflow for Claude Code users
+- **VERIFICATION_SCOPE.md**: Trust boundary and what we verify vs. assume
 
 ## Proofs Included
 

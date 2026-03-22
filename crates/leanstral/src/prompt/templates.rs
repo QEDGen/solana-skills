@@ -79,6 +79,12 @@ Prefer a smaller explicit model that compiles over a larger broken one.
 IMPORTANT: The Support API section below lists definitions that are ALREADY IMPORTED from the support modules.
 You MUST use these existing definitions. DO NOT redefine any function, type, or lemma listed in the Support API.
 If you need a definition not in the Support API, you may define it yourself.
+
+VERIFICATION SCOPE: We verify the program's business logic, NOT external dependencies.
+- CPI operations (token::transfer, system_program calls) are TRUSTED via axioms
+- We verify the program passes correct parameters to these operations
+- We verify authorization, state transitions, and compositional properties
+- Do NOT attempt to model SPL Token internals, PDA derivation, or Solana runtime
 "#;
 
 pub const OUTPUT_REQUIREMENTS: &str = r#"## Output Requirements
