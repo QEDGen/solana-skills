@@ -73,7 +73,6 @@ setup_global_workspace() {
     if [ -x "bin/leanstral" ]; then
         bin/leanstral setup --workspace "$ws_dir" &
         echo "  Background PID: $!"
-        echo "  Check progress: tail -f $ws_dir/setup.log"
     else
         echo "  Warning: binary not available, workspace will be set up on first use."
     fi

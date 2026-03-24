@@ -3,7 +3,7 @@
 // This module builds Lean-specific proof plans from language-agnostic Anchor analysis IR.
 
 use crate::ir::*;
-use anchor_ir::{InstructionIr, AccountsStructIr, PropertyCandidateIr, PreconditionIr, PreconditionKind};
+use anchor_ir::{InstructionIr, AccountsStructIr, PropertyCandidateIr, PreconditionKind};
 use anyhow::Result;
 use regex::Regex;
 use std::fs;

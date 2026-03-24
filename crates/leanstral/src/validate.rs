@@ -18,16 +18,12 @@ pub async fn validate_completion(
     std::fs::create_dir_all(&log_dir)?;
     let log_path = log_dir.join(format!("completion_{}.log", completion_index));
 
-    let workspace = if let Some(ws) = validation_workspace {
-        std::fs::create_dir_all(ws)?;
-        ensure_workspace_ready(ws).await?;
-        ws.to_path_buf()
-    } else {
-        let ws = validation_workspace_dir()?;
-        std::fs::create_dir_all(&ws)?;
-        ensure_workspace_ready(&ws).await?;
-        ws
+    let workspace = match validation_workspace {
+        Some(ws) => ws.to_path_buf(),
+        None => validation_workspace_dir()?,
     };
+    std::fs::create_dir_all(&workspace)?;
+    ensure_workspace_ready(&workspace).await?;
 
     // Copy Best.lean to validation workspace
     std::fs::copy(output_dir.join("Best.lean"), workspace.join("Best.lean"))?;
@@ -67,26 +63,52 @@ pub async fn validate_completion(
 /// Set up the global validation workspace. Called by `leanstral setup` and
 /// by the install script to pre-fetch the Mathlib cache.
 pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
-    let ws = if let Some(ws) = workspace {
-        ws.to_path_buf()
-    } else {
-        validation_workspace_dir()?
+    let ws = match workspace {
+        Some(ws) => ws.to_path_buf(),
+        None => validation_workspace_dir()?,
     };
 
     std::fs::create_dir_all(&ws)?;
     eprintln!("Setting up validation workspace at {}...", ws.display());
 
-    // Write full scaffold
     crate::project::setup_lean_project(&ws)?;
     eprintln!("  Project scaffold created.");
 
-    // Resolve dependencies
     eprintln!("  Running lake update...");
     let _update = run_command("lake", &["update"], &ws, &[]).await;
 
-    // Fetch Mathlib cache
+    fetch_or_build_mathlib(&ws).await;
+
+    eprintln!("Workspace setup complete: {}", ws.display());
+    Ok(())
+}
+
+/// Ensure the validation workspace is ready for `lake build Best`.
+///
+/// On first call (no lakefile.lean exists): sets up the full project scaffold,
+/// runs `lake update` to resolve dependencies, and fetches the Mathlib cache.
+///
+/// On subsequent calls: only updates the lean_support/ files (which may change
+/// when axioms are updated), preserving .lake/ build cache.
+async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
+    if !workspace.join("lakefile.lean").exists() {
+        crate::project::setup_lean_project(workspace)?;
+
+        eprintln!("  Setting up validation workspace (first time)...");
+        let _update = run_command("lake", &["update"], workspace, &[]).await;
+
+        fetch_or_build_mathlib(workspace).await;
+    } else {
+        crate::project::update_lean_support(workspace)?;
+    }
+
+    Ok(())
+}
+
+/// Fetch pre-built Mathlib oleans, falling back to building from source.
+async fn fetch_or_build_mathlib(workspace: &Path) {
     eprintln!("  Fetching Mathlib cache (this may take a few minutes)...");
-    let cache_result = run_command("lake", &["exe", "cache", "get"], &ws, &[]).await;
+    let cache_result = run_command("lake", &["exe", "cache", "get"], workspace, &[]).await;
 
     match &cache_result {
         Ok((_, _, code)) if *code == 0 => {
@@ -94,8 +116,7 @@ pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
         }
         _ => {
             eprintln!("  Mathlib cache fetch failed. Building from source...");
-            // Build Mathlib from source as fallback
-            let build_result = run_command("lake", &["build", "Mathlib.Tactic"], &ws, &[]).await;
+            let build_result = run_command("lake", &["build", "Mathlib.Tactic"], workspace, &[]).await;
             match &build_result {
                 Ok((_, _, code)) if *code == 0 => {
                     eprintln!("  Mathlib built from source successfully.");
@@ -106,64 +127,6 @@ pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
             }
         }
     }
-
-    eprintln!("Workspace setup complete: {}", ws.display());
-    Ok(())
-}
-
-/// Ensure the validation workspace is ready for `lake build Best`.
-///
-/// On first call (no lakefile.lean exists): sets up the full project scaffold,
-/// runs `lake update` to resolve dependencies, and fetches the Mathlib cache
-/// with `lake exe cache get` to avoid a 25+ minute source compilation.
-///
-/// On subsequent calls: only updates the lean_support/ files (which may change
-/// when axioms are updated). The lakefile.lean, lean-toolchain, and .lake/ cache
-/// are preserved to avoid invalidating the build cache.
-async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
-    let lakefile_path = workspace.join("lakefile.lean");
-    let is_fresh = !lakefile_path.exists();
-
-    if is_fresh {
-        // First-time setup: write all scaffold files
-        crate::project::setup_lean_project(workspace)?;
-
-        // Resolve dependencies (downloads mathlib, etc.)
-        eprintln!("  Setting up validation workspace (first time)...");
-        let _update = run_command(
-            "lake",
-            &["update"],
-            workspace,
-            &[],
-        )
-        .await;
-
-        // Fetch pre-built Mathlib oleans from cache (~1-2 min vs 25+ min from source)
-        eprintln!("  Fetching Mathlib cache...");
-        let cache_result = run_command(
-            "lake",
-            &["exe", "cache", "get"],
-            workspace,
-            &[],
-        )
-        .await;
-
-        match &cache_result {
-            Ok((_, _, code)) if *code == 0 => {
-                eprintln!("  Mathlib cache fetched successfully.");
-            }
-            _ => {
-                eprintln!("  Warning: Mathlib cache fetch failed, will build from source (slow).");
-            }
-        }
-    } else {
-        // Workspace already exists: only update lean_support files in case
-        // axioms changed, but don't touch lakefile.lean or lean-toolchain
-        // to preserve the .lake/ build cache.
-        crate::project::update_lean_support(workspace)?;
-    }
-
-    Ok(())
 }
 
 async fn run_command(
@@ -254,7 +217,7 @@ pub fn summarize_build_log(build_log: &str) -> String {
         .rev()
         .take(250)
         .rev()
-        .map(|s| *s)
+        .copied()
         .collect::<Vec<_>>()
         .join("\n")
         .chars()
