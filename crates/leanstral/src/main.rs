@@ -129,6 +129,13 @@ enum Commands {
         #[arg(long)]
         output_dir: PathBuf,
     },
+
+    /// Set up the global validation workspace (scaffold + Mathlib cache)
+    Setup {
+        /// Directory for the validation workspace (default: platform cache dir)
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -214,6 +221,10 @@ async fn main() -> Result<()> {
             output_dir,
         } => {
             consolidate::consolidate_proofs(&input_dir, &output_dir)?;
+        }
+
+        Commands::Setup { workspace } => {
+            validate::setup_workspace(workspace.as_deref()).await?;
         }
     }
 

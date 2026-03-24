@@ -210,7 +210,9 @@ pub async fn run_full_pipeline(
     // Determine project root
     let paths = vec![idl.clone(), input.clone()];
     let project_root = derive_project_root(&paths);
-    let validation_workspace = project_root.as_ref().map(|root| root.join(".leanstral/validation-workspace"));
+    // Use global validation workspace by default (shared Mathlib cache).
+    // Falls back to per-project only if LEANSTRAL_VALIDATION_WORKSPACE is set.
+    let validation_workspace: Option<PathBuf> = None;
 
     // Create directories
     std::fs::create_dir_all(&analysis_dir)?;

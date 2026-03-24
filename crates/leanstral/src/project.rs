@@ -29,6 +29,19 @@ pub fn setup_lean_project(output_dir: &Path) -> Result<()> {
     std::fs::write(output_dir.join("README.md"), README)?;
 
     // Write lean_support directory
+    write_lean_support(output_dir)?;
+
+    Ok(())
+}
+
+/// Update only the lean_support/ files without touching lakefile.lean or
+/// lean-toolchain. This preserves the .lake/ build cache while ensuring
+/// axiom definitions are current.
+pub fn update_lean_support(output_dir: &Path) -> Result<()> {
+    write_lean_support(output_dir)
+}
+
+fn write_lean_support(output_dir: &Path) -> Result<()> {
     let support_dir = output_dir.join("lean_support");
     std::fs::create_dir_all(&support_dir)?;
     std::fs::write(support_dir.join("lakefile.lean"), SUPPORT_LAKEFILE)?;

@@ -19,52 +19,25 @@ pub async fn validate_completion(
     let log_path = log_dir.join(format!("completion_{}.log", completion_index));
 
     let workspace = if let Some(ws) = validation_workspace {
+        std::fs::create_dir_all(ws)?;
+        ensure_workspace_ready(ws).await?;
         ws.to_path_buf()
     } else {
-        ensure_validation_workspace().await?
+        let ws = validation_workspace_dir()?;
+        std::fs::create_dir_all(&ws)?;
+        ensure_workspace_ready(&ws).await?;
+        ws
     };
 
     // Copy Best.lean to validation workspace
     std::fs::copy(output_dir.join("Best.lean"), workspace.join("Best.lean"))?;
 
-    // Set up Lake environment
-    let lake_env = std::env::var("LAKE_ARTIFACT_CACHE").unwrap_or_else(|_| "true".to_string());
-
-    // Run lake update
-    let update_result = run_command(
-        "lake",
-        &["update", "leanstralSupport"],
-        &workspace,
-        &[("LAKE_ARTIFACT_CACHE", &lake_env)],
-    )
-    .await;
-
-    match update_result {
-        Ok((stdout, stderr, code)) => {
-            if code != 0 {
-                let combined = format!("{}\n{}", stdout, stderr);
-                std::fs::write(&log_path, combined)?;
-                return Ok(ValidationResult {
-                    status: BuildStatus::Failed,
-                    log_path: Some(log_path),
-                });
-            }
-        }
-        Err(e) => {
-            std::fs::write(&log_path, format!("Error: {}", e))?;
-            return Ok(ValidationResult {
-                status: BuildStatus::Skipped,
-                log_path: Some(log_path),
-            });
-        }
-    }
-
     // Run lake build
     let build_result = run_command(
         "lake",
-        &["--try-cache", "build", "Best"],
+        &["build", "Best"],
         &workspace,
-        &[("LAKE_ARTIFACT_CACHE", &lake_env)],
+        &[],
     )
     .await;
 
@@ -91,6 +64,108 @@ pub async fn validate_completion(
     }
 }
 
+/// Set up the global validation workspace. Called by `leanstral setup` and
+/// by the install script to pre-fetch the Mathlib cache.
+pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
+    let ws = if let Some(ws) = workspace {
+        ws.to_path_buf()
+    } else {
+        validation_workspace_dir()?
+    };
+
+    std::fs::create_dir_all(&ws)?;
+    eprintln!("Setting up validation workspace at {}...", ws.display());
+
+    // Write full scaffold
+    crate::project::setup_lean_project(&ws)?;
+    eprintln!("  Project scaffold created.");
+
+    // Resolve dependencies
+    eprintln!("  Running lake update...");
+    let _update = run_command("lake", &["update"], &ws, &[]).await;
+
+    // Fetch Mathlib cache
+    eprintln!("  Fetching Mathlib cache (this may take a few minutes)...");
+    let cache_result = run_command("lake", &["exe", "cache", "get"], &ws, &[]).await;
+
+    match &cache_result {
+        Ok((_, _, code)) if *code == 0 => {
+            eprintln!("  Mathlib cache fetched successfully.");
+        }
+        _ => {
+            eprintln!("  Mathlib cache fetch failed. Building from source...");
+            // Build Mathlib from source as fallback
+            let build_result = run_command("lake", &["build", "Mathlib.Tactic"], &ws, &[]).await;
+            match &build_result {
+                Ok((_, _, code)) if *code == 0 => {
+                    eprintln!("  Mathlib built from source successfully.");
+                }
+                _ => {
+                    eprintln!("  Warning: Mathlib build failed. First validation run will be slow.");
+                }
+            }
+        }
+    }
+
+    eprintln!("Workspace setup complete: {}", ws.display());
+    Ok(())
+}
+
+/// Ensure the validation workspace is ready for `lake build Best`.
+///
+/// On first call (no lakefile.lean exists): sets up the full project scaffold,
+/// runs `lake update` to resolve dependencies, and fetches the Mathlib cache
+/// with `lake exe cache get` to avoid a 25+ minute source compilation.
+///
+/// On subsequent calls: only updates the lean_support/ files (which may change
+/// when axioms are updated). The lakefile.lean, lean-toolchain, and .lake/ cache
+/// are preserved to avoid invalidating the build cache.
+async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
+    let lakefile_path = workspace.join("lakefile.lean");
+    let is_fresh = !lakefile_path.exists();
+
+    if is_fresh {
+        // First-time setup: write all scaffold files
+        crate::project::setup_lean_project(workspace)?;
+
+        // Resolve dependencies (downloads mathlib, etc.)
+        eprintln!("  Setting up validation workspace (first time)...");
+        let _update = run_command(
+            "lake",
+            &["update"],
+            workspace,
+            &[],
+        )
+        .await;
+
+        // Fetch pre-built Mathlib oleans from cache (~1-2 min vs 25+ min from source)
+        eprintln!("  Fetching Mathlib cache...");
+        let cache_result = run_command(
+            "lake",
+            &["exe", "cache", "get"],
+            workspace,
+            &[],
+        )
+        .await;
+
+        match &cache_result {
+            Ok((_, _, code)) if *code == 0 => {
+                eprintln!("  Mathlib cache fetched successfully.");
+            }
+            _ => {
+                eprintln!("  Warning: Mathlib cache fetch failed, will build from source (slow).");
+            }
+        }
+    } else {
+        // Workspace already exists: only update lean_support files in case
+        // axioms changed, but don't touch lakefile.lean or lean-toolchain
+        // to preserve the .lake/ build cache.
+        crate::project::update_lean_support(workspace)?;
+    }
+
+    Ok(())
+}
+
 async fn run_command(
     cmd: &str,
     args: &[&str],
@@ -110,13 +185,6 @@ async fn run_command(
     let code = output.status.code().unwrap_or(-1);
 
     Ok((stdout, stderr, code))
-}
-
-async fn ensure_validation_workspace() -> Result<PathBuf> {
-    let workspace = validation_workspace_dir()?;
-    std::fs::create_dir_all(&workspace)?;
-    crate::project::setup_lean_project(&workspace)?;
-    Ok(workspace)
 }
 
 fn validation_workspace_dir() -> Result<PathBuf> {

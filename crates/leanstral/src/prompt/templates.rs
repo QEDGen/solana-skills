@@ -107,6 +107,28 @@ simp [transition] at h   -- BAD: may eliminate if-then-else before split_ifs
 split_ifs at h           -- ERROR: no if-then-else to split!
 ```
 
+### Opaque Values: Pubkey and Amount Preconditions
+
+CRITICAL: `Pubkey` is `abbrev Nat` and `U64` is `abbrev Nat`. Context structure fields like `ctx.from_account` and `ctx.to_account` are OPAQUE — you cannot prove they are distinct or bounded without explicit hypotheses.
+
+**WRONG** — trying to prove distinctness without a hypothesis:
+```lean
+-- This will FAIL: simp/decide/omega/rfl/injection cannot prove ctx.from ≠ ctx.to
+theorem cpi_valid (ctx : Context) : ctx.from ≠ ctx.to := by simp  -- ERROR!
+```
+
+**CORRECT** — add preconditions:
+```lean
+theorem cpi_valid (ctx : Context)
+    (h_distinct : ctx.from ≠ ctx.to)     -- Precondition for distinctness
+    (h_amount : ctx.amount ≤ U64_MAX)    -- Precondition for amount bound
+    : transferCpiValid (build_cpi ctx) := by
+  unfold build_cpi transferCpiValid
+  exact ⟨rfl, h_distinct, h_amount⟩
+```
+
+This applies to ANY property involving opaque struct fields that cannot be proven definitionally.
+
 ### If-Expressions with Proof Bindings
 
 - Use `if h : condition then ...` ONLY when you need the proof `h` in the then/else branches
@@ -204,64 +226,77 @@ VERIFICATION SCOPE: We verify that CPI parameters are CONSTRUCTED correctly - NO
 - Prove: CPI has correct program ID, distinct from/to accounts, bounded amounts, correct authorities
 - Trust: SPL Token implementation (external dependency)
 
-CRITICAL PATTERN: Define functions that extract CPI parameters from context:
+CRITICAL: `transferCpiValid` requires `program = TOKEN_PROGRAM_ID ∧ from ≠ to ∧ amount ≤ U64_MAX`.
+Since `Pubkey` is `Nat` and context fields are opaque, you CANNOT prove `from ≠ to` or `amount ≤ U64_MAX` without explicit hypotheses. These must be added as PRECONDITIONS to the theorem.
+
+DO NOT use `simp` alone to prove CPI validity — it cannot discharge `from ≠ to` for opaque pubkeys.
+DO NOT use `decide` on goals containing free variables (it requires closed terms).
+DO NOT use `omega` to prove `amount ≤ U64_MAX` for opaque Nat values.
+DO NOT use `rfl` or `injection` on inequality goals between opaque pubkeys.
+
+CRITICAL PATTERN for single-transfer CPI:
 ```lean
-structure ExchangeContext where
-  taker : Pubkey
-  escrow : Pubkey
-  taker_deposit : Pubkey
-  initializer_receive : Pubkey
+structure CancelContext where
   escrow_token_account : Pubkey
-  taker_receive : Pubkey
-  taker_amount : U64
-  initializer_amount : U64
+  initializer_deposit : Pubkey
+  authority : Pubkey
+  amount : U64
 
-def exchange_build_cpi_1 (ctx : ExchangeContext) : TransferCpi :=
+def cancel_build_transfer_cpi (ctx : CancelContext) : TransferCpi :=
   { program := TOKEN_PROGRAM_ID
-  , from := ctx.taker_deposit
-  , to := ctx.initializer_receive
-  , authority := ctx.taker
-  , amount := ctx.taker_amount }
+  , «from» := ctx.escrow_token_account
+  , «to» := ctx.initializer_deposit
+  , authority := ctx.authority
+  , amount := ctx.amount }
 
-def exchange_build_cpi_2 (ctx : ExchangeContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID
-  , from := ctx.escrow_token_account
-  , to := ctx.taker_receive
-  , authority := ctx.escrow
-  , amount := ctx.initializer_amount }
-
-theorem exchange_cpis_valid (ctx : ExchangeContext) :
-    let cpi1 := exchange_build_cpi_1 ctx
-    let cpi2 := exchange_build_cpi_2 ctx
-    -- Correct program IDs
-    cpi1.program = TOKEN_PROGRAM_ID ∧
-    cpi2.program = TOKEN_PROGRAM_ID ∧
-    -- Distinct from/to
-    cpi1.from ≠ cpi1.to ∧
-    cpi2.from ≠ cpi2.to ∧
-    -- Valid amounts
-    transferCpiValid cpi1 ∧
-    transferCpiValid cpi2 ∧
-    -- Correct authorities
-    cpi1.authority = ctx.taker ∧
-    cpi2.authority = ctx.escrow := by
-  simp [exchange_build_cpi_1, exchange_build_cpi_2, transferCpiValid]
-```
-
-For single-transfer instructions:
-```lean
-theorem initialize_cpi_valid (ctx : InitializeContext) :
-    let cpi := initialize_build_cpi ctx
+-- NOTE: h_distinct and h_amount are REQUIRED preconditions
+theorem cancel_cpi_valid (ctx : CancelContext)
+    (h_distinct : ctx.escrow_token_account ≠ ctx.initializer_deposit)
+    (h_amount : ctx.amount ≤ U64_MAX) :
+    let cpi := cancel_build_transfer_cpi ctx
     transferCpiValid cpi ∧
-    cpi.program = TOKEN_PROGRAM_ID ∧
-    cpi.from ≠ cpi.to ∧
-    cpi.authority = ctx.initializer := by
-  simp [initialize_build_cpi, transferCpiValid]
+    cpi.authority = ctx.authority ∧
+    cpi.«from» ≠ cpi.«to» := by
+  unfold cancel_build_transfer_cpi transferCpiValid
+  exact ⟨⟨rfl, h_distinct, h_amount⟩, rfl, h_distinct⟩
 ```
+
+CRITICAL PATTERN for multi-transfer CPI:
+```lean
+-- For multiple CPIs, add distinctness + amount preconditions for EACH transfer
+theorem exchange_cpis_valid (ctx : ExchangeContext)
+    (h_distinct1 : ctx.taker_deposit ≠ ctx.initializer_receive)
+    (h_distinct2 : ctx.escrow_token_account ≠ ctx.taker_receive)
+    (h_amount1 : ctx.taker_amount ≤ U64_MAX)
+    (h_amount2 : ctx.initializer_amount ≤ U64_MAX) :
+    let cpis := exchange_build_transfer_cpis ctx
+    multipleTransfersValid cpis ∧
+    (∀ cpi ∈ cpis, cpi.program = TOKEN_PROGRAM_ID) := by
+  unfold exchange_build_transfer_cpis
+  unfold multipleTransfersValid
+  simp only [Leanstral.Solana.transferCpiValid, Leanstral.Solana.Cpi.transferCpiValid]
+  constructor
+  · constructor
+    · intro cpi h
+      simp [List.mem_cons, List.mem_singleton] at h
+      rcases h with rfl | rfl
+      · exact ⟨rfl, h_distinct1, h_amount1⟩
+      · exact ⟨rfl, h_distinct2, h_amount2⟩
+    · intro cpi h
+      simp [List.mem_cons, List.mem_singleton] at h
+      rcases h with rfl | rfl
+      · exact h_distinct1
+      · exact h_distinct2
+  · intro cpi h
+    simp [List.mem_cons, List.mem_singleton] at h
+    rcases h with rfl | rfl <;> rfl
+```
+
+NOTE on `unfold transferCpiValid`: After `open Leanstral.Solana`, the abbreviation may not unfold directly.
+Use `simp only [Leanstral.Solana.transferCpiValid, Leanstral.Solana.Cpi.transferCpiValid]` to reduce through abbreviation layers, or use `unfold Leanstral.Solana.Cpi.transferCpiValid` with the fully qualified name.
 
 DO NOT model token balances or state changes - we only verify parameter construction.
 DO NOT use axioms like transfer_preserves_total - this is about CPI interface correctness.
-Use `simp` to unfold definitions and prove by computation.
 
 Keep the context structure minimal - only fields needed for CPI construction.
 In record creation, use Lean syntax `field := value`, never `field = value`."#;
@@ -363,11 +398,11 @@ pub fn support_api_for_modules(modules: &[String]) -> String {
             "CloseCpi : Type".to_string(),
             "TOKEN_PROGRAM_ID : Pubkey".to_string(),
             "SYSTEM_PROGRAM_ID : Pubkey".to_string(),
-            "transferCpiValid : TransferCpi -> Prop  -- checks program ID, from ≠ to, amount <= U64.max".to_string(),
+            "transferCpiValid : TransferCpi -> Prop  -- defined as: cpi.program = TOKEN_PROGRAM_ID ∧ cpi.from ≠ cpi.to ∧ cpi.amount ≤ U64_MAX. REQUIRES explicit hypotheses for from ≠ to and amount ≤ U64_MAX since Pubkey/U64 fields are opaque Nat values.".to_string(),
             "mintToCpiValid : MintToCpi -> Prop".to_string(),
             "burnCpiValid : BurnCpi -> Prop".to_string(),
             "closeCpiValid : CloseCpi -> Prop".to_string(),
-            "multipleTransfersValid : List TransferCpi -> Prop".to_string(),
+            "multipleTransfersValid : List TransferCpi -> Prop  -- defined as: (∀ cpi ∈ transfers, transferCpiValid cpi) ∧ (∀ cpi ∈ transfers, cpi.from ≠ cpi.to). Same precondition requirements as transferCpiValid for each element.".to_string(),
         ]);
     }
 

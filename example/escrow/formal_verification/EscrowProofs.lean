@@ -23,7 +23,7 @@ structure EscrowState where
   bump : U8
 
 def cancelTransition (p_preState : EscrowState) (p_signer : Pubkey) : Option Unit :=
-  if h : p_signer = p_preState.initializer then
+  if p_signer = p_preState.initializer then
     some ()
   else
     none
@@ -59,12 +59,15 @@ def cancel_build_transfer_cpi (p_ctx : CancelContext) : TransferCpi :=
   , authority := p_ctx.authority
   , amount := p_ctx.amount }
 
-theorem cancel_cpi_valid (p_ctx : CancelContext) :
+theorem cancel_cpi_valid (p_ctx : CancelContext)
+    (h_distinct : p_ctx.escrow_token_account ≠ p_ctx.initializer_deposit)
+    (h_amount : p_ctx.amount ≤ U64_MAX) :
     let cpi := cancel_build_transfer_cpi p_ctx
     transferCpiValid cpi ∧
     cpi.authority = p_ctx.authority ∧
     cpi.«from» ≠ cpi.«to» := by
-  simp [cancel_build_transfer_cpi, transferCpiValid]
+  unfold cancel_build_transfer_cpi transferCpiValid
+  exact ⟨⟨rfl, h_distinct, h_amount⟩, rfl, h_distinct⟩
 
 end CancelCpiCorrectness
 
@@ -153,19 +156,32 @@ def exchange_build_transfer_cpis (p_ctx : ExchangeContext) : List TransferCpi :=
     , authority := p_ctx.escrow
     , amount := p_ctx.initializer_amount } ]
 
-theorem exchange_cpis_valid (p_ctx : ExchangeContext) :
+theorem exchange_cpis_valid (p_ctx : ExchangeContext)
+    (h_distinct1 : p_ctx.taker_deposit ≠ p_ctx.initializer_receive)
+    (h_distinct2 : p_ctx.escrow_token_account ≠ p_ctx.taker_receive)
+    (h_amount1 : p_ctx.taker_amount ≤ U64_MAX)
+    (h_amount2 : p_ctx.initializer_amount ≤ U64_MAX) :
     let cpis := exchange_build_transfer_cpis p_ctx
     multipleTransfersValid cpis ∧
     (∀ cpi ∈ cpis, cpi.program = TOKEN_PROGRAM_ID) := by
-  unfold exchange_build_transfer_cpis multipleTransfersValid
-  simp
+  unfold exchange_build_transfer_cpis
+  unfold multipleTransfersValid
+  simp only [Leanstral.Solana.transferCpiValid, Leanstral.Solana.Cpi.transferCpiValid]
   constructor
-  · decide
+  · constructor
+    · intro cpi h
+      simp [List.mem_cons, List.mem_singleton] at h
+      rcases h with rfl | rfl
+      · exact ⟨rfl, h_distinct1, h_amount1⟩
+      · exact ⟨rfl, h_distinct2, h_amount2⟩
+    · intro cpi h
+      simp [List.mem_cons, List.mem_singleton] at h
+      rcases h with rfl | rfl
+      · exact h_distinct1
+      · exact h_distinct2
   · intro cpi h
-    simp at h
-    rcases h with (rfl | rfl)
-    · rfl
-    · rfl
+    simp [List.mem_cons, List.mem_singleton] at h
+    rcases h with rfl | rfl <;> rfl
 
 end ExchangeCpiCorrectness
 
@@ -245,16 +261,15 @@ def initialize_build_transfer_cpi (p_ctx : InitializeContext) : TransferCpi :=
   , authority := p_ctx.initializer
   , amount := p_ctx.amount }
 
-theorem initialize_cpi_valid (p_ctx : InitializeContext) :
+theorem initialize_cpi_valid (p_ctx : InitializeContext)
+    (h_distinct : p_ctx.initializer_deposit_token_account ≠ p_ctx.escrow_token_account)
+    (h_amount : p_ctx.amount ≤ U64_MAX) :
     let cpi := initialize_build_transfer_cpi p_ctx
     transferCpiValid cpi ∧
     cpi.authority = p_ctx.initializer ∧
     cpi.«from» ≠ cpi.«to» := by
-  simp [initialize_build_transfer_cpi, transferCpiValid]
-  constructor
-  · rfl
-  · intro h
-    injection h
+  unfold initialize_build_transfer_cpi transferCpiValid
+  exact ⟨⟨rfl, h_distinct, h_amount⟩, rfl, h_distinct⟩
 
 end InitializeCpiCorrectness
 

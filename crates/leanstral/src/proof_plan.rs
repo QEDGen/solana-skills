@@ -207,30 +207,65 @@ fn generate_theorem_skeleton(
             )
         }
         "cpi_correctness" => {
-            let num_transfers = instructions
+            let instruction = instructions
                 .iter()
-                .find(|ix| ix.name == *instruction_name)
-                .map(|ix| ix.transfers.len())
-                .unwrap_or(1);
+                .find(|ix| ix.name == *instruction_name);
+            let transfers: Vec<_> = instruction
+                .map(|ix| ix.transfers.clone())
+                .unwrap_or_default();
+            let num_transfers = if transfers.is_empty() { 1 } else { transfers.len() };
 
             if num_transfers == 1 {
+                // Build preconditions from transfer info
+                let transfer = transfers.first();
+                let from_field = transfer
+                    .and_then(|t| t.from.as_deref())
+                    .unwrap_or("from_account");
+                let to_field = transfer
+                    .and_then(|t| t.to.as_deref())
+                    .unwrap_or("to_account");
+
                 format!(
-                    r#"theorem {}_cpi_valid (ctx : {}Context) :
-    let cpi := {}_build_transfer_cpi ctx
+                    r#"theorem {ix}_cpi_valid (ctx : {ix}Context)
+    (h_distinct : ctx.{from_f} ≠ ctx.{to_f})
+    (h_amount : ctx.amount ≤ U64_MAX) :
+    let cpi := {ix}_build_transfer_cpi ctx
     transferCpiValid cpi ∧
     cpi.authority = ctx.authority ∧
-    cpi.from ≠ cpi.to := by
+    cpi.«from» ≠ cpi.«to» := by
   sorry"#,
-                    instruction_name, instruction_name, instruction_name
+                    ix = instruction_name,
+                    from_f = from_field,
+                    to_f = to_field,
                 )
             } else {
+                // Build per-transfer preconditions
+                let mut precond_lines = String::new();
+                for (i, transfer) in transfers.iter().enumerate() {
+                    let idx = i + 1;
+                    let from_field = transfer.from.as_deref().unwrap_or("from_account");
+                    let to_field = transfer.to.as_deref().unwrap_or("to_account");
+                    precond_lines.push_str(&format!(
+                        "\n    (h_distinct{idx} : ctx.{from_f} ≠ ctx.{to_f})",
+                        idx = idx, from_f = from_field, to_f = to_field,
+                    ));
+                }
+                for (i, _transfer) in transfers.iter().enumerate() {
+                    let idx = i + 1;
+                    precond_lines.push_str(&format!(
+                        "\n    (h_amount{idx} : ctx.amount{idx} ≤ U64_MAX)",
+                        idx = idx,
+                    ));
+                }
+
                 format!(
-                    r#"theorem {}_cpis_valid (ctx : {}Context) :
-    let cpis := {}_build_transfer_cpis ctx
+                    r#"theorem {ix}_cpis_valid (ctx : {ix}Context){preconds} :
+    let cpis := {ix}_build_transfer_cpis ctx
     multipleTransfersValid cpis ∧
     (∀ cpi ∈ cpis, cpi.program = TOKEN_PROGRAM_ID) := by
   sorry"#,
-                    instruction_name, instruction_name, instruction_name
+                    ix = instruction_name,
+                    preconds = precond_lines,
                 )
             }
         }
