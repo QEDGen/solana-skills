@@ -50,20 +50,20 @@ structure CancelContext where
   authority : Pubkey
   amount : U64
 
-def cancel_build_cpi (ctx : CancelContext) : TransferCpi :=
+def cancel_build_cpi (p_ctx : CancelContext) : TransferCpi :=
   { program := TOKEN_PROGRAM_ID
-  , «from» := ctx.escrow_token_account
-  , «to» := ctx.initializer_deposit
-  , authority := ctx.authority
-  , amount := ctx.amount }
+  , «from» := p_ctx.escrow_token_account
+  , «to» := p_ctx.initializer_deposit
+  , authority := p_ctx.authority
+  , amount := p_ctx.amount }
 
-theorem cancel_cpi_correct (ctx : CancelContext) :
-    let cpi := cancel_build_cpi ctx
+theorem cancel_cpi_correct (p_ctx : CancelContext) :
+    let cpi := cancel_build_cpi p_ctx
     cpi.program = TOKEN_PROGRAM_ID ∧
-    cpi.«from» = ctx.escrow_token_account ∧
-    cpi.«to» = ctx.initializer_deposit ∧
-    cpi.authority = ctx.authority ∧
-    cpi.amount = ctx.amount := by
+    cpi.«from» = p_ctx.escrow_token_account ∧
+    cpi.«to» = p_ctx.initializer_deposit ∧
+    cpi.authority = p_ctx.authority ∧
+    cpi.amount = p_ctx.amount := by
   unfold cancel_build_cpi
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
@@ -138,7 +138,6 @@ structure ExchangeContext where
   authority : Pubkey
   amount : U64
 
--- Define the builder function for the exchange CPI
 def exchange_build_cpi (ctx : ExchangeContext) : TransferCpi :=
   { program := TOKEN_PROGRAM_ID
   , «from» := ctx.from_account
@@ -146,7 +145,6 @@ def exchange_build_cpi (ctx : ExchangeContext) : TransferCpi :=
   , authority := ctx.authority
   , amount := ctx.amount }
 
--- Theorem proving the correctness of the exchange CPI parameters
 theorem exchange_cpi_correct (ctx : ExchangeContext) :
     let cpi := exchange_build_cpi ctx
     cpi.program = TOKEN_PROGRAM_ID ∧
@@ -201,7 +199,7 @@ structure EscrowState where
   bump : U8
 
 def initializeTransition (p_preState : EscrowState) (p_signer : Pubkey) : Option Unit :=
-  if h : p_signer = p_preState.initializer then
+  if p_signer = p_preState.initializer then
     some ()
   else
     none
