@@ -22,16 +22,40 @@ Read the IDL to understand the program's structure: instructions, accounts, argu
 
 ### Step 2: Build the verification scope interactively
 
-Have a conversation with the user about what the program does and what matters. Ask about **functionality and risks**, not implementation details.
+Run a short interactive quiz — one question at a time, each with checkbox options the user can select. Derive the options from the IDL (translate instructions/accounts into functional language). Ask about **functionality and risks**, not implementation details.
 
-**Questions to ask:**
+**Question 1: "What does this program need to guarantee above all else?"**
 
-1. "What does this program do?" — Get the user's mental model in their words. An escrow program "lets two parties trade tokens safely" — that's the level to work at.
-2. "What should never happen?" — This surfaces the critical safety properties. e.g., "tokens should never be lost", "only the depositor can withdraw", "a trade can't happen twice"
-3. "What are you most worried about?" — Focus verification effort where the user perceives risk. Maybe they trust the happy path but worry about cancellation edge cases.
-4. "Is there anything the program assumes but doesn't check?" — Surfaces implicit invariants that might not be in the code.
+Generate options from the IDL's instruction structure. Map to property categories:
+- Authorization / access control (derived from signers and `has_one` relations)
+- Tokens are never lost / correct routing (derived from token accounts and transfers)
+- One-shot safety / no replay (derived from accounts that get closed)
+- All of the above
 
-Don't ask about instructions, signers, or PDA seeds — you already have that from the IDL. Translate between the user's functional language and the technical structure yourself.
+Let the user select multiple. This determines which property categories to include.
+
+**Question 2: "Which scenario worries you most?"**
+
+Generate concrete risk scenarios from the IDL. For example:
+- Two-way swap gets accounts mixed up (if instruction has multiple writable token accounts)
+- Cancellation returns tokens to wrong account (if cancel has a transfer)
+- Someone replays a completed operation (if accounts are closed)
+- Amounts overflow silently (if instruction has numeric args)
+
+Let the user select multiple. This determines priority ordering within categories.
+
+**Question 3: "Does the program make any assumptions that aren't enforced on-chain?"**
+
+Options like:
+- Token account ownership is correct
+- Mint/token types match
+- External accounts exist and are initialized
+- No assumptions — Anchor handles everything
+- Not sure
+
+This determines the trust boundary section of the spec.
+
+Ask questions **one at a time**. Wait for the user's answer before presenting the next question. Don't ask about instructions, signers, or PDA seeds directly — you already have that from the IDL. Translate between the user's functional language and the technical structure yourself.
 
 ### Step 3: Write SPEC.md
 
