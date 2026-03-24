@@ -18,9 +18,9 @@ This skill calls Mistral's **Leanstral** model (`labs-leanstral-2603`) to genera
 
 Check for existing artifacts in this priority order:
 
-1. **SPEC.md exists** (in `formal_verification/` or project root) → Read it. The spec is the source of truth — skip scoping questions and go to Step 4. Ask only if something in the spec is unclear or contradicts the IDL.
-2. **IDL exists** (`target/idl/<program>.json`) → Run `leanstral spec --idl <path>` to generate a draft SPEC.md, then refine interactively in Step 2.
-3. **Neither exists** → If this is an Anchor project, tell the user to run `anchor build` to generate the IDL. If not an Anchor project, read the source code directly and ask broader scoping questions.
+1. **spec.md exists** (any casing, in repo root, `formal_verification/`, or `docs/`) → Read it. An existing spec is the best input — it captures the author's intent, state model, invariants, and operations in a way no static analysis can match. Extract security goals, state model, and formal properties from the spec. Skip the scoping quiz and go directly to Step 3 (write/update SPEC.md) to map spec properties to verifiable categories, then Step 4.
+2. **IDL exists** (`target/idl/<program>.json`) → Run `leanstral spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively in Step 2.
+3. **Neither exists** → The IDL requires compiling the program (`anchor build`), which may need toolchain setup. If the user can build it, ask them to. If not, read the source code directly (Rust, TypeScript, etc.) to understand the program structure and ask broader scoping questions. The agent has LSP support and can navigate the codebase effectively without an IDL.
 
 ### Step 2: Build the verification scope interactively
 
