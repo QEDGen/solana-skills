@@ -1,99 +1,76 @@
 ---
 name: leanstral
-description: Use Mistral's Leanstral model to generate formal Lean 4 proofs for programs, especially Solana/Rust code. Trigger this skill whenever the user wants to formally verify code, generate Lean 4 proofs, prove properties about algorithms or smart contracts, verify invariants, convert program logic into formal specifications, or anything involving Lean 4 and formal verification. Also trigger when the user mentions "leanstral", "lean proof", "formal proof", "verify my code", "prove correctness", "formal verification", or wants mathematical guarantees about their implementation. Even if the user just says something like "prove this works" or "can you verify this function is correct", use this skill.
+description: Formally verify programs by writing Lean 4 proofs. Trigger this skill whenever the user wants to formally verify code, generate Lean 4 proofs, prove properties about algorithms or smart contracts, verify invariants, convert program logic into formal specifications, or anything involving Lean 4 and formal verification. Also trigger when the user mentions "leanstral", "lean proof", "formal proof", "verify my code", "prove correctness", "formal verification", or wants mathematical guarantees about their implementation.
 ---
 
-# Leanstral — Lean 4 Proof Generation via Mistral API
+# Leanstral — Claude-Driven Formal Verification
 
-This skill calls Mistral's **Leanstral** model (`labs-leanstral-2603`) to generate formal Lean 4 proofs for Solana/Rust programs. The API is free during Mistral's feedback period.
+You (Claude) are the proof engineer. You read the codebase, write Lean 4 models and proofs, iterate on compiler errors, and call Leanstral (Mistral's theorem prover) only for hard sub-goals you cannot fill yourself.
 
-## When to use this skill
+## Architecture
 
-- User wants to formally verify, prove properties about, or generate Lean 4 specifications for code
-- User mentions "leanstral", "lean proof", "formal proof", "verify my code", "prove correctness"
+```
+You (Claude)                          Leanstral (remote model)
+  ├── Read spec / source code           ├── Fill sorry markers
+  ├── Write Lean 4 models               └── Suggest tactics for hard goals
+  ├── Write theorem statements
+  ├── Write proof attempts
+  ├── Run `lake build`, read errors
+  └── Fix and iterate
+```
 
-## Workflow
-
-### Step 1: Determine what's available
+## Step 1: Understand the program
 
 Check for existing artifacts in this priority order:
 
-1. **spec.md exists** (any casing, in repo root, `formal_verification/`, or `docs/`) → Read it. An existing spec is the best input — it captures the author's intent, state model, invariants, and operations in a way no static analysis can match. Extract security goals, state model, and formal properties from the spec. Skip the scoping quiz and go directly to Step 3 (write/update SPEC.md) to map spec properties to verifiable categories, then Step 4.
-2. **IDL exists** (`target/idl/<program>.json`) → Run `leanstral spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively in Step 2.
-3. **Neither exists** → The IDL requires compiling the program (`anchor build`), which may need toolchain setup. If the user can build it, ask them to. If not, read the source code directly (Rust, TypeScript, etc.) to understand the program structure and ask broader scoping questions. The agent has LSP support and can navigate the codebase effectively without an IDL.
+1. **spec.md exists** → Read it. An existing spec captures the author's intent, state model, invariants, and operations. Extract security goals, state model, and formal properties. Skip the scoping quiz and go directly to Step 2.
+2. **IDL exists** (`target/idl/<program>.json`) → Run `leanstral spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
+3. **Neither exists** → Read the source code directly. Ask broader scoping questions.
 
-### Step 2: Build the verification scope interactively
+## Step 2: Scope the verification
 
-Run a short interactive quiz — one question at a time, each with checkbox options the user can select. Derive the options from the IDL (translate instructions/accounts into functional language). Ask about **functionality and risks**, not implementation details.
+If no spec.md was found, run a short interactive quiz — one question at a time, with checkbox options derived from the program's structure. Ask about **functionality and risks**, not implementation details.
 
 **Question 1: "What does this program need to guarantee above all else?"**
-
-Generate options from the IDL's instruction structure. Map to property categories:
-- Authorization / access control (derived from signers and `has_one` relations)
-- Tokens are never lost / correct routing (derived from token accounts and transfers)
-- One-shot safety / no replay (derived from accounts that get closed)
+Options derived from the program's structure:
+- Authorization / access control
+- Tokens are never lost / correct routing
+- One-shot safety / no replay
+- Arithmetic safety / no overflow
+- Conservation (e.g., vault >= total claims)
 - All of the above
 
-Let the user select multiple. This determines which property categories to include.
-
 **Question 2: "Which scenario worries you most?"**
-
-Generate concrete risk scenarios from the IDL. For example:
-- Two-way swap gets accounts mixed up (if instruction has multiple writable token accounts)
-- Cancellation returns tokens to wrong account (if cancel has a transfer)
-- Someone replays a completed operation (if accounts are closed)
-- Amounts overflow silently (if instruction has numeric args)
-
-Let the user select multiple. This determines priority ordering within categories.
+Generate concrete risk scenarios from the program.
 
 **Question 3: "Does the program make any assumptions that aren't enforced on-chain?"**
 
-Options like:
-- Token account ownership is correct
-- Mint/token types match
-- External accounts exist and are initialized
-- No assumptions — Anchor handles everything
-- Not sure
+Ask questions **one at a time**. Wait for the user's answer before presenting the next question.
 
-This determines the trust boundary section of the spec.
+## Step 3: Write SPEC.md
 
-Ask questions **one at a time**. Wait for the user's answer before presenting the next question. Don't ask about instructions, signers, or PDA seeds directly — you already have that from the IDL. Translate between the user's functional language and the technical structure yourself.
-
-### Step 3: Write SPEC.md
-
-Based on the conversation, finalize SPEC.md in the project's `formal_verification/` directory. If you ran `leanstral spec` in Step 1, you already have a draft — resolve the `<!-- TODO -->` markers using the user's answers. Otherwise, create SPEC.md from scratch. Use normative language (MUST, MUST NOT, MAY) throughout.
-
-See `example/escrow/formal_verification/SPEC.md` for a complete example.
-
-Structure:
+Write `formal_verification/SPEC.md` using normative language (MUST, MUST NOT, MAY). Structure:
 
 ```markdown
 # <Program Name> Verification Spec v1.0
 
-<1-2 sentences describing what the program does, in the user's language>
+<1-2 sentences describing what the program does>
 
 ## 0. Security Goals
-
-The program MUST provide the following properties:
-1. **<Goal name>**: <normative statement using MUST/MUST NOT/MAY>
-2. ...
+1. **<Goal name>**: <normative statement>
 
 ## 1. State Model
-
 <State struct with field names, types, and comments>
-<PDA derivation>
 <Lifecycle diagram if applicable>
 
 ## 2. Operations
-
 ### 2.1 <Operation name>
 **Signers**: <who MUST sign>
 **Preconditions**: <what MUST be true before>
-**Effects**: <numbered steps with normative transfer descriptions>
+**Effects**: <numbered steps>
 **Postconditions**: <what MUST be true after>
 
 ## 3. Formal Properties
-
 ### 3.1 <Category>
 **<property_id>**: For all <quantified variables>,
 if <transition predicate> then <conclusion>.
@@ -104,78 +81,213 @@ if <transition predicate> then <conclusion>.
 ## 5. Verification Results
 | Property | Status | Proof |
 |---|---|---|
-| ... | **Verified** / **Open** | namespace.theorem_name |
+| ... | **Open** | |
 ```
 
-Present SPEC.md to the user and get confirmation before proceeding. This is the most important step — wrong scope means wasted proofs.
+Present SPEC.md to the user and get confirmation before proceeding.
 
-### Step 4: Run analysis
+## Step 4: Set up the Lean project
 
 ```bash
-leanstral verify \
-  --idl path/to/target/idl/my_program.json \
-  --validate \
-  --analysis-only
+leanstral setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
 ```
 
-Cross-reference `analysis.json` candidates against SPEC.md. Confirm the tool's candidates cover the user's stated properties. Adjust `--top-k` to match the number of properties in the spec.
+Create the project structure:
 
-Optional flags: `--input` (Rust source, passed to the LLM as context) and `--tests` (test files, hint signals for ranking).
+```
+formal_verification/
+  lakefile.lean          # import lean_support and Mathlib
+  lean-toolchain         # leanprover/lean4:v4.15.0
+  lean_support/          # Solana axiom library (copy from leanstral)
+  Proofs.lean            # root import: import Proofs.AccessControl etc.
+  Proofs/
+    AccessControl.lean
+    CpiCorrectness.lean
+    Conservation.lean
+    StateMachine.lean
+    ArithmeticSafety.lean
+```
 
-### Step 5: Generate proofs
+## Step 5: Write Lean proofs
+
+This is the core step. You write Lean 4 directly — models, transitions, theorems, and proofs.
+
+### Modeling workflow
+
+For each property in SPEC.md:
+
+1. **Define the state** as a Lean structure (map fields from source/spec)
+2. **Define the transition** as `Option StateType` (return `none` on precondition failure)
+3. **State the theorem** matching the SPEC.md property
+4. **Write the proof** using the patterns below
+5. **Run `lake build`** and iterate on errors
+
+### Support library API
+
+After `import Leanstral.Solana` and `open Leanstral.Solana`:
+
+**Types:**
+- `Pubkey` (= Nat), `U64` (= Nat), `U8` (= Nat)
+- `Account` — `{ key : Pubkey, authority : Pubkey, balance : Nat, writable : Bool }`
+- `Lifecycle` — `open | closed` (with DecidableEq)
+- `TransferCpi` — `{ program, «from», «to», authority, amount }`
+- `MintToCpi`, `BurnCpi`, `CloseCpi`
+
+**Constants:**
+- `TOKEN_PROGRAM_ID`, `SYSTEM_PROGRAM_ID`
+- `U8_MAX`, `U16_MAX`, `U32_MAX`, `U64_MAX`, `U128_MAX`
+
+**Functions:**
+- `findByKey : List Account → Pubkey → Option Account`
+- `findByAuthority : List Account → Pubkey → Option Account`
+- `canWrite : Pubkey → Account → Prop`
+- `transferCpiValid : TransferCpi → Prop`
+- `closes : Lifecycle → Lifecycle → Prop`
+- `valid_u64 : Nat → Prop` (and u8, u16, u32, u128)
+
+**Key lemmas:**
+- `closes_is_closed`, `closes_was_open`, `closed_irreversible`
+- `valid_u64_preserved_by_zero`, `valid_u64_preserved_by_same`
+- `find_map_update_other`, `find_map_update_same` (axioms for account list updates)
+
+### Proof patterns
+
+**Access control** — signer must match authority:
+```lean
+structure ProgramState where
+  authority : Pubkey
+
+def cancelTransition (s : ProgramState) (signer : Pubkey) : Option Unit :=
+  if signer = s.authority then some () else none
+
+theorem cancel_access_control (s : ProgramState) (signer : Pubkey)
+    (h : cancelTransition s signer ≠ none) :
+    signer = s.authority := by
+  unfold cancelTransition at h
+  split_ifs at h with h_eq
+  · exact h_eq
+  · contradiction
+```
+
+**CPI correctness** — parameters match (pure `rfl`):
+```lean
+def cancel_build_cpi (ctx : CancelContext) : TransferCpi :=
+  { program := TOKEN_PROGRAM_ID, «from» := ctx.escrow_token, «to» := ctx.dest,
+    authority := ctx.authority, amount := ctx.amount }
+
+theorem cancel_cpi_correct (ctx : CancelContext) :
+    let cpi := cancel_build_cpi ctx
+    cpi.program = TOKEN_PROGRAM_ID ∧ cpi.«from» = ctx.escrow_token ∧
+    cpi.«to» = ctx.dest ∧ cpi.authority = ctx.authority ∧
+    cpi.amount = ctx.amount := by
+  unfold cancel_build_cpi
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+```
+
+**State machine** — lifecycle transitions:
+```lean
+def cancelTransition (s : ProgramState) : Option ProgramState :=
+  if s.escrow.lifecycle = Lifecycle.open then
+    some { escrow := { s.escrow with lifecycle := Lifecycle.closed } }
+  else none
+
+theorem cancel_closes_escrow (pre post : ProgramState)
+    (h : cancelTransition pre = some post) :
+    post.escrow.lifecycle = Lifecycle.closed := by
+  unfold cancelTransition at h
+  split_ifs at h with h_open
+  cases h
+  rfl
+```
+
+**Conservation** — invariant preserved across operations:
+```lean
+def conservation (s : EngineState) : Prop := s.V >= s.C_tot + s.I
+
+def depositTransition (s : EngineState) (amount : Nat) : Option EngineState :=
+  if s.V + amount <= MAX_VAULT_TVL then
+    some { V := s.V + amount, C_tot := s.C_tot + amount, I := s.I }
+  else none
+
+theorem deposit_conservation (s s' : EngineState) (amount : Nat)
+    (h_inv : conservation s)
+    (h : depositTransition s amount = some s') :
+    conservation s' := by
+  unfold depositTransition at h
+  split_ifs at h with h_le
+  · cases h
+    unfold conservation at h_inv ⊢  -- MUST unfold in BOTH hypothesis and goal
+    omega
+  · contradiction
+```
+
+**Arithmetic safety** — bounds preserved:
+```lean
+def initializeTransition (amount taker : Nat) : Option ProgramState :=
+  if amount > 0 ∧ amount ≤ U64_MAX ∧ taker > 0 ∧ taker ≤ U64_MAX then
+    some { initializer_amount := amount, taker_amount := taker }
+  else none
+
+theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
+    (h : initializeTransition amount taker = some post) :
+    post.initializer_amount ≤ U64_MAX ∧ post.taker_amount ≤ U64_MAX := by
+  unfold initializeTransition at h
+  split_ifs at h with h_bounds
+  cases h
+  exact ⟨h_bounds.2.1, h_bounds.2.2.2⟩
+```
+
+### Critical tactic rules
+
+| Do | Don't |
+|---|---|
+| `unfold f at h` before `split_ifs` | `simp [f] at h` before `split_ifs` (kills if-structure) |
+| `unfold pred at h_inv ⊢` for named predicates | `unfold pred` only in goal (omega can't see hypotheses) |
+| `cases h` after `split_ifs` on `some = some` | `injection h` (unnecessary, cases handles it) |
+| `omega` for linear arithmetic | `norm_num` for linear goals (omega is more reliable) |
+| `exact ⟨rfl, rfl, rfl⟩` for conjunctions of rfl | `constructor` + `rfl` + `constructor` + `rfl` (verbose) |
+| `if cond then ... else ...` without proof binding | `if h : cond then ...` when `h` is unused |
+
+### Common errors and fixes
+
+| Error | Fix |
+|---|---|
+| `omega could not prove the goal` | Unfold named predicates in hypotheses: `unfold pred at h ⊢` |
+| `no goals to be solved` | Remove redundant tactic (e.g., `· contradiction` after auto-closed branch) |
+| `unknown constant 'X'` | Check imports; add `import Leanstral.Solana.X` or `open Leanstral.Solana` |
+| `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
+| `unused variable 'h'` | Remove proof binding: `if h : cond` → `if cond` |
+
+## Step 6: Call Leanstral for hard sub-goals
+
+When you have a proof with `sorry` markers you cannot fill after 2-3 attempts:
 
 ```bash
-leanstral verify \
-  --idl path/to/target/idl/my_program.json \
-  --validate \
-  --repair-rounds 1
+leanstral fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 ```
 
-### Step 6: Consolidate and verify
+This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
+
+If `fill-sorry` also fails, simplify the theorem statement or split the property into smaller lemmas.
+
+## Step 7: Verify and report
 
 ```bash
-leanstral consolidate \
-  --input-dir /tmp/leanstral-solana-proofs \
-  --output-dir path/to/formal_verification
+cd formal_verification && lake build
 ```
 
-```bash
-cd path/to/formal_verification
-lake build
-```
-
-### Step 7: Report results against the spec
-
-Map each generated proof back to the SPEC.md properties. Present results as:
-
-- **Verified**: Theorem compiles, property proven
-- **Partial**: Proof has `sorry` markers — sub-goals remain
-- **Failed**: No compiling proof generated
-
-For failures, iterate:
-- **`sorry` filling**: Ask Leanstral to fill specific `sorry` markers
-- **Specification refinement**: Adjust theorem statements and re-prove
-- **Property splitting**: One property per prompt works better than many
-- **Manual prompt**: Use `leanstral generate --prompt-file <file> --passes 4 --validate`
-
-Update SPEC.md with results (which properties are proven, which remain open).
-
-## Property categories
-
-1. **Access control** — signer checks, authority constraints
-2. **CPI correctness** — correct parameters passed to each transfer (axiomatic, pure `rfl`)
-3. **State machines** — lifecycle correctness, one-shot safety
-4. **Arithmetic safety** — overflow/underflow for fixed-width integers
+Update SPEC.md verification results table:
+- **Verified**: Theorem compiles, no `sorry`
+- **Partial**: Proof has `sorry` markers
+- **Open**: No compiling proof
 
 ## Environment
 
-- **`MISTRAL_API_KEY`** — required. Free from [console.mistral.ai](https://console.mistral.ai)
-- **`LEANSTRAL_VALIDATION_WORKSPACE`** — optional override for the global Mathlib cache location
+- **`MISTRAL_API_KEY`** — required for `fill-sorry`. Free from [console.mistral.ai](https://console.mistral.ai)
+- **`LEANSTRAL_VALIDATION_WORKSPACE`** — optional override for global Mathlib cache location
 
 ## Error handling
 
-- **`MISTRAL_API_KEY` not set**: Direct user to console.mistral.ai
-- **Rate limiting (429)**: Built-in exponential backoff handles this
-- **Poor output**: Lower temperature to 0.3 or rephrase with more context
-- **Long first build**: First Mathlib build takes 15-45 min; subsequent builds reuse the cache
-- **Corrupt Mathlib**: Remove `.lake/packages/mathlib` and rerun
+- **First `lake build` is slow**: Mathlib compilation takes 15-45 min on first run. Subsequent builds reuse the cache.
+- **`could not resolve 'HEAD' to a commit`**: Remove `.lake/packages/mathlib` and run `lake update`.
+- **Rate limiting (429)**: Built-in exponential backoff in `fill-sorry`.

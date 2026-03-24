@@ -280,19 +280,20 @@ pub struct LeanstralMetadata {
     pub best_selection_reason: String,
 }
 
-async fn call_mistral_api(
+async fn call_mistral_api_with_system(
     client: &Client,
     prompt: &str,
     api_key: &str,
     temperature: f64,
     max_tokens: usize,
+    system_prompt: &str,
 ) -> Result<(String, f64, Usage, String)> {
     let request = ChatRequest {
         model: MODEL.to_string(),
         messages: vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: SYSTEM_PROMPT.to_string(),
+                content: system_prompt.to_string(),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -376,6 +377,16 @@ async fn call_mistral_api(
     }
 
     anyhow::bail!("All retries exhausted")
+}
+
+async fn call_mistral_api(
+    client: &Client,
+    prompt: &str,
+    api_key: &str,
+    temperature: f64,
+    max_tokens: usize,
+) -> Result<(String, f64, Usage, String)> {
+    call_mistral_api_with_system(client, prompt, api_key, temperature, max_tokens, SYSTEM_PROMPT).await
 }
 
 fn extract_lean_code(content: &str) -> String {
@@ -698,6 +709,157 @@ pub async fn generate_proofs(
 
     Ok(())
 }
+
+const SORRY_FILL_SYSTEM_PROMPT: &str = r#"You are Leanstral, an expert Lean 4 proof engineer.
+
+TASK: Replace the `sorry` placeholder(s) in the provided Lean 4 file with valid proof tactics.
+
+Rules:
+1. Return the COMPLETE file with sorry markers replaced by working proofs
+2. Do NOT change any definitions, structures, or theorem signatures
+3. Do NOT add or remove imports
+4. Do NOT add new theorems or definitions
+5. Only modify the proof bodies where `sorry` appears
+6. Use standard Lean 4.15 / Mathlib 4.15 tactics
+7. Prefer: unfold, split_ifs, cases, omega, rfl, exact, constructor, contradiction
+8. When a named predicate appears in both a hypothesis and the goal, unfold it in BOTH: `unfold pred at h ⊢`
+9. Output the complete file in a single ```lean4 code block
+10. If you cannot fill a sorry, leave it as sorry"#;
+
+/// Parse sorry locations from a Lean file
+fn find_sorry_locations(code: &str) -> Vec<(usize, String)> {
+    let mut locations = Vec::new();
+    let sorry_re = regex::Regex::new(r"\bsorry\b").unwrap();
+
+    // Find enclosing theorem for each sorry
+    let theorem_re = regex::Regex::new(
+        r"(?m)^(theorem|lemma)\s+([a-zA-Z_][a-zA-Z0-9_']*)"
+    ).unwrap();
+
+    for mat in sorry_re.find_iter(code) {
+        let line_num = code[..mat.start()].matches('\n').count() + 1;
+
+        // Find the enclosing theorem
+        let before = &code[..mat.start()];
+        let enclosing = theorem_re
+            .captures_iter(before)
+            .last()
+            .and_then(|c| c.get(2))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        locations.push((line_num, enclosing));
+    }
+
+    locations
+}
+
+/// Fill sorry markers in a Lean file using Leanstral
+pub async fn fill_sorry(
+    file_path: &Path,
+    output_path: Option<&Path>,
+    passes: usize,
+    temperature: f64,
+    max_tokens: usize,
+    validate: bool,
+) -> Result<()> {
+    let api_key = std::env::var("MISTRAL_API_KEY")
+        .context("MISTRAL_API_KEY environment variable not set.\nGet a free key at https://console.mistral.ai")?;
+
+    let code = std::fs::read_to_string(file_path)
+        .context(format!("Cannot read file: {}", file_path.display()))?;
+
+    let sorry_locations = find_sorry_locations(&code);
+    if sorry_locations.is_empty() {
+        eprintln!("No sorry markers found in {}", file_path.display());
+        return Ok(());
+    }
+
+    eprintln!(
+        "Found {} sorry marker(s) in {}:",
+        sorry_locations.len(),
+        file_path.display()
+    );
+    for (line, theorem) in &sorry_locations {
+        eprintln!("  line {}: in {}", line, theorem);
+    }
+
+    let prompt = format!(
+        "Fill all `sorry` placeholders in this Lean 4 file with valid proofs.\n\n```lean4\n{}\n```",
+        code
+    );
+
+    let client = Client::new();
+    eprintln!(
+        "\nCalling Leanstral ({}) with pass@{}...",
+        MODEL, passes
+    );
+
+    let mut best_code: Option<String> = None;
+    let mut best_sorry_count = sorry_locations.len();
+
+    for i in 0..passes {
+        eprint!("  Pass {}/{}... ", i + 1, passes);
+        let result = call_mistral_api_with_system(
+            &client,
+            &prompt,
+            &api_key,
+            temperature,
+            max_tokens,
+            SORRY_FILL_SYSTEM_PROMPT,
+        )
+        .await;
+
+        match result {
+            Ok((content, elapsed, usage, _)) => {
+                let filled = extract_lean_code(&content);
+                let sorry_count = count_sorry(&filled);
+                eprintln!("done ({:.1}s, {} tokens, {} sorry remaining)", elapsed, usage.completion_tokens, sorry_count);
+
+                if sorry_count < best_sorry_count {
+                    best_sorry_count = sorry_count;
+                    best_code = Some(filled);
+                }
+                if sorry_count == 0 {
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {}", e);
+            }
+        }
+    }
+
+    let output = output_path.unwrap_or(file_path);
+
+    if let Some(filled_code) = best_code {
+        std::fs::write(output, &filled_code)?;
+        eprintln!(
+            "\nWrote filled proof to {} ({} sorry remaining)",
+            output.display(),
+            best_sorry_count
+        );
+
+        if validate {
+            let project_dir = output.parent().unwrap_or(Path::new("."));
+            eprintln!("Validating with lake build...");
+            let status = std::process::Command::new("lake")
+                .arg("build")
+                .current_dir(project_dir)
+                .status();
+            match status {
+                Ok(s) if s.success() => eprintln!("Validation: Success"),
+                Ok(_) => eprintln!("Validation: Failed (see errors above)"),
+                Err(e) => eprintln!("Validation: Could not run lake: {}", e),
+            }
+        }
+    } else {
+        eprintln!("\nNo improvement found. Original file unchanged.");
+    }
+
+    Ok(())
+}
+
 
 #[cfg(test)]
 mod tests {
