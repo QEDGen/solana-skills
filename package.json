@@ -14,21 +14,7 @@
     "mistral"
   ],
   "main": "SKILL.md",
-  "bin": {
-    "qedgen": "./bin/qedgen"
-  },
-  "files": [
-    "SKILL.md",
-    "bin/",
-    "install.sh",
-    "Cargo.toml",
-    "Cargo.lock",
-    "crates/",
-    "tools/"
-  ],
   "scripts": {
-    "postinstall": "bash install.sh",
-    "prepack": "cargo build --release && mkdir -p bin && cp target/release/qedgen bin/ && chmod +x bin/qedgen",
     "test": "./bin/qedgen --help"
   },
   "repository": {

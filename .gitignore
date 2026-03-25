@@ -42,7 +42,7 @@ package-lock.json
 yarn.lock
 
 # Built binaries (platform-specific)
-bin/qedgen
+# bin/qedgen is tracked — ships as pre-built arm64 macOS binary
 
 # Leanstral verification artifacts
 **/lean_proofs/*_raw.txt
