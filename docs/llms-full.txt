@@ -1,0 +1,274 @@
+# Leanstral
+
+> An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's Leanstral model.
+
+## Installation
+
+```bash
+npx skills add abishekk92/leanstral-solana-skill
+```
+
+The installer automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.
+
+## Setup
+
+Export a free Mistral API key from [console.mistral.ai](https://console.mistral.ai):
+
+```bash
+export MISTRAL_API_KEY=your_key_here
+```
+
+## What It Does
+
+Leanstral verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+
+### How It Works
+
+1. **Agent reads your code** — checks for existing specs or IDLs, reads source directly, and builds a model of the program's state, transitions, and invariants.
+2. **Writes spec and proofs** — generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. Runs `lake build` and iterates on errors.
+3. **Hard sub-goals go to Leanstral** — when the agent can't close a `sorry`, it calls Leanstral via `fill-sorry` with pass@N sampling. First compilable result wins.
+
+### Supported Agents
+
+Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, and anything supporting the [Agent Skills spec](https://agentskills.io).
+
+## CLI Commands
+
+### Full pipeline (recommended)
+
+```bash
+leanstral verify \
+  --idl target/idl/my_program.json \
+  --validate
+```
+
+The IDL is the primary input. Optional flags: `--input` (Rust source, passed to the LLM as context but not parsed) and `--tests` (test files, used as hint signals for property ranking).
+
+### Analysis only
+
+```bash
+leanstral analyze \
+  --idl target/idl/my_program.json
+```
+
+Emits `analysis.json` with ranked property candidates and one prompt file per property.
+
+### Generate from an existing prompt
+
+```bash
+leanstral generate \
+  --prompt-file /tmp/analysis/property.prompt.txt \
+  --output-dir /tmp/proof \
+  --passes 4 \
+  --validate
+```
+
+### Fill sorry markers
+
+```bash
+leanstral fill-sorry \
+  --file formal_verification/Proofs/Hard.lean \
+  --passes 3 \
+  --validate
+```
+
+Sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
+
+### Consolidate proofs
+
+```bash
+leanstral consolidate \
+  --input-dir /tmp/proofs \
+  --output-dir my_program/formal_verification
+```
+
+Merges validated `Best.lean` files into a single Lean project with namespaced proofs.
+
+### Generate a draft spec
+
+```bash
+leanstral spec --idl target/idl/program.json --output-dir ./formal_verification
+```
+
+### Set up global validation workspace
+
+```bash
+leanstral setup
+```
+
+First-time Mathlib build takes 15-45 minutes. Subsequent builds reuse the cache.
+
+## Proof-Writing Workflow (SKILL.md)
+
+The skill instructs your agent to follow this workflow:
+
+### Step 1: Understand the program
+
+Check for existing artifacts:
+1. **spec.md exists** — read it, extract security goals, state model, and formal properties
+2. **IDL exists** — run `leanstral spec --idl <path>` to generate a draft SPEC.md
+3. **Neither exists** — read source code directly, ask scoping questions
+
+### Step 2: Scope the verification
+
+Interactive quiz to determine security goals:
+- Authorization / access control
+- Token conservation / correct routing
+- One-shot safety / no replay
+- Arithmetic safety / no overflow
+- Conservation (e.g., vault >= total claims)
+
+### Step 3: Write SPEC.md
+
+Structure: Security Goals, State Model, Operations (with signers, preconditions, effects, postconditions), Formal Properties, Trust Boundary, Verification Results.
+
+### Step 4: Set up the Lean project
+
+```
+formal_verification/
+  lakefile.lean          # import lean_support and Mathlib
+  lean-toolchain         # leanprover/lean4:v4.15.0
+  lean_support/          # Solana axiom library
+  Proofs.lean            # root import
+  Proofs/
+    AccessControl.lean
+    Conservation.lean
+    StateMachine.lean
+    ArithmeticSafety.lean
+```
+
+### Step 5: Write Lean proofs
+
+For each property:
+1. Define the state as a Lean structure
+2. Define the transition as `Option StateType` (return `none` on precondition failure)
+3. State the theorem matching the SPEC.md property
+4. Write the proof
+5. Run `lake build` and iterate
+
+### Step 6: Call Leanstral for hard sub-goals
+
+```bash
+leanstral fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+```
+
+### Step 7: Verify and report
+
+Run `lake build` and update SPEC.md verification results.
+
+## Support Library API
+
+After `import Leanstral.Solana` and `open Leanstral.Solana`:
+
+**Types:** `Pubkey` (= Nat), `U64` (= Nat), `Account`, `Lifecycle` (open | closed), `TransferCpi`, `MintToCpi`, `BurnCpi`, `CloseCpi`
+
+**Constants:** `TOKEN_PROGRAM_ID`, `SYSTEM_PROGRAM_ID`, `U8_MAX`, `U16_MAX`, `U32_MAX`, `U64_MAX`, `U128_MAX`
+
+**Functions:** `findByKey`, `findByAuthority`, `canWrite`, `transferCpiValid`, `closes`, `valid_u64`
+
+**Key lemmas:** `closes_is_closed`, `closes_was_open`, `closed_irreversible`, `valid_u64_preserved_by_zero`, `valid_u64_preserved_by_same`, `find_map_update_other`, `find_map_update_same`
+
+## Proof Patterns
+
+### Access control — signer must match authority
+
+```lean
+def cancelTransition (s : ProgramState) (signer : Pubkey) : Option Unit :=
+  if signer = s.authority then some () else none
+
+theorem cancel_access_control (s : ProgramState) (signer : Pubkey)
+    (h : cancelTransition s signer ≠ none) :
+    signer = s.authority := by
+  unfold cancelTransition at h
+  split_ifs at h with h_eq
+  · exact h_eq
+  · contradiction
+```
+
+### Conservation — invariant preserved across operations
+
+```lean
+def conservation (s : EngineState) : Prop := s.V >= s.C_tot + s.I
+
+def depositTransition (s : EngineState) (amount : Nat) : Option EngineState :=
+  if s.V + amount <= MAX_VAULT_TVL then
+    some { V := s.V + amount, C_tot := s.C_tot + amount, I := s.I }
+  else none
+
+theorem deposit_conservation (s s' : EngineState) (amount : Nat)
+    (h_inv : conservation s)
+    (h : depositTransition s amount = some s') :
+    conservation s' := by
+  unfold depositTransition at h
+  split_ifs at h with h_le
+  · cases h
+    unfold conservation at h_inv ⊢
+    omega
+  · contradiction
+```
+
+### State machine — lifecycle transitions
+
+```lean
+theorem cancel_closes_escrow (pre post : ProgramState)
+    (h : cancelTransition pre = some post) :
+    post.escrow.lifecycle = Lifecycle.closed := by
+  unfold cancelTransition at h
+  split_ifs at h with h_open
+  cases h
+  rfl
+```
+
+### CPI correctness — parameters match (pure rfl)
+
+```lean
+theorem cancel_cpi_correct (ctx : CancelContext) :
+    let cpi := cancel_build_cpi ctx
+    cpi.program = TOKEN_PROGRAM_ID ∧ cpi.amount = ctx.amount := by
+  unfold cancel_build_cpi
+  exact ⟨rfl, rfl⟩
+```
+
+## Critical Tactic Rules
+
+| Do | Don't |
+|---|---|
+| `unfold f at h` before `split_ifs` | `simp [f] at h` before `split_ifs` (kills if-structure) |
+| `unfold pred at h_inv ⊢` for named predicates | `unfold pred` only in goal (omega can't see hypotheses) |
+| `cases h` after `split_ifs` on `some = some` | `injection h` (unnecessary) |
+| `omega` for linear arithmetic | `norm_num` for linear goals |
+| `exact ⟨rfl, rfl, rfl⟩` for conjunctions of rfl | `constructor` + `rfl` chains (verbose) |
+
+## Common Errors and Fixes
+
+| Error | Fix |
+|---|---|
+| `omega could not prove the goal` | Unfold named predicates in hypotheses: `unfold pred at h ⊢` |
+| `no goals to be solved` | Remove redundant tactic (e.g., `· contradiction` after auto-closed branch) |
+| `unknown constant 'X'` | Check imports; add `import Leanstral.Solana.X` or `open Leanstral.Solana` |
+| `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
+
+## Working Examples
+
+### Escrow (Anchor) — 9/9 proofs verified
+
+A token escrow that lets two parties trade safely. Properties verified: cancel access control, exchange access control, initialize access control, cancel CPI correctness, exchange CPI correctness, initialize CPI correctness, cancel closes escrow, exchange closes escrow, initialize arithmetic safety.
+
+### Percolator (Pure Rust) — 7/7 proofs verified
+
+A perpetual DEX risk engine with protected principal, junior profit claims, and lazy A/K side indices. Properties verified: deposit conservation, top-up insurance conservation, deposit fee credits conservation, PnL negation safety, deposit bounded, ADL lifecycle, fee credits nonpositive.
+
+## Environment Variables
+
+- `MISTRAL_API_KEY` — required for `fill-sorry` and `generate` commands. Free from console.mistral.ai.
+- `LEANSTRAL_VALIDATION_WORKSPACE` — optional override for global Mathlib cache location.
+
+## Requirements
+
+- Rust toolchain (auto-installed if missing)
+- Lean 4 / elan (auto-installed if missing)
+- `MISTRAL_API_KEY` environment variable
+
+## License
+
+MIT

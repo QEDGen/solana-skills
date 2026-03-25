@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Leanstral - Formally Verify Solana Programs with Lean 4</title>
-  <meta name="description" content="A Claude Code skill that formally verifies Solana programs using Lean 4 proofs. Claude writes the proofs, Leanstral solves the hard sub-goals.">
+  <meta name="description" content="An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's Leanstral model. Works with any AI coding agent.">
   <meta property="og:title" content="Leanstral - Formally Verify Solana Programs">
-  <meta property="og:description" content="Claude writes Lean 4 proofs. Leanstral solves hard sub-goals. 16/16 proofs verified across 2 example programs.">
+  <meta property="og:description" content="An agent skill for formal verification of Solana programs. Install with npx skills, works with any coding agent.">
   <meta property="og:url" content="https://abishekk92.github.io/leanstral-solana-skill/">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
@@ -18,7 +18,7 @@
     <a class="logo" href="#">lean<span>stral</span></a>
     <div class="links">
       <a href="#how-it-works">How It Works</a>
-      <a href="#properties">Properties</a>
+      <a href="#what-it-does">What It Does</a>
       <a href="#examples">Examples</a>
       <a href="#get-started">Get Started</a>
       <a href="https://github.com/abishekk92/leanstral-solana-skill">GitHub</a>
@@ -29,7 +29,9 @@
 <header class="hero">
   <div class="container">
     <h1>Formally verify Solana programs<br>with <span>Lean 4 proofs</span></h1>
-    <p class="subtitle">Claude writes the proofs. Leanstral solves the hard sub-goals. Every theorem compiles or it doesn't ship.</p>
+    <p class="subtitle">An agent skill that verifies your core business logic. Your agent reads the code, writes Lean 4 proofs, and iterates until they compile. Hard sub-goals go to Leanstral.</p>
+    <pre class="install-cmd"><code>npx skills add abishekk92/leanstral-solana-skill</code></pre>
+    <p class="compat">Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, and anything supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
     <div class="cta">
       <a href="#get-started" class="btn btn-primary">Get Started</a>
       <a href="https://github.com/abishekk92/leanstral-solana-skill" class="btn btn-secondary">View on GitHub</a>
@@ -40,72 +42,59 @@
 <section id="how-it-works">
   <div class="container">
     <h2>How it works</h2>
-    <p class="section-sub">Claude drives proof writing directly. No lossy analyzer, no pipeline, no prompt templates.</p>
+    <p class="section-sub">Your agent drives proof writing directly. Full code context, no lossy pipeline.</p>
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
-        <h3>Claude reads your code</h3>
-        <p>Claude reads your Solana source, writes a verification spec (SPEC.md), and models your program's state, transitions, and invariants in Lean 4.</p>
+        <h3>Agent reads your code</h3>
+        <p>Your agent reads the source, checks for existing specs or IDLs, and builds a model of the program's state, transitions, and invariants.</p>
       </div>
       <div class="step">
         <div class="step-num">2</div>
-        <h3>Proofs are written and compiled</h3>
-        <p>Claude writes theorem statements and proofs, then runs <code>lake build</code> and iterates on errors. Full code context means better proofs on the first try.</p>
+        <h3>Writes spec and proofs</h3>
+        <p>Generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. Runs <code>lake build</code> and iterates on errors.</p>
       </div>
       <div class="step">
         <div class="step-num">3</div>
         <h3>Hard sub-goals go to Leanstral</h3>
-        <p>When Claude can't fill a <code>sorry</code>, it calls Leanstral (Mistral's theorem prover) via <code>fill-sorry</code> with pass@N sampling. First compilable result wins.</p>
+        <p>When the agent can't close a <code>sorry</code>, it calls Leanstral (Mistral's theorem prover) via <code>fill-sorry</code> with pass@N sampling. First compilable result wins.</p>
       </div>
     </div>
   </div>
 </section>
 
-<section id="properties">
+<section id="what-it-does">
   <div class="container">
-    <h2>What gets verified</h2>
-    <p class="section-sub">Six categories of properties, proven as Lean 4 theorems that must compile.</p>
+    <h2>What it does</h2>
+    <p class="section-sub">Extracts what matters from your code and produces machine-checked proofs of your core business logic.</p>
     <div class="property-grid">
       <div class="property-card">
-        <h3>Access Control</h3>
-        <p>Signer checks and authority constraints. Only authorized parties can call each instruction.</p>
+        <h3>Reads your source</h3>
+        <p>Understands Anchor IDLs, account constraints, and pure Rust logic. No manual annotation required.</p>
       </div>
       <div class="property-card">
-        <h3>Conservation</h3>
-        <p>Token totals preserved across every operation. The vault always covers outstanding claims.</p>
+        <h3>Writes a verification spec</h3>
+        <p>Generates SPEC.md with security goals, state model, operations, and formal property statements -- all derived from your code.</p>
       </div>
       <div class="property-card">
-        <h3>CPI Correctness</h3>
-        <p>Every cross-program invocation passes the correct program ID, accounts, authority, and amount.</p>
-      </div>
-      <div class="property-card">
-        <h3>State Machines</h3>
-        <p>Lifecycle transitions are deterministic. Closed accounts stay closed, modes follow prescribed order.</p>
-      </div>
-      <div class="property-card">
-        <h3>Arithmetic Safety</h3>
-        <p>No silent overflow or underflow. All u64/i128 operations proven to stay within bounds.</p>
-      </div>
-      <div class="property-card">
-        <h3>Fee Isolation</h3>
-        <p>Unpaid fees tracked as negative credits, never inflating PnL, insurance, or deficit calculations.</p>
+        <h3>Produces Lean 4 proofs</h3>
+        <p>Models your program in Lean 4, writes theorems and proofs, compiles with <code>lake build</code>, and iterates until everything checks. Every theorem compiles or it doesn't ship.</p>
       </div>
     </div>
-    <p class="trust-note">We verify program logic. SPL Token, the Solana runtime, CPI mechanics, and Anchor are trusted as axioms.</p>
   </div>
 </section>
 
 <section id="examples">
   <div class="container">
     <h2>Working examples</h2>
-    <p class="section-sub">Two verified programs shipping with the skill. Every proof compiles via <code>lake build</code>.</p>
+    <p class="section-sub">Two verified programs ship with the skill. Every proof compiles via <code>lake build</code>.</p>
     <div class="example-grid">
       <div class="example-card">
         <h3>Escrow</h3>
         <span class="tag">Anchor</span>
         <p class="desc">A token escrow that lets two parties trade safely. The initializer deposits tokens and sets terms, a taker completes the trade, or the initializer cancels.</p>
         <div class="result">9/9 proofs verified</div>
-        <p class="props">Access control (3) &middot; CPI correctness (3) &middot; State machines (2) &middot; Arithmetic safety (1)</p>
+        <p class="props">Access control &middot; State machines &middot; Arithmetic safety</p>
         <pre><code><span style="color:#8b949e">-- Cancel only succeeds if signer = initializer</span>
 theorem cancel_access_control
     (p_preState : ProgramState) (p_signer : Pubkey)
@@ -122,7 +111,7 @@ theorem cancel_access_control
         <span class="tag">Pure Rust</span>
         <p class="desc">A perpetual DEX risk engine with protected principal, junior profit claims, and lazy A/K side indices. Non-Anchor, no_std.</p>
         <div class="result">7/7 proofs verified</div>
-        <p class="props">Conservation (3) &middot; Arithmetic safety (2) &middot; State machine (1) &middot; Fee isolation (1)</p>
+        <p class="props">Conservation &middot; Arithmetic safety &middot; State machine &middot; Fee isolation</p>
         <pre><code><span style="color:#8b949e">-- Deposit preserves V >= C_tot + I</span>
 theorem deposit_conservation
     (p_s p_s' : EngineState) (p_amount : Nat)
@@ -147,21 +136,20 @@ theorem deposit_conservation
     <p class="section-sub">Three steps to formally verified Solana programs.</p>
     <div class="getting-started-steps">
       <div class="gs-step">
-        <h3><span>1.</span> Set your Mistral API key</h3>
-        <p>Free during Mistral's feedback period.</p>
+        <h3><span>1.</span> Install the skill</h3>
+        <pre><code>npx skills add abishekk92/leanstral-solana-skill</code></pre>
+        <p>Automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.</p>
+      </div>
+      <div class="gs-step">
+        <h3><span>2.</span> Set your Mistral API key</h3>
+        <p>Free from <a href="https://console.mistral.ai">console.mistral.ai</a>.</p>
         <pre><code>export MISTRAL_API_KEY=your_key_here</code></pre>
       </div>
       <div class="gs-step">
-        <h3><span>2.</span> Build the CLI</h3>
-        <pre><code>git clone https://github.com/abishekk92/leanstral-solana-skill.git
-cd leanstral-solana-skill
-cargo build --release</code></pre>
-      </div>
-      <div class="gs-step">
-        <h3><span>3.</span> Ask Claude to verify your program</h3>
-        <p>Open Claude Code in your Solana project directory and say:</p>
+        <h3><span>3.</span> Ask your agent to verify your program</h3>
+        <p>Open your agent in your Solana project directory and say:</p>
         <pre><code>Formally verify this program.</code></pre>
-        <p>Claude will read your code, write SPEC.md, generate Lean 4 proofs, and iterate until they compile.</p>
+        <p>The agent reads your code, writes SPEC.md, generates Lean 4 proofs, and iterates until they compile.</p>
       </div>
     </div>
     <p class="note">First Lean build takes 15-45 minutes to compile Mathlib. Subsequent builds reuse the cache.</p>

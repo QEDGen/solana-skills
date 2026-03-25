@@ -84,6 +84,19 @@ nav .links a:hover { color: var(--text); }
   margin: 0 auto 2rem;
 }
 
+.hero .install-cmd {
+  max-width: 620px;
+  margin: 0 auto 0.75rem;
+  text-align: left;
+  font-size: 0.9rem;
+}
+
+.hero .compat {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 2rem;
+}
+
 .hero .cta {
   display: flex;
   gap: 1rem;
