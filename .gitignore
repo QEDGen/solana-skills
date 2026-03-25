@@ -49,6 +49,7 @@ bin/qedgen
 **/lean_proofs/metadata.json
 **/lean_proofs/prompt.txt
 **/.qedgen/
+**/.leanstral/
 
 # Lean build artifacts
 .lake/
