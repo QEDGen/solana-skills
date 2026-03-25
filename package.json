@@ -1,12 +1,12 @@
 {
-  "name": "leanstral-solana-skill",
+  "name": "qedgen-solana-skills",
   "version": "1.0.0",
-  "description": "Agent skill for generating formal Lean 4 proofs using Mistral's Leanstral model - perfect for verifying Solana programs, Rust code, and smart contracts",
+  "description": "Agent skill for generating formal Lean 4 proofs using Mistral's Leanstral model. Perfect for verifying Solana programs, Rust code, and smart contracts",
   "keywords": [
     "agent-skill",
     "lean4",
     "formal-verification",
-    "leanstral",
+    "qedgen",
     "solana",
     "rust",
     "smart-contracts",
@@ -15,7 +15,7 @@
   ],
   "main": "SKILL.md",
   "bin": {
-    "leanstral": "./bin/leanstral"
+    "qedgen": "./bin/qedgen"
   },
   "files": [
     "SKILL.md",
@@ -28,16 +28,16 @@
   ],
   "scripts": {
     "postinstall": "bash install.sh",
-    "prepack": "cargo build --release && mkdir -p bin && cp target/release/leanstral bin/ && chmod +x bin/leanstral",
-    "test": "./bin/leanstral --help"
+    "prepack": "cargo build --release && mkdir -p bin && cp target/release/qedgen bin/ && chmod +x bin/qedgen",
+    "test": "./bin/qedgen --help"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/abishekk92/leanstral-solana-skill.git"
+    "url": "git+https://github.com/QEDGen/solana-skills.git"
   },
   "author": "abishekk92",
   "license": "MIT",
-  "homepage": "https://github.com/abishekk92/leanstral-solana-skill#readme",
+  "homepage": "https://github.com/QEDGen/solana-skills#readme",
   "agentSkills": {
     "skills": [
       "SKILL.md"

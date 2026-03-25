@@ -42,13 +42,13 @@ package-lock.json
 yarn.lock
 
 # Built binaries (platform-specific)
-bin/leanstral
+bin/qedgen
 
 # Leanstral verification artifacts
 **/lean_proofs/*_raw.txt
 **/lean_proofs/metadata.json
 **/lean_proofs/prompt.txt
-**/.leanstral/
+**/.qedgen/
 
 # Lean build artifacts
 .lake/
@@ -59,4 +59,4 @@ bin/leanstral
 # Local agent/editor state
 .agents/
 .claude/
-\n# Generated proof artifacts\nlean_project/\nleanstral_*/
+\n# Generated proof artifacts\nlean_project/\nqedgen_*/

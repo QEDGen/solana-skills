@@ -4,20 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Leanstral is a Claude Code skill for formally verifying Solana programs using Lean 4 proofs. Claude (the local LLM) drives proof writing directly — reading code, writing Lean models/theorems/proofs, and iterating on `lake build` errors. Leanstral (Mistral's theorem prover) is called only for hard sub-goals via `fill-sorry`.
+QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 4 proofs. Claude (the local LLM) drives proof writing directly — reading code, writing Lean models/theorems/proofs, and iterating on `lake build` errors. Leanstral (Mistral's theorem prover) is called only for hard sub-goals via `fill-sorry`.
 
-**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `leanstral fill-sorry` for hard sub-goals
+**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `qedgen fill-sorry` for hard sub-goals
 
 ## Build and Development Commands
 
 ### Build the CLI
 
 ```bash
-# Build leanstral binary (outputs to ./bin/leanstral)
+# Build qedgen binary (outputs to ./bin/qedgen)
 cargo build --release
 
 # Build just the Lean support library
-cd crates/leanstral/lean_support
+cd crates/qedgen/lean_support
 lake build
 ```
 
@@ -28,7 +28,7 @@ lake build
 cargo test
 
 # Test Lean support library axioms
-cd crates/leanstral/lean_support
+cd crates/qedgen/lean_support
 lake env lean test_lemmas.lean
 
 # Build the example escrow verification
@@ -36,14 +36,14 @@ cd example/escrow/formal_verification
 lake build                # Verify all proofs compile
 ```
 
-### Leanstral Commands
+### QEDGen Commands
 
 ```bash
 # Set up global validation workspace (first time: 15-45 min for Mathlib)
-leanstral setup
+qedgen setup
 
 # Generate proofs from a prompt file (used by Claude internally)
-leanstral generate \
+qedgen generate \
   --prompt-file /tmp/proof/prompt.txt \
   --output-dir /tmp/proof \
   --passes 3 \
@@ -51,16 +51,16 @@ leanstral generate \
   --validate
 
 # Fill sorry markers in a Lean file (Claude calls this for hard sub-goals)
-leanstral fill-sorry \
+qedgen fill-sorry \
   --file formal_verification/Proofs/Hard.lean \
   --passes 3 \
   --validate
 
 # Generate a draft SPEC.md from an Anchor IDL
-leanstral spec --idl target/idl/program.json --output-dir ./formal_verification
+qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
 
 # Consolidate multiple proof projects into single project
-leanstral consolidate \
+qedgen consolidate \
   --input-dir /tmp/proofs \
   --output-dir formal_verification
 ```
@@ -69,7 +69,7 @@ leanstral consolidate \
 
 ### Crate Structure
 
-**`crates/leanstral/`** - Single crate: CLI and Mistral API client
+**`crates/qedgen/`** - Single crate: CLI and Mistral API client
 - `main.rs` - CLI entry points (generate, fill-sorry, spec, consolidate, setup)
 - `api.rs` - Mistral API client, pass@N sampling, sorry-filling, retry logic
 - `validate.rs` - Lake build validation in persistent workspace
@@ -77,11 +77,11 @@ leanstral consolidate \
 - `consolidate.rs` - Merges multiple proof projects
 - `spec.rs` - SPEC.md generation from Anchor IDL
 
-**`crates/leanstral/lean_support/`** - Canonical Lean axioms for Solana
-- `Leanstral/Solana/Account.lean` - Account structure
-- `Leanstral/Solana/Token.lean` - Token operations and conservation axioms
-- `Leanstral/Solana/Authority.lean` - Authorization predicates
-- `Leanstral/Solana/State.lean` - Lifecycle and state machines
+**`crates/qedgen/lean_support/`** - Canonical Lean axioms for Solana
+- `QEDGen/Solana/Account.lean` - Account structure
+- `QEDGen/Solana/Token.lean` - Token operations and conservation axioms
+- `QEDGen/Solana/Authority.lean` - Authorization predicates
+- `QEDGen/Solana/State.lean` - Lifecycle and state machines
 
 ### Key Design Decisions
 
@@ -91,19 +91,19 @@ leanstral consolidate \
 - Claude iterates on `lake build` errors naturally
 - Scales to large programs without combinatorial prompt explosion
 
-**Why Leanstral only for sorry-filling?**
+**Why Leanstral model only for sorry-filling?**
 - Full module generation requires too much context (import ordering, namespace management)
 - Focused sorry-filling gives Leanstral maximum signal with minimal noise
 - Claude handles the modeling/structuring; Leanstral handles hard tactic proofs
 
 **Why pass@N sampling?**
-- Leanstral is non-deterministic; multiple attempts increase success rate
+- The Leanstral model is non-deterministic; multiple attempts increase success rate
 - Validation selects compilable proof over heuristics (sorry count)
 
 **Why persistent validation workspace?**
 - Lake's first Mathlib build takes 15-45 minutes
 - Reusing `.lake/packages/` avoids repeated Mathlib compilation
-- Location: platform cache dir or `LEANSTRAL_VALIDATION_WORKSPACE`
+- Location: platform cache dir or `QEDGEN_VALIDATION_WORKSPACE`
 
 **Why axioms instead of proving SPL Token?**
 - Verification scope: program logic only (see VERIFICATION_SCOPE.md)
@@ -133,11 +133,11 @@ See `example/escrow/formal_verification/VERIFICATION_SCOPE.md` for details.
 
 When a proof pattern is reusable across programs:
 
-1. Add to `crates/leanstral/lean_support/Leanstral/Solana/Token.lean` (or other module)
+1. Add to `crates/qedgen/lean_support/QEDGen/Solana/Token.lean` (or other module)
 2. Document the trust assumption with a comment
-3. Export in `Leanstral.lean`
+3. Export in `QEDGen.lean`
 4. Update SKILL.md support library API section
-5. Test: `cd crates/leanstral/lean_support && lake build`
+5. Test: `cd crates/qedgen/lean_support && lake build`
 
 ### Debugging Failed Proofs
 
@@ -154,7 +154,7 @@ If `lake build` fails:
 ## Environment Variables
 
 - `MISTRAL_API_KEY` - Required for `fill-sorry` and `generate` commands
-- `LEANSTRAL_VALIDATION_WORKSPACE` - Override validation workspace path (default: platform cache dir)
+- `QEDGEN_VALIDATION_WORKSPACE` - Override validation workspace path (default: platform cache dir)
 
 ## Common Lean Proof Patterns
 
@@ -187,12 +187,12 @@ theorem cpi_correct (ctx : Context) :
 
 ## Output Artifacts
 
-After `leanstral generate`:
+After `qedgen generate`:
 ```
 /tmp/proof/
 ├── Best.lean              # Selected best completion
 ├── metadata.json          # Rankings, timings, tokens
-├── prompt.txt             # Prompt sent to Leanstral
+├── prompt.txt             # Prompt sent to Leanstral model
 ├── attempts/
 │   ├── completion_0.lean
 │   ├── completion_0_raw.txt
@@ -203,7 +203,7 @@ After `leanstral generate`:
 
 ## Notes
 
-- First Lean build is expensive (15-45 min for Mathlib). Run `leanstral setup` first.
+- First Lean build is expensive (15-45 min for Mathlib). Run `qedgen setup` first.
 - If `lake build` fails with "could not resolve 'HEAD' to a commit", remove `.lake/packages/mathlib` and run `lake update`.
-- Binary is built to `./bin/leanstral`, not `target/release/leanstral`.
+- Binary is built to `./bin/qedgen`, not `target/release/qedgen`.
 - The SKILL.md file defines the full proof-writing workflow that Claude follows.

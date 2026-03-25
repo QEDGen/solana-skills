@@ -1,11 +1,11 @@
-# Leanstral Solana Skill
+# QEDGen Solana Skills
 
-An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's **Leanstral** model (`labs-leanstral-2603`).
+An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's **Leanstral** model handles hard sub-goals.
 
 ## Installation
 
 ```bash
-npx skills add abishekk92/leanstral-solana-skill
+npx skills add QEDGen/solana-skills
 ```
 
 The installer automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.
@@ -23,7 +23,7 @@ export MISTRAL_API_KEY=your_key_here
 ### Full pipeline (recommended)
 
 ```bash
-leanstral verify \
+qedgen verify \
   --idl target/idl/my_program.json \
   --validate
 ```
@@ -35,7 +35,7 @@ This analyzes the program, ranks candidate properties, generates proofs via pass
 ### Analysis only
 
 ```bash
-leanstral analyze \
+qedgen analyze \
   --idl target/idl/my_program.json
 ```
 
@@ -44,7 +44,7 @@ Emits `analysis.json` with ranked property candidates and one prompt file per pr
 ### Generate from an existing prompt
 
 ```bash
-leanstral generate \
+qedgen generate \
   --prompt-file /tmp/analysis/property.prompt.txt \
   --output-dir /tmp/proof \
   --passes 4 \
@@ -61,7 +61,7 @@ lake build  # Success = formally verified
 ### Consolidate proofs
 
 ```bash
-leanstral consolidate \
+qedgen consolidate \
   --input-dir /tmp/proofs \
   --output-dir my_program/formal_verification
 ```
@@ -83,7 +83,7 @@ CPI calls are treated as axiomatic (external to business logic). We verify the p
 - Rust toolchain (auto-installed if missing)
 - Lean 4 / elan (auto-installed if missing)
 
-The first Mathlib build takes 15-45 minutes. Subsequent builds reuse the global cache. Override the cache location with `LEANSTRAL_VALIDATION_WORKSPACE`.
+The first Mathlib build takes 15-45 minutes. Subsequent builds reuse the global cache. Override the cache location with `QEDGEN_VALIDATION_WORKSPACE`.
 
 ## Supported Agents
 

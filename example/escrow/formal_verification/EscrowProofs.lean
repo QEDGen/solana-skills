@@ -1,13 +1,13 @@
-import Leanstral.Solana
-import Leanstral.Solana.Account
-import Leanstral.Solana.Authority
-import Leanstral.Solana.Cpi
-import Leanstral.Solana.State
-import Leanstral.Solana.Valid
+import QEDGen.Solana
+import QEDGen.Solana.Account
+import QEDGen.Solana.Authority
+import QEDGen.Solana.Cpi
+import QEDGen.Solana.State
+import QEDGen.Solana.Valid
 import Mathlib
 import Mathlib.Tactic
 
-open Leanstral.Solana
+open QEDGen.Solana
 
 /- ============================================================================
    CancelAccessControl Proof

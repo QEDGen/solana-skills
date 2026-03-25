@@ -1,9 +1,9 @@
 ---
-name: leanstral
-description: Formally verify programs by writing Lean 4 proofs. Trigger this skill whenever the user wants to formally verify code, generate Lean 4 proofs, prove properties about algorithms or smart contracts, verify invariants, convert program logic into formal specifications, or anything involving Lean 4 and formal verification. Also trigger when the user mentions "leanstral", "lean proof", "formal proof", "verify my code", "prove correctness", "formal verification", or wants mathematical guarantees about their implementation.
+name: qedgen
+description: Formally verify programs by writing Lean 4 proofs. Trigger this skill whenever the user wants to formally verify code, generate Lean 4 proofs, prove properties about algorithms or smart contracts, verify invariants, convert program logic into formal specifications, or anything involving Lean 4 and formal verification. Also trigger when the user mentions "qedgen", "lean proof", "formal proof", "verify my code", "prove correctness", "formal verification", or wants mathematical guarantees about their implementation.
 ---
 
-# Leanstral — Claude-Driven Formal Verification
+# QEDGen — Agent-Driven Formal Verification
 
 You (Claude) are the proof engineer. You read the codebase, write Lean 4 models and proofs, iterate on compiler errors, and call Leanstral (Mistral's theorem prover) only for hard sub-goals you cannot fill yourself.
 
@@ -24,7 +24,7 @@ You (Claude)                          Leanstral (remote model)
 Check for existing artifacts in this priority order:
 
 1. **spec.md exists** → Read it. An existing spec captures the author's intent, state model, invariants, and operations. Extract security goals, state model, and formal properties. Skip the scoping quiz and go directly to Step 2.
-2. **IDL exists** (`target/idl/<program>.json`) → Run `leanstral spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
+2. **IDL exists** (`target/idl/<program>.json`) → Run `qedgen spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
 3. **Neither exists** → Read the source code directly. Ask broader scoping questions.
 
 ## Step 2: Scope the verification
@@ -89,7 +89,7 @@ Present SPEC.md to the user and get confirmation before proceeding.
 ## Step 4: Set up the Lean project
 
 ```bash
-leanstral setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
+qedgen setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
 ```
 
 Create the project structure:
@@ -98,7 +98,7 @@ Create the project structure:
 formal_verification/
   lakefile.lean          # import lean_support and Mathlib
   lean-toolchain         # leanprover/lean4:v4.15.0
-  lean_support/          # Solana axiom library (copy from leanstral)
+  lean_support/          # Solana axiom library (copy from qedgen)
   Proofs.lean            # root import: import Proofs.AccessControl etc.
   Proofs/
     AccessControl.lean
@@ -124,7 +124,7 @@ For each property in SPEC.md:
 
 ### Support library API
 
-After `import Leanstral.Solana` and `open Leanstral.Solana`:
+After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
 **Types:**
 - `Pubkey` (= Nat), `U64` (= Nat), `U8` (= Nat)
@@ -254,7 +254,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 |---|---|
 | `omega could not prove the goal` | Unfold named predicates in hypotheses: `unfold pred at h ⊢` |
 | `no goals to be solved` | Remove redundant tactic (e.g., `· contradiction` after auto-closed branch) |
-| `unknown constant 'X'` | Check imports; add `import Leanstral.Solana.X` or `open Leanstral.Solana` |
+| `unknown constant 'X'` | Check imports; add `import QEDGen.Solana.X` or `open QEDGen.Solana` |
 | `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
 | `unused variable 'h'` | Remove proof binding: `if h : cond` → `if cond` |
 
@@ -263,7 +263,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 When you have a proof with `sorry` markers you cannot fill after 2-3 attempts:
 
 ```bash
-leanstral fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+qedgen fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 ```
 
 This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
@@ -284,7 +284,7 @@ Update SPEC.md verification results table:
 ## Environment
 
 - **`MISTRAL_API_KEY`** — required for `fill-sorry`. Free from [console.mistral.ai](https://console.mistral.ai)
-- **`LEANSTRAL_VALIDATION_WORKSPACE`** — optional override for global Mathlib cache location
+- **`QEDGEN_VALIDATION_WORKSPACE`** — optional override for global Mathlib cache location
 
 ## Error handling
 

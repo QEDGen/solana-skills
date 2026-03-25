@@ -1,11 +1,11 @@
-# Leanstral Solana
+# QEDGen
 
 > An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals.
 
 ## Installation
 
 ```bash
-npx skills add abishekk92/leanstral-solana-skill
+npx skills add QEDGen/solana-skills
 ```
 
 The installer automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.
@@ -20,7 +20,7 @@ export MISTRAL_API_KEY=your_key_here
 
 ## What It Does
 
-Leanstral Solana verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
 
 ### How It Works
 
@@ -37,7 +37,7 @@ Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, a
 ### Full pipeline (recommended)
 
 ```bash
-leanstral verify \
+qedgen verify \
   --idl target/idl/my_program.json \
   --validate
 ```
@@ -47,7 +47,7 @@ The IDL is the primary input. Optional flags: `--input` (Rust source, passed to 
 ### Analysis only
 
 ```bash
-leanstral analyze \
+qedgen analyze \
   --idl target/idl/my_program.json
 ```
 
@@ -56,7 +56,7 @@ Emits `analysis.json` with ranked property candidates and one prompt file per pr
 ### Generate from an existing prompt
 
 ```bash
-leanstral generate \
+qedgen generate \
   --prompt-file /tmp/analysis/property.prompt.txt \
   --output-dir /tmp/proof \
   --passes 4 \
@@ -66,18 +66,18 @@ leanstral generate \
 ### Fill sorry markers
 
 ```bash
-leanstral fill-sorry \
+qedgen fill-sorry \
   --file formal_verification/Proofs/Hard.lean \
   --passes 3 \
   --validate
 ```
 
-Sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
+Sends each `sorry` location to the Leanstral model with focused context. Review the result — The Leanstral model may introduce tactics you can learn from for future proofs.
 
 ### Consolidate proofs
 
 ```bash
-leanstral consolidate \
+qedgen consolidate \
   --input-dir /tmp/proofs \
   --output-dir my_program/formal_verification
 ```
@@ -87,13 +87,13 @@ Merges validated `Best.lean` files into a single Lean project with namespaced pr
 ### Generate a draft spec
 
 ```bash
-leanstral spec --idl target/idl/program.json --output-dir ./formal_verification
+qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
 ```
 
 ### Set up global validation workspace
 
 ```bash
-leanstral setup
+qedgen setup
 ```
 
 First-time Mathlib build takes 15-45 minutes. Subsequent builds reuse the cache.
@@ -106,7 +106,7 @@ The skill instructs your agent to follow this workflow:
 
 Check for existing artifacts:
 1. **spec.md exists** — read it, extract security goals, state model, and formal properties
-2. **IDL exists** — run `leanstral spec --idl <path>` to generate a draft SPEC.md
+2. **IDL exists** — run `qedgen spec --idl <path>` to generate a draft SPEC.md
 3. **Neither exists** — read source code directly, ask scoping questions
 
 ### Step 2: Scope the verification
@@ -146,10 +146,10 @@ For each property:
 4. Write the proof
 5. Run `lake build` and iterate
 
-### Step 6: Call Leanstral for hard sub-goals
+### Step 6: Call Leanstral model for hard sub-goals
 
 ```bash
-leanstral fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+qedgen fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 ```
 
 ### Step 7: Verify and report
@@ -158,7 +158,7 @@ Run `lake build` and update SPEC.md verification results.
 
 ## Support Library API
 
-After `import Leanstral.Solana` and `open Leanstral.Solana`:
+After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
 **Types:** `Pubkey` (= Nat), `U64` (= Nat), `Account`, `Lifecycle` (open | closed), `TransferCpi`, `MintToCpi`, `BurnCpi`, `CloseCpi`
 
@@ -245,7 +245,7 @@ theorem cancel_cpi_correct (ctx : CancelContext) :
 |---|---|
 | `omega could not prove the goal` | Unfold named predicates in hypotheses: `unfold pred at h ⊢` |
 | `no goals to be solved` | Remove redundant tactic (e.g., `· contradiction` after auto-closed branch) |
-| `unknown constant 'X'` | Check imports; add `import Leanstral.Solana.X` or `open Leanstral.Solana` |
+| `unknown constant 'X'` | Check imports; add `import QEDGen.Solana.X` or `open QEDGen.Solana` |
 | `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
 
 ## Working Examples
@@ -261,7 +261,7 @@ A perpetual DEX risk engine with protected principal, junior profit claims, and 
 ## Environment Variables
 
 - `MISTRAL_API_KEY` — required for `fill-sorry` and `generate` commands. Free from console.mistral.ai.
-- `LEANSTRAL_VALIDATION_WORKSPACE` — optional override for global Mathlib cache location.
+- `QEDGEN_VALIDATION_WORKSPACE` — optional override for global Mathlib cache location.
 
 ## Requirements
 

@@ -3,7 +3,7 @@
  "packages":
  [{"type": "path",
    "scope": "",
-   "name": "leanstralSupport",
+   "name": "qedgenSupport",
    "manifestFile": "lake-manifest.json",
    "inherited": false,
    "dir": "././lean_support",

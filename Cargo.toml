@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/leanstral"]
+members = ["crates/qedgen"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -1,6 +1,6 @@
 # Solana Program Lean Proofs
 
-This directory contains formal verification proofs for the Solana program, generated using Leanstral.
+This directory contains formal verification proofs for the Solana program, generated using QEDGen.
 
 ## Building and Verifying
 
@@ -16,7 +16,7 @@ This will verify all theorems and ensure they compile correctly.
 
 All proofs are contained in `EscrowProofs.lean`, organized into namespaces to avoid naming conflicts:
 - Each proof has its own namespace
-- Shared definitions from the Leanstral Solana library are imported at the top
+- Shared definitions from the QEDGen Solana library are imported at the top
 - The `lean_support` directory contains the Solana modeling framework
 
 ## Generated Proofs

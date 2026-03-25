@@ -1,8 +1,8 @@
 import Lake
 open Lake DSL
 
-package leanstralSupport
+package qedgenSupport
 
 @[default_target]
-lean_lib Leanstral where
-  roots := #[`Leanstral]
+lean_lib QEDGen where
+  roots := #[`QEDGen]

@@ -19,42 +19,42 @@ if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
     export PATH="$HOME/.elan/bin:$PATH"
 fi
 
-# ── Build leanstral binary ──────────────────────────────────────────────────
-if [ -f "bin/leanstral" ] && [ -x "bin/leanstral" ]; then
-    echo "✓ Pre-built leanstral binary found"
-    if ./bin/leanstral --version &> /dev/null; then
+# ── Build qedgen binary ──────────────────────────────────────────────────
+if [ -f "bin/qedgen" ] && [ -x "bin/qedgen" ]; then
+    echo "✓ Pre-built qedgen binary found"
+    if ./bin/qedgen --version &> /dev/null; then
         echo "✓ Binary is compatible with this platform"
     else
         echo "  Pre-built binary is not compatible, rebuilding..."
         cargo build --release
         mkdir -p bin
-        cp target/release/leanstral bin/
-        chmod +x bin/leanstral
+        cp target/release/qedgen bin/
+        chmod +x bin/qedgen
     fi
 else
-    echo "Building leanstral binary..."
+    echo "Building qedgen binary..."
     cargo build --release
     mkdir -p bin
-    cp target/release/leanstral bin/
-    chmod +x bin/leanstral
+    cp target/release/qedgen bin/
+    chmod +x bin/qedgen
 fi
 
-echo "✓ leanstral binary built successfully"
+echo "✓ qedgen binary built successfully"
 
 # ── Set up global validation workspace ──────────────────────────────────────
-# Pre-fetch Mathlib cache so the first `leanstral verify --validate` is fast.
+# Pre-fetch Mathlib cache so the first `qedgen verify --validate` is fast.
 # This runs in the background so it doesn't block npm install.
 
 setup_global_workspace() {
     local ws_dir
-    if [ -n "$LEANSTRAL_VALIDATION_WORKSPACE" ]; then
-        ws_dir="$LEANSTRAL_VALIDATION_WORKSPACE"
+    if [ -n "$QEDGEN_VALIDATION_WORKSPACE" ]; then
+        ws_dir="$QEDGEN_VALIDATION_WORKSPACE"
     elif [ "$(uname)" = "Darwin" ]; then
-        ws_dir="$HOME/Library/Caches/leanstral-solana-skill/validation-workspace"
+        ws_dir="$HOME/Library/Caches/qedgen-solana-skills/validation-workspace"
     elif [ -n "$XDG_CACHE_HOME" ]; then
-        ws_dir="$XDG_CACHE_HOME/leanstral-solana-skill/validation-workspace"
+        ws_dir="$XDG_CACHE_HOME/qedgen-solana-skills/validation-workspace"
     else
-        ws_dir="$HOME/.cache/leanstral-solana-skill/validation-workspace"
+        ws_dir="$HOME/.cache/qedgen-solana-skills/validation-workspace"
     fi
 
     # Skip if already set up
@@ -65,13 +65,13 @@ setup_global_workspace() {
 
     echo "Setting up global validation workspace at $ws_dir..."
     echo "  This downloads and caches Mathlib (~1-2 min with cache, 25+ min without)."
-    echo "  Running in background — leanstral will work once this completes."
+    echo "  Running in background — qedgen will work once this completes."
 
     mkdir -p "$ws_dir"
 
-    # Use leanstral setup command if available
-    if [ -x "bin/leanstral" ]; then
-        bin/leanstral setup --workspace "$ws_dir" &
+    # Use qedgen setup command if available
+    if [ -x "bin/qedgen" ]; then
+        bin/qedgen setup --workspace "$ws_dir" &
         echo "  Background PID: $!"
     else
         echo "  Warning: binary not available, workspace will be set up on first use."
@@ -82,12 +82,12 @@ setup_global_workspace
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  leanstral-solana-skill installed successfully!"
+echo "  qedgen-solana-skills installed successfully!"
 echo ""
 echo "  Requirements:"
 echo "    - MISTRAL_API_KEY environment variable must be set"
 echo "    - Lean toolchain (auto-installed via elan)"
 echo ""
 echo "  The global Mathlib cache may still be downloading in the background."
-echo "  First run of 'leanstral verify --validate' may be slow if not ready."
+echo "  First run of 'qedgen verify --validate' may be slow if not ready."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

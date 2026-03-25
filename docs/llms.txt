@@ -1,23 +1,23 @@
-# Leanstral Solana
+# QEDGen
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals. Install with `npx skills add abishekk92/leanstral-solana-skill`. Works with any coding agent supporting the Agent Skills spec.
+> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals. Install with `npx skills add QEDGen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
 
-Leanstral Solana verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
 
 ## Docs
 
-- [README](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/README.md): Installation, usage, CLI commands, and requirements
-- [SKILL.md](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/SKILL.md): Full proof-writing workflow, support library API, proof patterns, tactic rules, and error fixes
-- [CLAUDE.md](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/CLAUDE.md): Build commands, architecture, crate structure, and development guide
+- [README](https://raw.githubusercontent.com/QEDGen/solana-skills/main/README.md): Installation, usage, CLI commands, and requirements
+- [SKILL.md](https://raw.githubusercontent.com/QEDGen/solana-skills/main/SKILL.md): Full proof-writing workflow, support library API, proof patterns, tactic rules, and error fixes
+- [CLAUDE.md](https://raw.githubusercontent.com/QEDGen/solana-skills/main/CLAUDE.md): Build commands, architecture, crate structure, and development guide
 
 ## Examples
 
-- [Escrow Proofs](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/example/escrow/formal_verification/EscrowProofs.lean): 9/9 verified proofs for an Anchor token escrow (access control, state machines, arithmetic safety)
-- [Escrow Spec](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/example/escrow/formal_verification/SPEC.md): Verification spec for the escrow program
-- [Percolator Proofs](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/example/percolator/formal_verification/PercolatorProofs.lean): 7/7 verified proofs for a pure Rust risk engine (conservation, arithmetic safety, state machine, fee isolation)
-- [Percolator Spec](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/example/percolator/formal_verification/SPEC.md): Verification spec for the percolator engine
+- [Escrow Proofs](https://raw.githubusercontent.com/QEDGen/solana-skills/main/example/escrow/formal_verification/EscrowProofs.lean): 9/9 verified proofs for an Anchor token escrow (access control, state machines, arithmetic safety)
+- [Escrow Spec](https://raw.githubusercontent.com/QEDGen/solana-skills/main/example/escrow/formal_verification/SPEC.md): Verification spec for the escrow program
+- [Percolator Proofs](https://raw.githubusercontent.com/QEDGen/solana-skills/main/example/percolator/formal_verification/PercolatorProofs.lean): 7/7 verified proofs for a pure Rust risk engine (conservation, arithmetic safety, state machine, fee isolation)
+- [Percolator Spec](https://raw.githubusercontent.com/QEDGen/solana-skills/main/example/percolator/formal_verification/SPEC.md): Verification spec for the percolator engine
 
 ## Optional
 
-- [Verification Scope](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/example/escrow/formal_verification/VERIFICATION_SCOPE.md): What is verified vs. trusted as axioms
-- [Lean Support Library](https://raw.githubusercontent.com/abishekk92/leanstral-solana-skill/main/crates/leanstral/lean_support/Leanstral.lean): Root import for the Solana axiom library
+- [Verification Scope](https://raw.githubusercontent.com/QEDGen/solana-skills/main/example/escrow/formal_verification/VERIFICATION_SCOPE.md): What is verified vs. trusted as axioms
+- [Lean Support Library](https://raw.githubusercontent.com/QEDGen/solana-skills/main/crates/qedgen/lean_support/QEDGen.lean): Root import for the Solana axiom library

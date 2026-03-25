@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Leanstral Solana - Formally Verify Solana Programs with Lean 4</title>
-  <meta name="description" content="An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's Leanstral model. Works with any coding agent.">
-  <meta property="og:title" content="Leanstral Solana - Formally Verify Solana Programs">
+  <title>QEDGen - Formally Verify Solana Programs with Lean 4</title>
+  <meta name="description" content="An agent skill that formally verifies Solana programs by generating Lean 4 proofs Works with any coding agent.">
+  <meta property="og:title" content="QEDGen - Formally Verify Solana Programs">
   <meta property="og:description" content="An agent skill for formal verification of Solana programs. Install with npx skills, works with any coding agent.">
-  <meta property="og:url" content="https://abishekk92.github.io/leanstral-solana-skill/">
+  <meta property="og:url" content="https://qedgen.dev/">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -15,13 +15,13 @@
 
 <nav>
   <div class="container">
-    <a class="logo" href="#">lean<span>stral</span> solana</a>
+    <a class="logo" href="#">QED<span>Gen</span></a>
     <div class="links">
       <a href="#how-it-works">How It Works</a>
       <a href="#what-it-does">What It Does</a>
       <a href="#examples">Examples</a>
       <a href="#get-started">Get Started</a>
-      <a href="https://github.com/abishekk92/leanstral-solana-skill">GitHub</a>
+      <a href="https://github.com/QEDGen/solana-skills">GitHub</a>
     </div>
   </div>
 </nav>
@@ -30,11 +30,11 @@
   <div class="container">
     <h1>Formally verify Solana programs<br>with <span>Lean 4 proofs</span></h1>
     <p class="subtitle">An agent skill that verifies your core business logic. Your agent reads the code, writes Lean 4 proofs, and iterates until they compile. Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>, Mistral's theorem prover.</p>
-    <pre class="install-cmd"><code>npx skills add abishekk92/leanstral-solana-skill</code></pre>
+    <pre class="install-cmd"><code>npx skills add QEDGen/solana-skills</code></pre>
     <p class="compat">Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, and anything supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
     <div class="cta">
       <a href="#get-started" class="btn btn-primary">Get Started</a>
-      <a href="https://github.com/abishekk92/leanstral-solana-skill" class="btn btn-secondary">View on GitHub</a>
+      <a href="https://github.com/QEDGen/solana-skills" class="btn btn-secondary">View on GitHub</a>
     </div>
   </div>
 </header>
@@ -104,7 +104,7 @@ theorem cancel_access_control
   split_ifs at h with h_eq
   · exact h_eq
   · contradiction</code></pre>
-        <a href="https://github.com/abishekk92/leanstral-solana-skill/tree/main/example/escrow/formal_verification">View proofs</a>
+        <a href="https://github.com/QEDGen/solana-skills/tree/main/example/escrow/formal_verification">View proofs</a>
       </div>
       <div class="example-card">
         <h3>Percolator</h3>
@@ -124,7 +124,7 @@ theorem deposit_conservation
   unfold conservation at h_inv ⊢
   dsimp only
   omega</code></pre>
-        <a href="https://github.com/abishekk92/leanstral-solana-skill/tree/main/example/percolator/formal_verification">View proofs</a>
+        <a href="https://github.com/QEDGen/solana-skills/tree/main/example/percolator/formal_verification">View proofs</a>
       </div>
     </div>
   </div>
@@ -137,7 +137,7 @@ theorem deposit_conservation
     <div class="getting-started-steps">
       <div class="gs-step">
         <h3><span>1.</span> Install the skill</h3>
-        <pre><code>npx skills add abishekk92/leanstral-solana-skill</code></pre>
+        <pre><code>npx skills add QEDGen/solana-skills</code></pre>
         <p>Automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.</p>
       </div>
       <div class="gs-step">
@@ -158,11 +158,11 @@ theorem deposit_conservation
 
 <footer>
   <div class="container">
-    <p>Leanstral Solana Skill &middot; MIT License</p>
+    <p>QEDGen &middot; MIT License</p>
     <div class="links">
-      <a href="https://github.com/abishekk92/leanstral-solana-skill">GitHub</a>
-      <a href="https://github.com/abishekk92/leanstral-solana-skill/blob/main/SKILL.md">SKILL.md</a>
-      <a href="https://github.com/abishekk92/leanstral-solana-skill/issues">Issues</a>
+      <a href="https://github.com/QEDGen/solana-skills">GitHub</a>
+      <a href="https://github.com/QEDGen/solana-skills/blob/main/SKILL.md">SKILL.md</a>
+      <a href="https://github.com/QEDGen/solana-skills/issues">Issues</a>
     </div>
   </div>
 </footer>

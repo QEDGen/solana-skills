@@ -1,7 +1,7 @@
-import Leanstral.Solana
+import QEDGen.Solana
 import Mathlib
 
-open Leanstral.Solana
+open QEDGen.Solana
 
 /- ============================================================================
    Deposit Conservation Proof
