@@ -160,6 +160,23 @@ nav .links a:hover { color: var(--text); }
   margin-top: 0.25rem;
 }
 
+/* Flow diagram */
+#flow {
+  padding: 2rem 0 0;
+  border-top: 1px solid var(--border);
+}
+
+.flow-diagram {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  display: block;
+}
+
+@media (max-width: 768px) {
+  .flow-diagram { display: none; }
+}
+
 /* Sections */
 section {
   padding: 4rem 0;
