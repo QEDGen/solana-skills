@@ -9,13 +9,14 @@
   <meta property="og:description" content="An agent skill for formal verification of Solana programs. Install with npx skills, works with any coding agent.">
   <meta property="og:url" content="https://qedgen.dev/">
   <meta property="og:type" content="website">
+  <meta property="og:image" content="https://qedgen.dev/logo.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <nav>
   <div class="container">
-    <a class="logo" href="#">QED<span>Gen</span></a>
+    <a class="logo" href="#">QEDGen<span class="dot"></span></a>
     <div class="links">
       <a href="#how-it-works">How It Works</a>
       <a href="#examples">Examples</a>
@@ -27,10 +28,16 @@
 
 <header class="hero">
   <div class="container">
-    <h1>Formally verify Solana programs<br>with <span>Lean 4 proofs</span></h1>
+    <div class="ascii" aria-hidden="true"> ██████╗ ███████╗██████╗  ██████╗ ███████╗███╗   ██╗
+██╔═══██╗██╔════╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║
+██║   ██║█████╗  ██║  ██║██║  ███╗█████╗  ██╔██╗ ██║
+██║▄▄ ██║██╔══╝  ██║  ██║██║   ██║██╔══╝  ██║╚██╗██║
+╚██████╔╝███████╗██████╔╝╚██████╔╝███████╗██║ ╚████║
+ ╚══▀▀═╝ ╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝</div>
+    <h1>Formally verify Solana programs with Lean 4 proofs</h1>
     <p class="subtitle">An agent skill that verifies your core business logic. Your agent reads the code, writes Lean 4 proofs, and iterates until they compile. Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>, Mistral's theorem prover.</p>
     <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code></pre>
-    <p class="compat">Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, and anything supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
+    <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
     <div class="cta">
       <a href="#get-started" class="btn btn-primary">Get Started</a>
       <a href="https://github.com/qedgen/solana-skills" class="btn btn-secondary">View on GitHub</a>
@@ -45,49 +52,49 @@
 
     <svg class="flow-diagram" viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg">
       <g class="flow-node">
-        <rect x="10" y="70" width="130" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
-        <text x="75" y="96" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">Your Code</text>
-        <text x="75" y="114" text-anchor="middle" fill="#8b949e" font-size="11">Rust / Anchor</text>
+        <rect x="10" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
+        <text x="75" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Your Code</text>
+        <text x="75" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">Rust / Anchor</text>
       </g>
       <g class="flow-node">
-        <rect x="200" y="70" width="130" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
-        <text x="265" y="96" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">Agent</text>
-        <text x="265" y="114" text-anchor="middle" fill="#8b949e" font-size="11">reads &amp; models</text>
+        <rect x="200" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
+        <text x="265" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Agent</text>
+        <text x="265" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">reads &amp; models</text>
       </g>
       <g class="flow-node">
-        <rect x="390" y="70" width="130" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
-        <text x="455" y="96" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">SPEC.md</text>
-        <text x="455" y="114" text-anchor="middle" fill="#8b949e" font-size="11">goals &amp; properties</text>
+        <rect x="390" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
+        <text x="455" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">SPEC.md</text>
+        <text x="455" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">goals &amp; properties</text>
       </g>
       <g class="flow-node">
-        <rect x="580" y="70" width="130" height="60" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-        <text x="645" y="96" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">Lean 4 Proofs</text>
-        <text x="645" y="114" text-anchor="middle" fill="#8b949e" font-size="11">lake build</text>
+        <rect x="580" y="70" width="130" height="60" rx="0" fill="#111" stroke="#ededed" stroke-width="1"/>
+        <text x="645" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Lean 4 Proofs</text>
+        <text x="645" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">lake build</text>
       </g>
       <g class="flow-node">
-        <rect x="770" y="70" width="60" height="60" rx="8" fill="#58a6ff" stroke="none"/>
-        <text x="800" y="107" text-anchor="middle" fill="#0d1117" font-size="22" font-weight="800">&#x220E;</text>
+        <rect x="770" y="70" width="60" height="60" rx="0" fill="#ededed" stroke="none"/>
+        <text x="800" y="107" text-anchor="middle" fill="#0a0a0a" font-size="22" font-weight="800">&#x220E;</text>
       </g>
       <g class="flow-node">
-        <rect x="580" y="170" width="130" height="40" rx="6" fill="#161b22" stroke="#30363d" stroke-dasharray="4 3"/>
-        <text x="645" y="195" text-anchor="middle" fill="#8b949e" font-size="11">Leanstral (sorry)</text>
+        <rect x="580" y="170" width="130" height="40" rx="0" fill="#111" stroke="#222" stroke-dasharray="4 3"/>
+        <text x="645" y="195" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">Leanstral (sorry)</text>
       </g>
       <defs>
         <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#ededed"/>
         </marker>
         <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#666"/>
         </marker>
       </defs>
-      <line x1="140" y1="100" x2="198" y2="100" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
-      <line x1="330" y1="100" x2="388" y2="100" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
-      <line x1="520" y1="100" x2="578" y2="100" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
-      <line x1="710" y1="100" x2="768" y2="100" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrow)"/>
-      <line x1="645" y1="130" x2="645" y2="168" stroke="#8b949e" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <path d="M 710 190 Q 740 190 740 150 Q 740 130 710 130" fill="none" stroke="#8b949e" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <path d="M 630 70 Q 630 40 455 40 Q 280 40 280 68" fill="none" stroke="#30363d" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <text x="455" y="35" text-anchor="middle" fill="#8b949e" font-size="10">iterate on errors</text>
+      <line x1="140" y1="100" x2="198" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="330" y1="100" x2="388" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="520" y1="100" x2="578" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="710" y1="100" x2="768" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
+      <line x1="645" y1="130" x2="645" y2="168" stroke="#666" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
+      <path d="M 710 190 Q 740 190 740 150 Q 740 130 710 130" fill="none" stroke="#666" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
+      <path d="M 630 70 Q 630 40 455 40 Q 280 40 280 68" fill="none" stroke="#222" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
+      <text x="455" y="35" text-anchor="middle" fill="#666" font-size="10" font-family="'Geist Mono', monospace">iterate on errors</text>
     </svg>
 
     <div class="flow-mobile">
@@ -132,7 +139,7 @@
         <h3>Escrow <span class="tag">Anchor</span></h3>
         <p class="desc">Token escrow for two-party trades. Initializer deposits, taker completes, or initializer cancels.</p>
         <div class="result">9/9 proofs verified</div>
-        <pre><code><span style="color:#8b949e">-- Cancel only succeeds if signer = initializer</span>
+        <pre><code><span style="color:#666">-- Cancel only succeeds if signer = initializer</span>
 theorem cancel_access_control
     (p_preState : ProgramState) (p_signer : Pubkey)
     (h : cancelTransition p_preState p_signer ≠ none) :
@@ -141,13 +148,13 @@ theorem cancel_access_control
   split_ifs at h with h_eq
   · exact h_eq
   · contradiction</code></pre>
-        <a href="https://github.com/qedgen/solana-skills/tree/main/example/escrow/formal_verification">View proofs</a>
+        <a href="https://github.com/qedgen/solana-skills/tree/main/example/escrow/formal_verification">View proofs &rarr;</a>
       </div>
       <div class="example-card">
         <h3>Percolator <span class="tag">Pure Rust</span></h3>
         <p class="desc">Perpetual DEX risk engine with protected principal and lazy side indices. Non-Anchor, no_std.</p>
         <div class="result">7/7 proofs verified</div>
-        <pre><code><span style="color:#8b949e">-- Deposit preserves V >= C_tot + I</span>
+        <pre><code><span style="color:#666">-- Deposit preserves V >= C_tot + I</span>
 theorem deposit_conservation
     (p_s p_s' : EngineState) (p_amount : Nat)
     (h_inv : conservation p_s)
@@ -159,7 +166,7 @@ theorem deposit_conservation
   unfold conservation at h_inv ⊢
   dsimp only
   omega</code></pre>
-        <a href="https://github.com/qedgen/solana-skills/tree/main/example/percolator/formal_verification">View proofs</a>
+        <a href="https://github.com/qedgen/solana-skills/tree/main/example/percolator/formal_verification">View proofs &rarr;</a>
       </div>
     </div>
   </div>
@@ -175,8 +182,8 @@ theorem deposit_conservation
       </div>
       <div class="gs-step">
         <h3><span>2.</span> Set your Mistral API key</h3>
-        <pre><code>export MISTRAL_API_KEY=your_key_here</code></pre>
-        <p>Free from <a href="https://console.mistral.ai">console.mistral.ai</a>.</p>
+        <pre><code>export MISTRAL_API_KEY=your_key</code></pre>
+        <p>Free from <a href="https://console.mistral.ai">console.mistral.ai</a></p>
       </div>
       <div class="gs-step">
         <h3><span>3.</span> Verify your program</h3>
