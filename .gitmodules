@@ -1,3 +1,0 @@
-[submodule "example/percolator"]
-	path = example/percolator
-	url = git@github.com:aeyakovenko/percolator.git
