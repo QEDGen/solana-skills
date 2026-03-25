@@ -5,7 +5,7 @@ An agent skill that formally verifies Solana programs by generating Lean 4 proof
 ## Installation
 
 ```bash
-npx skills add QEDGen/solana-skills
+npx skills add qedgen/solana-skills
 ```
 
 The installer automatically sets up Rust, Lean/elan, the CLI binary, and a global Mathlib cache.

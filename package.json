@@ -33,11 +33,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QEDGen/solana-skills.git"
+    "url": "git+https://github.com/qedgen/solana-skills.git"
   },
   "author": "abishekk92",
   "license": "MIT",
-  "homepage": "https://github.com/QEDGen/solana-skills#readme",
+  "homepage": "https://github.com/qedgen/solana-skills#readme",
   "agentSkills": {
     "skills": [
       "SKILL.md"

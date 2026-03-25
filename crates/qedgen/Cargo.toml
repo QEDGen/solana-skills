@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["abishekk92"]
 description = "CLI tool for generating formal Lean 4 proofs for Solana programs powered by Mistral's Leanstral model"
 license = "MIT"
-repository = "https://github.com/QEDGen/solana-skills"
+repository = "https://github.com/qedgen/solana-skills"
 
 [[bin]]
 name = "qedgen"
