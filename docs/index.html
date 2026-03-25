@@ -17,7 +17,7 @@
   <div class="container">
     <a class="logo" href="#">QED<span>Gen</span></a>
     <div class="links">
-      <a href="#how-it-works">How It Works</a>
+      <a href="#flow">How It Works</a>
       <a href="#what-it-does">What It Does</a>
       <a href="#examples">Examples</a>
       <a href="#get-started">Get Started</a>
@@ -100,30 +100,6 @@
       <path d="M 630 70 Q 630 40 455 40 Q 280 40 280 68" fill="none" stroke="#30363d" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
       <text x="455" y="35" text-anchor="middle" fill="#8b949e" font-size="10">iterate on errors</text>
     </svg>
-  </div>
-</section>
-
-<section id="how-it-works">
-  <div class="container">
-    <h2>How it works</h2>
-    <p class="section-sub">Your agent drives proof writing directly. Full code context, no lossy pipeline.</p>
-    <div class="steps">
-      <div class="step">
-        <div class="step-num">1</div>
-        <h3>Agent reads your code</h3>
-        <p>Your agent reads the source, checks for existing specs or IDLs, and builds a model of the program's state, transitions, and invariants.</p>
-      </div>
-      <div class="step">
-        <div class="step-num">2</div>
-        <h3>Writes spec and proofs</h3>
-        <p>Generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. Runs <code>lake build</code> and iterates on errors.</p>
-      </div>
-      <div class="step">
-        <div class="step-num">3</div>
-        <h3>Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a></h3>
-        <p>When the agent can't close a <code>sorry</code>, it calls Mistral's Leanstral theorem prover via <code>fill-sorry</code> with pass@N sampling. First compilable result wins.</p>
-      </div>
-    </div>
   </div>
 </section>
 
