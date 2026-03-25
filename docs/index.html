@@ -10,193 +10,136 @@
   <meta property="og:url" content="https://qedgen.dev/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://qedgen.dev/logo.png">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 42 42' fill='none'><rect x='4' y='4' width='34' height='34' rx='4' stroke='%2338bdf8' stroke-width='2.5'/><path d='M12 21L18 27L30 15' stroke='%2338bdf8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/><rect x='28' y='28' width='6' height='6' fill='%2338bdf8'/></svg>">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
+<div class="hero-glow"></div>
+
+<!-- Nav -->
 <nav>
   <div class="container">
-    <a class="logo" href="#">QEDGen<span class="dot"></span></a>
+    <a class="logo-mark" href="#">
+      <svg class="logo-svg" width="28" height="28" viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="4" y="4" width="34" height="34" rx="4" stroke="#38bdf8" stroke-width="2.5"/>
+        <path d="M12 21L18 27L30 15" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="28" y="28" width="6" height="6" fill="#38bdf8"/>
+      </svg>
+      <span class="logo-text">QEDGen</span>
+    </a>
     <div class="links">
-      <a href="#how-it-works">How It Works</a>
-      <a href="#examples">Examples</a>
-      <a href="#get-started">Get Started</a>
+      <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md">Docs</a>
       <a href="https://github.com/qedgen/solana-skills">GitHub</a>
     </div>
   </div>
 </nav>
 
+<!-- Hero — single screen, split layout -->
 <header class="hero">
-  <div class="container">
-    <div class="ascii" aria-hidden="true"> ██████╗ ███████╗██████╗  ██████╗ ███████╗███╗   ██╗
-██╔═══██╗██╔════╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║
-██║   ██║█████╗  ██║  ██║██║  ███╗█████╗  ██╔██╗ ██║
-██║▄▄ ██║██╔══╝  ██║  ██║██║   ██║██╔══╝  ██║╚██╗██║
-╚██████╔╝███████╗██████╔╝╚██████╔╝███████╗██║ ╚████║
- ╚══▀▀═╝ ╚══════╝╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═══╝</div>
-    <h1>Formally verify Solana programs with Lean 4 proofs</h1>
-    <p class="subtitle">An agent skill that verifies your core business logic. Your agent reads the code, writes Lean 4 proofs, and iterates until they compile. Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>, Mistral's theorem prover.</p>
-    <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code></pre>
-    <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
-    <div class="cta">
-      <a href="#get-started" class="btn btn-primary">Get Started</a>
-      <a href="https://github.com/qedgen/solana-skills" class="btn btn-secondary">View on GitHub</a>
+  <div class="container hero-grid">
+    <div class="hero-copy">
+      <div class="badge"><span class="badge-dot"></span> Open Source on GitHub</div>
+      <h1>Your Solana code.<br><span class="accent-text">Formally proven. &#x220E;</span></h1>
+      <p class="subtitle">An agent skill that generates Lean 4 proofs for your Solana programs. Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>.</p>
+      <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code></pre>
+      <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
+      <div class="cta">
+        <a href="https://github.com/qedgen/solana-skills" class="btn btn-primary"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> Star on GitHub</a>
+        <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" class="btn btn-secondary">Read the Docs</a>
+      </div>
+    </div>
+    <div class="hero-diagram">
+      <svg viewBox="0 0 360 420" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#e2e8f0"/>
+          </marker>
+          <marker id="arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#38bdf8"/>
+          </marker>
+          <marker id="arr-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+          </marker>
+        </defs>
+
+        <!-- Box 1: Your Code -->
+        <rect x="95" y="8" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <svg x="173" y="16" width="14" height="14" viewBox="0 0 16 16">
+          <path fill="#71717a" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        <text x="180" y="46" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Your Code</text>
+        <text x="180" y="60" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">Rust / Anchor</text>
+
+        <!-- Arrow 1 → 2 -->
+        <line x1="180" y1="74" x2="180" y2="94" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+
+        <!-- Box 2: Your Agent -->
+        <rect x="95" y="96" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <svg x="173" y="104" width="14" height="14" viewBox="0 0 16 16">
+          <path fill="#71717a" d="M8 1 L9.5 6.5 L15 8 L9.5 9.5 L8 15 L6.5 9.5 L1 8 L6.5 6.5 Z"/>
+        </svg>
+        <text x="180" y="134" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Your Agent</text>
+        <text x="180" y="149" text-anchor="middle" fill="#52525b" font-size="7.5" font-family="'Geist Mono',monospace" letter-spacing="0.5">Claude &#xb7; Cursor &#xb7; Copilot</text>
+
+        <!-- Arrow 2 → 3 -->
+        <line x1="180" y1="162" x2="180" y2="182" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+
+        <!-- Box 3: SPEC.md -->
+        <rect x="95" y="184" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <svg x="173" y="192" width="14" height="14" viewBox="0 0 16 16">
+          <path fill="none" stroke="#71717a" stroke-width="1.3" stroke-linejoin="round" d="M4 1 h5 l4 4 v10 h-9 z"/>
+          <path fill="none" stroke="#71717a" stroke-width="1.3" d="M9 1 v4 h4"/>
+        </svg>
+        <text x="180" y="222" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">SPEC.md</text>
+        <text x="180" y="236" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">goals &amp; properties</text>
+
+        <!-- Arrow 3 → 4 -->
+        <line x1="180" y1="250" x2="180" y2="270" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+
+        <!-- Box 4: Lean 4 Proofs -->
+        <rect x="95" y="272" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.25)"/>
+        <text x="180" y="292" text-anchor="middle" fill="#38bdf8" font-size="16" font-weight="600" font-family="Georgia,serif" font-style="italic">&#x03BB;</text>
+        <text x="180" y="310" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Lean 4 Proofs</text>
+        <text x="180" y="324" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">lake build</text>
+
+        <!-- Arrow 4 → ∎ -->
+        <line x1="180" y1="338" x2="180" y2="366" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr-a)"/>
+
+        <!-- QED tombstone -->
+        <rect x="155" y="368" width="50" height="42" rx="8" fill="#38bdf8"/>
+        <text x="180" y="395" text-anchor="middle" fill="#09090b" font-size="18" font-weight="800">&#x220E;</text>
+
+        <!-- Leanstral -->
+        <rect x="5" y="283" width="74" height="44" rx="6" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)" stroke-dasharray="4 3"/>
+        <text x="42" y="300" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">Leanstral</text>
+        <text x="42" y="314" text-anchor="middle" fill="#6b7280" font-size="8" font-family="'Geist Mono',monospace">theorem prover</text>
+
+        <!-- Leanstral arrow -->
+        <line x1="95" y1="305" x2="81" y2="305" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
+
+        <!-- Iterate loop -->
+        <path d="M 265 305 Q 300 305 300 217 Q 300 129 265 129" fill="none" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
+        <text x="305" y="220" text-anchor="start" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">iterate</text>
+      </svg>
     </div>
   </div>
 </header>
 
-<section id="how-it-works">
-  <div class="container">
-    <h2>How it works</h2>
-    <p class="section-sub">Your agent drives proof writing directly. Full code context, no lossy pipeline.</p>
-
-    <svg class="flow-diagram" viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg">
-      <g class="flow-node">
-        <rect x="10" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
-        <text x="75" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Your Code</text>
-        <text x="75" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">Rust / Anchor</text>
-      </g>
-      <g class="flow-node">
-        <rect x="200" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
-        <text x="265" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Agent</text>
-        <text x="265" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">reads &amp; models</text>
-      </g>
-      <g class="flow-node">
-        <rect x="390" y="70" width="130" height="60" rx="0" fill="#111" stroke="#222"/>
-        <text x="455" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">SPEC.md</text>
-        <text x="455" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">goals &amp; properties</text>
-      </g>
-      <g class="flow-node">
-        <rect x="580" y="70" width="130" height="60" rx="0" fill="#111" stroke="#ededed" stroke-width="1"/>
-        <text x="645" y="96" text-anchor="middle" fill="#ededed" font-size="13" font-weight="600" font-family="'Geist Mono', monospace">Lean 4 Proofs</text>
-        <text x="645" y="114" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">lake build</text>
-      </g>
-      <g class="flow-node">
-        <rect x="770" y="70" width="60" height="60" rx="0" fill="#ededed" stroke="none"/>
-        <text x="800" y="107" text-anchor="middle" fill="#0a0a0a" font-size="22" font-weight="800">&#x220E;</text>
-      </g>
-      <g class="flow-node">
-        <rect x="580" y="170" width="130" height="40" rx="0" fill="#111" stroke="#222" stroke-dasharray="4 3"/>
-        <text x="645" y="195" text-anchor="middle" fill="#666" font-size="11" font-family="'Geist Mono', monospace">Leanstral (sorry)</text>
-      </g>
-      <defs>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#ededed"/>
-        </marker>
-        <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path d="M 0 0 L 10 5 L 0 10 z" fill="#666"/>
-        </marker>
-      </defs>
-      <line x1="140" y1="100" x2="198" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
-      <line x1="330" y1="100" x2="388" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
-      <line x1="520" y1="100" x2="578" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
-      <line x1="710" y1="100" x2="768" y2="100" stroke="#ededed" stroke-width="1" marker-end="url(#arrow)"/>
-      <line x1="645" y1="130" x2="645" y2="168" stroke="#666" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <path d="M 710 190 Q 740 190 740 150 Q 740 130 710 130" fill="none" stroke="#666" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <path d="M 630 70 Q 630 40 455 40 Q 280 40 280 68" fill="none" stroke="#222" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
-      <text x="455" y="35" text-anchor="middle" fill="#666" font-size="10" font-family="'Geist Mono', monospace">iterate on errors</text>
-    </svg>
-
-    <div class="flow-mobile">
-      <div class="flow-mobile-step">
-        <span class="flow-mobile-num">1</span>
-        <div>
-          <strong>Your Code</strong>
-          <p>Agent reads your Rust / Anchor source, existing specs, or IDLs.</p>
-        </div>
-      </div>
-      <div class="flow-mobile-step">
-        <span class="flow-mobile-num">2</span>
-        <div>
-          <strong>SPEC.md</strong>
-          <p>Generates security goals, state model, and formal properties from your code.</p>
-        </div>
-      </div>
-      <div class="flow-mobile-step">
-        <span class="flow-mobile-num">3</span>
-        <div>
-          <strong>Lean 4 Proofs</strong>
-          <p>Writes theorems, runs <code>lake build</code>, iterates until everything compiles.</p>
-        </div>
-      </div>
-      <div class="flow-mobile-step">
-        <span class="flow-mobile-num">&#x220E;</span>
-        <div>
-          <strong>Verified</strong>
-          <p>Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>. Every theorem compiles or it doesn't ship.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="examples">
-  <div class="container">
-    <h2>Working examples</h2>
-    <p class="section-sub">16 verified proofs across two programs. Every proof compiles via <code>lake build</code>.</p>
-    <div class="example-grid">
-      <div class="example-card">
-        <h3>Escrow <span class="tag">Anchor</span></h3>
-        <p class="desc">Token escrow for two-party trades. Initializer deposits, taker completes, or initializer cancels.</p>
-        <div class="result">9/9 proofs verified</div>
-        <pre><code><span style="color:#666">-- Cancel only succeeds if signer = initializer</span>
-theorem cancel_access_control
-    (p_preState : ProgramState) (p_signer : Pubkey)
-    (h : cancelTransition p_preState p_signer ≠ none) :
-    p_signer = p_preState.escrow.initializer := by
-  unfold cancelTransition at h
-  split_ifs at h with h_eq
-  · exact h_eq
-  · contradiction</code></pre>
-        <a href="https://github.com/qedgen/solana-skills/tree/main/example/escrow/formal_verification">View proofs &rarr;</a>
-      </div>
-      <div class="example-card">
-        <h3>Percolator <span class="tag">Pure Rust</span></h3>
-        <p class="desc">Perpetual DEX risk engine with protected principal and lazy side indices. Non-Anchor, no_std.</p>
-        <div class="result">7/7 proofs verified</div>
-        <pre><code><span style="color:#666">-- Deposit preserves V >= C_tot + I</span>
-theorem deposit_conservation
-    (p_s p_s' : EngineState) (p_amount : Nat)
-    (h_inv : conservation p_s)
-    (h : depositTransition p_s p_amount = some p_s') :
-    conservation p_s' := by
-  unfold depositTransition at h
-  split_ifs at h with h_le
-  cases h
-  unfold conservation at h_inv ⊢
-  dsimp only
-  omega</code></pre>
-        <a href="https://github.com/qedgen/solana-skills/tree/main/example/percolator/formal_verification">View proofs &rarr;</a>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="get-started">
-  <div class="container">
-    <h2>Get started</h2>
-    <div class="getting-started-steps">
-      <div class="gs-step">
-        <h3><span>1.</span> Install the skill</h3>
-        <pre><code>npx skills add qedgen/solana-skills</code></pre>
-      </div>
-      <div class="gs-step">
-        <h3><span>2.</span> Set your Mistral API key</h3>
-        <pre><code>export MISTRAL_API_KEY=your_key</code></pre>
-        <p>Free from <a href="https://console.mistral.ai">console.mistral.ai</a></p>
-      </div>
-      <div class="gs-step">
-        <h3><span>3.</span> Verify your program</h3>
-        <pre><code>Formally verify this program.</code></pre>
-      </div>
-    </div>
-  </div>
-</section>
-
+<!-- Footer -->
 <footer>
+  <div class="watermark">Q.E.D.</div>
   <div class="container">
-    <p>QEDGen &middot; MIT License</p>
-    <div class="links">
+    <div class="footer-left">
+      <svg width="20" height="20" viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="4" y="4" width="34" height="34" rx="4" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="2.5"/>
+        <path d="M12 21L18 27L30 15" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="28" y="28" width="6" height="6" fill="#38bdf8" fill-opacity="0.5"/>
+      </svg>
+      <span class="footer-name">QEDGen</span>
+      <span class="footer-copy">MIT License</span>
+    </div>
+    <div class="footer-links">
       <a href="https://github.com/qedgen/solana-skills">GitHub</a>
       <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md">SKILL.md</a>
       <a href="https://github.com/qedgen/solana-skills/issues">Issues</a>
