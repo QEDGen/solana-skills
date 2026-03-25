@@ -17,6 +17,7 @@
   <div class="container">
     <a class="logo" href="#">QED<span>Gen</span></a>
     <div class="links">
+      <a href="#how-it-works">How It Works</a>
       <a href="#examples">Examples</a>
       <a href="#get-started">Get Started</a>
       <a href="https://github.com/qedgen/solana-skills">GitHub</a>
@@ -30,8 +31,18 @@
     <p class="subtitle">An agent skill that verifies your core business logic. Your agent reads the code, writes Lean 4 proofs, and iterates until they compile. Hard sub-goals go to <a href="https://mistral.ai/news/leanstral">Leanstral</a>, Mistral's theorem prover.</p>
     <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code></pre>
     <p class="compat">Works with any coding agent — Cursor, Windsurf, Claude Code, GitHub Copilot, and anything supporting <a href="https://agentskills.io">Agent Skills</a>.</p>
+    <div class="cta">
+      <a href="#get-started" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/qedgen/solana-skills" class="btn btn-secondary">View on GitHub</a>
+    </div>
+  </div>
+</header>
 
-    <!-- Desktop flow diagram -->
+<section id="how-it-works">
+  <div class="container">
+    <h2>How it works</h2>
+    <p class="section-sub">Your agent drives proof writing directly. Full code context, no lossy pipeline.</p>
+
     <svg class="flow-diagram" viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg">
       <g class="flow-node">
         <rect x="10" y="70" width="130" height="60" rx="8" fill="#161b22" stroke="#30363d"/>
@@ -79,7 +90,6 @@
       <text x="455" y="35" text-anchor="middle" fill="#8b949e" font-size="10">iterate on errors</text>
     </svg>
 
-    <!-- Mobile flow fallback -->
     <div class="flow-mobile">
       <div class="flow-mobile-step">
         <span class="flow-mobile-num">1</span>
@@ -110,13 +120,8 @@
         </div>
       </div>
     </div>
-
-    <div class="cta">
-      <a href="#get-started" class="btn btn-primary">Get Started</a>
-      <a href="https://github.com/qedgen/solana-skills" class="btn btn-secondary">View on GitHub</a>
-    </div>
   </div>
-</header>
+</section>
 
 <section id="examples">
   <div class="container">
