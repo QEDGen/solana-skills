@@ -1,8 +1,8 @@
-# Leanstral
+# Leanstral Solana
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's Leanstral model. Install with `npx skills add abishekk92/leanstral-solana-skill`. Works with any coding agent supporting the Agent Skills spec.
+> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals. Install with `npx skills add abishekk92/leanstral-solana-skill`. Works with any coding agent supporting the Agent Skills spec.
 
-Leanstral verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+Leanstral Solana verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
 
 ## Docs
 

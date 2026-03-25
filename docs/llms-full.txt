@@ -1,6 +1,6 @@
-# Leanstral
+# Leanstral Solana
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs via Mistral's Leanstral model.
+> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals.
 
 ## Installation
 
@@ -20,7 +20,7 @@ export MISTRAL_API_KEY=your_key_here
 
 ## What It Does
 
-Leanstral verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+Leanstral Solana verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
 
 ### How It Works
 
