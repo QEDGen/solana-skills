@@ -20,11 +20,24 @@ if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
 fi
 
 # ── Build qedgen binary ──────────────────────────────────────────────────
-echo "Building qedgen binary from source..."
-cargo build --release
-mkdir -p bin
-cp target/release/qedgen bin/
-chmod +x bin/qedgen
+if [ -f "bin/qedgen" ] && [ -x "bin/qedgen" ]; then
+    echo "✓ Pre-built qedgen binary found"
+    if ./bin/qedgen --version &> /dev/null; then
+        echo "✓ Binary is compatible with this platform"
+    else
+        echo "  Pre-built binary is not compatible, rebuilding..."
+        cargo build --release
+        mkdir -p bin
+        cp target/release/qedgen bin/
+        chmod +x bin/qedgen
+    fi
+else
+    echo "Building qedgen binary..."
+    cargo build --release
+    mkdir -p bin
+    cp target/release/qedgen bin/
+    chmod +x bin/qedgen
+fi
 
 echo "✓ qedgen binary built successfully"
 
