@@ -65,7 +65,7 @@ nav .links a:hover { color: var(--text); }
 /* Hero */
 .hero {
   text-align: center;
-  padding: 5rem 0 4rem;
+  padding: 4rem 0 3rem;
 }
 
 .hero h1 {
@@ -78,15 +78,15 @@ nav .links a:hover { color: var(--text); }
 .hero h1 span { color: var(--accent); }
 
 .hero .subtitle {
-  font-size: 1.15rem;
+  font-size: 1.1rem;
   color: var(--text-muted);
   max-width: 640px;
-  margin: 0 auto 2rem;
+  margin: 0 auto 1.5rem;
 }
 
 .hero .install-cmd {
   max-width: 620px;
-  margin: 0 auto 0.75rem;
+  margin: 0 auto 0.5rem;
   text-align: left;
   font-size: 0.9rem;
 }
@@ -94,7 +94,7 @@ nav .links a:hover { color: var(--text); }
 .hero .compat {
   font-size: 0.85rem;
   color: var(--text-muted);
-  margin-bottom: 2rem;
+  margin-bottom: 1.5rem;
 }
 
 .hero .cta {
@@ -102,6 +102,60 @@ nav .links a:hover { color: var(--text); }
   gap: 1rem;
   justify-content: center;
   flex-wrap: wrap;
+  margin-top: 2rem;
+}
+
+/* Flow diagram (inside hero) */
+.flow-diagram {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  display: block;
+}
+
+/* Flow mobile fallback */
+.flow-mobile {
+  display: none;
+  text-align: left;
+  max-width: 500px;
+  margin: 0 auto;
+}
+
+.flow-mobile-step {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.flow-mobile-step:last-child { border-bottom: none; }
+
+.flow-mobile-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.flow-mobile-step strong {
+  display: block;
+  font-size: 0.95rem;
+  margin-bottom: 0.15rem;
+}
+
+.flow-mobile-step p {
+  font-size: 0.825rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin: 0;
 }
 
 .btn {
@@ -130,188 +184,67 @@ nav .links a:hover { color: var(--text); }
 
 .btn-secondary:hover { border-color: var(--text-muted); }
 
-/* Stats */
-.stats {
-  display: flex;
-  gap: 1rem;
-  justify-content: center;
-  margin-top: 3rem;
-  flex-wrap: wrap;
-}
-
-.stat {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.25rem 1.5rem;
-  text-align: center;
-  min-width: 180px;
-}
-
-.stat .number {
-  font-size: 1.8rem;
-  font-weight: 800;
-  color: var(--green);
-}
-
-.stat .label {
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  margin-top: 0.25rem;
-}
-
-/* Flow diagram */
-#flow {
-  padding: 2rem 0 0;
-  border-top: 1px solid var(--border);
-}
-
-.flow-diagram {
-  width: 100%;
-  max-width: 900px;
-  margin: 0 auto;
-  display: block;
-}
-
-@media (max-width: 768px) {
-  .flow-diagram { display: none; }
-}
-
 /* Sections */
 section {
-  padding: 4rem 0;
+  padding: 3rem 0;
   border-top: 1px solid var(--border);
 }
 
 section h2 {
-  font-size: 1.8rem;
+  font-size: 1.6rem;
   font-weight: 700;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.4rem;
 }
 
 section .section-sub {
   color: var(--text-muted);
-  margin-bottom: 2.5rem;
+  margin-bottom: 1.5rem;
   max-width: 600px;
-}
-
-/* Steps */
-.steps {
-  display: flex;
-  gap: 2rem;
-}
-
-.step {
-  flex: 1;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.5rem;
-}
-
-.step .step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
-  background: var(--accent);
-  color: var(--bg);
-  font-weight: 700;
-  font-size: 0.85rem;
-  margin-bottom: 0.75rem;
-}
-
-.step h3 {
-  font-size: 1rem;
-  margin-bottom: 0.5rem;
-}
-
-.step p {
-  font-size: 0.875rem;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-/* Property grid */
-.property-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1rem;
-}
-
-.property-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1.25rem;
-}
-
-.property-card h3 {
-  font-size: 0.95rem;
-  margin-bottom: 0.4rem;
-}
-
-.property-card p {
-  font-size: 0.825rem;
-  color: var(--text-muted);
-  line-height: 1.45;
-}
-
-.trust-note {
-  margin-top: 1.5rem;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  font-style: italic;
+  font-size: 0.9rem;
 }
 
 /* Examples */
 .example-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 1.5rem;
+  gap: 1.25rem;
 }
 
 .example-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 1.5rem;
+  padding: 1.25rem;
 }
 
 .example-card h3 {
-  font-size: 1.1rem;
-  margin-bottom: 0.25rem;
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
 }
 
 .example-card .tag {
-  display: inline-block;
-  font-size: 0.75rem;
+  display: inline;
+  font-size: 0.7rem;
   color: var(--accent);
   border: 1px solid var(--accent);
   border-radius: 4px;
-  padding: 0.1rem 0.4rem;
-  margin-bottom: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  font-weight: 400;
 }
 
 .example-card .desc {
-  font-size: 0.875rem;
+  font-size: 0.825rem;
   color: var(--text-muted);
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
 }
 
 .example-card .result {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   color: var(--green);
   margin-bottom: 0.75rem;
-}
-
-.example-card .props {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  margin-bottom: 1rem;
 }
 
 /* Code */
@@ -319,10 +252,11 @@ pre {
   background: var(--bg-code);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 1rem;
+  padding: 0.85rem;
   overflow-x: auto;
-  font-size: 0.8rem;
-  line-height: 1.55;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin-bottom: 0.75rem;
 }
 
 code {
@@ -338,39 +272,42 @@ p code, li code {
 
 /* Getting started */
 .getting-started-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  max-width: 700px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.25rem;
+}
+
+.gs-step {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
 }
 
 .gs-step h3 {
-  font-size: 1rem;
+  font-size: 0.95rem;
   margin-bottom: 0.5rem;
 }
 
 .gs-step h3 span {
   color: var(--accent);
-  margin-right: 0.5rem;
+  margin-right: 0.35rem;
 }
 
 .gs-step p {
-  font-size: 0.875rem;
-  color: var(--text-muted);
-  margin-bottom: 0.5rem;
-}
-
-.note {
   font-size: 0.825rem;
   color: var(--text-muted);
-  margin-top: 1.5rem;
-  font-style: italic;
+  margin-top: 0.4rem;
+}
+
+.gs-step pre {
+  margin-bottom: 0;
 }
 
 /* Footer */
 footer {
   border-top: 1px solid var(--border);
-  padding: 2rem 0;
+  padding: 1.5rem 0;
   text-align: center;
   font-size: 0.825rem;
   color: var(--text-muted);
@@ -381,10 +318,11 @@ footer .links a { margin: 0 0.75rem; }
 
 /* Responsive */
 @media (max-width: 768px) {
+  .hero { padding: 3rem 0 2rem; }
   .hero h1 { font-size: 2rem; }
-  .steps { flex-direction: column; }
-  .property-grid { grid-template-columns: 1fr; }
+  .flow-diagram { display: none; }
+  .flow-mobile { display: block; }
   .example-grid { grid-template-columns: 1fr; }
-  .stats { flex-direction: column; align-items: center; }
+  .getting-started-steps { grid-template-columns: 1fr; }
   nav .links { gap: 1rem; }
 }
