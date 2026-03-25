@@ -1,0 +1,8 @@
+<svg width="260" height="56" viewBox="0 0 260 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Icon: checkmark in rounded rect with QED tombstone -->
+  <rect x="4" y="8" width="40" height="40" rx="5" stroke="#0ea5e9" stroke-width="2.5"/>
+  <path d="M15 28L22 35L37 20" stroke="#0ea5e9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="33" y="37" width="7" height="7" fill="#0ea5e9"/>
+  <!-- Wordmark -->
+  <text x="56" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="32" font-weight="700" fill="#18181b" letter-spacing="-0.03em">QEDGen</text>
+</svg>
