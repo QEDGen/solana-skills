@@ -191,6 +191,13 @@ nav .links a:hover { color: var(--text); }
 section {
   padding: 3rem 0;
   border-top: 1px solid var(--border);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+}
+
+section > .container {
+  width: 100%;
 }
 
 section h2 {
