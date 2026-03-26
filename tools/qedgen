@@ -1,0 +1,12 @@
+#!/bin/bash
+# Wrapper that ensures the qedgen binary is installed before running it.
+# SKILL.md should reference this script instead of the binary directly.
+
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+QEDGEN_BIN="$SKILL_DIR/bin/qedgen"
+
+if ! "$QEDGEN_BIN" --version &>/dev/null 2>&1; then
+    bash "$SKILL_DIR/install.sh" >&2
+fi
+
+exec "$QEDGEN_BIN" "$@"

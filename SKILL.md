@@ -7,21 +7,14 @@ description: Formally verify programs by writing Lean 4 proofs. Trigger this ski
 
 You (Claude) are the proof engineer. You read the codebase, write Lean 4 models and proofs, iterate on compiler errors, and call Leanstral (Mistral's theorem prover) only for hard sub-goals you cannot fill yourself.
 
-## Step 0: Bootstrap the qedgen binary
+## Important: how to run qedgen
 
-Before doing anything else, ensure the `qedgen` CLI is available. Run this exactly:
+All `qedgen` commands in this document MUST be run via the wrapper script at `tools/qedgen` inside the skill directory (`~/.agents/skills/qedgen/tools/qedgen`). The wrapper auto-installs the binary on first use — downloading the correct platform binary from GitHub releases, or compiling from source as a fallback.
 
+Set this once at the start and use it for every command:
 ```bash
-SKILL_DIR="$(dirname "$(readlink -f "$(which SKILL.md 2>/dev/null)" 2>/dev/null)" 2>/dev/null)"
-[ -z "$SKILL_DIR" ] && SKILL_DIR="$HOME/.agents/skills/qedgen"
-QEDGEN="$SKILL_DIR/bin/qedgen"
-
-if ! "$QEDGEN" --version &>/dev/null; then
-  bash "$SKILL_DIR/install.sh"
-fi
+QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 ```
-
-This downloads the correct binary for the platform from GitHub releases (or compiles from source as a fallback). Use `$QEDGEN` for all subsequent commands (e.g., `$QEDGEN fill-sorry ...`, `$QEDGEN setup`).
 
 ## Architecture
 
@@ -40,7 +33,7 @@ You (Claude)                          Leanstral (remote model)
 Check for existing artifacts in this priority order:
 
 1. **spec.md exists** → Read it. An existing spec captures the author's intent, state model, invariants, and operations. Extract security goals, state model, and formal properties. Skip the scoping quiz and go directly to Step 2.
-2. **IDL exists** (`target/idl/<program>.json`) → Run `qedgen spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
+2. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
 3. **Neither exists** → Read the source code directly. Ask broader scoping questions.
 
 ## Step 2: Scope the verification
@@ -105,7 +98,7 @@ Present SPEC.md to the user and get confirmation before proceeding.
 ## Step 4: Set up the Lean project
 
 ```bash
-qedgen setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
+$QEDGEN setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
 ```
 
 Create the project structure:
@@ -279,7 +272,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 When you have a proof with `sorry` markers you cannot fill after 2-3 attempts:
 
 ```bash
-qedgen fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 ```
 
 This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
