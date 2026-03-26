@@ -9,12 +9,19 @@ You (Claude) are the proof engineer. You read the codebase, write Lean 4 models 
 
 ## Step 0: Bootstrap the qedgen binary
 
-Before doing anything else, locate and verify the `qedgen` CLI:
+Before doing anything else, ensure the `qedgen` CLI is available. Run this exactly:
 
-1. Find the skill directory — look for this SKILL.md file at `~/.agents/skills/qedgen/` or the project's skill install path.
-2. Test the binary: `<skill-dir>/bin/qedgen --version`
-3. If it fails or is missing, run: `bash <skill-dir>/install.sh`
-4. Set `QEDGEN` to the resolved binary path and use `$QEDGEN` for all subsequent commands (e.g., `$QEDGEN fill-sorry ...`, `$QEDGEN setup`).
+```bash
+SKILL_DIR="$(dirname "$(readlink -f "$(which SKILL.md 2>/dev/null)" 2>/dev/null)" 2>/dev/null)"
+[ -z "$SKILL_DIR" ] && SKILL_DIR="$HOME/.agents/skills/qedgen"
+QEDGEN="$SKILL_DIR/bin/qedgen"
+
+if ! "$QEDGEN" --version &>/dev/null; then
+  bash "$SKILL_DIR/install.sh"
+fi
+```
+
+This downloads the correct binary for the platform from GitHub releases (or compiles from source as a fallback). Use `$QEDGEN` for all subsequent commands (e.g., `$QEDGEN fill-sorry ...`, `$QEDGEN setup`).
 
 ## Architecture
 
