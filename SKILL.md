@@ -139,18 +139,26 @@ After `import QEDGen.Solana` and `open QEDGen.Solana`:
 - `Pubkey` (= Nat), `U64` (= Nat), `U8` (= Nat)
 - `Account` — `{ key : Pubkey, authority : Pubkey, balance : Nat, writable : Bool }`
 - `Lifecycle` — `open | closed` (with DecidableEq)
-- `TransferCpi` — `{ program, «from», «to», authority, amount }`
-- `MintToCpi`, `BurnCpi`, `CloseCpi`
+- `AccountMeta` — `{ pubkey : Pubkey, isSigner : Bool, isWritable : Bool }`
+- `CpiInstruction` — `{ programId : Pubkey, accounts : List AccountMeta, data : List Nat }`
 
 **Constants:**
-- `TOKEN_PROGRAM_ID`, `SYSTEM_PROGRAM_ID`
+- `SYSTEM_PROGRAM_ID`, `TOKEN_PROGRAM_ID`, `TOKEN_2022_PROGRAM_ID`, `ASSOCIATED_TOKEN_PROGRAM_ID`
+- `MEMO_PROGRAM_ID`, `COMPUTE_BUDGET_PROGRAM_ID`, `STAKE_PROGRAM_ID`
+- `DISC_TRANSFER`, `DISC_TRANSFER_CHECKED`, `DISC_MINT_TO`, `DISC_BURN`, `DISC_CLOSE_ACCOUNT`, etc.
+- `DISC_SYS_CREATE_ACCOUNT`, `DISC_SYS_TRANSFER`, etc.
+- `DISC_ATA_CREATE`, `DISC_ATA_CREATE_IDEMPOTENT`
 - `U8_MAX`, `U16_MAX`, `U32_MAX`, `U64_MAX`, `U128_MAX`
 
 **Functions:**
 - `findByKey : List Account → Pubkey → Option Account`
 - `findByAuthority : List Account → Pubkey → Option Account`
 - `canWrite : Pubkey → Account → Prop`
-- `transferCpiValid : TransferCpi → Prop`
+- `targetsProgram : CpiInstruction → Pubkey → Prop`
+- `accountAt : CpiInstruction → Nat → Pubkey → Bool → Bool → Prop`
+- `hasDiscriminator : CpiInstruction → List Nat → Prop`
+- `hasNAccounts : CpiInstruction → Nat → Prop`
+- `cpiWellFormed : CpiInstruction → Prop`
 - `closes : Lifecycle → Lifecycle → Prop`
 - `valid_u64 : Nat → Prop` (and u8, u16, u32, u128)
 
@@ -178,18 +186,26 @@ theorem cancel_access_control (s : ProgramState) (signer : Pubkey)
   · contradiction
 ```
 
-**CPI correctness** — parameters match (pure `rfl`):
+**CPI correctness** — program, accounts, discriminator match (pure `rfl`):
 ```lean
-def cancel_build_cpi (ctx : CancelContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID, «from» := ctx.escrow_token, «to» := ctx.dest,
-    authority := ctx.authority, amount := ctx.amount }
+def cancel_build_cpi (ctx : CancelContext) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [
+      ⟨ctx.escrow_token, false, true⟩,   -- source: writable
+      ⟨ctx.dest, false, true⟩,            -- dest: writable
+      ⟨ctx.authority, true, false⟩         -- authority: signer
+    ]
+  , data := [DISC_TRANSFER]
+  }
 
 theorem cancel_cpi_correct (ctx : CancelContext) :
     let cpi := cancel_build_cpi ctx
-    cpi.program = TOKEN_PROGRAM_ID ∧ cpi.«from» = ctx.escrow_token ∧
-    cpi.«to» = ctx.dest ∧ cpi.authority = ctx.authority ∧
-    cpi.amount = ctx.amount := by
-  unfold cancel_build_cpi
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 ctx.escrow_token false true ∧
+    accountAt cpi 1 ctx.dest false true ∧
+    accountAt cpi 2 ctx.authority true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold cancel_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 ```
 

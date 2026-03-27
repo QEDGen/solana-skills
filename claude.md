@@ -79,9 +79,10 @@ qedgen consolidate \
 
 **`crates/qedgen/lean_support/`** - Canonical Lean axioms for Solana
 - `QEDGen/Solana/Account.lean` - Account structure
-- `QEDGen/Solana/Token.lean` - Token operations and conservation axioms
 - `QEDGen/Solana/Authority.lean` - Authorization predicates
+- `QEDGen/Solana/Cpi.lean` - Generic CPI envelope (invoke_signed model)
 - `QEDGen/Solana/State.lean` - Lifecycle and state machines
+- `QEDGen/Solana/Valid.lean` - Numeric bounds and validity predicates
 
 ### Key Design Decisions
 
@@ -117,7 +118,7 @@ qedgen consolidate \
 - Conservation (token totals preserved)
 - State machines (lifecycle, one-shot safety)
 - Arithmetic safety (overflow/underflow)
-- CPI correctness (parameters match intent)
+- CPI correctness (program, accounts, discriminator match intent)
 
 **What we trust (axioms):**
 - SPL Token implementation
@@ -133,7 +134,7 @@ See `example/escrow/formal_verification/VERIFICATION_SCOPE.md` for details.
 
 When a proof pattern is reusable across programs:
 
-1. Add to `crates/qedgen/lean_support/QEDGen/Solana/Token.lean` (or other module)
+1. Add to the appropriate module in `crates/qedgen/lean_support/QEDGen/Solana/`
 2. Document the trust assumption with a comment
 3. Export in `QEDGen.lean`
 4. Update SKILL.md support library API section
@@ -178,11 +179,21 @@ omega
 
 ### CPI Correctness (pure rfl)
 ```lean
+-- Build a generic CpiInstruction (models invoke_signed)
+def build_cpi (ctx : Context) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [⟨ctx.src, false, true⟩, ⟨ctx.dst, false, true⟩, ⟨ctx.auth, true, false⟩]
+  , data := [DISC_TRANSFER] }
+
 theorem cpi_correct (ctx : Context) :
     let cpi := build_cpi ctx
-    cpi.program = TOKEN_PROGRAM_ID ∧ cpi.amount = ctx.amount := by
-  unfold build_cpi
-  exact ⟨rfl, rfl⟩
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 ctx.src false true ∧
+    accountAt cpi 1 ctx.dst false true ∧
+    accountAt cpi 2 ctx.auth true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold build_cpi targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 ```
 
 ## Output Artifacts

@@ -15,7 +15,6 @@ const SUPPORT_ROOT: &str = include_str!("../lean_support/QEDGen.lean");
 const SUPPORT_ACCOUNT: &str = include_str!("../lean_support/QEDGen/Solana/Account.lean");
 const SUPPORT_AUTHORITY: &str = include_str!("../lean_support/QEDGen/Solana/Authority.lean");
 const SUPPORT_STATE: &str = include_str!("../lean_support/QEDGen/Solana/State.lean");
-const SUPPORT_TOKEN: &str = include_str!("../lean_support/QEDGen/Solana/Token.lean");
 const SUPPORT_CPI: &str = include_str!("../lean_support/QEDGen/Solana/Cpi.lean");
 const SUPPORT_VALID: &str = include_str!("../lean_support/QEDGen/Solana/Valid.lean");
 const SUPPORT_SOLANA: &str = include_str!("../lean_support/QEDGen/Solana.lean");
@@ -59,7 +58,6 @@ fn write_lean_support(output_dir: &Path) -> Result<()> {
     std::fs::write(solana_dir.join("Account.lean"), SUPPORT_ACCOUNT)?;
     std::fs::write(solana_dir.join("Authority.lean"), SUPPORT_AUTHORITY)?;
     std::fs::write(solana_dir.join("State.lean"), SUPPORT_STATE)?;
-    std::fs::write(solana_dir.join("Token.lean"), SUPPORT_TOKEN)?;
     std::fs::write(solana_dir.join("Cpi.lean"), SUPPORT_CPI)?;
     std::fs::write(solana_dir.join("Valid.lean"), SUPPORT_VALID)?;
 

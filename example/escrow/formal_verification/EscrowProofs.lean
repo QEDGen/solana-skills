@@ -55,21 +55,24 @@ structure CancelContext where
   authority : Pubkey
   amount : U64
 
-def cancel_build_cpi (p_ctx : CancelContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID
-  , «from» := p_ctx.escrow_token_account
-  , «to» := p_ctx.initializer_deposit
-  , authority := p_ctx.authority
-  , amount := p_ctx.amount }
+def cancel_build_cpi (p_ctx : CancelContext) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [
+      ⟨p_ctx.escrow_token_account, false, true⟩,   -- source: writable
+      ⟨p_ctx.initializer_deposit, false, true⟩,     -- dest: writable
+      ⟨p_ctx.authority, true, false⟩                  -- authority: signer
+    ]
+  , data := [DISC_TRANSFER]
+  }
 
 theorem cancel_cpi_correct (p_ctx : CancelContext) :
     let cpi := cancel_build_cpi p_ctx
-    cpi.program = TOKEN_PROGRAM_ID ∧
-    cpi.«from» = p_ctx.escrow_token_account ∧
-    cpi.«to» = p_ctx.initializer_deposit ∧
-    cpi.authority = p_ctx.authority ∧
-    cpi.amount = p_ctx.amount := by
-  unfold cancel_build_cpi
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 p_ctx.escrow_token_account false true ∧
+    accountAt cpi 1 p_ctx.initializer_deposit false true ∧
+    accountAt cpi 2 p_ctx.authority true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold cancel_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 end CancelCpiCorrectness
@@ -154,21 +157,24 @@ structure ExchangeContext where
   authority : Pubkey
   amount : U64
 
-def exchange_build_cpi (ctx : ExchangeContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID
-  , «from» := ctx.from_account
-  , «to» := ctx.to_account
-  , authority := ctx.authority
-  , amount := ctx.amount }
+def exchange_build_cpi (ctx : ExchangeContext) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [
+      ⟨ctx.from_account, false, true⟩,   -- source: writable
+      ⟨ctx.to_account, false, true⟩,      -- dest: writable
+      ⟨ctx.authority, true, false⟩         -- authority: signer
+    ]
+  , data := [DISC_TRANSFER]
+  }
 
 theorem exchange_cpi_correct (ctx : ExchangeContext) :
     let cpi := exchange_build_cpi ctx
-    cpi.program = TOKEN_PROGRAM_ID ∧
-    cpi.«from» = ctx.from_account ∧
-    cpi.«to» = ctx.to_account ∧
-    cpi.authority = ctx.authority ∧
-    cpi.amount = ctx.amount := by
-  unfold exchange_build_cpi
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 ctx.from_account false true ∧
+    accountAt cpi 1 ctx.to_account false true ∧
+    accountAt cpi 2 ctx.authority true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold exchange_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 end ExchangeCpiCorrectness
@@ -282,21 +288,24 @@ structure InitializeContext where
   authority : Pubkey
   amount : U64
 
-def initialize_build_cpi (ctx : InitializeContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID
-  , «from» := ctx.from_account
-  , «to» := ctx.to_account
-  , authority := ctx.authority
-  , amount := ctx.amount }
+def initialize_build_cpi (ctx : InitializeContext) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [
+      ⟨ctx.from_account, false, true⟩,   -- source: writable
+      ⟨ctx.to_account, false, true⟩,      -- dest: writable
+      ⟨ctx.authority, true, false⟩         -- authority: signer
+    ]
+  , data := [DISC_TRANSFER]
+  }
 
 theorem initialize_cpi_correct (ctx : InitializeContext) :
     let cpi := initialize_build_cpi ctx
-    cpi.program = TOKEN_PROGRAM_ID ∧
-    cpi.«from» = ctx.from_account ∧
-    cpi.«to» = ctx.to_account ∧
-    cpi.authority = ctx.authority ∧
-    cpi.amount = ctx.amount := by
-  unfold initialize_build_cpi
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 ctx.from_account false true ∧
+    accountAt cpi 1 ctx.to_account false true ∧
+    accountAt cpi 2 ctx.authority true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold initialize_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 end InitializeCpiCorrectness

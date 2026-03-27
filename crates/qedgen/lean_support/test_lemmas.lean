@@ -1,38 +1,69 @@
 import QEDGen.Solana.Account
-import QEDGen.Solana.Token
 import QEDGen.Solana.State
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.Authority
 
 open QEDGen.Solana
 
--- Test 1: trackedTotal_nil works
-example : trackedTotal [] = 0 := by
-  exact trackedTotal_nil
-
--- Test 2: closes_is_closed works
+-- Test 1: closes_is_closed works
 example (before after : Lifecycle) (h : closes before after) :
     after = Lifecycle.closed := by
   exact closes_is_closed before after h
 
--- Test 3: closes_was_open works
+-- Test 2: closes_was_open works
 example (before after : Lifecycle) (h : closes before after) :
     before = Lifecycle.open := by
   exact closes_was_open before after h
 
--- Test 4: findByAuthority is find? by authority
+-- Test 3: findByAuthority is find? by authority
 example (accs : List Account) (auth : Pubkey) :
     findByAuthority accs auth = accs.find? (fun acc => acc.authority = auth) := by
   rfl
 
--- Test 5: authorized_refl works
+-- Test 4: authorized_refl works
 example (auth : Pubkey) : QEDGen.Solana.Authority.Authorized auth auth := by
   exact QEDGen.Solana.Authority.authorized_refl auth
 
--- Test 6: CPI construction is pure (rfl)
-example : (QEDGen.Solana.Cpi.TransferCpi.mk 0 1 2 3 100).program = TOKEN_PROGRAM_ID := by
+-- Test 5: targetsProgram with real TOKEN_PROGRAM_ID
+example : targetsProgram
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨1, true, false⟩], data := [DISC_TRANSFER] }
+    TOKEN_PROGRAM_ID := by
+  unfold targetsProgram
   rfl
 
--- Test 7: closed_cannot_close works
+-- Test 6: accountAt on concrete list
+example : accountAt
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨42, false, true⟩, ⟨99, true, false⟩], data := [DISC_TRANSFER] }
+    1 99 true false := by
+  unfold accountAt
+  rfl
+
+-- Test 7: hasDiscriminator with SPL Token transfer discriminator
+example : hasDiscriminator
+    { programId := TOKEN_PROGRAM_ID, accounts := [], data := [DISC_TRANSFER, 0, 0, 0, 100] }
+    [DISC_TRANSFER] := by
+  unfold hasDiscriminator
+  rfl
+
+-- Test 8: hasDiscriminator with System Program 4-byte discriminator
+example : hasDiscriminator
+    { programId := SYSTEM_PROGRAM_ID, accounts := [], data := [2, 0, 0, 0, 100] }
+    DISC_SYS_TRANSFER := by
+  unfold hasDiscriminator
+  rfl
+
+-- Test 9: hasNAccounts
+example : hasNAccounts
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨1, false, true⟩, ⟨2, false, true⟩, ⟨3, true, false⟩], data := [DISC_TRANSFER] }
+    3 := by
+  unfold hasNAccounts
+  rfl
+
+-- Test 10: program IDs are distinct
+example : TOKEN_PROGRAM_ID ≠ SYSTEM_PROGRAM_ID := by decide
+example : TOKEN_PROGRAM_ID ≠ TOKEN_2022_PROGRAM_ID := by decide
+example : TOKEN_PROGRAM_ID ≠ ASSOCIATED_TOKEN_PROGRAM_ID := by decide
+
+-- Test 11: closed_cannot_close works
 example (p_after : Lifecycle) : ¬ closes Lifecycle.closed p_after := by
   exact closed_cannot_close p_after

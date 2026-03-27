@@ -99,14 +99,12 @@ let cpi_ctx = CpiContext::new(token_program, cpi_accounts);
 token::transfer(cpi_ctx, escrow.taker_amount)?;
 ```
 
-We extract:
+We extract the CPI as a generic `CpiInstruction` (models `invoke_signed`):
 ```
-TransferCpi {
-  program: TOKEN_PROGRAM_ID,
-  from: taker_deposit,
-  to: initializer_receive,
-  authority: taker,
-  amount: taker_amount
+CpiInstruction {
+  programId: TOKEN_PROGRAM_ID,
+  accounts: [taker_deposit (writable), initializer_receive (writable), taker (signer)],
+  data: [3]  -- SPL Token Transfer discriminator
 }
 ```
 
@@ -121,23 +119,29 @@ structure ExchangeContext where
   taker_amount : U64
   ...
 
-def exchange_build_cpi_1 (ctx : ExchangeContext) : TransferCpi :=
-  { program := TOKEN_PROGRAM_ID
-  , from := ctx.taker_deposit
-  , to := ctx.initializer_receive
-  , authority := ctx.taker
-  , amount := ctx.taker_amount }
+def exchange_build_cpi_1 (ctx : ExchangeContext) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts := [
+      ⟨ctx.taker_deposit, false, true⟩,        -- source: writable
+      ⟨ctx.initializer_receive, false, true⟩,   -- dest: writable
+      ⟨ctx.taker, true, false⟩                   -- authority: signer
+    ]
+  , data := [DISC_TRANSFER]
+  }
 ```
 
-### 3. Prove CPI Validity (No Axioms!)
+### 3. Prove CPI Correctness (No Axioms!)
 
 ```lean
-theorem exchange_cpi_valid (ctx : ExchangeContext) :
+theorem exchange_cpi_correct (ctx : ExchangeContext) :
     let cpi := exchange_build_cpi_1 ctx
-    transferCpiValid cpi ∧
-    cpi.from ≠ cpi.to ∧
-    cpi.authority = ctx.taker := by
-  simp [exchange_build_cpi_1, transferCpiValid]
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 ctx.taker_deposit false true ∧
+    accountAt cpi 1 ctx.initializer_receive false true ∧
+    accountAt cpi 2 ctx.taker true false ∧
+    hasDiscriminator cpi [DISC_TRANSFER] := by
+  unfold exchange_build_cpi_1 targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 ```
 
 ## Benefits of This Approach

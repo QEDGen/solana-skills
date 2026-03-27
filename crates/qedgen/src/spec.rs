@@ -238,9 +238,9 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         .collect();
     if !cpi_instructions.is_empty() {
         let names: Vec<&str> = cpi_instructions.iter().map(|a| a.display_name.as_str()).collect();
-        writeln!(s, "{}. **CPI parameter correctness**: Token transfers in {} MUST pass \
-            the correct program ID, source, destination, authority, and amount. \
-            No transfer MAY route tokens to an unintended account.",
+        writeln!(s, "{}. **CPI parameter correctness**: CPI invocations in {} MUST target \
+            the correct program, pass accounts in the correct order with correct \
+            signer/writable flags, and use the correct instruction discriminator.",
             goal_num, names.join(", ")).unwrap();
         goal_num += 1;
     }
@@ -454,7 +454,7 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         writeln!(s, "### 3.2 CPI Parameter Correctness\n").unwrap();
         for analysis in &cpi_instructions {
             writeln!(s, "**{}_cpi_correct**: For all contexts `ctx`,", analysis.name).unwrap();
-            writeln!(s, "`{}_build_transfer_cpi(ctx)` MUST have correct `program`, `from`, `to`, `authority`, and `amount` fields matching the context.  ",
+            writeln!(s, "`{}_build_cpi(ctx)` MUST target the correct program, pass accounts in the correct order with correct signer/writable flags, and use the correct instruction discriminator.  ",
                 analysis.name).unwrap();
             writeln!(s).unwrap();
         }

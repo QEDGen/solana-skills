@@ -6,9 +6,10 @@ This directory contains the **canonical** Lean support library for Solana progra
 
 Provides pre-bundled axioms and types that model:
 - **Account**: Solana account structure (key, authority, balance)
-- **Token**: SPL Token operations as trusted axioms
+- **Cpi**: Generic CPI envelope (invoke_signed model with AccountMeta)
 - **State**: Lifecycle and state machine types
 - **Authority**: Authorization predicates
+- **Valid**: Numeric bounds and validity predicates
 
 ## Trust Boundary
 
@@ -16,7 +17,9 @@ These axioms represent the **trust boundary** between:
 - ✅ **Program logic** (what we verify)
 - ⚠️ **External dependencies** (what we trust)
 
-See `QEDGen/Solana/Token.lean` for detailed documentation of trust assumptions.
+CPI verification focuses on structural correctness: correct program, correct accounts
+with correct signer/writable flags, and correct instruction discriminator. Parameter
+serialization within instruction data is trusted (SDK territory).
 
 ## Usage in Projects
 
@@ -26,7 +29,6 @@ When generating proofs for a project:
 
 ```bash
 # The qedgen tool automatically copies this library
-./bin/qedgen analyze --input program.rs --output-dir /tmp/analysis
 ./bin/qedgen generate ... --output-dir /tmp/proofs
 ```
 
@@ -41,30 +43,6 @@ cd your-project/formal_verification/
 ln -s ../../../crates/qedgen/lean_support .
 ```
 
-## Pre-Bundled Axioms
-
-### Token Conservation
-
-```lean
--- Single transfer preserves total
-axiom transfer_preserves_total : ...
-
--- Four-way transfer (escrow-style exchanges) preserves total
-axiom four_way_transfer_preserves_total : ...
-
--- Balance updates with zero delta preserve total
-axiom balance_update_preserves_total : ...
-```
-
-### Utility Lemmas
-
-```lean
--- List operations on tracked totals
-axiom trackedTotal_cons : ...
-axiom trackedTotal_append : ...
-theorem trackedTotal_map_id : ...
-```
-
 ## Adding New Axioms
 
 When adding axioms that are reusable across **all** Solana programs:
@@ -72,8 +50,7 @@ When adding axioms that are reusable across **all** Solana programs:
 1. Add to the appropriate module in `QEDGen/Solana/`
 2. Export in the `QEDGen.Solana` namespace
 3. Document the trust assumption
-4. Update `templates.rs` to include in support API documentation
-5. Test by rebuilding: `lake build`
+4. Test by rebuilding: `lake build`
 
 ## Design Principles
 
@@ -97,7 +74,8 @@ lake env lean test_lemmas.lean
 - `lakefile.lean`: Lake build configuration
 - `QEDGen.lean`: Root module that exports everything
 - `QEDGen/Solana/Account.lean`: Account structure and field access
-- `QEDGen/Solana/Token.lean`: Token operations and conservation axioms
+- `QEDGen/Solana/Cpi.lean`: Generic CPI envelope (invoke_signed model)
 - `QEDGen/Solana/State.lean`: Lifecycle and state machine types
 - `QEDGen/Solana/Authority.lean`: Authorization predicates
+- `QEDGen/Solana/Valid.lean`: Numeric bounds and validity predicates
 - `test_lemmas.lean`: Smoke tests for type-checking axioms
