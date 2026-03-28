@@ -283,6 +283,166 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 | `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
 | `unused variable 'h'` | Remove proof binding: `if h : cond` → `if cond` |
 
+## sBPF Assembly Verification
+
+The same workflow applies to hand-written sBPF assembly programs. Claude reads the `.s` source (and IDL if available), writes SPEC.md, then writes Lean proofs using the SBPF support library.
+
+### Reading assembly source
+
+sBPF assembly uses AT&T-like syntax. Key patterns to recognize:
+
+| Assembly | Lean encoding | Meaning |
+|---|---|---|
+| `ldxdw r3, [r1+0x2918]` | `.ldx .dword .r3 .r1 0x2918` | Load 8 bytes from mem[r1+offset] into r3 |
+| `lddw r0, 1` | `.lddw .r0 1` | Load 64-bit immediate into r0 |
+| `jge r3, r4, label` | `.jge .r3 (.reg .r4) <abs_idx>` | Branch if r3 >= r4 |
+| `add64 r2, 8` | `.add64 .r2 (.imm 8)` | r2 = r2 + 8 (wrapping) |
+| `call sol_log_` | `.call .sol_log_` | Invoke syscall |
+| `exit` | `.exit` | Exit with code in r0 |
+
+**Jump target resolution**: Assembly uses labels; Lean uses absolute instruction indices (0-based). Count instructions from `.globl entrypoint` to determine the index for each label.
+
+**`.equ` constants**: Map directly to the offset values used in `ldx`/`stx` instructions.
+
+### Modeling the program
+
+Transcribe the assembly into a `Program := #[...]` array:
+
+```lean
+import QEDGen.Solana.SBPF
+
+open QEDGen.Solana.SBPF
+open QEDGen.Solana.SBPF.Memory
+
+def prog : Program := #[
+  .ldx .dword .r3 .r1 0x2918,   -- 0: r3 = mem[r1 + 0x2918]
+  .ldx .dword .r4 .r1 0x00a0,   -- 1: r4 = mem[r1 + 0x00a0]
+  .jge .r3 (.reg .r4) 4,        -- 2: if r3 >= r4 jump to 4
+  .exit,                          -- 3: success (r0 = 0)
+  .lddw .r0 1,                   -- 4: set error code
+  .exit                           -- 5: error exit
+]
+```
+
+### SBPF support library API
+
+After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
+
+**Types:**
+- `Reg` — `.r0` through `.r10` (r10 is read-only frame pointer)
+- `Src` — `.reg r` or `.imm v`
+- `Width` — `.byte` (1), `.half` (2), `.word` (4), `.dword` (8)
+- `Syscall` — `.sol_log_`, `.sol_invoke_signed`, `.sol_get_clock_sysvar`, etc.
+- `Insn` — All sBPF instructions (`.lddw`, `.ldx`, `.st`, `.stx`, `.add64`, `.jge`, `.call`, `.exit`, etc.)
+- `Program` — `Array Insn`
+
+**State types:**
+- `RegFile` — struct with fields `r0..r10 : Nat` (all default 0). `@[simp]` on `get`/`set`.
+- `State` — `{ regs : RegFile, mem : Mem, pc : Nat, exitCode : Option Nat }`
+- `Mem` — `Nat → Nat` (byte-addressable memory)
+
+**Functions (all `@[simp]`):**
+- `RegFile.get (rf : RegFile) : Reg → Nat`
+- `RegFile.set (rf : RegFile) (r : Reg) (v : Nat) : RegFile` — r10 writes are silently ignored
+- `resolveSrc (rf : RegFile) (src : Src) : Nat`
+- `step (insn : Insn) (s : State) : State` — single-instruction semantics
+- `execSyscall (sc : Syscall) (s : State) : State` — logging sets r0=0
+- `initState (inputAddr : Nat) (mem : Mem) : State` — r1=inputAddr, r10=stack, pc=0
+- `wrapAdd`, `wrapSub`, `wrapMul`, `wrapNeg` — 64-bit wrapping arithmetic
+
+**Execution (NOT `@[simp]` — must be unrolled):**
+- `execute (prog : Program) (s : State) (fuel : Nat) : State`
+
+**Memory functions (open `QEDGen.Solana.SBPF.Memory`):**
+- `effectiveAddr (base : Nat) (off : Int) : Nat`
+- `readU8`, `readU16`, `readU32`, `readU64` — little-endian reads
+- `writeU8`, `writeU16`, `writeU32`, `writeU64` — little-endian writes
+- `readByWidth`, `writeByWidth` — dispatch by `Width`
+
+**Memory constants:**
+- `RODATA_START`, `BYTECODE_START`, `STACK_START`, `HEAP_START`, `INPUT_START`
+
+**Lemmas:**
+- `execute_halted` (`@[simp]`) — halted state is a fixed point
+- `execute_step` — unfolds one step: `execute prog s (n+1) = execute prog (step insn s) n`
+- `execute_zero` (`@[simp]`) — `execute prog s 0 = s`
+
+**Memory axioms:**
+- `readU64_writeU64_same` — read-after-write returns original value
+- `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
+- `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
+
+### Proof strategy: `execute_step` unrolling
+
+**Do NOT** put `execute` in a simp set — it causes exponential term growth. Instead, unroll one step at a time with `execute_step`:
+
+**Step 1**: Pre-compute fetch lemmas for every instruction index:
+```lean
+private theorem f0 : prog[0]? = some (.ldx .dword .r3 .r1 0x2918) := by native_decide
+private theorem f1 : prog[1]? = some (.ldx .dword .r4 .r1 0x00a0) := by native_decide
+-- etc.
+```
+
+**Step 2**: Normalize memory hypotheses early:
+```lean
+simp only [effectiveAddr] at h_min h_tok
+```
+
+**Step 3**: Unroll each step with inline precondition proofs:
+```lean
+-- Step 0: ldxdw r3 — PC:0→1
+rw [show (10:Nat) = 9+1 from rfl, execute_step _ _ _ (.ldx .dword .r3 .r1 0x2918)
+  (by rfl)                      -- proves exitCode = none
+  (by simp [initState]; exact f0)]  -- proves prog[pc]? = some insn
+```
+
+For later steps where state is deeper, add more lemmas to the simp set:
+```lean
+-- Step 2: jge — branch resolves using h_slip hypothesis
+rw [show (8:Nat) = 7+1 from rfl, execute_step _ _ _ (.jge .r3 (.reg .r4) 4)
+  (by simp [step, initState])
+  (by simp [step, initState]; exact f2)]
+```
+
+After a branch instruction, simp needs the comparison hypothesis (`h_slip`, `h_not_ge`, etc.) plus `ge_iff_le` and `↓reduceIte` to resolve the branch direction and determine the PC:
+```lean
+(by simp [step, initState, RegFile.get, RegFile.set, readByWidth, effectiveAddr, resolveSrc,
+          h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]; exact f4)
+```
+
+**Step 4**: Close with `execute_halted` + simp after the final `exit`:
+```lean
+simp [execute_halted, step, initState, RegFile.get, RegFile.set, resolveSrc, readByWidth,
+      effectiveAddr, h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]
+```
+
+### Theorem statement pattern
+
+Properties are stated over symbolic memory with hypotheses binding memory reads:
+
+```lean
+theorem rejects_bad_input
+    (inputAddr : Nat) (mem : Mem)
+    (minBal tokenBal : Nat)
+    (h_min : readU64 mem (effectiveAddr inputAddr 0x2918) = minBal)
+    (h_tok : readU64 mem (effectiveAddr inputAddr 0x00a0) = tokenBal)
+    (h_slip : minBal ≥ tokenBal) :
+    (execute prog (initState inputAddr mem) 10).exitCode = some 1 := by
+  ...
+```
+
+The `fuel` parameter (10 above) must be large enough for the longest execution path. Count the maximum instructions from entry to exit.
+
+### Critical tactic rules for sBPF proofs
+
+| Do | Don't |
+|---|---|
+| Use `execute_step` to unroll one step at a time | Put `execute` in a simp set (term explosion) |
+| Use `native_decide` for fetch lemmas (closed terms) | Use `native_decide` on expressions with free variables |
+| Add `execSyscall` to simp set after `call` instructions | Forget `execSyscall` (state gets stuck) |
+| Add branch hypotheses (`h_slip`, `ge_iff_le`, `↓reduceIte`) after conditional jumps | Omit comparison hypotheses (PC unresolved) |
+| Set `maxHeartbeats` generously (1.6M–3.2M) for longer programs | Use default heartbeats (programs with 8+ steps will timeout) |
+
 ## Step 6: Call Leanstral for hard sub-goals
 
 When you have a proof with `sorry` markers you cannot fill after 2-3 attempts:
