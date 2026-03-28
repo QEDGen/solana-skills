@@ -1,3 +1,5 @@
+//! Source: https://github.com/aeyakovenko/percolator
+//!
 //! Formally Verified Risk Engine for Perpetual DEX — v11.26
 //!
 //! Implements the v11.26 spec: Native 128-bit Architecture.
