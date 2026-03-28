@@ -12,10 +12,15 @@ namespace SlippageProofs
 open QEDGen.Solana.SBPF
 open QEDGen.Solana.SBPF.Memory
 
+/-! ## Program transcription
+
+Translate asm-slippage.s into a Program array. Jump targets are absolute
+instruction indices: `end` label maps to index 4. -/
+
 def prog : Program := #[
   .ldx .dword .r3 .r1 0x2918,   -- 0: r3 = minimum_balance
   .ldx .dword .r4 .r1 0x00a0,   -- 1: r4 = token_account_balance
-  .jge .r3 (.reg .r4) 4,        -- 2: if min >= bal, jump to error
+  .jge .r3 (.reg .r4) 4,        -- 2: if min >= bal, jump to error (index 4)
   .exit,                          -- 3: success (r0 = 0)
   .lddw .r1 0,                   -- 4: error msg addr
   .lddw .r2 17,                  -- 5: error msg len
@@ -24,7 +29,11 @@ def prog : Program := #[
   .exit                           -- 8: error exit
 ]
 
--- Instruction fetch lemmas (closed terms, native_decide handles them)
+/-! ## Instruction fetch lemmas
+
+Pre-computed for each instruction index. These are closed terms so
+native_decide can evaluate them. -/
+
 private theorem f0 : prog[0]? = some (.ldx .dword .r3 .r1 0x2918) := by native_decide
 private theorem f1 : prog[1]? = some (.ldx .dword .r4 .r1 0x00a0) := by native_decide
 private theorem f2 : prog[2]? = some (.jge .r3 (.reg .r4) 4) := by native_decide
@@ -35,9 +44,10 @@ private theorem f6 : prog[6]? = some (.call .sol_log_) := by native_decide
 private theorem f7 : prog[7]? = some (.lddw .r0 1) := by native_decide
 private theorem f8 : prog[8]? = some .exit := by native_decide
 
-/-! ## Property: slippage rejection
+/-! ## Property P1: slippage rejection
 
-When minimum_balance >= token_account_balance, the program exits with code 1. -/
+SPEC.md §3.1 P1: When minimum_balance >= token_account_balance,
+the program MUST exit with code 1. -/
 
 set_option maxHeartbeats 3200000 in
 theorem rejects_insufficient_balance
@@ -48,7 +58,6 @@ theorem rejects_insufficient_balance
     (h_slip : minBal ≥ tokenBal) :
     (execute prog (initState inputAddr mem) 10).exitCode = some 1 := by
   simp only [effectiveAddr] at h_min h_tok
-  -- Macro: step_rw unfolds one execute step with inline precondition proofs
   -- Step 0: ldxdw r3 — PC:0→1
   rw [show (10:Nat) = 9+1 from rfl, execute_step _ _ _ (.ldx .dword .r3 .r1 0x2918)
     (by rfl) (by simp [initState]; exact f0)]
@@ -87,13 +96,14 @@ theorem rejects_insufficient_balance
               h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte])
     (by simp [step, execSyscall, initState, RegFile.get, RegFile.set, readByWidth, effectiveAddr, resolveSrc,
               h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]; exact f8)]
-  -- Now halted with exit code 1
+  -- Halted with exit code 1
   simp [execute_halted, step, execSyscall, initState, RegFile.get, RegFile.set, resolveSrc, readByWidth,
         effectiveAddr, h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]
 
-/-! ## Property: slippage acceptance
+/-! ## Property P2: slippage acceptance
 
-When minimum_balance < token_account_balance, the program exits with code 0. -/
+SPEC.md §3.1 P2: When minimum_balance < token_account_balance,
+the program MUST exit with code 0. -/
 
 set_option maxHeartbeats 1600000 in
 theorem accepts_sufficient_balance
