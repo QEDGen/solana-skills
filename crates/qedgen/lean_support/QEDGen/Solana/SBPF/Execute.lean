@@ -71,6 +71,15 @@ def State.running (s : State) : Prop := s.exitCode = none
   | .reg r => rf.get r
   | .imm v => v
 
+/-! ## Runtime error codes
+
+These are used when the VM encounters an unrecoverable error (not a program
+exit via `exit` instruction). They must be non-zero to distinguish from
+success. -/
+
+def ERR_DIVIDE_BY_ZERO : Nat := 0xFFFFFFFFFFFFFFFE
+def ERR_INVALID_PC     : Nat := 0xFFFFFFFFFFFFFFFF
+
 /-! ## Wrapping 64-bit arithmetic -/
 
 @[simp] def wrapAdd (a b : Nat) : Nat := (a + b) % U64_MODULUS
@@ -125,12 +134,12 @@ def State.running (s : State) : Prop := s.exitCode = none
     { s with regs := rf.set dst (wrapMul (rf.get dst) (resolveSrc rf src)), pc := pc' }
   | .div64 dst src =>
     let b := resolveSrc rf src
-    let v := if b = 0 then 0 else (rf.get dst / b) % U64_MODULUS
-    { s with regs := rf.set dst v, pc := pc' }
+    if b = 0 then { s with exitCode := some ERR_DIVIDE_BY_ZERO }
+    else { s with regs := rf.set dst ((rf.get dst / b) % U64_MODULUS), pc := pc' }
   | .mod64 dst src =>
     let b := resolveSrc rf src
-    let v := if b = 0 then 0 else rf.get dst % b
-    { s with regs := rf.set dst v, pc := pc' }
+    if b = 0 then { s with exitCode := some ERR_DIVIDE_BY_ZERO }
+    else { s with regs := rf.set dst (rf.get dst % b), pc := pc' }
   | .or64 dst src =>
     { s with regs := rf.set dst ((rf.get dst ||| resolveSrc rf src) % U64_MODULUS), pc := pc' }
   | .and64 dst src =>
@@ -138,11 +147,13 @@ def State.running (s : State) : Prop := s.exitCode = none
   | .xor64 dst src =>
     { s with regs := rf.set dst ((rf.get dst ^^^ resolveSrc rf src) % U64_MODULUS), pc := pc' }
   | .lsh64 dst src =>
-    { s with regs := rf.set dst ((rf.get dst <<< resolveSrc rf src) % U64_MODULUS), pc := pc' }
+    let shift := resolveSrc rf src % 64
+    { s with regs := rf.set dst ((rf.get dst <<< shift) % U64_MODULUS), pc := pc' }
   | .rsh64 dst src =>
-    { s with regs := rf.set dst (rf.get dst >>> resolveSrc rf src), pc := pc' }
+    let shift := resolveSrc rf src % 64
+    { s with regs := rf.set dst (rf.get dst >>> shift), pc := pc' }
   | .arsh64 dst src =>
-    let shift := resolveSrc rf src
+    let shift := resolveSrc rf src % 64
     let a := rf.get dst
     let v := if a < U64_MODULUS / 2 then a >>> shift
       else let shifted := a >>> shift
@@ -199,7 +210,7 @@ def execute (prog : Program) (s : State) (fuel : Nat) : State :=
     | some _ => s
     | none =>
       match prog[s.pc]? with
-      | none => { s with exitCode := some 0 }
+      | none => { s with exitCode := some ERR_INVALID_PC }
       | some insn => execute prog (step insn s) fuel'
 
 /-- Create an initial machine state with r1 pointing to the input buffer -/

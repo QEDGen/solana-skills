@@ -30,7 +30,12 @@ def INPUT_START    : Nat := 0x400000000
 
 /-! ## Effective address computation -/
 
-/-- Compute effective address from base register value and signed offset -/
+/-- Compute effective address from base register value and signed offset.
+
+    NOTE: Int.toNat clamps negative results to 0. In real sBPF, a negative
+    effective address would be caught by the memory region bounds check
+    (which we do not model). All verified programs use non-negative offsets,
+    so this clamping is unreachable in practice. -/
 def effectiveAddr (base : Nat) (off : Int) : Nat :=
   Int.toNat ((↑base : Int) + off)
 

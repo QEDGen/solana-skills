@@ -1,8 +1,7 @@
 -- sBPF Instruction Set Architecture for hand-written Solana programs
 --
 -- Minimal subset of the sBPF ISA sufficient to verify hand-written Solana
--- programs. Covers all instructions observed in real-world sBPF assembly:
--- slippage guards, timeout checks, memo logging, and lamport transfers.
+-- programs.
 --
 -- Reference: https://github.com/anza-xyz/sbpf
 
@@ -13,7 +12,7 @@ def U64_MODULUS : Nat := 2 ^ 64
 
 /-- sBPF registers: r0-r9 general purpose, r10 read-only frame pointer.
     r0 holds return values / exit codes.
-    r1-r5 are syscall arguments.
+    r1-r5 are caller-saved argument registers (used for all calls: syscalls, BPF-to-BPF, CPI).
     r6-r9 are callee-saved.
     r10 is the read-only stack frame pointer. -/
 inductive Reg
