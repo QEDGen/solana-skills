@@ -289,40 +289,54 @@ The same workflow applies to hand-written sBPF assembly programs. Claude reads t
 
 ### Reading assembly source
 
-sBPF assembly uses AT&T-like syntax. Key patterns to recognize:
+sBPF assembly uses AT&T-like syntax. Reference for understanding the source (transpilation is automated by `asm2lean`):
 
 | Assembly | Lean encoding | Meaning |
 |---|---|---|
 | `ldxdw r3, [r1+0x2918]` | `.ldx .dword .r3 .r1 0x2918` | Load 8 bytes from mem[r1+offset] into r3 |
+| `ldxb r2, [r1+OFF]` | `.ldx .byte .r2 .r1 OFF` | Load 1 byte from mem[r1+offset] into r2 |
 | `lddw r0, 1` | `.lddw .r0 1` | Load 64-bit immediate into r0 |
 | `jge r3, r4, label` | `.jge .r3 (.reg .r4) <abs_idx>` | Branch if r3 >= r4 |
+| `jne r2, 3, label` | `.jne .r2 (.imm 3) <abs_idx>` | Branch if r2 != 3 |
 | `add64 r2, 8` | `.add64 .r2 (.imm 8)` | r2 = r2 + 8 (wrapping) |
+| `mov64 r0, 1` | `.mov64 .r0 (.imm 1)` | r0 = 1 |
 | `call sol_log_` | `.call .sol_log_` | Invoke syscall |
 | `exit` | `.exit` | Exit with code in r0 |
 
-**Jump target resolution**: Assembly uses labels; Lean uses absolute instruction indices (0-based). Count instructions from `.globl entrypoint` to determine the index for each label.
+**Jump target resolution**: Assembly uses labels; Lean uses absolute instruction indices (0-based). `asm2lean` resolves these automatically.
 
-**`.equ` constants**: Map directly to the offset values used in `ldx`/`stx` instructions.
+**`.equ` constants**: Map to `abbrev` definitions. Constants used in memory operands (`[reg + CONST]`) are typed `Int`; all others are `Nat`.
 
 ### Modeling the program
 
-Transcribe the assembly into a `Program := #[...]` array:
+Use `qedgen asm2lean` to transpile the `.s` file into a Lean 4 module automatically:
 
+```bash
+$QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.lean
+```
+
+This generates a module with:
+- `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
+- `@[simp] def prog : Program := #[...]` with named constants and index comments
+- A namespace wrapper matching the output filename
+
+Add the generated module to `lakefile.lean`:
+```lean
+lean_lib ProgramProg where
+  roots := #[`ProgramProg]
+```
+
+Then import it in the proof file:
 ```lean
 import QEDGen.Solana.SBPF
+import ProgramProg
 
 open QEDGen.Solana.SBPF
 open QEDGen.Solana.SBPF.Memory
-
-def prog : Program := #[
-  .ldx .dword .r3 .r1 0x2918,   -- 0: r3 = mem[r1 + 0x2918]
-  .ldx .dword .r4 .r1 0x00a0,   -- 1: r4 = mem[r1 + 0x00a0]
-  .jge .r3 (.reg .r4) 4,        -- 2: if r3 >= r4 jump to 4
-  .exit,                          -- 3: success (r0 = 0)
-  .lddw .r0 1,                   -- 4: set error code
-  .exit                           -- 5: error exit
-]
+open ProgramProg
 ```
+
+**Never transcribe assembly by hand** — `asm2lean` handles jump target resolution, constant typing, and syntactic matching automatically.
 
 ### SBPF support library API
 
@@ -350,8 +364,8 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `initState (inputAddr : Nat) (mem : Mem) : State` — r1=inputAddr, r10=stack, pc=0
 - `wrapAdd`, `wrapSub`, `wrapMul`, `wrapNeg` — 64-bit wrapping arithmetic
 
-**Execution (NOT `@[simp]` — must be unrolled):**
-- `execute (prog : Program) (s : State) (fuel : Nat) : State`
+**Execution:**
+- `execute (prog : Program) (s : State) (fuel : Nat) : State` — use `sbpf_steps` tactic to unroll
 
 **Memory functions (open `QEDGen.Solana.SBPF.Memory`):**
 - `effectiveAddr (base : Nat) (off : Int) : Nat`
@@ -361,6 +375,9 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 
 **Memory constants:**
 - `RODATA_START`, `BYTECODE_START`, `STACK_START`, `HEAP_START`, `INPUT_START`
+
+**Tactics:**
+- `sbpf_steps` — automatically unrolls `execute`, steps through instructions, resolves branches, and closes the goal. Requires `@[simp]` on `prog`.
 
 **Lemmas:**
 - `execute_halted` (`@[simp]`) — halted state is a fixed point
@@ -372,76 +389,87 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
 - `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
 
-### Proof strategy: `execute_step` unrolling
+### Proof strategy: `sbpf_steps` tactic
 
-**Do NOT** put `execute` in a simp set — it causes exponential term growth. Instead, unroll one step at a time with `execute_step`:
+Use the `sbpf_steps` tactic to automatically unroll and simplify sBPF execution. It handles instruction fetch, stepping, branch resolution, and final state extraction in a single call:
 
-**Step 1**: Pre-compute fetch lemmas for every instruction index:
 ```lean
-private theorem f0 : prog[0]? = some (.ldx .dword .r3 .r1 0x2918) := by native_decide
-private theorem f1 : prog[1]? = some (.ldx .dword .r4 .r1 0x00a0) := by native_decide
--- etc.
+set_option maxHeartbeats 8000000 in
+theorem rejects_insufficient_balance
+    (inputAddr : Nat) (mem : Mem)
+    (minBal tokenBal : Nat)
+    (h_min : readU64 mem (effectiveAddr inputAddr MINIMUM_BALANCE) = minBal)
+    (h_tok : readU64 mem (effectiveAddr inputAddr TOKEN_ACCOUNT_BALANCE) = tokenBal)
+    (h_slip : minBal ≥ tokenBal) :
+    (execute prog (initState inputAddr mem) 10).exitCode = some 1 := by
+  sbpf_steps
 ```
 
-**Step 2**: Normalize memory hypotheses early:
+**Prerequisites for `sbpf_steps` to work efficiently:**
+1. `prog` must have `@[simp]` attribute (handled by `asm2lean`)
+2. Offset constants in `prog` must be `Int`, not `Nat` (handled by `asm2lean`)
+3. Named constants in `prog` must syntactically match hypothesis names (handled by `asm2lean`)
+
+For theorems with negated conditions, you may need a helper before `sbpf_steps`:
 ```lean
-simp only [effectiveAddr] at h_min h_tok
+-- When the hypothesis is ≠ but simp needs ¬(... = ...)
+have h_ne3 : ¬(readU64 mem inputAddr = N_ACCOUNTS_EXPECTED) := by rw [h_num]; exact h_ne
+sbpf_steps
+
+-- When the hypothesis is ≥ but simp needs ¬(... < ...)
+have h_not_lt : ¬(senderLamports < amount) := by omega
+sbpf_steps
 ```
 
-**Step 3**: Unroll each step with inline precondition proofs:
-```lean
--- Step 0: ldxdw r3 — PC:0→1
-rw [show (10:Nat) = 9+1 from rfl, execute_step _ _ _ (.ldx .dword .r3 .r1 0x2918)
-  (by rfl)                      -- proves exitCode = none
-  (by simp [initState]; exact f0)]  -- proves prog[pc]? = some insn
-```
-
-For later steps where state is deeper, add more lemmas to the simp set:
-```lean
--- Step 2: jge — branch resolves using h_slip hypothesis
-rw [show (8:Nat) = 7+1 from rfl, execute_step _ _ _ (.jge .r3 (.reg .r4) 4)
-  (by simp [step, initState])
-  (by simp [step, initState]; exact f2)]
-```
-
-After a branch instruction, simp needs the comparison hypothesis (`h_slip`, `h_not_ge`, etc.) plus `ge_iff_le` and `↓reduceIte` to resolve the branch direction and determine the PC:
-```lean
-(by simp [step, initState, RegFile.get, RegFile.set, readByWidth, effectiveAddr, resolveSrc,
-          h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]; exact f4)
-```
-
-**Step 4**: Close with `execute_halted` + simp after the final `exit`:
-```lean
-simp [execute_halted, step, initState, RegFile.get, RegFile.set, resolveSrc, readByWidth,
-      effectiveAddr, h_min, h_tok, ge_iff_le, h_slip, ↓reduceIte]
-```
+Set `maxHeartbeats` generously: 8M for short paths (3-6 instructions), 16M for full validation paths (15+ instructions).
 
 ### Theorem statement pattern
 
-Properties are stated over symbolic memory with hypotheses binding memory reads:
+Properties are stated over symbolic memory with hypotheses binding memory reads. Use the named constants from the generated `Prog` module — both in hypotheses and exit codes:
 
 ```lean
-theorem rejects_bad_input
+theorem rejects_insufficient_lamports
     (inputAddr : Nat) (mem : Mem)
-    (minBal tokenBal : Nat)
-    (h_min : readU64 mem (effectiveAddr inputAddr 0x2918) = minBal)
-    (h_tok : readU64 mem (effectiveAddr inputAddr 0x00a0) = tokenBal)
-    (h_slip : minBal ≥ tokenBal) :
-    (execute prog (initState inputAddr mem) 10).exitCode = some 1 := by
-  ...
+    (amount senderLamports : Nat)
+    (h_num   : readU64 mem inputAddr = N_ACCOUNTS_EXPECTED)
+    (h_sdl   : readU64 mem (effectiveAddr inputAddr SENDER_DATA_LENGTH_OFFSET) = DATA_LENGTH_ZERO)
+    (h_rdup  : readU8  mem (effectiveAddr inputAddr RECIPIENT_OFFSET) = NON_DUP_MARKER)
+    (h_rdl   : readU64 mem (effectiveAddr inputAddr RECIPIENT_DATA_LENGTH_OFFSET) = DATA_LENGTH_ZERO)
+    (h_sdup  : readU8  mem (effectiveAddr inputAddr SYSTEM_PROGRAM_OFFSET) = NON_DUP_MARKER)
+    (h_idl   : readU64 mem (effectiveAddr inputAddr INSTRUCTION_DATA_LENGTH_OFFSET) = INSTRUCTION_DATA_LENGTH_EXPECTED)
+    (h_amt   : readU64 mem (effectiveAddr inputAddr INSTRUCTION_DATA_OFFSET) = amount)
+    (h_bal   : readU64 mem (effectiveAddr inputAddr SENDER_LAMPORTS_OFFSET) = senderLamports)
+    (h_insuf : senderLamports < amount) :
+    (execute prog (initState inputAddr mem) 20).exitCode = some E_INSUFFICIENT_LAMPORTS := by
+  sbpf_steps
 ```
 
-The `fuel` parameter (10 above) must be large enough for the longest execution path. Count the maximum instructions from entry to exit.
+The `fuel` parameter (20 above) must be large enough for the longest execution path. Count the maximum instructions from entry to exit.
 
-### Critical tactic rules for sBPF proofs
+**Critical**: Use `readU8` for byte loads (`ldxb`) and `readU64` for dword loads (`ldxdw`). The read width must match the assembly instruction.
+
+### Critical rules for sBPF proofs
 
 | Do | Don't |
 |---|---|
-| Use `execute_step` to unroll one step at a time | Put `execute` in a simp set (term explosion) |
-| Use `native_decide` for fetch lemmas (closed terms) | Use `native_decide` on expressions with free variables |
-| Add `execSyscall` to simp set after `call` instructions | Forget `execSyscall` (state gets stuck) |
-| Add branch hypotheses (`h_slip`, `ge_iff_le`, `↓reduceIte`) after conditional jumps | Omit comparison hypotheses (PC unresolved) |
-| Set `maxHeartbeats` generously (1.6M–3.2M) for longer programs | Use default heartbeats (programs with 8+ steps will timeout) |
+| Use `sbpf_steps` tactic for all sBPF proofs | Manually unroll with `execute_step` (verbose, error-prone) |
+| Generate `Prog.lean` with `qedgen asm2lean` | Hand-transcribe assembly into Lean (wrong offsets, missing labels) |
+| Use named constants from `Prog.lean` in hypotheses | Use raw numeric literals in hypotheses (simp blowup) |
+| Use `Int` for offset constants (memory operands) | Use `Nat` for offsets (forces coercion, simp timeout) |
+| Ensure `@[simp]` on `prog` definition | Omit `@[simp]` (sbpf_steps cannot unfold prog) |
+| Set `maxHeartbeats` 8M–16M for sBPF proofs | Use default heartbeats (will timeout on 8+ instruction paths) |
+
+### sBPF simp performance (critical)
+
+Three rules that determine whether `sbpf_steps` completes in seconds or times out:
+
+1. **Offset constants MUST be `Int`**: `effectiveAddr` takes `(off : Int)`. If the constant is `Nat`, Lean inserts `↑(NAT_CONST)` coercion at every use, and `simp` cannot efficiently reduce `effectiveAddr base ↑N = effectiveAddr base N`. This alone causes 0.5s → 4+ minute blowup.
+
+2. **Named constants in `prog` MUST match hypothesis names**: `simp` uses syntactic matching. If `prog` has `.ldx .dword .r2 .r1 SENDER_DATA_LENGTH_OFFSET` but the hypothesis uses the raw number `88`, `simp` must unfold every `abbrev` at every subterm at every step — exponential blowup.
+
+3. **`@[simp]` on `prog` is required**: Without it, `sbpf_steps` cannot unfold `prog[pc]?` to fetch instructions.
+
+`qedgen asm2lean` handles all three rules automatically.
 
 ## Step 6: Call Leanstral for hard sub-goals
 
