@@ -106,8 +106,17 @@ qedgen consolidate \
 
 ## Examples
 
-- **[Escrow](example/escrow/)** — Token escrow with authority checks, CPI transfer verification, and lifecycle proofs
-- **[Percolator](example/percolator/)** — Market maker with state machine verification and arithmetic safety
+### Rust / Anchor
+
+- **[Escrow](examples/rust/escrow/)** — Token escrow with authority checks, CPI transfer verification, and lifecycle proofs
+- **[Percolator](examples/rust/percolator/)** — Market maker with state machine verification and arithmetic safety
+
+### sBPF Assembly
+
+- **[Counter](examples/sbpf/counter/)** — Account counter with 3 verified validation guards (178 instructions)
+- **[Tree](examples/sbpf/tree/)** — Red-black tree with 3 verified validation guards (498 instructions)
+- **[Transfer](examples/sbpf/transfer/)** — Lamport transfer with account count and data length checks
+- **[Slippage](examples/sbpf/slippage/)** — AMM slippage protection with overflow safety
 
 ## Requirements
 

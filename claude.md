@@ -32,7 +32,7 @@ cd crates/qedgen/lean_support
 lake env lean test_lemmas.lean
 
 # Build the example escrow verification
-cd example/escrow/formal_verification
+cd examples/rust/escrow/formal_verification
 lake build                # Verify all proofs compile
 ```
 
@@ -66,7 +66,7 @@ qedgen consolidate \
 
 # Transpile sBPF assembly to Lean 4 program module
 qedgen asm2lean \
-  --input example/transfer/src/transfer.s \
+  --input examples/sbpf/transfer/src/transfer.s \
   --output formal_verification/TransferProg.lean \
   --namespace TransferProg
 ```
@@ -133,7 +133,7 @@ qedgen asm2lean \
 - CPI mechanics
 - Anchor framework
 
-See `example/escrow/formal_verification/VERIFICATION_SCOPE.md` for details.
+See `examples/rust/escrow/formal_verification/VERIFICATION_SCOPE.md` for details.
 
 ## Common Development Tasks
 

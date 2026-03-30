@@ -1,3 +1,4 @@
+# Source: https://github.com/blueshift-gg/sbpf
 .equ TOKEN_ACCOUNT_BALANCE, 0x00a0
 .equ MINIMUM_BALANCE, 0x2918
 
