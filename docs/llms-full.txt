@@ -1,6 +1,6 @@
 # QEDGen
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Your agent writes the proofs; Mistral's Leanstral model handles hard sub-goals.
+> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Supports Rust/Anchor and native sBPF assembly. Your agent writes the proofs; Leanstral handles routine sub-goals (seconds), Aristotle handles hard ones (minutes-hours).
 
 ## Installation
 
@@ -20,13 +20,14 @@ export MISTRAL_API_KEY=your_key_here
 
 ## What It Does
 
-QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls Leanstral (Mistral's theorem prover) only for hard sub-goals.
+QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls external theorem provers only for hard sub-goals.
 
 ### How It Works
 
-1. **Agent reads your code** — checks for existing specs or IDLs, reads source directly, and builds a model of the program's state, transitions, and invariants.
-2. **Writes spec and proofs** — generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. Runs `lake build` and iterates on errors.
+1. **Agent reads your code** — checks for existing specs or IDLs, reads Rust source or sBPF assembly directly, and builds a model of the program's state, transitions, and invariants.
+2. **Writes spec and proofs** — generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. For sBPF, uses `qedgen asm2lean` to transpile assembly into a Lean program module. Runs `lake build` and iterates on errors.
 3. **Hard sub-goals go to Leanstral** — when the agent can't close a `sorry`, it calls Leanstral via `fill-sorry` with pass@N sampling. First compilable result wins.
+4. **Hardest goals go to Aristotle** — when Leanstral fails, the agent escalates to Aristotle (Harmonic), which runs agentic proof search for minutes to hours. Submit the full project and poll for results.
 
 ### Supported Agents
 
@@ -63,7 +64,7 @@ qedgen generate \
   --validate
 ```
 
-### Fill sorry markers
+### Fill sorry markers (Leanstral — fast)
 
 ```bash
 qedgen fill-sorry \
@@ -72,7 +73,28 @@ qedgen fill-sorry \
   --validate
 ```
 
-Sends each `sorry` location to the Leanstral model with focused context. Review the result — The Leanstral model may introduce tactics you can learn from for future proofs.
+Sends each `sorry` location to the Leanstral model with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
+
+### Escalate to Aristotle (deep — minutes to hours)
+
+```bash
+# Submit and wait inline
+qedgen aristotle submit --project-dir formal_verification --wait
+
+# Or submit, detach, and poll later
+qedgen aristotle submit --project-dir formal_verification
+qedgen aristotle status <project-id> --wait --output-dir formal_verification
+```
+
+Use when Leanstral fails. Aristotle runs agentic proof search and returns the project with sorry markers filled. `status --wait` polls periodically and auto-downloads the result on completion.
+
+### Transpile sBPF assembly to Lean
+
+```bash
+qedgen asm2lean --input src/program.s --output formal_verification/Prog.lean
+```
+
+Generates a Lean module with named constants, `@[simp] def prog`, and `progAt` (chunked function-based lookup for large programs). Handles offset typing (`Int` for memory operands), jump target resolution, and syntactic matching rules automatically.
 
 ### Consolidate proofs
 
@@ -146,10 +168,14 @@ For each property:
 4. Write the proof
 5. Run `lake build` and iterate
 
-### Step 6: Call Leanstral model for hard sub-goals
+### Step 6: Call theorem provers for hard sub-goals
 
 ```bash
+# Fast: Leanstral (seconds)
 qedgen fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+
+# Deep: Aristotle (minutes-hours), when Leanstral fails
+qedgen aristotle submit --project-dir formal_verification --wait
 ```
 
 ### Step 7: Verify and report
@@ -157,6 +183,8 @@ qedgen fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 Run `lake build` and update SPEC.md verification results.
 
 ## Support Library API
+
+### Solana (Rust/Anchor)
 
 After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
@@ -167,6 +195,20 @@ After `import QEDGen.Solana` and `open QEDGen.Solana`:
 **Functions:** `findByKey`, `findByAuthority`, `canWrite`, `transferCpiValid`, `closes`, `valid_u64`
 
 **Key lemmas:** `closes_is_closed`, `closes_was_open`, `closed_irreversible`, `valid_u64_preserved_by_zero`, `valid_u64_preserved_by_same`, `find_map_update_other`, `find_map_update_same`
+
+### sBPF Assembly
+
+After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
+
+**Types:** `Reg` (.r0-.r10), `Src` (.reg/.imm), `Width` (.byte/.half/.word/.dword), `Insn` (all sBPF instructions), `Program` (Array Insn), `State` (regs, mem, pc, exitCode), `Mem` (Nat -> Nat)
+
+**Execution:** `execute` (array-based, small programs), `executeFn` (function-based via `progAt`, large programs). `initState` (single pointer, r1=input), `initState2` (two pointers, r1=input, r2=insn data, with optional entryPc).
+
+**Memory:** `readU8`, `readU16`, `readU32`, `readU64`, `writeU8`-`writeU64`, `effectiveAddr`
+
+**Tactics:** `sbpf_steps` (for `execute`), `sbpf_fn_steps` (for `executeFn`). Manual fallback: `executeFn_step` for complex paths.
+
+**Key lemmas:** `execute_halted`, `execute_step`, `executeFn_halted`, `executeFn_step`, `executeFn_compose`, `readU64_writeU64_same`, `readU64_writeU64_disjoint`
 
 ## Proof Patterns
 
@@ -238,6 +280,7 @@ theorem cancel_cpi_correct (ctx : CancelContext) :
 | `cases h` after `split_ifs` on `some = some` | `injection h` (unnecessary) |
 | `omega` for linear arithmetic | `norm_num` for linear goals |
 | `exact ⟨rfl, rfl, rfl⟩` for conjunctions of rfl | `constructor` + `rfl` chains (verbose) |
+| `simp [wrapAdd, toU64, ...] at h` to normalize hypotheses to match step-execution goals | `simp only [...]` for this (misses modular identities and numeric evaluation that step-level simp applied) |
 
 ## Common Errors and Fixes
 
@@ -247,6 +290,7 @@ theorem cancel_cpi_correct (ctx : CancelContext) :
 | `no goals to be solved` | Remove redundant tactic (e.g., `· contradiction` after auto-closed branch) |
 | `unknown constant 'X'` | Check imports; add `import QEDGen.Solana.X` or `open QEDGen.Solana` |
 | `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
+| `omega` fails on address disjointness after stack writes | Normalize hypotheses with `simp [wrapAdd, toU64, ...]` (not `simp only`) so address forms match the goal |
 
 ## Working Examples
 
@@ -258,9 +302,18 @@ A token escrow that lets two parties trade safely. Properties verified: cancel a
 
 A perpetual DEX risk engine with protected principal, junior profit claims, and lazy A/K side indices. Properties verified: deposit conservation, top-up insurance conservation, deposit fee credits conservation, PnL negation safety, deposit bounded, ADL lifecycle, fee credits nonpositive.
 
+### Transfer (sBPF Assembly) — verified
+
+A native sBPF lamport transfer program. Properties verified: input validation, duplicate account rejection, balance sufficiency checks.
+
+### Dropset (sBPF Assembly) — 6/9 properties verified (3 in progress)
+
+An on-chain order book's RegisterMarket instruction (180 sBPF instructions). Properties verified: discriminant dispatch, account count validation, instruction length validation, user account freshness, market account uniqueness, market account freshness. Remaining: base/quote mint uniqueness, PDA integrity.
+
 ## Environment Variables
 
 - `MISTRAL_API_KEY` — required for `fill-sorry` and `generate` commands. Free from console.mistral.ai.
+- `ARISTOTLE_API_KEY` — required for `aristotle` commands. Get at aristotle.harmonic.fun.
 - `QEDGEN_VALIDATION_WORKSPACE` — optional override for global Mathlib cache location.
 
 ## Requirements

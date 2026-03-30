@@ -280,6 +280,15 @@ def executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State :=
   mem := mem
   pc := 0
 
+/-- Two-pointer initial state for SIMD-0321 programs.
+    r1 = input buffer, r2 = instruction data pointer.
+    `entryPc` allows starting at a non-zero entrypoint (e.g. when error
+    handlers are laid out before the entrypoint). -/
+@[simp] def initState2 (inputAddr insnAddr : Nat) (mem : Mem) (entryPc : Nat := 0) : State where
+  regs := { r1 := inputAddr, r2 := insnAddr, r10 := STACK_START + 0x1000 }
+  mem := mem
+  pc := entryPc
+
 /-! ## Execution unrolling lemmas -/
 
 @[simp] theorem execute_halted (prog : Program) (s : State) (n : Nat) (code : Nat)
@@ -317,6 +326,27 @@ theorem executeFn_step (fetch : Nat → Option Insn) (s : State) (n : Nat) (insn
     (h_fetch : fetch s.pc = some insn) :
     executeFn fetch s (n + 1) = executeFn fetch (step insn s) n := by
   simp [executeFn, h_running, h_fetch]
+
+/-- Composability of deterministic execution: running n+m steps is the same as
+    running n steps then running m steps from the resulting state. -/
+theorem executeFn_compose (fetch : Nat → Option Insn) (s : State) (n m : Nat) :
+    executeFn fetch s (n + m) = executeFn fetch (executeFn fetch s n) m := by
+  induction n generalizing s with
+  | zero => simp [executeFn]
+  | succ n ih =>
+    rw [Nat.succ_add]
+    simp only [executeFn]
+    split
+    · -- halted: exitCode = some _
+      rename_i h_halted
+      simp [executeFn_halted, h_halted]
+    · -- running: exitCode = none
+      split
+      · -- invalid PC: fetch returns none → sets exitCode, then halted for m steps
+        simp [executeFn_halted]
+      · -- valid instruction
+        rename_i insn h_fetch
+        exact ih (step insn s)
 
 /-- Step N times from a state, applying instructions from a list -/
 def stepN : List Insn → State → State

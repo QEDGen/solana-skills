@@ -131,7 +131,7 @@ nav .links a:hover { color: var(--text); }
 .hero {
   position: relative;
   padding: 56px 0 0;
-  flex: 1;
+  min-height: 100vh;
   display: flex;
   align-items: center;
 }

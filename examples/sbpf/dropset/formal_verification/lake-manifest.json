@@ -1,0 +1,12 @@
+{"version": "1.1.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "qedgenSupport",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "./../../../../lean_solana",
+   "configFile": "lakefile.lean"}],
+ "name": "dropsetProofs",
+ "lakeDir": ".lake"}

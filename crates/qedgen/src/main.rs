@@ -150,10 +150,22 @@ enum AristotleCommands {
         poll_interval: Option<u64>,
     },
 
-    /// Check the status of an Aristotle project
+    /// Check the status of an Aristotle project (use --wait to poll until done)
     Status {
         /// Project ID returned by 'aristotle submit'
         project_id: String,
+
+        /// Poll until the project reaches a terminal status, then download the result
+        #[arg(long)]
+        wait: bool,
+
+        /// Polling interval in seconds (default: 30, requires --wait)
+        #[arg(long)]
+        poll_interval: Option<u64>,
+
+        /// Output directory for the solved project (default: current dir, requires --wait)
+        #[arg(long, default_value = ".")]
+        output_dir: PathBuf,
     },
 
     /// Download the result of a completed Aristotle project
@@ -268,7 +280,12 @@ async fn main() -> Result<()> {
                     .await?;
             }
 
-            AristotleCommands::Status { project_id } => {
+            AristotleCommands::Status {
+                project_id,
+                wait,
+                poll_interval,
+                output_dir,
+            } => {
                 let project = aristotle::status(&project_id).await?;
                 println!("Project:  {}", project.project_id);
                 println!("Status:   {}", project.status);
@@ -280,6 +297,42 @@ async fn main() -> Result<()> {
                 println!("Updated:  {}", project.last_updated_at);
                 if let Some(summary) = &project.output_summary {
                     println!("Summary:  {}", summary);
+                }
+
+                if wait {
+                    match project.status.as_str() {
+                        "QUEUED" | "IN_PROGRESS" | "NOT_STARTED" => {
+                            eprintln!("\nPolling until completion...");
+                            let final_project =
+                                aristotle::poll(&project_id, poll_interval).await?;
+                            match final_project.status.as_str() {
+                                "COMPLETE" | "COMPLETE_WITH_ERRORS" => {
+                                    if final_project.status == "COMPLETE_WITH_ERRORS" {
+                                        eprintln!(
+                                            "Warning: Aristotle completed with some errors."
+                                        );
+                                    }
+                                    aristotle::download_result(
+                                        &final_project.project_id,
+                                        &output_dir,
+                                    )
+                                    .await?;
+                                    if let Some(summary) = &final_project.output_summary {
+                                        eprintln!("\nSummary: {}", summary);
+                                    }
+                                }
+                                status => {
+                                    eprintln!("Project ended with status: {}", status);
+                                    if let Some(summary) = &final_project.output_summary {
+                                        eprintln!("Summary: {}", summary);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            eprintln!("Project already in terminal state, nothing to poll.");
+                        }
+                    }
                 }
             }
 

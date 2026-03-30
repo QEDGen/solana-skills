@@ -271,6 +271,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 | `omega` for linear arithmetic | `norm_num` for linear goals (omega is more reliable) |
 | `exact ⟨rfl, rfl, rfl⟩` for conjunctions of rfl | `constructor` + `rfl` + `constructor` + `rfl` (verbose) |
 | `if cond then ... else ...` without proof binding | `if h : cond then ...` when `h` is unused |
+| `simp [wrapAdd, toU64, ...] at h` to normalize hypotheses to match step-execution goals | `simp only [...]` for this (misses modular identities and numeric evaluation that step-level simp applied) |
 
 ### Common errors and fixes
 
@@ -281,6 +282,7 @@ theorem initialize_arithmetic_safety (amount taker : Nat) (post : ProgramState)
 | `unknown constant 'X'` | Check imports; add `import QEDGen.Solana.X` or `open QEDGen.Solana` |
 | `tactic 'split_ifs' failed, no if-then-else` | Use `unfold` first, not `simp` |
 | `unused variable 'h'` | Remove proof binding: `if h : cond` → `if cond` |
+| `omega` fails on address disjointness after stack writes | Normalize hypotheses with `simp [wrapAdd, toU64, ...]` (not `simp only`) so address forms match the goal — see "Memory disjointness through stack writes" |
 
 ## sBPF Assembly Verification
 
@@ -317,6 +319,7 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.
 This generates a module with:
 - `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
 - `@[simp] def prog : Program := #[...]` with named constants and index comments
+- For large programs (>64 instructions): `def progAt : Nat → Option Insn` — a chunked function-based lookup for O(1) simp performance. Use with `executeFn` and `sbpf_fn_steps`.
 - A namespace wrapper matching the output filename
 
 Add the generated module to `lakefile.lean`:
@@ -361,10 +364,12 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `step (insn : Insn) (s : State) : State` — single-instruction semantics
 - `execSyscall (sc : Syscall) (s : State) : State` — logging sets r0=0
 - `initState (inputAddr : Nat) (mem : Mem) : State` — r1=inputAddr, r10=stack, pc=0
+- `initState2 (inputAddr insnAddr : Nat) (mem : Mem) (entryPc : Nat := 0) : State` — two-pointer state for SIMD-0321 programs (r1=input buffer, r2=instruction data); `entryPc` supports non-zero entry points
 - `wrapAdd`, `wrapSub`, `wrapMul`, `wrapNeg` — 64-bit wrapping arithmetic
 
 **Execution:**
-- `execute (prog : Program) (s : State) (fuel : Nat) : State` — use `sbpf_steps` tactic to unroll
+- `execute (prog : Program) (s : State) (fuel : Nat) : State` — array-based fetch, use `sbpf_steps` tactic to unroll. Best for small programs (≤64 instructions).
+- `executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State` — function-based fetch (O(1) per step). Use with `progAt` for large programs (>64 instructions) where array indexing causes simp blowup. Use `sbpf_fn_steps` tactic or manual `executeFn_step` to unroll.
 
 **Memory functions (open `QEDGen.Solana.SBPF.Memory`):**
 - `effectiveAddr (base : Nat) (off : Int) : Nat`
@@ -376,19 +381,24 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `RODATA_START`, `BYTECODE_START`, `STACK_START`, `HEAP_START`, `INPUT_START`
 
 **Tactics:**
-- `sbpf_steps` — automatically unrolls `execute`, steps through instructions, resolves branches, and closes the goal. Requires `@[simp]` on `prog`.
+- `sbpf_steps` — automatically unrolls `execute` (array-based), steps through instructions, resolves branches, and closes the goal. Requires `@[simp]` on `prog`.
+- `sbpf_fn_steps` — same as `sbpf_steps` but for `executeFn` (function-based fetch). Use with `progAt` for large programs.
 
 **Lemmas:**
 - `execute_halted` (`@[simp]`) — halted state is a fixed point
 - `execute_step` — unfolds one step: `execute prog s (n+1) = execute prog (step insn s) n`
 - `execute_zero` (`@[simp]`) — `execute prog s 0 = s`
+- `executeFn_halted` (`@[simp]`) — halted state is a fixed point (function-based)
+- `executeFn_step` — unfolds one step: `executeFn fetch s (n+1) = executeFn fetch (step insn s) n`
+- `executeFn_zero` (`@[simp]`) — `executeFn fetch s 0 = s`
+- `executeFn_compose` — composability: `executeFn fetch s (n+m) = executeFn fetch (executeFn fetch s n) m`
 
 **Memory axioms:**
 - `readU64_writeU64_same` — read-after-write returns original value
 - `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
 - `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
 
-### Proof strategy: `sbpf_steps` tactic
+### Proof strategy: `sbpf_steps` and `sbpf_fn_steps` tactics
 
 Use the `sbpf_steps` tactic to automatically unroll and simplify sBPF execution. It handles instruction fetch, stepping, branch resolution, and final state extraction in a single call:
 
@@ -404,7 +414,41 @@ theorem rejects_insufficient_balance
   sbpf_steps
 ```
 
-**Prerequisites for `sbpf_steps` to work efficiently:**
+For large programs (>64 instructions), `asm2lean` generates a `progAt` function alongside the `prog` array. Use `executeFn` + `sbpf_fn_steps` instead:
+
+```lean
+set_option maxHeartbeats 8000000 in
+theorem rejects_invalid_discriminant
+    (inputAddr insnAddr : Nat) (mem : Mem)
+    (disc : Nat)
+    (h_disc_val : readU8 mem insnAddr = disc)
+    (h_disc_ne  : disc ≠ DISC_REGISTER_MARKET) :
+    (executeFn progAt (initState2 inputAddr insnAddr mem 24) 8).exitCode
+      = some E_INVALID_DISCRIMINANT := by
+  have h_ne : ¬(readU8 mem insnAddr = DISC_REGISTER_MARKET) := by rw [h_disc_val]; exact h_disc_ne
+  sbpf_fn_steps
+```
+
+Note the use of `initState2` for programs that take two input pointers (r1=input buffer, r2=instruction data) and a non-zero `entryPc` when the program entrypoint isn't at instruction 0.
+
+**When `sbpf_fn_steps` times out on complex paths**, fall back to manual unrolling with `executeFn_step`:
+
+```lean
+-- Decompose fuel manually, then step one instruction at a time
+rw [show (8 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
+rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
+simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_offset]
+-- repeat for each instruction...
+```
+
+Define private `effectiveAddr` helper lemmas to keep manual steps concise:
+
+```lean
+private theorem ea_88 (b : Nat) : effectiveAddr b MY_OFFSET = b + 88 := by
+  unfold effectiveAddr MY_OFFSET; omega
+```
+
+**Prerequisites for `sbpf_steps`/`sbpf_fn_steps` to work efficiently:**
 1. `prog` must have `@[simp]` attribute (handled by `asm2lean`)
 2. Offset constants in `prog` must be `Int`, not `Nat` (handled by `asm2lean`)
 3. Named constants in `prog` must syntactically match hypothesis names (handled by `asm2lean`)
@@ -421,6 +465,59 @@ sbpf_steps
 ```
 
 Set `maxHeartbeats` generously: 8M for short paths (3-6 instructions), 16M for full validation paths (15+ instructions).
+
+### Memory disjointness through stack writes
+
+When an sBPF program writes to the stack (`stx` instructions) then later reads from the input buffer, the proof must show reads see the original memory. Use the memory axioms `readU64_writeU64_disjoint` and `readU8_writeU64_outside` with omega proofs for spatial separation.
+
+**Phase-based proof structure**: For complex paths (20+ steps) with memory mutations, organize the proof into phases:
+1. **Common validation prefix** — shared steps (discriminant check, account count, etc.) that `sbpf_fn_steps` or manual stepping handles
+2. **Pointer arithmetic / memory writes** — instructions that compute dynamic addresses and write to the stack. After stepping, introduce bound hypotheses for dynamically-computed addresses
+3. **Property-specific check** — the final read-and-branch that establishes the theorem. Apply memory disjointness axioms at each read-through-write
+
+**Stack-input separation hypothesis**: Add a hypothesis establishing spatial separation between the stack region and the input buffer:
+
+```lean
+theorem rejects_quote_mint_duplicate
+    (inputAddr : Nat) (mem : Mem) ...
+    (h_sep : STACK_START + 0x1000 > inputAddr + 100000) -- stack-input separation
+    ...
+```
+
+This gives omega the fact it needs to prove disjointness side conditions.
+
+**Reading through stack writes**: When the program wrote to the stack (e.g., `stx .dword [r10-N]`) and then reads from the input buffer, apply the appropriate axiom:
+
+```lean
+-- Byte read through a dword stack write
+rw [readU8_writeU64_outside _ _ _ _
+  (by left; unfold STACK_START at h_addr ⊢; omega)]
+-- Dword read through a dword stack write
+rw [readU64_writeU64_disjoint _ _ _ _ _
+  (by unfold STACK_START at h_addr ⊢; omega)]
+```
+
+Chain multiple rewrites when multiple stack writes precede the read.
+
+**`simp` vs `simp only` for hypothesis normalization (critical)**: After stepping through instructions that use `wrapAdd`/`toU64` (wrapping add, `and64`), the goal's address expressions get normalized by the step-level `simp` — which applies `@[simp]` lemmas including the modular identity `(a % m + b) % m = (a + b) % m` and evaluates `(↑7 % 2^64).toNat → 7`. But hypotheses introduced earlier (like `h_addr`) remain in their original `wrapAdd`/`toU64` form. To make omega see them as equal, normalize hypotheses with **`simp`** (not `simp only`):
+
+```lean
+-- GOOD: includes @[simp] lemmas, matches what step-level simp did to the goal
+simp [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_addr h_dup'
+
+-- BAD: misses modular identities and numeric evaluation — omega sees different free variables
+simp only [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_addr h_dup'
+```
+
+**Bound hypotheses for dynamic addresses**: When instructions compute addresses dynamically (e.g., `add64` + `and64` for alignment), introduce a bound hypothesis after the computation phase:
+
+```lean
+-- After stepping through add64 + and64 that computed the aligned offset in r9:
+-- The address stored in r9 is bounded by the data length computation
+(h_addr : (baseDataLen + DATA_LEN_MAX_PAD) &&& toU64 DATA_LEN_AND_MASK + inputAddr < STACK_START)
+```
+
+This lets omega prove the read address is below the stack region.
 
 ### Theorem statement pattern
 
@@ -451,7 +548,7 @@ The `fuel` parameter (20 above) must be large enough for the longest execution p
 
 | Do | Don't |
 |---|---|
-| Use `sbpf_steps` tactic for all sBPF proofs | Manually unroll with `execute_step` (verbose, error-prone) |
+| Use `sbpf_steps` (small programs) or `sbpf_fn_steps` (large programs with `progAt`) | Manually unroll unless the tactic times out on complex paths |
 | Generate `Prog.lean` with `qedgen asm2lean` | Hand-transcribe assembly into Lean (wrong offsets, missing labels) |
 | Use named constants from `Prog.lean` in hypotheses | Use raw numeric literals in hypotheses (simp blowup) |
 | Use `Int` for offset constants (memory operands) | Use `Nat` for offsets (forces coercion, simp timeout) |
@@ -480,11 +577,28 @@ $QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 
 This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
 
-If `fill-sorry` fails after multiple passes, escalate to Aristotle (Harmonic's long-running theorem prover). Submit the **entire project directory** so Aristotle has full context:
+If `fill-sorry` fails after multiple passes, escalate to Aristotle (Harmonic's long-running theorem prover). Submit the **entire project directory** so Aristotle has full context.
+
+**Option A — Submit and wait inline** (blocks until done):
 
 ```bash
 $QEDGEN aristotle submit --project-dir formal_verification --wait
 ```
+
+**Option B — Submit, detach, poll later** (recommended for long queues):
+
+```bash
+# Submit (returns project ID immediately)
+$QEDGEN aristotle submit --project-dir formal_verification
+
+# Later: attach and poll until completion, auto-download result
+$QEDGEN aristotle status <project-id> \
+  --wait \
+  --output-dir formal_verification \
+  --poll-interval 60
+```
+
+`status --wait` polls periodically (default 30s), prints progress updates, and auto-downloads the solved project when it reaches a terminal state. Without `--wait`, `status` is a single-shot check.
 
 Aristotle may run for minutes to hours. It returns the full project with sorry markers replaced. Review its output — it overwrites files in place, so verify with `lake build` afterward.
 

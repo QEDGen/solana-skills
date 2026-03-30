@@ -158,6 +158,7 @@ If `lake build` fails:
    - `unexpected token 'open'` → use `«open»` quoting for Lean keywords
    - Namespace collision → check `open` statements
    - `simp` timeout on sBPF proofs → see **sBPF simp performance** section below
+   - `omega` fails on address disjointness after stack writes → normalize hypotheses with `simp [wrapAdd, toU64, ...]` (not `simp only`) so they match the goal form. Step-level simp applies `@[simp]` lemmas (modular identity, numeric evaluation) that `simp only` misses.
 3. Fix the proof and re-run `lake build`
 
 ### sBPF Proof Workflow
@@ -175,12 +176,44 @@ import QEDGen.Solana.SBPF
 import Prog
 open Prog
 
+-- Small programs (≤64 instructions): use execute + sbpf_steps
 theorem my_property ... :=
     (execute prog (initState inputAddr mem) FUEL).exitCode = some CODE := by
   sbpf_steps
+
+-- Large programs (>64 instructions): use executeFn + progAt + sbpf_fn_steps
+-- asm2lean generates progAt (chunked function-based lookup) for O(1) simp
+theorem my_property ... :=
+    (executeFn progAt (initState inputAddr mem) FUEL).exitCode = some CODE := by
+  sbpf_fn_steps
 ```
 
-The `sbpf_steps` tactic automates sBPF execution unrolling via `simp`. It requires `@[simp]` on `prog`.
+For programs with two input pointers (r1=input buffer, r2=instruction data, e.g. SIMD-0321), use `initState2`:
+
+```lean
+-- entryPc allows non-zero entry points (e.g. error handlers before main logic)
+(executeFn progAt (initState2 inputAddr insnAddr mem 24) FUEL).exitCode = some CODE
+```
+
+The `sbpf_steps`/`sbpf_fn_steps` tactics automate sBPF execution unrolling via `simp`. When they time out on complex paths, fall back to manual `executeFn_step` unrolling (see SKILL.md for the pattern).
+
+### Memory Disjointness Through Stack Writes
+
+When sBPF programs write to the stack then read from the input buffer, use memory axioms to prove reads see original memory:
+
+```lean
+-- Byte read through dword stack write
+rw [readU8_writeU64_outside _ _ _ _
+  (by left; unfold STACK_START at h_addr ⊢; omega)]
+```
+
+Key patterns:
+- Add a **stack-input separation hypothesis**: `h_sep : STACK_START + 0x1000 > inputAddr + 100000`
+- For **dynamic addresses** (after `add64`/`and64`), introduce bound hypotheses so omega can prove disjointness
+- Use **`simp`** (not `simp only`) to normalize hypotheses containing `wrapAdd`/`toU64` to match step-execution goal forms — `simp only` misses modular identities like `(a % m + b) % m = (a + b) % m`
+- For complex paths (20+ steps), organize into **phases**: (1) validation prefix, (2) pointer arithmetic / stack writes, (3) property-specific read-and-branch with disjointness proofs
+
+See SKILL.md "Memory disjointness through stack writes" for the full pattern.
 
 ### sBPF simp Performance (Critical)
 
@@ -225,10 +258,15 @@ qedgen aristotle submit \
 # Submit without waiting (returns project ID)
 qedgen aristotle submit --project-dir formal_verification
 
-# Check status
+# Check status (single shot)
 qedgen aristotle status <project-id>
 
-# Download result when complete
+# Poll until done, then auto-download result
+qedgen aristotle status <project-id> \
+  --wait \
+  --output-dir formal_verification
+
+# Download result manually when complete
 qedgen aristotle result <project-id> --output-dir formal_verification
 
 # List recent projects
@@ -237,6 +275,8 @@ qedgen aristotle list
 # Cancel a running project
 qedgen aristotle cancel <project-id>
 ```
+
+`status --wait` is the recommended way to attach to a previously submitted project. It polls every 30s (override with `--poll-interval`), prints progress updates, and auto-downloads the result on completion.
 
 **When to use which backend:**
 - **Leanstral** (`fill-sorry`): Fast (seconds), good for straightforward goals. Try first.
