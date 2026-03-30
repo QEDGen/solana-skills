@@ -13,8 +13,8 @@ QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 
 ### Build the CLI
 
 ```bash
-# Build qedgen binary (outputs to ./bin/qedgen)
-cargo build --release
+# Build qedgen binary and copy to ./bin/qedgen
+cargo build --release && cp target/release/qedgen bin/qedgen
 
 # Build just the Lean support library
 cd lean_solana
@@ -347,5 +347,5 @@ After `qedgen generate`:
 
 - First Lean build is expensive (15-45 min for Mathlib). Run `qedgen setup` first.
 - If `lake build` fails with "could not resolve 'HEAD' to a commit", remove `.lake/packages/mathlib` and run `lake update`.
-- Binary is built to `./bin/qedgen`, not `target/release/qedgen`.
+- Binary: `cargo build --release` outputs to `target/release/qedgen`. Always copy to `bin/qedgen` after building: `cp target/release/qedgen bin/qedgen`.
 - The SKILL.md file defines the full proof-writing workflow that Claude follows.

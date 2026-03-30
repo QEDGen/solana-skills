@@ -42,6 +42,7 @@ fn api_key() -> Result<String> {
 fn client() -> Client {
     Client::builder()
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .http1_only()
         .build()
         .expect("failed to build HTTP client")
 }
@@ -288,6 +289,8 @@ pub async fn cancel(project_id: &str) -> Result<Project> {
     let resp = client
         .post(format!("{}/project/{}/cancel", BASE_URL, project_id))
         .header("X-API-Key", &key)
+        .header("Content-Type", "application/json")
+        .body("{}")
         .send()
         .await?;
 
