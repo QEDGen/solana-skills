@@ -19,10 +19,10 @@ QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 ## Architecture
 
 ```
-You (Claude)                          Leanstral (remote model)
-  ├── Read spec / source code           ├── Fill sorry markers
-  ├── Write Lean 4 models               └── Suggest tactics for hard goals
-  ├── Write theorem statements
+You (Claude)                          Leanstral (fast)        Aristotle (deep)
+  ├── Read spec / source code           ├── Fill sorry          ├── Long-running agent
+  ├── Write Lean 4 models               └── Suggest tactics     └── Hard sub-goals
+  ├── Write theorem statements                                     (minutes–hours)
   ├── Write proof attempts
   ├── Run `lake build`, read errors
   └── Fix and iterate
@@ -480,7 +480,15 @@ $QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
 
 This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
 
-If `fill-sorry` also fails, simplify the theorem statement or split the property into smaller lemmas.
+If `fill-sorry` fails after multiple passes, escalate to Aristotle (Harmonic's long-running theorem prover). Submit the **entire project directory** so Aristotle has full context:
+
+```bash
+$QEDGEN aristotle submit --project-dir formal_verification --wait
+```
+
+Aristotle may run for minutes to hours. It returns the full project with sorry markers replaced. Review its output — it overwrites files in place, so verify with `lake build` afterward.
+
+If Aristotle also fails, simplify the theorem statement or split the property into smaller lemmas.
 
 ## Step 7: Verify and report
 
@@ -496,6 +504,7 @@ Update SPEC.md verification results table:
 ## Environment
 
 - **`MISTRAL_API_KEY`** — required for `fill-sorry`. Free from [console.mistral.ai](https://console.mistral.ai)
+- **`ARISTOTLE_API_KEY`** — required for `aristotle` commands. Get at [aristotle.harmonic.fun](https://aristotle.harmonic.fun)
 - **`QEDGEN_VALIDATION_WORKSPACE`** — optional override for global Mathlib cache location
 
 ## Error handling

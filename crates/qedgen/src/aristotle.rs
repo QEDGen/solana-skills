@@ -250,10 +250,31 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
     let bytes = resp.bytes().await?;
     std::fs::create_dir_all(output_dir)?;
 
-    // Extract tar.gz
+    // Extract tar.gz, stripping the top-level directory prefix
+    // (Aristotle wraps results in a `project_aristotle/` directory)
     let decoder = flate2::read::GzDecoder::new(&bytes[..]);
     let mut archive = tar::Archive::new(decoder);
-    archive.unpack(output_dir)?;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+
+        // Strip first path component (e.g. "project_aristotle/Test.lean" → "Test.lean")
+        let stripped: PathBuf = path.components().skip(1).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+
+        let dest = output_dir.join(&stripped);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Skip directories (create_dir_all handles them), extract files only
+        if !entry.header().entry_type().is_dir() {
+            entry.unpack(&dest)?;
+        }
+    }
 
     eprintln!("Solution extracted to {}", output_dir.display());
     Ok(output_dir.to_path_buf())
