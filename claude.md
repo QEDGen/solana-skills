@@ -212,9 +212,40 @@ theorem t ... (h : readU64 mem (effectiveAddr inputAddr MY_OFFSET) = v) ...
 
 The `qedgen asm2lean` command handles Rules 1-3 automatically: it emits `Int`-typed offsets, `Nat`-typed non-offsets, named constants in the `prog` array, and `@[simp]` on `prog`.
 
+### Aristotle (Harmonic) — Long-Running Sorry-Filling
+
+For hard sub-goals that Leanstral cannot crack, Aristotle provides agentic proof search (minutes to hours):
+
+```bash
+# Submit a Lean project and wait for completion
+qedgen aristotle submit \
+  --project-dir formal_verification \
+  --wait
+
+# Submit without waiting (returns project ID)
+qedgen aristotle submit --project-dir formal_verification
+
+# Check status
+qedgen aristotle status <project-id>
+
+# Download result when complete
+qedgen aristotle result <project-id> --output-dir formal_verification
+
+# List recent projects
+qedgen aristotle list
+
+# Cancel a running project
+qedgen aristotle cancel <project-id>
+```
+
+**When to use which backend:**
+- **Leanstral** (`fill-sorry`): Fast (seconds), good for straightforward goals. Try first.
+- **Aristotle** (`aristotle submit`): Slow but powerful (minutes–hours). Use when Leanstral fails after multiple passes.
+
 ## Environment Variables
 
 - `MISTRAL_API_KEY` - Required for `fill-sorry` and `generate` commands
+- `ARISTOTLE_API_KEY` - Required for `aristotle` commands (get at https://aristotle.harmonic.fun)
 - `QEDGEN_VALIDATION_WORKSPACE` - Override validation workspace path (default: platform cache dir)
 
 ## Common Lean Proof Patterns
