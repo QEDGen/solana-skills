@@ -161,7 +161,7 @@ pub async fn poll(project_id: &str, interval_secs: Option<u64>) -> Result<Projec
                 let project: Project = r.json().await?;
 
                 let pct = project.percent_complete.unwrap_or(0);
-                eprint!("\r  Status: {} ({}%)", project.status, pct);
+                eprint!("\r  Status: {:<20} {:>3}%", project.status, pct);
 
                 match project.status.as_str() {
                     "QUEUED" | "IN_PROGRESS" | "NOT_STARTED" => {
