@@ -19,10 +19,10 @@ inductive Reg
   | r0 | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | r9 | r10
   deriving Repr, DecidableEq, BEq, Inhabited
 
-/-- Source operand: register or 64-bit immediate value -/
+/-- Source operand: register or signed immediate (converted to unsigned by resolveSrc) -/
 inductive Src
   | reg (r : Reg)
-  | imm (v : Nat)
+  | imm (v : Int)
   deriving Repr, DecidableEq
 
 /-- Memory access width -/
@@ -92,11 +92,11 @@ inductive Syscall
     our model treats each logical instruction as one array element. -/
 inductive Insn
   -- Load 64-bit immediate into register
-  | lddw  (dst : Reg) (imm : Nat)
+  | lddw  (dst : Reg) (imm : Int)
   -- Load from memory: dst = mem[src + off]
   | ldx   (w : Width) (dst src : Reg) (off : Int)
   -- Store immediate to memory: mem[dst + off] = imm
-  | st    (w : Width) (dst : Reg) (off : Int) (imm : Nat)
+  | st    (w : Width) (dst : Reg) (off : Int) (imm : Int)
   -- Store register to memory: mem[dst + off] = src
   | stx   (w : Width) (dst : Reg) (off : Int) (src : Reg)
   -- ALU 64-bit
@@ -151,5 +151,11 @@ inductive Insn
 def toSigned64 (v : Nat) : Int :=
   if v < U64_MODULUS / 2 then ↑v
   else ↑v - ↑U64_MODULUS
+
+/-- Convert a signed integer to its unsigned 64-bit representation.
+    sBPF immediates are sign-extended to 64 bits; this mirrors that
+    so codegen can emit readable negative literals while staying in Nat. -/
+@[simp, reducible] def toU64 (v : Int) : Nat :=
+  (v % (2^64 : Int)).toNat
 
 end QEDGen.Solana.SBPF

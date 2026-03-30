@@ -90,7 +90,6 @@ theorem init_rejects_user_data_len
   -- 163: exit → r0 % U32_MODULUS = E_USER_DATA_LEN
   rw [executeFn_step _ _ _ _ rfl (show progAt 163 = _ from rfl)]
   simp [step, RegFile.get]
-  native_decide
 /-! ## P3: PDA duplicate (initialize) → error 5
 
    numAccounts = 3, userData = 0, PDA is duplicate → exit code E_PDA_DUPLICATE.
@@ -135,6 +134,5 @@ theorem init_rejects_pda_duplicate
   -- 169: exit → r0 % U32_MODULUS = E_PDA_DUPLICATE
   rw [executeFn_step _ _ _ _ rfl (show progAt 169 = _ from rfl)]
   simp [step, RegFile.get]
-  native_decide
 
 end CounterProofs

@@ -197,137 +197,133 @@ fn parse(source: &str) -> Result<ParsedProgram> {
     let mut labels: HashMap<String, usize> = HashMap::new();
     let mut instructions: Vec<AsmInsn> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-    let mut in_rodata = false;
-    let mut pending_label: Option<String> = None;
 
-    // Pass 1: collect .equ and labels, count instructions
-    for (line_no, raw_line) in source.lines().enumerate() {
-        let line = strip_comment(raw_line);
-        if line.is_empty() {
-            continue;
-        }
+    // Intermediate: raw instruction lines (mnemonic, operand_text, line_no)
+    let mut raw_insns: Vec<(String, String, usize)> = Vec::new();
 
-        // .rodata section — stop collecting instructions
-        if line.starts_with(".rodata") {
-            in_rodata = true;
-            continue;
-        }
-        if in_rodata {
-            continue;
-        }
+    // ── Pass 1: collect .equ, labels, and raw instruction lines ──
+    {
+        let mut in_rodata = false;
+        let mut pending_label: Option<String> = None;
+        let mut insn_count: usize = 0;
 
-        // .equ directive
-        if line.starts_with(".equ ") || line.starts_with(".equ\t") {
-            let rest = line[5..].trim();
-            if let Some(comma_pos) = rest.find(',') {
-                let name = rest[..comma_pos].trim().to_string();
-                let val_str = rest[comma_pos + 1..].trim();
-                let is_hex = val_str.starts_with("0x") || val_str.starts_with("0X");
-                let val = if let Some(hex) =
-                    val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X"))
-                {
-                    i64::from_str_radix(hex, 16)
-                        .with_context(|| format!("line {}: bad hex in .equ", line_no + 1))?
-                } else {
-                    val_str
-                        .parse::<i64>()
-                        .with_context(|| format!("line {}: bad value in .equ", line_no + 1))?
-                };
-                equates_map.insert(name.clone(), val);
-                equates_ordered.push((name.clone(), val));
-                if is_hex {
-                    equates_hex.insert(name);
-                }
-            }
-            continue;
-        }
-
-        // .globl / .global
-        if line.starts_with(".globl") || line.starts_with(".global") {
-            continue;
-        }
-
-        // Label
-        if let Some(colon_pos) = line.find(':') {
-            let before = line[..colon_pos].trim();
-            // Only treat as label if the part before ':' is a valid identifier
-            if !before.is_empty()
-                && !before.contains(' ')
-                && !before.contains('[')
-                && !before.starts_with('.')
-            {
-                let label_name = before.to_string();
-                // Label points to the NEXT instruction
-                pending_label = Some(label_name);
-                // Check if there's an instruction on the same line after the label
-                let after = line[colon_pos + 1..].trim();
-                if after.is_empty() {
-                    continue;
-                }
-                // Fall through to parse the instruction after the label
-                // (handled below via pending_label)
-                let idx = instructions.len();
-                if let Some(lbl) = pending_label.take() {
-                    labels.insert(lbl, idx);
-                }
-                let (mnemonic, rest) = match after.find(|c: char| c.is_whitespace()) {
-                    Some(pos) => (after[..pos].to_string(), after[pos..].trim().to_string()),
-                    None => (after.to_string(), String::new()),
-                };
-                let operands = parse_operands(&rest, &equates_map);
-                for op in &operands {
-                    match op {
-                        Operand::Mem(_, Value::Sym(s)) | Operand::Mem(_, Value::NegSym(s)) => {
-                            offset_symbols.insert(s.clone());
-                        }
-                        _ => {}
-                    }
-                }
-                instructions.push(AsmInsn {
-                    mnemonic,
-                    operands,
-                    label: None, // will annotate in pass 2
-                    line_no: line_no + 1,
-                });
+        for (line_no, raw_line) in source.lines().enumerate() {
+            let line = strip_comment(raw_line);
+            if line.is_empty() {
                 continue;
             }
+            if line.starts_with(".rodata") {
+                in_rodata = true;
+                continue;
+            }
+            if in_rodata {
+                continue;
+            }
+
+            // .equ directive
+            if line.starts_with(".equ ") || line.starts_with(".equ\t") {
+                let rest = line[5..].trim();
+                if let Some(comma_pos) = rest.find(',') {
+                    let name = rest[..comma_pos].trim().to_string();
+                    let val_str = rest[comma_pos + 1..].trim();
+                    let is_hex = val_str.starts_with("0x") || val_str.starts_with("0X");
+                    let val = if let Some(hex) =
+                        val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X"))
+                    {
+                        i64::from_str_radix(hex, 16)
+                            .with_context(|| format!("line {}: bad hex in .equ", line_no + 1))?
+                    } else {
+                        val_str
+                            .parse::<i64>()
+                            .with_context(|| format!("line {}: bad value in .equ", line_no + 1))?
+                    };
+                    equates_map.insert(name.clone(), val);
+                    equates_ordered.push((name.clone(), val));
+                    if is_hex {
+                        equates_hex.insert(name);
+                    }
+                }
+                continue;
+            }
+
+            // .globl / .global
+            if line.starts_with(".globl") || line.starts_with(".global") {
+                continue;
+            }
+
+            // Label
+            if let Some(colon_pos) = line.find(':') {
+                let before = line[..colon_pos].trim();
+                if !before.is_empty()
+                    && !before.contains(' ')
+                    && !before.contains('[')
+                    && !before.starts_with('.')
+                {
+                    let label_name = before.to_string();
+                    // Flush previous pending label (consecutive labels map to same index)
+                    if let Some(prev_lbl) = pending_label.take() {
+                        labels.insert(prev_lbl, insn_count);
+                    }
+                    pending_label = Some(label_name);
+                    let after = line[colon_pos + 1..].trim();
+                    if after.is_empty() {
+                        continue;
+                    }
+                    // Instruction on same line as label
+                    if let Some(lbl) = pending_label.take() {
+                        labels.insert(lbl, insn_count);
+                    }
+                    let (mnemonic, rest) = match after.find(|c: char| c.is_whitespace()) {
+                        Some(pos) => (after[..pos].to_string(), after[pos..].trim().to_string()),
+                        None => (after.to_string(), String::new()),
+                    };
+                    raw_insns.push((mnemonic, rest, line_no + 1));
+                    insn_count += 1;
+                    continue;
+                }
+            }
+
+            // Instruction
+            if let Some(lbl) = pending_label.take() {
+                labels.insert(lbl, insn_count);
+            }
+            let line_trimmed = line.trim();
+            let (mnemonic, rest) = match line_trimmed.find(|c: char| c.is_whitespace()) {
+                Some(pos) => (
+                    line_trimmed[..pos].to_string(),
+                    line_trimmed[pos..].trim().to_string(),
+                ),
+                None => (line_trimmed.to_string(), String::new()),
+            };
+            raw_insns.push((mnemonic, rest, line_no + 1));
+            insn_count += 1;
         }
 
-        // Instruction
-        let idx = instructions.len();
-        if let Some(lbl) = pending_label.take() {
-            labels.insert(lbl, idx);
+        if let Some(lbl) = pending_label {
+            labels.insert(lbl, insn_count);
         }
+    }
 
-        let line_trimmed = line.trim();
-        let (mnemonic, rest) = match line_trimmed.find(|c: char| c.is_whitespace()) {
-            Some(pos) => (
-                line_trimmed[..pos].to_string(),
-                line_trimmed[pos..].trim().to_string(),
-            ),
-            None => (line_trimmed.to_string(), String::new()),
-        };
-
-        let operands = parse_operands(&rest, &equates_map);
+    // ── Pass 2: parse operands with full label + equate maps ──
+    for (mnemonic, rest, line_no) in &raw_insns {
+        let operands = parse_operands(rest, &equates_map);
         for op in &operands {
-            if let Operand::Mem(_, Value::Sym(s)) = op {
-                offset_symbols.insert(s.clone());
+            match op {
+                Operand::Mem(_, Value::Sym(s)) | Operand::Mem(_, Value::NegSym(s)) => {
+                    offset_symbols.insert(s.clone());
+                }
+                _ => {}
             }
         }
         instructions.push(AsmInsn {
-            mnemonic,
+            mnemonic: mnemonic.clone(),
             operands,
             label: None,
-            line_no: line_no + 1,
+            line_no: *line_no,
         });
     }
 
-    // Handle trailing pending_label (label at end of file with no instruction)
-    if let Some(lbl) = pending_label {
-        labels.insert(lbl, instructions.len());
-    }
-
-    // Annotate instructions with their labels (for comments in output)
+    // Annotate instructions with their labels
     let label_at_idx: HashMap<usize, String> = labels
         .iter()
         .map(|(name, &idx)| (idx, name.clone()))
@@ -426,37 +422,21 @@ fn format_num(n: i64) -> String {
     }
 }
 
-/// Format a value for use inside Src.imm (which takes Nat, not Int).
-/// - Negative numbers are converted to 64-bit unsigned representation.
-/// - Int-typed symbols get .toNat appended.
-fn lean_imm_value(v: &Value, equates: &HashMap<String, i64>, offset_symbols: &HashSet<String>) -> String {
+/// Format a value for use inside Src.imm / lddw / st (all take Int now).
+/// Nat-typed constants auto-coerce to Int in Lean, so no conversion needed.
+fn lean_imm_value(v: &Value, equates: &HashMap<String, i64>, _offset_symbols: &HashSet<String>) -> String {
     match v {
-        Value::Num(n) => {
-            if *n < 0 {
-                // Convert negative immediate to unsigned 64-bit representation
-                let unsigned = (*n as u64) as i64;
-                format!("0x{:016x}", unsigned as u64)
-            } else {
-                format_num(*n)
-            }
-        }
+        Value::Num(n) => format_num(*n),
         Value::Sym(s) => {
             if equates.contains_key(s) {
-                if offset_symbols.contains(s) {
-                    // Int-typed constant in Nat context — need .toNat
-                    format!("{}.toNat", s)
-                } else {
-                    s.clone()
-                }
+                s.clone()
             } else {
                 format!("0 /- undefined: {} -/", s)
             }
         }
         Value::NegSym(s) => {
-            if let Some(&val) = equates.get(s) {
-                // -SYMBOL as unsigned: convert the negated value
-                let neg = (-val) as u64;
-                format!("0x{:016x}", neg)
+            if equates.contains_key(s) {
+                format!("(-{})", s)
             } else {
                 format!("0 /- undefined: -{} -/", s)
             }
@@ -667,9 +647,9 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     if !prog.equates.is_empty() {
         writeln!(out, "/-! ## .equ constants -/\n")?;
         for (name, val) in &prog.equates {
-            // Offsets used in memory operands [reg + OFF] must be Int to match
-            // effectiveAddr's signature — avoids Nat→Int coercion overhead in simp.
-            let ty = if prog.offset_symbols.contains(name) {
+            // Int if: used as memory offset, OR negative value.
+            // Nat otherwise (non-negative immediates, error codes, etc.)
+            let ty = if prog.offset_symbols.contains(name) || *val < 0 {
                 "Int"
             } else {
                 "Nat"
@@ -688,29 +668,52 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     let use_fn_lookup = prog.instructions.len() > 64;
 
     if use_fn_lookup {
-        writeln!(out, "/-! ## Program (function-based fetch for O(1) simp lookup) -/\n")?;
-        writeln!(out, "@[simp] def progAt : Nat → Option QEDGen.Solana.SBPF.Insn")?;
+        writeln!(out, "/-! ## Program (chunked lookup for O(1) simp) -/\n")?;
 
-        for (idx, insn) in prog.instructions.iter().enumerate() {
-            let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
-            let comment = if let Some(ref lbl) = insn.label {
-                format!("-- {}: {}", idx, lbl)
-            } else {
-                format!("-- {}", idx)
-            };
-            writeln!(out, "  | {} => some ({})  {}", idx, lean, comment)?;
+        // Split into chunks of CHUNK_SIZE to keep each pattern match under
+        // Lean's heartbeat limit.  Top-level progAt dispatches by range.
+        const CHUNK_SIZE: usize = 100;
+        let n_insns = prog.instructions.len();
+        let n_chunks = (n_insns + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+        // Emit each chunk as a private function
+        for chunk_idx in 0..n_chunks {
+            let start = chunk_idx * CHUNK_SIZE;
+            let end = std::cmp::min(start + CHUNK_SIZE, n_insns);
+
+            writeln!(out, "private def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
+                     chunk_idx)?;
+
+            for idx in start..end {
+                let insn = &prog.instructions[idx];
+                let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
+                let comment = if let Some(ref lbl) = insn.label {
+                    format!("-- {}: {}", idx, lbl)
+                } else {
+                    format!("-- {}", idx)
+                };
+                writeln!(out, "  | {} => some ({})  {}", idx, lean, comment)?;
+            }
+            writeln!(out, "  | _ => none\n")?;
         }
 
-        writeln!(out, "  | _ => none\n")?;
+        // Emit top-level dispatch
+        writeln!(out, "def progAt (n : Nat) : Option QEDGen.Solana.SBPF.Insn :=")?;
+        for chunk_idx in 0..n_chunks {
+            let upper = (chunk_idx + 1) * CHUNK_SIZE;
+            if chunk_idx + 1 < n_chunks {
+                writeln!(out, "  if n < {} then progAt_{} n", upper, chunk_idx)?;
+                writeln!(out, "  else")?;
+            } else {
+                writeln!(out, "  progAt_{} n", chunk_idx)?;
+            }
+        }
+        writeln!(out)?;
 
         writeln!(out, "def prog : Program := #[")?;
         for (idx, insn) in prog.instructions.iter().enumerate() {
             let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
-            let comma = if idx + 1 < prog.instructions.len() {
-                ","
-            } else {
-                ""
-            };
+            let comma = if idx + 1 < n_insns { "," } else { "" };
             writeln!(out, "  {}{}", lean, comma)?;
         }
         writeln!(out, "]\n")?;

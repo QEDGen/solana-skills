@@ -65,11 +65,11 @@ def State.running (s : State) : Prop := s.exitCode = none
 
 /-! ## Helpers -/
 
-/-- Resolve a source operand to its value -/
+/-- Resolve a source operand to its unsigned 64-bit value -/
 @[simp] def resolveSrc (rf : RegFile) (src : Src) : Nat :=
   match src with
   | .reg r => rf.get r
-  | .imm v => v
+  | .imm v => toU64 v
 
 /-! ## Runtime error codes
 
@@ -117,7 +117,7 @@ def U32_MODULUS : Nat := 2 ^ 32
   match insn with
 
   | .lddw dst imm =>
-    { s with regs := rf.set dst imm, pc := pc' }
+    { s with regs := rf.set dst (toU64 imm), pc := pc' }
 
   | .ldx w dst src off =>
     let addr := effectiveAddr (rf.get src) off
@@ -126,7 +126,7 @@ def U32_MODULUS : Nat := 2 ^ 32
 
   | .st w dst off imm =>
     let addr := effectiveAddr (rf.get dst) off
-    let val := imm % (2 ^ (w.bytes * 8))
+    let val := (toU64 imm) % (2 ^ (w.bytes * 8))
     { s with mem := writeByWidth mem addr val w, pc := pc' }
 
   | .stx w dst off src =>

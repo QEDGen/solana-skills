@@ -49,51 +49,51 @@ abbrev INIT_CPI_INSN_DATA_LEN : Nat := 52
 abbrev INIT_CPI_DISCRIMINATOR : Nat := 0
 abbrev INIT_CPI_N_SIGNERS_SEEDS : Nat := 1
 abbrev INIT_CPI_ACCT_SIZE : Nat := 9
-abbrev STK_INC_SEED_0_ADDR_OFF : Nat := 64
-abbrev STK_INC_SEED_0_LEN_OFF : Nat := 56
-abbrev STK_INC_SEED_1_ADDR_OFF : Nat := 48
-abbrev STK_INC_SEED_1_LEN_OFF : Nat := 40
+abbrev STK_INC_SEED_0_ADDR_OFF : Int := 64
+abbrev STK_INC_SEED_0_LEN_OFF : Int := 56
+abbrev STK_INC_SEED_1_ADDR_OFF : Int := 48
+abbrev STK_INC_SEED_1_LEN_OFF : Int := 40
 abbrev STK_INC_PDA_OFF : Nat := 32
 abbrev STK_INIT_SYSTEM_PROGRAM_PUBKEY_OFF : Nat := 384
-abbrev STK_INIT_INSN_OFF : Nat := 352
-abbrev STK_INIT_INSN_ACCOUNTS_ADDR_OFF : Nat := 344
-abbrev STK_INIT_INSN_ACCOUNTS_LEN_OFF : Nat := 336
-abbrev STK_INIT_INSN_DATA_ADDR_OFF : Nat := 328
-abbrev STK_INIT_INSN_DATA_LEN_OFF : Nat := 320
+abbrev STK_INIT_INSN_OFF : Int := 352
+abbrev STK_INIT_INSN_ACCOUNTS_ADDR_OFF : Int := 344
+abbrev STK_INIT_INSN_ACCOUNTS_LEN_OFF : Int := 336
+abbrev STK_INIT_INSN_DATA_ADDR_OFF : Int := 328
+abbrev STK_INIT_INSN_DATA_LEN_OFF : Int := 320
 abbrev STK_INIT_SYSTEM_PROGRAM_PUBKEY_TO_ACCOUNT_METAS_OFF : Nat := 72
 abbrev STK_INIT_ACCOUNT_METAS_TO_INSN_DATA_OFF : Nat := 32
 abbrev STK_INIT_INSN_DATA_OFF : Nat := 280
-abbrev STK_INIT_INSN_DATA_LAMPORTS_OFF : Nat := 276
-abbrev STK_INIT_INSN_DATA_SPACE_OFF : Nat := 268
+abbrev STK_INIT_INSN_DATA_LAMPORTS_OFF : Int := 276
+abbrev STK_INIT_INSN_DATA_SPACE_OFF : Int := 268
 abbrev STK_INIT_INSN_DATA_OWNER_OFF : Nat := 260
 abbrev STK_INIT_ACCT_INFOS_OFF : Nat := 224
-abbrev STK_INIT_ACCT_META_USER_PUBKEY_ADDR_OFF : Nat := 312
-abbrev STK_INIT_ACCT_META_USER_IS_WRITABLE_OFF : Nat := 304
+abbrev STK_INIT_ACCT_META_USER_PUBKEY_ADDR_OFF : Int := 312
+abbrev STK_INIT_ACCT_META_USER_IS_WRITABLE_OFF : Int := 304
 abbrev STK_INIT_ACCT_META_USER_IS_SIGNER_OFF : Nat := 303
-abbrev STK_INIT_ACCT_META_PDA_PUBKEY_ADDR_OFF : Nat := 296
-abbrev STK_INIT_ACCT_META_PDA_IS_WRITABLE_OFF : Nat := 288
+abbrev STK_INIT_ACCT_META_PDA_PUBKEY_ADDR_OFF : Int := 296
+abbrev STK_INIT_ACCT_META_PDA_IS_WRITABLE_OFF : Int := 288
 abbrev STK_INIT_ACCT_META_PDA_IS_SIGNER_OFF : Nat := 287
-abbrev STK_INIT_ACCT_INFO_USER_KEY_ADDR_OFF : Nat := 224
-abbrev STK_INIT_ACCT_INFO_PDA_KEY_ADDR_OFF : Nat := 168
-abbrev STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF : Nat := 216
-abbrev STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF : Nat := 160
-abbrev STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF : Nat := 192
-abbrev STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF : Nat := 136
-abbrev STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF : Nat := 200
-abbrev STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF : Nat := 144
-abbrev STK_INIT_ACCT_INFO_USER_IS_SIGNER_OFF : Nat := 176
+abbrev STK_INIT_ACCT_INFO_USER_KEY_ADDR_OFF : Int := 224
+abbrev STK_INIT_ACCT_INFO_PDA_KEY_ADDR_OFF : Int := 168
+abbrev STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF : Int := 216
+abbrev STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF : Int := 160
+abbrev STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF : Int := 192
+abbrev STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF : Int := 136
+abbrev STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF : Int := 200
+abbrev STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF : Int := 144
+abbrev STK_INIT_ACCT_INFO_USER_IS_SIGNER_OFF : Int := 176
 abbrev STK_INIT_ACCT_INFO_USER_IS_WRITABLE_OFF : Nat := 175
-abbrev STK_INIT_ACCT_INFO_PDA_IS_SIGNER_OFF : Nat := 120
+abbrev STK_INIT_ACCT_INFO_PDA_IS_SIGNER_OFF : Int := 120
 abbrev STK_INIT_ACCT_INFO_PDA_IS_WRITABLE_OFF : Nat := 119
-abbrev STK_INIT_SEED_0_ADDR_OFF : Nat := 112
-abbrev STK_INIT_SEED_0_LEN_OFF : Nat := 104
-abbrev STK_INIT_SEED_1_ADDR_OFF : Nat := 96
-abbrev STK_INIT_SEED_1_LEN_OFF : Nat := 88
-abbrev STK_INIT_SIGNERS_SEEDS_OFF : Nat := 80
-abbrev STK_INIT_SIGNER_SEEDS_0_LEN_OFF : Nat := 72
+abbrev STK_INIT_SEED_0_ADDR_OFF : Int := 112
+abbrev STK_INIT_SEED_0_LEN_OFF : Int := 104
+abbrev STK_INIT_SEED_1_ADDR_OFF : Int := 96
+abbrev STK_INIT_SEED_1_LEN_OFF : Int := 88
+abbrev STK_INIT_SIGNERS_SEEDS_OFF : Int := 80
+abbrev STK_INIT_SIGNER_SEEDS_0_LEN_OFF : Int := 72
 abbrev STK_INIT_PDA_OFF : Nat := 64
 abbrev STK_INIT_RENT_OFF : Nat := 32
-abbrev STK_INIT_BUMP_SEED_OFF : Nat := 8
+abbrev STK_INIT_BUMP_SEED_OFF : Int := 8
 abbrev NO_OFFSET : Int := 0
 abbrev SUCCESS : Nat := 0
 abbrev BOOL_TRUE : Nat := 1
@@ -101,9 +101,9 @@ abbrev BOOL_TRUE_2X : Nat := 0x101
 abbrev N_SIGNER_SEEDS : Nat := 2
 abbrev COMPARE_EQUAL : Nat := 0
 
-/-! ## Program (function-based fetch for O(1) simp lookup) -/
+/-! ## Program (chunked lookup for O(1) simp) -/
 
-def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
+private def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 0 => some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFF)  -- 0: entrypoint
   | 1 => some (.jeq .r2 (.imm N_ACCOUNTS_INCREMENT) 116)  -- 1
   | 2 => some (.jeq .r2 (.imm N_ACCOUNTS_INIT) 5)  -- 2
@@ -196,14 +196,17 @@ def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
   | 89 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF) .r2)  -- 89
   | 90 => some (.add64 .r2 (.imm SIZE_OF_PUBKEY))  -- 90
   | 91 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF) .r2)  -- 91
-  | 92 => some (.add64 .r2 (.imm SIZE_OF_U64_2X.toNat))  -- 92
+  | 92 => some (.add64 .r2 (.imm SIZE_OF_U64_2X))  -- 92
   | 93 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF) .r2)  -- 93
   | 94 => some (.add64 .r2 (.imm USER_DATA_TO_PDA_OWNER_OFF))  -- 94
   | 95 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF) .r2)  -- 95
   | 96 => some (.add64 .r2 (.imm SIZE_OF_PUBKEY))  -- 96
   | 97 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF) .r2)  -- 97
-  | 98 => some (.add64 .r2 (.imm SIZE_OF_U64_2X.toNat))  -- 98
+  | 98 => some (.add64 .r2 (.imm SIZE_OF_U64_2X))  -- 98
   | 99 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF) .r2)  -- 99
+  | _ => none
+
+private def progAt_1 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 100 => some (.mov64 .r2 (.reg .r10))  -- 100
   | 101 => some (.sub64 .r2 (.imm STK_INIT_SEED_0_ADDR_OFF))  -- 101
   | 102 => some (.stx .dword .r10 (-STK_INIT_SIGNERS_SEEDS_OFF) .r2)  -- 102
@@ -222,14 +225,14 @@ def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
   | 115 => some (.exit)  -- 115
   | 116 => some (.ldx .dword .r9 .r1 USER_DATA_LEN_OFF)  -- 116: increment
   | 117 => some (.add64 .r9 (.imm 7))  -- 117
-  | 118 => some (.and64 .r9 (.imm 0xfffffffffffffff8))  -- 118
+  | 118 => some (.and64 .r9 (.imm (-8)))  -- 118
   | 119 => some (.add64 .r9 (.reg .r1))  -- 119
   | 120 => some (.ldx .byte .r8 .r9 PDA_NON_DUP_MARKER_OFF)  -- 120
   | 121 => some (.jne .r8 (.imm NON_DUP_MARKER) 168)  -- 121
   | 122 => some (.ldx .dword .r8 .r9 PDA_DATA_LEN_OFF)  -- 122
   | 123 => some (.jne .r8 (.imm INIT_CPI_ACCT_SIZE) 164)  -- 123
   | 124 => some (.ldx .dword .r8 .r9 INSTRUCTION_DATA_LEN_INC_OFF)  -- 124
-  | 125 => some (.jne .r8 (.imm SIZE_OF_U64.toNat) 174)  -- 125
+  | 125 => some (.jne .r8 (.imm SIZE_OF_U64) 174)  -- 125
   | 126 => some (.mov64 .r3 (.reg .r9))  -- 126
   | 127 => some (.add64 .r3 (.imm PROGRAM_ID_INC_OFF))  -- 127
   | 128 => some (.mov64 .r6 (.reg .r9))  -- 128
@@ -241,7 +244,7 @@ def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
   | 134 => some (.add64 .r1 (.imm USER_PUBKEY_OFF))  -- 134
   | 135 => some (.stx .dword .r10 (-STK_INC_SEED_0_ADDR_OFF) .r1)  -- 135
   | 136 => some (.st .dword .r10 (-STK_INC_SEED_0_LEN_OFF) SIZE_OF_PUBKEY)  -- 136
-  | 137 => some (.add64 .r9 (.imm PDA_BUMP_SEED_OFF.toNat))  -- 137
+  | 137 => some (.add64 .r9 (.imm PDA_BUMP_SEED_OFF))  -- 137
   | 138 => some (.stx .dword .r10 (-STK_INC_SEED_1_ADDR_OFF) .r9)  -- 138
   | 139 => some (.st .dword .r10 (-STK_INC_SEED_1_LEN_OFF) SIZE_OF_U8)  -- 139
   | 140 => some (.mov64 .r1 (.reg .r10))  -- 140
@@ -283,6 +286,11 @@ def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
   | 176 => some (.mov32 .r0 (.imm E_UNABLE_TO_DERIVE_PDA))  -- 176: e_unable_to_derive_pda
   | 177 => some (.exit)  -- 177
   | _ => none
+
+def progAt (n : Nat) : Option QEDGen.Solana.SBPF.Insn :=
+  if n < 100 then progAt_0 n
+  else
+  progAt_1 n
 
 def prog : Program := #[
   .ldx .dword .r2 .r1 N_ACCOUNTS_OFF,
@@ -377,13 +385,13 @@ def prog : Program := #[
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_OWNER_ADDR_OFF) .r2,
   .add64 .r2 (.imm SIZE_OF_PUBKEY),
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_LAMPORTS_ADDR_OFF) .r2,
-  .add64 .r2 (.imm SIZE_OF_U64_2X.toNat),
+  .add64 .r2 (.imm SIZE_OF_U64_2X),
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_USER_DATA_ADDR_OFF) .r2,
   .add64 .r2 (.imm USER_DATA_TO_PDA_OWNER_OFF),
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_OWNER_ADDR_OFF) .r2,
   .add64 .r2 (.imm SIZE_OF_PUBKEY),
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_LAMPORTS_ADDR_OFF) .r2,
-  .add64 .r2 (.imm SIZE_OF_U64_2X.toNat),
+  .add64 .r2 (.imm SIZE_OF_U64_2X),
   .stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF) .r2,
   .mov64 .r2 (.reg .r10),
   .sub64 .r2 (.imm STK_INIT_SEED_0_ADDR_OFF),
@@ -403,14 +411,14 @@ def prog : Program := #[
   .exit,
   .ldx .dword .r9 .r1 USER_DATA_LEN_OFF,
   .add64 .r9 (.imm 7),
-  .and64 .r9 (.imm 0xfffffffffffffff8),
+  .and64 .r9 (.imm (-8)),
   .add64 .r9 (.reg .r1),
   .ldx .byte .r8 .r9 PDA_NON_DUP_MARKER_OFF,
   .jne .r8 (.imm NON_DUP_MARKER) 168,
   .ldx .dword .r8 .r9 PDA_DATA_LEN_OFF,
   .jne .r8 (.imm INIT_CPI_ACCT_SIZE) 164,
   .ldx .dword .r8 .r9 INSTRUCTION_DATA_LEN_INC_OFF,
-  .jne .r8 (.imm SIZE_OF_U64.toNat) 174,
+  .jne .r8 (.imm SIZE_OF_U64) 174,
   .mov64 .r3 (.reg .r9),
   .add64 .r3 (.imm PROGRAM_ID_INC_OFF),
   .mov64 .r6 (.reg .r9),
@@ -422,7 +430,7 @@ def prog : Program := #[
   .add64 .r1 (.imm USER_PUBKEY_OFF),
   .stx .dword .r10 (-STK_INC_SEED_0_ADDR_OFF) .r1,
   .st .dword .r10 (-STK_INC_SEED_0_LEN_OFF) SIZE_OF_PUBKEY,
-  .add64 .r9 (.imm PDA_BUMP_SEED_OFF.toNat),
+  .add64 .r9 (.imm PDA_BUMP_SEED_OFF),
   .stx .dword .r10 (-STK_INC_SEED_1_ADDR_OFF) .r9,
   .st .dword .r10 (-STK_INC_SEED_1_LEN_OFF) SIZE_OF_U8,
   .mov64 .r1 (.reg .r10),
