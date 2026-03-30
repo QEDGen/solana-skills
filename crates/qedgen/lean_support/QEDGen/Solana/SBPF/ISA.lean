@@ -61,6 +61,7 @@ inductive Syscall
   | sol_try_find_program_address
   -- Cross-program invocation
   | sol_invoke_signed
+  | sol_invoke_signed_c
   -- Sysvars
   | sol_get_clock_sysvar
   | sol_get_rent_sysvar
@@ -112,6 +113,20 @@ inductive Insn
   | arsh64 (dst : Reg) (src : Src)
   | mov64  (dst : Reg) (src : Src)
   | neg64  (dst : Reg)
+  -- ALU 32-bit (result zero-extended to 64 bits)
+  | add32  (dst : Reg) (src : Src)
+  | sub32  (dst : Reg) (src : Src)
+  | mul32  (dst : Reg) (src : Src)
+  | div32  (dst : Reg) (src : Src)
+  | mod32  (dst : Reg) (src : Src)
+  | or32   (dst : Reg) (src : Src)
+  | and32  (dst : Reg) (src : Src)
+  | xor32  (dst : Reg) (src : Src)
+  | lsh32  (dst : Reg) (src : Src)
+  | rsh32  (dst : Reg) (src : Src)
+  | arsh32 (dst : Reg) (src : Src)
+  | mov32  (dst : Reg) (src : Src)
+  | neg32  (dst : Reg)
   -- Conditional jumps (target = absolute instruction index)
   | jeq   (dst : Reg) (src : Src) (target : Nat)
   | jne   (dst : Reg) (src : Src) (target : Nat)

@@ -87,6 +87,14 @@ def ERR_INVALID_PC     : Nat := 0xFFFFFFFFFFFFFFFF
 @[simp] def wrapMul (a b : Nat) : Nat := (a * b) % U64_MODULUS
 @[simp] def wrapNeg (a : Nat) : Nat := (U64_MODULUS - a % U64_MODULUS) % U64_MODULUS
 
+/-- 32-bit modulus for 32-bit ALU operations -/
+def U32_MODULUS : Nat := 2 ^ 32
+
+@[simp] def wrapAdd32 (a b : Nat) : Nat := (a + b) % U32_MODULUS
+@[simp] def wrapSub32 (a b : Nat) : Nat := (a + U32_MODULUS - b % U32_MODULUS) % U32_MODULUS
+@[simp] def wrapMul32 (a b : Nat) : Nat := (a * b) % U32_MODULUS
+@[simp] def wrapNeg32 (a : Nat) : Nat := (U32_MODULUS - a % U32_MODULUS) % U32_MODULUS
+
 /-! ## Syscall execution -/
 
 /-- Execute a syscall. Default: set r0 = 0 (success). -/
@@ -165,6 +173,46 @@ def ERR_INVALID_PC     : Nat := 0xFFFFFFFFFFFFFFFF
   | .neg64 dst =>
     { s with regs := rf.set dst (wrapNeg (rf.get dst)), pc := pc' }
 
+  -- 32-bit ALU: result zero-extended to 64 bits
+  | .add32 dst src =>
+    { s with regs := rf.set dst (wrapAdd32 (rf.get dst) (resolveSrc rf src)), pc := pc' }
+  | .sub32 dst src =>
+    { s with regs := rf.set dst (wrapSub32 (rf.get dst) (resolveSrc rf src)), pc := pc' }
+  | .mul32 dst src =>
+    { s with regs := rf.set dst (wrapMul32 (rf.get dst) (resolveSrc rf src)), pc := pc' }
+  | .div32 dst src =>
+    let b := resolveSrc rf src % U32_MODULUS
+    if b = 0 then { s with exitCode := some ERR_DIVIDE_BY_ZERO }
+    else { s with regs := rf.set dst ((rf.get dst % U32_MODULUS / b) % U32_MODULUS), pc := pc' }
+  | .mod32 dst src =>
+    let b := resolveSrc rf src % U32_MODULUS
+    if b = 0 then { s with exitCode := some ERR_DIVIDE_BY_ZERO }
+    else { s with regs := rf.set dst (rf.get dst % U32_MODULUS % b), pc := pc' }
+  | .or32 dst src =>
+    { s with regs := rf.set dst ((rf.get dst ||| resolveSrc rf src) % U32_MODULUS), pc := pc' }
+  | .and32 dst src =>
+    { s with regs := rf.set dst ((rf.get dst &&& resolveSrc rf src) % U32_MODULUS), pc := pc' }
+  | .xor32 dst src =>
+    { s with regs := rf.set dst ((rf.get dst ^^^ resolveSrc rf src) % U32_MODULUS), pc := pc' }
+  | .lsh32 dst src =>
+    let shift := resolveSrc rf src % 32
+    { s with regs := rf.set dst ((rf.get dst <<< shift) % U32_MODULUS), pc := pc' }
+  | .rsh32 dst src =>
+    let shift := resolveSrc rf src % 32
+    { s with regs := rf.set dst ((rf.get dst % U32_MODULUS) >>> shift), pc := pc' }
+  | .arsh32 dst src =>
+    let shift := resolveSrc rf src % 32
+    let a := rf.get dst % U32_MODULUS
+    let v := if a < U32_MODULUS / 2 then a >>> shift
+      else let shifted := a >>> shift
+           let highBits := (U32_MODULUS - 1) - (U32_MODULUS / (2 ^ shift) - 1)
+           (shifted ||| highBits) % U32_MODULUS
+    { s with regs := rf.set dst v, pc := pc' }
+  | .mov32 dst src =>
+    { s with regs := rf.set dst (resolveSrc rf src % U32_MODULUS), pc := pc' }
+  | .neg32 dst =>
+    { s with regs := rf.set dst (wrapNeg32 (rf.get dst)), pc := pc' }
+
   | .jeq dst src target =>
     { s with pc := if rf.get dst = resolveSrc rf src then target else pc' }
   | .jne dst src target =>
@@ -213,6 +261,19 @@ def execute (prog : Program) (s : State) (fuel : Nat) : State :=
       | none => { s with exitCode := some ERR_INVALID_PC }
       | some insn => execute prog (step insn s) fuel'
 
+/-- Execute using a function-based instruction fetch (O(1) per step).
+    Use this for large programs where Array.get? is too expensive for simp. -/
+def executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State :=
+  match fuel with
+  | 0 => s
+  | fuel' + 1 =>
+    match s.exitCode with
+    | some _ => s
+    | none =>
+      match fetch s.pc with
+      | none => { s with exitCode := some ERR_INVALID_PC }
+      | some insn => executeFn fetch (step insn s) fuel'
+
 /-- Create an initial machine state with r1 pointing to the input buffer -/
 @[simp] def initState (inputAddr : Nat) (mem : Mem) : State where
   regs := { r1 := inputAddr, r10 := STACK_START + 0x1000 }
@@ -237,6 +298,25 @@ theorem execute_step (prog : Program) (s : State) (n : Nat) (insn : Insn)
 @[simp] theorem execute_zero (prog : Program) (s : State) :
     execute prog s 0 = s := by
   simp [execute]
+
+-- Function-based execution lemmas (for large programs)
+
+@[simp] theorem executeFn_halted (fetch : Nat → Option Insn) (s : State) (n : Nat) (code : Nat)
+    (h : s.exitCode = some code) :
+    executeFn fetch s n = s := by
+  cases n with
+  | zero => simp [executeFn]
+  | succ n => simp [executeFn, h]
+
+@[simp] theorem executeFn_zero (fetch : Nat → Option Insn) (s : State) :
+    executeFn fetch s 0 = s := by
+  simp [executeFn]
+
+theorem executeFn_step (fetch : Nat → Option Insn) (s : State) (n : Nat) (insn : Insn)
+    (h_running : s.exitCode = none)
+    (h_fetch : fetch s.pc = some insn) :
+    executeFn fetch s (n + 1) = executeFn fetch (step insn s) n := by
+  simp [executeFn, h_running, h_fetch]
 
 /-- Step N times from a state, applying instructions from a list -/
 def stepN : List Insn → State → State

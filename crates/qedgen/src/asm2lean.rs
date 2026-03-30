@@ -17,6 +17,7 @@ use std::path::Path;
 enum Value {
     Num(i64),
     Sym(String),
+    NegSym(String),  // negated symbol: -SYMBOL (for [reg - OFFSET] syntax)
 }
 
 #[derive(Debug, Clone)]
@@ -99,20 +100,32 @@ fn is_register(s: &str) -> bool {
     parse_register(s).is_some()
 }
 
-fn parse_mem_operand(s: &str) -> Option<(String, String)> {
+/// Returns (base_reg, offset_str, is_negated)
+fn parse_mem_operand(s: &str) -> Option<(String, String, bool)> {
     let s = s.trim();
     let inner = s.strip_prefix('[')?.strip_suffix(']')?.trim();
-    // Split on '+' or '-'
+    // Split on '+' first, then '-'
     if let Some(pos) = inner.find('+') {
         let base = inner[..pos].trim();
         let off = inner[pos + 1..].trim();
         if parse_register(base).is_some() {
-            return Some((base.to_string(), off.to_string()));
+            return Some((base.to_string(), off.to_string(), false));
+        }
+    }
+    // Handle [reg - offset] (subtraction — common for stack-relative addressing)
+    // Find '-' that is NOT part of a negative number at the start
+    if let Some(pos) = inner.rfind('-') {
+        if pos > 0 {
+            let base = inner[..pos].trim();
+            let off = inner[pos + 1..].trim();
+            if parse_register(base).is_some() && !off.is_empty() {
+                return Some((base.to_string(), off.to_string(), true));
+            }
         }
     }
     // No offset — just [reg]
     if parse_register(inner).is_some() {
-        return Some((inner.to_string(), "0".to_string()));
+        return Some((inner.to_string(), "0".to_string(), false));
     }
     None
 }
@@ -155,8 +168,18 @@ fn parse_operands(rest: &str, equates: &HashMap<String, i64>) -> Vec<Operand> {
         .iter()
         .map(|tok| {
             let tok = tok.trim();
-            if let Some((base, off)) = parse_mem_operand(tok) {
-                Operand::Mem(base, parse_value(&off, equates))
+            if let Some((base, off, negated)) = parse_mem_operand(tok) {
+                let val = parse_value(&off, equates);
+                let val = if negated {
+                    match val {
+                        Value::Num(n) => Value::Num(-n),
+                        Value::Sym(s) => Value::NegSym(s),
+                        Value::NegSym(s) => Value::Sym(s), // double negation
+                    }
+                } else {
+                    val
+                };
+                Operand::Mem(base, val)
             } else if is_register(tok) {
                 Operand::Reg(tok.to_string())
             } else {
@@ -253,8 +276,11 @@ fn parse(source: &str) -> Result<ParsedProgram> {
                 };
                 let operands = parse_operands(&rest, &equates_map);
                 for op in &operands {
-                    if let Operand::Mem(_, Value::Sym(s)) = op {
-                        offset_symbols.insert(s.clone());
+                    match op {
+                        Operand::Mem(_, Value::Sym(s)) | Operand::Mem(_, Value::NegSym(s)) => {
+                            offset_symbols.insert(s.clone());
+                        }
+                        _ => {}
                     }
                 }
                 instructions.push(AsmInsn {
@@ -319,7 +345,10 @@ fn parse(source: &str) -> Result<ParsedProgram> {
         }
         for op in &insn.operands {
             match op {
-                Operand::Imm(Value::Sym(s)) | Operand::Mem(_, Value::Sym(s)) => {
+                Operand::Imm(Value::Sym(s))
+                | Operand::Mem(_, Value::Sym(s))
+                | Operand::Imm(Value::NegSym(s))
+                | Operand::Mem(_, Value::NegSym(s)) => {
                     if !equates_map.contains_key(s) && !labels.contains_key(s) {
                         warnings.push(format!(
                             "line {}: undefined symbol '{}', using 0",
@@ -377,6 +406,13 @@ fn lean_value(v: &Value, equates: &HashMap<String, i64>) -> String {
                 format!("0 /- undefined: {} -/", s)
             }
         }
+        Value::NegSym(s) => {
+            if equates.contains_key(s) {
+                format!("(-{})", s)
+            } else {
+                format!("0 /- undefined: -{} -/", s)
+            }
+        }
     }
 }
 
@@ -390,10 +426,49 @@ fn format_num(n: i64) -> String {
     }
 }
 
+/// Format a value for use inside Src.imm (which takes Nat, not Int).
+/// - Negative numbers are converted to 64-bit unsigned representation.
+/// - Int-typed symbols get .toNat appended.
+fn lean_imm_value(v: &Value, equates: &HashMap<String, i64>, offset_symbols: &HashSet<String>) -> String {
+    match v {
+        Value::Num(n) => {
+            if *n < 0 {
+                // Convert negative immediate to unsigned 64-bit representation
+                let unsigned = (*n as u64) as i64;
+                format!("0x{:016x}", unsigned as u64)
+            } else {
+                format_num(*n)
+            }
+        }
+        Value::Sym(s) => {
+            if equates.contains_key(s) {
+                if offset_symbols.contains(s) {
+                    // Int-typed constant in Nat context — need .toNat
+                    format!("{}.toNat", s)
+                } else {
+                    s.clone()
+                }
+            } else {
+                format!("0 /- undefined: {} -/", s)
+            }
+        }
+        Value::NegSym(s) => {
+            if let Some(&val) = equates.get(s) {
+                // -SYMBOL as unsigned: convert the negated value
+                let neg = (-val) as u64;
+                format!("0x{:016x}", neg)
+            } else {
+                format!("0 /- undefined: -{} -/", s)
+            }
+        }
+    }
+}
+
 fn lean_src(
     op: &Operand,
     equates: &HashMap<String, i64>,
     labels: &HashMap<String, usize>,
+    offset_symbols: &HashSet<String>,
 ) -> String {
     match op {
         Operand::Reg(r) => format!("(.reg {})", lean_reg(r)),
@@ -404,7 +479,7 @@ fn lean_src(
                     return format!("{}", idx);
                 }
             }
-            format!("(.imm {})", lean_value(v, equates))
+            format!("(.imm {})", lean_imm_value(v, equates, offset_symbols))
         }
         _ => "(.imm 0)".to_string(),
     }
@@ -434,6 +509,7 @@ fn emit_insn(
     insn: &AsmInsn,
     equates: &HashMap<String, i64>,
     labels: &HashMap<String, usize>,
+    offset_symbols: &HashSet<String>,
 ) -> Result<String> {
     let mn = insn.mnemonic.as_str();
     let ops = &insn.operands;
@@ -459,7 +535,8 @@ fn emit_insn(
             _ => bail!("line {}: lddw dst must be register", insn.line_no),
         };
         let val = match &ops[1] {
-            Operand::Imm(v) => lean_value(v, equates),
+            // lddw loads a Nat, so use imm_value for proper unsigned handling
+            Operand::Imm(v) => lean_imm_value(v, equates, offset_symbols),
             _ => bail!("line {}: lddw src must be immediate", insn.line_no),
         };
         return Ok(format!(".lddw {} {}", dst, val));
@@ -489,7 +566,8 @@ fn emit_insn(
             _ => bail!("line {}: st dst must be memory operand", insn.line_no),
         };
         let imm = match &ops[1] {
-            Operand::Imm(v) => lean_value(v, equates),
+            // st takes imm : Nat, so use imm_value for proper type handling
+            Operand::Imm(v) => lean_imm_value(v, equates, offset_symbols),
             _ => bail!("line {}: st src must be immediate", insn.line_no),
         };
         return Ok(format!(".st {} {} {} {}", width, dst, off, imm));
@@ -499,23 +577,25 @@ fn emit_insn(
     let alu_ops = [
         "add64", "sub64", "mul64", "div64", "mod64", "or64", "and64", "xor64", "lsh64",
         "rsh64", "arsh64", "mov64",
+        "add32", "sub32", "mul32", "div32", "mod32", "or32", "and32", "xor32", "lsh32",
+        "rsh32", "arsh32", "mov32",
     ];
     if alu_ops.contains(&mn) {
         let dst = match &ops[0] {
             Operand::Reg(r) => lean_reg(r),
             _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
-        let src = lean_src(&ops[1], equates, labels);
+        let src = lean_src(&ops[1], equates, labels, offset_symbols);
         return Ok(format!(".{} {} {}", mn, dst, src));
     }
 
-    // neg64 (unary)
-    if mn == "neg64" {
+    // neg (unary)
+    if mn == "neg64" || mn == "neg32" {
         let dst = match &ops[0] {
             Operand::Reg(r) => lean_reg(r),
-            _ => bail!("line {}: neg64 dst must be register", insn.line_no),
+            _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
-        return Ok(format!(".neg64 {}", dst));
+        return Ok(format!(".{} {}", mn, dst));
     }
 
     // Conditional jumps: j{eq,ne,gt,ge,lt,le,sgt,sge,slt,sle,set} dst, src, target
@@ -527,7 +607,7 @@ fn emit_insn(
             Operand::Reg(r) => lean_reg(r),
             _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
-        let src = lean_src(&ops[1], equates, labels);
+        let src = lean_src(&ops[1], equates, labels, offset_symbols);
         let target = lean_jump_target(&ops[2], equates, labels);
         return Ok(format!(".{} {} {} {}", mn, dst, src, target));
     }
@@ -603,26 +683,59 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         writeln!(out)?;
     }
 
-    // Program array
-    writeln!(out, "/-! ## Program -/\n")?;
-    writeln!(out, "@[simp] def prog : Program := #[")?;
+    // For large programs (>64 instructions), emit a function-based lookup
+    // for O(1) simp performance. Small programs use @[simp] on the array directly.
+    let use_fn_lookup = prog.instructions.len() > 64;
 
-    for (idx, insn) in prog.instructions.iter().enumerate() {
-        let lean = emit_insn(insn, &equates_map, &prog.labels)?;
-        let comma = if idx + 1 < prog.instructions.len() {
-            ","
-        } else {
-            ""
-        };
-        let comment = if let Some(ref lbl) = insn.label {
-            format!("-- {}: {}", idx, lbl)
-        } else {
-            format!("-- {}", idx)
-        };
-        writeln!(out, "  {}{:pad$}{}", lean, comma, comment, pad = 50_usize.saturating_sub(lean.len() + comma.len()))?;
+    if use_fn_lookup {
+        writeln!(out, "/-! ## Program (function-based fetch for O(1) simp lookup) -/\n")?;
+        writeln!(out, "@[simp] def progAt : Nat → Option QEDGen.Solana.SBPF.Insn")?;
+
+        for (idx, insn) in prog.instructions.iter().enumerate() {
+            let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
+            let comment = if let Some(ref lbl) = insn.label {
+                format!("-- {}: {}", idx, lbl)
+            } else {
+                format!("-- {}", idx)
+            };
+            writeln!(out, "  | {} => some ({})  {}", idx, lean, comment)?;
+        }
+
+        writeln!(out, "  | _ => none\n")?;
+
+        writeln!(out, "def prog : Program := #[")?;
+        for (idx, insn) in prog.instructions.iter().enumerate() {
+            let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
+            let comma = if idx + 1 < prog.instructions.len() {
+                ","
+            } else {
+                ""
+            };
+            writeln!(out, "  {}{}", lean, comma)?;
+        }
+        writeln!(out, "]\n")?;
+    } else {
+        writeln!(out, "/-! ## Program -/\n")?;
+        writeln!(out, "@[simp] def prog : Program := #[")?;
+
+        for (idx, insn) in prog.instructions.iter().enumerate() {
+            let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
+            let comma = if idx + 1 < prog.instructions.len() {
+                ","
+            } else {
+                ""
+            };
+            let comment = if let Some(ref lbl) = insn.label {
+                format!("-- {}: {}", idx, lbl)
+            } else {
+                format!("-- {}", idx)
+            };
+            writeln!(out, "  {}{:pad$}{}", lean, comma, comment, pad = 50_usize.saturating_sub(lean.len() + comma.len()))?;
+        }
+
+        writeln!(out, "]\n")?;
     }
 
-    writeln!(out, "]\n")?;
     writeln!(out, "end {}", namespace)?;
 
     Ok(out)
