@@ -1,4 +1,5 @@
 mod api;
+mod asm2lean;
 mod consolidate;
 mod project;
 mod spec;
@@ -95,6 +96,22 @@ enum Commands {
         output_dir: PathBuf,
     },
 
+    /// Transpile an sBPF assembly file (.s) to a Lean 4 program module
+    #[command(name = "asm2lean")]
+    Asm2Lean {
+        /// Path to the sBPF assembly source file
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Path for the generated Lean 4 file
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Lean namespace (default: derived from output filename)
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+
     /// Set up the global validation workspace (scaffold + Mathlib cache)
     Setup {
         /// Directory for the validation workspace (default: platform cache dir)
@@ -157,6 +174,14 @@ async fn main() -> Result<()> {
             output_dir,
         } => {
             consolidate::consolidate_proofs(&input_dir, &output_dir)?;
+        }
+
+        Commands::Asm2Lean {
+            input,
+            output,
+            namespace,
+        } => {
+            asm2lean::asm2lean(&input, &output, namespace.as_deref())?;
         }
 
         Commands::Setup { workspace } => {
