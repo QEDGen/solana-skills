@@ -1,10 +1,11 @@
-# Dropset RegisterMarket Verification Spec v1.0
+# Dropset RegisterMarket Verification Spec v1.1
 
 Dropset is a Solana on-chain order book (sBPF assembly). RegisterMarket creates a new
 market account as a PDA derived from `[base_mint_pubkey, quote_mint_pubkey]`, ensuring
 each token pair maps to exactly one market.
 
 Reference: https://docs.dropset.io/program/markets.html#registration
+Algorithm: https://docs.dropset.io/program/algorithm-index.html (REGISTER-MARKET)
 
 ## 0. Security Goals
 
@@ -67,13 +68,22 @@ The program operates on raw sBPF memory. Key regions:
 2. `insn_len == 1`
 3. `discriminant == 0`
 
-**Effects**:
-1. Validate all preconditions and account guards (see §3)
-2. Derive market PDA from `[base_mint_pubkey, quote_mint_pubkey]`
-3. Verify derived PDA matches provided market pubkey (4 × 8-byte chunks)
-4. Compute rent-exempt lamports from Rent sysvar data
-5. Build CreateAccount CPI (System Program) with market PDA as signer
-6. Invoke `sol_invoke_signed_c`
+**Effects** (from [REGISTER-MARKET algorithm](https://docs.dropset.io/program/algorithm-index.html)):
+1. Validate preconditions: `n_accounts >= 10`, `insn_len == 1`
+2. Check user account freshness (`data_len == 0`)
+3. Check market account uniqueness (`duplicate == NON_DUP_MARKER`) and freshness (`data_len == 0`)
+4. Check base mint uniqueness; store base mint pubkey as PDA seed
+5. Advance input pointer by `base_mint.padded_data_len` (dynamic, aligned to 8 bytes)
+6. Check quote mint uniqueness at shifted offset; store quote mint pubkey as PDA seed
+7. Advance to System Program account via `quote_mint.padded_data_len + EmptyAccount.size`
+8. Derive market PDA via `sol_try_find_program_address([base_mint, quote_mint], program_id)`
+9. Verify derived PDA matches market account pubkey
+10. Check System Program account uniqueness and known address
+11. Advance to Rent sysvar account
+12. Check Rent sysvar account uniqueness and known address
+13. Compute rent-exempt lamports from Rent sysvar data (`acct_size × lamports_per_byte`)
+14. Build CreateAccount CPI (System Program) with market PDA as signer
+15. Invoke `sol_invoke_signed_c`
 
 **Postconditions**:
 - Market account exists, owned by Dropset program
@@ -117,20 +127,54 @@ then `exitCode = 5` (E_MARKET_ACCOUNT_IS_DUPLICATE).
 if prior checks pass, market not duplicate, and `mktDataLen ≠ 0`
 then `exitCode = 6` (E_MARKET_HAS_DATA).
 
-### 3.7 Base Mint Uniqueness (future)
+### 3.7 Base Mint Uniqueness
 
 **P7**: For all inputs where prior checks pass and `baseMintDup ≠ 255`,
 then `exitCode = 7` (E_BASE_MINT_IS_DUPLICATE).
 
-### 3.8 Quote Mint Uniqueness (future)
+### 3.8 Quote Mint Uniqueness
 
 **P8**: For all inputs where prior checks pass and `quoteMintDup ≠ 255`,
 then `exitCode = 8` (E_QUOTE_MINT_IS_DUPLICATE).
+
+Note: The quote mint offset is dynamic — the input pointer is shifted by
+`base_mint.padded_data_len` (aligned to 8 bytes via `add64` + `and64`). The proof
+requires a stack-input separation hypothesis and memory disjointness axioms to read
+through stack writes.
 
 ### 3.9 PDA Integrity (future)
 
 **P9**: For all inputs where prior checks pass and derived PDA ≠ provided market pubkey,
 then `exitCode = 9` (E_INVALID_MARKET_PUBKEY).
+
+Note: Requires modeling `sol_try_find_program_address` syscall behavior. The PDA
+check compares 4 × 8-byte chunks of the derived address against the market account pubkey.
+
+### 3.10 System Program Uniqueness (future)
+
+**P10**: For all inputs where prior checks pass and System Program `duplicate ≠ 255`,
+then `exitCode = 10` (E_SYSTEM_PROGRAM_IS_DUPLICATE).
+
+Note: System Program account is reached after advancing past quote mint by
+`quote_mint.padded_data_len + EmptyAccount.size` — another dynamic offset.
+
+### 3.11 System Program Identity (future)
+
+**P11**: For all inputs where prior checks pass and System Program pubkey ≠ known address,
+then `exitCode = 11` (E_INVALID_SYSTEM_PROGRAM_PUBKEY).
+
+### 3.12 Rent Sysvar Uniqueness (future)
+
+**P12**: For all inputs where prior checks pass and Rent sysvar `duplicate ≠ 255`,
+then `exitCode = 12` (E_RENT_SYSVAR_IS_DUPLICATE).
+
+Note: Rent sysvar is reached after advancing past System Program by
+`system_program.padded_data_len + EmptyAccount.size` — a third dynamic offset.
+
+### 3.13 Rent Sysvar Identity (future)
+
+**P13**: For all inputs where prior checks pass and Rent sysvar pubkey ≠ known address,
+then `exitCode = 13` (E_INVALID_RENT_SYSVAR_PUBKEY).
 
 ## 4. Trust Boundary
 
@@ -149,8 +193,8 @@ then `exitCode = 9` (E_INVALID_MARKET_PUBKEY).
 | 4    | UserHasData                   | **P4**   |
 | 5    | MarketAccountIsDuplicate      | **P5**   |
 | 6    | MarketHasData                 | **P6**   |
-| 7    | BaseMintIsDuplicate           | Open     |
-| 8    | QuoteMintIsDuplicate          | Open     |
+| 7    | BaseMintIsDuplicate           | **P7**   |
+| 8    | QuoteMintIsDuplicate          | **P8**   |
 | 9    | InvalidMarketPubkey           | Open     |
 | 10   | SystemProgramIsDuplicate      | Open     |
 | 11   | InvalidSystemProgramPubkey    | Open     |
@@ -167,6 +211,10 @@ then `exitCode = 9` (E_INVALID_MARKET_PUBKEY).
 | P4       | **Verified** | `rejects_user_has_data`                      |
 | P5       | **Verified** | `rejects_market_duplicate`                   |
 | P6       | **Verified** | `rejects_market_has_data`                    |
-| P7       | **Open**     |                                              |
-| P8       | **Open**     |                                              |
+| P7       | **Verified** | `rejects_base_mint_duplicate`                |
+| P8       | **Verified** | `rejects_quote_mint_duplicate`               |
 | P9       | **Open**     |                                              |
+| P10      | **Open**     |                                              |
+| P11      | **Open**     |                                              |
+| P12      | **Open**     |                                              |
+| P13      | **Open**     |                                              |

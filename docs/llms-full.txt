@@ -306,9 +306,9 @@ A perpetual DEX risk engine with protected principal, junior profit claims, and 
 
 A native sBPF lamport transfer program. Properties verified: input validation, duplicate account rejection, balance sufficiency checks.
 
-### Dropset (sBPF Assembly) — 6/9 properties verified (3 in progress)
+### Dropset (sBPF Assembly) — 8/13 properties verified
 
-An on-chain order book's RegisterMarket instruction (180 sBPF instructions). Properties verified: discriminant dispatch, account count validation, instruction length validation, user account freshness, market account uniqueness, market account freshness. Remaining: base/quote mint uniqueness, PDA integrity.
+An on-chain order book's RegisterMarket instruction (180 sBPF instructions). Properties verified: discriminant dispatch, account count validation, instruction length validation, user account freshness, market account uniqueness, market account freshness, base mint uniqueness, quote mint uniqueness. Remaining: PDA integrity, System Program uniqueness/identity, Rent sysvar uniqueness/identity.
 
 ## Environment Variables
 
