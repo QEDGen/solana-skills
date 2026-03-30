@@ -98,5 +98,5 @@
    "inputRev": "main",
    "inherited": true,
    "configFile": "lakefile.toml"}],
- "name": "qedgenPercolatorProofs",
+ "name": "escrowProofs",
  "lakeDir": ".lake"}

@@ -10,7 +10,7 @@ package escrowProofs
 require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "v4.15.0"
 require qedgenSupport from
-  "./lean_support"
+  "./lean_solana"
 
 @[default_target]
 lean_lib EscrowProofs where
@@ -36,7 +36,7 @@ This will verify all theorems and ensure they compile correctly.
 All proofs are contained in `EscrowProofs.lean`, organized into namespaces to avoid naming conflicts:
 - Each proof has its own namespace
 - Shared definitions from the QEDGen Solana library are imported at the top
-- The `lean_support` directory contains the Solana modeling framework
+- The `lean_solana` directory contains the Solana modeling framework
 
 ## Generated Proofs
 
@@ -184,20 +184,12 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     // Write the consolidated proof file
     fs::write(output_dir.join("EscrowProofs.lean"), consolidated)?;
 
-    // Copy lean_support from one of the proof directories
-    let first_proof_dir = proof_files[0].parent().unwrap();
-    let source_support = first_proof_dir.join("lean_support");
-    let dest_support = output_dir.join("lean_support");
+    // Write lean_solana from embedded sources
+    crate::project::update_lean_solana(output_dir)?;
 
-    if source_support.exists() {
-        copy_dir_recursive(&source_support, &dest_support)?;
-    }
-
-    // Copy lean-toolchain
-    let source_toolchain = first_proof_dir.join("lean-toolchain");
-    if source_toolchain.exists() {
-        fs::copy(&source_toolchain, output_dir.join("lean-toolchain"))?;
-    }
+    // Write lean-toolchain
+    let toolchain = include_str!("../../../lean_solana/lean-toolchain");
+    fs::write(output_dir.join("lean-toolchain"), toolchain)?;
 
     // Write lakefile, README, and .gitignore
     fs::write(output_dir.join("lakefile.lean"), CONSOLIDATED_LAKEFILE)?;
@@ -208,30 +200,9 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     println!("  - EscrowProofs.lean");
     println!("  - lakefile.lean");
     println!("  - lean-toolchain");
-    println!("  - lean_support/");
+    println!("  - lean_solana/");
     println!("  - README.md");
     println!("  - .gitignore");
-
-    Ok(())
-}
-
-/// Recursively copy a directory
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !dst.exists() {
-        fs::create_dir_all(dst)?;
-    }
-
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let path = entry.path();
-        let dest_path = dst.join(entry.file_name());
-
-        if path.is_dir() {
-            copy_dir_recursive(&path, &dest_path)?;
-        } else {
-            fs::copy(&path, &dest_path)?;
-        }
-    }
 
     Ok(())
 }

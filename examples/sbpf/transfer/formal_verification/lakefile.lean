@@ -4,7 +4,7 @@ open Lake DSL
 package transferProofs
 
 require qedgenSupport from
-  "./lean_support"
+  "../../../../lean_solana"
 
 lean_lib TransferProg where
   roots := #[`TransferProg]

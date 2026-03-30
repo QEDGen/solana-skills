@@ -4,7 +4,7 @@ open Lake DSL
 package treeProofs
 
 require qedgenSupport from
-  "./lean_support"
+  "../../../../lean_solana"
 
 lean_lib TreeProg where
   roots := #[`TreeProg]

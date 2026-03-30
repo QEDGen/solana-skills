@@ -20,4 +20,4 @@ QEDGen verifies your core business logic. Your agent reads the codebase, writes 
 ## Optional
 
 - [Verification Scope](https://raw.githubusercontent.com/qedgen/solana-skills/main/example/escrow/formal_verification/VERIFICATION_SCOPE.md): What is verified vs. trusted as axioms
-- [Lean Support Library](https://raw.githubusercontent.com/qedgen/solana-skills/main/crates/qedgen/lean_support/QEDGen.lean): Root import for the Solana axiom library
+- [Lean Support Library](https://raw.githubusercontent.com/qedgen/solana-skills/main/lean_solana/QEDGen.lean): Root import for the Solana axiom library

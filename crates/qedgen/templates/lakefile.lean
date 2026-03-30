@@ -6,7 +6,7 @@ package qedgenProof
 require mathlib from git
   "https://github.com/leanprover-community/mathlib4.git" @ "v4.15.0"
 require qedgenSupport from
-  "./lean_support"
+  "./lean_solana"
 
 @[default_target]
 lean_lib Best where

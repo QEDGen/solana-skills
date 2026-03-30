@@ -32,7 +32,7 @@ When generating proofs for a project:
 ./bin/qedgen generate ... --output-dir /tmp/proofs
 ```
 
-The generated Lean project will include a `lean_support/` directory with this library.
+The generated Lean project will include a `lean_solana/` directory with this library.
 
 ### Option 2: Symlink (For Development)
 
@@ -40,7 +40,7 @@ If you're actively developing the support library:
 
 ```bash
 cd your-project/formal_verification/
-ln -s ../../../crates/qedgen/lean_support .
+ln -s path/to/lean_solana .
 ```
 
 ## Adding New Axioms

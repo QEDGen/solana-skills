@@ -4,7 +4,7 @@ open Lake DSL
 package slippageProofs
 
 require qedgenSupport from
-  "./lean_support"
+  "../../../../lean_solana"
 
 lean_lib SlippageProg where
   roots := #[`SlippageProg]

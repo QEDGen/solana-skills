@@ -88,7 +88,7 @@ pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
 /// On first call (no lakefile.lean exists): sets up the full project scaffold,
 /// runs `lake update` to resolve dependencies, and fetches the Mathlib cache.
 ///
-/// On subsequent calls: only updates the lean_support/ files (which may change
+/// On subsequent calls: only updates the lean_solana/ files (which may change
 /// when axioms are updated), preserving .lake/ build cache.
 async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
     if !workspace.join("lakefile.lean").exists() {
@@ -99,7 +99,7 @@ async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
 
         fetch_or_build_mathlib(workspace).await;
     } else {
-        crate::project::update_lean_support(workspace)?;
+        crate::project::update_lean_solana(workspace)?;
     }
 
     Ok(())

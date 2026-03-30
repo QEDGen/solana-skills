@@ -105,9 +105,8 @@ Create the project structure:
 
 ```
 formal_verification/
-  lakefile.lean          # import lean_support and Mathlib
+  lakefile.lean          # require qedgenSupport from path/to/lean_solana
   lean-toolchain         # leanprover/lean4:v4.15.0
-  lean_support/          # Solana axiom library (copy from qedgen)
   Proofs.lean            # root import: import Proofs.AccessControl etc.
   Proofs/
     AccessControl.lean

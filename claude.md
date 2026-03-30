@@ -17,7 +17,7 @@ QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 
 cargo build --release
 
 # Build just the Lean support library
-cd crates/qedgen/lean_support
+cd lean_solana
 lake build
 ```
 
@@ -28,7 +28,7 @@ lake build
 cargo test
 
 # Test Lean support library axioms
-cd crates/qedgen/lean_support
+cd lean_solana
 lake env lean test_lemmas.lean
 
 # Build the example escrow verification
@@ -84,7 +84,7 @@ qedgen asm2lean \
 - `consolidate.rs` - Merges multiple proof projects
 - `spec.rs` - SPEC.md generation from Anchor IDL
 
-**`crates/qedgen/lean_support/`** - Canonical Lean axioms for Solana
+**`lean_solana/`** - Standalone Lean 4 library: Solana axioms (QEDGen.Solana)
 - `QEDGen/Solana/Account.lean` - Account structure
 - `QEDGen/Solana/Authority.lean` - Authorization predicates
 - `QEDGen/Solana/Cpi.lean` - Generic CPI envelope (invoke_signed model)
@@ -141,11 +141,11 @@ See `examples/rust/escrow/formal_verification/VERIFICATION_SCOPE.md` for details
 
 When a proof pattern is reusable across programs:
 
-1. Add to the appropriate module in `crates/qedgen/lean_support/QEDGen/Solana/`
+1. Add to the appropriate module in `lean_solana/QEDGen/Solana/`
 2. Document the trust assumption with a comment
 3. Export in `QEDGen.lean`
 4. Update SKILL.md support library API section
-5. Test: `cd crates/qedgen/lean_support && lake build`
+5. Test: `cd lean_solana && lake build`
 
 ### Debugging Failed Proofs
 

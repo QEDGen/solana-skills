@@ -8,16 +8,16 @@ const MAIN_LEAN: &str = include_str!("../templates/Main.lean");
 const GITIGNORE: &str = include_str!("../templates/.gitignore");
 const README: &str = include_str!("../templates/README.lean.md");
 
-// Embed lean_support files
-const SUPPORT_LAKEFILE: &str = include_str!("../lean_support/lakefile.lean");
-const SUPPORT_TOOLCHAIN: &str = include_str!("../lean_support/lean-toolchain");
-const SUPPORT_ROOT: &str = include_str!("../lean_support/QEDGen.lean");
-const SUPPORT_ACCOUNT: &str = include_str!("../lean_support/QEDGen/Solana/Account.lean");
-const SUPPORT_AUTHORITY: &str = include_str!("../lean_support/QEDGen/Solana/Authority.lean");
-const SUPPORT_STATE: &str = include_str!("../lean_support/QEDGen/Solana/State.lean");
-const SUPPORT_CPI: &str = include_str!("../lean_support/QEDGen/Solana/Cpi.lean");
-const SUPPORT_VALID: &str = include_str!("../lean_support/QEDGen/Solana/Valid.lean");
-const SUPPORT_SOLANA: &str = include_str!("../lean_support/QEDGen/Solana.lean");
+// Embed lean_solana files (from repo root lean_solana/)
+const SUPPORT_LAKEFILE: &str = include_str!("../../../lean_solana/lakefile.lean");
+const SUPPORT_TOOLCHAIN: &str = include_str!("../../../lean_solana/lean-toolchain");
+const SUPPORT_ROOT: &str = include_str!("../../../lean_solana/QEDGen.lean");
+const SUPPORT_ACCOUNT: &str = include_str!("../../../lean_solana/QEDGen/Solana/Account.lean");
+const SUPPORT_AUTHORITY: &str = include_str!("../../../lean_solana/QEDGen/Solana/Authority.lean");
+const SUPPORT_STATE: &str = include_str!("../../../lean_solana/QEDGen/Solana/State.lean");
+const SUPPORT_CPI: &str = include_str!("../../../lean_solana/QEDGen/Solana/Cpi.lean");
+const SUPPORT_VALID: &str = include_str!("../../../lean_solana/QEDGen/Solana/Valid.lean");
+const SUPPORT_SOLANA: &str = include_str!("../../../lean_solana/QEDGen/Solana.lean");
 
 pub fn setup_lean_project(output_dir: &Path) -> Result<()> {
     // Write template files
@@ -27,21 +27,21 @@ pub fn setup_lean_project(output_dir: &Path) -> Result<()> {
     std::fs::write(output_dir.join(".gitignore"), GITIGNORE)?;
     std::fs::write(output_dir.join("README.md"), README)?;
 
-    // Write lean_support directory
-    write_lean_support(output_dir)?;
+    // Write lean_solana directory
+    write_lean_solana(output_dir)?;
 
     Ok(())
 }
 
-/// Update only the lean_support/ files without touching lakefile.lean or
+/// Update only the lean_solana/ files without touching lakefile.lean or
 /// lean-toolchain. This preserves the .lake/ build cache while ensuring
 /// axiom definitions are current.
-pub fn update_lean_support(output_dir: &Path) -> Result<()> {
-    write_lean_support(output_dir)
+pub fn update_lean_solana(output_dir: &Path) -> Result<()> {
+    write_lean_solana(output_dir)
 }
 
-fn write_lean_support(output_dir: &Path) -> Result<()> {
-    let support_dir = output_dir.join("lean_support");
+fn write_lean_solana(output_dir: &Path) -> Result<()> {
+    let support_dir = output_dir.join("lean_solana");
     std::fs::create_dir_all(&support_dir)?;
     std::fs::write(support_dir.join("lakefile.lean"), SUPPORT_LAKEFILE)?;
     std::fs::write(support_dir.join("lean-toolchain"), SUPPORT_TOOLCHAIN)?;
