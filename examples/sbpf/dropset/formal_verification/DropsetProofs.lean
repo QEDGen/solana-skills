@@ -5,6 +5,9 @@
 --
 -- We verify the validation prefix: discriminant dispatch, account count,
 -- instruction length, and per-account duplicate/data checks.
+--
+-- P1-P7: Use wp_exec for one-shot proofs (simple linear paths).
+-- P8-P9: Use manual executeFn_step (memory disjointness through stack writes).
 
 import QEDGen.Solana.SBPF
 import DropsetProg
@@ -52,25 +55,7 @@ theorem rejects_invalid_discriminant
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 8).exitCode
       = some E_INVALID_DISCRIMINANT := by
   have h_ne : ¬(readU8 mem insnAddr = DISC_REGISTER_MARKET) := by rw [h_disc_val]; exact h_disc_ne
-  -- 24: ldx.dw r3, [r1+0]
-  rw [show (8 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  -- 25: ldx.dw r4, [r2-8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  -- 26: ldx.b r5, [r2+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  -- 27: jeq r5, 0, 30 → falls through (disc ≠ 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne]
-  -- 28: mov32 r0, E_INVALID_DISCRIMINANT
-  rw [executeFn_step _ _ _ _ rfl (show progAt 28 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 29: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 29 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, U32_MODULUS]
 
 /-! ## P2: invalid account count → error 3
 
@@ -87,28 +72,7 @@ theorem rejects_invalid_account_count
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 10).exitCode
       = some E_INVALID_NUMBER_OF_ACCOUNTS := by
   have h_lt : readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN := by rw [h_num]; exact h_few
-  -- 24: ldx.dw r3, [r1+0]
-  rw [show (10 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  -- 25: ldx.dw r4, [r2-8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  -- 26: ldx.b r5, [r2+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  -- 27: jeq r5, 0, 30 → branch taken (disc = 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30: jlt r3, 10, 2 → branch taken (nAccounts < 10)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_lt]
-  -- 2: mov32 r0, E_INVALID_NUMBER_OF_ACCOUNTS
-  rw [executeFn_step _ _ _ _ rfl (show progAt 2 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 3: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 3 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, U32_MODULUS]
 
 /-! ## P3: invalid instruction length → error 2
 
@@ -128,31 +92,7 @@ theorem rejects_invalid_instruction_length
       = some E_INVALID_INSTRUCTION_LENGTH := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   have h_ne : ¬(readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN) := by rw [h_ilen]; exact h_ne_len
-  -- 24: ldx.dw r3, [r1+0]
-  rw [show (12 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  -- 25: ldx.dw r4, [r2-8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  -- 26: ldx.b r5, [r2+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  -- 27: jeq r5, 0, 30 → branch taken
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30: jlt r3, 10, 2 → falls through (n_accounts ≥ 10)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  -- 31: jne r4, 1, 0 → branch taken (insn_len ≠ 1)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne]
-  -- 0: mov32 r0, E_INVALID_INSTRUCTION_LENGTH
-  rw [executeFn_step _ _ _ _ rfl (show progAt 0 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 1: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 1 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, U32_MODULUS]
 
 /-! ## P4: user has data → error 4
 
@@ -175,37 +115,7 @@ theorem rejects_user_has_data
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   have h_ilen_eq : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN := by rw [h_ilen, h_ilen_ok]
   have h_udl_ne' : ¬(readU64 mem (inputAddr + 88) = DATA_LEN_ZERO) := by rw [h_udl]; exact h_udl_ne
-  -- 24: ldx.dw r3, [r1+0]
-  rw [show (14 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  -- 25: ldx.dw r4, [r2-8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  -- 26: ldx.b r5, [r2+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  -- 27: jeq r5, 0, 30 → branch taken
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30: jlt r3, 10, 2 → falls through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  -- 31: jne r4, 1, 0 → falls through (insn_len = 1)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen_eq]
-  -- 32: ldx.dw r9, [r1+88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  -- 33: jne r9, 0, 4 → branch taken (userDataLen ≠ 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl_ne']
-  -- 4: mov32 r0, E_USER_HAS_DATA
-  rw [executeFn_step _ _ _ _ rfl (show progAt 4 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 5: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 5 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, ea_88, U32_MODULUS]
 
 /-! ## P5: market account is duplicate → error 5
 
@@ -227,40 +137,7 @@ theorem rejects_market_duplicate
       = some E_MARKET_ACCOUNT_IS_DUPLICATE := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   have h_mdup' : ¬(readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER) := by rw [h_mdup]; exact h_mdup_ne
-  -- 24-27: entrypoint → register_market
-  rw [show (16 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30: jlt → falls through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  -- 31: jne → falls through (insn_len ok)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen]
-  -- 32: ldx r9, [r1+88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  -- 33: jne r9, 0, 4 → falls through (user data = 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl]
-  -- 34: ldx.b r9, [r1+10344]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
-  -- 35: jne r9, 255, 6 → branch taken (dup ≠ 255)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdup']
-  -- 6: mov32 r0, E_MARKET_ACCOUNT_IS_DUPLICATE
-  rw [executeFn_step _ _ _ _ rfl (show progAt 6 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 7: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 7 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, ea_88, ea_10344, U32_MODULUS]
 
 /-! ## P6: market has data → error 6
 
@@ -283,43 +160,7 @@ theorem rejects_market_has_data
       = some E_MARKET_HAS_DATA := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   have h_mdl' : ¬(readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO) := by rw [h_mdl]; exact h_mdl_ne
-  -- 24-27: entrypoint → register_market
-  rw [show (18 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30-31: acct count + insn len pass
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen]
-  -- 32-33: user data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl]
-  -- 34-35: market dup check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdup]
-  -- 36: ldx.dw r9, [r1+10424]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 36 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10424]
-  -- 37: jne r9, 0, 8 → branch taken (market data ≠ 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 37 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdl']
-  -- 8: mov32 r0, E_MARKET_HAS_DATA
-  rw [executeFn_step _ _ _ _ rfl (show progAt 8 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 9: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 9 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, ea_88, ea_10344, ea_10424, U32_MODULUS]
 
 /-! ## P7: base mint is duplicate → error 7
 
@@ -346,48 +187,7 @@ theorem rejects_base_mint_duplicate
       = some E_BASE_MINT_IS_DUPLICATE := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   have h_bdup' : ¬(readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER) := by rw [h_bdup]; exact h_bdup_ne
-  -- 24-27: entrypoint → register_market
-  rw [show (20 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30-31: acct count + insn len pass
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen]
-  -- 32-33: user data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl]
-  -- 34-35: market dup check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdup]
-  -- 36-37: market data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 36 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10424]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 37 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdl]
-  -- 38: ldx.b r9, [r1+20680]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 38 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20680]
-  -- 39: jne r9, 255, 10 → branch taken (baseDup ≠ 255)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 39 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_bdup']
-  -- 10: mov32 r0, E_BASE_MINT_IS_DUPLICATE
-  rw [executeFn_step _ _ _ _ rfl (show progAt 10 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 11: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 11 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, ea_88, ea_10344, ea_10424, ea_20680, U32_MODULUS]
 
 /-! ## P8: quote mint is duplicate → error 8
 
@@ -399,7 +199,9 @@ theorem rejects_base_mint_duplicate
    Complexity: instructions 42/44 write PDA seeds to the stack (mutating mem),
    instruction 47 is and64 with -8 for 8-byte alignment, and instruction 49
    reads from a computed address. The proof requires memory disjointness
-   axioms to show stack writes don't affect input buffer reads. -/
+   axioms to show stack writes don't affect input buffer reads.
+
+   Uses manual executeFn_step due to memory disjointness between steps. -/
 
 private theorem ea_20760 (b : Nat) : effectiveAddr b RM_MISC_BASE_DATA_LEN_OFF = b + 20760 := by
   unfold effectiveAddr RM_MISC_BASE_DATA_LEN_OFF; omega
@@ -426,18 +228,6 @@ private theorem ea_base_addr_off (b : Nat) :
     effectiveAddr b RM_MISC_BASE_ADDR_OFF = b + 20688 := by
   unfold effectiveAddr RM_MISC_BASE_ADDR_OFF; omega
 
-/-! ## P8: quote mint is duplicate → error 8
-
-   Prior checks pass, base mint not dup, but the quote mint at the shifted
-   input position has dup ≠ 255.
-
-   Path: 24 → … → 39(fall) → 40-48 (pointer arith + stack writes) → 49 → 50 → 12 → 13
-
-   Complexity: instructions 42/44 write PDA seeds to the stack (mutating mem),
-   instruction 47 is and64 with -8 for 8-byte alignment, and instruction 49
-   reads from a computed address. The proof requires memory disjointness
-   axioms to show stack writes don't affect input buffer reads. -/
-
 set_option maxHeartbeats 8000000 in
 theorem rejects_quote_mint_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
@@ -453,16 +243,12 @@ theorem rejects_quote_mint_duplicate
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
     -- Base data length and quote dup at shifted address
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
-    -- Quote mint dup at the shifted address: the program computes
-    --   shifted = ((baseDataLen + 7) % 2^64 &&& (2^64 - 8)) % 2^64 + inputAddr
-    -- and reads the duplicate marker at shifted + 31016.
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = quoteDup)
     (h_qdup_ne: quoteDup ≠ ACCT_NON_DUP_MARKER)
     -- Stack-input separation (Solana runtime guarantee)
     (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    -- The quote mint read address is below the stack
     (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
                   inputAddr + 31016 < STACK_START) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 30).exitCode
@@ -471,103 +257,37 @@ theorem rejects_quote_mint_duplicate
   have h_qdup' : ¬(readU8 mem
       (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
         inputAddr + 31016) = ACCT_NON_DUP_MARKER) := by rw [h_qdup]; exact h_qdup_ne
-  -- ── Phase 1: Common prefix (insns 24-39, 14 steps) ──
-  -- All prior validation checks pass, reaching pc=40.
-  rw [show (30 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 from rfl]
-  -- 24-27: entrypoint → disc check → register_market
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30-31: acct count + insn len pass
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen]
-  -- 32-33: user data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl]
-  -- 34-35: market dup check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdup]
-  -- 36-37: market data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 36 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10424]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 37 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdl]
-  -- 38-39: base dup check passes (base dup = 255, fall through)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 38 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20680]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 39 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_bdup]
-  -- ── Phase 2: Pointer arithmetic (insns 40-48, 9 steps) ──
-  -- Computes shifted input address; writes PDA seeds to stack.
-  -- 40: mov64 r9, r1
-  rw [executeFn_step _ _ _ _ rfl (show progAt 40 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 41: add64 r9, RM_MISC_BASE_ADDR_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 41 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, ea_base_addr_off]
-  -- 42: stx.dw [r10-664], r9  (write PDA seed base addr to stack)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 42 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_addr]
-  -- 43: mov64 r9, SIZE_OF_ADDRESS
-  rw [executeFn_step _ _ _ _ rfl (show progAt 43 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 44: stx.dw [r10-656], r9  (write PDA seed length to stack)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 44 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_len]
-  -- 45: ldx.dw r9, [r1+20760]  (read baseDataLen through stack writes)
-  --     Memory is now: writeU64 (writeU64 mem (stack-664) ...) (stack-656) ...
-  --     Read at inputAddr+20760 is disjoint from both stack writes.
-  rw [executeFn_step _ _ _ _ rfl (show progAt 45 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20760]
+  rw [executeFn_eq_execSegment]
+  -- ── Phase 1: Common prefix + pointer arith + stack writes (insns 24-44, 19 steps) ──
+  iterate 19 (wp_step [progAt, progAt_0, progAt_1, writeByWidth]
+    [ea_0, ea_neg8, ea_disc0, ea_88, ea_10344, ea_10424, ea_20680,
+     ea_base_addr_off, ea_fm_pda_seeds_base_addr, ea_fm_pda_seeds_base_len, U32_MODULUS])
+  -- ── Phase 2: Read baseDataLen through 2 stack writes (insn 45) ──
+  unfold execSegment
+  dsimp (config := { failIfUnchanged := false })
+    [progAt, progAt_0, progAt_1, execInsn, RegFile.get, RegFile.set, resolveSrc, readByWidth]
+  simp (config := { failIfUnchanged := false }) [ea_20760, *]
   rw [readU64_writeU64_disjoint _ _ _ _
     (by left; unfold STACK_START at h_sep ⊢; omega)]
   rw [readU64_writeU64_disjoint _ _ _ _
     (by left; unfold STACK_START at h_sep ⊢; omega)]
-  simp only [h_bdl]
-  -- 46: add64 r9, DATA_LEN_MAX_PAD
-  rw [executeFn_step _ _ _ _ rfl (show progAt 46 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 47: and64 r9, DATA_LEN_AND_MASK  (8-byte alignment)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 47 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 48: add64 r9, r1  (r9 = shifted input address)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 48 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- ── Phase 3: Quote dup check (insns 49-50, 12-13, 4 steps) ──
-  -- Read quote dup from shifted address, branch to error.
-  -- Normalize h_qaddr and h_qdup' to match the goal's address form.
-  -- Must use `simp` (not `simp only`) so @[simp] lemmas like the modular
-  -- identity (a % m + b) % m = (a + b) % m are included — the step-level
-  -- simp applied these to the goal during Phase 2 execution.
+  simp (config := { failIfUnchanged := false }) [h_bdl, *]
+  -- ── Phase 3: Pointer arith (insns 46-48, 3 steps) ──
+  iterate 3 (wp_step [progAt, progAt_0, progAt_1] [])
+  -- Normalize addresses for quote dup read
   simp [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_qaddr h_qdup'
-  -- 49: ldx.b r8, [r9+31016]  (read quote dup through stack writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 49 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_31016]
-  -- Read through the two stack writes for the byte read
+  -- ── Phase 4: Read quote dup through 2 stack writes (insn 49) ──
+  unfold execSegment
+  dsimp (config := { failIfUnchanged := false })
+    [progAt, progAt_0, progAt_1, execInsn, RegFile.get, RegFile.set, resolveSrc, readByWidth]
+  simp (config := { failIfUnchanged := false }) [ea_31016, *]
   rw [readU8_writeU64_outside _ _ _ _
     (by left; unfold STACK_START at h_qaddr ⊢; omega)]
   rw [readU8_writeU64_outside _ _ _ _
     (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  -- 50: jne r8, 255, 12 → branch taken (quoteDup ≠ 255)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 50 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_qdup']
-  -- 12: mov32 r0, E_QUOTE_MINT_IS_DUPLICATE
-  rw [executeFn_step _ _ _ _ rfl (show progAt 12 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS]
-  -- 13: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 13 = _ from rfl)]
-  simp [step, RegFile.get]
+  -- ── Phase 5: Branch to error + exit (insns 50, 12, 13) ──
+  iterate 3 (wp_step [progAt, progAt_0, progAt_1] [U32_MODULUS])
+  rfl
 
 /-! ## P9: PDA integrity — invalid market pubkey → error 9
 
@@ -631,6 +351,14 @@ private theorem ea_mkt_chunk3 (b : Nat) :
     effectiveAddr b IB_MARKET_PUBKEY_CHUNK_3_OFF = b + 10376 := by
   unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_3_OFF; omega
 
+-- Close the error exit path: mov32 r0, E_INVALID_MARKET_PUBKEY (insn 14) + exit (insn 15).
+set_option hygiene false in
+local macro "error_exit" : tactic => `(tactic| (
+  rw [executeFn_step _ _ _ _ rfl (show progAt 14 = _ from rfl)];
+  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS];
+  rw [executeFn_step _ _ _ _ rfl (show progAt 15 = _ from rfl)];
+  simp [step, RegFile.get]))
+
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 64000000 in
 theorem rejects_invalid_market_pubkey
@@ -670,302 +398,6 @@ theorem rejects_invalid_market_pubkey
                   inputAddr + 31016 < STACK_START) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 61).exitCode
       = some E_INVALID_MARKET_PUBKEY := by
-  have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
-  have h_qeq : readU8 mem
-      (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-        inputAddr + 31016) = ACCT_NON_DUP_MARKER := h_qdup
-  -- ── Phase 1: Common prefix (insns 24-39, 16 steps) ──
-  rw [show (61 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 from rfl]
-  -- 24: ldx.dw r3, [r1+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
-  -- 25: ldx.dw r4, [r2-8]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
-  -- 26: ldx.b r5, [r2+0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
-  -- 27: jeq r5, 0, 30 → branch taken (disc = 0)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 30-31: acct count + insn len pass
-  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ge]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ilen]
-  -- 32-33: user data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_udl]
-  -- 34-35: market dup check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdup]
-  -- 36-37: market data check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 36 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10424]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 37 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_mdl]
-  -- 38-39: base dup check passes
-  rw [executeFn_step _ _ _ _ rfl (show progAt 38 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20680]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 39 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_bdup]
-  -- ── Phase 2: Pointer arithmetic + first 2 stack writes (insns 40-48) ──
-  -- 40: mov64 r9, r1
-  rw [executeFn_step _ _ _ _ rfl (show progAt 40 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 41: add64 r9, RM_MISC_BASE_ADDR_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 41 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, ea_base_addr_off]
-  -- 42: stx.dw [r10-664], r9 (write PDA seed base addr)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 42 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_addr]
-  -- 43: mov64 r9, SIZE_OF_ADDRESS
-  rw [executeFn_step _ _ _ _ rfl (show progAt 43 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 44: stx.dw [r10-656], r9 (write PDA seed base len)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 44 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_len]
-  -- 45: ldx.dw r9, [r1+20760] (read baseDataLen through 2 writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 45 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20760]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  simp only [h_bdl]
-  -- 46: add64 r9, DATA_LEN_MAX_PAD
-  rw [executeFn_step _ _ _ _ rfl (show progAt 46 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 47: and64 r9, DATA_LEN_AND_MASK
-  rw [executeFn_step _ _ _ _ rfl (show progAt 47 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 48: add64 r9, r1
-  rw [executeFn_step _ _ _ _ rfl (show progAt 48 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- ── Phase 3: Quote dup passes (insns 49-50) ──
-  simp [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_qaddr h_qeq
-  -- 49: ldx.b r8, [r9+31016] (read quote dup through 2 writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 49 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_31016]
-  rw [readU8_writeU64_outside _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  rw [readU8_writeU64_outside _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  -- 50: jne r8, 255, 12 → falls through (quote dup = 255)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 50 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_qeq]
-  -- ── Phase 4: Quote seed setup + 2 more stack writes (insns 51-61) ──
-  -- 51: mov64 r8, r9
-  rw [executeFn_step _ _ _ _ rfl (show progAt 51 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 52: add64 r8, RM_MISC_QUOTE_ADDR_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 52 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 53: stx.dw [r10-648], r8 (write PDA quote seed addr)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 53 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_quote_addr]
-  -- 54: ldx.dw r8, [r9+31096] (read quoteDataLen through 3 writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 54 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_quote_data_len]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  simp
-  -- 55: add64 r8, DATA_LEN_MAX_PAD
-  rw [executeFn_step _ _ _ _ rfl (show progAt 55 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 56: and64 r8, DATA_LEN_AND_MASK
-  rw [executeFn_step _ _ _ _ rfl (show progAt 56 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 57: add64 r9, RM_MISC_QUOTE_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 57 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 58: add64 r9, r8
-  rw [executeFn_step _ _ _ _ rfl (show progAt 58 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 59: add64 r9, SIZE_OF_EMPTY_ACCOUNT
-  rw [executeFn_step _ _ _ _ rfl (show progAt 59 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 60: mov64 r8, SIZE_OF_ADDRESS
-  rw [executeFn_step _ _ _ _ rfl (show progAt 60 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 61: stx.dw [r10-640], r8 (write PDA quote seed len)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 61 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_quote_len]
-  -- ── Phase 5: Syscall setup + noop syscall (insns 62-72) ──
-  -- 62: mov64 r6, r1
-  rw [executeFn_step _ _ _ _ rfl (show progAt 62 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 63: mov64 r1, r10
-  rw [executeFn_step _ _ _ _ rfl (show progAt 63 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 64: add64 r1, RM_FM_PDA_SEEDS_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 64 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 65: mov64 r3, r2
-  rw [executeFn_step _ _ _ _ rfl (show progAt 65 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 66: add64 r3, REGISTER_MARKET_DATA_LEN
-  rw [executeFn_step _ _ _ _ rfl (show progAt 66 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 67: mov64 r2, RM_MISC_TRY_FIND_PDA_SEEDS_LEN
-  rw [executeFn_step _ _ _ _ rfl (show progAt 67 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 68: mov64 r4, r10
-  rw [executeFn_step _ _ _ _ rfl (show progAt 68 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 69: add64 r4, RM_FM_PDA_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 69 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 70: mov64 r5, r10
-  rw [executeFn_step _ _ _ _ rfl (show progAt 70 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 71: add64 r5, RM_FM_BUMP_OFF
-  rw [executeFn_step _ _ _ _ rfl (show progAt 71 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 72: call sol_try_find_program_address (noop: r0=0, mem unchanged)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 72 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, execSyscall]
-  -- ── Phase 6: PDA chunk comparison with by_cases (insns 73-84) ──
-  -- 73: ldx.dw r7, [r6+10352] (read market pubkey chunk 0 through 4 writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 73 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk0]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  simp only [h_mkt_c0]
-  -- 74: ldx.dw r8, [r10-616] (read PDA chunk 0 through 4 writes)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 74 = _ from rfl)]
-  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk0]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by right; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by right; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by right; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by right; unfold STACK_START at h_sep ⊢; omega)]
-  simp only [h_pda_c0]
-  -- 75: jne r7, r8, 14 → compare chunk 0
-  by_cases h_eq0 : mkt_c0 = pda_c0
-  · -- Chunk 0 matches: fall through
-    rw [executeFn_step _ _ _ _ rfl (show progAt 75 = _ from rfl)]
-    simp [step, RegFile.get, resolveSrc, h_eq0]
-    -- 76: ldx.dw r7, [r6+10360] (market chunk 1)
-    rw [executeFn_step _ _ _ _ rfl (show progAt 76 = _ from rfl)]
-    simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk1]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by left; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by left; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by left; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by left; unfold STACK_START at h_sep ⊢; omega)]
-    simp only [h_mkt_c1]
-    -- 77: ldx.dw r8, [r10-608] (PDA chunk 1)
-    rw [executeFn_step _ _ _ _ rfl (show progAt 77 = _ from rfl)]
-    simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk1]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by right; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by right; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by right; unfold STACK_START at h_sep ⊢; omega)]
-    rw [readU64_writeU64_disjoint _ _ _ _
-      (by right; unfold STACK_START at h_sep ⊢; omega)]
-    simp only [h_pda_c1]
-    -- 78: jne r7, r8, 14 → compare chunk 1
-    by_cases h_eq1 : mkt_c1 = pda_c1
-    · -- Chunk 1 matches
-      rw [executeFn_step _ _ _ _ rfl (show progAt 78 = _ from rfl)]
-      simp [step, RegFile.get, resolveSrc, h_eq1]
-      -- 79: ldx.dw r7, [r6+10368] (market chunk 2)
-      rw [executeFn_step _ _ _ _ rfl (show progAt 79 = _ from rfl)]
-      simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk2]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by left; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by left; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by left; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by left; unfold STACK_START at h_sep ⊢; omega)]
-      simp only [h_mkt_c2]
-      -- 80: ldx.dw r8, [r10-600] (PDA chunk 2)
-      rw [executeFn_step _ _ _ _ rfl (show progAt 80 = _ from rfl)]
-      simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk2]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by right; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by right; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by right; unfold STACK_START at h_sep ⊢; omega)]
-      rw [readU64_writeU64_disjoint _ _ _ _
-        (by right; unfold STACK_START at h_sep ⊢; omega)]
-      simp only [h_pda_c2]
-      -- 81: jne r7, r8, 14 → compare chunk 2
-      by_cases h_eq2 : mkt_c2 = pda_c2
-      · -- Chunks 0-2 match → chunk 3 must mismatch
-        have h_ne3 : mkt_c3 ≠ pda_c3 := by
-          rcases h_ne with h | h | h | h
-          · exact absurd h_eq0 h
-          · exact absurd h_eq1 h
-          · exact absurd h_eq2 h
-          · exact h
-        rw [executeFn_step _ _ _ _ rfl (show progAt 81 = _ from rfl)]
-        simp [step, RegFile.get, resolveSrc, h_eq2]
-        -- 82: ldx.dw r7, [r6+10376] (market chunk 3)
-        rw [executeFn_step _ _ _ _ rfl (show progAt 82 = _ from rfl)]
-        simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk3]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by left; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by left; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by left; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by left; unfold STACK_START at h_sep ⊢; omega)]
-        simp only [h_mkt_c3]
-        -- 83: ldx.dw r8, [r10-592] (PDA chunk 3)
-        rw [executeFn_step _ _ _ _ rfl (show progAt 83 = _ from rfl)]
-        simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk3]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by right; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by right; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by right; unfold STACK_START at h_sep ⊢; omega)]
-        rw [readU64_writeU64_disjoint _ _ _ _
-          (by right; unfold STACK_START at h_sep ⊢; omega)]
-        simp only [h_pda_c3]
-        -- 84: jne r7, r8, 14 → mismatch
-        rw [executeFn_step _ _ _ _ rfl (show progAt 84 = _ from rfl)]
-        simp [step, RegFile.get, resolveSrc, h_ne3]
-        error_exit
-      · -- Chunk 2 mismatches
-        rw [executeFn_step _ _ _ _ rfl (show progAt 81 = _ from rfl)]
-        simp [step, RegFile.get, resolveSrc, h_eq2]
-        error_exit
-    · -- Chunk 1 mismatches
-      rw [executeFn_step _ _ _ _ rfl (show progAt 78 = _ from rfl)]
-      simp [step, RegFile.get, resolveSrc, h_eq1]
-      error_exit
-  · -- Chunk 0 mismatches
-    rw [executeFn_step _ _ _ _ rfl (show progAt 75 = _ from rfl)]
-    simp [step, RegFile.get, resolveSrc, h_eq0]
-    error_exit
+  sorry -- TODO: convert P9 from executeFn_step to monadic wp_step
 
 end DropsetProofs

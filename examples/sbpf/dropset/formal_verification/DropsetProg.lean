@@ -216,7 +216,7 @@ abbrev RM_MISC_N_PDA_SIGNERS : Nat := 1
 
 /-! ## Program (chunked lookup for O(1) simp) -/
 
-private def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
+def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 0 => some (.mov32 .r0 (.imm E_INVALID_INSTRUCTION_LENGTH))  -- 0: e_invalid_instruction_length
   | 1 => some (.exit)  -- 1
   | 2 => some (.mov32 .r0 (.imm E_INVALID_NUMBER_OF_ACCOUNTS))  -- 2: e_invalid_number_of_accounts
@@ -319,7 +319,7 @@ private def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 99 => some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF)  -- 99
   | _ => none
 
-private def progAt_1 : Nat → Option QEDGen.Solana.SBPF.Insn
+def progAt_1 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 100 => some (.jne .r7 (.reg .r8) 18)  -- 100
   | 101 => some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_1_OFF)  -- 101
   | 102 => some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF)  -- 102
