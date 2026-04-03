@@ -569,4 +569,403 @@ theorem rejects_quote_mint_duplicate
   rw [executeFn_step _ _ _ _ rfl (show progAt 13 = _ from rfl)]
   simp [step, RegFile.get]
 
+/-! ## P9: PDA integrity — invalid market pubkey → error 9
+
+   Prior checks pass, but the derived PDA doesn't match the market pubkey
+   on at least one of 4 8-byte chunks.
+
+   Path: 24 → … → 50(fall) → 51-72 (quote seed + syscall) →
+         73-84 (chunk compare, mismatch → 14 → 15)
+
+   Noop syscall: mem universally quantified, PDA result already in memory. -/
+
+private theorem ea_fm_pda_seeds_quote_addr (b : Nat) :
+    effectiveAddr b RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF = b - 648 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF; omega
+
+private theorem ea_fm_pda_seeds_quote_len (b : Nat) :
+    effectiveAddr b RM_FM_PDA_SEEDS_QUOTE_LEN_OFF = b - 640 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_QUOTE_LEN_OFF; omega
+
+private theorem ea_quote_data_len (b : Nat) :
+    effectiveAddr b RM_MISC_QUOTE_DATA_LEN_OFF = b + 31096 := by
+  unfold effectiveAddr RM_MISC_QUOTE_DATA_LEN_OFF; omega
+
+private theorem ea_fm_pda_off (b : Nat) :
+    effectiveAddr b RM_FM_PDA_OFF = b - 616 := by
+  unfold effectiveAddr RM_FM_PDA_OFF; omega
+
+private theorem ea_fm_bump_off (b : Nat) :
+    effectiveAddr b RM_FM_BUMP_OFF = b - 8 := by
+  unfold effectiveAddr RM_FM_BUMP_OFF; omega
+
+private theorem ea_fm_pda_chunk0 (b : Nat) :
+    effectiveAddr b RM_FM_PDA_CHUNK_0_OFF = b - 616 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_0_OFF; omega
+
+private theorem ea_fm_pda_chunk1 (b : Nat) :
+    effectiveAddr b RM_FM_PDA_CHUNK_1_OFF = b - 608 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_1_OFF; omega
+
+private theorem ea_fm_pda_chunk2 (b : Nat) :
+    effectiveAddr b RM_FM_PDA_CHUNK_2_OFF = b - 600 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_2_OFF; omega
+
+private theorem ea_fm_pda_chunk3 (b : Nat) :
+    effectiveAddr b RM_FM_PDA_CHUNK_3_OFF = b - 592 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_3_OFF; omega
+
+private theorem ea_mkt_chunk0 (b : Nat) :
+    effectiveAddr b IB_MARKET_PUBKEY_CHUNK_0_OFF = b + 10352 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_0_OFF; omega
+
+private theorem ea_mkt_chunk1 (b : Nat) :
+    effectiveAddr b IB_MARKET_PUBKEY_CHUNK_1_OFF = b + 10360 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_1_OFF; omega
+
+private theorem ea_mkt_chunk2 (b : Nat) :
+    effectiveAddr b IB_MARKET_PUBKEY_CHUNK_2_OFF = b + 10368 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_2_OFF; omega
+
+private theorem ea_mkt_chunk3 (b : Nat) :
+    effectiveAddr b IB_MARKET_PUBKEY_CHUNK_3_OFF = b + 10376 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_3_OFF; omega
+
+set_option maxRecDepth 8192 in
+set_option maxHeartbeats 64000000 in
+theorem rejects_invalid_market_pubkey
+    (inputAddr insnAddr : Nat) (mem : Mem)
+    (nAccounts baseDataLen : Nat)
+    (pda_c0 pda_c1 pda_c2 pda_c3 : Nat)
+    (mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)
+    -- Common prefix
+    (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (h_num    : readU64 mem inputAddr = nAccounts)
+    (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
+    (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
+    (h_udl    : readU64 mem (inputAddr + 88) = DATA_LEN_ZERO)
+    (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
+    (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
+    (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
+    -- Quote dup passes
+    (h_qdup   : readU8 mem
+        (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+          inputAddr + 31016) = ACCT_NON_DUP_MARKER)
+    -- PDA chunks on stack (universally quantified via mem)
+    (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = pda_c0)
+    (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = pda_c1)
+    (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = pda_c2)
+    (h_pda_c3 : readU64 mem (STACK_START + 0x1000 - 592) = pda_c3)
+    -- Market pubkey chunks from input buffer
+    (h_mkt_c0 : readU64 mem (inputAddr + 10352) = mkt_c0)
+    (h_mkt_c1 : readU64 mem (inputAddr + 10360) = mkt_c1)
+    (h_mkt_c2 : readU64 mem (inputAddr + 10368) = mkt_c2)
+    (h_mkt_c3 : readU64 mem (inputAddr + 10376) = mkt_c3)
+    -- At least one chunk mismatches
+    (h_ne : mkt_c0 ≠ pda_c0 ∨ mkt_c1 ≠ pda_c1 ∨ mkt_c2 ≠ pda_c2 ∨ mkt_c3 ≠ pda_c3)
+    -- Separation (Solana runtime guarantee: input buffer sits below stack)
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START) :
+    (executeFn progAt (initState2 inputAddr insnAddr mem 24) 61).exitCode
+      = some E_INVALID_MARKET_PUBKEY := by
+  have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
+  have h_qeq : readU8 mem
+      (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+        inputAddr + 31016) = ACCT_NON_DUP_MARKER := h_qdup
+  -- ── Phase 1: Common prefix (insns 24-39, 16 steps) ──
+  rw [show (61 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 from rfl]
+  -- 24: ldx.dw r3, [r1+0]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
+  simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_0]
+  -- 25: ldx.dw r4, [r2-8]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 25 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_neg8]
+  -- 26: ldx.b r5, [r2+0]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 26 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_disc0]
+  -- 27: jeq r5, 0, 30 → branch taken (disc = 0)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 27 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_disc]
+  -- 30-31: acct count + insn len pass
+  rw [executeFn_step _ _ _ _ rfl (show progAt 30 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_ge]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 31 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_ilen]
+  -- 32-33: user data check passes
+  rw [executeFn_step _ _ _ _ rfl (show progAt 32 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_88]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 33 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_udl]
+  -- 34-35: market dup check passes
+  rw [executeFn_step _ _ _ _ rfl (show progAt 34 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10344]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 35 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_mdup]
+  -- 36-37: market data check passes
+  rw [executeFn_step _ _ _ _ rfl (show progAt 36 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_10424]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 37 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_mdl]
+  -- 38-39: base dup check passes
+  rw [executeFn_step _ _ _ _ rfl (show progAt 38 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20680]
+  rw [executeFn_step _ _ _ _ rfl (show progAt 39 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_bdup]
+  -- ── Phase 2: Pointer arithmetic + first 2 stack writes (insns 40-48) ──
+  -- 40: mov64 r9, r1
+  rw [executeFn_step _ _ _ _ rfl (show progAt 40 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 41: add64 r9, RM_MISC_BASE_ADDR_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 41 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, ea_base_addr_off]
+  -- 42: stx.dw [r10-664], r9 (write PDA seed base addr)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 42 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_addr]
+  -- 43: mov64 r9, SIZE_OF_ADDRESS
+  rw [executeFn_step _ _ _ _ rfl (show progAt 43 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 44: stx.dw [r10-656], r9 (write PDA seed base len)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 44 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_base_len]
+  -- 45: ldx.dw r9, [r1+20760] (read baseDataLen through 2 writes)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 45 = _ from rfl)]
+  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_20760]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  simp only [h_bdl]
+  -- 46: add64 r9, DATA_LEN_MAX_PAD
+  rw [executeFn_step _ _ _ _ rfl (show progAt 46 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 47: and64 r9, DATA_LEN_AND_MASK
+  rw [executeFn_step _ _ _ _ rfl (show progAt 47 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 48: add64 r9, r1
+  rw [executeFn_step _ _ _ _ rfl (show progAt 48 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- ── Phase 3: Quote dup passes (insns 49-50) ──
+  simp [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_qaddr h_qeq
+  -- 49: ldx.b r8, [r9+31016] (read quote dup through 2 writes)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 49 = _ from rfl)]
+  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_31016]
+  rw [readU8_writeU64_outside _ _ _ _
+    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  rw [readU8_writeU64_outside _ _ _ _
+    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  -- 50: jne r8, 255, 12 → falls through (quote dup = 255)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 50 = _ from rfl)]
+  simp [step, RegFile.get, resolveSrc, h_qeq]
+  -- ── Phase 4: Quote seed setup + 2 more stack writes (insns 51-61) ──
+  -- 51: mov64 r8, r9
+  rw [executeFn_step _ _ _ _ rfl (show progAt 51 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 52: add64 r8, RM_MISC_QUOTE_ADDR_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 52 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 53: stx.dw [r10-648], r8 (write PDA quote seed addr)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 53 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_quote_addr]
+  -- 54: ldx.dw r8, [r9+31096] (read quoteDataLen through 3 writes)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 54 = _ from rfl)]
+  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_quote_data_len]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  simp
+  -- 55: add64 r8, DATA_LEN_MAX_PAD
+  rw [executeFn_step _ _ _ _ rfl (show progAt 55 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 56: and64 r8, DATA_LEN_AND_MASK
+  rw [executeFn_step _ _ _ _ rfl (show progAt 56 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 57: add64 r9, RM_MISC_QUOTE_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 57 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 58: add64 r9, r8
+  rw [executeFn_step _ _ _ _ rfl (show progAt 58 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 59: add64 r9, SIZE_OF_EMPTY_ACCOUNT
+  rw [executeFn_step _ _ _ _ rfl (show progAt 59 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 60: mov64 r8, SIZE_OF_ADDRESS
+  rw [executeFn_step _ _ _ _ rfl (show progAt 60 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 61: stx.dw [r10-640], r8 (write PDA quote seed len)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 61 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, writeByWidth, ea_fm_pda_seeds_quote_len]
+  -- ── Phase 5: Syscall setup + noop syscall (insns 62-72) ──
+  -- 62: mov64 r6, r1
+  rw [executeFn_step _ _ _ _ rfl (show progAt 62 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 63: mov64 r1, r10
+  rw [executeFn_step _ _ _ _ rfl (show progAt 63 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 64: add64 r1, RM_FM_PDA_SEEDS_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 64 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 65: mov64 r3, r2
+  rw [executeFn_step _ _ _ _ rfl (show progAt 65 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 66: add64 r3, REGISTER_MARKET_DATA_LEN
+  rw [executeFn_step _ _ _ _ rfl (show progAt 66 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 67: mov64 r2, RM_MISC_TRY_FIND_PDA_SEEDS_LEN
+  rw [executeFn_step _ _ _ _ rfl (show progAt 67 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 68: mov64 r4, r10
+  rw [executeFn_step _ _ _ _ rfl (show progAt 68 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 69: add64 r4, RM_FM_PDA_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 69 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 70: mov64 r5, r10
+  rw [executeFn_step _ _ _ _ rfl (show progAt 70 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 71: add64 r5, RM_FM_BUMP_OFF
+  rw [executeFn_step _ _ _ _ rfl (show progAt 71 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc]
+  -- 72: call sol_try_find_program_address (noop: r0=0, mem unchanged)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 72 = _ from rfl)]
+  simp [step, RegFile.get, RegFile.set, resolveSrc, execSyscall]
+  -- ── Phase 6: PDA chunk comparison with by_cases (insns 73-84) ──
+  -- 73: ldx.dw r7, [r6+10352] (read market pubkey chunk 0 through 4 writes)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 73 = _ from rfl)]
+  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk0]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by left; unfold STACK_START at h_sep ⊢; omega)]
+  simp only [h_mkt_c0]
+  -- 74: ldx.dw r8, [r10-616] (read PDA chunk 0 through 4 writes)
+  rw [executeFn_step _ _ _ _ rfl (show progAt 74 = _ from rfl)]
+  simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk0]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by right; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by right; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by right; unfold STACK_START at h_sep ⊢; omega)]
+  rw [readU64_writeU64_disjoint _ _ _ _
+    (by right; unfold STACK_START at h_sep ⊢; omega)]
+  simp only [h_pda_c0]
+  -- 75: jne r7, r8, 14 → compare chunk 0
+  by_cases h_eq0 : mkt_c0 = pda_c0
+  · -- Chunk 0 matches: fall through
+    rw [executeFn_step _ _ _ _ rfl (show progAt 75 = _ from rfl)]
+    simp [step, RegFile.get, resolveSrc, h_eq0]
+    -- 76: ldx.dw r7, [r6+10360] (market chunk 1)
+    rw [executeFn_step _ _ _ _ rfl (show progAt 76 = _ from rfl)]
+    simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk1]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by left; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by left; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by left; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by left; unfold STACK_START at h_sep ⊢; omega)]
+    simp only [h_mkt_c1]
+    -- 77: ldx.dw r8, [r10-608] (PDA chunk 1)
+    rw [executeFn_step _ _ _ _ rfl (show progAt 77 = _ from rfl)]
+    simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk1]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by right; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by right; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by right; unfold STACK_START at h_sep ⊢; omega)]
+    rw [readU64_writeU64_disjoint _ _ _ _
+      (by right; unfold STACK_START at h_sep ⊢; omega)]
+    simp only [h_pda_c1]
+    -- 78: jne r7, r8, 14 → compare chunk 1
+    by_cases h_eq1 : mkt_c1 = pda_c1
+    · -- Chunk 1 matches
+      rw [executeFn_step _ _ _ _ rfl (show progAt 78 = _ from rfl)]
+      simp [step, RegFile.get, resolveSrc, h_eq1]
+      -- 79: ldx.dw r7, [r6+10368] (market chunk 2)
+      rw [executeFn_step _ _ _ _ rfl (show progAt 79 = _ from rfl)]
+      simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk2]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by left; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by left; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by left; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by left; unfold STACK_START at h_sep ⊢; omega)]
+      simp only [h_mkt_c2]
+      -- 80: ldx.dw r8, [r10-600] (PDA chunk 2)
+      rw [executeFn_step _ _ _ _ rfl (show progAt 80 = _ from rfl)]
+      simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk2]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by right; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by right; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by right; unfold STACK_START at h_sep ⊢; omega)]
+      rw [readU64_writeU64_disjoint _ _ _ _
+        (by right; unfold STACK_START at h_sep ⊢; omega)]
+      simp only [h_pda_c2]
+      -- 81: jne r7, r8, 14 → compare chunk 2
+      by_cases h_eq2 : mkt_c2 = pda_c2
+      · -- Chunks 0-2 match → chunk 3 must mismatch
+        have h_ne3 : mkt_c3 ≠ pda_c3 := by
+          rcases h_ne with h | h | h | h
+          · exact absurd h_eq0 h
+          · exact absurd h_eq1 h
+          · exact absurd h_eq2 h
+          · exact h
+        rw [executeFn_step _ _ _ _ rfl (show progAt 81 = _ from rfl)]
+        simp [step, RegFile.get, resolveSrc, h_eq2]
+        -- 82: ldx.dw r7, [r6+10376] (market chunk 3)
+        rw [executeFn_step _ _ _ _ rfl (show progAt 82 = _ from rfl)]
+        simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_mkt_chunk3]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by left; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by left; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by left; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by left; unfold STACK_START at h_sep ⊢; omega)]
+        simp only [h_mkt_c3]
+        -- 83: ldx.dw r8, [r10-592] (PDA chunk 3)
+        rw [executeFn_step _ _ _ _ rfl (show progAt 83 = _ from rfl)]
+        simp only [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_fm_pda_chunk3]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by right; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by right; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by right; unfold STACK_START at h_sep ⊢; omega)]
+        rw [readU64_writeU64_disjoint _ _ _ _
+          (by right; unfold STACK_START at h_sep ⊢; omega)]
+        simp only [h_pda_c3]
+        -- 84: jne r7, r8, 14 → mismatch
+        rw [executeFn_step _ _ _ _ rfl (show progAt 84 = _ from rfl)]
+        simp [step, RegFile.get, resolveSrc, h_ne3]
+        error_exit
+      · -- Chunk 2 mismatches
+        rw [executeFn_step _ _ _ _ rfl (show progAt 81 = _ from rfl)]
+        simp [step, RegFile.get, resolveSrc, h_eq2]
+        error_exit
+    · -- Chunk 1 mismatches
+      rw [executeFn_step _ _ _ _ rfl (show progAt 78 = _ from rfl)]
+      simp [step, RegFile.get, resolveSrc, h_eq1]
+      error_exit
+  · -- Chunk 0 mismatches
+    rw [executeFn_step _ _ _ _ rfl (show progAt 75 = _ from rfl)]
+    simp [step, RegFile.get, resolveSrc, h_eq0]
+    error_exit
+
 end DropsetProofs
