@@ -681,7 +681,7 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
             let start = chunk_idx * CHUNK_SIZE;
             let end = std::cmp::min(start + CHUNK_SIZE, n_insns);
 
-            writeln!(out, "private def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
+            writeln!(out, "def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
                      chunk_idx)?;
 
             for idx in start..end {
