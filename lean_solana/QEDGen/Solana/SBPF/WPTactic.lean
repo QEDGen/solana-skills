@@ -44,9 +44,9 @@ macro_rules
       repeat (
         unfold execSegment;
         dsimp (config := { failIfUnchanged := false })
-          [$[$fetch],*, initState, execInsn,
-           RegFile.get, RegFile.set, resolveSrc, readByWidth];
-        simp (config := { failIfUnchanged := false }) [$[$extras],*, *]);
+          [initState, execInsn,
+           RegFile.get, RegFile.set, resolveSrc, readByWidth, $[$fetch],*];
+        simp (config := { failIfUnchanged := false }) [*, $[$extras],*]);
       rfl))
 
 /-! ## wp_step — single instruction step (for manual proofs)
@@ -64,8 +64,8 @@ macro_rules
   | `(tactic| wp_step [$[$fetch:simpLemma],*] [$[$extras:simpLemma],*]) => `(tactic| (
       unfold execSegment;
       dsimp (config := { failIfUnchanged := false })
-        [$[$fetch],*, initState, execInsn,
-         RegFile.get, RegFile.set, resolveSrc, readByWidth];
-      simp (config := { failIfUnchanged := false }) [$[$extras],*, *]))
+        [initState, execInsn,
+         RegFile.get, RegFile.set, resolveSrc, readByWidth, $[$fetch],*];
+      simp (config := { failIfUnchanged := false }) [*, $[$extras],*]))
 
 end QEDGen.Solana.SBPF
