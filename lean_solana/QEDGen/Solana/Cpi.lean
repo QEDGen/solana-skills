@@ -139,7 +139,7 @@ def targetsProgram (cpi : CpiInstruction) (expected : Pubkey) : Prop :=
 /-- The account at index i has the expected pubkey, signer flag, and writable flag -/
 def accountAt (cpi : CpiInstruction) (i : Nat)
     (key : Pubkey) (signer writable : Bool) : Prop :=
-  cpi.accounts.get? i = some ⟨key, signer, writable⟩
+  cpi.accounts[i]? = some ⟨key, signer, writable⟩
 
 /-- The instruction data starts with the expected discriminator bytes -/
 def hasDiscriminator (cpi : CpiInstruction) (disc : List Nat) : Prop :=
