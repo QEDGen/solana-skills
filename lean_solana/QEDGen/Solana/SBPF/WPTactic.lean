@@ -14,12 +14,15 @@ namespace QEDGen.Solana.SBPF
 Unfolds one instruction of execSegment and simplifies using WP rules.
 Each step is O(1) kernel depth — no nested state accumulation. -/
 
+/-- Unfold one level of execSegment and reduce the resulting instruction.
+    Uses `unfold` (not simp) on execSegment to avoid recursive blowup.
+    Each call is O(1) kernel depth regardless of remaining fuel. -/
 syntax "wp_step" : tactic
 
 macro_rules
   | `(tactic| wp_step) => `(tactic| (
-      simp only [execSegment, execInsn,
-        step_eq_execInsn,
+      unfold execSegment;
+      simp (config := { failIfUnchanged := false }) only [execInsn,
         RegFile.get, RegFile.set,
         resolveSrc, effectiveAddr, effectiveAddr_nat,
         readByWidth, writeByWidth,
@@ -41,7 +44,7 @@ syntax "wp_bridge" : tactic
 
 macro_rules
   | `(tactic| wp_bridge) => `(tactic| (
-      apply executeFn_via_wp;
+      rw [executeFn_eq_execSegment];
       wp_steps))
 
 end QEDGen.Solana.SBPF
