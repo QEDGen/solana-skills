@@ -319,7 +319,7 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.
 This generates a module with:
 - `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
 - `@[simp] def prog : Program := #[...]` with named constants and index comments
-- For large programs (>64 instructions): `def progAt : Nat → Option Insn` — a chunked function-based lookup for O(1) simp performance. Use with `executeFn` and `sbpf_fn_steps`.
+- For large programs (>64 instructions): `def progAt : Nat → Option Insn` — a chunked function-based lookup for O(1) simp performance. Use with `executeFn` and `wp_exec`.
 - A namespace wrapper matching the output filename
 
 Add the generated module to `lakefile.lean`:
@@ -368,8 +368,8 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `wrapAdd`, `wrapSub`, `wrapMul`, `wrapNeg` — 64-bit wrapping arithmetic
 
 **Execution:**
-- `execute (prog : Program) (s : State) (fuel : Nat) : State` — array-based fetch, use `sbpf_steps` tactic to unroll. Best for small programs (≤64 instructions).
-- `executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State` — function-based fetch (O(1) per step). Use with `progAt` for large programs (>64 instructions) where array indexing causes simp blowup. Use `sbpf_fn_steps` tactic or manual `executeFn_step` to unroll.
+- `execute (prog : Program) (s : State) (fuel : Nat) : State` — array-based fetch. Best for small programs (≤64 instructions).
+- `executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State` — function-based fetch (O(1) per step). Use with `progAt` for large programs (>64 instructions) where array indexing causes simp blowup. Use `wp_exec` tactic to prove properties.
 
 **Memory functions (open `QEDGen.Solana.SBPF.Memory`):**
 - `effectiveAddr (base : Nat) (off : Int) : Nat`
@@ -381,8 +381,8 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `RODATA_START`, `BYTECODE_START`, `STACK_START`, `HEAP_START`, `INPUT_START`
 
 **Tactics:**
-- `sbpf_steps` — automatically unrolls `execute` (array-based), steps through instructions, resolves branches, and closes the goal. Requires `@[simp]` on `prog`.
-- `sbpf_fn_steps` — same as `sbpf_steps` but for `executeFn` (function-based fetch). Use with `progAt` for large programs.
+- `wp_exec [fetch_defs] [simp_extras]` — one-shot tactic for sBPF proofs. First bracket lists fetch function + chunk defs (passed to `dsimp` for instruction decode). Second bracket lists `effectiveAddr` lemmas and extras (passed to `simp` for branch resolution). Uses the monadic WP bridge for O(1) kernel depth per step.
+- `wp_step [fetch_defs] [simp_extras]` — single instruction step (same arguments as `wp_exec`). Use when `wp_exec` needs manual guidance (e.g., memory disjointness lemmas between steps).
 
 **Lemmas:**
 - `execute_halted` (`@[simp]`) — halted state is a fixed point
@@ -398,80 +398,76 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
 - `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
 
-### Proof strategy: `sbpf_steps` and `sbpf_fn_steps` tactics
+### Proof strategy: `wp_exec` tactic
 
-Use the `sbpf_steps` tactic to automatically unroll and simplify sBPF execution. It handles instruction fetch, stepping, branch resolution, and final state extraction in a single call:
+Use the `wp_exec` tactic to prove sBPF execution properties in a single call. It handles instruction fetch (via `dsimp` kernel reduction), branch resolution (via `simp` with hypotheses), and halted-state closure (via `rfl`). Each step is O(1) kernel depth.
 
 ```lean
-set_option maxHeartbeats 8000000 in
-theorem rejects_insufficient_balance
+set_option maxHeartbeats 800000 in
+theorem rejects_wrong_account_count
     (inputAddr : Nat) (mem : Mem)
-    (minBal tokenBal : Nat)
-    (h_min : readU64 mem (effectiveAddr inputAddr MINIMUM_BALANCE) = minBal)
-    (h_tok : readU64 mem (effectiveAddr inputAddr TOKEN_ACCOUNT_BALANCE) = tokenBal)
-    (h_slip : minBal ≥ tokenBal) :
-    (execute prog (initState inputAddr mem) 10).exitCode = some 1 := by
-  sbpf_steps
+    (numAccounts : Nat)
+    (h_num : readU64 mem inputAddr = numAccounts)
+    (h_ne2 : numAccounts ≠ N_ACCOUNTS_INCREMENT)
+    (h_ne3 : numAccounts ≠ N_ACCOUNTS_INIT) :
+    (executeFn progAt (initState inputAddr mem) 8).exitCode = some E_N_ACCOUNTS := by
+  have h1 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INCREMENT) := by rw [h_num]; exact h_ne2
+  have h2 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INIT) := by rw [h_num]; exact h_ne3
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0]
 ```
 
-For large programs (>64 instructions), `asm2lean` generates a `progAt` function alongside the `prog` array. Use `executeFn` + `sbpf_fn_steps` instead:
-
-```lean
-set_option maxHeartbeats 8000000 in
-theorem rejects_invalid_discriminant
-    (inputAddr insnAddr : Nat) (mem : Mem)
-    (disc : Nat)
-    (h_disc_val : readU8 mem insnAddr = disc)
-    (h_disc_ne  : disc ≠ DISC_REGISTER_MARKET) :
-    (executeFn progAt (initState2 inputAddr insnAddr mem 24) 8).exitCode
-      = some E_INVALID_DISCRIMINANT := by
-  have h_ne : ¬(readU8 mem insnAddr = DISC_REGISTER_MARKET) := by rw [h_disc_val]; exact h_disc_ne
-  sbpf_fn_steps
-```
+**Arguments:**
+- First bracket `[progAt, progAt_0, progAt_1]`: fetch function + chunk defs, passed to `dsimp` for instruction decode via kernel reduction. Include all `progAt_N` chunk functions generated by `asm2lean`.
+- Second bracket `[ea_0]`: `effectiveAddr` lemmas and extras, passed to `simp` for branch resolution. Include `U32_MODULUS` if the path has `mov32` instructions.
 
 Note the use of `initState2` for programs that take two input pointers (r1=input buffer, r2=instruction data) and a non-zero `entryPc` when the program entrypoint isn't at instruction 0.
 
-**When `sbpf_fn_steps` times out on complex paths**, fall back to manual unrolling with `executeFn_step`:
+**When `wp_exec` needs manual guidance on complex paths** (e.g., memory disjointness lemmas between steps), use `wp_step` to advance one instruction at a time:
 
 ```lean
--- Decompose fuel manually, then step one instruction at a time
-rw [show (8 : Nat) = 0 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 from rfl]
-rw [executeFn_step _ _ _ _ rfl (show progAt 24 = _ from rfl)]
-simp [step, initState2, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_offset]
--- repeat for each instruction...
+rw [executeFn_eq_execSegment]
+wp_step [progAt, progAt_0, progAt_1] [ea_0, ea_88]
+-- apply memory disjointness lemma here
+rw [readU8_writeU64_outside _ _ _ _ (by ...)]
+wp_step [progAt, progAt_0, progAt_1] [ea_0, ea_88]
+...
+rfl
 ```
 
-Define private `effectiveAddr` helper lemmas to keep manual steps concise:
+Note: when using `wp_step`, you must manually call `rw [executeFn_eq_execSegment]` first and close with `rfl` at the end.
+
+Define private `effectiveAddr` helper lemmas to keep proofs concise:
 
 ```lean
 private theorem ea_88 (b : Nat) : effectiveAddr b MY_OFFSET = b + 88 := by
   unfold effectiveAddr MY_OFFSET; omega
 ```
 
-**Prerequisites for `sbpf_steps`/`sbpf_fn_steps` to work efficiently:**
+**Prerequisites for `wp_exec` to work efficiently:**
 1. `prog` must have `@[simp]` attribute (handled by `asm2lean`)
 2. Offset constants in `prog` must be `Int`, not `Nat` (handled by `asm2lean`)
 3. Named constants in `prog` must syntactically match hypothesis names (handled by `asm2lean`)
+4. `progAt_0`, `progAt_1`, etc. must NOT be `private` (handled by `asm2lean`)
 
-For theorems with negated conditions, you may need a helper before `sbpf_steps`:
+For theorems with negated conditions, introduce helpers before `wp_exec`:
 ```lean
 -- When the hypothesis is ≠ but simp needs ¬(... = ...)
 have h_ne3 : ¬(readU64 mem inputAddr = N_ACCOUNTS_EXPECTED) := by rw [h_num]; exact h_ne
-sbpf_steps
+wp_exec [progAt, progAt_0, progAt_1] [ea_0]
 
 -- When the hypothesis is ≥ but simp needs ¬(... < ...)
 have h_not_lt : ¬(senderLamports < amount) := by omega
-sbpf_steps
+wp_exec [progAt, progAt_0, progAt_1] [ea_0]
 ```
 
-Set `maxHeartbeats` generously: 8M for short paths (3-6 instructions), 16M for full validation paths (15+ instructions).
+Set `maxHeartbeats` to 800000 for typical paths (3-8 instructions), higher for longer paths.
 
 ### Memory disjointness through stack writes
 
 When an sBPF program writes to the stack (`stx` instructions) then later reads from the input buffer, the proof must show reads see the original memory. Use the memory axioms `readU64_writeU64_disjoint` and `readU8_writeU64_outside` with omega proofs for spatial separation.
 
 **Phase-based proof structure**: For complex paths (20+ steps) with memory mutations, organize the proof into phases:
-1. **Common validation prefix** — shared steps (discriminant check, account count, etc.) that `sbpf_fn_steps` or manual stepping handles
+1. **Common validation prefix** — shared steps (discriminant check, account count, etc.) that `wp_exec` or `wp_step` handles
 2. **Pointer arithmetic / memory writes** — instructions that compute dynamic addresses and write to the stack. After stepping, introduce bound hypotheses for dynamically-computed addresses
 3. **Property-specific check** — the final read-and-branch that establishes the theorem. Apply memory disjointness axioms at each read-through-write
 
@@ -536,8 +532,9 @@ theorem rejects_insufficient_lamports
     (h_amt   : readU64 mem (effectiveAddr inputAddr INSTRUCTION_DATA_OFFSET) = amount)
     (h_bal   : readU64 mem (effectiveAddr inputAddr SENDER_LAMPORTS_OFFSET) = senderLamports)
     (h_insuf : senderLamports < amount) :
-    (execute prog (initState inputAddr mem) 20).exitCode = some E_INSUFFICIENT_LAMPORTS := by
-  sbpf_steps
+    (executeFn progAt (initState inputAddr mem) 20).exitCode = some E_INSUFFICIENT_LAMPORTS := by
+  have h_not_ge : ¬(senderLamports ≥ amount) := by omega
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88]
 ```
 
 The `fuel` parameter (20 above) must be large enough for the longest execution path. Count the maximum instructions from entry to exit.
@@ -548,22 +545,22 @@ The `fuel` parameter (20 above) must be large enough for the longest execution p
 
 | Do | Don't |
 |---|---|
-| Use `sbpf_steps` (small programs) or `sbpf_fn_steps` (large programs with `progAt`) | Manually unroll unless the tactic times out on complex paths |
+| Use `wp_exec [progAt, progAt_0, ...] [ea_lemmas]` for proofs | Manually unroll unless `wp_exec` needs per-step guidance |
 | Generate `Prog.lean` with `qedgen asm2lean` | Hand-transcribe assembly into Lean (wrong offsets, missing labels) |
 | Use named constants from `Prog.lean` in hypotheses | Use raw numeric literals in hypotheses (simp blowup) |
 | Use `Int` for offset constants (memory operands) | Use `Nat` for offsets (forces coercion, simp timeout) |
-| Ensure `@[simp]` on `prog` definition | Omit `@[simp]` (sbpf_steps cannot unfold prog) |
-| Set `maxHeartbeats` 8M–16M for sBPF proofs | Use default heartbeats (will timeout on 8+ instruction paths) |
+| Ensure `@[simp]` on `prog` definition | Omit `@[simp]` (wp_exec cannot unfold prog) |
+| Set `maxHeartbeats` 800000+ for sBPF proofs | Use default heartbeats (will timeout on 8+ instruction paths) |
 
 ### sBPF simp performance (critical)
 
-Three rules that determine whether `sbpf_steps` completes in seconds or times out:
+Three rules that determine whether `wp_exec` completes in seconds or times out:
 
 1. **Offset constants MUST be `Int`**: `effectiveAddr` takes `(off : Int)`. If the constant is `Nat`, Lean inserts `↑(NAT_CONST)` coercion at every use, and `simp` cannot efficiently reduce `effectiveAddr base ↑N = effectiveAddr base N`. This alone causes 0.5s → 4+ minute blowup.
 
 2. **Named constants in `prog` MUST match hypothesis names**: `simp` uses syntactic matching. If `prog` has `.ldx .dword .r2 .r1 SENDER_DATA_LENGTH_OFFSET` but the hypothesis uses the raw number `88`, `simp` must unfold every `abbrev` at every subterm at every step — exponential blowup.
 
-3. **`@[simp]` on `prog` is required**: Without it, `sbpf_steps` cannot unfold `prog[pc]?` to fetch instructions.
+3. **`@[simp]` on `prog` is required**: Without it, `wp_exec` cannot unfold `prog[pc]?` to fetch instructions.
 
 `qedgen asm2lean` handles all three rules automatically.
 

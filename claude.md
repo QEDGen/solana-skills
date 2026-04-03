@@ -174,18 +174,18 @@ Then write proofs in a separate file that imports the generated module:
 ```lean
 import QEDGen.Solana.SBPF
 import Prog
+
+open QEDGen.Solana.SBPF
+open QEDGen.Solana.SBPF.Memory
 open Prog
 
--- Small programs (≤64 instructions): use execute + sbpf_steps
-theorem my_property ... :=
-    (execute prog (initState inputAddr mem) FUEL).exitCode = some CODE := by
-  sbpf_steps
-
--- Large programs (>64 instructions): use executeFn + progAt + sbpf_fn_steps
--- asm2lean generates progAt (chunked function-based lookup) for O(1) simp
+-- wp_exec is the primary tactic for sBPF proofs.
+-- First bracket: fetch function + chunk defs (for dsimp instruction decode)
+-- Second bracket: effectiveAddr lemmas + extras (for simp branch resolution)
 theorem my_property ... :=
     (executeFn progAt (initState inputAddr mem) FUEL).exitCode = some CODE := by
-  sbpf_fn_steps
+  have h1 : ¬(readU64 mem inputAddr = SOME_CONST) := by rw [h_val]; exact h_ne
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88]
 ```
 
 For programs with two input pointers (r1=input buffer, r2=instruction data, e.g. SIMD-0321), use `initState2`:
@@ -195,7 +195,7 @@ For programs with two input pointers (r1=input buffer, r2=instruction data, e.g.
 (executeFn progAt (initState2 inputAddr insnAddr mem 24) FUEL).exitCode = some CODE
 ```
 
-The `sbpf_steps`/`sbpf_fn_steps` tactics automate sBPF execution unrolling via `simp`. When they time out on complex paths, fall back to manual `executeFn_step` unrolling (see SKILL.md for the pattern).
+The `wp_exec` tactic uses the monadic WP bridge (`executeFn_eq_execSegment`) to iteratively unfold execution at O(1) kernel depth per step. For complex paths needing manual guidance (e.g., memory disjointness lemmas between steps), use `wp_step` to advance one instruction at a time.
 
 ### Memory Disjointness Through Stack Writes
 
@@ -217,7 +217,7 @@ See SKILL.md "Memory disjointness through stack writes" for the full pattern.
 
 ### sBPF simp Performance (Critical)
 
-The `sbpf_steps` tactic is extremely sensitive to how constants are typed and named. Violations cause exponential blowup (seconds → hours).
+The `wp_exec` tactic is sensitive to how constants are typed and named. Violations cause exponential blowup (seconds → hours).
 
 **Rule 1: Offset constants MUST be `Int`, not `Nat`.**
 `effectiveAddr` takes `(off : Int)`. With `Nat` offsets, Lean inserts a `Nat → Int` coercion that `simp` cannot efficiently process.

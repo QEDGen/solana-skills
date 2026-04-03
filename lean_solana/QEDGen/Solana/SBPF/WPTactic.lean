@@ -1,7 +1,7 @@
 -- WP tactics for sBPF proof automation
 --
--- wp_step:  unfold one instruction via WP rules (O(1) kernel depth)
--- wp_steps: repeat wp_step until no more instructions
+-- wp_exec: one-shot tactic for sBPF property proofs
+-- wp_step: single instruction step (for manual proofs)
 
 import QEDGen.Solana.SBPF.WP
 import QEDGen.Solana.SBPF.MonadicStep
@@ -9,42 +9,63 @@ import QEDGen.Solana.SBPF.Bridge
 
 namespace QEDGen.Solana.SBPF
 
-/-! ## WP step tactic
+/-! ## wp_exec — one-shot sBPF verification
 
-Unfolds one instruction of execSegment and simplifies using WP rules.
-Each step is O(1) kernel depth — no nested state accumulation. -/
+Proves properties of the form:
+  (executeFn progAt (initState inputAddr mem) FUEL).exitCode = some CODE
 
-/-- Unfold one level of execSegment and reduce the resulting instruction.
-    Uses `unfold` (not simp) on execSegment to avoid recursive blowup.
-    Each call is O(1) kernel depth regardless of remaining fuel. -/
-syntax "wp_step" : tactic
+Usage:
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88]
 
+First bracket: fetch function + chunk defs (passed to dsimp for instruction decode).
+Second bracket: effectiveAddr lemmas + extras (passed to simp for branch resolution).
+
+The tactic:
+1. Applies executeFn_eq_execSegment to switch to monadic execution
+2. Iteratively unfolds execSegment one step at a time (O(1) kernel depth)
+3. Uses dsimp to evaluate instruction fetch via kernel reduction
+4. Uses simp with hypotheses to resolve branch conditions
+5. Closes the halted-state residual via rfl
+
+Example:
+  theorem rejects_bad_input ... := by
+    have h1 : ¬(readU64 mem inputAddr = EXPECTED) := by ...
+    wp_exec [progAt, progAt_0] [ea_0]
+-/
+
+open Lean.Parser.Tactic in
+syntax "wp_exec" "[" simpLemma,* "]" "[" simpLemma,* "]" : tactic
+
+set_option hygiene false in
+open Lean.Parser.Tactic in
 macro_rules
-  | `(tactic| wp_step) => `(tactic| (
-      unfold execSegment;
-      simp (config := { failIfUnchanged := false }) only [execInsn,
-        RegFile.get, RegFile.set,
-        resolveSrc, effectiveAddr, effectiveAddr_nat,
-        readByWidth, writeByWidth,
-        execSyscall,
-        Nat.add_zero]))
-
-/-- Repeatedly unfold instructions until the goal is discharged or
-    no further progress can be made. -/
-syntax "wp_steps" : tactic
-
-macro_rules
-  | `(tactic| wp_steps) => `(tactic| (
-      try simp only [effectiveAddr, effectiveAddr_nat, Nat.add_zero] at *;
-      repeat wp_step))
-
-/-- Apply the WP bridge: convert an executeFn goal to an execSegment goal,
-    then use WP tactics. -/
-syntax "wp_bridge" : tactic
-
-macro_rules
-  | `(tactic| wp_bridge) => `(tactic| (
+  | `(tactic| wp_exec [$[$fetch:simpLemma],*] [$[$extras:simpLemma],*]) => `(tactic| (
       rw [executeFn_eq_execSegment];
-      wp_steps))
+      repeat (
+        unfold execSegment;
+        dsimp (config := { failIfUnchanged := false })
+          [$[$fetch],*, initState, execInsn,
+           RegFile.get, RegFile.set, resolveSrc, readByWidth];
+        simp (config := { failIfUnchanged := false }) [$[$extras],*, *]);
+      rfl))
+
+/-! ## wp_step — single instruction step (for manual proofs)
+
+Unfolds one level of execSegment, evaluates the instruction via dsimp,
+and simplifies with hypotheses. Use when wp_exec needs manual guidance
+(e.g., memory disjointness lemmas between steps). -/
+
+open Lean.Parser.Tactic in
+syntax "wp_step" "[" simpLemma,* "]" "[" simpLemma,* "]" : tactic
+
+set_option hygiene false in
+open Lean.Parser.Tactic in
+macro_rules
+  | `(tactic| wp_step [$[$fetch:simpLemma],*] [$[$extras:simpLemma],*]) => `(tactic| (
+      unfold execSegment;
+      dsimp (config := { failIfUnchanged := false })
+        [$[$fetch],*, initState, execInsn,
+         RegFile.get, RegFile.set, resolveSrc, readByWidth];
+      simp (config := { failIfUnchanged := false }) [$[$extras],*, *]))
 
 end QEDGen.Solana.SBPF
