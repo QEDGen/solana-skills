@@ -106,7 +106,7 @@ Create the project structure:
 ```
 formal_verification/
   lakefile.lean          # require qedgenSupport from path/to/lean_solana
-  lean-toolchain         # leanprover/lean4:v4.15.0
+  lean-toolchain         # leanprover/lean4:v4.24.0
   Proofs.lean            # root import: import Proofs.AccessControl etc.
   Proofs/
     AccessControl.lean
