@@ -263,28 +263,16 @@ theorem rejects_quote_mint_duplicate
     [ea_0, ea_neg8, ea_disc0, ea_88, ea_10344, ea_10424, ea_20680,
      ea_base_addr_off, ea_fm_pda_seeds_base_addr, ea_fm_pda_seeds_base_len, U32_MODULUS])
   -- ── Phase 2: Read baseDataLen through 2 stack writes (insn 45) ──
-  unfold execSegment
-  dsimp (config := { failIfUnchanged := false })
-    [progAt, progAt_0, progAt_1, execInsn, RegFile.get, RegFile.set, resolveSrc, readByWidth]
-  simp (config := { failIfUnchanged := false }) [ea_20760, *]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  rw [readU64_writeU64_disjoint _ _ _ _
-    (by left; unfold STACK_START at h_sep ⊢; omega)]
-  simp (config := { failIfUnchanged := false }) [h_bdl, *]
+  wp_step [progAt, progAt_0, progAt_1] [ea_20760]
+  strip_writes
+  simp [*]
   -- ── Phase 3: Pointer arith (insns 46-48, 3 steps) ──
   iterate 3 (wp_step [progAt, progAt_0, progAt_1] [])
   -- Normalize addresses for quote dup read
   simp [wrapAdd, toU64, DATA_LEN_MAX_PAD] at h_qaddr h_qdup'
   -- ── Phase 4: Read quote dup through 2 stack writes (insn 49) ──
-  unfold execSegment
-  dsimp (config := { failIfUnchanged := false })
-    [progAt, progAt_0, progAt_1, execInsn, RegFile.get, RegFile.set, resolveSrc, readByWidth]
-  simp (config := { failIfUnchanged := false }) [ea_31016, *]
-  rw [readU8_writeU64_outside _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
-  rw [readU8_writeU64_outside _ _ _ _
-    (by left; unfold STACK_START at h_qaddr ⊢; omega)]
+  wp_step [progAt, progAt_0, progAt_1] [ea_31016]
+  strip_writes
   -- ── Phase 5: Branch to error + exit (insns 50, 12, 13) ──
   iterate 3 (wp_step [progAt, progAt_0, progAt_1] [U32_MODULUS])
   rfl

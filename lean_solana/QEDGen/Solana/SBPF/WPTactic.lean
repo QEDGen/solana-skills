@@ -68,4 +68,36 @@ macro_rules
          RegFile.get, RegFile.set, resolveSrc, readByWidth, $[$fetch],*];
       simp (config := { failIfUnchanged := false }) [*, $[$extras],*]))
 
+/-! ## strip_writes — automatic memory write stripping
+
+Strips nested write layers from read expressions by proving address disjointness
+via omega. Pre-unfolds STACK_START so omega sees pure numerals.
+
+Works for both cross-region (input reads through stack writes) and
+within-stack (stack reads at different offsets from stack writes).
+
+Usage (after a wp_step that left read-through-write patterns in the goal):
+  wp_step [progAt, progAt_0, progAt_1, writeByWidth] [ea_offsets...]
+  strip_writes
+  simp [h_read_hypothesis, *]
+
+For hypotheses containing wrapAdd/toU64, normalize them first:
+  simp [wrapAdd, toU64] at h_addr
+  strip_writes
+-/
+
+open QEDGen.Solana.SBPF.Memory in
+syntax "strip_writes" : tactic
+
+set_option hygiene false in
+open QEDGen.Solana.SBPF.Memory in
+macro_rules
+  | `(tactic| strip_writes) => `(tactic| (
+    try unfold STACK_START at *;
+    repeat (first
+      | rw [readU64_writeU64_disjoint _ _ _ _ (by omega)]
+      | rw [readU8_writeU64_outside _ _ _ _ (by omega)]
+      | rw [readU64_writeU8_disjoint _ _ _ _ (by omega)]
+      | rw [readU64_writeU64_same _ _ _ (by first | simp | omega)])))
+
 end QEDGen.Solana.SBPF
