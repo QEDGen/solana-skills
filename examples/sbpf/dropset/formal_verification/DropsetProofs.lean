@@ -339,16 +339,49 @@ private theorem ea_mkt_chunk3 (b : Nat) :
     effectiveAddr b IB_MARKET_PUBKEY_CHUNK_3_OFF = b + 10376 := by
   unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_3_OFF; omega
 
--- Close the error exit path: mov32 r0, E_INVALID_MARKET_PUBKEY (insn 14) + exit (insn 15).
-set_option hygiene false in
-local macro "error_exit" : tactic => `(tactic| (
-  rw [executeFn_step _ _ _ _ rfl (show progAt 14 = _ from rfl)];
-  simp [step, RegFile.get, RegFile.set, resolveSrc, U32_MODULUS];
-  rw [executeFn_step _ _ _ _ rfl (show progAt 15 = _ from rfl)];
-  simp [step, RegFile.get]))
+-- P9 is split into prefix + suffix to stay within kernel recursion depth.
+-- executeFn_compose splits 61 = 30 + 31 so each half is checked independently.
 
-set_option maxRecDepth 8192 in
-set_option maxHeartbeats 64000000 in
+set_option maxHeartbeats 32000000 in
+private theorem p9_suffix
+    (inputAddr insnAddr : Nat) (mem : Mem)
+    (baseDataLen : Nat)
+    (pda_c0 pda_c1 pda_c2 pda_c3 : Nat)
+    (mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)
+    (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
+    (h_qdup   : readU8 mem
+        (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+          inputAddr + 31016) = ACCT_NON_DUP_MARKER)
+    (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = pda_c0)
+    (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = pda_c1)
+    (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = pda_c2)
+    (h_pda_c3 : readU64 mem (STACK_START + 0x1000 - 592) = pda_c3)
+    (h_mkt_c0 : readU64 mem (inputAddr + 10352) = mkt_c0)
+    (h_mkt_c1 : readU64 mem (inputAddr + 10360) = mkt_c1)
+    (h_mkt_c2 : readU64 mem (inputAddr + 10368) = mkt_c2)
+    (h_mkt_c3 : readU64 mem (inputAddr + 10376) = mkt_c3)
+    (h_ne : mkt_c0 ≠ pda_c0 ∨ mkt_c1 ≠ pda_c1 ∨ mkt_c2 ≠ pda_c2 ∨ mkt_c3 ≠ pda_c3)
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START) :
+    (executeFn progAt (executeFn progAt (initState2 inputAddr insnAddr mem 24) 30) 31).exitCode
+      = some E_INVALID_MARKET_PUBKEY := by
+  rw [executeFn_eq_execSegment]
+  -- ─── Quote seed setup (insns 51-53: mov, add, stx) ───
+  iterate 3 (wp_step [progAt, progAt_0, progAt_1, writeByWidth]
+    [ea_fm_pda_seeds_quote_addr])
+  -- ─── Read quoteDataLen through 3 stack writes (insn 54) ───
+  wp_step [progAt, progAt_0, progAt_1] [ea_quote_data_len]
+  strip_writes
+  -- ─── Pointer arith + stack write (insns 55-61) ───
+  iterate 7 (wp_step [progAt, progAt_0, progAt_1, writeByWidth]
+    [ea_fm_pda_seeds_quote_len])
+  -- ─── Syscall setup + call (insns 62-72, 11 steps) ───
+  iterate 11 (wp_step [progAt, progAt_0, progAt_1]
+    [ea_fm_pda_off, ea_fm_bump_off])
+  sorry
+
+set_option maxHeartbeats 16000000 in
 theorem rejects_invalid_market_pubkey
     (inputAddr insnAddr : Nat) (mem : Mem)
     (nAccounts baseDataLen : Nat)
@@ -386,6 +419,12 @@ theorem rejects_invalid_market_pubkey
                   inputAddr + 31016 < STACK_START) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 61).exitCode
       = some E_INVALID_MARKET_PUBKEY := by
-  sorry -- TODO: convert P9 from executeFn_step to monadic wp_step
+  have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
+  -- Split 61 = 30 + 31 so each half stays within kernel depth
+  rw [show (61 : Nat) = 30 + 31 from rfl, executeFn_compose]
+  exact p9_suffix inputAddr insnAddr mem baseDataLen
+    pda_c0 pda_c1 pda_c2 pda_c3 mkt_c0 mkt_c1 mkt_c2 mkt_c3
+    h_bdl h_qdup h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3
+    h_mkt_c0 h_mkt_c1 h_mkt_c2 h_mkt_c3 h_ne h_sep h_qaddr
 
 end DropsetProofs
