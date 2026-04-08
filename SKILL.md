@@ -382,7 +382,12 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 
 **Tactics:**
 - `wp_exec [fetch_defs] [simp_extras]` — one-shot tactic for sBPF proofs. First bracket lists fetch function + chunk defs (passed to `dsimp` for instruction decode). Second bracket lists `effectiveAddr` lemmas and extras (passed to `simp` for branch resolution). Uses the monadic WP bridge for O(1) kernel depth per step.
-- `wp_step [fetch_defs] [simp_extras]` — single instruction step (same arguments as `wp_exec`). Use when `wp_exec` needs manual guidance (e.g., memory disjointness lemmas between steps).
+- `wp_step [fetch_defs] [simp_extras]` — single instruction step (same arguments as `wp_exec`). Use when `wp_exec` needs manual guidance. **Requires** `rw [executeFn_eq_execSegment]` first and `rfl` at the end.
+- `strip_writes` — strips nested write layers from read expressions via disjointness (omega). Pre-unfolds STACK_START.
+- `strip_writes_goal` — like `strip_writes` but only unfolds STACK_START in the goal (for large contexts).
+- `rewrite_mem [hmem]` — rewrites with memory hypotheses then applies region frame reasoning.
+- `solve_read [hmem] h_val` — `rewrite_mem` + `exact h_val` (one-shot memory read resolution).
+- `mem_frame` — automatic region-based write stripping. Handles cross-width reads/writes, within-stack disjointness, and same-address round-trips.
 
 **Lemmas:**
 - `execute_halted` (`@[simp]`) — halted state is a fixed point
@@ -398,10 +403,49 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `RegFile.get_set_self` — `(rf.set r v).get r = v` (when `r ≠ .r10`)
 - `RegFile.get_set_diff` — `(rf.set r2 v).get r1 = rf.get r1` (when `r1 ≠ r2`)
 
-**Memory axioms:**
-- `readU64_writeU64_same` — read-after-write returns original value
-- `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
-- `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
+**r10 invariance (all `@[simp]`):**
+- `RegFile.set_preserves_r10` — `(rf.set r v).r10 = rf.r10` for any register
+- `execSyscall_preserves_r10` — syscalls preserve r10
+- `step_preserves_r10` — single instruction preserves r10
+- `executeFn_preserves_r10` — full execution preserves r10
+- `executeFn_r10_initState` — `(executeFn fetch (initState ...) n).regs.r10 = STACK_START + 0x1000`
+- `executeFn_r10_initState2` — same for `initState2`
+
+No need to thread r10 hypotheses through sub-lemmas — use `(by simp [h_r10])` or `(by simp)` at call sites.
+
+**Memory axioms — same-address round-trip:**
+- `readU64_writeU64_same`, `readU32_writeU32_same`, `readU8_writeU8_same`
+
+**Memory axioms — disjoint-address (within same region):**
+- `readU64_writeU64_disjoint`, `readU64_writeU32_disjoint`, `readU64_writeU16_disjoint`, `readU64_writeU8_disjoint`
+- `readU32_writeU64_disjoint`, `readU32_writeU32_disjoint`
+- `readU8_writeU64_outside`, `readU8_writeU32_outside`, `readU8_writeU16_outside`, `readU8_writeU8_disjoint`
+
+**Memory axioms — region frame (read below STACK_START, write above):**
+- `readU64_writeU64_frame`, `readU64_writeU32_frame`, `readU64_writeU16_frame`, `readU64_writeU8_frame`
+- `readU32_writeU64_frame`, `readU32_writeU32_frame`
+- `readU8_writeU64_frame`, `readU8_writeU32_frame`, `readU8_writeU16_frame`, `readU8_writeU8_frame`
+
+**Region helpers (`open QEDGen.Solana.SBPF.Region`):**
+- `writeU64Chain mem writes` — applies a list of `(addr, val)` U64 writes to memory
+- `readU64_writeU64Chain_frame`, `readU32_writeU64Chain_frame`, `readU8_writeU64Chain_frame` — reads from input region survive a chain of stack writes
+- `belowStack base bound` — `base + bound ≤ STACK_START`
+
+**Pubkey helpers (`import QEDGen.Solana.SBPF.Pubkey`):**
+- `Pubkey4` — 32-byte pubkey as four U64 chunks (`.c0`, `.c1`, `.c2`, `.c3`)
+- `Pubkey4.ne_iff` — two pubkeys differ iff at least one chunk differs
+- `pubkeyAt mem base pk` — the four chunks reside at `base`, `base+8`, `base+16`, `base+24`
+- `pubkeyAt_of_mem_eq` — memory equality preserves pubkeyAt
+- `pubkeyAt_writeU64_disjoint` — survives a disjoint U64 write
+- `pubkeyAt_writeU64_frame` — survives a stack write (input-region pubkey)
+- `pubkeyAt_writeU64Chain_frame` — survives a chain of stack writes
+
+**SbpfMem (optional region-typed wrapper, `open QEDGen.Solana.SBPF.Region`):**
+- `SbpfMem.ofMem mem base bound h_sep` — wrap raw memory with region proof
+- `SbpfMem.readInput`, `readInputU32`, `readInputU8` — region-typed reads
+- `SbpfMem.writeStack`, `writeStackU32`, `writeStackU8` — region-typed writes
+- `readInput_writeStack`, `readInputU8_writeStack` — frame theorems
+- `readInput_writeStack_chain` — chain frame theorem
 
 **Reusable instruction patterns** (`import QEDGen.Solana.SBPF.Patterns`):
 
