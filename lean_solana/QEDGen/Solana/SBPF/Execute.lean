@@ -46,6 +46,20 @@ structure RegFile where
   | .r8 => { rf with r8 := v } | .r9 => { rf with r9 := v }
   | .r10 => rf
 
+/-- Writing to r10 is a no-op (frame pointer is read-only). -/
+@[simp] theorem RegFile.set_r10 (rf : RegFile) (v : Nat) :
+    rf.set .r10 v = rf := rfl
+
+/-- Reading the register just written returns the written value (r0-r9 only). -/
+theorem RegFile.get_set_self (rf : RegFile) (r : Reg) (v : Nat) (h : r ≠ .r10) :
+    (rf.set r v).get r = v := by
+  cases r <;> simp_all [RegFile.get, RegFile.set]
+
+/-- Reading a different register from the one written returns the original value. -/
+theorem RegFile.get_set_diff (rf : RegFile) (r1 r2 : Reg) (v : Nat) (h : r1 ≠ r2) :
+    (rf.set r2 v).get r1 = rf.get r1 := by
+  cases r1 <;> cases r2 <;> simp_all [RegFile.get, RegFile.set]
+
 /-! ## Machine state -/
 
 /-- sBPF machine state -/

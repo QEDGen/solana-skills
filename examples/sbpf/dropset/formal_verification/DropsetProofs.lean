@@ -364,18 +364,14 @@ private theorem p9_chunk_ne_error (inputAddr : Nat) (s : State) (n : Nat)
             readU64 s.mem (effectiveAddr (STACK_START + 0x1000) off2))
     (h_fuel : n ≥ 5) :
     (executeFn progAt s n).exitCode = some E_INVALID_MARKET_PUBKEY := by
-  rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
-  suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_MARKET_PUBKEY by
-    rw [executeFn_halted _ _ _ _ h5]; exact h5
-  -- Precompute fetch values for the error handler (PCs 14-15) to avoid expensive progAt_0 reduction
   have hf14 : progAt 14 = some (.mov32 .r0 (.imm E_INVALID_MARKET_PUBKEY)) := by native_decide
   have hf15 : progAt 15 = some (.exit) := by native_decide
-  rw [show (5 : Nat) = 1 + (1 + (1 + (1 + (1 + 0)))) from rfl]
-  iterate 4 (rw [executeFn_compose])
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc, toU64,
-    h_exit, h_r6, h_r10, h_f1, h_f2, h_f3, h_ne,
-    hf14, hf15, E_INVALID_MARKET_PUBKEY, U32_MODULUS]
+  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r6) off1) ≠
+               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
+    simp only [RegFile.get, h_r6, h_r10]; exact h_ne
+  exact chunk_ne_mem_error progAt s n .r7 .r8 .r6 .r10 off1 off2 14 E_INVALID_MARKET_PUBKEY
+    (by decide) (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_ne' hf14 hf15 h_fuel
 
 -- Chunk match: ldx + ldx + jne(fallthrough) advances pc by 3, preserves key state.
 set_option maxHeartbeats 1600000 in
@@ -397,11 +393,19 @@ private theorem p9_chunk_eq_state (inputAddr : Nat) (s : State)
     (executeFn progAt s 3).regs.r6 = inputAddr ∧
     (executeFn progAt s 3).regs.r9 = s.regs.r9 ∧
     (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
-  rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-  iterate 2 (rw [executeFn_compose])
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_r6, h_r10, h_f1, h_f2, h_f3, h_eq]
+  have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r6) off1) =
+               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
+    simp only [RegFile.get, h_r6, h_r10]; exact h_eq
+  obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_mem progAt s .r7 .r8 .r6 .r10 off1 off2 14
+    (by decide) (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_eq'
+  have hr3 := hreg .r3 (by decide) (by decide)
+  have hr5 := hreg .r5 (by decide) (by decide)
+  have hr6' := hreg .r6 (by decide) (by decide)
+  have hr9 := hreg .r9 (by decide) (by decide)
+  have hr10' := hreg .r10 (by decide) (by decide)
+  simp only [RegFile.get] at hr3 hr5 hr6' hr9 hr10'
+  exact ⟨he, hp, hm, hr3, hr5, by rw [hr6', h_r6], hr9, by rw [hr10', h_r10]⟩
 
 /-! ### Part 3: Chunk comparison from abstract state
 
@@ -940,22 +944,22 @@ private theorem p10_dup_exit
     (sysDup : Nat)
     (h_exit : s.exitCode = none)
     (h_pc   : s.pc = 96)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_dup  : readU8 s.mem (s.regs.r9) = sysDup)
     (h_ne   : sysDup ≠ ACCT_NON_DUP_MARKER) :
     (executeFn progAt s 4).exitCode = some E_SYSTEM_PROGRAM_IS_DUPLICATE := by
-  have h_ne' : ¬(readU8 s.mem (s.regs.r9) = (255 : Nat)) := by rw [h_dup]; exact h_ne
   have hf96 : progAt 96 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
   have hf97 : progAt 97 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 16) := by native_decide
   have hf16 : progAt 16 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_IS_DUPLICATE)) := by native_decide
   have hf17 : progAt 17 = some (.exit) := by native_decide
-  rw [show (4 : Nat) = 1+1+1+1 from rfl]
-  iterate 3 (rw [executeFn_compose])
-  simp only [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_pc, h_r10, ea_acct_dup,
-    hf96, hf97, hf16, hf17]
-  simp [*, E_SYSTEM_PROGRAM_IS_DUPLICATE, U32_MODULUS]
+  have h_ne_lib : readU8 s.mem (effectiveAddr (s.regs.get .r9) ACCT_DUPLICATE_OFF) ≠
+      toU64 (↑ACCT_NON_DUP_MARKER : Int) := by
+    simp only [RegFile.get, ea_acct_dup]; rw [h_dup]; exact h_ne
+  rw [show (4 : Nat) = 2 + 2 from rfl, executeFn_compose]
+  obtain ⟨he, hp, _, hreg⟩ := dup_fail progAt s .r7 .r9 ACCT_DUPLICATE_OFF
+    (↑ACCT_NON_DUP_MARKER : Int) 16 (by decide) h_exit
+    (by rw [h_pc]; exact hf96) (by rw [h_pc]; exact hf97) h_ne_lib
+  exact error_exit progAt _ E_SYSTEM_PROGRAM_IS_DUPLICATE he (by rw [hp]; exact hf16) (by rw [hp]; exact hf17)
 
 -- Main P10 theorem: compose prefix + chunk match + CPI setup + dup check
 set_option maxHeartbeats 4000000 in
@@ -1070,11 +1074,16 @@ private theorem p11_dup_pass
     s'.mem = s.mem := by
   have hf96 : progAt 96 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
   have hf97 : progAt 97 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 16) := by native_decide
-  rw [show (2 : Nat) = 1 + (1 + 0) from rfl, executeFn_compose]
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_pc, h_r10, ea_acct_dup,
-    hf96, hf97, h_dup]
+  have h_eq : readU8 s.mem (effectiveAddr (s.regs.get .r9) ACCT_DUPLICATE_OFF) =
+      toU64 (↑ACCT_NON_DUP_MARKER : Int) := by
+    simp only [RegFile.get, ea_acct_dup]; exact h_dup
+  obtain ⟨he, hp, hm, hreg⟩ := dup_pass progAt s .r7 .r9 ACCT_DUPLICATE_OFF
+    (↑ACCT_NON_DUP_MARKER : Int) 16 (by decide) h_exit
+    (by rw [h_pc]; exact hf96) (by rw [h_pc]; exact hf97) h_eq
+  have hr9 := hreg .r9 (by decide)
+  have hr10' := hreg .r10 (by decide)
+  simp only [RegFile.get] at hr9 hr10'
+  exact ⟨he, by rw [hp, h_pc], hr9, by rw [hr10', h_r10], hm⟩
 
 -- Chunk match (r9-based): ldx from r9 + ldx from r10 + jne(fallthrough) → 3 steps.
 set_option maxHeartbeats 1600000 in
@@ -1093,11 +1102,16 @@ private theorem p11_chunk_eq_state (sysAddr : Nat) (s : State)
     (executeFn progAt s 3).mem = s.mem ∧
     (executeFn progAt s 3).regs.r9 = sysAddr ∧
     (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
-  rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-  iterate 2 (rw [executeFn_compose])
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_r9, h_r10, h_f1, h_f2, h_f3, h_eq]
+  have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off1) =
+               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
+    simp only [RegFile.get, h_r9, h_r10]; exact h_eq
+  obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_mem progAt s .r7 .r8 .r9 .r10 off1 off2 18
+    (by decide) (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_eq'
+  have hr9 := hreg .r9 (by decide) (by decide)
+  have hr10' := hreg .r10 (by decide) (by decide)
+  simp only [RegFile.get] at hr9 hr10'
+  exact ⟨he, hp, hm, by rw [hr9, h_r9], by rw [hr10', h_r10]⟩
 
 -- Chunk mismatch (r9-based): branch to PC 18 → E_INVALID_SYSTEM_PROGRAM_PUBKEY.
 private theorem p11_chunk_ne_error (sysAddr : Nat) (s : State) (n : Nat)
@@ -1112,17 +1126,14 @@ private theorem p11_chunk_ne_error (sysAddr : Nat) (s : State) (n : Nat)
             readU64 s.mem (effectiveAddr (STACK_START + 0x1000) off2))
     (h_fuel : n ≥ 5) :
     (executeFn progAt s n).exitCode = some E_INVALID_SYSTEM_PROGRAM_PUBKEY := by
-  rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
-  suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_SYSTEM_PROGRAM_PUBKEY by
-    rw [executeFn_halted _ _ _ _ h5]; exact h5
   have hf18 : progAt 18 = some (.mov32 .r0 (.imm E_INVALID_SYSTEM_PROGRAM_PUBKEY)) := by native_decide
   have hf19 : progAt 19 = some (.exit) := by native_decide
-  rw [show (5 : Nat) = 1 + (1 + (1 + (1 + (1 + 0)))) from rfl]
-  iterate 4 (rw [executeFn_compose])
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc, toU64,
-    h_exit, h_r9, h_r10, h_f1, h_f2, h_f3, h_ne,
-    hf18, hf19, E_INVALID_SYSTEM_PROGRAM_PUBKEY, U32_MODULUS]
+  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off1) ≠
+               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
+    simp only [RegFile.get, h_r9, h_r10]; exact h_ne
+  exact chunk_ne_mem_error progAt s n .r7 .r8 .r9 .r10 off1 off2 18 E_INVALID_SYSTEM_PROGRAM_PUBKEY
+    (by decide) (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_ne' hf18 hf19 h_fuel
 
 -- System program pubkey comparison: by_cases over 4 chunks.
 set_option maxHeartbeats 4000000 in
@@ -1546,11 +1557,16 @@ private theorem p13_rent_dup_pass
     s'.mem = s.mem := by
   have hf118 : progAt 118 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
   have hf119 : progAt 119 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 20) := by native_decide
-  rw [show (2 : Nat) = 1 + (1 + 0) from rfl, executeFn_compose]
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_pc, h_r10, ea_acct_dup,
-    hf118, hf119, h_dup]
+  have h_eq : readU8 s.mem (effectiveAddr (s.regs.get .r9) ACCT_DUPLICATE_OFF) =
+      toU64 (↑ACCT_NON_DUP_MARKER : Int) := by
+    simp only [RegFile.get, ea_acct_dup]; exact h_dup
+  obtain ⟨he, hp, hm, hreg⟩ := dup_pass progAt s .r7 .r9 ACCT_DUPLICATE_OFF
+    (↑ACCT_NON_DUP_MARKER : Int) 20 (by decide) h_exit
+    (by rw [h_pc]; exact hf118) (by rw [h_pc]; exact hf119) h_eq
+  have hr9 := hreg .r9 (by decide)
+  have hr10' := hreg .r10 (by decide)
+  simp only [RegFile.get] at hr9 hr10'
+  exact ⟨he, by rw [hp, h_pc], hr9, by rw [hr10', h_r10], hm⟩
 
 -- Chunk match via lddw: 3 steps (ldx + lddw + jne fallthrough).
 set_option maxHeartbeats 1600000 in
@@ -1568,11 +1584,15 @@ private theorem p13_chunk_eq_lddw (rentAddr : Nat) (s : State)
     (executeFn progAt s 3).mem = s.mem ∧
     (executeFn progAt s 3).regs.r9 = rentAddr ∧
     (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
-  rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-  iterate 2 (rw [executeFn_compose])
-  simp [executeFn, step, readByWidth,
-    RegFile.get, RegFile.set, resolveSrc,
-    h_exit, h_r9, h_r10, h_f1, h_f2, h_f3, h_eq]
+  have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) = toU64 val := by
+    simp only [RegFile.get, h_r9]; exact h_eq
+  obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_imm progAt s .r7 .r8 .r9 off val 22
+    (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_eq'
+  have hr9 := hreg .r9 (by decide) (by decide)
+  have hr10' := hreg .r10 (by decide) (by decide)
+  simp only [RegFile.get] at hr9 hr10'
+  exact ⟨he, hp, hm, by rw [hr9, h_r9], by rw [hr10', h_r10]⟩
 
 -- Shared error handler: PC = 22 → mov32 r0 E_INVALID_RENT_SYSVAR_PUBKEY → exit.
 private theorem p13_error_at_22 (s : State)
@@ -1581,9 +1601,7 @@ private theorem p13_error_at_22 (s : State)
     (executeFn progAt s 2).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY := by
   have hf22 : progAt 22 = some (.mov32 .r0 (.imm E_INVALID_RENT_SYSVAR_PUBKEY)) := by native_decide
   have hf23 : progAt 23 = some (.exit) := by native_decide
-  rw [show (2 : Nat) = 1 + (1 + 0) from rfl, executeFn_compose]
-  simp [executeFn, step, RegFile.get, RegFile.set, resolveSrc, toU64,
-    h_exit, h_pc, hf22, hf23, E_INVALID_RENT_SYSVAR_PUBKEY, U32_MODULUS]
+  exact error_exit progAt s E_INVALID_RENT_SYSVAR_PUBKEY h_exit (by rw [h_pc]; exact hf22) (by rw [h_pc]; exact hf23)
 
 -- Chunk mismatch via lddw: branch to PC 22 → E_INVALID_RENT_SYSVAR_PUBKEY.
 set_option maxHeartbeats 4000000 in
@@ -1591,7 +1609,7 @@ private theorem p13_chunk_ne_lddw (rentAddr : Nat) (s : State) (n : Nat)
     (off : Int) (val : Int)
     (h_exit : s.exitCode = none)
     (h_r9   : s.regs.r9 = rentAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
     (h_f2 : progAt (s.pc + 1) = some (.lddw .r8 val))
     (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
@@ -1601,23 +1619,13 @@ private theorem p13_chunk_ne_lddw (rentAddr : Nat) (s : State) (n : Nat)
   rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
   suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY by
     rw [executeFn_halted _ _ _ _ h5]; exact h5
-  -- Split: 5 = 3 + 2 (branch + error handler)
+  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) ≠ toU64 val := by
+    simp only [RegFile.get, h_r9]; exact h_ne
   rw [show (5 : Nat) = 3 + 2 from rfl, executeFn_compose]
-  -- Prove branch reaches PC 22
-  have h3_exit : (executeFn progAt s 3).exitCode = none := by
-    rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-    iterate 2 (rw [executeFn_compose])
-    simp only [executeFn, step, readByWidth,
-      RegFile.get, RegFile.set, resolveSrc,
-      h_exit, h_r9, h_r10, h_f1, h_f2, h_f3]
-  have h3_pc : (executeFn progAt s 3).pc = 22 := by
-    rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-    iterate 2 (rw [executeFn_compose])
-    simp only [executeFn, step, readByWidth,
-      RegFile.get, RegFile.set, resolveSrc,
-      h_exit, h_r9, h_r10, h_f1, h_f2, h_f3]
-    exact if_pos h_ne
-  exact p13_error_at_22 _ h3_exit h3_pc
+  obtain ⟨he, hp, _⟩ := chunk_ne_imm progAt s .r7 .r8 .r9 off val 22
+    (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_ne'
+  exact p13_error_at_22 _ he (by rw [hp])
 
 -- Chunk mismatch via mov32 (chunk 3): branch to PC 22 → E_INVALID_RENT_SYSVAR_PUBKEY.
 set_option maxHeartbeats 4000000 in
@@ -1625,7 +1633,7 @@ private theorem p13_chunk_ne_mov32 (rentAddr : Nat) (s : State) (n : Nat)
     (off : Int) (val : Int)
     (h_exit : s.exitCode = none)
     (h_r9   : s.regs.r9 = rentAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
     (h_f2 : progAt (s.pc + 1) = some (.mov32 .r8 (.imm val)))
     (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
@@ -1635,23 +1643,13 @@ private theorem p13_chunk_ne_mov32 (rentAddr : Nat) (s : State) (n : Nat)
   rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
   suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY by
     rw [executeFn_halted _ _ _ _ h5]; exact h5
-  -- Split: 5 = 3 + 2 (branch + error handler)
+  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) ≠ toU64 val % U32_MODULUS := by
+    simp only [RegFile.get, h_r9]; exact h_ne
   rw [show (5 : Nat) = 3 + 2 from rfl, executeFn_compose]
-  -- Prove branch reaches PC 22
-  have h3_exit : (executeFn progAt s 3).exitCode = none := by
-    rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-    iterate 2 (rw [executeFn_compose])
-    simp only [executeFn, step, readByWidth,
-      RegFile.get, RegFile.set, resolveSrc,
-      h_exit, h_r9, h_r10, h_f1, h_f2, h_f3]
-  have h3_pc : (executeFn progAt s 3).pc = 22 := by
-    rw [show (3 : Nat) = 1 + (1 + (1 + 0)) from rfl]
-    iterate 2 (rw [executeFn_compose])
-    simp only [executeFn, step, readByWidth,
-      RegFile.get, RegFile.set, resolveSrc,
-      h_exit, h_r9, h_r10, h_f1, h_f2, h_f3]
-    exact if_pos h_ne
-  exact p13_error_at_22 _ h3_exit h3_pc
+  obtain ⟨he, hp, _⟩ := chunk_ne_imm32 progAt s .r7 .r8 .r9 off val 22
+    (by decide) (by decide) (by decide)
+    h_exit h_f1 h_f2 h_f3 h_ne'
+  exact p13_error_at_22 _ he (by rw [hp])
 
 -- Rent sysvar pubkey comparison: by_cases over 4 chunks, max 14 steps.
 -- Chunks 0-2 use lddw for expected value; chunk 3 uses mov32.
