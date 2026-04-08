@@ -70,4 +70,40 @@ abbrev INSTRUCTION_DATA_OFFSET : Int := 31040
   .exit                                             -- 30
 ]
 
+/-! ## Instruction fetch function -/
+
+@[simp] def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
+  | 0  => some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFFSET)
+  | 1  => some (.jne .r2 (.imm N_ACCOUNTS_EXPECTED) 17)
+  | 2  => some (.ldx .dword .r2 .r1 SENDER_DATA_LENGTH_OFFSET)
+  | 3  => some (.jne .r2 (.imm DATA_LENGTH_ZERO) 19)
+  | 4  => some (.ldx .byte .r2 .r1 RECIPIENT_OFFSET)
+  | 5  => some (.jne .r2 (.imm NON_DUP_MARKER) 21)
+  | 6  => some (.ldx .dword .r2 .r1 RECIPIENT_DATA_LENGTH_OFFSET)
+  | 7  => some (.jne .r2 (.imm DATA_LENGTH_ZERO) 23)
+  | 8  => some (.ldx .byte .r2 .r1 SYSTEM_PROGRAM_OFFSET)
+  | 9  => some (.jne .r2 (.imm NON_DUP_MARKER) 25)
+  | 10 => some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_LENGTH_OFFSET)
+  | 11 => some (.jne .r4 (.imm INSTRUCTION_DATA_LENGTH_EXPECTED) 27)
+  | 12 => some (.ldx .dword .r4 .r1 INSTRUCTION_DATA_OFFSET)
+  | 13 => some (.ldx .dword .r2 .r1 SENDER_LAMPORTS_OFFSET)
+  | 14 => some (.jlt .r2 (.reg .r4) 29)
+  | 15 => some (.call .sol_invoke_signed)
+  | 16 => some .exit
+  | 17 => some (.mov64 .r0 (.imm 1))
+  | 18 => some .exit
+  | 19 => some (.mov64 .r0 (.imm 2))
+  | 20 => some .exit
+  | 21 => some (.mov64 .r0 (.imm 3))
+  | 22 => some .exit
+  | 23 => some (.mov64 .r0 (.imm 4))
+  | 24 => some .exit
+  | 25 => some (.mov64 .r0 (.imm 5))
+  | 26 => some .exit
+  | 27 => some (.mov64 .r0 (.imm 6))
+  | 28 => some .exit
+  | 29 => some (.mov64 .r0 (.imm 7))
+  | 30 => some .exit
+  | _  => none
+
 end TransferProg

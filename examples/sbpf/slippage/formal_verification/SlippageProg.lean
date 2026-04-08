@@ -26,4 +26,18 @@ abbrev MINIMUM_BALANCE : Int := 0x2918
   .exit                                             -- 8
 ]
 
+/-! ## Instruction fetch function -/
+
+@[simp] def progAt : Nat → Option QEDGen.Solana.SBPF.Insn
+  | 0 => some (.ldx .dword .r3 .r1 MINIMUM_BALANCE)
+  | 1 => some (.ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE)
+  | 2 => some (.jge .r3 (.reg .r4) 4)
+  | 3 => some .exit
+  | 4 => some (.lddw .r1 0)
+  | 5 => some (.lddw .r2 17)
+  | 6 => some (.call .sol_log_)
+  | 7 => some (.lddw .r0 1)
+  | 8 => some .exit
+  | _ => none
+
 end SlippageProg

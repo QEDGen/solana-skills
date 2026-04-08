@@ -268,20 +268,7 @@ def U32_MODULUS : Nat := 2 ^ 32
 
 abbrev Program := Array Insn
 
-/-- Execute a program from the current state, consuming up to `fuel` steps. -/
-def execute (prog : Program) (s : State) (fuel : Nat) : State :=
-  match fuel with
-  | 0 => s
-  | fuel' + 1 =>
-    match s.exitCode with
-    | some _ => s
-    | none =>
-      match prog[s.pc]? with
-      | none => { s with exitCode := some ERR_INVALID_PC }
-      | some insn => execute prog (step insn s) fuel'
-
-/-- Execute using a function-based instruction fetch (O(1) per step).
-    Use this for large programs where Array.get? is too expensive for simp. -/
+/-- Execute using a function-based instruction fetch (O(1) per step). -/
 def executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State :=
   match fuel with
   | 0 => s
@@ -309,25 +296,6 @@ def executeFn (fetch : Nat → Option Insn) (s : State) (fuel : Nat) : State :=
   pc := entryPc
 
 /-! ## Execution unrolling lemmas -/
-
-@[simp] theorem execute_halted (prog : Program) (s : State) (n : Nat) (code : Nat)
-    (h : s.exitCode = some code) :
-    execute prog s n = s := by
-  cases n with
-  | zero => simp [execute]
-  | succ n => simp [execute, h]
-
-theorem execute_step (prog : Program) (s : State) (n : Nat) (insn : Insn)
-    (h_running : s.exitCode = none)
-    (h_fetch : prog[s.pc]? = some insn) :
-    execute prog s (n + 1) = execute prog (step insn s) n := by
-  simp [execute, h_running, h_fetch]
-
-@[simp] theorem execute_zero (prog : Program) (s : State) :
-    execute prog s 0 = s := by
-  simp [execute]
-
--- Function-based execution lemmas (for large programs)
 
 @[simp] theorem executeFn_halted (fetch : Nat → Option Insn) (s : State) (n : Nat) (code : Nat)
     (h : s.exitCode = some code) :
@@ -405,10 +373,5 @@ theorem executeFn_r10_initState2 (fetch : Nat → Option Insn) (inputAddr insnAd
     (executeFn fetch (initState2 inputAddr insnAddr mem entryPc) n).regs.r10
       = STACK_START + 0x1000 := by
   simp [initState2]
-
-/-- Step N times from a state, applying instructions from a list -/
-def stepN : List Insn → State → State
-  | [], s => s
-  | i :: is, s => stepN is (step i s)
 
 end QEDGen.Solana.SBPF
