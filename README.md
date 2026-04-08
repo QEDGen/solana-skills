@@ -21,7 +21,7 @@
 
 ---
 
-An agent skill that formally verifies Solana programs by generating **Lean 4 proofs**. Your agent writes the proofs; **Leanstral** handles routine sub-goals (seconds), **Aristotle** handles the hardest ones (minutes–hours).
+An agent skill that formally verifies Solana programs — **Rust/Anchor** and **sBPF assembly** — by generating machine-checked **Lean 4 proofs**. Your agent writes the proofs; **Leanstral** handles routine sub-goals (seconds), **Aristotle** handles the hardest ones (minutes–hours).
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -53,18 +53,29 @@ Your Code ──► Your Agent ──► SPEC.md ──► Lean 4 Proofs ──�
 | **CPI correctness** | Correct parameters passed to each transfer (axiomatic, pure `rfl`) |
 | **State machines** | Lifecycle correctness, one-shot safety |
 | **Arithmetic safety** | Overflow/underflow for fixed-width integers |
+| **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |
+| **PDA integrity** | Program-derived address validation (sBPF) |
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
 
-## Setup
-
-Export a [Mistral API key](https://console.mistral.ai) (free tier available):
+## Quick start
 
 ```bash
-export MISTRAL_API_KEY=your_key_here
+# 1. Install
+npx skills add qedgen/solana-skills
+
+# 2. Set API keys
+export MISTRAL_API_KEY=your_key_here                    # https://console.mistral.ai (free tier available)
+export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harmonic.fun
+
+# 3. Run setup (installs Lean, Rust, Mathlib cache — first run takes 15-45 min)
+qedgen setup
+
+# 4. Verify an example
+cd examples/sbpf/dropset/formal_verification && lake build
 ```
 
-The installer handles Rust, Lean/elan, the CLI binary, and global Mathlib cache automatically. First Mathlib build takes 15-45 min; subsequent builds reuse the cache.
+If `lake build` completes with no errors, your setup is working. Every theorem compiled = every property proven.
 
 ## Usage
 
@@ -131,10 +142,12 @@ qedgen consolidate \
 
 ## Requirements
 
-- `MISTRAL_API_KEY` environment variable (for `fill-sorry` and `generate`)
-- `ARISTOTLE_API_KEY` environment variable (for `aristotle` commands — get at [aristotle.harmonic.fun](https://aristotle.harmonic.fun))
 - Rust toolchain (auto-installed if missing)
 - Lean 4 / elan (auto-installed if missing)
+- `MISTRAL_API_KEY` — for `fill-sorry` and `generate` ([console.mistral.ai](https://console.mistral.ai), free tier available)
+- `ARISTOTLE_API_KEY` — for `aristotle` commands ([aristotle.harmonic.fun](https://aristotle.harmonic.fun))
+
+Both API keys are optional — `qedgen` works without them, but unresolved sub-goals will remain as `sorry` markers in proofs.
 
 Override the Mathlib cache location with `QEDGEN_VALIDATION_WORKSPACE`.
 
