@@ -353,7 +353,7 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `Program` — `Array Insn`
 
 **State types:**
-- `RegFile` — struct with fields `r0..r10 : Nat` (all default 0). `@[simp]` on `get`/`set`.
+- `RegFile` — struct with fields `r0..r10 : Nat` (all default 0). `@[simp]` on `get`/`set`. Writes to r10 are silently ignored (`set_r10`).
 - `State` — `{ regs : RegFile, mem : Mem, pc : Nat, exitCode : Option Nat }`
 - `Mem` — `Nat → Nat` (byte-addressable memory)
 
@@ -393,10 +393,49 @@ After `import QEDGen.Solana.SBPF` and `open QEDGen.Solana.SBPF`:
 - `executeFn_zero` (`@[simp]`) — `executeFn fetch s 0 = s`
 - `executeFn_compose` — composability: `executeFn fetch s (n+m) = executeFn fetch (executeFn fetch s n) m`
 
+**Register lemmas:**
+- `RegFile.set_r10` (`@[simp]`) — writing to r10 is a no-op
+- `RegFile.get_set_self` — `(rf.set r v).get r = v` (when `r ≠ .r10`)
+- `RegFile.get_set_diff` — `(rf.set r2 v).get r1 = rf.get r1` (when `r1 ≠ r2`)
+
 **Memory axioms:**
 - `readU64_writeU64_same` — read-after-write returns original value
 - `readU64_writeU64_disjoint` — non-overlapping write doesn't affect read
 - `readU8_writeU64_outside`, `readU64_writeU8_disjoint`
+
+**Reusable instruction patterns** (`import QEDGen.Solana.SBPF.Patterns`):
+
+Pre-proven theorems for common 2-3 instruction sequences. Parameterized over `fetch`, registers, offsets, and branch targets. Register disjointness hypotheses are dischargeable by `decide` at call sites.
+
+| Pattern | Steps | Sequence | Conclusion |
+|---|---|---|---|
+| `error_exit` | 2 | `mov32 r0 code; exit` | `exitCode = some (toU64 code % U32_MODULUS)` |
+| `dup_pass` | 2 | `ldx byte; jne (fall)` | `exitCode = none ∧ pc = pc+2 ∧ mem preserved ∧ ∀ r ≠ dst, reg preserved` |
+| `dup_fail` | 2 | `ldx byte; jne (taken)` | `exitCode = none ∧ pc = target ∧ mem preserved ∧ ∀ r ≠ dst, reg preserved` |
+| `chunk_eq_mem` | 3 | `ldx; ldx; jne (fall)` | `exitCode = none ∧ pc = pc+3 ∧ mem preserved ∧ ∀ r ≠ dstA,dstB, reg preserved` |
+| `chunk_ne_mem` | 3 | `ldx; ldx; jne (taken)` | `exitCode = none ∧ pc = target ∧ mem preserved` |
+| `chunk_eq_imm` | 3 | `ldx; lddw; jne (fall)` | same as `chunk_eq_mem` (vs 64-bit immediate) |
+| `chunk_ne_imm` | 3 | `ldx; lddw; jne (taken)` | same as `chunk_ne_mem` (vs 64-bit immediate) |
+| `chunk_eq_imm32` | 3 | `ldx; mov32; jne (fall)` | same as `chunk_eq_mem` (vs 32-bit immediate) |
+| `chunk_ne_imm32` | 3 | `ldx; mov32; jne (taken)` | same as `chunk_ne_mem` (vs 32-bit immediate) |
+| `chunk_ne_mem_error` | 5 | chunk mismatch → error exit | `exitCode = some (toU64 errorCode % U32_MODULUS)` |
+
+**Usage example** — comparing a pubkey chunk against a known value:
+```lean
+-- Bridge hypotheses to library form (s.regs.get .r9 → sysAddr)
+have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off1) =
+             readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
+  simp only [RegFile.get, h_r9, h_r10]; exact h_eq
+-- Call library pattern
+obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_mem progAt s .r7 .r8 .r9 .r10 off1 off2 target
+  (by decide) (by decide) (by decide) (by decide)  -- register disjointness
+  h_exit h_f1 h_f2 h_f3 h_eq'
+-- Extract specific register preservation from ∀
+have hr9 := hreg .r9 (by decide) (by decide)
+have hr10 := hreg .r10 (by decide) (by decide)
+```
+
+For composed patterns (e.g., chunk mismatch → error), `chunk_ne_mem_error` handles the full 5-step sequence in one call, combining `executeFn_compose` and `executeFn_halted` internally.
 
 ### Proof strategy: `wp_exec` tactic
 
@@ -461,6 +500,18 @@ wp_exec [progAt, progAt_0, progAt_1] [ea_0]
 ```
 
 Set `maxHeartbeats` to 800000 for typical paths (3-8 instructions), higher for longer paths.
+
+### Using library patterns vs wp_exec
+
+**Use `wp_exec`** for end-to-end proofs of simple linear paths (3-15 instructions) where the full execution can be discharged in one tactic call.
+
+**Use library patterns** for structured programs with recurring instruction sequences. Common in SIMD-0321 programs that validate multiple accounts with the same check pattern:
+
+1. **Split with `executeFn_compose`** into phases (prefix + per-account checks)
+2. **Call library patterns** for each 2-3 instruction sequence (dup check, chunk comparison)
+3. **Chain results** via `obtain` destructuring
+
+This avoids repeating `simp [RegFile.get, RegFile.set, ...]` in every helper and makes the proof structure match the program structure. The dropset proofs demonstrate this: 11 helpers rewritten from inline simp to library pattern calls.
 
 ### Memory disjointness through stack writes
 
