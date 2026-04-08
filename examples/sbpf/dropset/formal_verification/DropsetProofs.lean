@@ -7,7 +7,8 @@
 -- instruction length, and per-account duplicate/data checks.
 --
 -- P1-P7: Use wp_exec for one-shot proofs (simple linear paths).
--- P8-P9: Use manual executeFn_step (memory disjointness through stack writes).
+-- P8-P9: Use manual wp_step (memory disjointness through stack writes).
+-- P10-P13: Use helper lemma composition via executeFn_compose.
 
 import QEDGen.Solana.SBPF
 import DropsetProg
@@ -1408,7 +1409,7 @@ private theorem p12_r9_advance
     hf110, hf111, hf112, hf113, hf114, hf115, hf116, hf117]
   exact ⟨trivial, trivial, _, rfl⟩
 
--- Rent sysvar dup check: 4 steps PCs 118-121.
+-- Rent sysvar dup check: 4 steps from PC 118 → error exit.
 -- ldx.byte from r9 (rent dup marker) + jne to error handler at PC 20 + mov32 + exit.
 set_option maxHeartbeats 800000 in
 private theorem p12_dup_exit
