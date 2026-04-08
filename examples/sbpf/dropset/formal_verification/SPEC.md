@@ -142,39 +142,50 @@ Note: The quote mint offset is dynamic — the input pointer is shifted by
 requires a stack-input separation hypothesis and memory disjointness axioms to read
 through stack writes.
 
-### 3.9 PDA Integrity (future)
+### 3.9 PDA Integrity
 
 **P9**: For all inputs where prior checks pass and derived PDA ≠ provided market pubkey,
 then `exitCode = 9` (E_INVALID_MARKET_PUBKEY).
 
-Note: Requires modeling `sol_try_find_program_address` syscall behavior. The PDA
-check compares 4 × 8-byte chunks of the derived address against the market account pubkey.
+The PDA check compares 4 × 8-byte chunks of the derived address (written to the stack
+by `sol_try_find_program_address`) against the market account pubkey in the input buffer.
+The proof requires memory disjointness (stack writes don't affect input buffer reads)
+and `executeFn_compose` to split the long execution path into composable segments.
 
-### 3.10 System Program Uniqueness (future)
+### 3.10 System Program Uniqueness
 
 **P10**: For all inputs where prior checks pass and System Program `duplicate ≠ 255`,
 then `exitCode = 10` (E_SYSTEM_PROGRAM_IS_DUPLICATE).
 
-Note: System Program account is reached after advancing past quote mint by
-`quote_mint.padded_data_len + EmptyAccount.size` — another dynamic offset.
+The System Program account is reached after advancing past quote mint by
+`quote_mint.padded_data_len + EmptyAccount.size` — a dynamic offset computed via
+`add64` + `and64`. The proof threads the dynamic address through stack writes
+and verifies the duplicate marker read at the shifted offset.
 
-### 3.11 System Program Identity (future)
+### 3.11 System Program Identity
 
 **P11**: For all inputs where prior checks pass and System Program pubkey ≠ known address,
 then `exitCode = 11` (E_INVALID_SYSTEM_PROGRAM_PUBKEY).
 
-### 3.12 Rent Sysvar Uniqueness (future)
+The pubkey check compares 4 × 8-byte chunks of the System Program account address
+against the well-known System Program pubkey (all zeros). Uses `chunk_ne_mem` and
+`chunk_ne_imm` pattern lemmas for the chunk-by-chunk comparison.
+
+### 3.12 Rent Sysvar Uniqueness
 
 **P12**: For all inputs where prior checks pass and Rent sysvar `duplicate ≠ 255`,
 then `exitCode = 12` (E_RENT_SYSVAR_IS_DUPLICATE).
 
-Note: Rent sysvar is reached after advancing past System Program by
+The Rent sysvar is reached after advancing past the System Program account by
 `system_program.padded_data_len + EmptyAccount.size` — a third dynamic offset.
 
-### 3.13 Rent Sysvar Identity (future)
+### 3.13 Rent Sysvar Identity
 
 **P13**: For all inputs where prior checks pass and Rent sysvar pubkey ≠ known address,
 then `exitCode = 13` (E_INVALID_RENT_SYSVAR_PUBKEY).
+
+The Rent sysvar pubkey check follows the same 4-chunk comparison pattern as P11,
+comparing against the well-known Rent sysvar address (`SysvarRent111111111111111111111111111111111`).
 
 ## 4. Trust Boundary
 
@@ -195,11 +206,11 @@ then `exitCode = 13` (E_INVALID_RENT_SYSVAR_PUBKEY).
 | 6    | MarketHasData                 | **P6**   |
 | 7    | BaseMintIsDuplicate           | **P7**   |
 | 8    | QuoteMintIsDuplicate          | **P8**   |
-| 9    | InvalidMarketPubkey           | Open     |
-| 10   | SystemProgramIsDuplicate      | Open     |
-| 11   | InvalidSystemProgramPubkey    | Open     |
-| 12   | RentSysvarIsDuplicate         | Open     |
-| 13   | InvalidRentSysvarPubkey       | Open     |
+| 9    | InvalidMarketPubkey           | **P9**   |
+| 10   | SystemProgramIsDuplicate      | **P10**  |
+| 11   | InvalidSystemProgramPubkey    | **P11**  |
+| 12   | RentSysvarIsDuplicate         | **P12**  |
+| 13   | InvalidRentSysvarPubkey       | **P13**  |
 
 ## 6. Verification Results
 
@@ -213,8 +224,8 @@ then `exitCode = 13` (E_INVALID_RENT_SYSVAR_PUBKEY).
 | P6       | **Verified** | `rejects_market_has_data`                    |
 | P7       | **Verified** | `rejects_base_mint_duplicate`                |
 | P8       | **Verified** | `rejects_quote_mint_duplicate`               |
-| P9       | **Open**     |                                              |
-| P10      | **Open**     |                                              |
-| P11      | **Open**     |                                              |
-| P12      | **Open**     |                                              |
-| P13      | **Open**     |                                              |
+| P9       | **Verified** | `rejects_invalid_market_pubkey`              |
+| P10      | **Verified** | `rejects_system_program_duplicate`           |
+| P11      | **Verified** | `rejects_invalid_system_program_pubkey`      |
+| P12      | **Verified** | `rejects_rent_sysvar_duplicate`              |
+| P13      | **Verified** | `rejects_invalid_rent_sysvar_pubkey`         |
