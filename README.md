@@ -21,7 +21,7 @@
 
 ---
 
-An agent skill that formally verifies Solana programs by generating **Lean 4 proofs**. Your agent writes the proofs; Mistral's **Leanstral** model handles hard sub-goals.
+An agent skill that formally verifies Solana programs by generating **Lean 4 proofs**. Your agent writes the proofs; **Leanstral** handles routine sub-goals (seconds), **Aristotle** handles the hardest ones (minutes–hours).
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -33,18 +33,17 @@ npx skills add qedgen/solana-skills
 
 ```
 Your Code ──► Your Agent ──► SPEC.md ──► Lean 4 Proofs ──► lake build ──► ∎
-                  │                           ▲
-                  │                           │
-                  └─── iterate on errors ─────┘
-                         Leanstral fills
-                         hard sub-goals
+                  │                           ▲       │
+                  │                           │       ├─► Leanstral (fast)
+                  └─── iterate on errors ─────┘       └─► Aristotle (deep)
 ```
 
 1. Your agent reads the program source and IDL
 2. Generates a `SPEC.md` with verification goals and properties
 3. Writes Lean 4 proofs against the QEDGen support library
 4. Iterates on `lake build` errors until proofs compile
-5. Calls `qedgen fill-sorry` for hard sub-goals (powered by Leanstral)
+5. Calls `qedgen fill-sorry` for hard sub-goals (Leanstral — seconds)
+6. Escalates to `qedgen aristotle submit` when Leanstral fails (Aristotle — minutes to hours)
 
 ## What it verifies
 
@@ -96,6 +95,17 @@ qedgen fill-sorry \
   --validate
 ```
 
+### Escalate to Aristotle (when Leanstral fails)
+
+```bash
+# Submit and wait inline
+qedgen aristotle submit --project-dir formal_verification --wait
+
+# Or submit, detach, and poll later
+qedgen aristotle submit --project-dir formal_verification
+qedgen aristotle status <project-id> --wait --output-dir formal_verification
+```
+
 ### Consolidate proofs
 
 ```bash
@@ -115,12 +125,14 @@ qedgen consolidate \
 
 - **[Counter](examples/sbpf/counter/)** — Account counter with 3 verified validation guards (178 instructions)
 - **[Tree](examples/sbpf/tree/)** — Red-black tree with 3 verified validation guards (498 instructions)
+- **[Dropset](examples/sbpf/dropset/)** — On-chain order book RegisterMarket — 13/13 security properties verified (180 instructions)
 - **[Transfer](examples/sbpf/transfer/)** — Lamport transfer with account count and data length checks
 - **[Slippage](examples/sbpf/slippage/)** — AMM slippage protection with overflow safety
 
 ## Requirements
 
-- `MISTRAL_API_KEY` environment variable
+- `MISTRAL_API_KEY` environment variable (for `fill-sorry` and `generate`)
+- `ARISTOTLE_API_KEY` environment variable (for `aristotle` commands — get at [aristotle.harmonic.fun](https://aristotle.harmonic.fun))
 - Rust toolchain (auto-installed if missing)
 - Lean 4 / elan (auto-installed if missing)
 
