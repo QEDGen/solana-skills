@@ -214,6 +214,218 @@ abbrev RM_MISC_TRY_FIND_PDA_SEEDS_LEN : Nat := 2
 abbrev RM_MISC_CREATE_ACCOUNT_N_ACCOUNTS : Nat := 2
 abbrev RM_MISC_N_PDA_SIGNERS : Nat := 1
 
+/-! ## effectiveAddr lemmas -/
+
+section EffectiveAddr
+
+open QEDGen.Solana.SBPF.Memory
+
+@[simp] theorem ea_ACCT_ADDRESS_CHUNK_0_OFF (b : Nat) : effectiveAddr b ACCT_ADDRESS_CHUNK_0_OFF = b + 8 := by
+  unfold effectiveAddr ACCT_ADDRESS_CHUNK_0_OFF; omega
+
+@[simp] theorem ea_ACCT_ADDRESS_CHUNK_1_OFF (b : Nat) : effectiveAddr b ACCT_ADDRESS_CHUNK_1_OFF = b + 16 := by
+  unfold effectiveAddr ACCT_ADDRESS_CHUNK_1_OFF; omega
+
+@[simp] theorem ea_ACCT_ADDRESS_CHUNK_2_OFF (b : Nat) : effectiveAddr b ACCT_ADDRESS_CHUNK_2_OFF = b + 24 := by
+  unfold effectiveAddr ACCT_ADDRESS_CHUNK_2_OFF; omega
+
+@[simp] theorem ea_ACCT_ADDRESS_CHUNK_3_OFF (b : Nat) : effectiveAddr b ACCT_ADDRESS_CHUNK_3_OFF = b + 32 := by
+  unfold effectiveAddr ACCT_ADDRESS_CHUNK_3_OFF; omega
+
+@[simp] theorem ea_ACCT_DATA_LEN_OFF (b : Nat) : effectiveAddr b ACCT_DATA_LEN_OFF = b + 80 := by
+  unfold effectiveAddr ACCT_DATA_LEN_OFF; omega
+
+@[simp] theorem ea_ACCT_DATA_OFF (b : Nat) : effectiveAddr b ACCT_DATA_OFF = b + 88 := by
+  unfold effectiveAddr ACCT_DATA_OFF; omega
+
+@[simp] theorem ea_ACCT_DUPLICATE_OFF (b : Nat) : effectiveAddr b ACCT_DUPLICATE_OFF = b := by
+  unfold effectiveAddr ACCT_DUPLICATE_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_DATA_LEN_OFF (b : Nat) : effectiveAddr b IB_MARKET_DATA_LEN_OFF = b + 10424 := by
+  unfold effectiveAddr IB_MARKET_DATA_LEN_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_DUPLICATE_OFF (b : Nat) : effectiveAddr b IB_MARKET_DUPLICATE_OFF = b + 10344 := by
+  unfold effectiveAddr IB_MARKET_DUPLICATE_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_PUBKEY_CHUNK_0_OFF (b : Nat) : effectiveAddr b IB_MARKET_PUBKEY_CHUNK_0_OFF = b + 10352 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_0_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_PUBKEY_CHUNK_1_OFF (b : Nat) : effectiveAddr b IB_MARKET_PUBKEY_CHUNK_1_OFF = b + 10360 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_1_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_PUBKEY_CHUNK_2_OFF (b : Nat) : effectiveAddr b IB_MARKET_PUBKEY_CHUNK_2_OFF = b + 10368 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_2_OFF; omega
+
+@[simp] theorem ea_IB_MARKET_PUBKEY_CHUNK_3_OFF (b : Nat) : effectiveAddr b IB_MARKET_PUBKEY_CHUNK_3_OFF = b + 10376 := by
+  unfold effectiveAddr IB_MARKET_PUBKEY_CHUNK_3_OFF; omega
+
+@[simp] theorem ea_IB_N_ACCTS_OFF (b : Nat) : effectiveAddr b IB_N_ACCTS_OFF = b := by
+  unfold effectiveAddr IB_N_ACCTS_OFF; omega
+
+@[simp] theorem ea_IB_USER_DATA_LEN_OFF (b : Nat) : effectiveAddr b IB_USER_DATA_LEN_OFF = b + 88 := by
+  unfold effectiveAddr IB_USER_DATA_LEN_OFF; omega
+
+@[simp] theorem ea_INSN_DISC_OFF (b : Nat) : effectiveAddr b INSN_DISC_OFF = b := by
+  unfold effectiveAddr INSN_DISC_OFF; omega
+
+@[simp] theorem ea_INSN_LEN_OFF (b : Nat) : effectiveAddr b INSN_LEN_OFF = b - 8 := by
+  unfold effectiveAddr INSN_LEN_OFF; omega
+
+@[simp] theorem ea_PUBKEY_CHUNK_0_OFF (b : Nat) : effectiveAddr b PUBKEY_CHUNK_0_OFF = b := by
+  unfold effectiveAddr PUBKEY_CHUNK_0_OFF; omega
+
+@[simp] theorem ea_PUBKEY_CHUNK_1_OFF (b : Nat) : effectiveAddr b PUBKEY_CHUNK_1_OFF = b + 8 := by
+  unfold effectiveAddr PUBKEY_CHUNK_1_OFF; omega
+
+@[simp] theorem ea_PUBKEY_CHUNK_2_OFF (b : Nat) : effectiveAddr b PUBKEY_CHUNK_2_OFF = b + 16 := by
+  unfold effectiveAddr PUBKEY_CHUNK_2_OFF; omega
+
+@[simp] theorem ea_PUBKEY_CHUNK_3_OFF (b : Nat) : effectiveAddr b PUBKEY_CHUNK_3_OFF = b + 24 := by
+  unfold effectiveAddr PUBKEY_CHUNK_3_OFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_INFO_DATA_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_INFO_DATA_UOFF = b - 416 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_INFO_DATA_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_INFO_IS_SIGNER_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_INFO_IS_SIGNER_UOFF = b - 392 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_INFO_IS_SIGNER_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_INFO_KEY_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_INFO_KEY_UOFF = b - 440 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_INFO_KEY_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_INFO_LAMPORTS_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_INFO_LAMPORTS_UOFF = b - 432 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_INFO_LAMPORTS_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_INFO_OWNER_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_INFO_OWNER_UOFF = b - 408 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_INFO_OWNER_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_META_IS_WRITABLE_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_META_IS_WRITABLE_UOFF = b - 136 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_META_IS_WRITABLE_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_TARGET_ACCT_META_PUBKEY_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_TARGET_ACCT_META_PUBKEY_UOFF = b - 144 := by
+  unfold effectiveAddr RM_FM_CPI_TARGET_ACCT_META_PUBKEY_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_INFO_DATA_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_INFO_DATA_UOFF = b - 472 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_INFO_DATA_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_INFO_IS_SIGNER_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_INFO_IS_SIGNER_UOFF = b - 448 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_INFO_IS_SIGNER_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_INFO_KEY_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_INFO_KEY_UOFF = b - 496 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_INFO_KEY_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_INFO_LAMPORTS_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_INFO_LAMPORTS_UOFF = b - 488 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_INFO_LAMPORTS_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_INFO_OWNER_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_INFO_OWNER_UOFF = b - 464 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_INFO_OWNER_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_META_IS_WRITABLE_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_META_IS_WRITABLE_UOFF = b - 152 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_META_IS_WRITABLE_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CPI_USER_ACCT_META_PUBKEY_UOFF (b : Nat) : effectiveAddr b RM_FM_CPI_USER_ACCT_META_PUBKEY_UOFF = b - 160 := by
+  unfold effectiveAddr RM_FM_CPI_USER_ACCT_META_PUBKEY_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_LAMPORTS_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_LAMPORTS_UOFF = b - 548 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_LAMPORTS_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_OWNER_CHUNK_0_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_OWNER_CHUNK_0_UOFF = b - 532 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_OWNER_CHUNK_0_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_OWNER_CHUNK_1_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_OWNER_CHUNK_1_UOFF = b - 524 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_OWNER_CHUNK_1_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_OWNER_CHUNK_2_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_OWNER_CHUNK_2_UOFF = b - 516 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_OWNER_CHUNK_2_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_OWNER_CHUNK_3_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_OWNER_CHUNK_3_UOFF = b - 508 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_OWNER_CHUNK_3_UOFF; omega
+
+@[simp] theorem ea_RM_FM_CREATE_ACCT_SPACE_UOFF (b : Nat) : effectiveAddr b RM_FM_CREATE_ACCT_SPACE_UOFF = b - 540 := by
+  unfold effectiveAddr RM_FM_CREATE_ACCT_SPACE_UOFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_CHUNK_0_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_CHUNK_0_OFF = b - 616 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_0_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_CHUNK_1_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_CHUNK_1_OFF = b - 608 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_1_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_CHUNK_2_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_CHUNK_2_OFF = b - 600 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_2_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_CHUNK_3_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_CHUNK_3_OFF = b - 592 := by
+  unfold effectiveAddr RM_FM_PDA_CHUNK_3_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_BASE_ADDR_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_BASE_ADDR_OFF = b - 664 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_BASE_ADDR_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_BASE_LEN_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_BASE_LEN_OFF = b - 656 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_BASE_LEN_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_BUMP_ADDR_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_BUMP_ADDR_OFF = b - 632 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_BUMP_ADDR_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_BUMP_LEN_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_BUMP_LEN_OFF = b - 624 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_BUMP_LEN_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF = b - 648 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF; omega
+
+@[simp] theorem ea_RM_FM_PDA_SEEDS_QUOTE_LEN_OFF (b : Nat) : effectiveAddr b RM_FM_PDA_SEEDS_QUOTE_LEN_OFF = b - 640 := by
+  unfold effectiveAddr RM_FM_PDA_SEEDS_QUOTE_LEN_OFF; omega
+
+@[simp] theorem ea_RM_FM_SIGNERS_SEEDS_ADDR_UOFF (b : Nat) : effectiveAddr b RM_FM_SIGNERS_SEEDS_ADDR_UOFF = b - 64 := by
+  unfold effectiveAddr RM_FM_SIGNERS_SEEDS_ADDR_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SIGNERS_SEEDS_LEN_UOFF (b : Nat) : effectiveAddr b RM_FM_SIGNERS_SEEDS_LEN_UOFF = b - 56 := by
+  unfold effectiveAddr RM_FM_SIGNERS_SEEDS_LEN_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SOL_INSN_ACCOUNTS_UOFF (b : Nat) : effectiveAddr b RM_FM_SOL_INSN_ACCOUNTS_UOFF = b - 40 := by
+  unfold effectiveAddr RM_FM_SOL_INSN_ACCOUNTS_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SOL_INSN_ACCOUNT_LEN_UOFF (b : Nat) : effectiveAddr b RM_FM_SOL_INSN_ACCOUNT_LEN_UOFF = b - 32 := by
+  unfold effectiveAddr RM_FM_SOL_INSN_ACCOUNT_LEN_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SOL_INSN_DATA_LEN_UOFF (b : Nat) : effectiveAddr b RM_FM_SOL_INSN_DATA_LEN_UOFF = b - 16 := by
+  unfold effectiveAddr RM_FM_SOL_INSN_DATA_LEN_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SOL_INSN_DATA_UOFF (b : Nat) : effectiveAddr b RM_FM_SOL_INSN_DATA_UOFF = b - 24 := by
+  unfold effectiveAddr RM_FM_SOL_INSN_DATA_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SOL_INSN_PROGRAM_ID_UOFF (b : Nat) : effectiveAddr b RM_FM_SOL_INSN_PROGRAM_ID_UOFF = b - 48 := by
+  unfold effectiveAddr RM_FM_SOL_INSN_PROGRAM_ID_UOFF; omega
+
+@[simp] theorem ea_RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF (b : Nat) : effectiveAddr b RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF = b - 584 := by
+  unfold effectiveAddr RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF; omega
+
+@[simp] theorem ea_RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF (b : Nat) : effectiveAddr b RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF = b - 576 := by
+  unfold effectiveAddr RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF; omega
+
+@[simp] theorem ea_RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF (b : Nat) : effectiveAddr b RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF = b - 568 := by
+  unfold effectiveAddr RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF; omega
+
+@[simp] theorem ea_RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF (b : Nat) : effectiveAddr b RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF = b - 560 := by
+  unfold effectiveAddr RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF; omega
+
+@[simp] theorem ea_RM_MISC_BASE_DATA_LEN_OFF (b : Nat) : effectiveAddr b RM_MISC_BASE_DATA_LEN_OFF = b + 20760 := by
+  unfold effectiveAddr RM_MISC_BASE_DATA_LEN_OFF; omega
+
+@[simp] theorem ea_RM_MISC_BASE_DUPLICATE_OFF (b : Nat) : effectiveAddr b RM_MISC_BASE_DUPLICATE_OFF = b + 20680 := by
+  unfold effectiveAddr RM_MISC_BASE_DUPLICATE_OFF; omega
+
+@[simp] theorem ea_RM_MISC_QUOTE_DATA_LEN_OFF (b : Nat) : effectiveAddr b RM_MISC_QUOTE_DATA_LEN_OFF = b + 31096 := by
+  unfold effectiveAddr RM_MISC_QUOTE_DATA_LEN_OFF; omega
+
+@[simp] theorem ea_RM_MISC_QUOTE_DUPLICATE_OFF (b : Nat) : effectiveAddr b RM_MISC_QUOTE_DUPLICATE_OFF = b + 31016 := by
+  unfold effectiveAddr RM_MISC_QUOTE_DUPLICATE_OFF; omega
+
+end EffectiveAddr
+
+/-! ## toU64 bridge lemmas (lddw constants) -/
+
+@[simp] theorem bridge_PUBKEY_RENT_CHUNK_0 : toU64 (↑PUBKEY_RENT_CHUNK_0 : Int) = PUBKEY_RENT_CHUNK_0 := by native_decide
+@[simp] theorem bridge_PUBKEY_RENT_CHUNK_1 : toU64 (↑PUBKEY_RENT_CHUNK_1 : Int) = PUBKEY_RENT_CHUNK_1 := by native_decide
+@[simp] theorem bridge_PUBKEY_RENT_CHUNK_2 : toU64 (↑PUBKEY_RENT_CHUNK_2 : Int) = PUBKEY_RENT_CHUNK_2 := by native_decide
+
 /-! ## Program (chunked lookup for O(1) simp) -/
 
 def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
@@ -589,5 +801,188 @@ def prog : Program := #[
   .call .sol_invoke_signed_c,
   .exit
 ]
+
+/-! ## Instruction fetch cache -/
+
+@[simp] theorem insn_0 : progAt 0 = some (.mov32 .r0 (.imm E_INVALID_INSTRUCTION_LENGTH)) := by native_decide
+@[simp] theorem insn_1 : progAt 1 = some (.exit) := by native_decide
+@[simp] theorem insn_2 : progAt 2 = some (.mov32 .r0 (.imm E_INVALID_NUMBER_OF_ACCOUNTS)) := by native_decide
+@[simp] theorem insn_3 : progAt 3 = some (.exit) := by native_decide
+@[simp] theorem insn_4 : progAt 4 = some (.mov32 .r0 (.imm E_USER_HAS_DATA)) := by native_decide
+@[simp] theorem insn_5 : progAt 5 = some (.exit) := by native_decide
+@[simp] theorem insn_6 : progAt 6 = some (.mov32 .r0 (.imm E_MARKET_ACCOUNT_IS_DUPLICATE)) := by native_decide
+@[simp] theorem insn_7 : progAt 7 = some (.exit) := by native_decide
+@[simp] theorem insn_8 : progAt 8 = some (.mov32 .r0 (.imm E_MARKET_HAS_DATA)) := by native_decide
+@[simp] theorem insn_9 : progAt 9 = some (.exit) := by native_decide
+@[simp] theorem insn_10 : progAt 10 = some (.mov32 .r0 (.imm E_BASE_MINT_IS_DUPLICATE)) := by native_decide
+@[simp] theorem insn_11 : progAt 11 = some (.exit) := by native_decide
+@[simp] theorem insn_12 : progAt 12 = some (.mov32 .r0 (.imm E_QUOTE_MINT_IS_DUPLICATE)) := by native_decide
+@[simp] theorem insn_13 : progAt 13 = some (.exit) := by native_decide
+@[simp] theorem insn_14 : progAt 14 = some (.mov32 .r0 (.imm E_INVALID_MARKET_PUBKEY)) := by native_decide
+@[simp] theorem insn_15 : progAt 15 = some (.exit) := by native_decide
+@[simp] theorem insn_16 : progAt 16 = some (.mov32 .r0 (.imm E_SYSTEM_PROGRAM_IS_DUPLICATE)) := by native_decide
+@[simp] theorem insn_17 : progAt 17 = some (.exit) := by native_decide
+@[simp] theorem insn_18 : progAt 18 = some (.mov32 .r0 (.imm E_INVALID_SYSTEM_PROGRAM_PUBKEY)) := by native_decide
+@[simp] theorem insn_19 : progAt 19 = some (.exit) := by native_decide
+@[simp] theorem insn_20 : progAt 20 = some (.mov32 .r0 (.imm E_RENT_SYSVAR_IS_DUPLICATE)) := by native_decide
+@[simp] theorem insn_21 : progAt 21 = some (.exit) := by native_decide
+@[simp] theorem insn_22 : progAt 22 = some (.mov32 .r0 (.imm E_INVALID_RENT_SYSVAR_PUBKEY)) := by native_decide
+@[simp] theorem insn_23 : progAt 23 = some (.exit) := by native_decide
+@[simp] theorem insn_24 : progAt 24 = some (.ldx .dword .r3 .r1 IB_N_ACCTS_OFF) := by native_decide
+@[simp] theorem insn_25 : progAt 25 = some (.ldx .dword .r4 .r2 INSN_LEN_OFF) := by native_decide
+@[simp] theorem insn_26 : progAt 26 = some (.ldx .byte .r5 .r2 INSN_DISC_OFF) := by native_decide
+@[simp] theorem insn_27 : progAt 27 = some (.jeq .r5 (.imm DISC_REGISTER_MARKET) 30) := by native_decide
+@[simp] theorem insn_28 : progAt 28 = some (.mov32 .r0 (.imm E_INVALID_DISCRIMINANT)) := by native_decide
+@[simp] theorem insn_29 : progAt 29 = some (.exit) := by native_decide
+@[simp] theorem insn_30 : progAt 30 = some (.jlt .r3 (.imm REGISTER_MARKET_ACCOUNTS_LEN) 2) := by native_decide
+@[simp] theorem insn_31 : progAt 31 = some (.jne .r4 (.imm REGISTER_MARKET_DATA_LEN) 0) := by native_decide
+@[simp] theorem insn_32 : progAt 32 = some (.ldx .dword .r9 .r1 IB_USER_DATA_LEN_OFF) := by native_decide
+@[simp] theorem insn_33 : progAt 33 = some (.jne .r9 (.imm DATA_LEN_ZERO) 4) := by native_decide
+@[simp] theorem insn_34 : progAt 34 = some (.ldx .byte .r9 .r1 IB_MARKET_DUPLICATE_OFF) := by native_decide
+@[simp] theorem insn_35 : progAt 35 = some (.jne .r9 (.imm ACCT_NON_DUP_MARKER) 6) := by native_decide
+@[simp] theorem insn_36 : progAt 36 = some (.ldx .dword .r9 .r1 IB_MARKET_DATA_LEN_OFF) := by native_decide
+@[simp] theorem insn_37 : progAt 37 = some (.jne .r9 (.imm DATA_LEN_ZERO) 8) := by native_decide
+@[simp] theorem insn_38 : progAt 38 = some (.ldx .byte .r9 .r1 RM_MISC_BASE_DUPLICATE_OFF) := by native_decide
+@[simp] theorem insn_39 : progAt 39 = some (.jne .r9 (.imm ACCT_NON_DUP_MARKER) 10) := by native_decide
+@[simp] theorem insn_40 : progAt 40 = some (.mov64 .r9 (.reg .r1)) := by native_decide
+@[simp] theorem insn_41 : progAt 41 = some (.add64 .r9 (.imm RM_MISC_BASE_ADDR_OFF)) := by native_decide
+@[simp] theorem insn_42 : progAt 42 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_BASE_ADDR_OFF .r9) := by native_decide
+@[simp] theorem insn_43 : progAt 43 = some (.mov64 .r9 (.imm SIZE_OF_ADDRESS)) := by native_decide
+@[simp] theorem insn_44 : progAt 44 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_BASE_LEN_OFF .r9) := by native_decide
+@[simp] theorem insn_45 : progAt 45 = some (.ldx .dword .r9 .r1 RM_MISC_BASE_DATA_LEN_OFF) := by native_decide
+@[simp] theorem insn_46 : progAt 46 = some (.add64 .r9 (.imm DATA_LEN_MAX_PAD)) := by native_decide
+@[simp] theorem insn_47 : progAt 47 = some (.and64 .r9 (.imm DATA_LEN_AND_MASK)) := by native_decide
+@[simp] theorem insn_48 : progAt 48 = some (.add64 .r9 (.reg .r1)) := by native_decide
+@[simp] theorem insn_49 : progAt 49 = some (.ldx .byte .r8 .r9 RM_MISC_QUOTE_DUPLICATE_OFF) := by native_decide
+@[simp] theorem insn_50 : progAt 50 = some (.jne .r8 (.imm ACCT_NON_DUP_MARKER) 12) := by native_decide
+@[simp] theorem insn_51 : progAt 51 = some (.mov64 .r8 (.reg .r9)) := by native_decide
+@[simp] theorem insn_52 : progAt 52 = some (.add64 .r8 (.imm RM_MISC_QUOTE_ADDR_OFF)) := by native_decide
+@[simp] theorem insn_53 : progAt 53 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_QUOTE_ADDR_OFF .r8) := by native_decide
+@[simp] theorem insn_54 : progAt 54 = some (.ldx .dword .r8 .r9 RM_MISC_QUOTE_DATA_LEN_OFF) := by native_decide
+@[simp] theorem insn_55 : progAt 55 = some (.add64 .r8 (.imm DATA_LEN_MAX_PAD)) := by native_decide
+@[simp] theorem insn_56 : progAt 56 = some (.and64 .r8 (.imm DATA_LEN_AND_MASK)) := by native_decide
+@[simp] theorem insn_57 : progAt 57 = some (.add64 .r9 (.imm RM_MISC_QUOTE_OFF)) := by native_decide
+@[simp] theorem insn_58 : progAt 58 = some (.add64 .r9 (.reg .r8)) := by native_decide
+@[simp] theorem insn_59 : progAt 59 = some (.add64 .r9 (.imm SIZE_OF_EMPTY_ACCOUNT)) := by native_decide
+@[simp] theorem insn_60 : progAt 60 = some (.mov64 .r8 (.imm SIZE_OF_ADDRESS)) := by native_decide
+@[simp] theorem insn_61 : progAt 61 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_QUOTE_LEN_OFF .r8) := by native_decide
+@[simp] theorem insn_62 : progAt 62 = some (.mov64 .r6 (.reg .r1)) := by native_decide
+@[simp] theorem insn_63 : progAt 63 = some (.mov64 .r1 (.reg .r10)) := by native_decide
+@[simp] theorem insn_64 : progAt 64 = some (.add64 .r1 (.imm RM_FM_PDA_SEEDS_OFF)) := by native_decide
+@[simp] theorem insn_65 : progAt 65 = some (.mov64 .r3 (.reg .r2)) := by native_decide
+@[simp] theorem insn_66 : progAt 66 = some (.add64 .r3 (.imm REGISTER_MARKET_DATA_LEN)) := by native_decide
+@[simp] theorem insn_67 : progAt 67 = some (.mov64 .r2 (.imm RM_MISC_TRY_FIND_PDA_SEEDS_LEN)) := by native_decide
+@[simp] theorem insn_68 : progAt 68 = some (.mov64 .r4 (.reg .r10)) := by native_decide
+@[simp] theorem insn_69 : progAt 69 = some (.add64 .r4 (.imm RM_FM_PDA_OFF)) := by native_decide
+@[simp] theorem insn_70 : progAt 70 = some (.mov64 .r5 (.reg .r10)) := by native_decide
+@[simp] theorem insn_71 : progAt 71 = some (.add64 .r5 (.imm RM_FM_BUMP_OFF)) := by native_decide
+@[simp] theorem insn_72 : progAt 72 = some (.call .sol_try_find_program_address) := by native_decide
+@[simp] theorem insn_73 : progAt 73 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_74 : progAt 74 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_75 : progAt 75 = some (.jne .r7 (.reg .r8) 14) := by native_decide
+@[simp] theorem insn_76 : progAt 76 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_77 : progAt 77 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_78 : progAt 78 = some (.jne .r7 (.reg .r8) 14) := by native_decide
+@[simp] theorem insn_79 : progAt 79 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_80 : progAt 80 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_81 : progAt 81 = some (.jne .r7 (.reg .r8) 14) := by native_decide
+@[simp] theorem insn_82 : progAt 82 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_83 : progAt 83 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_84 : progAt 84 = some (.jne .r7 (.reg .r8) 14) := by native_decide
+@[simp] theorem insn_85 : progAt 85 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_BUMP_ADDR_OFF .r5) := by native_decide
+@[simp] theorem insn_86 : progAt 86 = some (.mov64 .r7 (.imm SIZE_OF_U8)) := by native_decide
+@[simp] theorem insn_87 : progAt 87 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_BUMP_LEN_OFF .r7) := by native_decide
+@[simp] theorem insn_88 : progAt 88 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_89 : progAt 89 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_OWNER_CHUNK_0_UOFF .r7) := by native_decide
+@[simp] theorem insn_90 : progAt 90 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_91 : progAt 91 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_OWNER_CHUNK_1_UOFF .r7) := by native_decide
+@[simp] theorem insn_92 : progAt 92 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_93 : progAt 93 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_OWNER_CHUNK_2_UOFF .r7) := by native_decide
+@[simp] theorem insn_94 : progAt 94 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_95 : progAt 95 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_OWNER_CHUNK_3_UOFF .r7) := by native_decide
+@[simp] theorem insn_96 : progAt 96 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
+@[simp] theorem insn_97 : progAt 97 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 16) := by native_decide
+@[simp] theorem insn_98 : progAt 98 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_99 : progAt 99 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_100 : progAt 100 = some (.jne .r7 (.reg .r8) 18) := by native_decide
+@[simp] theorem insn_101 : progAt 101 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_102 : progAt 102 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_103 : progAt 103 = some (.jne .r7 (.reg .r8) 18) := by native_decide
+@[simp] theorem insn_104 : progAt 104 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_105 : progAt 105 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_106 : progAt 106 = some (.jne .r7 (.reg .r8) 18) := by native_decide
+@[simp] theorem insn_107 : progAt 107 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_108 : progAt 108 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_109 : progAt 109 = some (.jne .r7 (.reg .r8) 18) := by native_decide
+@[simp] theorem insn_110 : progAt 110 = some (.mov64 .r7 (.reg .r9)) := by native_decide
+@[simp] theorem insn_111 : progAt 111 = some (.add64 .r7 (.imm ACCT_ADDRESS_OFF)) := by native_decide
+@[simp] theorem insn_112 : progAt 112 = some (.stx .dword .r10 RM_FM_SOL_INSN_PROGRAM_ID_UOFF .r7) := by native_decide
+@[simp] theorem insn_113 : progAt 113 = some (.ldx .dword .r7 .r9 ACCT_DATA_LEN_OFF) := by native_decide
+@[simp] theorem insn_114 : progAt 114 = some (.add64 .r7 (.imm DATA_LEN_MAX_PAD)) := by native_decide
+@[simp] theorem insn_115 : progAt 115 = some (.and64 .r7 (.imm DATA_LEN_AND_MASK)) := by native_decide
+@[simp] theorem insn_116 : progAt 116 = some (.add64 .r9 (.reg .r7)) := by native_decide
+@[simp] theorem insn_117 : progAt 117 = some (.add64 .r9 (.imm SIZE_OF_EMPTY_ACCOUNT)) := by native_decide
+@[simp] theorem insn_118 : progAt 118 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
+@[simp] theorem insn_119 : progAt 119 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 20) := by native_decide
+@[simp] theorem insn_120 : progAt 120 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_0_OFF) := by native_decide
+@[simp] theorem insn_121 : progAt 121 = some (.lddw .r8 PUBKEY_RENT_CHUNK_0) := by native_decide
+@[simp] theorem insn_122 : progAt 122 = some (.jne .r7 (.reg .r8) 22) := by native_decide
+@[simp] theorem insn_123 : progAt 123 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_1_OFF) := by native_decide
+@[simp] theorem insn_124 : progAt 124 = some (.lddw .r8 PUBKEY_RENT_CHUNK_1) := by native_decide
+@[simp] theorem insn_125 : progAt 125 = some (.jne .r7 (.reg .r8) 22) := by native_decide
+@[simp] theorem insn_126 : progAt 126 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_2_OFF) := by native_decide
+@[simp] theorem insn_127 : progAt 127 = some (.lddw .r8 PUBKEY_RENT_CHUNK_2) := by native_decide
+@[simp] theorem insn_128 : progAt 128 = some (.jne .r7 (.reg .r8) 22) := by native_decide
+@[simp] theorem insn_129 : progAt 129 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_3_OFF) := by native_decide
+@[simp] theorem insn_130 : progAt 130 = some (.mov32 .r8 (.imm PUBKEY_RENT_CHUNK_3_LO)) := by native_decide
+@[simp] theorem insn_131 : progAt 131 = some (.jne .r7 (.reg .r8) 22) := by native_decide
+@[simp] theorem insn_132 : progAt 132 = some (.mov64 .r7 (.imm SIZE_OF_MARKET_HEADER)) := by native_decide
+@[simp] theorem insn_133 : progAt 133 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_SPACE_UOFF .r7) := by native_decide
+@[simp] theorem insn_134 : progAt 134 = some (.add64 .r7 (.imm ACCT_STORAGE_OVERHEAD)) := by native_decide
+@[simp] theorem insn_135 : progAt 135 = some (.ldx .dword .r8 .r9 ACCT_DATA_OFF) := by native_decide
+@[simp] theorem insn_136 : progAt 136 = some (.mul64 .r7 (.reg .r8)) := by native_decide
+@[simp] theorem insn_137 : progAt 137 = some (.stx .dword .r10 RM_FM_CREATE_ACCT_LAMPORTS_UOFF .r7) := by native_decide
+@[simp] theorem insn_138 : progAt 138 = some (.st .half .r10 RM_FM_CPI_USER_ACCT_INFO_IS_SIGNER_UOFF CPI_WRITABLE_SIGNER) := by native_decide
+@[simp] theorem insn_139 : progAt 139 = some (.st .half .r10 RM_FM_CPI_USER_ACCT_META_IS_WRITABLE_UOFF CPI_WRITABLE_SIGNER) := by native_decide
+@[simp] theorem insn_140 : progAt 140 = some (.st .half .r10 RM_FM_CPI_TARGET_ACCT_INFO_IS_SIGNER_UOFF CPI_WRITABLE_SIGNER) := by native_decide
+@[simp] theorem insn_141 : progAt 141 = some (.st .half .r10 RM_FM_CPI_TARGET_ACCT_META_IS_WRITABLE_UOFF CPI_WRITABLE_SIGNER) := by native_decide
+@[simp] theorem insn_142 : progAt 142 = some (.add64 .r6 (.imm IB_USER_PUBKEY_OFF)) := by native_decide
+@[simp] theorem insn_143 : progAt 143 = some (.stx .dword .r10 RM_FM_CPI_USER_ACCT_META_PUBKEY_UOFF .r6) := by native_decide
+@[simp] theorem insn_144 : progAt 144 = some (.stx .dword .r10 RM_FM_CPI_USER_ACCT_INFO_KEY_UOFF .r6) := by native_decide
+@[simp] theorem insn_145 : progAt 145 = some (.add64 .r6 (.imm IB_ADDRESS_TO_OWNER_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_146 : progAt 146 = some (.stx .dword .r10 RM_FM_CPI_USER_ACCT_INFO_OWNER_UOFF .r6) := by native_decide
+@[simp] theorem insn_147 : progAt 147 = some (.add64 .r6 (.imm IB_OWNER_TO_LAMPORTS_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_148 : progAt 148 = some (.stx .dword .r10 RM_FM_CPI_USER_ACCT_INFO_LAMPORTS_UOFF .r6) := by native_decide
+@[simp] theorem insn_149 : progAt 149 = some (.add64 .r6 (.imm IB_LAMPORTS_TO_DATA_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_150 : progAt 150 = some (.stx .dword .r10 RM_FM_CPI_USER_ACCT_INFO_DATA_UOFF .r6) := by native_decide
+@[simp] theorem insn_151 : progAt 151 = some (.add64 .r6 (.imm IB_USER_DATA_TO_MARKET_ADDRESS_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_152 : progAt 152 = some (.stx .dword .r10 RM_FM_CPI_TARGET_ACCT_META_PUBKEY_UOFF .r6) := by native_decide
+@[simp] theorem insn_153 : progAt 153 = some (.stx .dword .r10 RM_FM_CPI_TARGET_ACCT_INFO_KEY_UOFF .r6) := by native_decide
+@[simp] theorem insn_154 : progAt 154 = some (.add64 .r6 (.imm IB_ADDRESS_TO_OWNER_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_155 : progAt 155 = some (.stx .dword .r10 RM_FM_CPI_TARGET_ACCT_INFO_OWNER_UOFF .r6) := by native_decide
+@[simp] theorem insn_156 : progAt 156 = some (.add64 .r6 (.imm IB_OWNER_TO_LAMPORTS_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_157 : progAt 157 = some (.stx .dword .r10 RM_FM_CPI_TARGET_ACCT_INFO_LAMPORTS_UOFF .r6) := by native_decide
+@[simp] theorem insn_158 : progAt 158 = some (.add64 .r6 (.imm IB_LAMPORTS_TO_DATA_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_159 : progAt 159 = some (.stx .dword .r10 RM_FM_CPI_TARGET_ACCT_INFO_DATA_UOFF .r6) := by native_decide
+@[simp] theorem insn_160 : progAt 160 = some (.stx .dword .r10 RM_FM_SIGNERS_SEEDS_ADDR_UOFF .r1) := by native_decide
+@[simp] theorem insn_161 : progAt 161 = some (.mov64 .r7 (.imm RM_FM_PDA_SEEDS_N_SEEDS)) := by native_decide
+@[simp] theorem insn_162 : progAt 162 = some (.stx .dword .r10 RM_FM_SIGNERS_SEEDS_LEN_UOFF .r7) := by native_decide
+@[simp] theorem insn_163 : progAt 163 = some (.mov64 .r7 (.reg .r10)) := by native_decide
+@[simp] theorem insn_164 : progAt 164 = some (.add64 .r7 (.imm RM_FM_CREATE_ACCT_DATA_OFF)) := by native_decide
+@[simp] theorem insn_165 : progAt 165 = some (.stx .dword .r10 RM_FM_SOL_INSN_DATA_UOFF .r7) := by native_decide
+@[simp] theorem insn_166 : progAt 166 = some (.add64 .r7 (.imm RM_FM_CREATE_ACCT_DATA_TO_CPI_ACCT_METAS_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_167 : progAt 167 = some (.stx .dword .r10 RM_FM_SOL_INSN_ACCOUNTS_UOFF .r7) := by native_decide
+@[simp] theorem insn_168 : progAt 168 = some (.mov64 .r7 (.imm RM_MISC_CREATE_ACCOUNT_N_ACCOUNTS)) := by native_decide
+@[simp] theorem insn_169 : progAt 169 = some (.stx .dword .r10 RM_FM_SOL_INSN_ACCOUNT_LEN_UOFF .r7) := by native_decide
+@[simp] theorem insn_170 : progAt 170 = some (.mov64 .r7 (.imm SIZE_OF_CREATE_ACCOUNT_DATA)) := by native_decide
+@[simp] theorem insn_171 : progAt 171 = some (.stx .dword .r10 RM_FM_SOL_INSN_DATA_LEN_UOFF .r7) := by native_decide
+@[simp] theorem insn_172 : progAt 172 = some (.add64 .r1 (.imm RM_FM_PDA_SEEDS_TO_SOL_INSN_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_173 : progAt 173 = some (.mov64 .r2 (.reg .r10)) := by native_decide
+@[simp] theorem insn_174 : progAt 174 = some (.add64 .r2 (.imm RM_FM_CPI_SOL_ACCT_INFO_OFF)) := by native_decide
+@[simp] theorem insn_175 : progAt 175 = some (.mov64 .r3 (.imm RM_MISC_CREATE_ACCOUNT_N_ACCOUNTS)) := by native_decide
+@[simp] theorem insn_176 : progAt 176 = some (.add64 .r4 (.imm RM_FM_PDA_TO_SIGNERS_SEEDS_REL_OFF_IMM)) := by native_decide
+@[simp] theorem insn_177 : progAt 177 = some (.mov64 .r5 (.imm RM_MISC_N_PDA_SIGNERS)) := by native_decide
+@[simp] theorem insn_178 : progAt 178 = some (.call .sol_invoke_signed_c) := by native_decide
+@[simp] theorem insn_179 : progAt 179 = some (.exit) := by native_decide
 
 end DropsetProg

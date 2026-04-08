@@ -475,12 +475,13 @@ rfl
 
 Note: when using `wp_step`, you must manually call `rw [executeFn_eq_execSegment]` first and close with `rfl` at the end.
 
-Define private `effectiveAddr` helper lemmas to keep proofs concise:
+`asm2lean` auto-generates the following boilerplate in the program module:
 
-```lean
-private theorem ea_88 (b : Nat) : effectiveAddr b MY_OFFSET = b + 88 := by
-  unfold effectiveAddr MY_OFFSET; omega
-```
+- **`@[simp] theorem ea_NAME`** — effectiveAddr lemmas for each offset symbol, proving `effectiveAddr b NAME = b ± val`
+- **`@[simp] theorem bridge_NAME`** — toU64 bridge lemmas for Nat constants used in `lddw` instructions, proving `toU64 (↑NAME : Int) = NAME`
+- **`@[simp] theorem insn_N`** — instruction fetch cache for each PC, proving `progAt N = some (...)` via `native_decide`
+
+These are all `@[simp]` so they fire automatically during `wp_exec`/`wp_step`. Proofs should **not** hand-write their own `ea_`, `bridge_`, or `have hfN : progAt N = ...` boilerplate — use the auto-generated versions.
 
 **Prerequisites for `wp_exec` to work efficiently:**
 1. `prog` must have `@[simp]` attribute (handled by `asm2lean`)

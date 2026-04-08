@@ -243,7 +243,10 @@ theorem t ... (h : readU64 mem (effectiveAddr inputAddr MY_OFFSET) = v) ...
 
 **Rule 3: `@[simp]` on `prog` is required.** The tactic needs to evaluate `prog[n]?` at each step.
 
-The `qedgen asm2lean` command handles Rules 1-3 automatically: it emits `Int`-typed offsets, `Nat`-typed non-offsets, named constants in the `prog` array, and `@[simp]` on `prog`.
+The `qedgen asm2lean` command handles Rules 1-3 automatically: it emits `Int`-typed offsets, `Nat`-typed non-offsets, named constants in the `prog` array, and `@[simp]` on `prog`. It also auto-generates:
+- `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol
+- `@[simp] theorem bridge_NAME` — toU64 bridge lemmas for Nat lddw constants
+- `@[simp] theorem insn_N` — instruction fetch cache (`progAt N = some (...)` via `native_decide`)
 
 ### Aristotle (Harmonic) — Long-Running Sorry-Filling
 
