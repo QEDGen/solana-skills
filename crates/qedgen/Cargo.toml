@@ -1,6 +1,6 @@
 [package]
 name = "qedgen-solana-skills"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 authors = ["abishekk92"]
 description = "CLI tool for generating formal Lean 4 proofs for Solana programs powered by Mistral's Leanstral model"
