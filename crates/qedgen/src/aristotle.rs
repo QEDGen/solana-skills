@@ -45,7 +45,10 @@ fn validate_project_id(id: &str) -> Result<&str> {
     if id.is_empty() {
         anyhow::bail!("Project ID cannot be empty");
     }
-    if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         Ok(id)
     } else {
         anyhow::bail!("Invalid project ID: must contain only alphanumeric characters, hyphens, and underscores");
@@ -82,9 +85,7 @@ fn tar_project_dir(dir: &Path) -> Result<Vec<u8>> {
     use std::io::Write;
 
     let skip_dirs: &[&str] = &[".git", ".lake"];
-    let skip_extensions: &[&str] = &[
-        "olean", "ilean", "ir", "o", "so", "a", "dylib", "trace",
-    ];
+    let skip_extensions: &[&str] = &["olean", "ilean", "ir", "o", "so", "a", "dylib", "trace"];
 
     let mut tar_builder = tar::Builder::new(Vec::new());
 
@@ -208,8 +209,7 @@ pub async fn poll(project_id: &str, interval_secs: Option<u64>) -> Result<Projec
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
                 let backoff = Duration::from_secs(15).min(
-                    Duration::from_secs(120)
-                        .min(cumulative_failure + Duration::from_secs(15)),
+                    Duration::from_secs(120).min(cumulative_failure + Duration::from_secs(15)),
                 );
                 cumulative_failure += backoff;
                 if cumulative_failure.as_secs() > MAX_POLL_FAILURE_SECS {
@@ -220,7 +220,11 @@ pub async fn poll(project_id: &str, interval_secs: Option<u64>) -> Result<Projec
                         body
                     );
                 }
-                eprintln!("\n  API error ({}), retrying in {}s...", status, backoff.as_secs());
+                eprintln!(
+                    "\n  API error ({}), retrying in {}s...",
+                    status,
+                    backoff.as_secs()
+                );
                 sleep(backoff).await;
             }
             Err(e) => {
@@ -353,11 +357,7 @@ pub async fn list(limit: u32, status_filter: Option<&str>) -> Result<Vec<Project
         url.push_str(&format!("&status={}", url_encode(s)));
     }
 
-    let resp = client
-        .get(&url)
-        .header("X-API-Key", &key)
-        .send()
-        .await?;
+    let resp = client.get(&url).header("X-API-Key", &key).send().await?;
 
     let http_status = resp.status();
     if !http_status.is_success() {

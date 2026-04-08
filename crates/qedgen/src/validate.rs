@@ -29,13 +29,7 @@ pub async fn validate_completion(
     std::fs::copy(output_dir.join("Best.lean"), workspace.join("Best.lean"))?;
 
     // Run lake build
-    let build_result = run_command(
-        "lake",
-        &["build", "Best"],
-        &workspace,
-        &[],
-    )
-    .await;
+    let build_result = run_command("lake", &["build", "Best"], &workspace, &[]).await;
 
     match build_result {
         Ok((stdout, stderr, code)) => {
@@ -116,13 +110,16 @@ async fn fetch_or_build_mathlib(workspace: &Path) {
         }
         _ => {
             eprintln!("  Mathlib cache fetch failed. Building from source...");
-            let build_result = run_command("lake", &["build", "Mathlib.Tactic"], workspace, &[]).await;
+            let build_result =
+                run_command("lake", &["build", "Mathlib.Tactic"], workspace, &[]).await;
             match &build_result {
                 Ok((_, _, code)) if *code == 0 => {
                     eprintln!("  Mathlib built from source successfully.");
                 }
                 _ => {
-                    eprintln!("  Warning: Mathlib build failed. First validation run will be slow.");
+                    eprintln!(
+                        "  Warning: Mathlib build failed. First validation run will be slow."
+                    );
                 }
             }
         }
@@ -136,7 +133,11 @@ async fn run_command(
     env: &[(&str, &str)],
 ) -> Result<(String, String, i32)> {
     let mut command = Command::new(cmd);
-    command.args(args).current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     for (key, value) in env {
         command.env(key, value);
@@ -176,4 +177,3 @@ fn validation_workspace_dir() -> Result<PathBuf> {
         .join("qedgen-solana-skills")
         .join("validation-workspace"))
 }
-
