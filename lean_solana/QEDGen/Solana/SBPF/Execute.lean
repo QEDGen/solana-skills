@@ -348,6 +348,16 @@ theorem executeFn_compose (fetch : Nat → Option Insn) (s : State) (n m : Nat) 
         rename_i insn h_fetch
         exact ih (step insn s)
 
+/-- Split a long execution into prefix + suffix via a predicate on the intermediate state.
+    The prefix proves the predicate; the suffix proves the exit code from any state
+    satisfying the predicate. Kernel checks each half independently. -/
+theorem executeFn_split_props (fetch : Nat → Option Insn) (s : State) (n m : Nat) (code : Nat)
+    (P : State → Prop)
+    (h_prefix : P (executeFn fetch s n))
+    (h_suffix : ∀ sMid, P sMid → (executeFn fetch sMid m).exitCode = some code) :
+    (executeFn fetch s (n + m)).exitCode = some code := by
+  rw [executeFn_compose]; exact h_suffix _ h_prefix
+
 /-- Step N times from a state, applying instructions from a list -/
 def stepN : List Insn → State → State
   | [], s => s

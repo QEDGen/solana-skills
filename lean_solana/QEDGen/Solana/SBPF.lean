@@ -7,4 +7,5 @@ import QEDGen.Solana.SBPF.WP
 import QEDGen.Solana.SBPF.MonadicStep
 import QEDGen.Solana.SBPF.Bridge
 import QEDGen.Solana.SBPF.WPTactic
+import QEDGen.Solana.SBPF.Pubkey
 import QEDGen.Solana.SBPF.LoomWP
