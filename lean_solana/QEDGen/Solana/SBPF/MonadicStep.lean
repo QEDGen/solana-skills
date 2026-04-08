@@ -175,21 +175,4 @@ def execSegment (fetch : Nat → Option Insn) : Nat → SbpfM PUnit
         let (_, s') := execInsn insn s
         execSegment fetch fuel s'
 
-theorem execSegment_halted (fetch : Nat → Option Insn) (n : Nat) (s : State)
-    (h : s.exitCode = some c) :
-    (execSegment fetch n s).2.exitCode = some c := by
-  induction n with
-  | zero => simp [execSegment, h]
-  | succ n _ => simp [execSegment, h]
-
-/-- When the current instruction is `exit`, execution terminates with r0 as exit code. -/
-theorem execSegment_exit (fetch : Nat → Option Insn) (n : Nat) (s : State) (v : Nat)
-    (h_none : s.exitCode = none)
-    (h_fetch : fetch s.pc = some .exit)
-    (h_r0 : s.regs.r0 = v) :
-    (execSegment fetch (n + 1) s).2.exitCode = some v := by
-  subst h_r0
-  simp [execSegment, h_none, h_fetch, execInsn]
-  exact execSegment_halted fetch n _ rfl
-
 end QEDGen.Solana.SBPF
