@@ -391,8 +391,7 @@ private theorem p9_chunk_eq_state (inputAddr : Nat) (s : State)
     (executeFn progAt s 3).regs.r3 = s.regs.r3 ∧
     (executeFn progAt s 3).regs.r5 = s.regs.r5 ∧
     (executeFn progAt s 3).regs.r6 = inputAddr ∧
-    (executeFn progAt s 3).regs.r9 = s.regs.r9 ∧
-    (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
+    (executeFn progAt s 3).regs.r9 = s.regs.r9 := by
   have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r6) off1) =
                readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
     simp only [RegFile.get, h_r6, h_r10]; exact h_eq
@@ -403,9 +402,8 @@ private theorem p9_chunk_eq_state (inputAddr : Nat) (s : State)
   have hr5 := hreg .r5 (by decide) (by decide)
   have hr6' := hreg .r6 (by decide) (by decide)
   have hr9 := hreg .r9 (by decide) (by decide)
-  have hr10' := hreg .r10 (by decide) (by decide)
-  simp only [RegFile.get] at hr3 hr5 hr6' hr9 hr10'
-  exact ⟨he, hp, hm, hr3, hr5, by rw [hr6', h_r6], hr9, by rw [hr10', h_r10]⟩
+  simp only [RegFile.get] at hr3 hr5 hr6' hr9
+  exact ⟨he, hp, hm, hr3, hr5, by rw [hr6', h_r6], hr9⟩
 
 /-! ### Part 3: Chunk comparison from abstract state
 
@@ -454,18 +452,18 @@ private theorem p9_chunk_compare
       h_exit h_r6 h_r10
       (by rw [h_pc]; exact hf73) (by rw [h_pc]; exact hf74) (by rw [h_pc]; exact hf75)
       (by rw [ea_mkt_chunk0, ea_fm_pda_chunk0, h_mkt_c0, h_pda_c0]; exact h_eq0)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, _, _, h_r6₁, _, h_r10₁⟩ := hst
+    obtain ⟨h_exit₁, h_pc₁, h_mem₁, _, _, h_r6₁, _⟩ := hst
     by_cases h_eq1 : mkt_c1 = pda_c1
     · -- Chunk 1 matches
       simp [h_eq1] at h_ne
       rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
       have hst := p9_chunk_eq_state inputAddr (executeFn progAt s 3)
         IB_MARKET_PUBKEY_CHUNK_1_OFF RM_FM_PDA_CHUNK_1_OFF
-        h_exit₁ h_r6₁ h_r10₁
+        h_exit₁ h_r6₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf76) (by rw [h_pc₁, h_pc]; exact hf77)
         (by rw [h_pc₁, h_pc]; exact hf78)
         (by rw [ea_mkt_chunk1, ea_fm_pda_chunk1, h_mem₁, h_mkt_c1, h_pda_c1]; exact h_eq1)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, _, _, h_r6₂, _, h_r10₂⟩ := hst
+      obtain ⟨h_exit₂, h_pc₂, h_mem₂, _, _, h_r6₂, _⟩ := hst
       by_cases h_eq2 : mkt_c2 = pda_c2
       · -- Chunk 2 matches → chunk 3 must mismatch
         simp [h_eq2] at h_ne
@@ -473,15 +471,15 @@ private theorem p9_chunk_compare
         have hst := p9_chunk_eq_state inputAddr
           (executeFn progAt (executeFn progAt s 3) 3)
           IB_MARKET_PUBKEY_CHUNK_2_OFF RM_FM_PDA_CHUNK_2_OFF
-          h_exit₂ h_r6₂ h_r10₂
+          h_exit₂ h_r6₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf79) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf80)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf81)
           (by rw [ea_mkt_chunk2, ea_fm_pda_chunk2, h_mem₂, h_mem₁, h_mkt_c2, h_pda_c2]; exact h_eq2)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, _, _, h_r6₃, _, h_r10₃⟩ := hst
+        obtain ⟨h_exit₃, h_pc₃, h_mem₃, _, _, h_r6₃, _⟩ := hst
         exact p9_chunk_ne_error inputAddr
           (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
           5 IB_MARKET_PUBKEY_CHUNK_3_OFF RM_FM_PDA_CHUNK_3_OFF
-          h_exit₃ h_r6₃ h_r10₃
+          h_exit₃ h_r6₃ (by simp [h_r10])
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf82)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf83)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf84)
@@ -492,7 +490,7 @@ private theorem p9_chunk_compare
         exact p9_chunk_ne_error inputAddr
           (executeFn progAt (executeFn progAt s 3) 3)
           8 IB_MARKET_PUBKEY_CHUNK_2_OFF RM_FM_PDA_CHUNK_2_OFF
-          h_exit₂ h_r6₂ h_r10₂
+          h_exit₂ h_r6₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf79) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf80)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf81)
           (by rw [ea_mkt_chunk2, ea_fm_pda_chunk2, h_mem₂, h_mem₁,
@@ -501,7 +499,7 @@ private theorem p9_chunk_compare
     · -- Chunk 1 mismatches
       exact p9_chunk_ne_error inputAddr (executeFn progAt s 3)
         11 IB_MARKET_PUBKEY_CHUNK_1_OFF RM_FM_PDA_CHUNK_1_OFF
-        h_exit₁ h_r6₁ h_r10₁
+        h_exit₁ h_r6₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf76) (by rw [h_pc₁, h_pc]; exact hf77)
         (by rw [h_pc₁, h_pc]; exact hf78)
         (by rw [ea_mkt_chunk1, ea_fm_pda_chunk1, h_mem₁,
@@ -539,7 +537,7 @@ private theorem p9_part1
                   inputAddr + 31016 < STACK_START) :
     let s := executeFn progAt (initState2 inputAddr insnAddr mem 24) 25
     s.exitCode = none ∧ s.pc = 51 ∧
-    s.regs.r1 = inputAddr ∧ s.regs.r10 = STACK_START + 0x1000 ∧
+    s.regs.r1 = inputAddr ∧
     ∃ v1 v2, s.mem = writeU64 (writeU64 mem (STACK_START + 0x1000 - 664) v1) (STACK_START + 0x1000 - 656) v2 := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
   rw [executeFn_eq_execSegment]
@@ -554,7 +552,7 @@ private theorem p9_part1
   wp_step [progAt, progAt_0, progAt_1] [ea_31016]
   strip_writes
   wp_step [progAt, progAt_0, progAt_1] []
-  exact ⟨rfl, rfl, rfl, rfl, _, _, rfl⟩
+  exact ⟨rfl, rfl, rfl, _, _, rfl⟩
 
 -- Part 2a: 11 steps from abstract state at PC 51 to PC 62.
 -- Uses executeFn decomposition + single simp only (avoids kernel depth from sequential wp_step_from).
@@ -568,7 +566,6 @@ private theorem p9_part2a
     (h_r10  : s.regs.r10 = STACK_START + 0x1000) :
     let s' := executeFn progAt s 11
     s'.exitCode = none ∧ s'.pc = 62 ∧ s'.regs.r1 = inputAddr ∧
-    s'.regs.r10 = STACK_START + 0x1000 ∧
     ∃ w1 w2, s'.mem = writeU64 (writeU64 s.mem (STACK_START + 0x1000 - 648) w1) (STACK_START + 0x1000 - 640) w2 := by
   have hf51 : progAt 51 = some (.mov64 .r8 (.reg .r9)) := by native_decide
   have hf52 : progAt 52 = some (.add64 .r8 (.imm RM_MISC_QUOTE_ADDR_OFF)) := by native_decide
@@ -590,7 +587,7 @@ private theorem p9_part2a
     ea_fm_pda_seeds_quote_addr, ea_fm_pda_seeds_quote_len,
     h_exit, h_pc, h_r1, h_r10,
     hf51, hf52, hf53, hf54, hf55, hf56, hf57, hf58, hf59, hf60, hf61]
-  exact ⟨trivial, trivial, trivial, trivial, _, _, rfl⟩
+  exact ⟨trivial, trivial, trivial, _, _, rfl⟩
 
 -- Part 2b: 11 steps from abstract state at PC 62 to PC 73.
 -- Uses executeFn decomposition + single simp only (avoids kernel depth from sequential wp_step_from).
@@ -603,7 +600,7 @@ private theorem p9_part2b
     (h_r10  : s.regs.r10 = STACK_START + 0x1000) :
     let s' := executeFn progAt s 11
     s'.exitCode = none ∧ s'.pc = 73 ∧ s'.regs.r6 = inputAddr ∧
-    s'.regs.r10 = STACK_START + 0x1000 ∧ s'.mem = s.mem := by
+    s'.mem = s.mem := by
   have hf62 : progAt 62 = some (.mov64 .r6 (.reg .r1)) := by native_decide
   have hf63 : progAt 63 = some (.mov64 .r1 (.reg .r10)) := by native_decide
   have hf64 : progAt 64 = some (.add64 .r1 (.imm RM_FM_PDA_SEEDS_OFF)) := by native_decide
@@ -649,24 +646,23 @@ private theorem p9_prefix
                   inputAddr + 31016 < STACK_START) :
     let s := executeFn progAt (initState2 inputAddr insnAddr mem 24) 47
     s.exitCode = none ∧ s.pc = 73 ∧ s.regs.r6 = inputAddr ∧
-    s.regs.r10 = STACK_START + 0x1000 ∧
     ∃ v1 v2 w1 w2, s.mem = writeU64 (writeU64 (writeU64 (writeU64 mem
       (STACK_START + 0x1000 - 664) v1) (STACK_START + 0x1000 - 656) v2)
       (STACK_START + 0x1000 - 648) w1) (STACK_START + 0x1000 - 640) w2 := by
   -- Decompose 47 = 25 + 11 + 11
   rw [show (47 : Nat) = 25 + (11 + 11) from rfl, executeFn_compose, executeFn_compose]
   -- Part 1: 25 steps, state props + memory form (2 writes at -664, -656)
-  obtain ⟨h1e, h1p, h1r1, h1r10, v1, v2, hmem1⟩ :=
+  obtain ⟨h1e, h1p, h1r1, v1, v2, hmem1⟩ :=
     p9_part1 inputAddr insnAddr mem nAccounts baseDataLen
       h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Part 2a: 11 steps, state props + memory form (2 writes at -648, -640)
-  obtain ⟨h2e, h2p, h2r1, h2r10, w1, w2, hmem2⟩ :=
-    p9_part2a inputAddr _ h1e h1p h1r1 h1r10
+  obtain ⟨h2e, h2p, h2r1, w1, w2, hmem2⟩ :=
+    p9_part2a inputAddr _ h1e h1p h1r1 (by simp)
   -- Part 2b: 11 steps, state props + mem unchanged
-  obtain ⟨h3e, h3p, h3r6, h3r10, h3mem⟩ :=
-    p9_part2b inputAddr _ h2e h2p h2r1 h2r10
+  obtain ⟨h3e, h3p, h3r6, h3mem⟩ :=
+    p9_part2b inputAddr _ h2e h2p h2r1 (by simp)
   -- State props + compose memory: s3.mem = s2.mem = writes(s1.mem) = writes(writes(mem))
-  exact ⟨h3e, h3p, h3r6, h3r10, v1, v2, w1, w2, by rw [h3mem, hmem2, hmem1]⟩
+  exact ⟨h3e, h3p, h3r6, v1, v2, w1, w2, by rw [h3mem, hmem2, hmem1]⟩
 
 -- Main theorem: compose prefix (47 steps) + chunk comparison (14 steps)
 set_option maxHeartbeats 800000 in
@@ -702,13 +698,13 @@ theorem rejects_invalid_market_pubkey
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 61).exitCode
       = some E_INVALID_MARKET_PUBKEY := by
   rw [show (61 : Nat) = 47 + 14 from rfl, executeFn_compose]
-  obtain ⟨he, hp, hr6, hr10, v1, v2, w1, w2, hmem⟩ :=
+  obtain ⟨he, hp, hr6, v1, v2, w1, w2, hmem⟩ :=
     p9_prefix inputAddr insnAddr mem nAccounts baseDataLen
       h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Strip 4 writes from each memory read (omega needs STACK_START unfolded)
   unfold STACK_START at h_sep
   exact p9_chunk_compare inputAddr _ mkt_c0 mkt_c1 mkt_c2 mkt_c3
-    pda_c0 pda_c1 pda_c2 pda_c3 he hp hr6 hr10
+    pda_c0 pda_c1 pda_c2 pda_c3 he hp hr6 (by simp)
     (by solve_read [hmem] h_mkt_c0)
     (by solve_read [hmem] h_mkt_c1)
     (by solve_read [hmem] h_mkt_c2)
@@ -791,42 +787,42 @@ private theorem p10_chunk_match
     (h_eq3 : readU64 s.mem (inputAddr + 10376) = readU64 s.mem (STACK_START + 0x1000 - 592)) :
     let s' := executeFn progAt s 12
     s'.exitCode = none ∧ s'.pc = 85 ∧
-    s'.regs.r6 = inputAddr ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r6 = inputAddr ∧
     s'.regs.r3 = s.regs.r3 ∧ s'.regs.r5 = s.regs.r5 ∧
     s'.regs.r9 = s.regs.r9 ∧ s'.mem = s.mem := by
   -- 12 = 3 + 3 + 3 + 3, one chunk comparison per triple
   rw [show (12 : Nat) = 3 + (3 + (3 + 3)) from rfl]
   iterate 3 (rw [executeFn_compose])
   -- Chunk 0
-  obtain ⟨he1, hp1, hm1, hr3_1, hr5_1, hr6_1, hr9_1, hr10_1⟩ :=
+  obtain ⟨he1, hp1, hm1, hr3_1, hr5_1, hr6_1, hr9_1⟩ :=
     p9_chunk_eq_state inputAddr s
       IB_MARKET_PUBKEY_CHUNK_0_OFF RM_FM_PDA_CHUNK_0_OFF
       h_exit h_r6 h_r10
       (by rw [h_pc]; native_decide) (by rw [h_pc]; native_decide) (by rw [h_pc]; native_decide)
       (by rw [ea_mkt_chunk0, ea_fm_pda_chunk0]; exact h_eq0)
   -- Chunk 1
-  obtain ⟨he2, hp2, hm2, hr3_2, hr5_2, hr6_2, hr9_2, hr10_2⟩ :=
+  obtain ⟨he2, hp2, hm2, hr3_2, hr5_2, hr6_2, hr9_2⟩ :=
     p9_chunk_eq_state inputAddr _ IB_MARKET_PUBKEY_CHUNK_1_OFF RM_FM_PDA_CHUNK_1_OFF
-      he1 hr6_1 hr10_1
+      he1 hr6_1 (by simp [h_r10])
       (by rw [hp1, h_pc]; native_decide) (by rw [hp1, h_pc]; native_decide)
       (by rw [hp1, h_pc]; native_decide)
       (by rw [ea_mkt_chunk1, ea_fm_pda_chunk1, hm1]; exact h_eq1)
   -- Chunk 2
-  obtain ⟨he3, hp3, hm3, hr3_3, hr5_3, hr6_3, hr9_3, hr10_3⟩ :=
+  obtain ⟨he3, hp3, hm3, hr3_3, hr5_3, hr6_3, hr9_3⟩ :=
     p9_chunk_eq_state inputAddr _ IB_MARKET_PUBKEY_CHUNK_2_OFF RM_FM_PDA_CHUNK_2_OFF
-      he2 hr6_2 hr10_2
+      he2 hr6_2 (by simp [h_r10])
       (by rw [hp2, hp1, h_pc]; native_decide) (by rw [hp2, hp1, h_pc]; native_decide)
       (by rw [hp2, hp1, h_pc]; native_decide)
       (by rw [ea_mkt_chunk2, ea_fm_pda_chunk2, hm2, hm1]; exact h_eq2)
   -- Chunk 3
-  obtain ⟨he4, hp4, hm4, hr3_4, hr5_4, hr6_4, hr9_4, hr10_4⟩ :=
+  obtain ⟨he4, hp4, hm4, hr3_4, hr5_4, hr6_4, hr9_4⟩ :=
     p9_chunk_eq_state inputAddr _ IB_MARKET_PUBKEY_CHUNK_3_OFF RM_FM_PDA_CHUNK_3_OFF
-      he3 hr6_3 hr10_3
+      he3 hr6_3 (by simp [h_r10])
       (by rw [hp3, hp2, hp1, h_pc]; native_decide) (by rw [hp3, hp2, hp1, h_pc]; native_decide)
       (by rw [hp3, hp2, hp1, h_pc]; native_decide)
       (by rw [ea_mkt_chunk3, ea_fm_pda_chunk3, hm3, hm2, hm1]; exact h_eq3)
   exact ⟨he4, by rw [hp4, hp3, hp2, hp1, h_pc], by rw [hr6_4],
-    hr10_4, by rw [hr3_4, hr3_3, hr3_2, hr3_1],
+    by rw [hr3_4, hr3_3, hr3_2, hr3_1],
     by rw [hr5_4, hr5_3, hr5_2, hr5_1],
     by rw [hr9_4, hr9_3, hr9_2, hr9_1],
     by rw [hm4, hm3, hm2, hm1]⟩
@@ -841,7 +837,7 @@ private theorem p10_cpi_setup_a
     let s' := executeFn progAt s 3
     s'.exitCode = none ∧ s'.pc = 88 ∧
     s'.regs.r3 = s.regs.r3 ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     ∃ w1 w2, s'.mem = writeU64 (writeU64 s.mem
       (STACK_START + 0x1000 - 632) w1) (STACK_START + 0x1000 - 624) w2 := by
   have hf85 : progAt 85 = some (.stx .dword .r10 RM_FM_PDA_SEEDS_BUMP_ADDR_OFF .r5) := by native_decide
@@ -854,7 +850,7 @@ private theorem p10_cpi_setup_a
     ea_bump_addr, ea_bump_len,
     h_exit, h_pc, h_r10,
     hf85, hf86, hf87]
-  exact ⟨trivial, trivial, trivial, trivial, trivial, _, _, rfl⟩
+  exact ⟨trivial, trivial, trivial, trivial, _, _, rfl⟩
 
 -- CPI setup part B: 4 steps PCs 88-91 (owner chunks 0-1 → 2 writes)
 -- h_r3 needed so simp can resolve ldx reads without deep state traversal
@@ -868,7 +864,7 @@ private theorem p10_cpi_setup_b
     let s' := executeFn progAt s 4
     s'.exitCode = none ∧ s'.pc = 92 ∧
     s'.regs.r3 = ownerAddr ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     ∃ w3 w4, s'.mem = writeU64 (writeU64 s.mem
       (STACK_START + 0x1000 - 532) w3) (STACK_START + 0x1000 - 524) w4 := by
   have hf88 : progAt 88 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_0_OFF) := by native_decide
@@ -883,7 +879,7 @@ private theorem p10_cpi_setup_b
     ea_owner_chunk0, ea_owner_chunk1,
     h_exit, h_pc, h_r3, h_r10,
     hf88, hf89, hf90, hf91]
-  exact ⟨trivial, trivial, trivial, trivial, trivial, _, _, rfl⟩
+  exact ⟨trivial, trivial, trivial, trivial, _, _, rfl⟩
 
 -- CPI setup part C: 4 steps PCs 92-95 (owner chunks 2-3 → 2 writes)
 set_option maxHeartbeats 40000000 in
@@ -895,7 +891,7 @@ private theorem p10_cpi_setup_c
     (h_r10  : s.regs.r10 = STACK_START + 0x1000) :
     let s' := executeFn progAt s 4
     s'.exitCode = none ∧ s'.pc = 96 ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     ∃ w5 w6, s'.mem = writeU64 (writeU64 s.mem
       (STACK_START + 0x1000 - 516) w5) (STACK_START + 0x1000 - 508) w6 := by
   have hf92 : progAt 92 = some (.ldx .dword .r7 .r3 PUBKEY_CHUNK_2_OFF) := by native_decide
@@ -910,7 +906,7 @@ private theorem p10_cpi_setup_c
     ea_owner_chunk2, ea_owner_chunk3,
     h_exit, h_pc, h_r3, h_r10,
     hf92, hf93, hf94, hf95]
-  exact ⟨trivial, trivial, trivial, trivial, _, _, rfl⟩
+  exact ⟨trivial, trivial, trivial, _, _, rfl⟩
 
 -- CPI setup composed: 11 steps PCs 85-95
 private theorem p10_cpi_setup
@@ -920,16 +916,16 @@ private theorem p10_cpi_setup
     (h_r10  : s.regs.r10 = STACK_START + 0x1000) :
     let s' := executeFn progAt s 11
     s'.exitCode = none ∧ s'.pc = 96 ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     ∃ w1 w2 w3 w4 w5 w6, s'.mem = writeU64 (writeU64 (writeU64 (writeU64 (writeU64 (writeU64 s.mem
       (STACK_START + 0x1000 - 632) w1) (STACK_START + 0x1000 - 624) w2)
       (STACK_START + 0x1000 - 532) w3) (STACK_START + 0x1000 - 524) w4)
       (STACK_START + 0x1000 - 516) w5) (STACK_START + 0x1000 - 508) w6 := by
   rw [show (11 : Nat) = 3 + (4 + 4) from rfl, executeFn_compose, executeFn_compose]
-  obtain ⟨he1, hp1, hr3_1, hr9_1, hr10_1, w1, w2, hmem1⟩ := p10_cpi_setup_a s h_exit h_pc h_r10
-  obtain ⟨he2, hp2, hr3_2, hr9_2, hr10_2, w3, w4, hmem2⟩ := p10_cpi_setup_b s.regs.r3 _ he1 hp1 hr3_1 hr10_1
-  obtain ⟨he3, hp3, hr9_3, hr10_3, w5, w6, hmem3⟩ := p10_cpi_setup_c s.regs.r3 _ he2 hp2 hr3_2 hr10_2
-  exact ⟨he3, hp3, by rw [hr9_3, hr9_2, hr9_1], hr10_3,
+  obtain ⟨he1, hp1, hr3_1, hr9_1, w1, w2, hmem1⟩ := p10_cpi_setup_a s h_exit h_pc h_r10
+  obtain ⟨he2, hp2, hr3_2, hr9_2, w3, w4, hmem2⟩ := p10_cpi_setup_b s.regs.r3 _ he1 hp1 hr3_1 (by simp [h_r10])
+  obtain ⟨he3, hp3, hr9_3, w5, w6, hmem3⟩ := p10_cpi_setup_c s.regs.r3 _ he2 hp2 hr3_2 (by simp [h_r10])
+  exact ⟨he3, hp3, by rw [hr9_3, hr9_2, hr9_1],
     w1, w2, w3, w4, w5, w6, by rw [hmem3, hmem2, hmem1]⟩
 
 -- effectiveAddr for ACCT_DUPLICATE_OFF (= 0)
@@ -1001,15 +997,15 @@ theorem rejects_system_program_duplicate
       = some E_SYSTEM_PROGRAM_IS_DUPLICATE := by
   -- Split 74 = 47 + 27
   rw [show (74 : Nat) = 47 + 27 from rfl, executeFn_compose]
-  obtain ⟨he, hp, hr6, hr10, v1, v2, w1, w2, hmem⟩ := p9_prefix
+  obtain ⟨he, hp, hr6, v1, v2, w1, w2, hmem⟩ := p9_prefix
     inputAddr insnAddr mem nAccounts baseDataLen
     h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Split 27 = 12 + 15
   rw [show (27 : Nat) = 12 + 15 from rfl, executeFn_compose]
   unfold STACK_START at h_sep h_r9_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3
   -- Chunk match: strip 4 prefix writes to provide chunk equalities
-  obtain ⟨he2, hp2, hr6_2, hr10_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
-    p10_chunk_match inputAddr _ he hp hr6 hr10
+  obtain ⟨he2, hp2, hr6_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
+    p10_chunk_match inputAddr _ he hp hr6 (by simp)
       (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
       (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
       (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
@@ -1018,11 +1014,11 @@ theorem rejects_system_program_duplicate
   -- Split 15 = 11 + 4
   rw [show (15 : Nat) = 11 + 4 from rfl, executeFn_compose]
   -- CPI setup: 6 more stack writes
-  obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
-    p10_cpi_setup _ he2 hp2 hr10_2
+  obtain ⟨he3, hp3, hr9_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
+    p10_cpi_setup _ he2 hp2 (by simp)
   rw [hmem2] at hmem3  -- collapse: hmem3 carries full chain
   -- Dup exit: strip 10 writes from s_96.mem to recover readU8 from original mem
-  apply p10_dup_exit _ sysDup he3 hp3 hr10_3 _ h_sdup_ne
+  apply p10_dup_exit _ sysDup he3 hp3 (by simp) _ h_sdup_ne
   solve_read [hr9_3, hr9_2, hmem3] h_sdup
 
 -- ============ P11: Invalid system program pubkey ============
@@ -1066,11 +1062,11 @@ private theorem p11_dup_pass
     (s : State)
     (h_exit : s.exitCode = none)
     (h_pc   : s.pc = 96)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_dup  : readU8 s.mem s.regs.r9 = ACCT_NON_DUP_MARKER) :
     let s' := executeFn progAt s 2
     s'.exitCode = none ∧ s'.pc = 98 ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     s'.mem = s.mem := by
   have hf96 : progAt 96 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
   have hf97 : progAt 97 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 16) := by native_decide
@@ -1081,9 +1077,8 @@ private theorem p11_dup_pass
     (↑ACCT_NON_DUP_MARKER : Int) 16 (by decide) h_exit
     (by rw [h_pc]; exact hf96) (by rw [h_pc]; exact hf97) h_eq
   have hr9 := hreg .r9 (by decide)
-  have hr10' := hreg .r10 (by decide)
-  simp only [RegFile.get] at hr9 hr10'
-  exact ⟨he, by rw [hp, h_pc], hr9, by rw [hr10', h_r10], hm⟩
+  simp only [RegFile.get] at hr9
+  exact ⟨he, by rw [hp, h_pc], hr9, hm⟩
 
 -- Chunk match (r9-based): ldx from r9 + ldx from r10 + jne(fallthrough) → 3 steps.
 set_option maxHeartbeats 1600000 in
@@ -1100,8 +1095,7 @@ private theorem p11_chunk_eq_state (sysAddr : Nat) (s : State)
     (executeFn progAt s 3).exitCode = none ∧
     (executeFn progAt s 3).pc = s.pc + 3 ∧
     (executeFn progAt s 3).mem = s.mem ∧
-    (executeFn progAt s 3).regs.r9 = sysAddr ∧
-    (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
+    (executeFn progAt s 3).regs.r9 = sysAddr := by
   have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off1) =
                readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
     simp only [RegFile.get, h_r9, h_r10]; exact h_eq
@@ -1109,9 +1103,8 @@ private theorem p11_chunk_eq_state (sysAddr : Nat) (s : State)
     (by decide) (by decide) (by decide) (by decide)
     h_exit h_f1 h_f2 h_f3 h_eq'
   have hr9 := hreg .r9 (by decide) (by decide)
-  have hr10' := hreg .r10 (by decide) (by decide)
-  simp only [RegFile.get] at hr9 hr10'
-  exact ⟨he, hp, hm, by rw [hr9, h_r9], by rw [hr10', h_r10]⟩
+  simp only [RegFile.get] at hr9
+  exact ⟨he, hp, hm, by rw [hr9, h_r9]⟩
 
 -- Chunk mismatch (r9-based): branch to PC 18 → E_INVALID_SYSTEM_PROGRAM_PUBKEY.
 private theorem p11_chunk_ne_error (sysAddr : Nat) (s : State) (n : Nat)
@@ -1176,33 +1169,33 @@ private theorem p11_pubkey_compare
       h_exit h_r9 h_r10
       (by rw [h_pc]; exact hf98) (by rw [h_pc]; exact hf99) (by rw [h_pc]; exact hf100)
       (by rw [ea_acct_addr_chunk0, ea_sys_prog_chunk0, h_acct_c0, h_sys_c0]; exact h_eq0)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁, h_r10₁⟩ := hst
+    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁⟩ := hst
     by_cases h_eq1 : acct_c1 = sys_c1
     · simp [h_eq1] at h_ne
       rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
       have hst := p11_chunk_eq_state sysAddr (executeFn progAt s 3)
         ACCT_ADDRESS_CHUNK_1_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
-        h_exit₁ h_r9₁ h_r10₁
+        h_exit₁ h_r9₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf101) (by rw [h_pc₁, h_pc]; exact hf102)
         (by rw [h_pc₁, h_pc]; exact hf103)
         (by rw [ea_acct_addr_chunk1, ea_sys_prog_chunk1, h_mem₁, h_acct_c1, h_sys_c1]; exact h_eq1)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂, h_r10₂⟩ := hst
+      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂⟩ := hst
       by_cases h_eq2 : acct_c2 = sys_c2
       · simp [h_eq2] at h_ne
         rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
         have hst := p11_chunk_eq_state sysAddr
           (executeFn progAt (executeFn progAt s 3) 3)
           ACCT_ADDRESS_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF
-          h_exit₂ h_r9₂ h_r10₂
+          h_exit₂ h_r9₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf104) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf105)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf106)
           (by rw [ea_acct_addr_chunk2, ea_sys_prog_chunk2, h_mem₂, h_mem₁, h_acct_c2, h_sys_c2]; exact h_eq2)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃, h_r10₃⟩ := hst
+        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃⟩ := hst
         -- Chunk 3 must mismatch
         exact p11_chunk_ne_error sysAddr
           (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
           5 ACCT_ADDRESS_CHUNK_3_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF
-          h_exit₃ h_r9₃ h_r10₃
+          h_exit₃ h_r9₃ (by simp [h_r10])
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf107)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf108)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf109)
@@ -1213,7 +1206,7 @@ private theorem p11_pubkey_compare
         exact p11_chunk_ne_error sysAddr
           (executeFn progAt (executeFn progAt s 3) 3)
           8 ACCT_ADDRESS_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF
-          h_exit₂ h_r9₂ h_r10₂
+          h_exit₂ h_r9₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf104) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf105)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf106)
           (by rw [ea_acct_addr_chunk2, ea_sys_prog_chunk2, h_mem₂, h_mem₁,
@@ -1222,7 +1215,7 @@ private theorem p11_pubkey_compare
     · -- Chunk 1 mismatches
       exact p11_chunk_ne_error sysAddr (executeFn progAt s 3)
         11 ACCT_ADDRESS_CHUNK_1_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
-        h_exit₁ h_r9₁ h_r10₁
+        h_exit₁ h_r9₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf101) (by rw [h_pc₁, h_pc]; exact hf102)
         (by rw [h_pc₁, h_pc]; exact hf103)
         (by rw [ea_acct_addr_chunk1, ea_sys_prog_chunk1, h_mem₁,
@@ -1292,14 +1285,14 @@ theorem rejects_invalid_system_program_pubkey
       = some E_INVALID_SYSTEM_PROGRAM_PUBKEY := by
   -- Split 86 = 47 + 39
   rw [show (86 : Nat) = 47 + 39 from rfl, executeFn_compose]
-  obtain ⟨he, hp, hr6, hr10, v1, v2, w1, w2, hmem⟩ := p9_prefix
+  obtain ⟨he, hp, hr6, v1, v2, w1, w2, hmem⟩ := p9_prefix
     inputAddr insnAddr mem nAccounts baseDataLen
     h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Split 39 = 12 + 27
   rw [show (39 : Nat) = 12 + 27 from rfl, executeFn_compose]
   unfold STACK_START at h_sep h_r9_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
-  obtain ⟨he2, hp2, hr6_2, hr10_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
-    p10_chunk_match inputAddr _ he hp hr6 hr10
+  obtain ⟨he2, hp2, hr6_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
+    p10_chunk_match inputAddr _ he hp hr6 (by simp)
       (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
       (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
       (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
@@ -1307,19 +1300,19 @@ theorem rejects_invalid_system_program_pubkey
   rw [hmem] at hmem2
   -- Split 27 = 11 + 16
   rw [show (27 : Nat) = 11 + 16 from rfl, executeFn_compose]
-  obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
-    p10_cpi_setup _ he2 hp2 hr10_2
+  obtain ⟨he3, hp3, hr9_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
+    p10_cpi_setup _ he2 hp2 (by simp)
   rw [hmem2] at hmem3
   -- Split 16 = 2 + 14
   rw [show (16 : Nat) = 2 + 14 from rfl, executeFn_compose]
   -- Dup pass: strip writes to recover readU8 from original mem
-  have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
+  have h_dup_pass := p11_dup_pass _ he3 hp3 (by simp)
     (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
-  obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
+  obtain ⟨he4, hp4, hr9_4, hmem4⟩ := h_dup_pass
   rw [hmem3] at hmem4
   -- Pubkey compare: single hmem4 carries full chain back to mem
   apply p11_pubkey_compare _ _ acct_c0 acct_c1 acct_c2 acct_c3 sys_c0 sys_c1 sys_c2 sys_c3
-    he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
+    he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) (by simp)
     (by solve_read [hmem4] h_acct_c0)
     (by solve_read [hmem4] h_acct_c1)
     (by solve_read [hmem4] h_acct_c2)
@@ -1347,34 +1340,34 @@ private theorem p12_sys_pubkey_match
     (h_eq3 : readU64 s.mem (sysAddr + 32) = readU64 s.mem (STACK_START + 0x1000 - 560)) :
     let s' := executeFn progAt s 12
     s'.exitCode = none ∧ s'.pc = 110 ∧
-    s'.regs.r9 = sysAddr ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = sysAddr ∧
     s'.mem = s.mem := by
   rw [show (12 : Nat) = 3 + (3 + (3 + 3)) from rfl]
   iterate 3 (rw [executeFn_compose])
-  obtain ⟨he1, hp1, hm1, hr9_1, hr10_1⟩ :=
+  obtain ⟨he1, hp1, hm1, hr9_1⟩ :=
     p11_chunk_eq_state sysAddr s ACCT_ADDRESS_CHUNK_0_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF
       h_exit h_r9 h_r10
       (by rw [h_pc]; native_decide) (by rw [h_pc]; native_decide) (by rw [h_pc]; native_decide)
       (by rw [ea_acct_addr_chunk0, ea_sys_prog_chunk0]; exact h_eq0)
-  obtain ⟨he2, hp2, hm2, hr9_2, hr10_2⟩ :=
+  obtain ⟨he2, hp2, hm2, hr9_2⟩ :=
     p11_chunk_eq_state sysAddr _ ACCT_ADDRESS_CHUNK_1_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
-      he1 hr9_1 hr10_1
+      he1 hr9_1 (by simp [h_r10])
       (by rw [hp1, h_pc]; native_decide) (by rw [hp1, h_pc]; native_decide)
       (by rw [hp1, h_pc]; native_decide)
       (by rw [ea_acct_addr_chunk1, ea_sys_prog_chunk1, hm1]; exact h_eq1)
-  obtain ⟨he3, hp3, hm3, hr9_3, hr10_3⟩ :=
+  obtain ⟨he3, hp3, hm3, hr9_3⟩ :=
     p11_chunk_eq_state sysAddr _ ACCT_ADDRESS_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF
-      he2 hr9_2 hr10_2
+      he2 hr9_2 (by simp [h_r10])
       (by rw [hp2, hp1, h_pc]; native_decide) (by rw [hp2, hp1, h_pc]; native_decide)
       (by rw [hp2, hp1, h_pc]; native_decide)
       (by rw [ea_acct_addr_chunk2, ea_sys_prog_chunk2, hm2, hm1]; exact h_eq2)
-  obtain ⟨he4, hp4, hm4, hr9_4, hr10_4⟩ :=
+  obtain ⟨he4, hp4, hm4, hr9_4⟩ :=
     p11_chunk_eq_state sysAddr _ ACCT_ADDRESS_CHUNK_3_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF
-      he3 hr9_3 hr10_3
+      he3 hr9_3 (by simp [h_r10])
       (by rw [hp3, hp2, hp1, h_pc]; native_decide) (by rw [hp3, hp2, hp1, h_pc]; native_decide)
       (by rw [hp3, hp2, hp1, h_pc]; native_decide)
       (by rw [ea_acct_addr_chunk3, ea_sys_prog_chunk3, hm3, hm2, hm1]; exact h_eq3)
-  exact ⟨he4, by rw [hp4, hp3, hp2, hp1, h_pc], by rw [hr9_4], hr10_4,
+  exact ⟨he4, by rw [hp4, hp3, hp2, hp1, h_pc], by rw [hr9_4],
     by rw [hm4, hm3, hm2, hm1]⟩
 
 -- effectiveAddr lemmas for r9 advance
@@ -1397,7 +1390,6 @@ private theorem p12_r9_advance
     (h_r10  : s.regs.r10 = STACK_START + 0x1000) :
     let s' := executeFn progAt s 8
     s'.exitCode = none ∧ s'.pc = 118 ∧
-    s'.regs.r10 = STACK_START + 0x1000 ∧
     ∃ w, s'.mem = writeU64 s.mem (STACK_START + 0x1000 - 48) w := by
   have hf110 : progAt 110 = some (.mov64 .r7 (.reg .r9)) := by native_decide
   have hf111 : progAt 111 = some (.add64 .r7 (.imm ACCT_ADDRESS_OFF)) := by native_decide
@@ -1414,7 +1406,7 @@ private theorem p12_r9_advance
     ea_sol_insn_prog_id, ea_acct_data_len,
     h_exit, h_pc, h_r9, h_r10,
     hf110, hf111, hf112, hf113, hf114, hf115, hf116, hf117]
-  exact ⟨trivial, trivial, trivial, _, rfl⟩
+  exact ⟨trivial, trivial, _, rfl⟩
 
 -- Rent sysvar dup check: 4 steps PCs 118-121.
 -- ldx.byte from r9 (rent dup marker) + jne to error handler at PC 20 + mov32 + exit.
@@ -1503,41 +1495,41 @@ theorem rejects_rent_sysvar_duplicate
   rw [show (92 : Nat) = 47 + (12 + (11 + (2 + (12 + 8)))) from rfl] at h_rdup h_r9_rent_sep
   iterate 5 (rw [executeFn_compose] at h_rdup h_r9_rent_sep)
   -- Prefix
-  obtain ⟨he, hp, hr6, hr10, v1, v2, w1, w2, hmem⟩ := p9_prefix
+  obtain ⟨he, hp, hr6, v1, v2, w1, w2, hmem⟩ := p9_prefix
     inputAddr insnAddr mem nAccounts baseDataLen
     h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Market pubkey match (12 steps)
   unfold STACK_START at h_sep h_r9_sep h_r9_rent_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
-  obtain ⟨he2, hp2, _, hr10_2, _, _, hr9_2, hmem2⟩ :=
-    p10_chunk_match inputAddr _ he hp hr6 hr10
+  obtain ⟨he2, hp2, _, _, _, hr9_2, hmem2⟩ :=
+    p10_chunk_match inputAddr _ he hp hr6 (by simp)
       (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
       (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
       (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
       (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
   rw [hmem] at hmem2
   -- CPI setup (11 steps)
-  obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
-    p10_cpi_setup _ he2 hp2 hr10_2
+  obtain ⟨he3, hp3, hr9_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
+    p10_cpi_setup _ he2 hp2 (by simp)
   rw [hmem2] at hmem3
   -- System program dup pass (2 steps)
-  have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
+  have h_dup_pass := p11_dup_pass _ he3 hp3 (by simp)
     (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
-  obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
+  obtain ⟨he4, hp4, hr9_4, hmem4⟩ := h_dup_pass
   rw [hmem3] at hmem4
   -- System program pubkey match (12 steps)
-  obtain ⟨he5, hp5, hr9_5, hr10_5, hmem5⟩ :=
-    p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
+  obtain ⟨he5, hp5, hr9_5, hmem5⟩ :=
+    p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) (by simp)
       (by rewrite_mem [hmem4]; rw [h_acct_c0, h_sys_c0])
       (by rewrite_mem [hmem4]; rw [h_acct_c1, h_sys_c1])
       (by rewrite_mem [hmem4]; rw [h_acct_c2, h_sys_c2])
       (by rewrite_mem [hmem4]; rw [h_acct_c3, h_sys_c3])
   rw [hmem4] at hmem5
   -- r9 advance (8 steps)
-  obtain ⟨he6, hp6, hr10_6, w_prog, hmem6⟩ :=
-    p12_r9_advance _ _ he5 hp5 hr9_5 hr10_5
+  obtain ⟨he6, hp6, w_prog, hmem6⟩ :=
+    p12_r9_advance _ _ he5 hp5 hr9_5 (by simp)
   rw [hmem5] at hmem6
   -- Dup exit (4 steps)
-  apply p12_dup_exit _ rentDup he6 hp6 hr10_6 _ h_rdup_ne
+  apply p12_dup_exit _ rentDup he6 hp6 (by simp) _ h_rdup_ne
   solve_read [hmem6] h_rdup
 
 -- ============ P13: Invalid rent sysvar pubkey ============
@@ -1553,11 +1545,11 @@ private theorem p13_rent_dup_pass
     (s : State)
     (h_exit : s.exitCode = none)
     (h_pc   : s.pc = 118)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_dup  : readU8 s.mem s.regs.r9 = ACCT_NON_DUP_MARKER) :
     let s' := executeFn progAt s 2
     s'.exitCode = none ∧ s'.pc = 120 ∧
-    s'.regs.r9 = s.regs.r9 ∧ s'.regs.r10 = STACK_START + 0x1000 ∧
+    s'.regs.r9 = s.regs.r9 ∧
     s'.mem = s.mem := by
   have hf118 : progAt 118 = some (.ldx .byte .r7 .r9 ACCT_DUPLICATE_OFF) := by native_decide
   have hf119 : progAt 119 = some (.jne .r7 (.imm ACCT_NON_DUP_MARKER) 20) := by native_decide
@@ -1568,9 +1560,8 @@ private theorem p13_rent_dup_pass
     (↑ACCT_NON_DUP_MARKER : Int) 20 (by decide) h_exit
     (by rw [h_pc]; exact hf118) (by rw [h_pc]; exact hf119) h_eq
   have hr9 := hreg .r9 (by decide)
-  have hr10' := hreg .r10 (by decide)
-  simp only [RegFile.get] at hr9 hr10'
-  exact ⟨he, by rw [hp, h_pc], hr9, by rw [hr10', h_r10], hm⟩
+  simp only [RegFile.get] at hr9
+  exact ⟨he, by rw [hp, h_pc], hr9, hm⟩
 
 -- Chunk match via lddw: 3 steps (ldx + lddw + jne fallthrough).
 set_option maxHeartbeats 1600000 in
@@ -1578,7 +1569,7 @@ private theorem p13_chunk_eq_lddw (rentAddr : Nat) (s : State)
     (off : Int) (val : Int)
     (h_exit : s.exitCode = none)
     (h_r9   : s.regs.r9 = rentAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
     (h_f2 : progAt (s.pc + 1) = some (.lddw .r8 val))
     (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
@@ -1586,17 +1577,15 @@ private theorem p13_chunk_eq_lddw (rentAddr : Nat) (s : State)
     (executeFn progAt s 3).exitCode = none ∧
     (executeFn progAt s 3).pc = s.pc + 3 ∧
     (executeFn progAt s 3).mem = s.mem ∧
-    (executeFn progAt s 3).regs.r9 = rentAddr ∧
-    (executeFn progAt s 3).regs.r10 = STACK_START + 0x1000 := by
+    (executeFn progAt s 3).regs.r9 = rentAddr := by
   have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) = toU64 val := by
     simp only [RegFile.get, h_r9]; exact h_eq
   obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_imm progAt s .r7 .r8 .r9 off val 22
     (by decide) (by decide) (by decide)
     h_exit h_f1 h_f2 h_f3 h_eq'
   have hr9 := hreg .r9 (by decide) (by decide)
-  have hr10' := hreg .r10 (by decide) (by decide)
-  simp only [RegFile.get] at hr9 hr10'
-  exact ⟨he, hp, hm, by rw [hr9, h_r9], by rw [hr10', h_r10]⟩
+  simp only [RegFile.get] at hr9
+  exact ⟨he, hp, hm, by rw [hr9, h_r9]⟩
 
 -- Shared error handler: PC = 22 → mov32 r0 E_INVALID_RENT_SYSVAR_PUBKEY → exit.
 private theorem p13_error_at_22 (s : State)
@@ -1693,32 +1682,32 @@ private theorem p13_pubkey_compare
       h_exit h_r9 h_r10
       (by rw [h_pc]; exact hf120) (by rw [h_pc]; exact hf121) (by rw [h_pc]; exact hf122)
       (by rw [ea_acct_addr_chunk0, h_rent_c0, h_eq0]; exact rent_bridge_0.symm)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁, h_r10₁⟩ := hst
+    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁⟩ := hst
     by_cases h_eq1 : rent_c1 = PUBKEY_RENT_CHUNK_1
     · simp [h_eq1] at h_ne
       rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
       have hst := p13_chunk_eq_lddw rentAddr _
         ACCT_ADDRESS_CHUNK_1_OFF PUBKEY_RENT_CHUNK_1
-        h_exit₁ h_r9₁ h_r10₁
+        h_exit₁ h_r9₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf123) (by rw [h_pc₁, h_pc]; exact hf124)
         (by rw [h_pc₁, h_pc]; exact hf125)
         (by rw [ea_acct_addr_chunk1, h_mem₁, h_rent_c1, h_eq1]; exact rent_bridge_1.symm)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂, h_r10₂⟩ := hst
+      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂⟩ := hst
       by_cases h_eq2 : rent_c2 = PUBKEY_RENT_CHUNK_2
       · simp [h_eq2] at h_ne
         rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
         have hst := p13_chunk_eq_lddw rentAddr _
           ACCT_ADDRESS_CHUNK_2_OFF PUBKEY_RENT_CHUNK_2
-          h_exit₂ h_r9₂ h_r10₂
+          h_exit₂ h_r9₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf126) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf127)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf128)
           (by rw [ea_acct_addr_chunk2, h_mem₂, h_mem₁, h_rent_c2, h_eq2]; exact rent_bridge_2.symm)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃, h_r10₃⟩ := hst
+        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃⟩ := hst
         -- Chunk 3 must mismatch (mov32 pattern)
         exact p13_chunk_ne_mov32 rentAddr
           (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
           5 ACCT_ADDRESS_CHUNK_3_OFF PUBKEY_RENT_CHUNK_3_LO
-          h_exit₃ h_r9₃ h_r10₃
+          h_exit₃ h_r9₃ (by simp [h_r10])
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf129)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf130)
           (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf131)
@@ -1728,7 +1717,7 @@ private theorem p13_pubkey_compare
         exact p13_chunk_ne_lddw rentAddr
           (executeFn progAt (executeFn progAt s 3) 3)
           8 ACCT_ADDRESS_CHUNK_2_OFF PUBKEY_RENT_CHUNK_2
-          h_exit₂ h_r9₂ h_r10₂
+          h_exit₂ h_r9₂ (by simp [h_r10])
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf126) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf127)
           (by rw [h_pc₂, h_pc₁, h_pc]; exact hf128)
           (by rw [ea_acct_addr_chunk2, h_mem₂, h_mem₁, h_rent_c2, rent_bridge_2]; exact h_eq2)
@@ -1736,7 +1725,7 @@ private theorem p13_pubkey_compare
     · -- Chunk 1 mismatches
       exact p13_chunk_ne_lddw rentAddr (executeFn progAt s 3)
         11 ACCT_ADDRESS_CHUNK_1_OFF PUBKEY_RENT_CHUNK_1
-        h_exit₁ h_r9₁ h_r10₁
+        h_exit₁ h_r9₁ (by simp [h_r10])
         (by rw [h_pc₁, h_pc]; exact hf123) (by rw [h_pc₁, h_pc]; exact hf124)
         (by rw [h_pc₁, h_pc]; exact hf125)
         (by rw [ea_acct_addr_chunk1, h_mem₁, h_rent_c1, rent_bridge_1]; exact h_eq1)
@@ -1822,47 +1811,47 @@ theorem rejects_invalid_rent_sysvar_pubkey
   rw [show (92 : Nat) = 47 + (12 + (11 + (2 + (12 + 8)))) from rfl] at h_rdup h_r9_rent_sep h_rent_c0 h_rent_c1 h_rent_c2 h_rent_c3
   iterate 5 (rw [executeFn_compose] at h_rdup h_r9_rent_sep h_rent_c0 h_rent_c1 h_rent_c2 h_rent_c3)
   -- Prefix (47 steps)
-  obtain ⟨he, hp, hr6, hr10, v1, v2, w1, w2, hmem⟩ := p9_prefix
+  obtain ⟨he, hp, hr6, v1, v2, w1, w2, hmem⟩ := p9_prefix
     inputAddr insnAddr mem nAccounts baseDataLen
     h_disc h_num h_enough h_ilen h_udl h_mdup h_mdl h_bdup h_bdl h_qdup h_sep h_qaddr
   -- Market pubkey match (12 steps)
   unfold STACK_START at h_sep h_r9_sep h_r9_rent_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
-  obtain ⟨he2, hp2, _, hr10_2, _, _, hr9_2, hmem2⟩ :=
-    p10_chunk_match inputAddr _ he hp hr6 hr10
+  obtain ⟨he2, hp2, _, _, _, hr9_2, hmem2⟩ :=
+    p10_chunk_match inputAddr _ he hp hr6 (by simp)
       (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
       (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
       (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
       (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
   rw [hmem] at hmem2
   -- CPI setup (11 steps)
-  obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
-    p10_cpi_setup _ he2 hp2 hr10_2
+  obtain ⟨he3, hp3, hr9_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
+    p10_cpi_setup _ he2 hp2 (by simp)
   rw [hmem2] at hmem3
   -- System program dup pass (2 steps)
-  have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
+  have h_dup_pass := p11_dup_pass _ he3 hp3 (by simp)
     (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
-  obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
+  obtain ⟨he4, hp4, hr9_4, hmem4⟩ := h_dup_pass
   rw [hmem3] at hmem4
   -- System program pubkey match (12 steps)
-  obtain ⟨he5, hp5, hr9_5, hr10_5, hmem5⟩ :=
-    p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
+  obtain ⟨he5, hp5, hr9_5, hmem5⟩ :=
+    p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) (by simp)
       (by rewrite_mem [hmem4]; rw [h_acct_c0, h_sys_c0])
       (by rewrite_mem [hmem4]; rw [h_acct_c1, h_sys_c1])
       (by rewrite_mem [hmem4]; rw [h_acct_c2, h_sys_c2])
       (by rewrite_mem [hmem4]; rw [h_acct_c3, h_sys_c3])
   rw [hmem4] at hmem5
   -- r9 advance (8 steps)
-  obtain ⟨he6, hp6, hr10_6, w_prog, hmem6⟩ :=
-    p12_r9_advance _ _ he5 hp5 hr9_5 hr10_5
+  obtain ⟨he6, hp6, w_prog, hmem6⟩ :=
+    p12_r9_advance _ _ he5 hp5 hr9_5 (by simp)
   rw [hmem5] at hmem6
   -- Rent sysvar dup pass (2 steps)
-  have h_rent_dup := p13_rent_dup_pass _ he6 hp6 hr10_6
+  have h_rent_dup := p13_rent_dup_pass _ he6 hp6 (by simp)
     (by solve_read [hmem6] h_rdup)
-  obtain ⟨he7, hp7, hr9_7, hr10_7, hmem7⟩ := h_rent_dup
+  obtain ⟨he7, hp7, hr9_7, hmem7⟩ := h_rent_dup
   rw [hmem6] at hmem7
   -- Rent pubkey compare (14 steps)
   apply p13_pubkey_compare _ _ rent_c0 rent_c1 rent_c2 rent_c3
-    he7 hp7 hr9_7 hr10_7
+    he7 hp7 hr9_7 (by simp)
     (by solve_read [hmem7] h_rent_c0)
     (by solve_read [hmem7] h_rent_c1)
     (by solve_read [hmem7] h_rent_c2)
