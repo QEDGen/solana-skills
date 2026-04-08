@@ -13,7 +13,6 @@ const SUPPORT_LAKEFILE: &str = include_str!("../../../lean_solana/lakefile.lean"
 const SUPPORT_TOOLCHAIN: &str = include_str!("../../../lean_solana/lean-toolchain");
 const SUPPORT_ROOT: &str = include_str!("../../../lean_solana/QEDGen.lean");
 const SUPPORT_ACCOUNT: &str = include_str!("../../../lean_solana/QEDGen/Solana/Account.lean");
-const SUPPORT_AUTHORITY: &str = include_str!("../../../lean_solana/QEDGen/Solana/Authority.lean");
 const SUPPORT_STATE: &str = include_str!("../../../lean_solana/QEDGen/Solana/State.lean");
 const SUPPORT_CPI: &str = include_str!("../../../lean_solana/QEDGen/Solana/Cpi.lean");
 const SUPPORT_VALID: &str = include_str!("../../../lean_solana/QEDGen/Solana/Valid.lean");
@@ -56,7 +55,6 @@ fn write_lean_solana(output_dir: &Path) -> Result<()> {
     let solana_dir = support_dir.join("QEDGen/Solana");
     std::fs::create_dir_all(&solana_dir)?;
     std::fs::write(solana_dir.join("Account.lean"), SUPPORT_ACCOUNT)?;
-    std::fs::write(solana_dir.join("Authority.lean"), SUPPORT_AUTHORITY)?;
     std::fs::write(solana_dir.join("State.lean"), SUPPORT_STATE)?;
     std::fs::write(solana_dir.join("Cpi.lean"), SUPPORT_CPI)?;
     std::fs::write(solana_dir.join("Valid.lean"), SUPPORT_VALID)?;

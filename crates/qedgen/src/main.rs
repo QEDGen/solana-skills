@@ -6,7 +6,7 @@ mod project;
 mod spec;
 mod validate;
 
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -209,6 +209,12 @@ async fn main() -> Result<()> {
             max_tokens,
             validate,
         } => {
+            ensure!(passes > 0, "passes must be greater than 0");
+            ensure!(
+                (0.0..=2.0).contains(&temperature),
+                "temperature must be between 0.0 and 2.0"
+            );
+            ensure!(max_tokens > 0, "max_tokens must be greater than 0");
             let prompt = std::fs::read_to_string(&prompt_file)?;
             api::generate_proofs(
                 &prompt,
@@ -230,6 +236,12 @@ async fn main() -> Result<()> {
             max_tokens,
             validate,
         } => {
+            ensure!(passes > 0, "passes must be greater than 0");
+            ensure!(
+                (0.0..=2.0).contains(&temperature),
+                "temperature must be between 0.0 and 2.0"
+            );
+            ensure!(max_tokens > 0, "max_tokens must be greater than 0");
             api::fill_sorry(
                 &file,
                 output.as_deref(),
@@ -272,6 +284,10 @@ async fn main() -> Result<()> {
                 wait,
                 poll_interval,
             } => {
+                if let Some(interval) = poll_interval {
+                    ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
+                    ensure!(interval <= 3600, "poll_interval must be at most 3600 seconds");
+                }
                 let prompt = prompt.unwrap_or_else(|| {
                     "Fill in all sorry placeholders with valid proofs".to_string()
                 });
@@ -286,6 +302,10 @@ async fn main() -> Result<()> {
                 poll_interval,
                 output_dir,
             } => {
+                if let Some(interval) = poll_interval {
+                    ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
+                    ensure!(interval <= 3600, "poll_interval must be at most 3600 seconds");
+                }
                 let project = aristotle::status(&project_id).await?;
                 println!("Project:  {}", project.project_id);
                 println!("Status:   {}", project.status);

@@ -13,7 +13,7 @@ const BACKOFF_BASE_MS: u64 = 2000;
 
 const SYSTEM_PROMPT: &str = r#"You are Leanstral, an expert Lean 4 proof engineer.
 
-GOAL: Produce a single Lean 4 module that COMPILES under Lean 4.15 + Mathlib 4.15 with <5% sorry usage.
+GOAL: Produce a single Lean 4 module that COMPILES under Lean 4 + Mathlib with <5% sorry usage.
 
 CRITICAL SYNTAX RULE - Parameter Naming Convention:
 ALL function parameters MUST be prefixed with `p_` to avoid conflicts with Lean reserved keywords.
@@ -41,7 +41,7 @@ Hard constraints:
 4. Every theorem must include a complete proof body
 5. Aim for 0 `sorry`; absolute maximum is <5% of theorems using `sorry`
 6. Define every helper function, structure, theorem, and constant before first use
-7. Use only identifiers and constants that are defined in the file or are standard in Lean 4.15 / Mathlib 4.15
+7. Use only identifiers and constants that are defined in the file or are standard in Lean 4 / Mathlib
 8. Do NOT invent library constants or theorem names such as `Nat.le_max`, `Nat.add_le_max`, `u64_max`, etc. If you need a bound, define it explicitly in the file
 9. Do NOT use `_` placeholders in theorem statements or definitions when Lean must infer a witness or value
 10. In particular, do NOT write propositions like `f x = some _`
@@ -208,7 +208,7 @@ When in doubt, choose the simplest model and the simplest theorem statement that
 
 const SBPF_SYSTEM_PROMPT: &str = r#"You are Leanstral, an expert Lean 4 proof engineer specializing in sBPF bytecode verification.
 
-GOAL: Produce a single Lean 4 module that COMPILES under Lean 4.15 with <5% sorry usage. The module verifies properties of hand-written sBPF (Solana BPF) assembly programs.
+GOAL: Produce a single Lean 4 module that COMPILES under Lean 4 with <5% sorry usage. The module verifies properties of hand-written sBPF (Solana BPF) assembly programs.
 
 Hard constraints:
 1. Output exactly one Lean module in a SINGLE ```lean4 code block
@@ -487,10 +487,16 @@ async fn call_mistral_api_with_system(
                     }
                 } else {
                     let error_body = resp.text().await.unwrap_or_default();
-                    eprintln!("ERROR: HTTP {}: {}", status, error_body);
-                    if attempt < MAX_RETRIES - 1 {
-                        sleep(Duration::from_millis(BACKOFF_BASE_MS * 2_u64.pow(attempt))).await;
-                        continue;
+                    if status.is_server_error() {
+                        // 5xx: transient server error, retry with backoff
+                        eprintln!("ERROR: HTTP {} (retryable): {}", status, error_body);
+                        if attempt < MAX_RETRIES - 1 {
+                            sleep(Duration::from_millis(BACKOFF_BASE_MS * 2_u64.pow(attempt))).await;
+                            continue;
+                        }
+                    } else {
+                        // 4xx (other than 429/401/403): client error, don't retry
+                        eprintln!("ERROR: HTTP {}: {}", status, error_body);
                     }
                     anyhow::bail!("HTTP {}: {}", status, error_body);
                 }
@@ -856,7 +862,7 @@ Rules:
 3. Do NOT add or remove imports
 4. Do NOT add new theorems or definitions
 5. Only modify the proof bodies where `sorry` appears
-6. Use standard Lean 4.15 / Mathlib 4.15 tactics
+6. Use standard Lean 4 / Mathlib tactics
 7. Prefer: unfold, split_ifs, cases, omega, rfl, exact, constructor, contradiction
 8. When a named predicate appears in both a hypothesis and the goal, unfold it in BOTH: `unfold pred at h ⊢`
 9. Output the complete file in a single ```lean4 code block

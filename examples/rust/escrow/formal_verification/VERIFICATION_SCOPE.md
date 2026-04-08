@@ -73,17 +73,6 @@ structure Account where
 - Owner and rent fields (not relevant to business logic)
 - Data deserialization (assumed correct via Anchor)
 
-### Authority Model (Authority.lean)
-
-```lean
-axiom Authorized : Pubkey -> Pubkey -> Prop
-```
-
-**What this abstracts:**
-- Anchor's constraint checking (`#[account(constraint = ...)]`)
-- Signer validation
-- PDA authority delegation via `new_with_signer`
-
 ## Verification Strategy
 
 ### 1. Extract CPI Construction

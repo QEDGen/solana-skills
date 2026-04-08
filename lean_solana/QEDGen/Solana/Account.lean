@@ -122,7 +122,6 @@ abbrev Pubkey := QEDGen.Solana.Account.Pubkey
 abbrev U64 := QEDGen.Solana.Account.U64
 abbrev U8 := QEDGen.Solana.Account.U8
 abbrev Account := QEDGen.Solana.Account.Account
-abbrev AccountState := QEDGen.Solana.Account.Account
 abbrev canWrite := QEDGen.Solana.Account.canWrite
 abbrev findByKey := QEDGen.Solana.Account.findByKey
 abbrev findByAuthority := QEDGen.Solana.Account.findByAuthority

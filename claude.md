@@ -86,7 +86,6 @@ qedgen asm2lean \
 
 **`lean_solana/`** - Standalone Lean 4 library: Solana axioms (QEDGen.Solana)
 - `QEDGen/Solana/Account.lean` - Account structure
-- `QEDGen/Solana/Authority.lean` - Authorization predicates
 - `QEDGen/Solana/Cpi.lean` - Generic CPI envelope (invoke_signed model)
 - `QEDGen/Solana/State.lean` - Lifecycle and state machines
 - `QEDGen/Solana/Valid.lean` - Numeric bounds and validity predicates

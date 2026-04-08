@@ -3,8 +3,7 @@
 -- wp_exec: one-shot tactic for sBPF property proofs
 -- wp_step: single instruction step (for manual proofs)
 
-import QEDGen.Solana.SBPF.MonadicStep
-import QEDGen.Solana.SBPF.Bridge
+import QEDGen.Solana.SBPF.Execute
 
 namespace QEDGen.Solana.SBPF
 

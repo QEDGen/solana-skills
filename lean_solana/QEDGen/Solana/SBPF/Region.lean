@@ -6,7 +6,6 @@
 -- This module provides:
 --   1. Chain frame lemmas: strip N writes in one shot
 --   2. The `mem_frame` tactic: automatic region-based write stripping
---   3. SbpfMem: optional region-typed wrapper for compositional proofs
 --
 -- The key optimization over strip_writes: mem_frame pre-unfolds STACK_START
 -- once and uses two-premise frame lemmas (h_r + h_w) instead of trying

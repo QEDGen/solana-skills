@@ -116,6 +116,24 @@ formal_verification/
     ArithmeticSafety.lean
 ```
 
+### When to add Mathlib
+
+**sBPF assembly proofs do NOT need Mathlib.** The support library's built-in tactics (`wp_exec`, `simp`, `omega`, `native_decide`) handle everything. Keep the lakefile minimal — no Mathlib means fast builds.
+
+**Anchor/Rust model proofs MAY need Mathlib** when the proof requires:
+- `linarith` or `ring` for nonlinear integer reasoning
+- `Mathlib.Tactic` for advanced automation
+- Any `import Mathlib.*` in the proof files
+
+If you need Mathlib, add it to the project's `lakefile.lean`:
+```lean
+require "leanprover-community" / "mathlib" @ git "v4.24.0"
+```
+
+Then add `import Mathlib.Tactic` (or a specific Mathlib module) in the proof file. Run `lake update` to fetch the cache.
+
+**Rule of thumb:** Start without Mathlib. If `lake build` fails because a tactic or import is missing, add it then.
+
 ## Step 5: Write Lean proofs
 
 This is the core step. You write Lean 4 directly — models, transitions, theorems, and proofs.
@@ -164,7 +182,7 @@ After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
 **Key lemmas:**
 - `closes_is_closed`, `closes_was_open`, `closed_irreversible`
-- `valid_u64_preserved_by_zero`, `valid_u64_preserved_by_same`
+- `valid_u64_zero`
 - `find_map_update_other`, `find_map_update_same` (axioms for account list updates)
 
 ### Proof patterns

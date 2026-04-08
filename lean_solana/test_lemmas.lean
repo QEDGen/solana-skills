@@ -1,7 +1,6 @@
 import QEDGen.Solana.Account
 import QEDGen.Solana.State
 import QEDGen.Solana.Cpi
-import QEDGen.Solana.Authority
 
 open QEDGen.Solana
 
@@ -20,11 +19,7 @@ example (accs : List Account) (auth : Pubkey) :
     findByAuthority accs auth = accs.find? (fun acc => acc.authority = auth) := by
   rfl
 
--- Test 4: authorized_refl works
-example (auth : Pubkey) : QEDGen.Solana.Authority.Authorized auth auth := by
-  exact QEDGen.Solana.Authority.authorized_refl auth
-
--- Test 5: targetsProgram with real TOKEN_PROGRAM_ID
+-- Test 4: targetsProgram with real TOKEN_PROGRAM_ID
 example : targetsProgram
     { programId := TOKEN_PROGRAM_ID, accounts := [⟨⟨1, 0, 0, 0⟩, true, false⟩], data := [DISC_TRANSFER] }
     TOKEN_PROGRAM_ID := by

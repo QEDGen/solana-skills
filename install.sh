@@ -34,10 +34,36 @@ download_binary() {
 
     # Get the latest release download URL
     local url="https://github.com/${REPO}/releases/latest/download/${asset_name}"
+    local checksum_url="https://github.com/${REPO}/releases/latest/download/${asset_name}.sha256"
     echo "  Downloading from $url ..."
 
     mkdir -p "$SKILL_DIR/bin"
     if curl -fSL --retry 2 -o "$QEDGEN_BIN" "$url" 2>/dev/null; then
+        # Verify checksum if available
+        local checksum_file
+        checksum_file=$(mktemp)
+        if curl -fSL --retry 2 -o "$checksum_file" "$checksum_url" 2>/dev/null; then
+            local expected actual
+            expected=$(awk '{print $1}' "$checksum_file")
+            if command -v sha256sum &> /dev/null; then
+                actual=$(sha256sum "$QEDGEN_BIN" | awk '{print $1}')
+            elif command -v shasum &> /dev/null; then
+                actual=$(shasum -a 256 "$QEDGEN_BIN" | awk '{print $1}')
+            fi
+            rm -f "$checksum_file"
+            if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
+                echo "  ERROR: SHA256 checksum mismatch!"
+                echo "    Expected: $expected"
+                echo "    Actual:   $actual"
+                rm -f "$QEDGEN_BIN"
+                return 1
+            fi
+            echo "  Checksum verified."
+        else
+            rm -f "$checksum_file"
+            echo "  Warning: No checksum file available, skipping verification."
+        fi
+
         chmod +x "$QEDGEN_BIN"
         if "$QEDGEN_BIN" --version &> /dev/null; then
             return 0
@@ -90,7 +116,7 @@ fi
 # ── Lean / elan ───────────────────────────────────────────────────────────
 if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
     echo "  Installing Lean toolchain via elan..."
-    curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain leanprover/lean4:v4.15.0
+    curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.24.0
     export PATH="$HOME/.elan/bin:$PATH"
 fi
 

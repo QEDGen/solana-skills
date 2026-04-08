@@ -1,4 +1,4 @@
-I need a single Lean 4 module that compiles under Lean 4.15 + Mathlib 4.15.
+I need a single Lean 4 module that compiles under Lean 4 + Mathlib.
 
 Return Lean code only.
 Do not duplicate declarations.
@@ -103,6 +103,6 @@ Now, generate a Lean proof for the following.
 ## Output Requirements
 1. Define the model types and executable transition functions first.
 2. State the theorem only after the semantics are defined.
-3. Use only Lean 4.15 / Mathlib 4.15 identifiers you are confident exist.
+3. Use only Lean 4 / Mathlib identifiers you are confident exist.
 4. Prefer concrete definitions over placeholders.
 5. If the full request is too large, prove a sound subset cleanly instead of emitting broken code.

@@ -194,7 +194,7 @@ After `import QEDGen.Solana` and `open QEDGen.Solana`:
 
 **Functions:** `findByKey`, `findByAuthority`, `canWrite`, `transferCpiValid`, `closes`, `valid_u64`
 
-**Key lemmas:** `closes_is_closed`, `closes_was_open`, `closed_irreversible`, `valid_u64_preserved_by_zero`, `valid_u64_preserved_by_same`, `find_map_update_other`, `find_map_update_same`
+**Key lemmas:** `closes_is_closed`, `closes_was_open`, `closed_irreversible`, `valid_u64_zero`, `find_map_update_other`, `find_map_update_same`
 
 ### sBPF Assembly
 

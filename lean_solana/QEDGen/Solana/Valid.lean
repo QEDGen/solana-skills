@@ -21,17 +21,9 @@ def valid_u32 (n : Nat) : Prop := n <= U32_MAX
 def valid_u64 (n : Nat) : Prop := n <= U64_MAX
 def valid_u128 (n : Nat) : Prop := n <= U128_MAX
 
--- Helper: validity is preserved by operations that don't exceed bounds
-theorem valid_u64_preserved_by_zero (n : Nat) :
-    valid_u64 n → valid_u64 0 := by
-  intro _
-  unfold valid_u64
-  omega
-
-theorem valid_u64_preserved_by_same (n : Nat) :
-    valid_u64 n → valid_u64 n := by
-  intro h
-  exact h
+-- Zero is always a valid u64
+theorem valid_u64_zero : valid_u64 0 := by
+  unfold valid_u64; omega
 
 -- Example: Generic ValidState template
 -- Users can define custom ValidState predicates for their programs
@@ -57,7 +49,6 @@ abbrev valid_u32 := QEDGen.Solana.Valid.valid_u32
 abbrev valid_u64 := QEDGen.Solana.Valid.valid_u64
 abbrev valid_u128 := QEDGen.Solana.Valid.valid_u128
 
-abbrev valid_u64_preserved_by_zero := QEDGen.Solana.Valid.valid_u64_preserved_by_zero
-abbrev valid_u64_preserved_by_same := QEDGen.Solana.Valid.valid_u64_preserved_by_same
+abbrev valid_u64_zero := QEDGen.Solana.Valid.valid_u64_zero
 
 end QEDGen.Solana

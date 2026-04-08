@@ -10,6 +10,7 @@ const BASE_URL: &str = "https://aristotle.harmonic.fun/api/v2";
 const REQUEST_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 30;
 const MAX_POLL_FAILURE_SECS: u64 = 600;
+const MAX_ARCHIVE_SIZE_BYTES: usize = 500 * 1024 * 1024; // 500 MB
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -37,6 +38,34 @@ fn api_key() -> Result<String> {
         "ARISTOTLE_API_KEY environment variable not set.\n\
          Get a key at https://aristotle.harmonic.fun",
     )
+}
+
+/// Validate that a project ID contains only safe URL characters (alphanumeric, hyphens, underscores).
+fn validate_project_id(id: &str) -> Result<&str> {
+    if id.is_empty() {
+        anyhow::bail!("Project ID cannot be empty");
+    }
+    if id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        Ok(id)
+    } else {
+        anyhow::bail!("Invalid project ID: must contain only alphanumeric characters, hyphens, and underscores");
+    }
+}
+
+/// Percent-encode a string for safe use in URL query parameters.
+fn url_encode(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(b as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    encoded
 }
 
 fn client() -> Client {
@@ -144,6 +173,7 @@ pub async fn submit(project_dir: &Path, prompt: &str) -> Result<Project> {
 /// Poll a project until it reaches a terminal status.
 /// Returns the final project state.
 pub async fn poll(project_id: &str, interval_secs: Option<u64>) -> Result<Project> {
+    let project_id = validate_project_id(project_id)?;
     let key = api_key()?;
     let client = client();
     let interval = Duration::from_secs(interval_secs.unwrap_or(DEFAULT_POLL_INTERVAL_SECS));
@@ -212,6 +242,7 @@ pub async fn poll(project_id: &str, interval_secs: Option<u64>) -> Result<Projec
 
 /// Get the current status of a project (single request, no polling).
 pub async fn status(project_id: &str) -> Result<Project> {
+    let project_id = validate_project_id(project_id)?;
     let key = api_key()?;
     let client = client();
 
@@ -233,6 +264,7 @@ pub async fn status(project_id: &str) -> Result<Project> {
 /// Download the solution tar.gz and extract it to the output directory.
 /// Returns the path where the solution was extracted.
 pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<PathBuf> {
+    let project_id = validate_project_id(project_id)?;
     let key = api_key()?;
     let client = client();
 
@@ -249,6 +281,13 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
     }
 
     let bytes = resp.bytes().await?;
+    if bytes.len() > MAX_ARCHIVE_SIZE_BYTES {
+        anyhow::bail!(
+            "Downloaded archive ({} MB) exceeds maximum allowed size ({} MB)",
+            bytes.len() / (1024 * 1024),
+            MAX_ARCHIVE_SIZE_BYTES / (1024 * 1024)
+        );
+    }
     std::fs::create_dir_all(output_dir)?;
 
     // Extract tar.gz, stripping the top-level directory prefix
@@ -283,6 +322,7 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
 
 /// Cancel a running project.
 pub async fn cancel(project_id: &str) -> Result<Project> {
+    let project_id = validate_project_id(project_id)?;
     let key = api_key()?;
     let client = client();
 
@@ -310,7 +350,7 @@ pub async fn list(limit: u32, status_filter: Option<&str>) -> Result<Vec<Project
 
     let mut url = format!("{}/project?limit={}", BASE_URL, limit);
     if let Some(s) = status_filter {
-        url.push_str(&format!("&status={}", s));
+        url.push_str(&format!("&status={}", url_encode(s)));
     }
 
     let resp = client

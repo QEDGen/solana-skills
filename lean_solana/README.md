@@ -76,6 +76,5 @@ lake env lean test_lemmas.lean
 - `QEDGen/Solana/Account.lean`: Account structure and field access
 - `QEDGen/Solana/Cpi.lean`: Generic CPI envelope (invoke_signed model)
 - `QEDGen/Solana/State.lean`: Lifecycle and state machine types
-- `QEDGen/Solana/Authority.lean`: Authorization predicates
 - `QEDGen/Solana/Valid.lean`: Numeric bounds and validity predicates
 - `test_lemmas.lean`: Smoke tests for type-checking axioms
