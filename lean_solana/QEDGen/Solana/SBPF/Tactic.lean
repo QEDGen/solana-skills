@@ -49,7 +49,7 @@ syntax "sbpf_steps" : tactic
 macro_rules
   | `(tactic| sbpf_steps) => `(tactic| (
       try simp only [effectiveAddr, effectiveAddr_nat, Nat.add_zero] at *;
-      simp [*, execute, execute_halted, step, initState, RegFile.get, RegFile.set, resolveSrc,
+      simp [*, execute, execute_halted, step, initState, initState2, RegFile.get, RegFile.set, resolveSrc,
             readByWidth, effectiveAddr, effectiveAddr_nat, execSyscall]))
 
 /-- Like sbpf_steps but for executeFn (function-based fetch).
@@ -59,7 +59,7 @@ syntax "sbpf_fn_steps" : tactic
 macro_rules
   | `(tactic| sbpf_fn_steps) => `(tactic| (
       try simp only [effectiveAddr, effectiveAddr_nat, Nat.add_zero] at *;
-      simp [*, executeFn, executeFn_halted, step, initState, RegFile.get, RegFile.set, resolveSrc,
+      simp [*, executeFn, executeFn_halted, step, initState, initState2, RegFile.get, RegFile.set, resolveSrc,
             readByWidth, effectiveAddr, effectiveAddr_nat, execSyscall]))
 
 end QEDGen.Solana.SBPF

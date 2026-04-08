@@ -13,8 +13,8 @@ QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 
 ### Build the CLI
 
 ```bash
-# Build qedgen binary (outputs to ./bin/qedgen)
-cargo build --release
+# Build qedgen binary and copy to ./bin/qedgen
+cargo build --release && cp target/release/qedgen bin/qedgen
 
 # Build just the Lean support library
 cd lean_solana
@@ -158,6 +158,7 @@ If `lake build` fails:
    - `unexpected token 'open'` → use `«open»` quoting for Lean keywords
    - Namespace collision → check `open` statements
    - `simp` timeout on sBPF proofs → see **sBPF simp performance** section below
+   - `omega` fails on address disjointness after stack writes → normalize hypotheses with `simp [wrapAdd, toU64, ...]` (not `simp only`) so they match the goal form. Step-level simp applies `@[simp]` lemmas (modular identity, numeric evaluation) that `simp only` misses.
 3. Fix the proof and re-run `lake build`
 
 ### sBPF Proof Workflow
@@ -173,18 +174,50 @@ Then write proofs in a separate file that imports the generated module:
 ```lean
 import QEDGen.Solana.SBPF
 import Prog
+
+open QEDGen.Solana.SBPF
+open QEDGen.Solana.SBPF.Memory
 open Prog
 
+-- wp_exec is the primary tactic for sBPF proofs.
+-- First bracket: fetch function + chunk defs (for dsimp instruction decode)
+-- Second bracket: effectiveAddr lemmas + extras (for simp branch resolution)
 theorem my_property ... :=
-    (execute prog (initState inputAddr mem) FUEL).exitCode = some CODE := by
-  sbpf_steps
+    (executeFn progAt (initState inputAddr mem) FUEL).exitCode = some CODE := by
+  have h1 : ¬(readU64 mem inputAddr = SOME_CONST) := by rw [h_val]; exact h_ne
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88]
 ```
 
-The `sbpf_steps` tactic automates sBPF execution unrolling via `simp`. It requires `@[simp]` on `prog`.
+For programs with two input pointers (r1=input buffer, r2=instruction data, e.g. SIMD-0321), use `initState2`:
+
+```lean
+-- entryPc allows non-zero entry points (e.g. error handlers before main logic)
+(executeFn progAt (initState2 inputAddr insnAddr mem 24) FUEL).exitCode = some CODE
+```
+
+The `wp_exec` tactic uses the monadic WP bridge (`executeFn_eq_execSegment`) to iteratively unfold execution at O(1) kernel depth per step. For complex paths needing manual guidance (e.g., memory disjointness lemmas between steps), use `wp_step` to advance one instruction at a time.
+
+### Memory Disjointness Through Stack Writes
+
+When sBPF programs write to the stack then read from the input buffer, use memory axioms to prove reads see original memory:
+
+```lean
+-- Byte read through dword stack write
+rw [readU8_writeU64_outside _ _ _ _
+  (by left; unfold STACK_START at h_addr ⊢; omega)]
+```
+
+Key patterns:
+- Add a **stack-input separation hypothesis**: `h_sep : STACK_START + 0x1000 > inputAddr + 100000`
+- For **dynamic addresses** (after `add64`/`and64`), introduce bound hypotheses so omega can prove disjointness
+- Use **`simp`** (not `simp only`) to normalize hypotheses containing `wrapAdd`/`toU64` to match step-execution goal forms — `simp only` misses modular identities like `(a % m + b) % m = (a + b) % m`
+- For complex paths (20+ steps), organize into **phases**: (1) validation prefix, (2) pointer arithmetic / stack writes, (3) property-specific read-and-branch with disjointness proofs
+
+See SKILL.md "Memory disjointness through stack writes" for the full pattern.
 
 ### sBPF simp Performance (Critical)
 
-The `sbpf_steps` tactic is extremely sensitive to how constants are typed and named. Violations cause exponential blowup (seconds → hours).
+The `wp_exec` tactic is sensitive to how constants are typed and named. Violations cause exponential blowup (seconds → hours).
 
 **Rule 1: Offset constants MUST be `Int`, not `Nat`.**
 `effectiveAddr` takes `(off : Int)`. With `Nat` offsets, Lean inserts a `Nat → Int` coercion that `simp` cannot efficiently process.
@@ -210,11 +243,52 @@ theorem t ... (h : readU64 mem (effectiveAddr inputAddr MY_OFFSET) = v) ...
 
 **Rule 3: `@[simp]` on `prog` is required.** The tactic needs to evaluate `prog[n]?` at each step.
 
-The `qedgen asm2lean` command handles Rules 1-3 automatically: it emits `Int`-typed offsets, `Nat`-typed non-offsets, named constants in the `prog` array, and `@[simp]` on `prog`.
+The `qedgen asm2lean` command handles Rules 1-3 automatically: it emits `Int`-typed offsets, `Nat`-typed non-offsets, named constants in the `prog` array, and `@[simp]` on `prog`. It also auto-generates:
+- `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol
+- `@[simp] theorem bridge_NAME` — toU64 bridge lemmas for Nat lddw constants
+- `@[simp] theorem insn_N` — instruction fetch cache (`progAt N = some (...)` via `native_decide`)
+
+### Aristotle (Harmonic) — Long-Running Sorry-Filling
+
+For hard sub-goals that Leanstral cannot crack, Aristotle provides agentic proof search (minutes to hours):
+
+```bash
+# Submit a Lean project and wait for completion
+qedgen aristotle submit \
+  --project-dir formal_verification \
+  --wait
+
+# Submit without waiting (returns project ID)
+qedgen aristotle submit --project-dir formal_verification
+
+# Check status (single shot)
+qedgen aristotle status <project-id>
+
+# Poll until done, then auto-download result
+qedgen aristotle status <project-id> \
+  --wait \
+  --output-dir formal_verification
+
+# Download result manually when complete
+qedgen aristotle result <project-id> --output-dir formal_verification
+
+# List recent projects
+qedgen aristotle list
+
+# Cancel a running project
+qedgen aristotle cancel <project-id>
+```
+
+`status --wait` is the recommended way to attach to a previously submitted project. It polls every 30s (override with `--poll-interval`), prints progress updates, and auto-downloads the result on completion.
+
+**When to use which backend:**
+- **Leanstral** (`fill-sorry`): Fast (seconds), good for straightforward goals. Try first.
+- **Aristotle** (`aristotle submit`): Slow but powerful (minutes–hours). Use when Leanstral fails after multiple passes.
 
 ## Environment Variables
 
 - `MISTRAL_API_KEY` - Required for `fill-sorry` and `generate` commands
+- `ARISTOTLE_API_KEY` - Required for `aristotle` commands (get at https://aristotle.harmonic.fun)
 - `QEDGEN_VALIDATION_WORKSPACE` - Override validation workspace path (default: platform cache dir)
 
 ## Common Lean Proof Patterns
@@ -276,5 +350,5 @@ After `qedgen generate`:
 
 - First Lean build is expensive (15-45 min for Mathlib). Run `qedgen setup` first.
 - If `lake build` fails with "could not resolve 'HEAD' to a commit", remove `.lake/packages/mathlib` and run `lake update`.
-- Binary is built to `./bin/qedgen`, not `target/release/qedgen`.
+- Binary: `cargo build --release` outputs to `target/release/qedgen`. Always copy to `bin/qedgen` after building: `cp target/release/qedgen bin/qedgen`.
 - The SKILL.md file defines the full proof-writing workflow that Claude follows.

@@ -118,5 +118,5 @@
    "inputRev": "main",
    "inherited": true,
    "configFile": "lakefile.toml"}],
- "name": "counterProofs",
+ "name": "dropsetProofs",
  "lakeDir": ".lake"}

@@ -103,7 +103,7 @@ abbrev COMPARE_EQUAL : Nat := 0
 
 /-! ## Program (chunked lookup for O(1) simp) -/
 
-private def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
+def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 0 => some (.ldx .dword .r2 .r1 N_ACCOUNTS_OFF)  -- 0: entrypoint
   | 1 => some (.jeq .r2 (.imm N_ACCOUNTS_INCREMENT) 116)  -- 1
   | 2 => some (.jeq .r2 (.imm N_ACCOUNTS_INIT) 5)  -- 2
@@ -206,7 +206,7 @@ private def progAt_0 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 99 => some (.stx .dword .r10 (-STK_INIT_ACCT_INFO_PDA_DATA_ADDR_OFF) .r2)  -- 99
   | _ => none
 
-private def progAt_1 : Nat → Option QEDGen.Solana.SBPF.Insn
+def progAt_1 : Nat → Option QEDGen.Solana.SBPF.Insn
   | 100 => some (.mov64 .r2 (.reg .r10))  -- 100
   | 101 => some (.sub64 .r2 (.imm STK_INIT_SEED_0_ADDR_OFF))  -- 101
   | 102 => some (.stx .dword .r10 (-STK_INIT_SIGNERS_SEEDS_OFF) .r2)  -- 102

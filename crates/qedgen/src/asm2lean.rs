@@ -663,6 +663,67 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         writeln!(out)?;
     }
 
+    // effectiveAddr lemmas: one per offset symbol, proves effectiveAddr b OFF = b ± val
+    {
+        let mut offset_names: Vec<&String> = prog.offset_symbols.iter().collect();
+        offset_names.sort();
+        if !offset_names.is_empty() {
+            writeln!(out, "/-! ## effectiveAddr lemmas -/\n")?;
+            writeln!(out, "section EffectiveAddr\n")?;
+            writeln!(out, "open QEDGen.Solana.SBPF.Memory\n")?;
+            for name in &offset_names {
+                if let Some(&val) = equates_map.get(name.as_str()) {
+                    let rhs = if val == 0 {
+                        "b".to_string()
+                    } else if val > 0 {
+                        format!("b + {}", val)
+                    } else {
+                        format!("b - {}", -val)
+                    };
+                    writeln!(
+                        out,
+                        "@[simp] theorem ea_{} (b : Nat) : effectiveAddr b {} = {} := by\n  unfold effectiveAddr {}; omega\n",
+                        name, name, rhs, name
+                    )?;
+                }
+            }
+            writeln!(out, "end EffectiveAddr\n")?;
+        }
+    }
+
+    // toU64 bridge lemmas: for Nat-typed constants used in lddw instructions.
+    // lddw internally involves toU64 coercion; these bridge lemmas let simp
+    // resolve `toU64 (↑NAME : Int) = NAME` without native_decide in proofs.
+    {
+        let mut lddw_nat_syms: Vec<String> = Vec::new();
+        for insn in &prog.instructions {
+            if insn.mnemonic == "lddw" {
+                if let Some(Operand::Imm(Value::Sym(s))) = insn.operands.get(1) {
+                    // Only emit bridge for Nat-typed constants (not offset symbols / negative)
+                    if !prog.offset_symbols.contains(s) {
+                        if let Some(&val) = equates_map.get(s.as_str()) {
+                            if val >= 0 && !lddw_nat_syms.contains(s) {
+                                lddw_nat_syms.push(s.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !lddw_nat_syms.is_empty() {
+            lddw_nat_syms.sort();
+            writeln!(out, "/-! ## toU64 bridge lemmas (lddw constants) -/\n")?;
+            for name in &lddw_nat_syms {
+                writeln!(
+                    out,
+                    "@[simp] theorem bridge_{} : toU64 (↑{} : Int) = {} := by native_decide",
+                    name, name, name
+                )?;
+            }
+            writeln!(out)?;
+        }
+    }
+
     // For large programs (>64 instructions), emit a function-based lookup
     // for O(1) simp performance. Small programs use @[simp] on the array directly.
     let use_fn_lookup = prog.instructions.len() > 64;
@@ -681,7 +742,7 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
             let start = chunk_idx * CHUNK_SIZE;
             let end = std::cmp::min(start + CHUNK_SIZE, n_insns);
 
-            writeln!(out, "private def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
+            writeln!(out, "def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
                      chunk_idx)?;
 
             for idx in start..end {
@@ -737,6 +798,24 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         }
 
         writeln!(out, "]\n")?;
+    }
+
+    // progAt instruction fetch cache: pre-computed theorems for each PC.
+    // Eliminates the need for `have hfN : progAt N = some (...) := by native_decide`
+    // boilerplate in proof files.
+    {
+        let n_insns = prog.instructions.len();
+        writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
+        for idx in 0..n_insns {
+            let insn = &prog.instructions[idx];
+            let lean = emit_insn(insn, &equates_map, &prog.labels, &prog.offset_symbols)?;
+            writeln!(
+                out,
+                "@[simp] theorem insn_{} : progAt {} = some ({}) := by native_decide",
+                idx, idx, lean
+            )?;
+        }
+        writeln!(out)?;
     }
 
     writeln!(out, "end {}", namespace)?;
