@@ -47,7 +47,7 @@ theorem readU64_writeU64Chain_frame (mem : Mem) (rAddr : Nat) (writes : List (Na
     have h_tl : ∀ p ∈ tl, STACK_START ≤ p.1 :=
       fun p hp => h_w p (List.mem_cons_of_mem _ hp)
     rw [ih (writeU64 mem hd.1 hd.2) h_tl]
-    exact readU64_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self _ _))
+    exact readU64_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self ..))
 
 /-- readU32 from below stack through a chain of U64 writes above stack. -/
 theorem readU32_writeU64Chain_frame (mem : Mem) (rAddr : Nat) (writes : List (Nat × Nat))
@@ -61,7 +61,7 @@ theorem readU32_writeU64Chain_frame (mem : Mem) (rAddr : Nat) (writes : List (Na
     have h_tl : ∀ p ∈ tl, STACK_START ≤ p.1 :=
       fun p hp => h_w p (List.mem_cons_of_mem _ hp)
     rw [ih (writeU64 mem hd.1 hd.2) h_tl]
-    exact readU32_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self _ _))
+    exact readU32_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self ..))
 
 /-- readU8 from below stack through a chain of U64 writes above stack. -/
 theorem readU8_writeU64Chain_frame (mem : Mem) (rAddr : Nat) (writes : List (Nat × Nat))
@@ -75,7 +75,7 @@ theorem readU8_writeU64Chain_frame (mem : Mem) (rAddr : Nat) (writes : List (Nat
     have h_tl : ∀ p ∈ tl, STACK_START ≤ p.1 :=
       fun p hp => h_w p (List.mem_cons_of_mem _ hp)
     rw [ih (writeU64 mem hd.1 hd.2) h_tl]
-    exact readU8_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self _ _))
+    exact readU8_writeU64_frame _ _ _ _ h_r (h_w hd (List.mem_cons_self ..))
 
 /-! ## mem_frame tactic
 
@@ -122,11 +122,7 @@ macro_rules
       -- Same-address reads (for reading back written values)
       | rw [readU64_writeU64_same _ _ _ (by first | simp | omega)]
       | rw [readU32_writeU32_same _ _ _ (by first | simp | omega)]
-      | rw [readU8_writeU8_same   _ _ _ (by first | simp | omega)]
-      -- PDA composite writes
-      | rw [readU64_writePDA_disjoint _ _ _ _ _ _ _ _ _ (by omega) (by omega)]
-      | rw [readU8_writePDA_disjoint  _ _ _ _ _ _ _ _ _ (by omega) (by omega)]
-      | rw [readU64_writePDA_chunk0 _ _ _ _ _ _ _ _ (by first | simp | omega) (by omega)])))
+      | rw [readU8_writeU8_same   _ _ _ (by first | simp | omega)])))
 
 /-! ## SbpfMem: region-typed memory wrapper
 
@@ -186,9 +182,9 @@ theorem readInput_writeStack_chain (sm : SbpfMem) (rOff : Nat)
   | nil => simp
   | cons hd tl ih =>
     simp only [List.foldl_cons]
-    have h_hd : STACK_START ≤ hd.1 := h_all_stack hd (List.mem_cons_self hd tl)
+    have h_hd : STACK_START ≤ hd.1 := h_all_stack hd (List.mem_cons_self ..)
     have h_tl : ∀ p ∈ tl, STACK_START ≤ p.1 := fun p hp =>
-      h_all_stack p (List.mem_cons_of_mem hd hp)
+      h_all_stack p (List.mem_cons_of_mem _ hp)
     rw [ih (sm.writeStack hd.1 hd.2) (by simp [SbpfMem.writeStack]; exact h_rOff) h_tl]
     exact readInput_writeStack sm rOff hd.1 hd.2 h_rOff h_hd
 

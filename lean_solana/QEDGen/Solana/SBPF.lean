@@ -8,3 +8,4 @@ import QEDGen.Solana.SBPF.Bridge
 import QEDGen.Solana.SBPF.WPTactic
 import QEDGen.Solana.SBPF.Pubkey
 import QEDGen.Solana.SBPF.Patterns
+import QEDGen.Solana.SBPF.Region

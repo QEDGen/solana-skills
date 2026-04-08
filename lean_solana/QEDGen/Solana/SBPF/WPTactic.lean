@@ -119,4 +119,58 @@ macro_rules
       | rw [readU64_writeU8_disjoint _ _ _ _ (by omega)]
       | rw [readU64_writeU64_same _ _ _ (by first | simp | omega)])))
 
+/-! ## rewrite_mem — rewrite memory chain + frame
+
+Rewrites with a chain of memory hypotheses, then applies region-based
+frame reasoning to strip write layers from read expressions.
+
+Usage:
+  rewrite_mem [hmem]
+
+is equivalent to:
+  rw [hmem]; mem_frame
+-/
+
+open Lean.Parser.Tactic in
+syntax "rewrite_mem" "[" rwRule,* "]" : tactic
+
+set_option hygiene false in
+open Lean.Parser.Tactic in
+open QEDGen.Solana.SBPF.Memory in
+macro_rules
+  | `(tactic| rewrite_mem [$[$ts:rwRule],*]) => `(tactic| (
+      rw [$[$ts],*];
+      -- Unfold STACK_START in goal only (not hypotheses — collapsed hmem can be huge)
+      try unfold STACK_START;
+      repeat (first
+        -- Frame: read below stack, write above stack (most common in sBPF)
+        | rw [readU64_writeU64_frame _ _ _ _ (by omega) (by omega)]
+        | rw [readU8_writeU64_frame _ _ _ _ (by omega) (by omega)]
+        -- Disjointness fallback (within same region or mixed widths)
+        | rw [readU64_writeU64_disjoint _ _ _ _ (by omega)]
+        | rw [readU8_writeU64_outside _ _ _ _ (by omega)]
+        | rw [readU64_writeU8_disjoint _ _ _ _ (by omega)]
+        -- Same-address round-trip
+        | rw [readU64_writeU64_same _ _ _ (by first | simp | omega)])))
+
+/-! ## solve_read — one-shot memory read resolution
+
+Rewrites with a chain of memory hypotheses, applies frame reasoning
+to strip write layers, then closes the goal with `exact`.
+
+Usage:
+  solve_read [hmem] h_val
+-/
+
+open Lean.Parser.Tactic in
+syntax "solve_read" "[" rwRule,* "]" term : tactic
+
+set_option hygiene false in
+open Lean.Parser.Tactic in
+open QEDGen.Solana.SBPF.Memory in
+macro_rules
+  | `(tactic| solve_read [$[$ts:rwRule],*] $closing) => `(tactic| (
+      rewrite_mem [$[$ts],*];
+      exact $closing))
+
 end QEDGen.Solana.SBPF

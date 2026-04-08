@@ -50,6 +50,11 @@ structure RegFile where
 @[simp] theorem RegFile.set_r10 (rf : RegFile) (v : Nat) :
     rf.set .r10 v = rf := rfl
 
+/-- Any register write preserves the r10 field (frame pointer is read-only). -/
+@[simp] theorem RegFile.set_preserves_r10 (rf : RegFile) (r : Reg) (v : Nat) :
+    (rf.set r v).r10 = rf.r10 := by
+  cases r <;> rfl
+
 /-- Reading the register just written returns the written value (r0-r9 only). -/
 theorem RegFile.get_set_self (rf : RegFile) (r : Reg) (v : Nat) (h : r ≠ .r10) :
     (rf.set r v).get r = v := by
@@ -361,6 +366,45 @@ theorem executeFn_compose (fetch : Nat → Option Insn) (s : State) (n m : Nat) 
       · -- valid instruction
         rename_i insn h_fetch
         exact ih (step insn s)
+
+/-! ## Frame pointer (r10) invariance
+
+r10 is the SVM frame pointer. It is set by the runtime at program entry
+and never modified: `RegFile.set .r10 v = rf` (no-op). This means r10
+is invariant through all execution — no need to thread `h_r10` hypotheses. -/
+
+@[simp] theorem execSyscall_preserves_r10 (sc : Syscall) (s : State) :
+    (execSyscall sc s).regs.r10 = s.regs.r10 := by
+  cases sc <;> simp [execSyscall]
+
+@[simp] theorem step_preserves_r10 (insn : Insn) (s : State) :
+    (step insn s).regs.r10 = s.regs.r10 := by
+  cases insn <;> (dsimp only [step]; try split) <;>
+    simp only [RegFile.set_preserves_r10, execSyscall_preserves_r10]
+
+@[simp] theorem executeFn_preserves_r10 (fetch : Nat → Option Insn) (s : State) (n : Nat) :
+    (executeFn fetch s n).regs.r10 = s.regs.r10 := by
+  induction n generalizing s with
+  | zero => rfl
+  | succ n ih =>
+    simp only [executeFn]
+    split
+    · rfl
+    · split
+      · rfl
+      · rw [ih]; exact step_preserves_r10 _ _
+
+/-- r10 = STACK_START + 0x1000 is invariant from initState. -/
+theorem executeFn_r10_initState (fetch : Nat → Option Insn) (inputAddr : Nat) (mem : Mem) (n : Nat) :
+    (executeFn fetch (initState inputAddr mem) n).regs.r10 = STACK_START + 0x1000 := by
+  simp [initState]
+
+/-- r10 = STACK_START + 0x1000 is invariant from initState2. -/
+theorem executeFn_r10_initState2 (fetch : Nat → Option Insn) (inputAddr insnAddr : Nat)
+    (mem : Mem) (entryPc : Nat) (n : Nat) :
+    (executeFn fetch (initState2 inputAddr insnAddr mem entryPc) n).regs.r10
+      = STACK_START + 0x1000 := by
+  simp [initState2]
 
 /-- Step N times from a state, applying instructions from a list -/
 def stepN : List Insn → State → State

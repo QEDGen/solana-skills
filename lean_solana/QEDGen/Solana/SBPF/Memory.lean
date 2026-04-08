@@ -125,25 +125,146 @@ These are provable from the concrete definitions above via byte decomposition
 lemmas, but stated as axioms to keep proofs tractable. The key property is that
 little-endian encode/decode is a round-trip for values within range. -/
 
+/-! ### Same-address round-trip -/
+
 /-- Reading back a U64 from the address it was just written to yields the original value -/
 axiom readU64_writeU64_same (mem : Mem) (addr val : Nat)
     (h : val < 2 ^ 64) :
     readU64 (writeU64 mem addr val) addr = val
+
+/-- Reading back a U32 from the address it was just written to yields the original value -/
+axiom readU32_writeU32_same (mem : Mem) (addr val : Nat)
+    (h : val < 2 ^ 32) :
+    readU32 (writeU32 mem addr val) addr = val
+
+/-- Reading back a U8 from the address it was just written to yields the original value -/
+axiom readU8_writeU8_same (mem : Mem) (addr val : Nat)
+    (h : val < 2 ^ 8) :
+    readU8 (writeU8 mem addr val) addr = val
+
+/-! ### Disjoint-address axioms (single-premise, within same region) -/
 
 /-- Writing a U64 does not affect reads from non-overlapping addresses -/
 axiom readU64_writeU64_disjoint (mem : Mem) (rAddr wAddr val : Nat)
     (h : rAddr + 8 ≤ wAddr ∨ wAddr + 8 ≤ rAddr) :
     readU64 (writeU64 mem wAddr val) rAddr = readU64 mem rAddr
 
-/-- Writing a U64 does not affect individual byte reads outside the written range -/
-axiom readU8_writeU64_outside (mem : Mem) (bAddr wAddr val : Nat)
-    (h : bAddr < wAddr ∨ wAddr + 8 ≤ bAddr) :
-    readU8 (writeU64 mem wAddr val) bAddr = readU8 mem bAddr
+/-- Writing a U32 does not affect U64 reads from non-overlapping addresses -/
+axiom readU64_writeU32_disjoint (mem : Mem) (rAddr wAddr val : Nat)
+    (h : rAddr + 8 ≤ wAddr ∨ wAddr + 4 ≤ rAddr) :
+    readU64 (writeU32 mem wAddr val) rAddr = readU64 mem rAddr
+
+/-- Writing a U16 does not affect U64 reads from non-overlapping addresses -/
+axiom readU64_writeU16_disjoint (mem : Mem) (rAddr wAddr val : Nat)
+    (h : rAddr + 8 ≤ wAddr ∨ wAddr + 2 ≤ rAddr) :
+    readU64 (writeU16 mem wAddr val) rAddr = readU64 mem rAddr
 
 /-- Writing a U8 does not affect U64 reads from non-overlapping addresses -/
 axiom readU64_writeU8_disjoint (mem : Mem) (rAddr wAddr val : Nat)
     (h : wAddr < rAddr ∨ rAddr + 8 ≤ wAddr) :
     readU64 (writeU8 mem wAddr val) rAddr = readU64 mem rAddr
+
+/-- Writing a U64 does not affect U32 reads from non-overlapping addresses -/
+axiom readU32_writeU64_disjoint (mem : Mem) (rAddr wAddr val : Nat)
+    (h : rAddr + 4 ≤ wAddr ∨ wAddr + 8 ≤ rAddr) :
+    readU32 (writeU64 mem wAddr val) rAddr = readU32 mem rAddr
+
+/-- Writing a U32 does not affect U32 reads from non-overlapping addresses -/
+axiom readU32_writeU32_disjoint (mem : Mem) (rAddr wAddr val : Nat)
+    (h : rAddr + 4 ≤ wAddr ∨ wAddr + 4 ≤ rAddr) :
+    readU32 (writeU32 mem wAddr val) rAddr = readU32 mem rAddr
+
+/-- Writing a U64 does not affect individual byte reads outside the written range -/
+axiom readU8_writeU64_outside (mem : Mem) (bAddr wAddr val : Nat)
+    (h : bAddr < wAddr ∨ wAddr + 8 ≤ bAddr) :
+    readU8 (writeU64 mem wAddr val) bAddr = readU8 mem bAddr
+
+/-- Writing a U32 does not affect byte reads outside the written range -/
+axiom readU8_writeU32_outside (mem : Mem) (bAddr wAddr val : Nat)
+    (h : bAddr < wAddr ∨ wAddr + 4 ≤ bAddr) :
+    readU8 (writeU32 mem wAddr val) bAddr = readU8 mem bAddr
+
+/-- Writing a U16 does not affect byte reads outside the written range -/
+axiom readU8_writeU16_outside (mem : Mem) (bAddr wAddr val : Nat)
+    (h : bAddr < wAddr ∨ wAddr + 2 ≤ bAddr) :
+    readU8 (writeU16 mem wAddr val) bAddr = readU8 mem bAddr
+
+/-- Writing a U8 does not affect byte reads at different addresses -/
+axiom readU8_writeU8_disjoint (mem : Mem) (rAddr wAddr val : Nat)
+    (h : rAddr ≠ wAddr) :
+    readU8 (writeU8 mem wAddr val) rAddr = readU8 mem rAddr
+
+/-! ### Region frame axioms (two-premise: read below STACK_START, write above)
+
+These are derivable from the disjoint axioms (if rAddr + N ≤ STACK_START
+and STACK_START ≤ wAddr then rAddr + N ≤ wAddr). Stated separately because
+omega resolves two simple inequalities faster than one compound disjunction,
+and the `mem_frame` tactic uses them for efficient region-based stripping. -/
+
+/-- Input read survives stack write (U64 × U64) -/
+theorem readU64_writeU64_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 8 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU64 (writeU64 mem wAddr val) rAddr = readU64 mem rAddr :=
+  readU64_writeU64_disjoint mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Input read survives stack write (U64 × U32) -/
+theorem readU64_writeU32_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 8 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU64 (writeU32 mem wAddr val) rAddr = readU64 mem rAddr :=
+  readU64_writeU32_disjoint mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Input read survives stack write (U64 × U16) -/
+theorem readU64_writeU16_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 8 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU64 (writeU16 mem wAddr val) rAddr = readU64 mem rAddr :=
+  readU64_writeU16_disjoint mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Input read survives stack write (U64 × U8) -/
+theorem readU64_writeU8_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 8 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU64 (writeU8 mem wAddr val) rAddr = readU64 mem rAddr :=
+  readU64_writeU8_disjoint mem rAddr wAddr val (Or.inr (by omega))
+
+/-- Input read survives stack write (U32 × U64) -/
+theorem readU32_writeU64_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 4 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU32 (writeU64 mem wAddr val) rAddr = readU32 mem rAddr :=
+  readU32_writeU64_disjoint mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Input read survives stack write (U32 × U32) -/
+theorem readU32_writeU32_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 4 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU32 (writeU32 mem wAddr val) rAddr = readU32 mem rAddr :=
+  readU32_writeU32_disjoint mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Byte read survives stack write (U8 × U64) -/
+theorem readU8_writeU64_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 1 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU8 (writeU64 mem wAddr val) rAddr = readU8 mem rAddr :=
+  readU8_writeU64_outside mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Byte read survives stack write (U8 × U32) -/
+theorem readU8_writeU32_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 1 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU8 (writeU32 mem wAddr val) rAddr = readU8 mem rAddr :=
+  readU8_writeU32_outside mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Byte read survives stack write (U8 × U16) -/
+theorem readU8_writeU16_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 1 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU8 (writeU16 mem wAddr val) rAddr = readU8 mem rAddr :=
+  readU8_writeU16_outside mem rAddr wAddr val (Or.inl (by omega))
+
+/-- Byte read survives stack write (U8 × U8) -/
+theorem readU8_writeU8_frame (mem : Mem) (rAddr wAddr val : Nat)
+    (h_r : rAddr + 1 ≤ STACK_START) (h_w : STACK_START ≤ wAddr) :
+    readU8 (writeU8 mem wAddr val) rAddr = readU8 mem rAddr :=
+  readU8_writeU8_disjoint mem rAddr wAddr val (by omega)
+
+/-! ### Region predicate -/
+
+/-- Input region [base, base + bound) lies entirely below STACK_START -/
+def belowStack (base bound : Nat) : Prop := base + bound ≤ STACK_START
 
 /-! ## Input buffer layout helpers
 

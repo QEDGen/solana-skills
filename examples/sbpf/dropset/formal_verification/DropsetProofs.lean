@@ -709,14 +709,14 @@ theorem rejects_invalid_market_pubkey
   unfold STACK_START at h_sep
   exact p9_chunk_compare inputAddr _ mkt_c0 mkt_c1 mkt_c2 mkt_c3
     pda_c0 pda_c1 pda_c2 pda_c3 he hp hr6 hr10
-    (by rw [hmem]; strip_writes_goal; exact h_mkt_c0)
-    (by rw [hmem]; strip_writes_goal; exact h_mkt_c1)
-    (by rw [hmem]; strip_writes_goal; exact h_mkt_c2)
-    (by rw [hmem]; strip_writes_goal; exact h_mkt_c3)
-    (by rw [hmem]; strip_writes_goal; exact h_pda_c0)
-    (by rw [hmem]; strip_writes_goal; exact h_pda_c1)
-    (by rw [hmem]; strip_writes_goal; exact h_pda_c2)
-    (by rw [hmem]; strip_writes_goal; exact h_pda_c3)
+    (by solve_read [hmem] h_mkt_c0)
+    (by solve_read [hmem] h_mkt_c1)
+    (by solve_read [hmem] h_mkt_c2)
+    (by solve_read [hmem] h_mkt_c3)
+    (by solve_read [hmem] h_pda_c0)
+    (by solve_read [hmem] h_pda_c1)
+    (by solve_read [hmem] h_pda_c2)
+    (by solve_read [hmem] h_pda_c3)
     h_ne
 
 /-! ## P10+ effectiveAddr lemmas for CPI setup (PCs 85-95) -/
@@ -1010,20 +1010,20 @@ theorem rejects_system_program_duplicate
   -- Chunk match: strip 4 prefix writes to provide chunk equalities
   obtain ⟨he2, hp2, hr6_2, hr10_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
     p10_chunk_match inputAddr _ he hp hr6 hr10
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c0, h_pda_c0])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c1, h_pda_c1])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c2, h_pda_c2])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c3, h_pda_c3])
+      (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
+      (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
+      (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
+      (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
+  rw [hmem] at hmem2  -- collapse: hmem2 now carries full chain back to mem
   -- Split 15 = 11 + 4
   rw [show (15 : Nat) = 11 + 4 from rfl, executeFn_compose]
   -- CPI setup: 6 more stack writes
   obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
     p10_cpi_setup _ he2 hp2 hr10_2
+  rw [hmem2] at hmem3  -- collapse: hmem3 carries full chain
   -- Dup exit: strip 10 writes from s_96.mem to recover readU8 from original mem
   apply p10_dup_exit _ sysDup he3 hp3 hr10_3 _ h_sdup_ne
-  rw [hr9_3, hr9_2, hmem3, hmem2, hmem]
-  strip_writes_goal
-  exact h_sdup
+  solve_read [hr9_3, hr9_2, hmem3] h_sdup
 
 -- ============ P11: Invalid system program pubkey ============
 
@@ -1300,33 +1300,34 @@ theorem rejects_invalid_system_program_pubkey
   unfold STACK_START at h_sep h_r9_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
   obtain ⟨he2, hp2, hr6_2, hr10_2, hr3_2, hr5_2, hr9_2, hmem2⟩ :=
     p10_chunk_match inputAddr _ he hp hr6 hr10
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c0, h_pda_c0])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c1, h_pda_c1])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c2, h_pda_c2])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c3, h_pda_c3])
+      (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
+      (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
+      (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
+      (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
+  rw [hmem] at hmem2
   -- Split 27 = 11 + 16
   rw [show (27 : Nat) = 11 + 16 from rfl, executeFn_compose]
   obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
     p10_cpi_setup _ he2 hp2 hr10_2
+  rw [hmem2] at hmem3
   -- Split 16 = 2 + 14
   rw [show (16 : Nat) = 2 + 14 from rfl, executeFn_compose]
-  -- Dup pass: strip 10 writes to recover readU8 from original mem
+  -- Dup pass: strip writes to recover readU8 from original mem
   have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
-    (by rw [hr9_3, hr9_2, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sdup)
+    (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
   obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
-  -- Pubkey compare: strip 10 writes for each chunk read
+  rw [hmem3] at hmem4
+  -- Pubkey compare: single hmem4 carries full chain back to mem
   apply p11_pubkey_compare _ _ acct_c0 acct_c1 acct_c2 acct_c3 sys_c0 sys_c1 sys_c2 sys_c3
     he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
-    -- account address chunks (r9 below stack, all writes disjoint)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_acct_c0)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_acct_c1)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_acct_c2)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_acct_c3)
-    -- system program pubkey chunks on stack (disjoint from all writes)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sys_c0)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sys_c1)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sys_c2)
-    (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sys_c3)
+    (by solve_read [hmem4] h_acct_c0)
+    (by solve_read [hmem4] h_acct_c1)
+    (by solve_read [hmem4] h_acct_c2)
+    (by solve_read [hmem4] h_acct_c3)
+    (by solve_read [hmem4] h_sys_c0)
+    (by solve_read [hmem4] h_sys_c1)
+    (by solve_read [hmem4] h_sys_c2)
+    (by solve_read [hmem4] h_sys_c3)
     h_ne
 
 -- ============ P12: Rent sysvar is duplicate ============
@@ -1509,32 +1510,35 @@ theorem rejects_rent_sysvar_duplicate
   unfold STACK_START at h_sep h_r9_sep h_r9_rent_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
   obtain ⟨he2, hp2, _, hr10_2, _, _, hr9_2, hmem2⟩ :=
     p10_chunk_match inputAddr _ he hp hr6 hr10
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c0, h_pda_c0])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c1, h_pda_c1])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c2, h_pda_c2])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c3, h_pda_c3])
+      (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
+      (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
+      (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
+      (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
+  rw [hmem] at hmem2
   -- CPI setup (11 steps)
   obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
     p10_cpi_setup _ he2 hp2 hr10_2
+  rw [hmem2] at hmem3
   -- System program dup pass (2 steps)
   have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
-    (by rw [hr9_3, hr9_2, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sdup)
+    (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
   obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
+  rw [hmem3] at hmem4
   -- System program pubkey match (12 steps)
   obtain ⟨he5, hp5, hr9_5, hr10_5, hmem5⟩ :=
     p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c0, h_sys_c0])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c1, h_sys_c1])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c2, h_sys_c2])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c3, h_sys_c3])
+      (by rewrite_mem [hmem4]; rw [h_acct_c0, h_sys_c0])
+      (by rewrite_mem [hmem4]; rw [h_acct_c1, h_sys_c1])
+      (by rewrite_mem [hmem4]; rw [h_acct_c2, h_sys_c2])
+      (by rewrite_mem [hmem4]; rw [h_acct_c3, h_sys_c3])
+  rw [hmem4] at hmem5
   -- r9 advance (8 steps)
   obtain ⟨he6, hp6, hr10_6, w_prog, hmem6⟩ :=
     p12_r9_advance _ _ he5 hp5 hr9_5 hr10_5
+  rw [hmem5] at hmem6
   -- Dup exit (4 steps)
   apply p12_dup_exit _ rentDup he6 hp6 hr10_6 _ h_rdup_ne
-  rw [hmem6, hmem5, hmem4, hmem3, hmem2, hmem]
-  strip_writes_goal
-  exact h_rdup
+  solve_read [hmem6] h_rdup
 
 -- ============ P13: Invalid rent sysvar pubkey ============
 
@@ -1825,38 +1829,44 @@ theorem rejects_invalid_rent_sysvar_pubkey
   unfold STACK_START at h_sep h_r9_sep h_r9_rent_sep h_pda_c0 h_pda_c1 h_pda_c2 h_pda_c3 h_sys_c0 h_sys_c1 h_sys_c2 h_sys_c3
   obtain ⟨he2, hp2, _, hr10_2, _, _, hr9_2, hmem2⟩ :=
     p10_chunk_match inputAddr _ he hp hr6 hr10
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c0, h_pda_c0])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c1, h_pda_c1])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c2, h_pda_c2])
-      (by rw [hmem]; strip_writes_goal; rw [h_mkt_c3, h_pda_c3])
+      (by rewrite_mem [hmem]; rw [h_mkt_c0, h_pda_c0])
+      (by rewrite_mem [hmem]; rw [h_mkt_c1, h_pda_c1])
+      (by rewrite_mem [hmem]; rw [h_mkt_c2, h_pda_c2])
+      (by rewrite_mem [hmem]; rw [h_mkt_c3, h_pda_c3])
+  rw [hmem] at hmem2
   -- CPI setup (11 steps)
   obtain ⟨he3, hp3, hr9_3, hr10_3, w3, w4, w5, w6, w7, w8, hmem3⟩ :=
     p10_cpi_setup _ he2 hp2 hr10_2
+  rw [hmem2] at hmem3
   -- System program dup pass (2 steps)
   have h_dup_pass := p11_dup_pass _ he3 hp3 hr10_3
-    (by rw [hr9_3, hr9_2, hmem3, hmem2, hmem]; strip_writes_goal; exact h_sdup)
+    (by solve_read [hr9_3, hr9_2, hmem3] h_sdup)
   obtain ⟨he4, hp4, hr9_4, hr10_4, hmem4⟩ := h_dup_pass
+  rw [hmem3] at hmem4
   -- System program pubkey match (12 steps)
   obtain ⟨he5, hp5, hr9_5, hr10_5, hmem5⟩ :=
     p12_sys_pubkey_match _ _ he4 hp4 (by rw [hr9_4, hr9_3, hr9_2]) hr10_4
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c0, h_sys_c0])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c1, h_sys_c1])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c2, h_sys_c2])
-      (by rw [hmem4, hmem3, hmem2, hmem]; strip_writes_goal; rw [h_acct_c3, h_sys_c3])
+      (by rewrite_mem [hmem4]; rw [h_acct_c0, h_sys_c0])
+      (by rewrite_mem [hmem4]; rw [h_acct_c1, h_sys_c1])
+      (by rewrite_mem [hmem4]; rw [h_acct_c2, h_sys_c2])
+      (by rewrite_mem [hmem4]; rw [h_acct_c3, h_sys_c3])
+  rw [hmem4] at hmem5
   -- r9 advance (8 steps)
   obtain ⟨he6, hp6, hr10_6, w_prog, hmem6⟩ :=
     p12_r9_advance _ _ he5 hp5 hr9_5 hr10_5
+  rw [hmem5] at hmem6
   -- Rent sysvar dup pass (2 steps)
   have h_rent_dup := p13_rent_dup_pass _ he6 hp6 hr10_6
-    (by rw [hmem6, hmem5, hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_rdup)
+    (by solve_read [hmem6] h_rdup)
   obtain ⟨he7, hp7, hr9_7, hr10_7, hmem7⟩ := h_rent_dup
+  rw [hmem6] at hmem7
   -- Rent pubkey compare (14 steps)
   apply p13_pubkey_compare _ _ rent_c0 rent_c1 rent_c2 rent_c3
     he7 hp7 hr9_7 hr10_7
-    (by rw [hmem7, hmem6, hmem5, hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_rent_c0)
-    (by rw [hmem7, hmem6, hmem5, hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_rent_c1)
-    (by rw [hmem7, hmem6, hmem5, hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_rent_c2)
-    (by rw [hmem7, hmem6, hmem5, hmem4, hmem3, hmem2, hmem]; strip_writes_goal; exact h_rent_c3)
+    (by solve_read [hmem7] h_rent_c0)
+    (by solve_read [hmem7] h_rent_c1)
+    (by solve_read [hmem7] h_rent_c2)
+    (by solve_read [hmem7] h_rent_c3)
     h_ne
 
 end DropsetProofs
