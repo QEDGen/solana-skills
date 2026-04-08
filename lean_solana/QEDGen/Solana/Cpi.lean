@@ -51,31 +51,37 @@ structure CpiInstruction where
 
 /-- System Program (11111111111111111111111111111111) -/
 def SYSTEM_PROGRAM_ID : Pubkey :=
-  0x0000000000000000000000000000000000000000000000000000000000000000
+  ⟨0x0000000000000000, 0x0000000000000000, 0x0000000000000000, 0x0000000000000000⟩
 
-/-- SPL Token Program (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA) -/
+/-- SPL Token Program (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA)
+    Big-endian: 0x06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9 -/
 def TOKEN_PROGRAM_ID : Pubkey :=
-  0x06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9
+  ⟨0x93a165d7e1f6dd06, 0xac79ebce46e1cbd9, 0x91375b5fed85b41c, 0xa900ff7e85f58c3a⟩
 
-/-- Token-2022 / Token Extensions (TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb) -/
+/-- Token-2022 / Token Extensions (TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb)
+    Big-endian: 0x06ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928d8a18bfc -/
 def TOKEN_2022_PROGRAM_ID : Pubkey :=
-  0x06ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928d8a18bfc
+  ⟨0xde8f75eee1f6dd06, 0xdacd6ce4bc5d4218, 0x270db9834dfc1ab6, 0xfc8ba1d828f9bdfe⟩
 
-/-- Associated Token Account Program (ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL) -/
+/-- Associated Token Account Program (ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL)
+    Big-endian: 0x8c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8dbe9f859 -/
 def ASSOCIATED_TOKEN_PROGRAM_ID : Pubkey :=
-  0x8c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8dbe9f859
+  ⟨0xf189244e8f25978c, 0x830d8e1429103dbb, 0x8410ffda99135a0b, 0x59f8e9dbd87b8e04⟩
 
-/-- Memo Program v2 (MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr) -/
+/-- Memo Program v2 (MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr)
+    Big-endian: 0x054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d -/
 def MEMO_PROGRAM_ID : Pubkey :=
-  0x054a535a992921064d24e87160da387c7c35b5ddbc92bb81e41fa8404105448d
+  ⟨0x062129995a534a05, 0x7c38da6071e8244d, 0x81bb92bcddb5357c, 0x8d44054140a81fe4⟩
 
-/-- Compute Budget Program (ComputeBudget111111111111111111111111111111) -/
+/-- Compute Budget Program (ComputeBudget111111111111111111111111111111)
+    Big-endian: 0x0306466fe5211732ffecadba72c39be7bc8ce5bbc5f7126b2c439b3a40000000 -/
 def COMPUTE_BUDGET_PROGRAM_ID : Pubkey :=
-  0x0306466fe5211732ffecadba72c39be7bc8ce5bbc5f7126b2c439b3a40000000
+  ⟨0x321721e56f460603, 0xe79bc372baadecff, 0x6b12f7c5bbe58cbc, 0x000000403a9b432c⟩
 
-/-- Stake Program (Stake11111111111111111111111111111111111111) -/
+/-- Stake Program (Stake11111111111111111111111111111111111111)
+    Big-endian: 0x06a1d8179137542a983437bdfe2a7ab2557f535c8a78722b68a49dc000000000 -/
 def STAKE_PROGRAM_ID : Pubkey :=
-  0x06a1d8179137542a983437bdfe2a7ab2557f535c8a78722b68a49dc000000000
+  ⟨0x2a54379117d8a106, 0xb27a2afebd373498, 0x2b72788a5c537f55, 0x00000000c09da468⟩
 
 /- ============================================================================
    SPL Token instruction discriminators (single u8 byte)

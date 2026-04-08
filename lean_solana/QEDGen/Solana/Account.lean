@@ -1,6 +1,43 @@
 namespace QEDGen.Solana.Account
 
-abbrev Pubkey := Nat
+/-- A 32-byte Solana public key as four little-endian U64 chunks.
+    Matches sBPF VM representation: programs compare pubkeys via
+    four `ldx.dw` loads at byte offsets 0, 8, 16, 24. -/
+structure Pubkey where
+  c0 : Nat  -- bytes 0-7, little-endian U64
+  c1 : Nat  -- bytes 8-15
+  c2 : Nat  -- bytes 16-23
+  c3 : Nat  -- bytes 24-31
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+theorem Pubkey.ext' {a b : Pubkey}
+    (h0 : a.c0 = b.c0) (h1 : a.c1 = b.c1) (h2 : a.c2 = b.c2) (h3 : a.c3 = b.c3) :
+    a = b := by
+  cases a; cases b; simp_all
+
+/-- Two pubkeys differ iff at least one chunk differs. -/
+theorem Pubkey.ne_iff {a b : Pubkey} :
+    a ≠ b ↔ a.c0 ≠ b.c0 ∨ a.c1 ≠ b.c1 ∨ a.c2 ≠ b.c2 ∨ a.c3 ≠ b.c3 := by
+  constructor
+  · intro h
+    if h0 : a.c0 = b.c0 then
+      if h1 : a.c1 = b.c1 then
+        if h2 : a.c2 = b.c2 then
+          if h3 : a.c3 = b.c3 then
+            exact absurd (Pubkey.ext' h0 h1 h2 h3) h
+          else exact Or.inr (Or.inr (Or.inr h3))
+        else exact Or.inr (Or.inr (Or.inl h2))
+      else exact Or.inr (Or.inl h1)
+    else exact Or.inl h0
+  · intro h heq; subst heq
+    cases h with
+    | inl h => exact h rfl
+    | inr h => cases h with
+      | inl h => exact h rfl
+      | inr h => cases h with
+        | inl h => exact h rfl
+        | inr h => exact h rfl
+
 abbrev U64 := Nat
 abbrev U8 := Nat
 
