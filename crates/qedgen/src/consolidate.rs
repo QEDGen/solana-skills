@@ -71,7 +71,10 @@ fn find_proof_files(input_dir: &Path) -> Result<Vec<PathBuf>> {
     }
 
     if proof_files.is_empty() {
-        anyhow::bail!("No Best.lean files found in subdirectories of {}", input_dir.display());
+        anyhow::bail!(
+            "No Best.lean files found in subdirectories of {}",
+            input_dir.display()
+        );
     }
 
     proof_files.sort();
@@ -114,7 +117,8 @@ fn process_proof_file(proof_file: &Path) -> Result<(String, Vec<String>, String)
         let trimmed = line.trim();
         if trimmed.starts_with("import ") {
             imports.push(trimmed.to_string());
-        } else if !trimmed.is_empty() && !trimmed.starts_with("open ") && !trimmed.starts_with("--") {
+        } else if !trimmed.is_empty() && !trimmed.starts_with("open ") && !trimmed.starts_with("--")
+        {
             content_start = i;
             break;
         }
@@ -165,17 +169,15 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
 
     // Write each proof in its namespace
     for (namespace, content) in &proofs {
-
         consolidated.push_str(&format!(
-            "/- {separator}\n   {title}\n   {separator} -/\n\n",
+            "/- {separator}\n   {namespace} Proof\n   {separator} -/\n\n",
             separator = "=".repeat(76),
-            title = format!("{} Proof", namespace)
         ));
 
         consolidated.push_str(&format!("namespace {}\n\n", namespace));
-        consolidated.push_str(&content);
+        consolidated.push_str(content);
         consolidated.push_str("\n\nend ");
-        consolidated.push_str(&namespace);
+        consolidated.push_str(namespace);
         consolidated.push_str("\n\n");
     }
 

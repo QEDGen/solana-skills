@@ -477,7 +477,9 @@ async fn call_mistral_api_with_system(
                     sleep(Duration::from_millis(wait)).await;
                     continue;
                 } else if status.as_u16() == 401 {
-                    anyhow::bail!("Invalid or missing MISTRAL_API_KEY. Get one at https://console.mistral.ai");
+                    anyhow::bail!(
+                        "Invalid or missing MISTRAL_API_KEY. Get one at https://console.mistral.ai"
+                    );
                 } else if status.as_u16() == 403 {
                     let error_body = resp.text().await.unwrap_or_default();
                     if error_body.contains("labs_not_enabled") {
@@ -491,7 +493,8 @@ async fn call_mistral_api_with_system(
                         // 5xx: transient server error, retry with backoff
                         eprintln!("ERROR: HTTP {} (retryable): {}", status, error_body);
                         if attempt < MAX_RETRIES - 1 {
-                            sleep(Duration::from_millis(BACKOFF_BASE_MS * 2_u64.pow(attempt))).await;
+                            sleep(Duration::from_millis(BACKOFF_BASE_MS * 2_u64.pow(attempt)))
+                                .await;
                             continue;
                         }
                     } else {
@@ -522,8 +525,20 @@ async fn call_mistral_api(
     temperature: f64,
     max_tokens: usize,
 ) -> Result<(String, f64, Usage, String)> {
-    let system_prompt = if is_sbpf_content(prompt) { SBPF_SYSTEM_PROMPT } else { SYSTEM_PROMPT };
-    call_mistral_api_with_system(client, prompt, api_key, temperature, max_tokens, system_prompt).await
+    let system_prompt = if is_sbpf_content(prompt) {
+        SBPF_SYSTEM_PROMPT
+    } else {
+        SYSTEM_PROMPT
+    };
+    call_mistral_api_with_system(
+        client,
+        prompt,
+        api_key,
+        temperature,
+        max_tokens,
+        system_prompt,
+    )
+    .await
 }
 
 fn extract_lean_code(content: &str) -> String {
@@ -591,7 +606,9 @@ fn deduplicate_lean_blocks(blocks: &[&str]) -> String {
                 let has_implementation = !is_stub(decl_text);
 
                 // Keep the declaration with implementation, or the latest one if both are stubs
-                if let Some((existing_idx, _existing_text, existing_has_impl)) = declarations.get(&name) {
+                if let Some((existing_idx, _existing_text, existing_has_impl)) =
+                    declarations.get(&name)
+                {
                     // Prefer the one with implementation
                     if has_implementation && !existing_has_impl {
                         declarations.insert(name, (block_idx, decl_text, has_implementation));
@@ -641,7 +658,8 @@ fn is_stub(decl_text: &str) -> bool {
     if let Some(by_pos) = decl_text.find(":= by") {
         let after_by = &decl_text[by_pos + 5..].trim();
         // If there's nothing after `:= by` or just whitespace/comments, it's a stub
-        let meaningful_content = after_by.lines()
+        let meaningful_content = after_by
+            .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty() && !l.starts_with("--"))
             .collect::<Vec<_>>();
@@ -687,7 +705,10 @@ fn normalize_lean_code(code: &str) -> String {
     import_block.extend(normalized_imports);
 
     let trimmed_body = body_lines.join("\n").trim_start().to_string();
-    format!("{}\n\n{}\n", import_block.join("\n"), trimmed_body).trim_end().to_string() + "\n"
+    format!("{}\n\n{}\n", import_block.join("\n"), trimmed_body)
+        .trim_end()
+        .to_string()
+        + "\n"
 }
 
 fn count_sorry(code: &str) -> usize {
@@ -718,7 +739,10 @@ pub async fn generate_proofs(
     // Save the prompt
     std::fs::write(output_dir.join("prompt.txt"), prompt)?;
 
-    eprintln!("Calling Leanstral model ({}) with pass@{}...", MODEL, passes);
+    eprintln!(
+        "Calling Leanstral model ({}) with pass@{}...",
+        MODEL, passes
+    );
 
     let client = Client::new();
     let mut metadata = QedgenMetadata {
@@ -754,7 +778,10 @@ pub async fn generate_proofs(
             attempts_dir.join(format!("completion_{}_raw.txt", i)),
             &content,
         )?;
-        std::fs::write(attempts_dir.join(format!("completion_{}.lean", i)), &lean_code)?;
+        std::fs::write(
+            attempts_dir.join(format!("completion_{}.lean", i)),
+            &lean_code,
+        )?;
 
         metadata.completions.push(CompletionMetadata {
             index: i,
@@ -787,15 +814,21 @@ pub async fn generate_proofs(
 
         let mut found_validated = false;
         for candidate in ranked_candidates {
-            let candidate_lean =
-                std::fs::read_to_string(attempts_dir.join(format!("completion_{}.lean", candidate.index)))?;
+            let candidate_lean = std::fs::read_to_string(
+                attempts_dir.join(format!("completion_{}.lean", candidate.index)),
+            )?;
             std::fs::write(output_dir.join("Best.lean"), &candidate_lean)?;
 
             eprint!(
                 "  Validate completion_{}.lean ({} sorry)... ",
                 candidate.index, candidate.sorry_count
             );
-            let validation = crate::validate::validate_completion(output_dir, candidate.index, validation_workspace).await?;
+            let validation = crate::validate::validate_completion(
+                output_dir,
+                candidate.index,
+                validation_workspace,
+            )
+            .await?;
 
             // Update metadata
             let meta = metadata
@@ -874,9 +907,8 @@ fn find_sorry_locations(code: &str) -> Vec<(usize, String)> {
     let sorry_re = regex::Regex::new(r"\bsorry\b").unwrap();
 
     // Find enclosing theorem for each sorry
-    let theorem_re = regex::Regex::new(
-        r"(?m)^(theorem|lemma)\s+([a-zA-Z_][a-zA-Z0-9_']*)"
-    ).unwrap();
+    let theorem_re =
+        regex::Regex::new(r"(?m)^(theorem|lemma)\s+([a-zA-Z_][a-zA-Z0-9_']*)").unwrap();
 
     for mat in sorry_re.find_iter(code) {
         let line_num = code[..mat.start()].matches('\n').count() + 1;
@@ -961,7 +993,10 @@ pub async fn fill_sorry(
             Ok((content, elapsed, usage, _)) => {
                 let filled = extract_lean_code(&content);
                 let sorry_count = count_sorry(&filled);
-                eprintln!("done ({:.1}s, {} tokens, {} sorry remaining)", elapsed, usage.completion_tokens, sorry_count);
+                eprintln!(
+                    "done ({:.1}s, {} tokens, {} sorry remaining)",
+                    elapsed, usage.completion_tokens, sorry_count
+                );
 
                 if sorry_count < best_sorry_count {
                     best_sorry_count = sorry_count;
@@ -1006,7 +1041,6 @@ pub async fn fill_sorry(
 
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {

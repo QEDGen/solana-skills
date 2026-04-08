@@ -286,14 +286,16 @@ async fn main() -> Result<()> {
             } => {
                 if let Some(interval) = poll_interval {
                     ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
-                    ensure!(interval <= 3600, "poll_interval must be at most 3600 seconds");
+                    ensure!(
+                        interval <= 3600,
+                        "poll_interval must be at most 3600 seconds"
+                    );
                 }
                 let prompt = prompt.unwrap_or_else(|| {
                     "Fill in all sorry placeholders with valid proofs".to_string()
                 });
                 let output = output_dir.unwrap_or_else(|| project_dir.clone());
-                aristotle::fill_sorry(&project_dir, &output, &prompt, wait, poll_interval)
-                    .await?;
+                aristotle::fill_sorry(&project_dir, &output, &prompt, wait, poll_interval).await?;
             }
 
             AristotleCommands::Status {
@@ -304,15 +306,15 @@ async fn main() -> Result<()> {
             } => {
                 if let Some(interval) = poll_interval {
                     ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
-                    ensure!(interval <= 3600, "poll_interval must be at most 3600 seconds");
+                    ensure!(
+                        interval <= 3600,
+                        "poll_interval must be at most 3600 seconds"
+                    );
                 }
                 let project = aristotle::status(&project_id).await?;
                 println!("Project:  {}", project.project_id);
                 println!("Status:   {}", project.status);
-                println!(
-                    "Progress: {}%",
-                    project.percent_complete.unwrap_or(0)
-                );
+                println!("Progress: {}%", project.percent_complete.unwrap_or(0));
                 println!("Created:  {}", project.created_at);
                 println!("Updated:  {}", project.last_updated_at);
                 if let Some(summary) = &project.output_summary {
@@ -323,14 +325,11 @@ async fn main() -> Result<()> {
                     match project.status.as_str() {
                         "QUEUED" | "IN_PROGRESS" | "NOT_STARTED" => {
                             eprintln!("\nPolling until completion...");
-                            let final_project =
-                                aristotle::poll(&project_id, poll_interval).await?;
+                            let final_project = aristotle::poll(&project_id, poll_interval).await?;
                             match final_project.status.as_str() {
                                 "COMPLETE" | "COMPLETE_WITH_ERRORS" => {
                                     if final_project.status == "COMPLETE_WITH_ERRORS" {
-                                        eprintln!(
-                                            "Warning: Aristotle completed with some errors."
-                                        );
+                                        eprintln!("Warning: Aristotle completed with some errors.");
                                     }
                                     aristotle::download_result(
                                         &final_project.project_id,
@@ -365,19 +364,18 @@ async fn main() -> Result<()> {
 
             AristotleCommands::Cancel { project_id } => {
                 let project = aristotle::cancel(&project_id).await?;
-                eprintln!("Project {} cancelled (status: {})", project.project_id, project.status);
+                eprintln!(
+                    "Project {} cancelled (status: {})",
+                    project.project_id, project.status
+                );
             }
 
             AristotleCommands::List { limit, status } => {
-                let projects =
-                    aristotle::list(limit, status.as_deref()).await?;
+                let projects = aristotle::list(limit, status.as_deref()).await?;
                 if projects.is_empty() {
                     println!("No projects found.");
                 } else {
-                    println!(
-                        "{:<38} {:<22} {:>5}  {}",
-                        "ID", "STATUS", "%", "CREATED"
-                    );
+                    println!("{:<38} {:<22} {:>5}  CREATED", "ID", "STATUS", "%");
                     for p in &projects {
                         println!(
                             "{:<38} {:<22} {:>4}%  {}",

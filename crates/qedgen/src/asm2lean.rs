@@ -17,30 +17,30 @@ use std::path::Path;
 enum Value {
     Num(i64),
     Sym(String),
-    NegSym(String),  // negated symbol: -SYMBOL (for [reg - OFFSET] syntax)
+    NegSym(String), // negated symbol: -SYMBOL (for [reg - OFFSET] syntax)
 }
 
 #[derive(Debug, Clone)]
 enum Operand {
-    Reg(String),            // "r0" .. "r10"
-    Imm(Value),             // numeric literal or symbol
-    Mem(String, Value),     // [base_reg + offset]
+    Reg(String),        // "r0" .. "r10"
+    Imm(Value),         // numeric literal or symbol
+    Mem(String, Value), // [base_reg + offset]
 }
 
 #[derive(Debug, Clone)]
 struct AsmInsn {
     mnemonic: String,
     operands: Vec<Operand>,
-    label: Option<String>,  // label defined at this instruction
+    label: Option<String>, // label defined at this instruction
     line_no: usize,
 }
 
 struct ParsedProgram {
-    equates: Vec<(String, i64)>,        // insertion-order
-    equates_hex: HashSet<String>,       // names originally written in hex
-    offset_symbols: HashSet<String>,    // symbols used as memory offsets → typed Int
+    equates: Vec<(String, i64)>,     // insertion-order
+    equates_hex: HashSet<String>,    // names originally written in hex
+    offset_symbols: HashSet<String>, // symbols used as memory offsets → typed Int
     instructions: Vec<AsmInsn>,
-    labels: HashMap<String, usize>,     // label → instruction index
+    labels: HashMap<String, usize>, // label → instruction index
     warnings: Vec<String>,
 }
 
@@ -65,7 +65,7 @@ fn strip_comment(line: &str) -> &str {
     result.trim()
 }
 
-fn parse_value(s: &str, equates: &HashMap<String, i64>) -> Value {
+fn parse_value(s: &str, _equates: &HashMap<String, i64>) -> Value {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         if let Ok(v) = i64::from_str_radix(hex, 16) {
@@ -75,19 +75,14 @@ fn parse_value(s: &str, equates: &HashMap<String, i64>) -> Value {
     if let Ok(v) = s.parse::<i64>() {
         return Value::Num(v);
     }
-    // It's a symbol — if we know its value, still keep it as Sym for codegen
-    // (we want named constants in the output)
-    if equates.contains_key(s) {
-        Value::Sym(s.to_string())
-    } else {
-        Value::Sym(s.to_string())
-    }
+    // It's a symbol — keep as Sym for codegen (we want named constants in the output)
+    Value::Sym(s.to_string())
 }
 
 fn parse_register(s: &str) -> Option<String> {
     let s = s.trim();
-    if s.starts_with('r') {
-        if let Ok(n) = s[1..].parse::<u32>() {
+    if let Some(rest) = s.strip_prefix('r') {
+        if let Ok(n) = rest.parse::<u32>() {
             if n <= 10 {
                 return Some(s.to_string());
             }
@@ -227,8 +222,9 @@ fn parse(source: &str) -> Result<ParsedProgram> {
                     let name = rest[..comma_pos].trim().to_string();
                     let val_str = rest[comma_pos + 1..].trim();
                     let is_hex = val_str.starts_with("0x") || val_str.starts_with("0X");
-                    let val = if let Some(hex) =
-                        val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X"))
+                    let val = if let Some(hex) = val_str
+                        .strip_prefix("0x")
+                        .or_else(|| val_str.strip_prefix("0X"))
                     {
                         i64::from_str_radix(hex, 16)
                             .with_context(|| format!("line {}: bad hex in .equ", line_no + 1))?
@@ -424,7 +420,11 @@ fn format_num(n: i64) -> String {
 
 /// Format a value for use inside Src.imm / lddw / st (all take Int now).
 /// Nat-typed constants auto-coerce to Int in Lean, so no conversion needed.
-fn lean_imm_value(v: &Value, equates: &HashMap<String, i64>, _offset_symbols: &HashSet<String>) -> String {
+fn lean_imm_value(
+    v: &Value,
+    equates: &HashMap<String, i64>,
+    _offset_symbols: &HashSet<String>,
+) -> String {
     match v {
         Value::Num(n) => format_num(*n),
         Value::Sym(s) => {
@@ -537,7 +537,7 @@ fn emit_insn(
         return Ok(format!(".stx {} {} {} {}", width, dst, off, src));
     }
 
-    if mn.starts_with("st") && !mn.starts_with("stx") && mn != "st" || mn == "st" {
+    if mn == "st" || mn.starts_with("st") && !mn.starts_with("stx") {
         // Immediate store: st{b,h,w,dw} [dst + off], imm
         let real_mn = if mn == "st" { "stdw" } else { mn };
         let width = lean_width(real_mn);
@@ -555,10 +555,9 @@ fn emit_insn(
 
     // ALU instructions (binary: dst, src)
     let alu_ops = [
-        "add64", "sub64", "mul64", "div64", "mod64", "or64", "and64", "xor64", "lsh64",
-        "rsh64", "arsh64", "mov64",
-        "add32", "sub32", "mul32", "div32", "mod32", "or32", "and32", "xor32", "lsh32",
-        "rsh32", "arsh32", "mov32",
+        "add64", "sub64", "mul64", "div64", "mod64", "or64", "and64", "xor64", "lsh64", "rsh64",
+        "arsh64", "mov64", "add32", "sub32", "mul32", "div32", "mod32", "or32", "and32", "xor32",
+        "lsh32", "rsh32", "arsh32", "mov32",
     ];
     if alu_ops.contains(&mn) {
         let dst = match &ops[0] {
@@ -735,15 +734,18 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         // Lean's heartbeat limit.  Top-level progAt dispatches by range.
         const CHUNK_SIZE: usize = 100;
         let n_insns = prog.instructions.len();
-        let n_chunks = (n_insns + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let n_chunks = n_insns.div_ceil(CHUNK_SIZE);
 
         // Emit each chunk as a private function
         for chunk_idx in 0..n_chunks {
             let start = chunk_idx * CHUNK_SIZE;
             let end = std::cmp::min(start + CHUNK_SIZE, n_insns);
 
-            writeln!(out, "def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
-                     chunk_idx)?;
+            writeln!(
+                out,
+                "def progAt_{} : Nat → Option QEDGen.Solana.SBPF.Insn",
+                chunk_idx
+            )?;
 
             for idx in start..end {
                 let insn = &prog.instructions[idx];
@@ -759,7 +761,10 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         }
 
         // Emit top-level dispatch
-        writeln!(out, "def progAt (n : Nat) : Option QEDGen.Solana.SBPF.Insn :=")?;
+        writeln!(
+            out,
+            "def progAt (n : Nat) : Option QEDGen.Solana.SBPF.Insn :="
+        )?;
         for chunk_idx in 0..n_chunks {
             let upper = (chunk_idx + 1) * CHUNK_SIZE;
             if chunk_idx + 1 < n_chunks {
@@ -794,7 +799,14 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
             } else {
                 format!("-- {}", idx)
             };
-            writeln!(out, "  {}{:pad$}{}", lean, comma, comment, pad = 50_usize.saturating_sub(lean.len() + comma.len()))?;
+            writeln!(
+                out,
+                "  {}{:pad$}{}",
+                lean,
+                comma,
+                comment,
+                pad = 50_usize.saturating_sub(lean.len() + comma.len())
+            )?;
         }
 
         writeln!(out, "]\n")?;

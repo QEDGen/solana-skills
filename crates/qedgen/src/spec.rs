@@ -130,7 +130,8 @@ pub fn generate_spec(idl_path: &Path, output_path: &Path) -> Result<()> {
     let idl_source = std::fs::read_to_string(idl_path)?;
     let idl: Idl = serde_json::from_str(&idl_source)?;
 
-    let analyses: Vec<InstructionAnalysis> = idl.instructions.iter().map(analyze_instruction).collect();
+    let analyses: Vec<InstructionAnalysis> =
+        idl.instructions.iter().map(analyze_instruction).collect();
     let spec = build_spec(&idl, &analyses);
 
     std::fs::create_dir_all(output_path)?;
@@ -141,42 +142,50 @@ pub fn generate_spec(idl_path: &Path, output_path: &Path) -> Result<()> {
 }
 
 fn analyze_instruction(ix: &IdlInstruction) -> InstructionAnalysis {
-    let signers: Vec<String> = ix.accounts.iter()
+    let signers: Vec<String> = ix
+        .accounts
+        .iter()
         .filter(|a| a.signer)
         .map(|a| a.name.clone())
         .collect();
 
-    let writable_accounts: Vec<String> = ix.accounts.iter()
+    let writable_accounts: Vec<String> = ix
+        .accounts
+        .iter()
         .filter(|a| a.writable)
         .map(|a| a.name.clone())
         .collect();
 
-    let pda_accounts: Vec<String> = ix.accounts.iter()
+    let pda_accounts: Vec<String> = ix
+        .accounts
+        .iter()
         .filter(|a| a.pda.is_some())
         .map(|a| a.name.clone())
         .collect();
 
-    let has_one_relations: Vec<(String, String)> = ix.accounts.iter()
+    let has_one_relations: Vec<(String, String)> = ix
+        .accounts
+        .iter()
         .flat_map(|a| a.relations.iter().map(move |r| (a.name.clone(), r.clone())))
         .collect();
 
-    let args: Vec<(String, String)> = ix.args.iter()
+    let args: Vec<(String, String)> = ix
+        .args
+        .iter()
         .map(|a| (a.name.clone(), type_label(&a.ty)))
         .collect();
 
-    let has_token_program = ix.accounts.iter()
-        .any(|a| a.name.contains("token_program"));
+    let has_token_program = ix.accounts.iter().any(|a| a.name.contains("token_program"));
 
     // Close semantics: non-init instruction with a writable PDA state account
     // and either has_one relations or no args (terminal operations typically take no args)
-    let has_writable_pda = ix.accounts.iter()
-        .any(|a| a.writable && a.pda.is_some());
-    let has_relations = ix.accounts.iter()
-        .any(|a| !a.relations.is_empty());
+    let has_writable_pda = ix.accounts.iter().any(|a| a.writable && a.pda.is_some());
+    let has_relations = ix.accounts.iter().any(|a| !a.relations.is_empty());
     let is_init = ix.name.contains("init");
     let has_close_semantics = has_writable_pda && !is_init && (has_relations || ix.args.is_empty());
 
-    let has_numeric_args = args.iter()
+    let has_numeric_args = args
+        .iter()
         .any(|(_, ty)| ty.starts_with('u') || ty.starts_with('i'));
 
     InstructionAnalysis {
@@ -202,12 +211,17 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s, "# {} Verification Spec v1.0\n", program_name).unwrap();
 
     // Program summary from instruction docs
-    let doc_summary: Vec<String> = analyses.iter()
+    let doc_summary: Vec<String> = analyses
+        .iter()
         .filter(|a| !a.docs.is_empty())
         .map(|a| format!("- **{}**: {}", a.display_name, a.docs))
         .collect();
     if !doc_summary.is_empty() {
-        writeln!(s, "<!-- TODO: Replace with a 1-2 sentence summary in your own words -->\n").unwrap();
+        writeln!(
+            s,
+            "<!-- TODO: Replace with a 1-2 sentence summary in your own words -->\n"
+        )
+        .unwrap();
         for line in &doc_summary {
             writeln!(s, "{}", line).unwrap();
         }
@@ -221,49 +235,73 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     let mut goal_num = 1;
 
     // Access control goals
-    let signers_instructions: Vec<&InstructionAnalysis> = analyses.iter()
-        .filter(|a| !a.signers.is_empty())
-        .collect();
+    let signers_instructions: Vec<&InstructionAnalysis> =
+        analyses.iter().filter(|a| !a.signers.is_empty()).collect();
     if !signers_instructions.is_empty() {
-        let names: Vec<&str> = signers_instructions.iter().map(|a| a.display_name.as_str()).collect();
-        writeln!(s, "{}. **Authorization**: Only authorized signers MAY execute {}. \
+        let names: Vec<&str> = signers_instructions
+            .iter()
+            .map(|a| a.display_name.as_str())
+            .collect();
+        writeln!(
+            s,
+            "{}. **Authorization**: Only authorized signers MAY execute {}. \
             Each operation MUST verify the signer matches the expected authority.",
-            goal_num, names.join(", ")).unwrap();
+            goal_num,
+            names.join(", ")
+        )
+        .unwrap();
         goal_num += 1;
     }
 
     // CPI correctness goals
-    let cpi_instructions: Vec<&InstructionAnalysis> = analyses.iter()
-        .filter(|a| a.has_token_program)
-        .collect();
+    let cpi_instructions: Vec<&InstructionAnalysis> =
+        analyses.iter().filter(|a| a.has_token_program).collect();
     if !cpi_instructions.is_empty() {
-        let names: Vec<&str> = cpi_instructions.iter().map(|a| a.display_name.as_str()).collect();
-        writeln!(s, "{}. **CPI parameter correctness**: CPI invocations in {} MUST target \
+        let names: Vec<&str> = cpi_instructions
+            .iter()
+            .map(|a| a.display_name.as_str())
+            .collect();
+        writeln!(
+            s,
+            "{}. **CPI parameter correctness**: CPI invocations in {} MUST target \
             the correct program, pass accounts in the correct order with correct \
             signer/writable flags, and use the correct instruction discriminator.",
-            goal_num, names.join(", ")).unwrap();
+            goal_num,
+            names.join(", ")
+        )
+        .unwrap();
         goal_num += 1;
     }
 
     // State machine goals
-    let close_instructions: Vec<&InstructionAnalysis> = analyses.iter()
-        .filter(|a| a.has_close_semantics)
-        .collect();
+    let close_instructions: Vec<&InstructionAnalysis> =
+        analyses.iter().filter(|a| a.has_close_semantics).collect();
     if !close_instructions.is_empty() {
-        let names: Vec<&str> = close_instructions.iter().map(|a| a.display_name.as_str()).collect();
-        writeln!(s, "{}. **One-shot safety**: After {} completes, the account MUST be closed \
+        let names: Vec<&str> = close_instructions
+            .iter()
+            .map(|a| a.display_name.as_str())
+            .collect();
+        writeln!(
+            s,
+            "{}. **One-shot safety**: After {} completes, the account MUST be closed \
             and MUST NOT be reusable.",
-            goal_num, names.join(" or ")).unwrap();
+            goal_num,
+            names.join(" or ")
+        )
+        .unwrap();
         goal_num += 1;
     }
 
     // Arithmetic goals
-    let numeric_instructions: Vec<&InstructionAnalysis> = analyses.iter()
-        .filter(|a| a.has_numeric_args)
-        .collect();
+    let numeric_instructions: Vec<&InstructionAnalysis> =
+        analyses.iter().filter(|a| a.has_numeric_args).collect();
     if !numeric_instructions.is_empty() {
-        writeln!(s, "{}. **Arithmetic bounds**: Numeric parameters MUST NOT overflow during processing.",
-            goal_num).unwrap();
+        writeln!(
+            s,
+            "{}. **Arithmetic bounds**: Numeric parameters MUST NOT overflow during processing.",
+            goal_num
+        )
+        .unwrap();
     }
 
     writeln!(s).unwrap();
@@ -276,8 +314,14 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
             writeln!(s, "{} {{", ty.name).unwrap();
             let max_name_len = ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
             for field in &ty.ty.fields {
-                writeln!(s, "  {:<width$}  {}", format!("{}:", field.name), type_label(&field.ty),
-                    width = max_name_len + 1).unwrap();
+                writeln!(
+                    s,
+                    "  {:<width$}  {}",
+                    format!("{}:", field.name),
+                    type_label(&field.ty),
+                    width = max_name_len + 1
+                )
+                .unwrap();
             }
             writeln!(s, "}}").unwrap();
             writeln!(s, "```\n").unwrap();
@@ -291,20 +335,30 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         for acct in &ix.accounts {
             if let Some(pda) = &acct.pda {
                 if seen_pdas.insert(acct.name.clone()) {
-                    let seeds: Vec<String> = pda.seeds.iter().map(|seed| {
-                        if let Some(path) = &seed.path {
-                            format!("{}", path)
-                        } else if let Some(serde_json::Value::Array(bytes)) = &seed.value {
-                            let values: Vec<u8> = bytes.iter()
-                                .filter_map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
-                                .collect();
-                            String::from_utf8(values).unwrap_or_else(|_| "const".into())
-                        } else {
-                            "const".into()
-                        }
-                    }).collect();
-                    writeln!(s, "`{}` is a PDA derived from `[\"{}\"]`.",
-                        acct.name, seeds.join("\", \"")).unwrap();
+                    let seeds: Vec<String> = pda
+                        .seeds
+                        .iter()
+                        .map(|seed| {
+                            if let Some(path) = &seed.path {
+                                path.to_string()
+                            } else if let Some(serde_json::Value::Array(bytes)) = &seed.value {
+                                let values: Vec<u8> = bytes
+                                    .iter()
+                                    .filter_map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok()))
+                                    .collect();
+                                String::from_utf8(values).unwrap_or_else(|_| "const".into())
+                            } else {
+                                "const".into()
+                            }
+                        })
+                        .collect();
+                    writeln!(
+                        s,
+                        "`{}` is a PDA derived from `[\"{}\"]`.",
+                        acct.name,
+                        seeds.join("\", \"")
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -315,10 +369,15 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     let has_lifecycle = analyses.iter().any(|a| a.has_close_semantics);
     if has_lifecycle {
         writeln!(s, "### Lifecycle\n").unwrap();
-        writeln!(s, "<!-- TODO: Describe the lifecycle states and transitions -->\n").unwrap();
+        writeln!(
+            s,
+            "<!-- TODO: Describe the lifecycle states and transitions -->\n"
+        )
+        .unwrap();
         writeln!(s, "```").unwrap();
         let init = analyses.iter().find(|a| a.name.contains("init"));
-        let terminals: Vec<&str> = analyses.iter()
+        let terminals: Vec<&str> = analyses
+            .iter()
             .filter(|a| a.has_close_semantics)
             .map(|a| a.name.as_str())
             .collect();
@@ -328,8 +387,13 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
                 if i == 0 {
                     writeln!(s, "  →  {}  →  [closed]", t).unwrap();
                 } else {
-                    writeln!(s, "{}→  {}  →  [closed]",
-                        " ".repeat(init_ix.name.len() + 12), t).unwrap();
+                    writeln!(
+                        s,
+                        "{}→  {}  →  [closed]",
+                        " ".repeat(init_ix.name.len() + 12),
+                        t
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -347,21 +411,41 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
 
         // Signers
         if !analysis.signers.is_empty() {
-            writeln!(s, "**Signers**: {} (MUST sign)\n",
-                analysis.signers.iter().map(|s| format!("`{}`", s)).collect::<Vec<_>>().join(", ")).unwrap();
+            writeln!(
+                s,
+                "**Signers**: {} (MUST sign)\n",
+                analysis
+                    .signers
+                    .iter()
+                    .map(|s| format!("`{}`", s))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .unwrap();
         }
 
         // Preconditions from errors, relations, args
         writeln!(s, "**Preconditions**:").unwrap();
         for (acct, rel) in &analysis.has_one_relations {
-            writeln!(s, "- `{}` MUST match `{}.{}` (enforced by `has_one`)", rel, acct, rel).unwrap();
+            writeln!(
+                s,
+                "- `{}` MUST match `{}.{}` (enforced by `has_one`)",
+                rel, acct, rel
+            )
+            .unwrap();
         }
         // Check if there are related errors
         for err in &idl.errors {
             // Heuristic: associate errors with instructions that have matching arg patterns
             let err_lower = err.name.to_lowercase();
-            let args_lower: Vec<String> = analysis.args.iter().map(|(n, _)| n.to_lowercase()).collect();
-            if args_lower.iter().any(|a| err_lower.contains(a)) || err_lower.contains(&analysis.name.to_lowercase()) {
+            let args_lower: Vec<String> = analysis
+                .args
+                .iter()
+                .map(|(n, _)| n.to_lowercase())
+                .collect();
+            if args_lower.iter().any(|a| err_lower.contains(a))
+                || err_lower.contains(&analysis.name.to_lowercase())
+            {
                 writeln!(s, "- `{}`: {}", err.name, err.msg).unwrap();
             }
         }
@@ -373,32 +457,50 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         if analysis.has_token_program {
             // Find the corresponding IDL instruction for full account details
             if let Some(idl_ix) = idl.instructions.iter().find(|i| i.name == analysis.name) {
-                let writable_token: Vec<&IdlAccount> = idl_ix.accounts.iter()
-                    .filter(|a| a.writable && a.name.contains("token") && !a.name.contains("program"))
+                let writable_token: Vec<&IdlAccount> = idl_ix
+                    .accounts
+                    .iter()
+                    .filter(|a| {
+                        a.writable && a.name.contains("token") && !a.name.contains("program")
+                    })
                     .collect();
                 // Separate PDA vaults from user accounts
-                let vaults: Vec<&&IdlAccount> = writable_token.iter().filter(|a| a.pda.is_some()).collect();
-                let user_accounts: Vec<&&IdlAccount> = writable_token.iter().filter(|a| a.pda.is_none()).collect();
+                let vaults: Vec<&&IdlAccount> =
+                    writable_token.iter().filter(|a| a.pda.is_some()).collect();
+                let user_accounts: Vec<&&IdlAccount> =
+                    writable_token.iter().filter(|a| a.pda.is_none()).collect();
 
                 if analysis.name.contains("init") {
                     // Init: user → vault
                     for (u, v) in user_accounts.iter().zip(vaults.iter()) {
-                        writeln!(s, "{}. Transfer tokens: `{}` → `{}`",
-                            effect_num, u.name, v.name).unwrap();
+                        writeln!(
+                            s,
+                            "{}. Transfer tokens: `{}` → `{}`",
+                            effect_num, u.name, v.name
+                        )
+                        .unwrap();
                         effect_num += 1;
                     }
                 } else if vaults.len() == 1 && user_accounts.len() == 1 {
                     // Terminal with one transfer: vault → user (e.g., cancel)
-                    writeln!(s, "{}. Transfer tokens: `{}` → `{}`",
-                        effect_num, vaults[0].name, user_accounts[0].name).unwrap();
+                    writeln!(
+                        s,
+                        "{}. Transfer tokens: `{}` → `{}`",
+                        effect_num, vaults[0].name, user_accounts[0].name
+                    )
+                    .unwrap();
                     effect_num += 1;
                 } else {
                     // Multiple transfers: list all writable token accounts as
                     // TODO for the user to specify direction
                     for pair in writable_token.chunks(2) {
                         if pair.len() == 2 {
-                            writeln!(s, "{}. Transfer tokens: `{}` ↔ `{}` <!-- TODO: confirm direction -->",
-                                effect_num, pair[0].name, pair[1].name).unwrap();
+                            writeln!(
+                                s,
+                                "{}. Transfer tokens: `{}` ↔ `{}` <!-- TODO: confirm direction -->",
+                                effect_num, pair[0].name, pair[1].name
+                            )
+                            .unwrap();
                             effect_num += 1;
                         }
                     }
@@ -438,13 +540,23 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     if !signers_instructions.is_empty() {
         writeln!(s, "### 3.1 Access Control\n").unwrap();
         for analysis in &signers_instructions {
-            writeln!(s, "**{}_access_control**: For all states `s` and signers `p`,",
-                analysis.name).unwrap();
-            writeln!(s, "if `{}Transition(s, p) ≠ none` then `p = s.{}`.  ",
+            writeln!(
+                s,
+                "**{}_access_control**: For all states `s` and signers `p`,",
+                analysis.name
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "if `{}Transition(s, p) ≠ none` then `p = s.{}`.  ",
                 analysis.name,
-                analysis.has_one_relations.first()
+                analysis
+                    .has_one_relations
+                    .first()
                     .map(|(_, r)| r.as_str())
-                    .unwrap_or("<!-- TODO: authority field -->")).unwrap();
+                    .unwrap_or("<!-- TODO: authority field -->")
+            )
+            .unwrap();
             writeln!(s).unwrap();
         }
     }
@@ -453,7 +565,12 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     if !cpi_instructions.is_empty() {
         writeln!(s, "### 3.2 CPI Parameter Correctness\n").unwrap();
         for analysis in &cpi_instructions {
-            writeln!(s, "**{}_cpi_correct**: For all contexts `ctx`,", analysis.name).unwrap();
+            writeln!(
+                s,
+                "**{}_cpi_correct**: For all contexts `ctx`,",
+                analysis.name
+            )
+            .unwrap();
             writeln!(s, "`{}_build_cpi(ctx)` MUST target the correct program, pass accounts in the correct order with correct signer/writable flags, and use the correct instruction discriminator.  ",
                 analysis.name).unwrap();
             writeln!(s).unwrap();
@@ -464,8 +581,18 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     if !close_instructions.is_empty() {
         writeln!(s, "### 3.3 State Machine Safety\n").unwrap();
         for analysis in &close_instructions {
-            writeln!(s, "**{}_closes_account**: For all states `s, s'`,", analysis.name).unwrap();
-            writeln!(s, "if `{}Transition(s) = some s'` then `s'.lifecycle = closed`.  ", analysis.name).unwrap();
+            writeln!(
+                s,
+                "**{}_closes_account**: For all states `s, s'`,",
+                analysis.name
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "if `{}Transition(s) = some s'` then `s'.lifecycle = closed`.  ",
+                analysis.name
+            )
+            .unwrap();
             writeln!(s).unwrap();
         }
     }
@@ -481,7 +608,11 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s, "## 4. Trust Boundary\n").unwrap();
     writeln!(s, "The following are axiomatic (not verified):\n").unwrap();
     writeln!(s, "- **SPL Token program**: Transfer semantics are correct. We verify parameters passed, not the transfer itself.").unwrap();
-    writeln!(s, "- **Solana runtime**: PDA derivation, account ownership enforcement, rent collection.").unwrap();
+    writeln!(
+        s,
+        "- **Solana runtime**: PDA derivation, account ownership enforcement, rent collection."
+    )
+    .unwrap();
     writeln!(s, "- **Anchor framework**: Constraint enforcement (`has_one`, `signer`, account deserialization, close semantics).").unwrap();
     writeln!(s).unwrap();
 
