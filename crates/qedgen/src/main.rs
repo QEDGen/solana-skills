@@ -2,9 +2,11 @@ mod api;
 mod aristotle;
 mod asm2lean;
 mod consolidate;
+mod init;
 mod project;
 mod spec;
 mod validate;
+mod verify;
 
 use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
@@ -118,6 +120,36 @@ enum Commands {
         /// Directory for the validation workspace (default: platform cache dir)
         #[arg(long)]
         workspace: Option<PathBuf>,
+    },
+
+    /// Initialize a new formal verification project
+    Init {
+        /// Project name (alphanumeric + underscores)
+        #[arg(long)]
+        name: String,
+
+        /// sBPF assembly source file (runs asm2lean automatically)
+        #[arg(long)]
+        asm: Option<PathBuf>,
+
+        /// Include Mathlib dependency
+        #[arg(long)]
+        mathlib: bool,
+
+        /// Output directory (default: ./formal_verification)
+        #[arg(long, default_value = "./formal_verification")]
+        output_dir: PathBuf,
+    },
+
+    /// Verify sBPF proofs: check source hash, regenerate if stale, run lake build
+    Verify {
+        /// Path to the sBPF assembly source file
+        #[arg(long)]
+        asm: PathBuf,
+
+        /// Path to the formal_verification directory containing proofs
+        #[arg(long, default_value = "./formal_verification")]
+        proofs: PathBuf,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -274,6 +306,19 @@ async fn main() -> Result<()> {
 
         Commands::Setup { workspace } => {
             validate::setup_workspace(workspace.as_deref()).await?;
+        }
+
+        Commands::Init {
+            name,
+            asm,
+            mathlib,
+            output_dir,
+        } => {
+            init::init(&name, &output_dir, asm.as_deref(), mathlib)?;
+        }
+
+        Commands::Verify { asm, proofs } => {
+            verify::verify(&asm, &proofs)?;
         }
 
         Commands::Aristotle(cmd) => match cmd {

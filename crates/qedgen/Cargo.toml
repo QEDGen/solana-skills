@@ -1,6 +1,6 @@
 [package]
 name = "qedgen-solana-skills"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 authors = ["abishekk92"]
 description = "CLI tool for generating formal Lean 4 proofs for Solana programs powered by Mistral's Leanstral model"
@@ -19,5 +19,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 regex = "1"
+sha2 = "0.10"
 tar = "0.4"
 flate2 = "1"

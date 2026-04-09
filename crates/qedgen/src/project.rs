@@ -16,6 +16,7 @@ const SUPPORT_ACCOUNT: &str = include_str!("../../../lean_solana/QEDGen/Solana/A
 const SUPPORT_STATE: &str = include_str!("../../../lean_solana/QEDGen/Solana/State.lean");
 const SUPPORT_CPI: &str = include_str!("../../../lean_solana/QEDGen/Solana/Cpi.lean");
 const SUPPORT_VALID: &str = include_str!("../../../lean_solana/QEDGen/Solana/Valid.lean");
+const SUPPORT_SPEC: &str = include_str!("../../../lean_solana/QEDGen/Solana/Spec.lean");
 const SUPPORT_SOLANA: &str = include_str!("../../../lean_solana/QEDGen/Solana.lean");
 
 pub fn setup_lean_project(output_dir: &Path) -> Result<()> {
@@ -58,6 +59,7 @@ fn write_lean_solana(output_dir: &Path) -> Result<()> {
     std::fs::write(solana_dir.join("State.lean"), SUPPORT_STATE)?;
     std::fs::write(solana_dir.join("Cpi.lean"), SUPPORT_CPI)?;
     std::fs::write(solana_dir.join("Valid.lean"), SUPPORT_VALID)?;
+    std::fs::write(solana_dir.join("Spec.lean"), SUPPORT_SPEC)?;
 
     Ok(())
 }
