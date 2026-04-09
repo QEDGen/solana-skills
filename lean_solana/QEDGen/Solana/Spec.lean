@@ -10,8 +10,8 @@ import Lean.Elab.Command
 Declarative specification macros for Solana program verification.
 The `qedspec` block is the source of truth — it expands to:
   - State structure with DecidableEq
-  - Transition function stubs (sorry — agent fills)
-  - Typed theorem signatures with sorry (one per operation × property)
+  - Transition functions with signer/lifecycle guards
+  - Typed theorem signatures with sorry (access_control, state_machine, cpi, bounds)
   - Invariant theorem stubs
 
 Humans write and approve the spec. Agents fill the sorry markers.
@@ -35,6 +35,7 @@ syntax specOp :=
     "who: " rawIdent
     "when: " rawIdent
     "then: " rawIdent
+    ("calls: " rawIdent rawIdent "(" rawIdent,* ")")?
 
 /-- Invariant declaration -/
 syntax specInvariant := "invariant " rawIdent str
@@ -48,7 +49,54 @@ syntax (name := qedspecCmd)
   : command
 
 -- ============================================================================
--- Elaborator: parse qedspec syntax, generate Lean source, elaborate it
+-- Known CPI templates — maps Anchor-style calls to account layouts
+-- ============================================================================
+
+/-- A known CPI instruction template.
+    Account flags stored as List (Bool × Bool) = (isSigner, isWritable). -/
+structure CpiTemplate where
+  programId : String          -- e.g. "TOKEN_PROGRAM_ID"
+  discriminator : String      -- e.g. "[DISC_TRANSFER]"
+  accountFlags : Array (Bool × Bool)  -- per-account (isSigner, isWritable)
+
+/-- Lookup a known CPI template by program.instruction name -/
+private def lookupCpi (program instruction : String) : Option CpiTemplate :=
+  match program, instruction with
+  -- SPL Token operations (Anchor: token::transfer, token::burn, etc.)
+  -- SPL Token operations (Anchor: token::transfer, token::burn, etc.)
+  | "token", "transfer" => some {
+      programId := "TOKEN_PROGRAM_ID"
+      discriminator := "[DISC_TRANSFER]"
+      accountFlags := #[(false, true), (false, true), (true, false)] }
+  | "token", "burn" => some {
+      programId := "TOKEN_PROGRAM_ID"
+      discriminator := "[DISC_BURN]"
+      accountFlags := #[(false, true), (false, true), (true, false)] }
+  | "token", "mint_to" => some {
+      programId := "TOKEN_PROGRAM_ID"
+      discriminator := "[DISC_MINT_TO]"
+      accountFlags := #[(false, true), (false, true), (true, false)] }
+  | "token", "close_account" => some {
+      programId := "TOKEN_PROGRAM_ID"
+      discriminator := "[DISC_CLOSE_ACCOUNT]"
+      accountFlags := #[(false, true), (false, true), (true, false)] }
+  | "token", "approve" => some {
+      programId := "TOKEN_PROGRAM_ID"
+      discriminator := "[DISC_APPROVE]"
+      accountFlags := #[(false, true), (false, false), (true, false)] }
+  -- System Program
+  | "system", "transfer" => some {
+      programId := "SYSTEM_PROGRAM_ID"
+      discriminator := "DISC_SYS_TRANSFER"
+      accountFlags := #[(true, true), (false, true)] }
+  | "system", "create_account" => some {
+      programId := "SYSTEM_PROGRAM_ID"
+      discriminator := "DISC_SYS_CREATE_ACCOUNT"
+      accountFlags := #[(true, true), (true, true)] }
+  | _, _ => none
+
+-- ============================================================================
+-- Elaborator
 -- ============================================================================
 
 -- Lean keywords that need «» quoting when used as identifiers
@@ -83,6 +131,9 @@ def elabQedspec : CommandElab := fun stx => do
     let fieldName := quoteName (f[0].getId.toString (escape := false))
     let fieldType := f[2].getId.toString (escape := false)
     fieldData := fieldData.push (fieldName, fieldType)
+
+  -- Collect U64 fields for arithmetic bounds generation
+  let u64Fields := fieldData.filter (fun (_, ft) => ft == "U64")
 
   -- Collect lifecycle states from when/then across all operations
   let mut lifecycleStates : Array String := #[]
@@ -149,6 +200,88 @@ def elabQedspec : CommandElab := fun stx => do
       cmds := cmds.push (s!"theorem {opName}.state_machine (s s' : State) (p : Pubkey)\n" ++
         s!"    (h : {transName} s p = some s') :\n" ++
         s!"    True := sorry")
+
+    -- CPI correctness theorem (if calls: clause present)
+    -- specOp with optional CPI: "operation" name "who:" signer "when:" pre "then:" post ("calls:" program instruction "(" accounts,* ")")?
+    let cpiStx := op[8]
+    if !cpiStx.isMissing then
+      -- cpiStx layout: "calls:" program instruction "(" accounts,* ")"
+      let cpiProgram := cpiStx[1].getId.toString (escape := false)
+      let cpiInstruction := cpiStx[2].getId.toString (escape := false)
+
+      -- Parse CPI account arguments (index 4 is the rawIdent,* separator node)
+      let cpiAccountsStx := cpiStx[4]
+      let mut cpiAccounts : Array String := #[]
+      for i in List.range cpiAccountsStx.getArgs.size do
+        let arg := cpiAccountsStx.getArgs[i]!
+        -- In a separator node, even indices are values, odd indices are separators
+        if i % 2 == 0 then
+          cpiAccounts := cpiAccounts.push (arg.getId.toString (escape := false))
+
+      match lookupCpi cpiProgram cpiInstruction with
+      | none =>
+        throwError m!"qedspec: unknown CPI call '{cpiProgram}.{cpiInstruction}'. Known: token.transfer, token.burn, token.mint_to, token.close_account, token.approve, system.transfer, system.create_account"
+      | some tmpl =>
+        if cpiAccounts.size != tmpl.accountFlags.size then
+          throwError m!"qedspec: {cpiProgram}.{cpiInstruction} expects {tmpl.accountFlags.size} accounts, got {cpiAccounts.size}"
+
+        -- Use raw name for compound identifiers (CpiContext, build_cpi)
+        let cpiCtxName := quoteName s!"{opNameRaw}CpiContext"
+        let buildCpiName := quoteName s!"{opNameRaw}_build_cpi"
+
+        -- Generate CPI context structure
+        let mut ctxFields := ""
+        for acct in cpiAccounts do
+          ctxFields := ctxFields ++ s!"  {acct} : Pubkey\n"
+        cmds := cmds.push s!"structure {cpiCtxName} where\n{ctxFields}  deriving Repr, DecidableEq, BEq"
+
+        -- Generate build_cpi function
+        let mut accountsList := ""
+        for i in List.range cpiAccounts.size do
+          let acct := cpiAccounts[i]!
+          let (isSigner, isWritable) := tmpl.accountFlags[i]!
+          if i > 0 then accountsList := accountsList ++ ",\n      "
+          accountsList := accountsList ++
+            s!"⟨ctx.{acct}, {isSigner}, {isWritable}⟩"
+
+        cmds := cmds.push (
+          s!"def {buildCpiName} (ctx : {cpiCtxName}) : CpiInstruction :=\n" ++
+          s!"  \{ programId := {tmpl.programId}\n" ++
+          s!"  , accounts := [{accountsList}]\n" ++
+          s!"  , data := {tmpl.discriminator} }")
+
+        -- Generate cpi_correct theorem
+        let mut conjuncts := s!"    targetsProgram cpi {tmpl.programId}"
+        for i in List.range cpiAccounts.size do
+          let acct := cpiAccounts[i]!
+          let (isSigner, isWritable) := tmpl.accountFlags[i]!
+          conjuncts := conjuncts ++ s!" ∧\n    accountAt cpi {i} ctx.{acct} {isSigner} {isWritable}"
+        conjuncts := conjuncts ++ s!" ∧\n    hasDiscriminator cpi {tmpl.discriminator}"
+
+        cmds := cmds.push (
+          s!"theorem {opName}.cpi_correct (ctx : {cpiCtxName}) :\n" ++
+          s!"    let cpi := {buildCpiName} ctx\n" ++
+          conjuncts ++ " := sorry")
+
+    -- Arithmetic bounds preservation (for operations with U64 fields)
+    if u64Fields.size > 0 then
+      let mut boundsConj := ""
+      for i in List.range u64Fields.size do
+        let (fn_, _) := u64Fields[i]!
+        if i > 0 then boundsConj := boundsConj ++ " ∧\n    "
+        boundsConj := boundsConj ++ s!"valid_u64 s'.{fn_}"
+
+      let mut preConj := ""
+      for i in List.range u64Fields.size do
+        let (fn_, _) := u64Fields[i]!
+        if i > 0 then preConj := preConj ++ " ∧ "
+        preConj := preConj ++ s!"valid_u64 s.{fn_}"
+
+      cmds := cmds.push (
+        s!"theorem {opName}.u64_bounds (s s' : State) (p : Pubkey)\n" ++
+        s!"    (h_valid : {preConj})\n" ++
+        s!"    (h : {transName} s p = some s') :\n" ++
+        s!"    {boundsConj} := sorry")
 
   for inv in invsStx.getArgs do
     let invName := inv[1].getId.toString (escape := false)
