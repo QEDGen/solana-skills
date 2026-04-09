@@ -8,6 +8,9 @@ require qedgenSupport from
 
 require "leanprover-community" / "mathlib" @ git "v4.24.0"
 
+lean_lib PercolatorSpec where
+  roots := #[`Spec]
+
 @[default_target]
 lean_lib PercolatorProofs where
   roots := #[`PercolatorProofs]

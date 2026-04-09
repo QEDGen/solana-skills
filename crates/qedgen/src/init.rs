@@ -135,6 +135,12 @@ This file is the source of truth — proofs must satisfy the properties declared
 --     when: Uninitialized
 --     then: Active
 --
+--   operation transfer
+--     who: owner
+--     when: Active
+--     then: Active
+--     calls: TOKEN_PROGRAM_ID DISC_TRANSFER(source writable, destination writable, authority signer)
+--
 --   invariant conservation "total tokens preserved"
 "#,
         cap, cap

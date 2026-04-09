@@ -59,7 +59,7 @@ def cancel_build_cpi (p_ctx : CancelContext) : CpiInstruction :=
       ⟨p_ctx.initializer_deposit, false, true⟩,     -- dest: writable
       ⟨p_ctx.authority, true, false⟩                  -- authority: signer
     ]
-  , data := [DISC_TRANSFER]
+  , data := DISC_TRANSFER
   }
 
 theorem cancel_cpi_correct (p_ctx : CancelContext) :
@@ -68,7 +68,7 @@ theorem cancel_cpi_correct (p_ctx : CancelContext) :
     accountAt cpi 0 p_ctx.escrow_token_account false true ∧
     accountAt cpi 1 p_ctx.initializer_deposit false true ∧
     accountAt cpi 2 p_ctx.authority true false ∧
-    hasDiscriminator cpi [DISC_TRANSFER] := by
+    hasDiscriminator cpi DISC_TRANSFER := by
   unfold cancel_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
@@ -161,7 +161,7 @@ def exchange_build_cpi (ctx : ExchangeContext) : CpiInstruction :=
       ⟨ctx.to_account, false, true⟩,      -- dest: writable
       ⟨ctx.authority, true, false⟩         -- authority: signer
     ]
-  , data := [DISC_TRANSFER]
+  , data := DISC_TRANSFER
   }
 
 theorem exchange_cpi_correct (ctx : ExchangeContext) :
@@ -170,7 +170,7 @@ theorem exchange_cpi_correct (ctx : ExchangeContext) :
     accountAt cpi 0 ctx.from_account false true ∧
     accountAt cpi 1 ctx.to_account false true ∧
     accountAt cpi 2 ctx.authority true false ∧
-    hasDiscriminator cpi [DISC_TRANSFER] := by
+    hasDiscriminator cpi DISC_TRANSFER := by
   unfold exchange_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
@@ -292,7 +292,7 @@ def initialize_build_cpi (ctx : InitializeContext) : CpiInstruction :=
       ⟨ctx.to_account, false, true⟩,      -- dest: writable
       ⟨ctx.authority, true, false⟩         -- authority: signer
     ]
-  , data := [DISC_TRANSFER]
+  , data := DISC_TRANSFER
   }
 
 theorem initialize_cpi_correct (ctx : InitializeContext) :
@@ -301,7 +301,7 @@ theorem initialize_cpi_correct (ctx : InitializeContext) :
     accountAt cpi 0 ctx.from_account false true ∧
     accountAt cpi 1 ctx.to_account false true ∧
     accountAt cpi 2 ctx.authority true false ∧
-    hasDiscriminator cpi [DISC_TRANSFER] := by
+    hasDiscriminator cpi DISC_TRANSFER := by
   unfold initialize_build_cpi targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
