@@ -18,6 +18,9 @@ pub fn init(name: &str, output_dir: &Path, asm_source: Option<&Path>, mathlib: b
     let proofs_dir = output_dir.join("Proofs");
     std::fs::create_dir_all(&proofs_dir)?;
 
+    // Write lean_solana/ support library (embedded in binary)
+    crate::project::update_lean_solana(output_dir)?;
+
     // Lean toolchain
     std::fs::write(output_dir.join("lean-toolchain"), LEAN_TOOLCHAIN)?;
 
@@ -54,6 +57,7 @@ pub fn init(name: &str, output_dir: &Path, asm_source: Option<&Path>, mathlib: b
     eprintln!("  {}/", output_dir.display());
     eprintln!("  ├── lakefile.lean");
     eprintln!("  ├── lean-toolchain");
+    eprintln!("  ├── lean_solana/        (support library)");
     eprintln!("  ├── Spec.lean          ← define your spec here");
     eprintln!("  ├── Proofs.lean");
     if asm_module.is_some() {
@@ -76,7 +80,7 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
 
     s.push_str("import Lake\nopen Lake DSL\n\n");
     s.push_str(&format!("package {}\n\n", pkg_name));
-    s.push_str("require qedgenSupport from\n  \"../../../../lean_solana\"\n\n");
+    s.push_str("require qedgenSupport from\n  \"./lean_solana\"\n\n");
 
     if mathlib {
         s.push_str("require \"leanprover-community\" / \"mathlib\" @ git \"v4.24.0\"\n\n");
@@ -109,9 +113,9 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
 fn generate_spec_skeleton(name: &str) -> String {
     let cap = capitalize(name);
     format!(
-        r#"import QEDGen.Solana
+        r#"import QEDGen.Solana.Spec
 
-open QEDGen.Solana
+open QEDGen.Solana.SpecDSL
 
 /-!
 # {} Verification Spec
@@ -120,19 +124,20 @@ Define the program's state, operations, invariants, and trust boundary here.
 This file is the source of truth — proofs must satisfy the properties declared below.
 -/
 
--- TODO: Replace with qedspec macro once available (v1.5)
-
--- State
--- structure {}State where
---   field : Type
-
--- Operations
--- def someTransition (s : {}State) (signer : Pubkey) : Option {}State := sorry
-
--- Properties
--- theorem some_property : sorry := sorry
+-- Uncomment and fill in your spec:
+-- qedspec {} where
+--   state
+--     owner : Pubkey
+--     amount : U64
+--
+--   operation initialize
+--     who: owner
+--     when: Uninitialized
+--     then: Active
+--
+--   invariant conservation "total tokens preserved"
 "#,
-        cap, cap, cap, cap
+        cap, cap
     )
 }
 
