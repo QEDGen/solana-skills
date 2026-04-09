@@ -277,7 +277,78 @@ example (s : Governance.State) (p : Pubkey)
   exact h.1
 
 -- ============================================================================
--- 5. Error: invalid account flag
+-- 5. Optional who:/when:/then:
+-- ============================================================================
+
+-- 5a. No who: — anyone can call (no access_control theorem generated)
+qedspec OpenPool where
+  state
+    total : U64
+
+  operation contribute
+    when: Active
+    then: Active
+    takes: amount U64
+    guard: "s.total + amount ≤ U64_MAX"
+    effect: total add amount
+
+-- Transition succeeds for any signer
+example (s : OpenPool.State) (p : Pubkey)
+    (h_st : s.status = .Active) (h_g : s.total + 42 ≤ U64_MAX) :
+    OpenPool.contributeTransition s p 42 =
+      some { s with total := s.total + 42, status := .Active } := by
+  simp [OpenPool.contributeTransition, h_st, h_g]
+
+-- State machine theorem still exists
+#check @OpenPool.contribute.state_machine
+
+-- 5b. No when:/then: — no lifecycle at all
+qedspec Counter where
+  state
+    admin : Pubkey
+    count : U64
+
+  operation increment
+    who: admin
+    takes: n U64
+    guard: "s.count + n ≤ U64_MAX"
+    effect: count add n
+
+-- No Status type generated — State has no status field
+example : Counter.State := { admin := ⟨0,0,0,0⟩, count := 0 }
+
+-- Transition checks only signer + guard
+example (s : Counter.State) (h_g : s.count + 5 ≤ U64_MAX) :
+    Counter.incrementTransition s s.admin 5 =
+      some { s with count := s.count + 5 } := by
+  simp [Counter.incrementTransition, h_g]
+
+-- Access control still works
+example (s : Counter.State) (p : Pubkey) (n : U64)
+    (h : Counter.incrementTransition s p n ≠ none) : p = s.admin := by
+  simp [Counter.incrementTransition] at h
+  exact h.1
+
+-- 5c. No who:, no when:, no then: — pure arithmetic operation
+qedspec Accumulator where
+  state
+    value : U64
+
+  operation add_value
+    takes: amount U64
+    guard: "s.value + amount ≤ U64_MAX"
+    effect: value add amount
+
+-- No Status, no signer check — transition always succeeds if guard holds
+example (s : Accumulator.State) (p : Pubkey) (h_g : s.value + 10 ≤ U64_MAX) :
+    Accumulator.add_valueTransition s p 10 =
+      some { s with value := s.value + 10 } := by
+  simp [Accumulator.add_valueTransition, h_g]
+
+-- No access_control or state_machine theorems generated (nothing to assert)
+
+-- ============================================================================
+-- 6. Error: invalid account flag
 -- ============================================================================
 
 /--
@@ -293,3 +364,44 @@ qedspec BadFlag where
     when: Active
     then: Active
     calls: TOKEN_PROGRAM_ID DISC_TRANSFER(source mutable, dest writable, auth signer)
+
+-- ============================================================================
+-- 7. Error: bad field reference in guard
+-- ============================================================================
+
+/--
+error: qedspec: guard in operation 'deposit' references unknown field 's.balancee'. Available: [owner, balance]
+-/
+#guard_msgs in
+qedspec BadGuard where
+  state
+    owner : Pubkey
+    balance : U64
+
+  operation deposit
+    who: owner
+    when: Active
+    then: Active
+    takes: amount U64
+    guard: "s.balancee + amount ≤ U64_MAX"
+
+-- ============================================================================
+-- 8. Error: bad field reference in property
+-- ============================================================================
+
+/--
+error: qedspec: property 'bounded' references unknown field 's.balnce'. Available: [owner, balance]
+-/
+#guard_msgs in
+qedspec BadProp where
+  state
+    owner : Pubkey
+    balance : U64
+
+  operation deposit
+    who: owner
+    when: Active
+    then: Active
+
+  property bounded "s.balnce ≤ U64_MAX"
+    preserved_by: deposit

@@ -39,6 +39,8 @@ theorem Pubkey.ne_iff {a b : Pubkey} :
         | inr h => exact h rfl
 
 abbrev U64 := Nat
+abbrev U128 := Nat
+abbrev I128 := Int
 abbrev U8 := Nat
 
 structure Account where
@@ -120,6 +122,8 @@ namespace QEDGen.Solana
 
 abbrev Pubkey := QEDGen.Solana.Account.Pubkey
 abbrev U64 := QEDGen.Solana.Account.U64
+abbrev U128 := QEDGen.Solana.Account.U128
+abbrev I128 := QEDGen.Solana.Account.I128
 abbrev U8 := QEDGen.Solana.Account.U8
 abbrev Account := QEDGen.Solana.Account.Account
 abbrev canWrite := QEDGen.Solana.Account.canWrite

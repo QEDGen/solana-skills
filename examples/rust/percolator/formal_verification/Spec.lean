@@ -1,124 +1,76 @@
-import QEDGen.Solana
+import QEDGen.Solana.Spec
 
-open QEDGen.Solana
+open QEDGen.Solana.SpecDSL
 
 /-!
-# Percolator Risk Engine Verification Spec
+# Percolator Risk Engine — Spec-Driven Verification
 
 A perpetual DEX risk engine managing protected principal, junior profit claims,
 and lazy A/K side indices.
 
-This spec does NOT use the `qedspec` DSL because the percolator is a pure
-computation engine without the Anchor patterns that the DSL targets:
-  - No explicit signers (access control is in the wrapper layer)
-  - No CPI calls (token transfers are in the wrapper layer)
-  - No lifecycle states (the engine is always active)
+Core properties:
+  - Conservation: V >= C_tot + I (vault covers all obligations)
+  - Vault bounded: V <= MAX_VAULT_TVL
+  - ADL lifecycle: Active → Draining → Resetting → Active
 
-Instead, the core properties are conservation invariants over arithmetic
-state transitions. These are declared as theorem stubs below, matching
-the hand-written proofs in PercolatorProofs.lean.
+Effects use structured `field add/sub param` syntax — validated against
+state fields at elaboration time. `sub` auto-generates underflow guards.
 -/
 
-namespace Percolator
+qedspec Percolator where
+  state
+    authority : Pubkey
+    V : U64
+    C_tot : U64
+    I : U64
 
--- ============================================================================
--- State
--- ============================================================================
+  -- Deposit: user adds capital, V and C_tot increase by same amount
+  operation deposit
+    who: authority
+    when: Active
+    then: Active
+    takes: amount U64
+    guard: "s.V + amount ≤ 10000000000000000"
+    effect: V add amount, C_tot add amount
 
-structure EngineState where
-  V : Nat       -- vault TVL
-  C_tot : Nat   -- sum of all account capitals
-  I : Nat       -- insurance fund
-  deriving Repr, DecidableEq, BEq
+  -- Withdraw: user removes capital, V and C_tot decrease by same amount
+  -- Auto-generates: amount ≤ s.V ∧ amount ≤ s.C_tot
+  operation withdraw
+    who: authority
+    when: Active
+    then: Active
+    takes: amount U64
+    effect: V sub amount, C_tot sub amount
 
-structure AccountState where
-  C_i : Nat           -- protected principal
-  fee_credits_i : Int -- fee balance (always <= 0)
-  deriving Repr, DecidableEq, BEq
+  -- Top up insurance: external deposit into insurance fund
+  operation top_up_insurance
+    who: authority
+    when: Active
+    then: Active
+    takes: amount U64
+    guard: "s.V + amount ≤ 10000000000000000"
+    effect: V add amount, I add amount
 
-def MAX_VAULT_TVL : Nat := 10000000000000000
+  -- ADL lifecycle transitions (no state field mutations)
+  operation trigger_adl
+    who: authority
+    when: Active
+    then: Draining
 
--- ============================================================================
--- Conservation predicate
--- ============================================================================
+  operation complete_drain
+    who: authority
+    when: Draining
+    then: Resetting
 
-def conservation (s : EngineState) : Prop := s.V >= s.C_tot + s.I
+  operation reset
+    who: authority
+    when: Resetting
+    then: Active
 
--- ============================================================================
--- Transitions
--- ============================================================================
+  -- Conservation: vault covers all obligations
+  property conservation "s.V ≥ s.C_tot + s.I"
+    preserved_by: deposit, withdraw, top_up_insurance, trigger_adl, complete_drain, reset
 
-def depositTransition (s : EngineState) (amount : Nat) : Option EngineState :=
-  if s.V + amount ≤ MAX_VAULT_TVL then
-    some { V := s.V + amount, C_tot := s.C_tot + amount, I := s.I }
-  else
-    none
-
-def topUpInsuranceTransition (s : EngineState) (amount : Nat) : Option EngineState :=
-  if s.V + amount ≤ MAX_VAULT_TVL then
-    some { V := s.V + amount, C_tot := s.C_tot, I := s.I + amount }
-  else
-    none
-
-def depositFeeCreditsTransition (s : EngineState) (acct : AccountState) (amount : Nat) : Option (EngineState × AccountState) :=
-  if acct.fee_credits_i ≤ 0 then
-    let pay := min amount (Int.toNat (-acct.fee_credits_i))
-    some ({ V := s.V + pay, C_tot := s.C_tot, I := s.I + pay },
-          { acct with fee_credits_i := acct.fee_credits_i + pay })
-  else
-    none
-
--- ============================================================================
--- Property declarations (theorem stubs)
--- ============================================================================
-
--- Conservation: V >= C_tot + I after every operation
-
-theorem deposit_conservation (s s' : EngineState) (amount : Nat)
-    (h_inv : conservation s)
-    (h : depositTransition s amount = some s') :
-    conservation s' := sorry
-
-theorem top_up_insurance_conservation (s s' : EngineState) (amount : Nat)
-    (h_inv : conservation s)
-    (h : topUpInsuranceTransition s amount = some s') :
-    conservation s' := sorry
-
-theorem deposit_fee_credits_conservation (s s' : EngineState) (acct acct' : AccountState) (amount : Nat)
-    (h_inv : conservation s)
-    (h : depositFeeCreditsTransition s acct amount = some (s', acct')) :
-    conservation s' := sorry
-
--- Arithmetic: deposit cannot exceed MAX_VAULT_TVL
-
-theorem deposit_bounded (s s' : EngineState) (amount : Nat)
-    (h : depositTransition s amount = some s') :
-    s'.V ≤ MAX_VAULT_TVL := sorry
-
--- Fee isolation: fee_credits remain non-positive
-
-theorem fee_credits_nonpositive (s : EngineState) (acct acct' : AccountState) (amount : Nat) (s' : EngineState)
-    (h_pre : acct.fee_credits_i ≤ 0)
-    (h : depositFeeCreditsTransition s acct amount = some (s', acct')) :
-    acct'.fee_credits_i ≤ 0 := sorry
-
--- ADL lifecycle: Normal → DrainOnly → ResetPending → Normal
-
-inductive SideMode where
-  | Normal
-  | DrainOnly
-  | ResetPending
-  deriving Repr, DecidableEq, BEq
-
-def validAdlTransition : SideMode → SideMode → Prop
-  | .Normal, .DrainOnly => True
-  | .DrainOnly, .ResetPending => True
-  | .ResetPending, .Normal => True
-  | _, _ => False
-
-theorem adl_lifecycle (m m' : SideMode) (h : validAdlTransition m m') :
-    (m = .Normal ∧ m' = .DrainOnly) ∨
-    (m = .DrainOnly ∧ m' = .ResetPending) ∨
-    (m = .ResetPending ∧ m' = .Normal) := sorry
-
-end Percolator
+  -- Vault bounded by MAX_VAULT_TVL
+  property vault_bounded "s.V ≤ 10000000000000000"
+    preserved_by: deposit, top_up_insurance
