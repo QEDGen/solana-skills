@@ -2,21 +2,20 @@ import QEDGen.Solana.Account
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.State
 import QEDGen.Solana.Valid
+import Lean.Elab.Command
 
 /-!
-# QEDGen Spec DSL (v1.5.0 — initial scaffold)
+# QEDGen Spec DSL
 
 Declarative specification macros for Solana program verification.
 The `qedspec` block is the source of truth — it expands to:
-  - Theorem signatures with sorry (one per operation × property)
-  - Transition function stubs (agent fills these)
+  - State structure with DecidableEq
+  - Transition function stubs (sorry — agent fills)
+  - Typed theorem signatures with sorry (one per operation × property)
+  - Invariant theorem stubs
 
 Humans write and approve the spec. Agents fill the sorry markers.
 `lake build` enforces that every declared property has a proof.
-
-## Current status
-First iteration. The syntax will evolve through prototyping
-against real Anchor programs (escrow, AMMs, vaults).
 -/
 
 open QEDGen.Solana
@@ -49,65 +48,67 @@ syntax (name := qedspecCmd)
   : command
 
 -- ============================================================================
--- Macro expansion
+-- Elaborator: parse qedspec syntax, generate Lean source, elaborate it
 -- ============================================================================
 
 open Lean in
-macro_rules
-  | `(command| qedspec $progName where
-        state $[$fields:specField]*
-        $[$ops:specOp]*
-        $[$invs:specInvariant]*) => do
-    let name := progName.getId
-    let ns := mkIdent name
+open Lean.Elab in
+open Lean.Elab.Command in
+@[command_elab qedspecCmd]
+def elabQedspec : CommandElab := fun stx => do
+  -- Extract pieces from the syntax tree
+  -- Layout: "qedspec" ident "where" "state" fields* ops* invs*
+  let progNameStx := stx[1]
+  let name := progNameStx.getId
+  let fieldsStx := stx[4]  -- specField* (index 4: after "qedspec" ident "where" "state")
+  let opsStx := stx[5]     -- specOp*
+  let invsStx := stx[6]    -- specInvariant*
 
-    -- Collect field info for documentation
-    let mut fieldStrs : Array String := #[]
-    for f in fields do
-      match f with
-      | `(specField| $fn : $ft) =>
-        fieldStrs := fieldStrs.push s!"{fn.getId} : {ft.getId}"
-      | _ => Macro.throwError "invalid field declaration"
+  -- Parse field declarations
+  let mut fieldData : Array (String × String) := #[]
+  for f in fieldsStx.getArgs do
+    let fieldName := f[0].getId.toString (escape := false)
+    let fieldType := f[2].getId.toString (escape := false)
+    fieldData := fieldData.push (fieldName, fieldType)
 
-    -- Generate per-operation theorem stubs
-    let mut opCmds : Array Syntax := #[]
-    for op in ops do
-      match op with
-      | `(specOp| operation $opName
-            who: $signer
-            when: $preStatus
-            then: $postStatus) => do
-        -- Access control theorem stub
-        let acName := mkIdent (opName.getId ++ `access_control)
-        let acDoc := s!"Only {signer.getId} can execute {opName.getId}. \
-                        Requires {preStatus.getId} → {postStatus.getId}."
-        let acCmd ← `(
-          /-- $(Lean.mkDocStringFromStr acDoc) -/
-          theorem $acName : True := sorry)
-        opCmds := opCmds.push acCmd
+  -- Build state structure field source
+  let mut structFields := ""
+  for (fn_, ft) in fieldData do
+    structFields := structFields ++ s!"  {fn_} : {ft}\n"
 
-        -- State machine theorem stub
-        let smName := mkIdent (opName.getId ++ `state_machine)
-        let smDoc := s!"{opName.getId} transitions from {preStatus.getId} to {postStatus.getId}."
-        let smCmd ← `(
-          /-- $(Lean.mkDocStringFromStr smDoc) -/
-          theorem $smName : True := sorry)
-        opCmds := opCmds.push smCmd
-      | _ => Macro.throwError "invalid operation declaration"
+  -- Assemble individual command strings to parse and elaborate one at a time
+  -- (Lean's runParserCategory `command parses exactly ONE command)
+  let mut cmds : Array String := #[]
+  cmds := cmds.push s!"namespace {name}"
+  cmds := cmds.push s!"open QEDGen.Solana"
+  cmds := cmds.push s!"structure State where\n{structFields}  deriving Repr, DecidableEq, BEq"
 
-    -- Generate invariant theorem stubs
-    let mut invCmds : Array Syntax := #[]
-    for inv in invs do
-      match inv with
-      | `(specInvariant| invariant $invName $desc) => do
-        let invCmd ← `(
-          theorem $invName : True := sorry)
-        invCmds := invCmds.push invCmd
-      | _ => Macro.throwError "invalid invariant declaration"
+  for op in opsStx.getArgs do
+    let opName := op[1].getId.toString (escape := false)
+    let signer := op[3].getId.toString (escape := false)
+    let transName := s!"{opName}Transition"
 
-    let nsOpen ← `(command| namespace $ns)
-    let nsClose ← `(command| end $ns)
-    let allCmds := #[nsOpen] ++ opCmds ++ invCmds ++ #[nsClose]
-    return Lean.mkNullNode allCmds
+    cmds := cmds.push s!"noncomputable def {transName} (s : State) (signer : Pubkey) : Option State := sorry"
+    cmds := cmds.push (s!"theorem {opName}.access_control (s : State) (p : Pubkey)\n" ++
+      s!"    (h : {transName} s p ≠ none) :\n" ++
+      s!"    p = s.{signer} := sorry")
+    cmds := cmds.push (s!"theorem {opName}.state_machine (s s' : State) (p : Pubkey)\n" ++
+      s!"    (h : {transName} s p = some s') :\n" ++
+      s!"    True := sorry")
+
+  for inv in invsStx.getArgs do
+    let invName := inv[1].getId.toString (escape := false)
+    cmds := cmds.push s!"theorem {invName} : True := sorry"
+
+  cmds := cmds.push s!"end {name}"
+
+  -- Parse and elaborate each command
+  let env ← getEnv
+  for src in cmds do
+    match Lean.Parser.runParserCategory env `command src "<qedspec>" with
+    | .error msg =>
+      throwError m!"qedspec: failed to parse generated code:\n{msg}\n\nSource:\n{src}"
+    | .ok cmdStx =>
+      elabCommand cmdStx
 
 end QEDGen.Solana.SpecDSL

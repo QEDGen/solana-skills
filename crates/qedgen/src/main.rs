@@ -1,6 +1,8 @@
 mod api;
 mod aristotle;
 mod asm2lean;
+mod check;
+mod ci;
 mod consolidate;
 mod init;
 mod project;
@@ -75,6 +77,10 @@ enum Commands {
         /// Validate filled file with 'lake build'
         #[arg(long)]
         validate: bool,
+
+        /// Auto-escalate to Aristotle if sorry markers remain after Leanstral
+        #[arg(long)]
+        escalate: bool,
     },
 
     /// Generate a draft SPEC.md from an Anchor IDL
@@ -150,6 +156,28 @@ enum Commands {
         /// Path to the formal_verification directory containing proofs
         #[arg(long, default_value = "./formal_verification")]
         proofs: PathBuf,
+    },
+
+    /// Check spec coverage: which properties are proven, sorry, or missing
+    Check {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Path to the proofs directory
+        #[arg(long, default_value = "./formal_verification/Proofs")]
+        proofs: PathBuf,
+    },
+
+    /// Generate a GitHub Actions workflow for formal verification CI
+    Ci {
+        /// Output path for the workflow file
+        #[arg(long, default_value = ".github/workflows/verify.yml")]
+        output: PathBuf,
+
+        /// sBPF assembly source file (adds verify step to CI)
+        #[arg(long)]
+        asm: Option<String>,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -267,6 +295,7 @@ async fn main() -> Result<()> {
             temperature,
             max_tokens,
             validate,
+            escalate,
         } => {
             ensure!(passes > 0, "passes must be greater than 0");
             ensure!(
@@ -283,6 +312,42 @@ async fn main() -> Result<()> {
                 validate,
             )
             .await?;
+
+            // If --escalate: check for remaining sorry markers, submit to Aristotle
+            if escalate {
+                let result_path = output.as_deref().unwrap_or(&file);
+                let content = std::fs::read_to_string(result_path)?;
+                if content.contains("sorry") {
+                    eprintln!("\nSorry markers remain after Leanstral. Escalating to Aristotle...");
+                    // Derive project dir from the file path (go up to lakefile.lean)
+                    let project_dir = result_path
+                        .parent()
+                        .and_then(|p| {
+                            if p.join("lakefile.lean").exists() {
+                                Some(p.to_path_buf())
+                            } else {
+                                p.parent().and_then(|pp| {
+                                    if pp.join("lakefile.lean").exists() {
+                                        Some(pp.to_path_buf())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Could not find lakefile.lean above {}. \
+                                 Run `qedgen aristotle submit` manually with --project-dir.",
+                                result_path.display()
+                            )
+                        })?;
+                    let prompt = "Fill in all sorry placeholders with valid proofs".to_string();
+                    aristotle::fill_sorry(&project_dir, &project_dir, &prompt, true, None).await?;
+                } else {
+                    eprintln!("All sorry markers filled by Leanstral.");
+                }
+            }
         }
 
         Commands::Spec { idl, output_dir } => {
@@ -319,6 +384,24 @@ async fn main() -> Result<()> {
 
         Commands::Verify { asm, proofs } => {
             verify::verify(&asm, &proofs)?;
+        }
+
+        Commands::Check { spec, proofs } => {
+            let results = check::check(&spec, &proofs)?;
+            let spec_name = spec
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Spec".to_string());
+            check::print_report(&spec_name, &results);
+            // Exit non-zero if any property is not proven
+            let all_proven = results.iter().all(|r| r.status == check::Status::Proven);
+            if !all_proven {
+                std::process::exit(1);
+            }
+        }
+
+        Commands::Ci { output, asm } => {
+            ci::generate_ci(&output, asm.as_deref())?;
         }
 
         Commands::Aristotle(cmd) => match cmd {
