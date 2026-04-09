@@ -29,15 +29,15 @@ namespace QEDGen.Solana.SpecDSL
 /-- A single state field: `fieldName : FieldType` -/
 syntax specField := ident " : " ident
 
-/-- Operation block -/
+/-- Operation block (rawIdent allows Lean keywords like `initialize`, `open`) -/
 syntax specOp :=
-  "operation " ident
-    "who: " ident
-    "when: " ident
-    "then: " ident
+  "operation " rawIdent
+    "who: " rawIdent
+    "when: " rawIdent
+    "then: " rawIdent
 
 /-- Invariant declaration -/
-syntax specInvariant := "invariant " ident str
+syntax specInvariant := "invariant " rawIdent str
 
 /-- The top-level qedspec command. -/
 syntax (name := qedspecCmd)
@@ -50,6 +50,19 @@ syntax (name := qedspecCmd)
 -- ============================================================================
 -- Elaborator: parse qedspec syntax, generate Lean source, elaborate it
 -- ============================================================================
+
+-- Lean keywords that need «» quoting when used as identifiers
+private def leanKeywords : List String :=
+  ["initialize", "open", "end", "where", "if", "then", "else", "do",
+   "let", "def", "theorem", "structure", "inductive", "namespace",
+   "section", "import", "return", "match", "with", "fun", "have",
+   "show", "by", "from", "in", "at", "class", "instance", "deriving",
+   "variable", "axiom", "opaque", "abbrev", "noncomputable", "partial",
+   "unsafe", "private", "protected", "mutual", "set_option", "attribute"]
+
+/-- Quote a name with «» if it's a Lean keyword -/
+private def quoteName (n : String) : String :=
+  if leanKeywords.contains n then s!"«{n}»" else n
 
 open Lean in
 open Lean.Elab in
@@ -67,7 +80,7 @@ def elabQedspec : CommandElab := fun stx => do
   -- Parse field declarations
   let mut fieldData : Array (String × String) := #[]
   for f in fieldsStx.getArgs do
-    let fieldName := f[0].getId.toString (escape := false)
+    let fieldName := quoteName (f[0].getId.toString (escape := false))
     let fieldType := f[2].getId.toString (escape := false)
     fieldData := fieldData.push (fieldName, fieldType)
 
@@ -104,11 +117,12 @@ def elabQedspec : CommandElab := fun stx => do
   cmds := cmds.push s!"structure State where\n{structFields}  deriving Repr, DecidableEq, BEq"
 
   for op in opsStx.getArgs do
-    let opName := op[1].getId.toString (escape := false)
-    let signer := op[3].getId.toString (escape := false)
+    let opNameRaw := op[1].getId.toString (escape := false)
+    let opName := quoteName opNameRaw
+    let signer := quoteName (op[3].getId.toString (escape := false))
     let preStatus := op[5].getId.toString (escape := false)
     let postStatus := op[7].getId.toString (escape := false)
-    let transName := s!"{opName}Transition"
+    let transName := quoteName s!"{opNameRaw}Transition"
 
     -- Transition function with signer guard + lifecycle guard
     if hasLifecycle then
