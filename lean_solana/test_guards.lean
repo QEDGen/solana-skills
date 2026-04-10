@@ -31,9 +31,9 @@ qedguards SimpleCheck where
       "(h_bal : readU64 mem (inputAddr + 8) = bal)"
       "(h_low : bal < 100)"
 
--- Verify types
-#check @SimpleCheck.rejects_bad_disc
-#check @SimpleCheck.rejects_low_balance
+-- Verify structure fields exist
+#check @SimpleCheck.Spec.rejects_bad_disc
+#check @SimpleCheck.Spec.rejects_low_balance
 
 -- ============================================================================
 -- Test 2: Two-register program with entry PC and error constants
@@ -67,9 +67,9 @@ qedguards TwoReg where
 #check @TwoReg.E_BAD_DISC   -- Nat
 #check @TwoReg.E_BAD_COUNT  -- Nat
 
--- Verify theorems exist and accumulate correctly
-#check @TwoReg.rejects_bad_disc
-#check @TwoReg.rejects_bad_count
+-- Verify structure fields exist and accumulate correctly
+#check @TwoReg.Spec.rejects_bad_disc
+#check @TwoReg.Spec.rejects_bad_count
 
 -- ============================================================================
 -- Test 3: 3-guard chain — verify full accumulation
@@ -106,4 +106,4 @@ qedguards ThreeGuard where
       "(h_fail : z = 0)"
 
 -- step3 should have: params + step1.after + step2.after + step3.hyps
-#check @ThreeGuard.step3
+#check @ThreeGuard.Spec.step3

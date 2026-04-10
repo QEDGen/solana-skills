@@ -223,28 +223,28 @@ qedguards RegisterMarket where
 #check @RegisterMarket.E_INVALID_RENT_SYSVAR_PUBKEY  -- Nat = 13
 
 -- P1: simple — disc + fail
-#check @RegisterMarket.rejects_invalid_discriminant
+#check @RegisterMarket.Spec.rejects_invalid_discriminant
 
 -- P5: accumulates P1-P4 after-blocks
-#check @RegisterMarket.rejects_market_duplicate
+#check @RegisterMarket.Spec.rejects_market_duplicate
 
 -- P7: accumulates P1-P6 — last "simple" guard
-#check @RegisterMarket.rejects_base_mint_duplicate
+#check @RegisterMarket.Spec.rejects_base_mint_duplicate
 
 -- P8: dynamic offset (wrapAdd expression)
-#check @RegisterMarket.rejects_quote_mint_duplicate
+#check @RegisterMarket.Spec.rejects_quote_mint_duplicate
 
 -- P9: 4-chunk PDA comparison with stack reads
-#check @RegisterMarket.rejects_invalid_market_pubkey
+#check @RegisterMarket.Spec.rejects_invalid_market_pubkey
 
 -- P10: register-computed address (r9 at step 47)
-#check @RegisterMarket.rejects_system_program_duplicate
+#check @RegisterMarket.Spec.rejects_system_program_duplicate
 
 -- P11: stack pubkey vs r9 account pubkey
-#check @RegisterMarket.rejects_invalid_system_program_pubkey
+#check @RegisterMarket.Spec.rejects_invalid_system_program_pubkey
 
 -- P12: r9 at step 92 (different intermediate state)
-#check @RegisterMarket.rejects_rent_sysvar_duplicate
+#check @RegisterMarket.Spec.rejects_rent_sysvar_duplicate
 
 -- P13: full accumulation — all 12 prior guards' after-blocks
-#check @RegisterMarket.rejects_invalid_rent_sysvar_pubkey
+#check @RegisterMarket.Spec.rejects_invalid_rent_sysvar_pubkey

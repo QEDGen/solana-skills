@@ -153,32 +153,38 @@ def elabQedguards : CommandElab := fun stx => do
   for (eName, eVal) in errorDecls do
     cmds := cmds.push s!"abbrev {eName} : Nat := {eVal}"
 
-  -- Accumulate after-blocks and generate one theorem per guard
+  -- Build structure with one field per guard (proof obligations)
+  let mut structStr := s!"structure Spec ({progName} : Nat → Option QEDGen.Solana.SBPF.Insn) where"
   let mut accumulated : Array String := #[]
 
   for (gName, fuelN, errStr, gHyps, gAfter) in guardList do
-    -- Build theorem
-    let mut thmStr := s!"theorem {gName} ({progName} : Nat → Option QEDGen.Solana.SBPF.Insn)" ++ nl
-    thmStr := thmStr ++ s!"    {params}" ++ nl
-
-    -- Accumulated after from prior guards
+    -- Collect all binders: params + accumulated after + this guard's hyps
+    let mut binderLines : Array String := #[]
+    binderLines := binderLines.push s!"∀ {params}"
     for hp in accumulated do
-      thmStr := thmStr ++ s!"    {hp}" ++ nl
-
-    -- This guard's hypotheses
+      binderLines := binderLines.push hp
     for hp in gHyps do
-      thmStr := thmStr ++ s!"    {hp}" ++ nl
+      binderLines := binderLines.push hp
+
+    -- Field declaration
+    structStr := structStr ++ nl ++ s!"  {gName} :"
+    let lastIdx := binderLines.size - 1
+    for i in [:binderLines.size] do
+      let line := binderLines[i]!
+      if i == lastIdx then
+        structStr := structStr ++ nl ++ s!"    {line},"
+      else
+        structStr := structStr ++ nl ++ s!"    {line}"
 
     -- Conclusion
-    thmStr := thmStr ++ s!"    :" ++ nl
-    thmStr := thmStr ++ s!"    (executeFn {progName} ({initExpr}) {fuelN}).exitCode" ++ nl
-    thmStr := thmStr ++ s!"      = some {errStr} := sorry"
-
-    cmds := cmds.push thmStr
+    structStr := structStr ++ nl ++ s!"    (executeFn {progName} ({initExpr}) {fuelN}).exitCode"
+    structStr := structStr ++ nl ++ s!"      = some {errStr}"
 
     -- Add this guard's after-block to the accumulation
     for hp in gAfter do
       accumulated := accumulated.push hp
+
+  cmds := cmds.push structStr
 
   cmds := cmds.push s!"end {name}"
 

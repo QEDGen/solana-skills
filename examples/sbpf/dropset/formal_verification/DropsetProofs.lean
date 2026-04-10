@@ -12,6 +12,7 @@
 
 import QEDGen.Solana.SBPF
 import DropsetProg
+import DropsetSpec
 
 namespace DropsetProofs
 
@@ -66,8 +67,8 @@ theorem rejects_invalid_discriminant
 set_option maxHeartbeats 800000 in
 theorem rejects_invalid_account_count
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts : Nat)
     (h_disc  : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num   : readU64 mem inputAddr = nAccounts)
     (h_few   : nAccounts < REGISTER_MARKET_ACCOUNTS_LEN) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 10).exitCode
@@ -83,10 +84,11 @@ theorem rejects_invalid_account_count
 set_option maxHeartbeats 800000 in
 theorem rejects_invalid_instruction_length
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts insnLen : Nat)
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
+    (insnLen : Nat)
     (h_ilen   : readU64 mem (insnAddr - 8) = insnLen)
     (h_ne_len : insnLen ≠ REGISTER_MARKET_DATA_LEN) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 12).exitCode
@@ -103,18 +105,17 @@ theorem rejects_invalid_instruction_length
 set_option maxHeartbeats 800000 in
 theorem rejects_user_has_data
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts insnLen userDataLen : Nat)
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
-    (h_ilen   : readU64 mem (insnAddr - 8) = insnLen)
-    (h_ilen_ok: insnLen = REGISTER_MARKET_DATA_LEN)
+    (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
+    (userDataLen : Nat)
     (h_udl    : readU64 mem (inputAddr + 88) = userDataLen)
     (h_udl_ne : userDataLen ≠ DATA_LEN_ZERO) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 14).exitCode
       = some E_USER_HAS_DATA := by
   have h_ge : ¬(readU64 mem inputAddr < REGISTER_MARKET_ACCOUNTS_LEN) := by rw [h_num]; exact h_enough
-  have h_ilen_eq : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN := by rw [h_ilen, h_ilen_ok]
   have h_udl_ne' : ¬(readU64 mem (inputAddr + 88) = DATA_LEN_ZERO) := by rw [h_udl]; exact h_udl_ne
   wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_neg8, ea_disc0, ea_88, U32_MODULUS]
 
@@ -126,12 +127,13 @@ theorem rejects_user_has_data
 set_option maxHeartbeats 800000 in
 theorem rejects_market_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts mktDup : Nat)
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
     (h_udl    : readU64 mem (inputAddr + 88) = DATA_LEN_ZERO)
+    (mktDup : Nat)
     (h_mdup   : readU8 mem (inputAddr + 10344) = mktDup)
     (h_mdup_ne: mktDup ≠ ACCT_NON_DUP_MARKER) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 16).exitCode
@@ -148,13 +150,14 @@ theorem rejects_market_duplicate
 set_option maxHeartbeats 800000 in
 theorem rejects_market_has_data
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts mktDataLen : Nat)
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
     (h_udl    : readU64 mem (inputAddr + 88) = DATA_LEN_ZERO)
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
+    (mktDataLen : Nat)
     (h_mdl    : readU64 mem (inputAddr + 10424) = mktDataLen)
     (h_mdl_ne : mktDataLen ≠ DATA_LEN_ZERO) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 18).exitCode
@@ -174,14 +177,15 @@ private theorem ea_20680 (b : Nat) : effectiveAddr b RM_MISC_BASE_DUPLICATE_OFF 
 set_option maxHeartbeats 800000 in
 theorem rejects_base_mint_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDup : Nat)
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
     (h_udl    : readU64 mem (inputAddr + 88) = DATA_LEN_ZERO)
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
+    (baseDup : Nat)
     (h_bdup   : readU8 mem (inputAddr + 20680) = baseDup)
     (h_bdup_ne: baseDup ≠ ACCT_NON_DUP_MARKER) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 20).exitCode
@@ -232,9 +236,9 @@ private theorem ea_base_addr_off (b : Nat) :
 set_option maxHeartbeats 8000000 in
 theorem rejects_quote_mint_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen quoteDup : Nat)
-    -- Common prefix
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -242,7 +246,8 @@ theorem rejects_quote_mint_duplicate
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
-    -- Base data length and quote dup at shifted address
+    -- P8 hyps
+    (baseDataLen quoteDup : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
@@ -669,10 +674,9 @@ private theorem p9_prefix
 set_option maxHeartbeats 800000 in
 theorem rejects_invalid_market_pubkey
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen : Nat)
-    (pda_c0 pda_c1 pda_c2 pda_c3 : Nat)
-    (mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -680,10 +684,18 @@ theorem rejects_invalid_market_pubkey
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    -- Accumulated after from P8
+    (baseDataLen : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = ACCT_NON_DUP_MARKER)
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START)
+    -- P9 hyps
+    (pda_c0 pda_c1 pda_c2 pda_c3 : Nat)
+    (mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)
     (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = pda_c0)
     (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = pda_c1)
     (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = pda_c2)
@@ -692,10 +704,7 @@ theorem rejects_invalid_market_pubkey
     (h_mkt_c1 : readU64 mem (inputAddr + 10360) = mkt_c1)
     (h_mkt_c2 : readU64 mem (inputAddr + 10368) = mkt_c2)
     (h_mkt_c3 : readU64 mem (inputAddr + 10376) = mkt_c3)
-    (h_ne : mkt_c0 ≠ pda_c0 ∨ mkt_c1 ≠ pda_c1 ∨ mkt_c2 ≠ pda_c2 ∨ mkt_c3 ≠ pda_c3)
-    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-                  inputAddr + 31016 < STACK_START) :
+    (h_ne : mkt_c0 ≠ pda_c0 ∨ mkt_c1 ≠ pda_c1 ∨ mkt_c2 ≠ pda_c2 ∨ mkt_c3 ≠ pda_c3) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 61).exitCode
       = some E_INVALID_MARKET_PUBKEY := by
   rw [show (61 : Nat) = 47 + 14 from rfl, executeFn_compose]
@@ -962,10 +971,9 @@ private theorem p10_dup_exit
 set_option maxHeartbeats 4000000 in
 theorem rejects_system_program_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen : Nat)
-    (c0 c1 c2 c3 : Nat)
-    (sysDup : Nat)
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -973,11 +981,17 @@ theorem rejects_system_program_duplicate
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    -- Accumulated after from P8
+    (baseDataLen : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = ACCT_NON_DUP_MARKER)
-    -- P9 pass: PDA chunks match market pubkey
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START)
+    -- Accumulated after from P9
+    (c0 c1 c2 c3 : Nat)
     (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = c0)
     (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = c1)
     (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = c2)
@@ -986,14 +1000,12 @@ theorem rejects_system_program_duplicate
     (h_mkt_c1 : readU64 mem (inputAddr + 10360) = c1)
     (h_mkt_c2 : readU64 mem (inputAddr + 10368) = c2)
     (h_mkt_c3 : readU64 mem (inputAddr + 10376) = c3)
-    -- P10 fail: system program duplicate marker ≠ 255
+    -- P10 hyps
+    (sysDup : Nat)
     (h_sdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9) = sysDup)
     (h_sdup_ne: sysDup ≠ ACCT_NON_DUP_MARKER)
-    (h_r9_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 < STACK_START)
-    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-                  inputAddr + 31016 < STACK_START) :
+    (h_r9_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 < STACK_START) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 74).exitCode
       = some E_SYSTEM_PROGRAM_IS_DUPLICATE := by
   -- Split 74 = 47 + 27
@@ -1234,11 +1246,9 @@ private theorem p11_pubkey_compare
 set_option maxHeartbeats 4000000 in
 theorem rejects_invalid_system_program_pubkey
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen : Nat)
-    (c0 c1 c2 c3 : Nat)
-    (acct_c0 acct_c1 acct_c2 acct_c3 : Nat)
-    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -1246,11 +1256,17 @@ theorem rejects_invalid_system_program_pubkey
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    -- Accumulated after from P8
+    (baseDataLen : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = ACCT_NON_DUP_MARKER)
-    -- P9 pass: PDA chunks match market pubkey
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START)
+    -- Accumulated after from P9
+    (c0 c1 c2 c3 : Nat)
     (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = c0)
     (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = c1)
     (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = c2)
@@ -1259,16 +1275,17 @@ theorem rejects_invalid_system_program_pubkey
     (h_mkt_c1 : readU64 mem (inputAddr + 10360) = c1)
     (h_mkt_c2 : readU64 mem (inputAddr + 10368) = c2)
     (h_mkt_c3 : readU64 mem (inputAddr + 10376) = c3)
-    -- P10 pass: system program dup = 255 (not duplicate)
+    -- Accumulated after from P10
     (h_sdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9) = ACCT_NON_DUP_MARKER)
     (h_r9_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 40 < STACK_START)
-    -- System program pubkey on stack (expected)
+    -- P11 hyps
+    (acct_c0 acct_c1 acct_c2 acct_c3 : Nat)
+    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
     (h_sys_c0 : readU64 mem (STACK_START + 0x1000 - 584) = sys_c0)
     (h_sys_c1 : readU64 mem (STACK_START + 0x1000 - 576) = sys_c1)
     (h_sys_c2 : readU64 mem (STACK_START + 0x1000 - 568) = sys_c2)
     (h_sys_c3 : readU64 mem (STACK_START + 0x1000 - 560) = sys_c3)
-    -- Account address at r9 (actual)
     (h_acct_c0 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 8) = acct_c0)
     (h_acct_c1 : readU64 mem
@@ -1277,11 +1294,7 @@ theorem rejects_invalid_system_program_pubkey
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 24) = acct_c2)
     (h_acct_c3 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 32) = acct_c3)
-    -- Pubkey mismatch
-    (h_ne : acct_c0 ≠ sys_c0 ∨ acct_c1 ≠ sys_c1 ∨ acct_c2 ≠ sys_c2 ∨ acct_c3 ≠ sys_c3)
-    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-                  inputAddr + 31016 < STACK_START) :
+    (h_ne : acct_c0 ≠ sys_c0 ∨ acct_c1 ≠ sys_c1 ∨ acct_c2 ≠ sys_c2 ∨ acct_c3 ≠ sys_c3) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 86).exitCode
       = some E_INVALID_SYSTEM_PROGRAM_PUBKEY := by
   -- Split 86 = 47 + 39
@@ -1437,11 +1450,9 @@ private theorem p12_dup_exit
 set_option maxHeartbeats 4000000 in
 theorem rejects_rent_sysvar_duplicate
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen : Nat)
-    (c0 c1 c2 c3 : Nat)
-    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
-    (rentDup : Nat)
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -1449,11 +1460,17 @@ theorem rejects_rent_sysvar_duplicate
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    -- Accumulated after from P8
+    (baseDataLen : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = ACCT_NON_DUP_MARKER)
-    -- P9 pass: PDA chunks match market pubkey
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START)
+    -- Accumulated after from P9
+    (c0 c1 c2 c3 : Nat)
     (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = c0)
     (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = c1)
     (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = c2)
@@ -1462,11 +1479,12 @@ theorem rejects_rent_sysvar_duplicate
     (h_mkt_c1 : readU64 mem (inputAddr + 10360) = c1)
     (h_mkt_c2 : readU64 mem (inputAddr + 10368) = c2)
     (h_mkt_c3 : readU64 mem (inputAddr + 10376) = c3)
-    -- P10 pass: system program dup = 255
+    -- Accumulated after from P10
     (h_sdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9) = ACCT_NON_DUP_MARKER)
     (h_r9_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 40 < STACK_START)
-    -- P11 pass: system program pubkey matches expected
+    -- Accumulated after from P11
+    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
     (h_sys_c0 : readU64 mem (STACK_START + 0x1000 - 584) = sys_c0)
     (h_sys_c1 : readU64 mem (STACK_START + 0x1000 - 576) = sys_c1)
     (h_sys_c2 : readU64 mem (STACK_START + 0x1000 - 568) = sys_c2)
@@ -1479,14 +1497,12 @@ theorem rejects_rent_sysvar_duplicate
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 24) = sys_c2)
     (h_acct_c3 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 32) = sys_c3)
-    -- P12 fail: rent sysvar dup ≠ 255
+    -- P12 hyps
+    (rentDup : Nat)
     (h_rdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9) = rentDup)
     (h_rdup_ne : rentDup ≠ ACCT_NON_DUP_MARKER)
-    (h_r9_rent_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 < STACK_START)
-    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-                  inputAddr + 31016 < STACK_START) :
+    (h_r9_rent_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 < STACK_START) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 96).exitCode
       = some E_RENT_SYSVAR_IS_DUPLICATE := by
   -- Decompose execution: 96 = 47 + 12 + 11 + 2 + 12 + 8 + 4
@@ -1743,11 +1759,9 @@ private theorem p13_pubkey_compare
 set_option maxHeartbeats 4000000 in
 theorem rejects_invalid_rent_sysvar_pubkey
     (inputAddr insnAddr : Nat) (mem : Mem)
-    (nAccounts baseDataLen : Nat)
-    (c0 c1 c2 c3 : Nat)
-    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
-    (rent_c0 rent_c1 rent_c2 rent_c3 : Nat)
+    -- Accumulated after from P1-P7
     (h_disc   : readU8 mem insnAddr = DISC_REGISTER_MARKET)
+    (nAccounts : Nat)
     (h_num    : readU64 mem inputAddr = nAccounts)
     (h_enough : ¬(nAccounts < REGISTER_MARKET_ACCOUNTS_LEN))
     (h_ilen   : readU64 mem (insnAddr - 8) = REGISTER_MARKET_DATA_LEN)
@@ -1755,11 +1769,17 @@ theorem rejects_invalid_rent_sysvar_pubkey
     (h_mdup   : readU8 mem (inputAddr + 10344) = ACCT_NON_DUP_MARKER)
     (h_mdl    : readU64 mem (inputAddr + 10424) = DATA_LEN_ZERO)
     (h_bdup   : readU8 mem (inputAddr + 20680) = ACCT_NON_DUP_MARKER)
+    -- Accumulated after from P8
+    (baseDataLen : Nat)
     (h_bdl    : readU64 mem (inputAddr + 20760) = baseDataLen)
     (h_qdup   : readU8 mem
         (wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
           inputAddr + 31016) = ACCT_NON_DUP_MARKER)
-    -- P9 pass: PDA chunks match market pubkey
+    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
+    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
+                  inputAddr + 31016 < STACK_START)
+    -- Accumulated after from P9
+    (c0 c1 c2 c3 : Nat)
     (h_pda_c0 : readU64 mem (STACK_START + 0x1000 - 616) = c0)
     (h_pda_c1 : readU64 mem (STACK_START + 0x1000 - 608) = c1)
     (h_pda_c2 : readU64 mem (STACK_START + 0x1000 - 600) = c2)
@@ -1768,11 +1788,12 @@ theorem rejects_invalid_rent_sysvar_pubkey
     (h_mkt_c1 : readU64 mem (inputAddr + 10360) = c1)
     (h_mkt_c2 : readU64 mem (inputAddr + 10368) = c2)
     (h_mkt_c3 : readU64 mem (inputAddr + 10376) = c3)
-    -- P10 pass: system program dup = 255
+    -- Accumulated after from P10
     (h_sdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9) = ACCT_NON_DUP_MARKER)
     (h_r9_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 40 < STACK_START)
-    -- P11 pass: system program pubkey matches expected
+    -- Accumulated after from P11
+    (sys_c0 sys_c1 sys_c2 sys_c3 : Nat)
     (h_sys_c0 : readU64 mem (STACK_START + 0x1000 - 584) = sys_c0)
     (h_sys_c1 : readU64 mem (STACK_START + 0x1000 - 576) = sys_c1)
     (h_sys_c2 : readU64 mem (STACK_START + 0x1000 - 568) = sys_c2)
@@ -1785,11 +1806,12 @@ theorem rejects_invalid_rent_sysvar_pubkey
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 24) = sys_c2)
     (h_acct_c3 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9 + 32) = sys_c3)
-    -- P12 pass: rent sysvar dup = 255
+    -- Accumulated after from P12
     (h_rdup   : readU8 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9) = ACCT_NON_DUP_MARKER)
     (h_r9_rent_sep : (executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 + 40 < STACK_START)
-    -- P13 fail: rent pubkey mismatch
+    -- P13 hyps
+    (rent_c0 rent_c1 rent_c2 rent_c3 : Nat)
     (h_rent_c0 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 + 8) = rent_c0)
     (h_rent_c1 : readU64 mem
@@ -1799,10 +1821,7 @@ theorem rejects_invalid_rent_sysvar_pubkey
     (h_rent_c3 : readU64 mem
         ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 + 32) = rent_c3)
     (h_ne : rent_c0 ≠ PUBKEY_RENT_CHUNK_0 ∨ rent_c1 ≠ PUBKEY_RENT_CHUNK_1 ∨
-            rent_c2 ≠ PUBKEY_RENT_CHUNK_2 ∨ rent_c3 ≠ PUBKEY_RENT_CHUNK_3)
-    (h_sep    : STACK_START + 0x1000 > inputAddr + 100000)
-    (h_qaddr  : wrapAdd (((wrapAdd baseDataLen (toU64 (↑DATA_LEN_MAX_PAD : Int))) &&& toU64 DATA_LEN_AND_MASK) % U64_MODULUS)
-                  inputAddr + 31016 < STACK_START) :
+            rent_c2 ≠ PUBKEY_RENT_CHUNK_2 ∨ rent_c3 ≠ PUBKEY_RENT_CHUNK_3) :
     (executeFn progAt (initState2 inputAddr insnAddr mem 24) 108).exitCode
       = some E_INVALID_RENT_SYSVAR_PUBKEY := by
   -- Decompose execution: 108 = 47 + (12 + (11 + (2 + (12 + (8 + (2 + 14))))))
@@ -1860,3 +1879,20 @@ theorem rejects_invalid_rent_sysvar_pubkey
     h_ne
 
 end DropsetProofs
+
+-- End-to-end: DSL spec (DropsetSpec) → proven instance (zero sorry, zero wrappers)
+open DropsetProofs DropsetProg in
+def RegisterMarket.verified : RegisterMarket.Spec progAt where
+  rejects_invalid_discriminant := rejects_invalid_discriminant
+  rejects_invalid_account_count := rejects_invalid_account_count
+  rejects_invalid_instruction_length := rejects_invalid_instruction_length
+  rejects_user_has_data := rejects_user_has_data
+  rejects_market_duplicate := rejects_market_duplicate
+  rejects_market_has_data := rejects_market_has_data
+  rejects_base_mint_duplicate := rejects_base_mint_duplicate
+  rejects_quote_mint_duplicate := rejects_quote_mint_duplicate
+  rejects_invalid_market_pubkey := rejects_invalid_market_pubkey
+  rejects_system_program_duplicate := rejects_system_program_duplicate
+  rejects_invalid_system_program_pubkey := rejects_invalid_system_program_pubkey
+  rejects_rent_sysvar_duplicate := rejects_rent_sysvar_duplicate
+  rejects_invalid_rent_sysvar_pubkey := rejects_invalid_rent_sysvar_pubkey
