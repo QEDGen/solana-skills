@@ -22,6 +22,17 @@ def pubkeyAt (mem : Mem) (base : Nat) (pk : Pubkey) : Prop :=
   readU64 mem (base + 16) = pk.c2 ∧
   readU64 mem (base + 24) = pk.c3
 
+/-- Read a pubkey from four consecutive 8-byte addresses. Functional version of `pubkeyAt`. -/
+def readPubkey (mem : Mem) (base : Nat) : Pubkey :=
+  ⟨readU64 mem base, readU64 mem (base + 8),
+   readU64 mem (base + 16), readU64 mem (base + 24)⟩
+
+theorem pubkeyAt_iff_readPubkey (mem : Mem) (base : Nat) (pk : Pubkey) :
+    pubkeyAt mem base pk ↔ readPubkey mem base = pk := by
+  constructor
+  · rintro ⟨h0, h1, h2, h3⟩; exact Pubkey.ext' h0 h1 h2 h3
+  · rintro h; subst h; exact ⟨rfl, rfl, rfl, rfl⟩
+
 /-- Memory equality preserves pubkeyAt. Use after proving `s'.mem = s.mem`
     for register-only instruction sections. -/
 theorem pubkeyAt_of_mem_eq {mem₁ mem₂ : Mem} {base : Nat} {pk : Pubkey}
