@@ -13,6 +13,7 @@ qedguards RegisterMarket where
   entry: 24
   r1: inputAddr
   r2: insnAddr
+  chunks progAt_0 progAt_1
 
   errors
     E_INVALID_DISCRIMINANT 1
@@ -29,8 +30,18 @@ qedguards RegisterMarket where
     E_RENT_SYSVAR_IS_DUPLICATE 12
     E_INVALID_RENT_SYSVAR_PUBKEY 13
 
+  offsets
+    IB_N_ACCTS_OFF "0"
+    INSN_LEN_OFF "-8"
+    INSN_DISC_OFF "0"
+    IB_USER_DATA_LEN_OFF "88"
+    IB_MARKET_DUPLICATE_OFF "10344"
+    IB_MARKET_DATA_LEN_OFF "10424"
+    RM_MISC_BASE_DUPLICATE_OFF "20680"
+
   -- ── P1: Invalid discriminant ──────────────────────────────────────────
   guard rejects_invalid_discriminant fuel 8 error E_INVALID_DISCRIMINANT
+    proof auto
     hyps
       "(disc : Nat)"
       "(h_disc_val : readU8 mem insnAddr = disc)"
@@ -40,6 +51,7 @@ qedguards RegisterMarket where
 
   -- ── P2: Invalid account count ─────────────────────────────────────────
   guard rejects_invalid_account_count fuel 10 error E_INVALID_NUMBER_OF_ACCOUNTS
+    proof auto
     hyps
       "(nAccounts : Nat)"
       "(h_num : readU64 mem inputAddr = nAccounts)"
@@ -51,6 +63,7 @@ qedguards RegisterMarket where
 
   -- ── P3: Invalid instruction length ────────────────────────────────────
   guard rejects_invalid_instruction_length fuel 12 error E_INVALID_INSTRUCTION_LENGTH
+    proof auto
     hyps
       "(insnLen : Nat)"
       "(h_ilen : readU64 mem (insnAddr - 8) = insnLen)"
@@ -60,6 +73,7 @@ qedguards RegisterMarket where
 
   -- ── P4: User has data ─────────────────────────────────────────────────
   guard rejects_user_has_data fuel 14 error E_USER_HAS_DATA
+    proof auto
     hyps
       "(userDataLen : Nat)"
       "(h_udl : readU64 mem (inputAddr + 88) = userDataLen)"
@@ -69,6 +83,7 @@ qedguards RegisterMarket where
 
   -- ── P5: Market account is duplicate ───────────────────────────────────
   guard rejects_market_duplicate fuel 16 error E_MARKET_ACCOUNT_IS_DUPLICATE
+    proof auto
     hyps
       "(mktDup : Nat)"
       "(h_mdup : readU8 mem (inputAddr + 10344) = mktDup)"
@@ -78,6 +93,7 @@ qedguards RegisterMarket where
 
   -- ── P6: Market has data ───────────────────────────────────────────────
   guard rejects_market_has_data fuel 18 error E_MARKET_HAS_DATA
+    proof auto
     hyps
       "(mktDataLen : Nat)"
       "(h_mdl : readU64 mem (inputAddr + 10424) = mktDataLen)"
@@ -87,6 +103,7 @@ qedguards RegisterMarket where
 
   -- ── P7: Base mint is duplicate ────────────────────────────────────────
   guard rejects_base_mint_duplicate fuel 20 error E_BASE_MINT_IS_DUPLICATE
+    proof auto
     hyps
       "(baseDup : Nat)"
       "(h_bdup : readU8 mem (inputAddr + 20680) = baseDup)"
@@ -113,6 +130,10 @@ qedguards RegisterMarket where
 
   -- ── P9: Invalid market pubkey (4-chunk PDA comparison) ────────────────
   guard rejects_invalid_market_pubkey fuel 61 error E_INVALID_MARKET_PUBKEY
+    proof phased
+    phases
+      phase p9_prefix 47
+      phase p9_chunks 14
     hyps
       "(pda_c0 pda_c1 pda_c2 pda_c3 : Nat)"
       "(mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)"

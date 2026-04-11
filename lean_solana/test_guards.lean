@@ -107,3 +107,60 @@ qedguards ThreeGuard where
 
 -- step3 should have: params + step1.after + step2.after + step3.hyps
 #check @ThreeGuard.Spec.step3
+
+-- ============================================================================
+-- Test 4: Phased proof — generates composition scaffolding
+-- ============================================================================
+
+qedguards PhasedCheck where
+  prog: progAt
+  entry: 10
+  r1: inputAddr
+  r2: insnAddr
+
+  guard simple_guard fuel 5 error 1
+    proof auto
+    hyps
+      "(disc : Nat)"
+      "(h_disc : readU8 mem insnAddr = disc)"
+      "(h_ne : disc ≠ 0)"
+    after
+      "(h_disc : readU8 mem insnAddr = 0)"
+
+  guard complex_guard fuel 30 error 2
+    proof phased
+    phases
+      phase setup 20
+      phase finish 10
+    hyps
+      "(x : Nat)"
+      "(h_x : readU64 mem inputAddr = x)"
+      "(h_fail : x ≠ 42)"
+
+-- Verify composition theorem exists (with sorry body)
+#check @PhasedCheck.complex_guard          -- main composition theorem
+
+-- Verify auto proof still works alongside phased
+#check @PhasedCheck.simple_guard
+
+-- ============================================================================
+-- Test 5: 3-phase proof
+-- ============================================================================
+
+qedguards ThreePhase where
+  prog: progAt
+  r1: inputAddr
+
+  guard multi_phase fuel 47 error 1
+    proof phased
+    phases
+      phase init 25
+      phase setup 11
+      phase finish 11
+    hyps
+      "(x : Nat)"
+      "(h_x : readU64 mem inputAddr = x)"
+      "(h_fail : x < 10)"
+
+-- 3-phase composition theorem
+#check @ThreePhase.multi_phase
