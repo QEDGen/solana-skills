@@ -17,7 +17,13 @@ const SUPPORT_STATE: &str = include_str!("../../../lean_solana/QEDGen/Solana/Sta
 const SUPPORT_CPI: &str = include_str!("../../../lean_solana/QEDGen/Solana/Cpi.lean");
 const SUPPORT_VALID: &str = include_str!("../../../lean_solana/QEDGen/Solana/Valid.lean");
 const SUPPORT_SPEC: &str = include_str!("../../../lean_solana/QEDGen/Solana/Spec.lean");
-const SUPPORT_SOLANA: &str = include_str!("../../../lean_solana/QEDGen/Solana.lean");
+// Trimmed barrel import — only the modules we embed (no SBPF/Bridge/Guards)
+const SUPPORT_SOLANA: &str = "\
+import QEDGen.Solana.Account\n\
+import QEDGen.Solana.Cpi\n\
+import QEDGen.Solana.State\n\
+import QEDGen.Solana.Valid\n\
+import QEDGen.Solana.Spec\n";
 
 pub fn setup_lean_project(output_dir: &Path) -> Result<()> {
     // Write template files

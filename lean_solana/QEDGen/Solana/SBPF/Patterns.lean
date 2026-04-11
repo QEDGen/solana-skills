@@ -365,9 +365,9 @@ theorem pubkey_compare_mem (fetch : Nat → Option Insn) (s : State)
       rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
       obtain ⟨he2, hp2, hm2, hreg2⟩ := chunk_eq_mem fetch _ dstA dstB srcA srcB offA1 offB1 target
         h_ne_AB h_srcB_ne_dstA h_dstA_ne_r10 h_dstB_ne_r10 he1
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf3)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf4)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf5)
+        (by simp only [hp1, h_pc]; exact hf3)
+        (by simp only [hp1, h_pc]; exact hf4)
+        (by simp only [hp1, h_pc]; exact hf5)
         (by rw [hm1, hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha1,
                 hreg1 srcB h_srcB_ne_dstA h_srcB_ne_dstB, hb1]; exact h_eq1)
       by_cases h_eq2 : a2 = b2
@@ -375,9 +375,9 @@ theorem pubkey_compare_mem (fetch : Nat → Option Insn) (s : State)
         rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
         obtain ⟨he3, hp3, hm3, hreg3⟩ := chunk_eq_mem fetch _ dstA dstB srcA srcB offA2 offB2 target
           h_ne_AB h_srcB_ne_dstA h_dstA_ne_r10 h_dstB_ne_r10 he2
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf6)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf7)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf8)
+          (by simp only [hp2, hp1, h_pc]; exact hf6)
+          (by simp only [hp2, hp1, h_pc]; exact hf7)
+          (by simp only [hp2, hp1, h_pc]; exact hf8)
           (by rw [hm2, hm1,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha2,
@@ -385,9 +385,9 @@ theorem pubkey_compare_mem (fetch : Nat → Option Insn) (s : State)
                   hreg1 srcB h_srcB_ne_dstA h_srcB_ne_dstB, hb2]; exact h_eq2)
         exact chunk_ne_mem_error fetch _ 5 dstA dstB srcA srcB offA3 offB3 target errorCode
           h_ne_AB h_srcB_ne_dstA h_dstA_ne_r10 h_dstB_ne_r10 he3
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf9)
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf10)
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf11)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf9)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf10)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf11)
           (by rw [hm3, hm2, hm1,
                   hreg3 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
@@ -398,9 +398,9 @@ theorem pubkey_compare_mem (fetch : Nat → Option Insn) (s : State)
           hfe1 hfe2 (by omega)
       · exact chunk_ne_mem_error fetch _ 8 dstA dstB srcA srcB offA2 offB2 target errorCode
           h_ne_AB h_srcB_ne_dstA h_dstA_ne_r10 h_dstB_ne_r10 he2
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf6)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf7)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf8)
+          (by simp only [hp2, hp1, h_pc]; exact hf6)
+          (by simp only [hp2, hp1, h_pc]; exact hf7)
+          (by simp only [hp2, hp1, h_pc]; exact hf8)
           (by rw [hm2, hm1,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha2,
@@ -409,9 +409,9 @@ theorem pubkey_compare_mem (fetch : Nat → Option Insn) (s : State)
           hfe1 hfe2 (by omega)
     · exact chunk_ne_mem_error fetch _ 11 dstA dstB srcA srcB offA1 offB1 target errorCode
         h_ne_AB h_srcB_ne_dstA h_dstA_ne_r10 h_dstB_ne_r10 he1
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf3)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf4)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf5)
+        (by simp only [hp1, h_pc]; exact hf3)
+        (by simp only [hp1, h_pc]; exact hf4)
+        (by simp only [hp1, h_pc]; exact hf5)
         (by rw [hm1, hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha1,
                 hreg1 srcB h_srcB_ne_dstA h_srcB_ne_dstB, hb1]; exact h_eq1)
         hfe1 hfe2 (by omega)
@@ -465,26 +465,26 @@ theorem pubkey_compare_imm (fetch : Nat → Option Insn) (s : State)
       rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
       obtain ⟨he2, hp2, hm2, hreg2⟩ := chunk_eq_imm fetch _ dstA dstB srcA offA1 val1 target
         h_ne_AB h_dstA_ne_r10 h_dstB_ne_r10 he1
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf3)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf4)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf5)
+        (by simp only [hp1, h_pc]; exact hf3)
+        (by simp only [hp1, h_pc]; exact hf4)
+        (by simp only [hp1, h_pc]; exact hf5)
         (by rw [hm1, hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha1, hb1]; exact h_eq1)
       by_cases h_eq2 : a2 = b2
       · simp [h_eq2] at h_ne
         rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
         obtain ⟨he3, hp3, hm3, hreg3⟩ := chunk_eq_imm fetch _ dstA dstB srcA offA2 val2 target
           h_ne_AB h_dstA_ne_r10 h_dstB_ne_r10 he2
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf6)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf7)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf8)
+          (by simp only [hp2, hp1, h_pc]; exact hf6)
+          (by simp only [hp2, hp1, h_pc]; exact hf7)
+          (by simp only [hp2, hp1, h_pc]; exact hf8)
           (by rw [hm2, hm1,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha2, hb2]; exact h_eq2)
         exact chunk_ne_imm32_error fetch _ 5 dstA dstB srcA offA3 val3 target errorCode
           h_ne_AB h_dstA_ne_r10 h_dstB_ne_r10 he3
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf9)
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf10)
-          (by simp only [hp3, hp2, hp1, h_pc, Nat.add_assoc]; exact hf11)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf9)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf10)
+          (by simp only [hp3, hp2, hp1, h_pc]; exact hf11)
           (by rw [hm3, hm2, hm1,
                   hreg3 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
@@ -492,18 +492,18 @@ theorem pubkey_compare_imm (fetch : Nat → Option Insn) (s : State)
           hfe1 hfe2 (by omega)
       · exact chunk_ne_imm_error fetch _ 8 dstA dstB srcA offA2 val2 target errorCode
           h_ne_AB h_dstA_ne_r10 h_dstB_ne_r10 he2
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf6)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf7)
-          (by simp only [hp2, hp1, h_pc, Nat.add_assoc]; exact hf8)
+          (by simp only [hp2, hp1, h_pc]; exact hf6)
+          (by simp only [hp2, hp1, h_pc]; exact hf7)
+          (by simp only [hp2, hp1, h_pc]; exact hf8)
           (by rw [hm2, hm1,
                   hreg2 srcA h_srcA_ne_dstA h_srcA_ne_dstB,
                   hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha2, hb2]; exact h_eq2)
           hfe1 hfe2 (by omega)
     · exact chunk_ne_imm_error fetch _ 11 dstA dstB srcA offA1 val1 target errorCode
         h_ne_AB h_dstA_ne_r10 h_dstB_ne_r10 he1
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf3)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf4)
-        (by simp only [hp1, h_pc, Nat.add_assoc]; exact hf5)
+        (by simp only [hp1, h_pc]; exact hf3)
+        (by simp only [hp1, h_pc]; exact hf4)
+        (by simp only [hp1, h_pc]; exact hf5)
         (by rw [hm1, hreg1 srcA h_srcA_ne_dstA h_srcA_ne_dstB, ha1, hb1]; exact h_eq1)
         hfe1 hfe2 (by omega)
   · exact chunk_ne_imm_error fetch s 14 dstA dstB srcA offA0 val0 target errorCode

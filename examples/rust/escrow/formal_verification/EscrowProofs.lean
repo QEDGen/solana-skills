@@ -25,7 +25,7 @@ structure ProgramState where
   initializer : Pubkey
 
 def cancelTransition (p_preState : ProgramState) (p_signer : Pubkey) : Option Unit :=
-  if h : p_signer = p_preState.escrow.initializer then
+  if p_signer = p_preState.escrow.initializer then
     some ()
   else
     none
@@ -127,7 +127,7 @@ structure ProgramState where
   is_active : Bool
 
 def exchangeTransition (p_preState : ProgramState) (p_signer : Pubkey) : Option Unit :=
-  if h : p_signer = p_preState.taker then
+  if p_signer = p_preState.taker then
     some ()
   else
     none
