@@ -193,29 +193,6 @@ private theorem ea_mkt_chunk3 (b : Nat) :
     On mismatch, jne jumps to PC 14 (mov32 r0 9, exit).
     On match, execution falls through to the next chunk. -/
 
--- Chunk mismatch: ldx + ldx + jne(taken) + mov32 + exit = error in ≤n steps.
-set_option maxHeartbeats 800000
-private theorem p9_chunk_ne_error (inputAddr : Nat) (s : State) (n : Nat)
-    (off1 off2 : Int)
-    (h_exit : s.exitCode = none)
-    (h_r6   : s.regs.r6 = inputAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
-    (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r6 off1))
-    (h_f2 : progAt (s.pc + 1) = some (.ldx .dword .r8 .r10 off2))
-    (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 14))
-    (h_ne : readU64 s.mem (effectiveAddr inputAddr off1) ≠
-            readU64 s.mem (effectiveAddr (STACK_START + 0x1000) off2))
-    (h_fuel : n ≥ 5) :
-    (executeFn progAt s n).exitCode = some E_INVALID_MARKET_PUBKEY := by
-  have hf14 : progAt 14 = some (.mov32 .r0 (.imm E_INVALID_MARKET_PUBKEY)) := by native_decide
-  have hf15 : progAt 15 = some (.exit) := by native_decide
-  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r6) off1) ≠
-               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
-    simp only [RegFile.get, h_r6, h_r10]; exact h_ne
-  exact chunk_ne_mem_error progAt s n .r7 .r8 .r6 .r10 off1 off2 14 E_INVALID_MARKET_PUBKEY
-    (by decide) (by decide) (by decide) (by decide)
-    h_exit h_f1 h_f2 h_f3 h_ne' hf14 hf15 h_fuel
-
 -- Chunk match: ldx + ldx + jne(fallthrough) advances pc by 3, preserves key state.
 set_option maxHeartbeats 1600000 in
 private theorem p9_chunk_eq_state (inputAddr : Nat) (s : State)
@@ -248,13 +225,8 @@ private theorem p9_chunk_eq_state (inputAddr : Nat) (s : State)
   simp only [RegFile.get] at hr3 hr5 hr6' hr9
   exact ⟨he, hp, hm, hr3, hr5, by rw [hr6', h_r6], hr9⟩
 
-/-! ### Part 3: Chunk comparison from abstract state
-
-    At PC 73, r6 = inputAddr (market account base), r10 = frame ptr.
-    Uses by_cases on each chunk: mismatch → p9_chunk_ne_error,
-    match → p9_chunk_eq_state + continue. -/
-
-set_option maxHeartbeats 4000000 in
+-- Chunk comparison: 14 steps from PC 73, mismatch → E_INVALID_MARKET_PUBKEY.
+-- Delegates to generic pubkey_compare_mem (Patterns.lean).
 private theorem p9_chunk_compare
     (inputAddr : Nat) (s : State)
     (mkt_c0 mkt_c1 mkt_c2 mkt_c3 : Nat)
@@ -273,88 +245,29 @@ private theorem p9_chunk_compare
     (h_pda_c3 : readU64 s.mem (STACK_START + 0x1000 - 592) = pda_c3)
     (h_ne : mkt_c0 ≠ pda_c0 ∨ mkt_c1 ≠ pda_c1 ∨ mkt_c2 ≠ pda_c2 ∨ mkt_c3 ≠ pda_c3) :
     (executeFn progAt s 14).exitCode = some E_INVALID_MARKET_PUBKEY := by
-  -- Pre-compute all fetch values for chunk comparison PCs (73-84)
-  have hf73 : progAt 73 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_0_OFF) := by native_decide
-  have hf74 : progAt 74 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_0_OFF) := by native_decide
-  have hf75 : progAt 75 = some (.jne .r7 (.reg .r8) 14) := by native_decide
-  have hf76 : progAt 76 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_1_OFF) := by native_decide
-  have hf77 : progAt 77 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_1_OFF) := by native_decide
-  have hf78 : progAt 78 = some (.jne .r7 (.reg .r8) 14) := by native_decide
-  have hf79 : progAt 79 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_2_OFF) := by native_decide
-  have hf80 : progAt 80 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_2_OFF) := by native_decide
-  have hf81 : progAt 81 = some (.jne .r7 (.reg .r8) 14) := by native_decide
-  have hf82 : progAt 82 = some (.ldx .dword .r7 .r6 IB_MARKET_PUBKEY_CHUNK_3_OFF) := by native_decide
-  have hf83 : progAt 83 = some (.ldx .dword .r8 .r10 RM_FM_PDA_CHUNK_3_OFF) := by native_decide
-  have hf84 : progAt 84 = some (.jne .r7 (.reg .r8) 14) := by native_decide
-  by_cases h_eq0 : mkt_c0 = pda_c0
-  · -- Chunk 0 matches → advance 3 steps
-    simp [h_eq0] at h_ne
-    rw [show (14 : Nat) = 3 + 11 from rfl, executeFn_compose]
-    have hst := p9_chunk_eq_state inputAddr s
-      IB_MARKET_PUBKEY_CHUNK_0_OFF RM_FM_PDA_CHUNK_0_OFF
-      h_exit h_r6 h_r10
-      (by rw [h_pc]; exact hf73) (by rw [h_pc]; exact hf74) (by rw [h_pc]; exact hf75)
-      (by rw [ea_mkt_chunk0, ea_fm_pda_chunk0, h_mkt_c0, h_pda_c0]; exact h_eq0)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, _, _, h_r6₁, _⟩ := hst
-    by_cases h_eq1 : mkt_c1 = pda_c1
-    · -- Chunk 1 matches
-      simp [h_eq1] at h_ne
-      rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
-      have hst := p9_chunk_eq_state inputAddr (executeFn progAt s 3)
-        IB_MARKET_PUBKEY_CHUNK_1_OFF RM_FM_PDA_CHUNK_1_OFF
-        h_exit₁ h_r6₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf76) (by rw [h_pc₁, h_pc]; exact hf77)
-        (by rw [h_pc₁, h_pc]; exact hf78)
-        (by rw [ea_mkt_chunk1, ea_fm_pda_chunk1, h_mem₁, h_mkt_c1, h_pda_c1]; exact h_eq1)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, _, _, h_r6₂, _⟩ := hst
-      by_cases h_eq2 : mkt_c2 = pda_c2
-      · -- Chunk 2 matches → chunk 3 must mismatch
-        simp [h_eq2] at h_ne
-        rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
-        have hst := p9_chunk_eq_state inputAddr
-          (executeFn progAt (executeFn progAt s 3) 3)
-          IB_MARKET_PUBKEY_CHUNK_2_OFF RM_FM_PDA_CHUNK_2_OFF
-          h_exit₂ h_r6₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf79) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf80)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf81)
-          (by rw [ea_mkt_chunk2, ea_fm_pda_chunk2, h_mem₂, h_mem₁, h_mkt_c2, h_pda_c2]; exact h_eq2)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, _, _, h_r6₃, _⟩ := hst
-        exact p9_chunk_ne_error inputAddr
-          (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
-          5 IB_MARKET_PUBKEY_CHUNK_3_OFF RM_FM_PDA_CHUNK_3_OFF
-          h_exit₃ h_r6₃ (by simp [h_r10])
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf82)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf83)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf84)
-          (by rw [ea_mkt_chunk3, ea_fm_pda_chunk3, h_mem₃, h_mem₂, h_mem₁,
-                  h_mkt_c3, h_pda_c3]; exact h_ne)
-          (by omega)
-      · -- Chunk 2 mismatches
-        exact p9_chunk_ne_error inputAddr
-          (executeFn progAt (executeFn progAt s 3) 3)
-          8 IB_MARKET_PUBKEY_CHUNK_2_OFF RM_FM_PDA_CHUNK_2_OFF
-          h_exit₂ h_r6₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf79) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf80)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf81)
-          (by rw [ea_mkt_chunk2, ea_fm_pda_chunk2, h_mem₂, h_mem₁,
-                  h_mkt_c2, h_pda_c2]; exact h_eq2)
-          (by omega)
-    · -- Chunk 1 mismatches
-      exact p9_chunk_ne_error inputAddr (executeFn progAt s 3)
-        11 IB_MARKET_PUBKEY_CHUNK_1_OFF RM_FM_PDA_CHUNK_1_OFF
-        h_exit₁ h_r6₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf76) (by rw [h_pc₁, h_pc]; exact hf77)
-        (by rw [h_pc₁, h_pc]; exact hf78)
-        (by rw [ea_mkt_chunk1, ea_fm_pda_chunk1, h_mem₁,
-                h_mkt_c1, h_pda_c1]; exact h_eq1)
-        (by omega)
-  · -- Chunk 0 mismatches
-    exact p9_chunk_ne_error inputAddr s 14
-      IB_MARKET_PUBKEY_CHUNK_0_OFF RM_FM_PDA_CHUNK_0_OFF
-      h_exit h_r6 h_r10
-      (by rw [h_pc]; exact hf73) (by rw [h_pc]; exact hf74) (by rw [h_pc]; exact hf75)
-      (by rw [ea_mkt_chunk0, ea_fm_pda_chunk0, h_mkt_c0, h_pda_c0]; exact h_eq0)
-      (by omega)
+  exact pubkey_compare_mem progAt s .r7 .r8 .r6 .r10 73
+    IB_MARKET_PUBKEY_CHUNK_0_OFF IB_MARKET_PUBKEY_CHUNK_1_OFF
+    IB_MARKET_PUBKEY_CHUNK_2_OFF IB_MARKET_PUBKEY_CHUNK_3_OFF
+    RM_FM_PDA_CHUNK_0_OFF RM_FM_PDA_CHUNK_1_OFF
+    RM_FM_PDA_CHUNK_2_OFF RM_FM_PDA_CHUNK_3_OFF
+    14 E_INVALID_MARKET_PUBKEY
+    mkt_c0 mkt_c1 mkt_c2 mkt_c3 pda_c0 pda_c1 pda_c2 pda_c3
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+    h_exit h_pc
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide)
+    (by simp only [RegFile.get, h_r6, ea_mkt_chunk0]; exact h_mkt_c0)
+    (by simp only [RegFile.get, h_r10, ea_fm_pda_chunk0]; exact h_pda_c0)
+    (by simp only [RegFile.get, h_r6, ea_mkt_chunk1]; exact h_mkt_c1)
+    (by simp only [RegFile.get, h_r10, ea_fm_pda_chunk1]; exact h_pda_c1)
+    (by simp only [RegFile.get, h_r6, ea_mkt_chunk2]; exact h_mkt_c2)
+    (by simp only [RegFile.get, h_r10, ea_fm_pda_chunk2]; exact h_pda_c2)
+    (by simp only [RegFile.get, h_r6, ea_mkt_chunk3]; exact h_mkt_c3)
+    (by simp only [RegFile.get, h_r10, ea_fm_pda_chunk3]; exact h_pda_c3)
+    h_ne
 
 -- Part 1: 25 steps from initState2 to PC 51 (quote dup passes).
 -- Proves state properties + memory form (existential avoids expensive strip_writes_goal).
@@ -956,30 +869,7 @@ private theorem p11_chunk_eq_state (sysAddr : Nat) (s : State)
   simp only [RegFile.get] at hr9
   exact ⟨he, hp, hm, by rw [hr9, h_r9]⟩
 
--- Chunk mismatch (r9-based): branch to PC 18 → E_INVALID_SYSTEM_PROGRAM_PUBKEY.
-private theorem p11_chunk_ne_error (sysAddr : Nat) (s : State) (n : Nat)
-    (off1 off2 : Int)
-    (h_exit : s.exitCode = none)
-    (h_r9   : s.regs.r9 = sysAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
-    (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off1))
-    (h_f2 : progAt (s.pc + 1) = some (.ldx .dword .r8 .r10 off2))
-    (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 18))
-    (h_ne : readU64 s.mem (effectiveAddr sysAddr off1) ≠
-            readU64 s.mem (effectiveAddr (STACK_START + 0x1000) off2))
-    (h_fuel : n ≥ 5) :
-    (executeFn progAt s n).exitCode = some E_INVALID_SYSTEM_PROGRAM_PUBKEY := by
-  have hf18 : progAt 18 = some (.mov32 .r0 (.imm E_INVALID_SYSTEM_PROGRAM_PUBKEY)) := by native_decide
-  have hf19 : progAt 19 = some (.exit) := by native_decide
-  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off1) ≠
-               readU64 s.mem (effectiveAddr (s.regs.get .r10) off2) := by
-    simp only [RegFile.get, h_r9, h_r10]; exact h_ne
-  exact chunk_ne_mem_error progAt s n .r7 .r8 .r9 .r10 off1 off2 18 E_INVALID_SYSTEM_PROGRAM_PUBKEY
-    (by decide) (by decide) (by decide) (by decide)
-    h_exit h_f1 h_f2 h_f3 h_ne' hf18 hf19 h_fuel
-
--- System program pubkey comparison: by_cases over 4 chunks.
-set_option maxHeartbeats 4000000 in
+-- System program pubkey comparison: 14 steps from PC 98, delegates to pubkey_compare_mem.
 private theorem p11_pubkey_compare
     (sysAddr : Nat) (s : State)
     (acct_c0 acct_c1 acct_c2 acct_c3 : Nat)
@@ -998,86 +888,29 @@ private theorem p11_pubkey_compare
     (h_sys_c3 : readU64 s.mem (STACK_START + 0x1000 - 560) = sys_c3)
     (h_ne : acct_c0 ≠ sys_c0 ∨ acct_c1 ≠ sys_c1 ∨ acct_c2 ≠ sys_c2 ∨ acct_c3 ≠ sys_c3) :
     (executeFn progAt s 14).exitCode = some E_INVALID_SYSTEM_PROGRAM_PUBKEY := by
-  -- Instruction fetches for PCs 98-109
-  have hf98  : progAt 98  = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_0_OFF) := by native_decide
-  have hf99  : progAt 99  = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF) := by native_decide
-  have hf100 : progAt 100 = some (.jne .r7 (.reg .r8) 18) := by native_decide
-  have hf101 : progAt 101 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_1_OFF) := by native_decide
-  have hf102 : progAt 102 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF) := by native_decide
-  have hf103 : progAt 103 = some (.jne .r7 (.reg .r8) 18) := by native_decide
-  have hf104 : progAt 104 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_2_OFF) := by native_decide
-  have hf105 : progAt 105 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF) := by native_decide
-  have hf106 : progAt 106 = some (.jne .r7 (.reg .r8) 18) := by native_decide
-  have hf107 : progAt 107 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_3_OFF) := by native_decide
-  have hf108 : progAt 108 = some (.ldx .dword .r8 .r10 RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF) := by native_decide
-  have hf109 : progAt 109 = some (.jne .r7 (.reg .r8) 18) := by native_decide
-  by_cases h_eq0 : acct_c0 = sys_c0
-  · simp [h_eq0] at h_ne
-    rw [show (14 : Nat) = 3 + 11 from rfl, executeFn_compose]
-    have hst := p11_chunk_eq_state sysAddr s
-      ACCT_ADDRESS_CHUNK_0_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF
-      h_exit h_r9 h_r10
-      (by rw [h_pc]; exact hf98) (by rw [h_pc]; exact hf99) (by rw [h_pc]; exact hf100)
-      (by rw [ea_acct_addr_chunk0, ea_sys_prog_chunk0, h_acct_c0, h_sys_c0]; exact h_eq0)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁⟩ := hst
-    by_cases h_eq1 : acct_c1 = sys_c1
-    · simp [h_eq1] at h_ne
-      rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
-      have hst := p11_chunk_eq_state sysAddr (executeFn progAt s 3)
-        ACCT_ADDRESS_CHUNK_1_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
-        h_exit₁ h_r9₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf101) (by rw [h_pc₁, h_pc]; exact hf102)
-        (by rw [h_pc₁, h_pc]; exact hf103)
-        (by rw [ea_acct_addr_chunk1, ea_sys_prog_chunk1, h_mem₁, h_acct_c1, h_sys_c1]; exact h_eq1)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂⟩ := hst
-      by_cases h_eq2 : acct_c2 = sys_c2
-      · simp [h_eq2] at h_ne
-        rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
-        have hst := p11_chunk_eq_state sysAddr
-          (executeFn progAt (executeFn progAt s 3) 3)
-          ACCT_ADDRESS_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF
-          h_exit₂ h_r9₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf104) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf105)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf106)
-          (by rw [ea_acct_addr_chunk2, ea_sys_prog_chunk2, h_mem₂, h_mem₁, h_acct_c2, h_sys_c2]; exact h_eq2)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃⟩ := hst
-        -- Chunk 3 must mismatch
-        exact p11_chunk_ne_error sysAddr
-          (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
-          5 ACCT_ADDRESS_CHUNK_3_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF
-          h_exit₃ h_r9₃ (by simp [h_r10])
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf107)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf108)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf109)
-          (by rw [ea_acct_addr_chunk3, ea_sys_prog_chunk3, h_mem₃, h_mem₂, h_mem₁,
-                  h_acct_c3, h_sys_c3]; exact h_ne)
-          (by omega)
-      · -- Chunk 2 mismatches
-        exact p11_chunk_ne_error sysAddr
-          (executeFn progAt (executeFn progAt s 3) 3)
-          8 ACCT_ADDRESS_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF
-          h_exit₂ h_r9₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf104) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf105)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf106)
-          (by rw [ea_acct_addr_chunk2, ea_sys_prog_chunk2, h_mem₂, h_mem₁,
-                  h_acct_c2, h_sys_c2]; exact h_eq2)
-          (by omega)
-    · -- Chunk 1 mismatches
-      exact p11_chunk_ne_error sysAddr (executeFn progAt s 3)
-        11 ACCT_ADDRESS_CHUNK_1_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
-        h_exit₁ h_r9₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf101) (by rw [h_pc₁, h_pc]; exact hf102)
-        (by rw [h_pc₁, h_pc]; exact hf103)
-        (by rw [ea_acct_addr_chunk1, ea_sys_prog_chunk1, h_mem₁,
-                h_acct_c1, h_sys_c1]; exact h_eq1)
-        (by omega)
-  · -- Chunk 0 mismatches
-    exact p11_chunk_ne_error sysAddr s 14
-      ACCT_ADDRESS_CHUNK_0_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF
-      h_exit h_r9 h_r10
-      (by rw [h_pc]; exact hf98) (by rw [h_pc]; exact hf99) (by rw [h_pc]; exact hf100)
-      (by rw [ea_acct_addr_chunk0, ea_sys_prog_chunk0, h_acct_c0, h_sys_c0]; exact h_eq0)
-      (by omega)
+  exact pubkey_compare_mem progAt s .r7 .r8 .r9 .r10 98
+    ACCT_ADDRESS_CHUNK_0_OFF ACCT_ADDRESS_CHUNK_1_OFF
+    ACCT_ADDRESS_CHUNK_2_OFF ACCT_ADDRESS_CHUNK_3_OFF
+    RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_0_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_1_OFF
+    RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_2_OFF RM_FM_SYSTEM_PROGRAM_PUBKEY_CHUNK_3_OFF
+    18 E_INVALID_SYSTEM_PROGRAM_PUBKEY
+    acct_c0 acct_c1 acct_c2 acct_c3 sys_c0 sys_c1 sys_c2 sys_c3
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+    h_exit h_pc
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk0]; exact h_acct_c0)
+    (by simp only [RegFile.get, h_r10, ea_sys_prog_chunk0]; exact h_sys_c0)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk1]; exact h_acct_c1)
+    (by simp only [RegFile.get, h_r10, ea_sys_prog_chunk1]; exact h_sys_c1)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk2]; exact h_acct_c2)
+    (by simp only [RegFile.get, h_r10, ea_sys_prog_chunk2]; exact h_sys_c2)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk3]; exact h_acct_c3)
+    (by simp only [RegFile.get, h_r10, ea_sys_prog_chunk3]; exact h_sys_c3)
+    h_ne
 
 -- Main P11 theorem: compose prefix + chunk match + CPI setup + dup pass + pubkey compare
 set_option maxHeartbeats 4000000 in
@@ -1417,97 +1250,15 @@ private theorem p13_rent_dup_pass
   simp only [RegFile.get] at hr9
   exact ⟨he, by rw [hp, h_pc], hr9, hm⟩
 
--- Chunk match via lddw: 3 steps (ldx + lddw + jne fallthrough).
-set_option maxHeartbeats 1600000 in
-private theorem p13_chunk_eq_lddw (rentAddr : Nat) (s : State)
-    (off : Int) (val : Int)
-    (h_exit : s.exitCode = none)
-    (h_r9   : s.regs.r9 = rentAddr)
-    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
-    (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
-    (h_f2 : progAt (s.pc + 1) = some (.lddw .r8 val))
-    (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
-    (h_eq : readU64 s.mem (effectiveAddr rentAddr off) = toU64 val) :
-    (executeFn progAt s 3).exitCode = none ∧
-    (executeFn progAt s 3).pc = s.pc + 3 ∧
-    (executeFn progAt s 3).mem = s.mem ∧
-    (executeFn progAt s 3).regs.r9 = rentAddr := by
-  have h_eq' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) = toU64 val := by
-    simp only [RegFile.get, h_r9]; exact h_eq
-  obtain ⟨he, hp, hm, hreg⟩ := chunk_eq_imm progAt s .r7 .r8 .r9 off val 22
-    (by decide) (by decide) (by decide)
-    h_exit h_f1 h_f2 h_f3 h_eq'
-  have hr9 := hreg .r9 (by decide) (by decide)
-  simp only [RegFile.get] at hr9
-  exact ⟨he, hp, hm, by rw [hr9, h_r9]⟩
-
--- Shared error handler: PC = 22 → mov32 r0 E_INVALID_RENT_SYSVAR_PUBKEY → exit.
-private theorem p13_error_at_22 (s : State)
-    (h_exit : s.exitCode = none)
-    (h_pc   : s.pc = 22) :
-    (executeFn progAt s 2).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY := by
-  have hf22 : progAt 22 = some (.mov32 .r0 (.imm E_INVALID_RENT_SYSVAR_PUBKEY)) := by native_decide
-  have hf23 : progAt 23 = some (.exit) := by native_decide
-  exact error_exit progAt s E_INVALID_RENT_SYSVAR_PUBKEY h_exit (by rw [h_pc]; exact hf22) (by rw [h_pc]; exact hf23)
-
--- Chunk mismatch via lddw: branch to PC 22 → E_INVALID_RENT_SYSVAR_PUBKEY.
-set_option maxHeartbeats 4000000 in
-private theorem p13_chunk_ne_lddw (rentAddr : Nat) (s : State) (n : Nat)
-    (off : Int) (val : Int)
-    (h_exit : s.exitCode = none)
-    (h_r9   : s.regs.r9 = rentAddr)
-    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
-    (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
-    (h_f2 : progAt (s.pc + 1) = some (.lddw .r8 val))
-    (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
-    (h_ne : readU64 s.mem (effectiveAddr rentAddr off) ≠ toU64 val)
-    (h_fuel : n ≥ 5) :
-    (executeFn progAt s n).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY := by
-  rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
-  suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY by
-    rw [executeFn_halted _ _ _ _ h5]; exact h5
-  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) ≠ toU64 val := by
-    simp only [RegFile.get, h_r9]; exact h_ne
-  rw [show (5 : Nat) = 3 + 2 from rfl, executeFn_compose]
-  obtain ⟨he, hp, _⟩ := chunk_ne_imm progAt s .r7 .r8 .r9 off val 22
-    (by decide) (by decide) (by decide)
-    h_exit h_f1 h_f2 h_f3 h_ne'
-  exact p13_error_at_22 _ he (by rw [hp])
-
--- Chunk mismatch via mov32 (chunk 3): branch to PC 22 → E_INVALID_RENT_SYSVAR_PUBKEY.
-set_option maxHeartbeats 4000000 in
-private theorem p13_chunk_ne_mov32 (rentAddr : Nat) (s : State) (n : Nat)
-    (off : Int) (val : Int)
-    (h_exit : s.exitCode = none)
-    (h_r9   : s.regs.r9 = rentAddr)
-    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
-    (h_f1 : progAt s.pc = some (.ldx .dword .r7 .r9 off))
-    (h_f2 : progAt (s.pc + 1) = some (.mov32 .r8 (.imm val)))
-    (h_f3 : progAt (s.pc + 2) = some (.jne .r7 (.reg .r8) 22))
-    (h_ne : readU64 s.mem (effectiveAddr rentAddr off) ≠ toU64 val % U32_MODULUS)
-    (h_fuel : n ≥ 5) :
-    (executeFn progAt s n).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY := by
-  rw [show n = 5 + (n - 5) from by omega, executeFn_compose]
-  suffices h5 : (executeFn progAt s 5).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY by
-    rw [executeFn_halted _ _ _ _ h5]; exact h5
-  have h_ne' : readU64 s.mem (effectiveAddr (s.regs.get .r9) off) ≠ toU64 val % U32_MODULUS := by
-    simp only [RegFile.get, h_r9]; exact h_ne
-  rw [show (5 : Nat) = 3 + 2 from rfl, executeFn_compose]
-  obtain ⟨he, hp, _⟩ := chunk_ne_imm32 progAt s .r7 .r8 .r9 off val 22
-    (by decide) (by decide) (by decide)
-    h_exit h_f1 h_f2 h_f3 h_ne'
-  exact p13_error_at_22 _ he (by rw [hp])
-
--- Rent sysvar pubkey comparison: by_cases over 4 chunks, max 14 steps.
+-- Rent sysvar pubkey comparison: 14 steps from PC 120, delegates to pubkey_compare_imm.
 -- Chunks 0-2 use lddw for expected value; chunk 3 uses mov32.
-set_option maxHeartbeats 4000000 in
 private theorem p13_pubkey_compare
     (rentAddr : Nat) (s : State)
     (rent_c0 rent_c1 rent_c2 rent_c3 : Nat)
     (h_exit : s.exitCode = none)
     (h_pc   : s.pc = 120)
     (h_r9   : s.regs.r9 = rentAddr)
-    (h_r10  : s.regs.r10 = STACK_START + 0x1000)
+    (_h_r10 : s.regs.r10 = STACK_START + 0x1000)
     (h_rent_c0 : readU64 s.mem (rentAddr + 8) = rent_c0)
     (h_rent_c1 : readU64 s.mem (rentAddr + 16) = rent_c1)
     (h_rent_c2 : readU64 s.mem (rentAddr + 24) = rent_c2)
@@ -1515,82 +1266,26 @@ private theorem p13_pubkey_compare
     (h_ne : rent_c0 ≠ PUBKEY_RENT_CHUNK_0 ∨ rent_c1 ≠ PUBKEY_RENT_CHUNK_1 ∨
             rent_c2 ≠ PUBKEY_RENT_CHUNK_2 ∨ rent_c3 ≠ PUBKEY_RENT_CHUNK_3) :
     (executeFn progAt s 14).exitCode = some E_INVALID_RENT_SYSVAR_PUBKEY := by
-  -- Instruction fetches for PCs 120-131
-  have hf120 : progAt 120 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_0_OFF) := by native_decide
-  have hf121 : progAt 121 = some (.lddw .r8 PUBKEY_RENT_CHUNK_0) := by native_decide
-  have hf122 : progAt 122 = some (.jne .r7 (.reg .r8) 22) := by native_decide
-  have hf123 : progAt 123 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_1_OFF) := by native_decide
-  have hf124 : progAt 124 = some (.lddw .r8 PUBKEY_RENT_CHUNK_1) := by native_decide
-  have hf125 : progAt 125 = some (.jne .r7 (.reg .r8) 22) := by native_decide
-  have hf126 : progAt 126 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_2_OFF) := by native_decide
-  have hf127 : progAt 127 = some (.lddw .r8 PUBKEY_RENT_CHUNK_2) := by native_decide
-  have hf128 : progAt 128 = some (.jne .r7 (.reg .r8) 22) := by native_decide
-  have hf129 : progAt 129 = some (.ldx .dword .r7 .r9 ACCT_ADDRESS_CHUNK_3_OFF) := by native_decide
-  have hf130 : progAt 130 = some (.mov32 .r8 (.imm PUBKEY_RENT_CHUNK_3_LO)) := by native_decide
-  have hf131 : progAt 131 = some (.jne .r7 (.reg .r8) 22) := by native_decide
-  by_cases h_eq0 : rent_c0 = PUBKEY_RENT_CHUNK_0
-  · simp [h_eq0] at h_ne
-    rw [show (14 : Nat) = 3 + 11 from rfl, executeFn_compose]
-    have hst := p13_chunk_eq_lddw rentAddr s
-      ACCT_ADDRESS_CHUNK_0_OFF PUBKEY_RENT_CHUNK_0
-      h_exit h_r9 h_r10
-      (by rw [h_pc]; exact hf120) (by rw [h_pc]; exact hf121) (by rw [h_pc]; exact hf122)
-      (by rw [ea_acct_addr_chunk0, h_rent_c0, h_eq0]; exact rent_bridge_0.symm)
-    obtain ⟨h_exit₁, h_pc₁, h_mem₁, h_r9₁⟩ := hst
-    by_cases h_eq1 : rent_c1 = PUBKEY_RENT_CHUNK_1
-    · simp [h_eq1] at h_ne
-      rw [show (11 : Nat) = 3 + 8 from rfl, executeFn_compose]
-      have hst := p13_chunk_eq_lddw rentAddr _
-        ACCT_ADDRESS_CHUNK_1_OFF PUBKEY_RENT_CHUNK_1
-        h_exit₁ h_r9₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf123) (by rw [h_pc₁, h_pc]; exact hf124)
-        (by rw [h_pc₁, h_pc]; exact hf125)
-        (by rw [ea_acct_addr_chunk1, h_mem₁, h_rent_c1, h_eq1]; exact rent_bridge_1.symm)
-      obtain ⟨h_exit₂, h_pc₂, h_mem₂, h_r9₂⟩ := hst
-      by_cases h_eq2 : rent_c2 = PUBKEY_RENT_CHUNK_2
-      · simp [h_eq2] at h_ne
-        rw [show (8 : Nat) = 3 + 5 from rfl, executeFn_compose]
-        have hst := p13_chunk_eq_lddw rentAddr _
-          ACCT_ADDRESS_CHUNK_2_OFF PUBKEY_RENT_CHUNK_2
-          h_exit₂ h_r9₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf126) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf127)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf128)
-          (by rw [ea_acct_addr_chunk2, h_mem₂, h_mem₁, h_rent_c2, h_eq2]; exact rent_bridge_2.symm)
-        obtain ⟨h_exit₃, h_pc₃, h_mem₃, h_r9₃⟩ := hst
-        -- Chunk 3 must mismatch (mov32 pattern)
-        exact p13_chunk_ne_mov32 rentAddr
-          (executeFn progAt (executeFn progAt (executeFn progAt s 3) 3) 3)
-          5 ACCT_ADDRESS_CHUNK_3_OFF PUBKEY_RENT_CHUNK_3_LO
-          h_exit₃ h_r9₃ (by simp [h_r10])
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf129)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf130)
-          (by rw [h_pc₃, h_pc₂, h_pc₁, h_pc]; exact hf131)
-          (by rw [ea_acct_addr_chunk3, h_mem₃, h_mem₂, h_mem₁, h_rent_c3, rent_bridge_3]; exact h_ne)
-          (by omega)
-      · -- Chunk 2 mismatches
-        exact p13_chunk_ne_lddw rentAddr
-          (executeFn progAt (executeFn progAt s 3) 3)
-          8 ACCT_ADDRESS_CHUNK_2_OFF PUBKEY_RENT_CHUNK_2
-          h_exit₂ h_r9₂ (by simp [h_r10])
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf126) (by rw [h_pc₂, h_pc₁, h_pc]; exact hf127)
-          (by rw [h_pc₂, h_pc₁, h_pc]; exact hf128)
-          (by rw [ea_acct_addr_chunk2, h_mem₂, h_mem₁, h_rent_c2, rent_bridge_2]; exact h_eq2)
-          (by omega)
-    · -- Chunk 1 mismatches
-      exact p13_chunk_ne_lddw rentAddr (executeFn progAt s 3)
-        11 ACCT_ADDRESS_CHUNK_1_OFF PUBKEY_RENT_CHUNK_1
-        h_exit₁ h_r9₁ (by simp [h_r10])
-        (by rw [h_pc₁, h_pc]; exact hf123) (by rw [h_pc₁, h_pc]; exact hf124)
-        (by rw [h_pc₁, h_pc]; exact hf125)
-        (by rw [ea_acct_addr_chunk1, h_mem₁, h_rent_c1, rent_bridge_1]; exact h_eq1)
-        (by omega)
-  · -- Chunk 0 mismatches
-    exact p13_chunk_ne_lddw rentAddr s 14
-      ACCT_ADDRESS_CHUNK_0_OFF PUBKEY_RENT_CHUNK_0
-      h_exit h_r9 h_r10
-      (by rw [h_pc]; exact hf120) (by rw [h_pc]; exact hf121) (by rw [h_pc]; exact hf122)
-      (by rw [ea_acct_addr_chunk0, h_rent_c0, rent_bridge_0]; exact h_eq0)
-      (by omega)
+  exact pubkey_compare_imm progAt s .r7 .r8 .r9 120
+    ACCT_ADDRESS_CHUNK_0_OFF ACCT_ADDRESS_CHUNK_1_OFF
+    ACCT_ADDRESS_CHUNK_2_OFF ACCT_ADDRESS_CHUNK_3_OFF
+    PUBKEY_RENT_CHUNK_0 PUBKEY_RENT_CHUNK_1 PUBKEY_RENT_CHUNK_2 PUBKEY_RENT_CHUNK_3_LO
+    22 E_INVALID_RENT_SYSVAR_PUBKEY
+    rent_c0 rent_c1 rent_c2 rent_c3
+    PUBKEY_RENT_CHUNK_0 PUBKEY_RENT_CHUNK_1 PUBKEY_RENT_CHUNK_2 PUBKEY_RENT_CHUNK_3
+    (by decide) (by decide) (by decide) (by decide) (by decide)
+    h_exit h_pc
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide) (by native_decide)
+    (by native_decide) (by native_decide)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk0]; exact h_rent_c0)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk1]; exact h_rent_c1)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk2]; exact h_rent_c2)
+    (by simp only [RegFile.get, h_r9, ea_acct_addr_chunk3]; exact h_rent_c3)
+    rent_bridge_0 rent_bridge_1 rent_bridge_2 rent_bridge_3
+    h_ne
 
 -- Main P13 theorem
 set_option maxHeartbeats 4000000 in
