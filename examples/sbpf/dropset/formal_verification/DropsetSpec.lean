@@ -159,6 +159,12 @@ qedguards RegisterMarket where
 
   -- ── P10: System program is duplicate (register-computed address) ──────
   guard rejects_system_program_duplicate fuel 74 error E_SYSTEM_PROGRAM_IS_DUPLICATE
+    proof phased
+    phases
+      phase p10_reuse_prefix 47
+      phase p10_chunk_match 12
+      phase p10_cpi_setup 11
+      phase p10_dup_exit 4
     hyps
       "(sysDup : Nat)"
       "(h_sdup : readU8 mem ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 47).regs.r9) = sysDup)"
@@ -170,6 +176,13 @@ qedguards RegisterMarket where
 
   -- ── P11: Invalid system program pubkey (stack vs r9 chunks) ───────────
   guard rejects_invalid_system_program_pubkey fuel 86 error E_INVALID_SYSTEM_PROGRAM_PUBKEY
+    proof phased
+    phases
+      phase p11_reuse_prefix 47
+      phase p11_chunk_match 12
+      phase p11_cpi_setup 11
+      phase p11_dup_pass 2
+      phase p11_pubkey_compare 14
     hyps
       "(acct_c0 acct_c1 acct_c2 acct_c3 : Nat)"
       "(sys_c0 sys_c1 sys_c2 sys_c3 : Nat)"
@@ -195,6 +208,15 @@ qedguards RegisterMarket where
 
   -- ── P12: Rent sysvar is duplicate (r9 at step 92) ────────────────────
   guard rejects_rent_sysvar_duplicate fuel 96 error E_RENT_SYSVAR_IS_DUPLICATE
+    proof phased
+    phases
+      phase p12_reuse_prefix 47
+      phase p12_chunk_match 12
+      phase p12_cpi_setup 11
+      phase p12_sys_dup_pass 2
+      phase p12_sys_pubkey_match 12
+      phase p12_r9_advance 8
+      phase p12_rent_dup_exit 4
     hyps
       "(rentDup : Nat)"
       "(h_rdup : readU8 mem ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9) = rentDup)"
@@ -206,6 +228,16 @@ qedguards RegisterMarket where
 
   -- ── P13: Invalid rent sysvar pubkey (r9 chunks vs known pubkey) ───────
   guard rejects_invalid_rent_sysvar_pubkey fuel 108 error E_INVALID_RENT_SYSVAR_PUBKEY
+    proof phased
+    phases
+      phase p13_reuse_prefix 47
+      phase p13_chunk_match 12
+      phase p13_cpi_setup 11
+      phase p13_sys_dup_pass 2
+      phase p13_sys_pubkey_match 12
+      phase p13_r9_advance 8
+      phase p13_rent_dup_pass 2
+      phase p13_rent_pubkey_compare 14
     hyps
       "(rent_c0 rent_c1 rent_c2 rent_c3 : Nat)"
       "(h_rent_c0 : readU64 mem ((executeFn progAt (initState2 inputAddr insnAddr mem 24) 92).regs.r9 + 8) = rent_c0)"
