@@ -1,15 +1,15 @@
-import QEDGen.Solana.CodeGen
+import QEDGen.Solana.CommandBuilders
 /-!
-# CodeGen builder unit tests
+# CommandBuilders unit tests
 
-Run: `cd lean_solana && lake build && lake env lean test_codegen.lean`
+Run: `cd lean_solana && lake build && lake env lean test_command_builders.lean`
 
 Tests verify that each builder produces correct strings by checking
 against expected output. Since these strings are consumed by
 `runParserCategory`, correctness here means "parses as valid Lean".
 -/
 
-open QEDGen.Solana.CodeGen
+open QEDGen.Solana.CommandBuilders
 
 -- ============================================================================
 -- safeName

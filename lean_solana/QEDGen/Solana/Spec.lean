@@ -1,5 +1,5 @@
 import QEDGen.Solana.Account
-import QEDGen.Solana.CodeGen
+import QEDGen.Solana.CommandBuilders
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.State
 import QEDGen.Solana.Valid
@@ -137,10 +137,10 @@ private def parseFlag (flag : String) : Option (Bool × Bool) :=
 -- Elaborator
 -- ============================================================================
 
--- Use CodeGen builders for safe string construction
-open QEDGen.Solana.CodeGen in
+-- Use CommandBuilders for safe string construction
+open QEDGen.Solana.CommandBuilders in
 private def quoteName := safeName
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 private def mapDslType := mapType
 
 /-- Validate that `s.FIELD` references in a string expression correspond to
@@ -160,7 +160,7 @@ private def validateFieldRefs (expr : String) (fields : Array (String × String)
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 @[command_elab qedspecCmd]
 def elabQedspec : CommandElab := fun stx => do
   -- Extract pieces from the syntax tree

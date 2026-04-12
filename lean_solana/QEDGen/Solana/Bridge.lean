@@ -1,4 +1,4 @@
-import QEDGen.Solana.CodeGen
+import QEDGen.Solana.CommandBuilders
 import QEDGen.Solana.Spec
 import QEDGen.Solana.SBPF
 import Lean.Elab.Command
@@ -51,10 +51,10 @@ syntax (name := qedbridgeCmd)
 -- Helpers
 -- ============================================================================
 
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 private def quoteName := safeName
 
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 private def mapDslType := mapType
 
 /-- Map DSL types to (encode read fn, decode fn). -/
@@ -72,7 +72,7 @@ private def typeReadFns (t : String) : String × String :=
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 @[command_elab qedbridgeCmd]
 def elabQedbridge : CommandElab := fun stx => do
   let specNameStx := stx[1]

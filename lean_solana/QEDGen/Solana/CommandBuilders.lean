@@ -1,5 +1,5 @@
 /-!
-# Code Generation Helpers
+# Command Builders
 
 Typed builder functions for generating Lean 4 command strings.
 Each builder takes structured inputs and handles keyword quoting,
@@ -17,7 +17,7 @@ string construction into tested, single-purpose functions.
 - Builders never validate semantics — that stays in the elaborators
 -/
 
-namespace QEDGen.Solana.CodeGen
+namespace QEDGen.Solana.CommandBuilders
 
 -- ============================================================================
 -- Core: identifier safety and type mapping
@@ -165,4 +165,4 @@ def mkTacticTheorem (name : String) (binders : Array String)
   let optLine := if options.isEmpty then "" else s!"{options}\n"
   s!"{optLine}theorem {safeName name}{binderStr} :\n    {conclusion} := by\n  {tactics}"
 
-end QEDGen.Solana.CodeGen
+end QEDGen.Solana.CommandBuilders

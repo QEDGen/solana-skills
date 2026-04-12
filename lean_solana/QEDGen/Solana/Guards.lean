@@ -1,4 +1,4 @@
-import QEDGen.Solana.CodeGen
+import QEDGen.Solana.CommandBuilders
 import QEDGen.Solana.SBPF
 import Lean.Elab.Command
 
@@ -245,7 +245,7 @@ private def buildFuelSum (fuels : Array Nat) : String :=
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
-open QEDGen.Solana.CodeGen in
+open QEDGen.Solana.CommandBuilders in
 @[command_elab qedguardsCmd]
 def elabQedguards : CommandElab := fun stx => do
   let nameStx := stx[1]
