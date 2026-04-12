@@ -4,6 +4,7 @@ mod asm2lean;
 mod check;
 mod ci;
 mod consolidate;
+mod explain;
 mod init;
 mod project;
 mod spec;
@@ -83,11 +84,19 @@ enum Commands {
         escalate: bool,
     },
 
-    /// Generate a draft SPEC.md from an Anchor IDL
+    /// Generate SPEC.md from an Anchor IDL or a Spec.lean file
     Spec {
         /// Path to Anchor IDL JSON file
+        #[arg(long, required_unless_present = "from_lean")]
+        idl: Option<PathBuf>,
+
+        /// Path to Spec.lean file (alternative to --idl)
+        #[arg(long, conflicts_with = "idl")]
+        from_lean: Option<PathBuf>,
+
+        /// Path to proofs directory (for --from-lean status checking)
         #[arg(long)]
-        idl: PathBuf,
+        proofs: Option<PathBuf>,
 
         /// Directory to write SPEC.md (default: ./formal_verification)
         #[arg(long, default_value = "./formal_verification")]
@@ -167,6 +176,21 @@ enum Commands {
         /// Path to the proofs directory
         #[arg(long, default_value = "./formal_verification/Proofs")]
         proofs: PathBuf,
+    },
+
+    /// Generate a Markdown verification report with intent descriptions
+    Explain {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Path to the proofs directory
+        #[arg(long, default_value = "./formal_verification")]
+        proofs: PathBuf,
+
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     /// Generate a GitHub Actions workflow for formal verification CI
@@ -350,8 +374,23 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Spec { idl, output_dir } => {
-            spec::generate_spec(&idl, &output_dir)?;
+        Commands::Spec {
+            idl,
+            from_lean,
+            proofs,
+            output_dir,
+        } => {
+            if let Some(lean_path) = from_lean {
+                spec::generate_spec_from_lean(
+                    &lean_path,
+                    proofs.as_deref(),
+                    &output_dir,
+                )?;
+            } else if let Some(idl_path) = idl {
+                spec::generate_spec(&idl_path, &output_dir)?;
+            } else {
+                anyhow::bail!("Either --idl or --from-lean must be specified");
+            }
         }
 
         Commands::Consolidate {
@@ -397,6 +436,20 @@ async fn main() -> Result<()> {
             let all_proven = results.iter().all(|r| r.status == check::Status::Proven);
             if !all_proven {
                 std::process::exit(1);
+            }
+        }
+
+        Commands::Explain {
+            spec,
+            proofs,
+            output,
+        } => {
+            let report = explain::explain(&spec, &proofs)?;
+            if let Some(ref path) = output {
+                std::fs::write(path, &report)?;
+                eprintln!("Wrote verification report to {}", path.display());
+            } else {
+                print!("{}", report);
             }
         }
 

@@ -25,18 +25,21 @@ qedspec Escrow where
     escrow_token_account : Pubkey
 
   operation initialize
+    doc: "Initializer deposits tokens and opens the escrow"
     who: initializer
     when: Uninitialized
     then: Open
     calls: TOKEN_PROGRAM_ID DISC_TRANSFER(initializer_deposit writable, escrow_token writable, initializer signer)
 
   operation exchange
+    doc: "Taker completes the trade by sending their tokens"
     who: taker
     when: Open
     then: Closed
     calls: TOKEN_PROGRAM_ID DISC_TRANSFER(taker_deposit writable, initializer_receive writable, taker signer)
 
   operation cancel
+    doc: "Initializer reclaims their deposit and closes the escrow"
     who: initializer
     when: Open
     then: Closed
