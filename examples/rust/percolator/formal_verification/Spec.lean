@@ -24,8 +24,8 @@ qedspec Percolator where
     C_tot : U64
     I : U64
 
-  -- Deposit: user adds capital, V and C_tot increase by same amount
   operation deposit
+    doc: "User adds capital — V and C_tot increase by same amount"
     who: authority
     when: Active
     then: Active
@@ -33,17 +33,16 @@ qedspec Percolator where
     guard: "s.V + amount ≤ 10000000000000000"
     effect: V add amount, C_tot add amount
 
-  -- Withdraw: user removes capital, V and C_tot decrease by same amount
-  -- Auto-generates: amount ≤ s.V ∧ amount ≤ s.C_tot
   operation withdraw
+    doc: "User removes capital — V and C_tot decrease by same amount"
     who: authority
     when: Active
     then: Active
     takes: amount U64
     effect: V sub amount, C_tot sub amount
 
-  -- Top up insurance: external deposit into insurance fund
   operation top_up_insurance
+    doc: "External deposit into insurance fund"
     who: authority
     when: Active
     then: Active
@@ -51,18 +50,20 @@ qedspec Percolator where
     guard: "s.V + amount ≤ 10000000000000000"
     effect: V add amount, I add amount
 
-  -- ADL lifecycle transitions (no state field mutations)
   operation trigger_adl
+    doc: "Begin auto-deleveraging cycle"
     who: authority
     when: Active
     then: Draining
 
   operation complete_drain
+    doc: "Complete the drain phase of ADL"
     who: authority
     when: Draining
     then: Resetting
 
   operation reset
+    doc: "Reset risk engine after ADL cycle"
     who: authority
     when: Resetting
     then: Active
