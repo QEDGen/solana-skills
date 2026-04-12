@@ -130,6 +130,23 @@ open QEDGen.Solana.CommandBuilders
   == "theorem trivial :\n    True := sorry"
 
 -- ============================================================================
+-- mkDocSorryTheorem
+-- ============================================================================
+
+#guard mkDocSorryTheorem "withdraw.access_control"
+    #["(s : State)", "(p : Pubkey)", "(h : withdrawTransition s p ≠ none)"]
+    "p = s.owner"
+    "Only the owner can withdraw funds."
+  == "/-- Only the owner can withdraw funds. -/\ntheorem withdraw.access_control (s : State) (p : Pubkey) (h : withdrawTransition s p ≠ none) :\n    p = s.owner := sorry"
+
+-- ============================================================================
+-- mkModuleDoc
+-- ============================================================================
+
+#guard mkModuleDoc "## Assumptions\n- Balance tracked for U64 bounds"
+  == "/-!\n## Assumptions\n- Balance tracked for U64 bounds\n-/"
+
+-- ============================================================================
 -- mkTacticTheorem
 -- ============================================================================
 

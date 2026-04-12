@@ -405,3 +405,23 @@ qedspec BadProp where
 
   property bounded "s.balnce ≤ U64_MAX"
     preserved_by: deposit
+
+-- ============================================================================
+-- 9. doc: clause — intent annotations
+-- ============================================================================
+
+qedspec Documented where
+  state
+    owner : Pubkey
+    balance : U64
+
+  operation withdraw
+    doc: "Only the vault owner can withdraw funds"
+    who: owner
+    takes: amount U64
+    guard: "amount ≤ s.balance"
+    effect: balance sub amount
+
+-- Verify the theorems exist and have correct types
+#check @Documented.withdraw.access_control
+#check @Documented.withdraw.u64_bounds

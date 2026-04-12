@@ -7,3 +7,4 @@ import QEDGen.Solana.SBPF
 import QEDGen.Solana.Spec
 import QEDGen.Solana.Bridge
 import QEDGen.Solana.Guards
+import QEDGen.Solana.Verify

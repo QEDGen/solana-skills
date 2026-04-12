@@ -156,6 +156,20 @@ def mkSorryTheorem (name : String) (binders : Array String)
   let binderStr := binders.foldl (fun acc b => acc ++ s!" {b}") ""
   s!"theorem {safeName name}{binderStr} :\n    {conclusion} := sorry"
 
+/-- Build a sorry theorem with a preceding `/-- ... -/` doc comment.
+    `doc` is the intent gloss (e.g., "Only the owner can withdraw").
+    The doc comment is emitted as a separate command before the theorem
+    so `runParserCategory` can parse each independently. -/
+def mkDocSorryTheorem (name : String) (binders : Array String)
+    (conclusion : String) (doc : String) : String :=
+  let binderStr := binders.foldl (fun acc b => acc ++ s!" {b}") ""
+  s!"/-- {doc} -/\ntheorem {safeName name}{binderStr} :\n    {conclusion} := sorry"
+
+/-- Build a module doc comment block: `/-! ... -/`.
+    Used for assumption summaries at the top of generated namespaces. -/
+def mkModuleDoc (content : String) : String :=
+  s!"/-!\n{content}\n-/"
+
 /-- Build a theorem with a tactic proof body.
     Like `mkSorryTheorem` but with `by\n  tactics` instead of `sorry`. -/
 def mkTacticTheorem (name : String) (binders : Array String)

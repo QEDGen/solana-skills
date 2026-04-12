@@ -83,9 +83,11 @@ syntax specEffectAssign := rawIdent rawIdent rawIdent
 syntax specLet := rawIdent str
 
 /-- Operation block (rawIdent allows Lean keywords like `initialize`, `open`).
-    `who:`, `when:`, `then:` are optional — omit for signer-less or lifecycle-less operations. -/
+    `who:`, `when:`, `then:` are optional — omit for signer-less or lifecycle-less operations.
+    `doc:` provides a human-readable intent description attached to generated theorems. -/
 syntax specOp :=
   "operation " rawIdent
+    ("doc: " str)?
     ("who: " rawIdent)?
     ("when: " rawIdent)?
     ("then: " rawIdent)?
@@ -199,15 +201,15 @@ def elabQedspec : CommandElab := fun stx => do
   let u64Fields := fieldData.filter (fun (_, ft) => ft == "U64")
 
   -- Collect lifecycle states from when/then across all operations
-  -- (op[3] = when?, op[4] = then? — both optional)
+  -- (op[2] = doc?, op[3] = who?, op[4] = when?, op[5] = then?)
   let mut lifecycleStates : Array String := #[]
   for op in opsStx.getArgs do
-    let whenStx := op[3]
+    let whenStx := op[4]
     if !whenStx.isMissing && whenStx.getNumArgs > 0 then
       let preStatus := whenStx[1].getId.toString (escape := false)
       if !lifecycleStates.contains preStatus then
         lifecycleStates := lifecycleStates.push preStatus
-    let thenStx := op[4]
+    let thenStx := op[5]
     if !thenStx.isMissing && thenStx.getNumArgs > 0 then
       let postStatus := thenStx[1].getId.toString (escape := false)
       if !lifecycleStates.contains postStatus then
@@ -239,30 +241,47 @@ def elabQedspec : CommandElab := fun stx => do
   -- Track per-operation parameters so property preservation theorems can reference them
   let mut opParamsMap : Array (String × Array (String × String)) := #[]
 
+  -- Collect assumptions for the module doc block
+  let mut assumptions : Array String := #[]
+  if u64Fields.size > 0 then
+    let u64Names := ", ".intercalate (u64Fields.map (·.1)).toList
+    assumptions := assumptions.push s!"**U64 bounds tracking**: Fields [{u64Names}] are tracked for overflow/underflow safety."
+  if hasLifecycle then
+    let states := ", ".intercalate lifecycleStates.toList
+    assumptions := assumptions.push s!"**Lifecycle states**: {states}."
+
   for op in opsStx.getArgs do
     let opNameRaw := op[1].getId.toString (escape := false)
     let opName := quoteName opNameRaw
     let transName := quoteName s!"{opNameRaw}Transition"
 
     -- ----------------------------------------------------------------
-    -- Parse optional who:/when:/then: clauses (op[2], op[3], op[4])
+    -- Parse optional doc: clause (op[2])
     -- ----------------------------------------------------------------
-    let whoStx := op[2]
+    let docStx := op[2]
+    let docStr := if !docStx.isMissing && docStx.getNumArgs > 0 then
+      docStx[1].isStrLit?.getD ""
+    else ""
+
+    -- ----------------------------------------------------------------
+    -- Parse optional who:/when:/then: clauses (op[3], op[4], op[5])
+    -- ----------------------------------------------------------------
+    let whoStx := op[3]
     let hasSigner := !whoStx.isMissing && whoStx.getNumArgs > 0
     let signer := if hasSigner then quoteName (whoStx[1].getId.toString (escape := false)) else ""
 
-    let whenStx := op[3]
+    let whenStx := op[4]
     let hasWhen := !whenStx.isMissing && whenStx.getNumArgs > 0
     let preStatus := if hasWhen then whenStx[1].getId.toString (escape := false) else ""
 
-    let thenStx := op[4]
+    let thenStx := op[5]
     let hasThen := !thenStx.isMissing && thenStx.getNumArgs > 0
     let postStatus := if hasThen then thenStx[1].getId.toString (escape := false) else ""
 
     -- ----------------------------------------------------------------
-    -- Parse optional takes: clause (op[5])
+    -- Parse optional takes: clause (op[6])
     -- ----------------------------------------------------------------
-    let takesStx := op[5]
+    let takesStx := op[6]
     let mut params : Array (String × String) := #[]
     if !takesStx.isMissing && takesStx.getNumArgs > 0 then
       let paramsSepStx := takesStx[1]  -- specParam,* separator node
@@ -281,9 +300,9 @@ def elabQedspec : CommandElab := fun stx => do
     let paramArgs := mkParamArgs params
 
     -- ----------------------------------------------------------------
-    -- Parse optional let: clause (op[6])
+    -- Parse optional let: clause (op[7])
     -- ----------------------------------------------------------------
-    let letStx := op[6]
+    let letStx := op[7]
     let mut letBindings : Array (String × String) := #[]
     if !letStx.isMissing && letStx.getNumArgs > 0 then
       let letsSepStx := letStx[1]  -- specLet,* separator node
@@ -295,9 +314,9 @@ def elabQedspec : CommandElab := fun stx => do
           letBindings := letBindings.push (letName, letExpr)
 
     -- ----------------------------------------------------------------
-    -- Parse optional guard: clause (op[7])
+    -- Parse optional guard: clause (op[8])
     -- ----------------------------------------------------------------
-    let guardStx := op[7]
+    let guardStx := op[8]
     let guardStr := if !guardStx.isMissing && guardStx.getNumArgs > 0 then
       guardStx[1].isStrLit?.getD ""
     else ""
@@ -307,10 +326,10 @@ def elabQedspec : CommandElab := fun stx => do
       validateFieldRefs guardStr fieldData s!"guard in operation '{opNameRaw}'"
 
     -- ----------------------------------------------------------------
-    -- Parse optional effect: clause (op[8])
+    -- Parse optional effect: clause (op[9])
     -- Structured: `field add param` or `field sub param`
     -- ----------------------------------------------------------------
-    let effectStx := op[8]
+    let effectStx := op[9]
     let mut effectAssigns : Array String := #[]
     let mut autoGuards : Array String := #[]
 
@@ -371,6 +390,14 @@ def elabQedspec : CommandElab := fun stx => do
     let hasCond := condParts.size > 0
     let ifCond := mkConj condParts
 
+    -- Collect per-operation assumptions
+    if hasSigner then
+      assumptions := assumptions.push s!"**Signer**: `{opNameRaw}` checks `signer = s.{signer}` (from `who: {signer}`)."
+    if hasWhen then
+      assumptions := assumptions.push s!"**Lifecycle**: `{opNameRaw}` requires `s.status = .{preStatus}` → `.{postStatus}`."
+    for g in autoGuards do
+      assumptions := assumptions.push s!"**Auto-guard**: `{opNameRaw}` has auto-generated underflow guard `{g}` from `effect: sub`."
+
     -- ----------------------------------------------------------------
     -- Build result state
     -- ----------------------------------------------------------------
@@ -407,7 +434,10 @@ def elabQedspec : CommandElab := fun stx => do
       for (pn, pt) in params do
         acBinders := acBinders.push (mkBinder pn (mapType pt))
       acBinders := acBinders.push s!"(h : {transName} s p{paramArgs} ≠ none)"
-      cmds := cmds.push (mkSorryTheorem s!"{opName}.access_control" acBinders s!"p = s.{signer}")
+      let acDoc := if docStr.isEmpty then
+        s!"Only {signer} can call {opNameRaw}. If {opNameRaw} succeeds, the signer must equal s.{signer}."
+      else s!"{docStr} — Formally: if {opNameRaw} succeeds, signer = s.{signer}."
+      cmds := cmds.push (mkDocSorryTheorem s!"{opName}.access_control" acBinders s!"p = s.{signer}" acDoc)
 
     -- ----------------------------------------------------------------
     -- State machine theorem (only when when:/then: specified)
@@ -420,14 +450,15 @@ def elabQedspec : CommandElab := fun stx => do
       for (pn, pt) in params do
         smBinders := smBinders.push (mkBinder pn (mapType pt))
       smBinders := smBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
-      cmds := cmds.push (mkSorryTheorem s!"{opName}.state_machine" smBinders (mkConj smParts))
+      let smDoc := s!"{opNameRaw} transitions from {preStatus} to {postStatus}."
+      cmds := cmds.push (mkDocSorryTheorem s!"{opName}.state_machine" smBinders (mkConj smParts) smDoc)
 
     -- ----------------------------------------------------------------
     -- CPI correctness theorem (if calls: clause present)
-    -- op[9]: calls clause (after operation name[1] who?[2] when?[3] then?[4]
-    --         takes?[5] let?[6] guard?[7] effect?[8])
+    -- op[10]: calls clause (after operation name[1] doc?[2] who?[3] when?[4]
+    --          then?[5] takes?[6] let?[7] guard?[8] effect?[9])
     -- ----------------------------------------------------------------
-    let cpiStx := op[9]
+    let cpiStx := op[10]
     if !cpiStx.isMissing && cpiStx.getNumArgs > 0 then
       -- cpiStx layout: "calls:" programId discriminator "(" specCpiAcct,* ")"
       let cpiProgramId := cpiStx[1].getId.toString (escape := false)
@@ -477,7 +508,8 @@ def elabQedspec : CommandElab := fun stx => do
         cpiParts := cpiParts.push s!"accountAt cpi {i} ctx.{acct} {isSigner} {isWritable}"
       cpiParts := cpiParts.push s!"hasDiscriminator cpi {cpiDiscriminator}"
       let cpiConc := s!"let cpi := {buildCpiName} ctx\n    " ++ mkConj cpiParts
-      cmds := cmds.push (mkSorryTheorem s!"{opName}.cpi_correct" #[s!"(ctx : {cpiCtxName})"] cpiConc)
+      let cpiDoc := s!"{opNameRaw} CPI targets {cpiProgramId} with correct accounts and discriminator."
+      cmds := cmds.push (mkDocSorryTheorem s!"{opName}.cpi_correct" #[s!"(ctx : {cpiCtxName})"] cpiConc cpiDoc)
 
     -- ----------------------------------------------------------------
     -- Arithmetic bounds preservation (for operations with U64 fields)
@@ -490,11 +522,14 @@ def elabQedspec : CommandElab := fun stx => do
         boundsBinders := boundsBinders.push (mkBinder pn (mapType pt))
       boundsBinders := boundsBinders.push s!"(h_valid : {preConj})"
       boundsBinders := boundsBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
-      cmds := cmds.push (mkSorryTheorem s!"{opName}.u64_bounds" boundsBinders postConj)
+      let u64FieldNames := ", ".intercalate (u64Fields.map (·.1)).toList
+      let boundsDoc := s!"All U64 fields ({u64FieldNames}) remain within bounds after {opNameRaw}."
+      cmds := cmds.push (mkDocSorryTheorem s!"{opName}.u64_bounds" boundsBinders postConj boundsDoc)
 
   for inv in invsStx.getArgs do
     let invName := inv[1].getId.toString (escape := false)
-    cmds := cmds.push (mkSorryTheorem invName #[] "True")
+    let invDoc := s!"Invariant: {invName}."
+    cmds := cmds.push (mkDocSorryTheorem invName #[] "True" invDoc)
 
   -- Typed property declarations with preservation theorems
   -- specProperty layout: "property" name predicate-string "preserved_by:" op,*
@@ -530,7 +565,13 @@ def elabQedspec : CommandElab := fun stx => do
           pvBinders := pvBinders.push (mkBinder pn (mapType pt))
         pvBinders := pvBinders.push s!"(h_inv : {propName} s)"
         pvBinders := pvBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
-        cmds := cmds.push (mkSorryTheorem s!"{opName}.preserves_{propName}" pvBinders s!"{propName} s'")
+        let pvDoc := s!"{opNameRaw} preserves {propName}."
+        cmds := cmds.push (mkDocSorryTheorem s!"{opName}.preserves_{propName}" pvBinders s!"{propName} s'" pvDoc)
+
+  -- Emit assumptions summary as module doc
+  if assumptions.size > 0 then
+    let assumptionBody := assumptions.foldl (fun acc a => acc ++ s!"- {a}\n") ""
+    cmds := cmds.push (mkModuleDoc s!"## Assumptions made by qedspec\n\n{assumptionBody}")
 
   cmds := cmds.push (mkEnd s!"{name}")
 
