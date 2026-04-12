@@ -1,4 +1,5 @@
 import QEDGen.Solana.Account
+import QEDGen.Solana.CodeGen
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.State
 import QEDGen.Solana.Valid
@@ -136,29 +137,11 @@ private def parseFlag (flag : String) : Option (Bool × Bool) :=
 -- Elaborator
 -- ============================================================================
 
--- Lean keywords that need «» quoting when used as identifiers
-private def leanKeywords : List String :=
-  ["initialize", "open", "end", "where", "if", "then", "else", "do",
-   "let", "def", "theorem", "structure", "inductive", "namespace",
-   "section", "import", "return", "match", "with", "fun", "have",
-   "show", "by", "from", "in", "at", "class", "instance", "deriving",
-   "variable", "axiom", "opaque", "abbrev", "noncomputable", "partial",
-   "unsafe", "private", "protected", "mutual", "set_option", "attribute"]
-
-/-- Quote a name with «» if it's a Lean keyword -/
-private def quoteName (n : String) : String :=
-  if leanKeywords.contains n then s!"«{n}»" else n
-
-/-- Map DSL types to Lean types for omega compatibility.
-    U64/U128/U8 → Nat (so omega works directly), I128 → Int.
-    Other types (Pubkey, custom) pass through unchanged. -/
-private def mapDslType (t : String) : String :=
-  match t with
-  | "U64"  => "Nat"
-  | "U128" => "Nat"
-  | "I128" => "Int"
-  | "U8"   => "Nat"
-  | _      => t
+-- Use CodeGen builders for safe string construction
+open QEDGen.Solana.CodeGen in
+private def quoteName := safeName
+open QEDGen.Solana.CodeGen in
+private def mapDslType := mapType
 
 /-- Validate that `s.FIELD` references in a string expression correspond to
     declared state fields. Catches typos at elaboration time. -/
@@ -177,6 +160,7 @@ private def validateFieldRefs (expr : String) (fields : Array (String × String)
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
+open QEDGen.Solana.CodeGen in
 @[command_elab qedspecCmd]
 def elabQedspec : CommandElab := fun stx => do
   -- Extract pieces from the syntax tree
@@ -231,34 +215,26 @@ def elabQedspec : CommandElab := fun stx => do
 
   let hasLifecycle := lifecycleStates.size > 0
 
-  -- Build state structure field source (map DSL types → Lean types for omega)
-  let mut structFields := ""
-  for (fn_, ft) in fieldData do
-    let leanType := mapDslType ft
-    structFields := structFields ++ s!"  {fn_} : {leanType}\n"
+  -- Build state field list (add lifecycle status if any when/then clauses exist)
+  let mut stateFields := fieldData
   if hasLifecycle then
-    structFields := structFields ++ s!"  status : Status\n"
+    stateFields := stateFields.push ("status", "Status")
 
   -- Assemble individual command strings to parse and elaborate one at a time
   -- (Lean's runParserCategory `command parses exactly ONE command)
   let mut cmds : Array String := #[]
-  cmds := cmds.push s!"namespace {name}"
-  cmds := cmds.push s!"open QEDGen.Solana"
+  cmds := cmds.push (mkNamespace s!"{name}")
+  cmds := cmds.push (mkOpen "QEDGen.Solana")
 
   -- Generate Status inductive from when/then values
   if hasLifecycle then
-    let variants := lifecycleStates.foldl (fun acc s => acc ++ s!" | {s}") ""
-    cmds := cmds.push s!"inductive Status where{variants}\n  deriving Repr, DecidableEq, BEq"
+    cmds := cmds.push (mkInductive "Status" lifecycleStates)
 
   -- Generate account structures (before State, since State references them)
   for (acctName, acctFields) in accountData do
-    let mut acctStructFields := ""
-    for (fn_, ft) in acctFields do
-      let leanType := mapDslType ft
-      acctStructFields := acctStructFields ++ s!"  {fn_} : {leanType}\n"
-    cmds := cmds.push s!"structure {acctName} where\n{acctStructFields}  deriving Repr, DecidableEq, BEq"
+    cmds := cmds.push (mkStructure acctName acctFields)
 
-  cmds := cmds.push s!"structure State where\n{structFields}  deriving Repr, DecidableEq, BEq"
+  cmds := cmds.push (mkStructure "State" stateFields)
 
   -- Track per-operation parameters so property preservation theorems can reference them
   let mut opParamsMap : Array (String × Array (String × String)) := #[]
@@ -301,9 +277,8 @@ def elabQedspec : CommandElab := fun stx => do
     opParamsMap := opParamsMap.push (opNameRaw, params)
 
     -- Build param strings for function signatures and theorem calls
-    -- Map DSL types (U64 etc.) to Lean types (Nat etc.) for omega compatibility
-    let paramSig := params.foldl (fun acc (pn, pt) => acc ++ s!" ({pn} : {mapDslType pt})") ""
-    let paramArgs := params.foldl (fun acc (pn, _) => acc ++ s!" {pn}") ""
+    let paramSig := mkParamSig params
+    let paramArgs := mkParamArgs params
 
     -- ----------------------------------------------------------------
     -- Parse optional let: clause (op[6])
@@ -394,8 +369,7 @@ def elabQedspec : CommandElab := fun stx => do
       condParts := condParts.push guardStr
 
     let hasCond := condParts.size > 0
-    let ifCond := condParts.foldl (fun acc p =>
-      if acc.isEmpty then p else acc ++ s!" ∧ {p}") ""
+    let ifCond := mkConj condParts
 
     -- ----------------------------------------------------------------
     -- Build result state
@@ -406,13 +380,7 @@ def elabQedspec : CommandElab := fun stx => do
     if hasThen then
       withParts := withParts.push s!"status := .{postStatus}"
 
-    let thenBody :=
-      if withParts.isEmpty then
-        "some s"
-      else
-        let assigns := withParts.foldl (fun acc a =>
-          if acc.isEmpty then a else acc ++ s!", {a}") ""
-        s!"some \{ s with {assigns} }"
+    let thenBody := mkSomeUpdate "s" withParts
 
     -- ----------------------------------------------------------------
     -- Generate transition function
@@ -435,9 +403,11 @@ def elabQedspec : CommandElab := fun stx => do
     -- Access control theorem (only when who: is specified)
     -- ----------------------------------------------------------------
     if hasSigner then
-      cmds := cmds.push (s!"theorem {opName}.access_control (s : State) (p : Pubkey){paramSig}\n" ++
-        s!"    (h : {transName} s p{paramArgs} ≠ none) :\n" ++
-        s!"    p = s.{signer} := sorry")
+      let mut acBinders : Array String := #["(s : State)", "(p : Pubkey)"]
+      for (pn, pt) in params do
+        acBinders := acBinders.push (mkBinder pn (mapType pt))
+      acBinders := acBinders.push s!"(h : {transName} s p{paramArgs} ≠ none)"
+      cmds := cmds.push (mkSorryTheorem s!"{opName}.access_control" acBinders s!"p = s.{signer}")
 
     -- ----------------------------------------------------------------
     -- State machine theorem (only when when:/then: specified)
@@ -446,11 +416,11 @@ def elabQedspec : CommandElab := fun stx => do
       let mut smParts : Array String := #[]
       if hasWhen then smParts := smParts.push s!"s.status = .{preStatus}"
       if hasThen then smParts := smParts.push s!"s'.status = .{postStatus}"
-      let smConc := smParts.foldl (fun acc p =>
-        if acc.isEmpty then p else acc ++ s!" ∧ {p}") ""
-      cmds := cmds.push (s!"theorem {opName}.state_machine (s s' : State) (p : Pubkey){paramSig}\n" ++
-        s!"    (h : {transName} s p{paramArgs} = some s') :\n" ++
-        s!"    {smConc} := sorry")
+      let mut smBinders : Array String := #["(s s' : State)", "(p : Pubkey)"]
+      for (pn, pt) in params do
+        smBinders := smBinders.push (mkBinder pn (mapType pt))
+      smBinders := smBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
+      cmds := cmds.push (mkSorryTheorem s!"{opName}.state_machine" smBinders (mkConj smParts))
 
     -- ----------------------------------------------------------------
     -- CPI correctness theorem (if calls: clause present)
@@ -483,10 +453,8 @@ def elabQedspec : CommandElab := fun stx => do
       let buildCpiName := quoteName s!"{opNameRaw}_build_cpi"
 
       -- Generate CPI context structure
-      let mut ctxFields := ""
-      for (acct, _, _) in cpiAccounts do
-        ctxFields := ctxFields ++ s!"  {acct} : Pubkey\n"
-      cmds := cmds.push s!"structure {cpiCtxName} where\n{ctxFields}  deriving Repr, DecidableEq, BEq"
+      let ctxFieldPairs := cpiAccounts.map fun (acct, _, _) => (acct, "Pubkey")
+      cmds := cmds.push (mkStructure cpiCtxName ctxFieldPairs)
 
       -- Generate build_cpi function
       let mut accountsList := ""
@@ -503,42 +471,30 @@ def elabQedspec : CommandElab := fun stx => do
         s!"  , data := {cpiDiscriminator} }")
 
       -- Generate cpi_correct theorem
-      let mut conjuncts := s!"    targetsProgram cpi {cpiProgramId}"
+      let mut cpiParts : Array String := #[s!"targetsProgram cpi {cpiProgramId}"]
       for i in List.range cpiAccounts.size do
         let (acct, isSigner, isWritable) := cpiAccounts[i]!
-        conjuncts := conjuncts ++ s!" ∧\n    accountAt cpi {i} ctx.{acct} {isSigner} {isWritable}"
-      conjuncts := conjuncts ++ s!" ∧\n    hasDiscriminator cpi {cpiDiscriminator}"
-
-      cmds := cmds.push (
-        s!"theorem {opName}.cpi_correct (ctx : {cpiCtxName}) :\n" ++
-        s!"    let cpi := {buildCpiName} ctx\n" ++
-        conjuncts ++ " := sorry")
+        cpiParts := cpiParts.push s!"accountAt cpi {i} ctx.{acct} {isSigner} {isWritable}"
+      cpiParts := cpiParts.push s!"hasDiscriminator cpi {cpiDiscriminator}"
+      let cpiConc := s!"let cpi := {buildCpiName} ctx\n    " ++ mkConj cpiParts
+      cmds := cmds.push (mkSorryTheorem s!"{opName}.cpi_correct" #[s!"(ctx : {cpiCtxName})"] cpiConc)
 
     -- ----------------------------------------------------------------
     -- Arithmetic bounds preservation (for operations with U64 fields)
     -- ----------------------------------------------------------------
     if u64Fields.size > 0 then
-      let mut boundsConj := ""
-      for i in List.range u64Fields.size do
-        let (fn_, _) := u64Fields[i]!
-        if i > 0 then boundsConj := boundsConj ++ " ∧\n    "
-        boundsConj := boundsConj ++ s!"valid_u64 s'.{fn_}"
-
-      let mut preConj := ""
-      for i in List.range u64Fields.size do
-        let (fn_, _) := u64Fields[i]!
-        if i > 0 then preConj := preConj ++ " ∧ "
-        preConj := preConj ++ s!"valid_u64 s.{fn_}"
-
-      cmds := cmds.push (
-        s!"theorem {opName}.u64_bounds (s s' : State) (p : Pubkey){paramSig}\n" ++
-        s!"    (h_valid : {preConj})\n" ++
-        s!"    (h : {transName} s p{paramArgs} = some s') :\n" ++
-        s!"    {boundsConj} := sorry")
+      let preConj := mkConj (u64Fields.map fun (fn_, _) => s!"valid_u64 s.{fn_}")
+      let postConj := mkConj (u64Fields.map fun (fn_, _) => s!"valid_u64 s'.{fn_}")
+      let mut boundsBinders : Array String := #["(s s' : State)", "(p : Pubkey)"]
+      for (pn, pt) in params do
+        boundsBinders := boundsBinders.push (mkBinder pn (mapType pt))
+      boundsBinders := boundsBinders.push s!"(h_valid : {preConj})"
+      boundsBinders := boundsBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
+      cmds := cmds.push (mkSorryTheorem s!"{opName}.u64_bounds" boundsBinders postConj)
 
   for inv in invsStx.getArgs do
     let invName := inv[1].getId.toString (escape := false)
-    cmds := cmds.push s!"theorem {invName} : True := sorry"
+    cmds := cmds.push (mkSorryTheorem invName #[] "True")
 
   -- Typed property declarations with preservation theorems
   -- specProperty layout: "property" name predicate-string "preserved_by:" op,*
@@ -566,16 +522,17 @@ def elabQedspec : CommandElab := fun stx => do
         let opParams := match opParamsMap.find? (fun (n, _) => n == opNameRaw) with
           | some (_, ps) => ps
           | none => #[]
-        let paramSig := opParams.foldl (fun acc (pn, pt) => acc ++ s!" ({pn} : {mapDslType pt})") ""
-        let paramArgs := opParams.foldl (fun acc (pn, _) => acc ++ s!" {pn}") ""
+        let paramSig := mkParamSig opParams
+        let paramArgs := mkParamArgs opParams
 
-        cmds := cmds.push (
-          s!"theorem {opName}.preserves_{propName} (s s' : State) (p : Pubkey){paramSig}\n" ++
-          s!"    (h_inv : {propName} s)\n" ++
-          s!"    (h : {transName} s p{paramArgs} = some s') :\n" ++
-          s!"    {propName} s' := sorry")
+        let mut pvBinders : Array String := #["(s s' : State)", "(p : Pubkey)"]
+        for (pn, pt) in opParams do
+          pvBinders := pvBinders.push (mkBinder pn (mapType pt))
+        pvBinders := pvBinders.push s!"(h_inv : {propName} s)"
+        pvBinders := pvBinders.push s!"(h : {transName} s p{paramArgs} = some s')"
+        cmds := cmds.push (mkSorryTheorem s!"{opName}.preserves_{propName}" pvBinders s!"{propName} s'")
 
-  cmds := cmds.push s!"end {name}"
+  cmds := cmds.push (mkEnd s!"{name}")
 
   -- Parse and elaborate each command
   let env ← getEnv

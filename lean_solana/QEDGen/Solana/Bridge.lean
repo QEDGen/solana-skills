@@ -1,3 +1,4 @@
+import QEDGen.Solana.CodeGen
 import QEDGen.Solana.Spec
 import QEDGen.Solana.SBPF
 import Lean.Elab.Command
@@ -50,25 +51,11 @@ syntax (name := qedbridgeCmd)
 -- Helpers
 -- ============================================================================
 
-private def leanKeywords : List String :=
-  ["initialize", "open", "end", "where", "if", "then", "else", "do",
-   "let", "def", "theorem", "structure", "inductive", "namespace",
-   "section", "import", "return", "match", "with", "fun", "have",
-   "show", "by", "from", "in", "at", "class", "instance", "deriving",
-   "variable", "axiom", "opaque", "abbrev", "noncomputable", "partial",
-   "unsafe", "private", "protected", "mutual", "set_option", "attribute"]
+open QEDGen.Solana.CodeGen in
+private def quoteName := safeName
 
-private def quoteName (n : String) : String :=
-  if leanKeywords.contains n then s!"«{n}»" else n
-
-/-- Map DSL types to Lean types (same as Spec.lean) -/
-private def mapDslType (t : String) : String :=
-  match t with
-  | "U64"  => "Nat"
-  | "U128" => "Nat"
-  | "I128" => "Int"
-  | "U8"   => "Nat"
-  | _      => t
+open QEDGen.Solana.CodeGen in
+private def mapDslType := mapType
 
 /-- Map DSL types to (encode read fn, decode fn). -/
 private def typeReadFns (t : String) : String × String :=
@@ -85,6 +72,7 @@ private def typeReadFns (t : String) : String × String :=
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
+open QEDGen.Solana.CodeGen in
 @[command_elab qedbridgeCmd]
 def elabQedbridge : CommandElab := fun stx => do
   let specNameStx := stx[1]
@@ -168,26 +156,26 @@ def elabQedbridge : CommandElab := fun stx => do
   let mut cmds : Array String := #[]
   let nl := "\n"
 
-  cmds := cmds.push s!"namespace {specName}.Bridge"
-  cmds := cmds.push s!"open QEDGen.Solana"
-  cmds := cmds.push s!"open QEDGen.Solana.SBPF"
-  cmds := cmds.push s!"open QEDGen.Solana.SBPF.Memory"
+  cmds := cmds.push (mkNamespace s!"{specName}.Bridge")
+  cmds := cmds.push (mkOpen "QEDGen.Solana")
+  cmds := cmds.push (mkOpen "QEDGen.Solana.SBPF")
+  cmds := cmds.push (mkOpen "QEDGen.Solana.SBPF.Memory")
 
   -- 1. Offset constants
   for (fname, _, foffset) in fields do
-    let constName := quoteName (fname.toUpper ++ "_OFF")
-    cmds := cmds.push s!"def {constName} : Nat := {foffset}"
+    let constName := fname.toUpper ++ "_OFF"
+    cmds := cmds.push (mkSimpleDef constName "Nat" s!"{foffset}")
 
   -- 2. Fuel constant
-  cmds := cmds.push s!"def FUEL : Nat := {fuelVal}"
+  cmds := cmds.push (mkSimpleDef "FUEL" "Nat" s!"{fuelVal}")
 
   -- 3. Entry PC constant
   if entryPc != 0 then
-    cmds := cmds.push s!"def ENTRY : Nat := {entryPc}"
+    cmds := cmds.push (mkSimpleDef "ENTRY" "Nat" s!"{entryPc}")
 
   -- 4. Status offset + encoding/decoding
   if hasStatusEncoding then
-    cmds := cmds.push s!"def STATUS_OFF : Nat := {statusOffset}"
+    cmds := cmds.push (mkSimpleDef "STATUS_OFF" "Nat" s!"{statusOffset}")
     let mut encCases := ""
     let mut decCases := ""
     for (variant, value) in statusMappings do
@@ -197,9 +185,9 @@ def elabQedbridge : CommandElab := fun stx => do
 
     cmds := cmds.push (s!"def encodeStatus : {specName}.Status → Nat" ++ encCases)
     cmds := cmds.push (s!"def decodeStatus : Nat → Option {specName}.Status" ++ decCases)
-    cmds := cmds.push (
-      s!"theorem decode_encode_status (st : {specName}.Status) : " ++
-      "decodeStatus (encodeStatus st) = some st := sorry")
+    cmds := cmds.push (mkSorryTheorem "decode_encode_status"
+      #[s!"(st : {specName}.Status)"]
+      "decodeStatus (encodeStatus st) = some st")
 
   -- 5. encodeState
   let mut encConjuncts : Array String := #[]
@@ -243,9 +231,10 @@ def elabQedbridge : CommandElab := fun stx => do
     s!"  {lbrace} {decBody} {rbrace}")
 
   -- 7. decode_encode round-trip theorem
-  cmds := cmds.push (
-    s!"theorem decode_encode (s : {specName}.State) (addr : Nat) (mem : Mem)" ++ nl ++
-    "    (h : encodeState s addr mem) : decodeState addr mem = s := sorry")
+  cmds := cmds.push (mkSorryTheorem "decode_encode"
+    #[s!"(s : {specName}.State)", "(addr : Nat)", "(mem : Mem)",
+      "(h : encodeState s addr mem)"]
+    "decodeState addr mem = s")
 
   -- 8. Refinement theorem stubs per operation
   let entryStr := if entryPc != 0 then "ENTRY" else "0"
@@ -256,8 +245,8 @@ def elabQedbridge : CommandElab := fun stx => do
     let transName := quoteName (opName ++ "Transition")
 
     -- Build parameter signature and argument strings
-    let paramSig := params.foldl (fun acc (pn, pt) => acc ++ s!" ({pn} : {mapDslType pt})") ""
-    let paramArgs := params.foldl (fun acc (pn, _) => acc ++ s!" {pn}") ""
+    let paramSig := mkParamSig params
+    let paramArgs := mkParamArgs params
 
     let mut hyps := ""
     hyps := hyps ++ s!"    (h_encode : encodeState s inputAddr mem)" ++ nl
@@ -293,7 +282,7 @@ def elabQedbridge : CommandElab := fun stx => do
       s!"    (h_fail : {transName} s signer{paramArgs} = none) :" ++ nl ++
       s!"    (executeFn progAt ({initExpr}) FUEL).exitCode ≠ some 0 := sorry")
 
-  cmds := cmds.push s!"end {specName}.Bridge"
+  cmds := cmds.push (mkEnd s!"{specName}.Bridge")
 
   -- Parse and elaborate each command
   let env ← getEnv

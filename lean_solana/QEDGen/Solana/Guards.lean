@@ -1,3 +1,4 @@
+import QEDGen.Solana.CodeGen
 import QEDGen.Solana.SBPF
 import Lean.Elab.Command
 
@@ -244,6 +245,7 @@ private def buildFuelSum (fuels : Array Nat) : String :=
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
+open QEDGen.Solana.CodeGen in
 @[command_elab qedguardsCmd]
 def elabQedguards : CommandElab := fun stx => do
   let nameStx := stx[1]
@@ -316,7 +318,8 @@ def elabQedguards : CommandElab := fun stx => do
       let intVal := parseIntStr valStr
       let rhs := offsetRhs intVal
       eaNames := eaNames.push s!"ea_{oNameStr}"
-      eaCmds := eaCmds.push s!"theorem ea_{oNameStr} (b : Nat) : effectiveAddr b {oNameStr} = {rhs} := by\n  unfold effectiveAddr {oNameStr}; omega"
+      eaCmds := eaCmds.push (mkTacticTheorem s!"ea_{oNameStr}" #["(b : Nat)"]
+        s!"effectiveAddr b {oNameStr} = {rhs}" s!"unfold effectiveAddr {oNameStr}; omega")
 
   -- Parse guard blocks (index 12)
   let guardsStx := stx[12]
@@ -390,14 +393,14 @@ def elabQedguards : CommandElab := fun stx => do
   let mut cmds : Array String := #[]
   let nl := "\n"
 
-  cmds := cmds.push s!"namespace {name}"
-  cmds := cmds.push s!"open QEDGen.Solana"
-  cmds := cmds.push s!"open QEDGen.Solana.SBPF"
-  cmds := cmds.push s!"open QEDGen.Solana.SBPF.Memory"
+  cmds := cmds.push (mkNamespace name)
+  cmds := cmds.push (mkOpen "QEDGen.Solana")
+  cmds := cmds.push (mkOpen "QEDGen.Solana.SBPF")
+  cmds := cmds.push (mkOpen "QEDGen.Solana.SBPF.Memory")
 
   -- Error code constants
   for (eName, eVal) in errorDecls do
-    cmds := cmds.push s!"abbrev {eName} : Nat := {eVal}"
+    cmds := cmds.push (mkAbbrev eName "Nat" s!"{eVal}")
 
   -- Build structure with one field per guard (proof obligations)
   let mut structStr := s!"structure Spec ({progName} : Nat → Option QEDGen.Solana.SBPF.Insn) where"
@@ -493,7 +496,7 @@ def elabQedguards : CommandElab := fun stx => do
   for proofCmd in proofCmds do
     cmds := cmds.push proofCmd
 
-  cmds := cmds.push s!"end {name}"
+  cmds := cmds.push (mkEnd name)
 
   -- Parse and elaborate each command
   let env ← getEnv
