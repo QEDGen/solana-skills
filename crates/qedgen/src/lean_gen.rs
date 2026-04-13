@@ -1073,8 +1073,7 @@ mod tests {
     use super::*;
     use crate::parser;
 
-    const MULTISIG_SPEC: &str =
-        include_str!("../../../examples/rust/multisig/multisig.qedspec");
+    const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
     #[test]
     fn lean_gen_has_namespace() {
@@ -1156,8 +1155,7 @@ mod tests {
     // Multi-account (Lending) tests
     // ========================================================================
 
-    const LENDING_SPEC: &str =
-        include_str!("../../../examples/rust/lending/lending.qedspec");
+    const LENDING_SPEC: &str = include_str!("../../../examples/rust/lending/lending.qedspec");
 
     #[test]
     fn lean_gen_multi_per_account_status() {
@@ -1220,8 +1218,7 @@ mod tests {
     // sBPF (Dropset) tests
     // ========================================================================
 
-    const DROPSET_SPEC: &str =
-        include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
+    const DROPSET_SPEC: &str = include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
 
     #[test]
     fn lean_gen_sbpf_routes_to_sbpf_renderer() {

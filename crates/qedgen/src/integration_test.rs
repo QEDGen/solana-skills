@@ -632,11 +632,9 @@ mod tests {
     use super::*;
     use crate::parser;
 
-    const MULTISIG_SPEC: &str =
-        include_str!("../../../examples/rust/multisig/multisig.qedspec");
+    const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
-    const ESCROW_SPEC: &str =
-        include_str!("../../../examples/rust/escrow/escrow.qedspec");
+    const ESCROW_SPEC: &str = include_str!("../../../examples/rust/escrow/escrow.qedspec");
 
     #[test]
     fn integration_test_multisig_generates() {

@@ -69,11 +69,7 @@ fn infer_lifecycle(analyses: &[InstructionAnalysis]) -> Vec<String> {
     let has_close = analyses.iter().any(|a| a.has_close_semantics);
 
     match (has_init, has_close) {
-        (true, true) => vec![
-            "Uninitialized".into(),
-            "Active".into(),
-            "Closed".into(),
-        ],
+        (true, true) => vec!["Uninitialized".into(), "Active".into(), "Closed".into()],
         (true, false) => vec!["Uninitialized".into(), "Active".into()],
         (false, true) => vec!["Active".into(), "Closed".into()],
         (false, false) => vec!["Active".into()],
@@ -245,24 +241,12 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s, "spec {}", program_name).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "target quasar").unwrap();
-    writeln!(
-        s,
-        "# TODO: Replace with deployed program ID"
-    )
-    .unwrap();
-    writeln!(
-        s,
-        "program_id \"11111111111111111111111111111111\""
-    )
-    .unwrap();
+    writeln!(s, "# TODO: Replace with deployed program ID").unwrap();
+    writeln!(s, "program_id \"11111111111111111111111111111111\"").unwrap();
     writeln!(s).unwrap();
 
     // ── State / Account blocks ───────────────────────────────────────────
-    let struct_types: Vec<_> = idl
-        .types
-        .iter()
-        .filter(|t| t.ty.kind == "struct")
-        .collect();
+    let struct_types: Vec<_> = idl.types.iter().filter(|t| t.ty.kind == "struct").collect();
 
     if multi_account {
         for ty in &struct_types {
@@ -278,12 +262,7 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
                 )
                 .unwrap();
             }
-            writeln!(
-                s,
-                "  lifecycle [{}]",
-                lifecycle.join(", ")
-            )
-            .unwrap();
+            writeln!(s, "  lifecycle [{}]", lifecycle.join(", ")).unwrap();
             writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
         }
@@ -654,10 +633,7 @@ mod tests {
 
     #[test]
     fn map_type_complex_fallback() {
-        assert_eq!(
-            map_type(&serde_json::json!({"vec": "u8"})),
-            "U64"
-        );
+        assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "U64");
     }
 
     // ── Lifecycle inference ──────────────────────────────────────────────
@@ -683,8 +659,12 @@ mod tests {
         let (idl, analyses) = parse_test_idl(ESCROW_IDL);
         let content = render(&idl, &analyses);
 
-        let spec = crate::parser::parse(&content)
-            .unwrap_or_else(|e| panic!("Generated .qedspec failed to parse:\n{}\n\nContent:\n{}", e, content));
+        let spec = crate::parser::parse(&content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .qedspec failed to parse:\n{}\n\nContent:\n{}",
+                e, content
+            )
+        });
 
         assert_eq!(spec.program_name, "Escrow");
         assert_eq!(spec.target.as_deref(), Some("quasar"));
@@ -706,8 +686,12 @@ mod tests {
         let (idl, analyses) = parse_test_idl(LENDING_IDL);
         let content = render(&idl, &analyses);
 
-        let spec = crate::parser::parse(&content)
-            .unwrap_or_else(|e| panic!("Generated .qedspec failed to parse:\n{}\n\nContent:\n{}", e, content));
+        let spec = crate::parser::parse(&content).unwrap_or_else(|e| {
+            panic!(
+                "Generated .qedspec failed to parse:\n{}\n\nContent:\n{}",
+                e, content
+            )
+        });
 
         assert_eq!(spec.program_name, "Lending");
         assert_eq!(spec.account_types.len(), 2);

@@ -814,10 +814,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 ),
                 subject: Some(op.name.clone()),
                 fix: "Add input validation for takes parameters".to_string(),
-                example: Some(format!(
-                    "  operation {}\n    guard {}",
-                    op.name, guard_expr
-                )),
+                example: Some(format!("  operation {}\n    guard {}", op.name, guard_expr)),
             });
         }
     }
@@ -931,9 +928,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     // Rule 10: context has Token program but operation has no calls
     for ctx in &spec.contexts {
-        let has_token_program = ctx.accounts.iter().any(|a| {
-            a.account_type == "Program" && a.inner_type.as_deref() == Some("Token")
-        });
+        let has_token_program = ctx
+            .accounts
+            .iter()
+            .any(|a| a.account_type == "Program" && a.inner_type.as_deref() == Some("Token"));
         if !has_token_program {
             continue;
         }
@@ -1444,7 +1442,9 @@ mod tests {
         };
         let warnings = check_completeness(&spec);
         assert!(
-            warnings.iter().any(|w| w.rule == "missing_guard_from_takes"),
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
             "expected missing_guard_from_takes, got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
@@ -1464,7 +1464,9 @@ mod tests {
         };
         let warnings = check_completeness(&spec);
         assert!(
-            !warnings.iter().any(|w| w.rule == "missing_guard_from_takes"),
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
             "should not fire when guard exists"
         );
     }
@@ -1497,7 +1499,11 @@ mod tests {
         op.has_takes = true;
         op.has_guard = true;
         op.has_effect = true;
-        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
         let spec = ParsedSpec {
             operations: vec![op],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1515,7 +1521,11 @@ mod tests {
     fn test_no_properties_fires() {
         let mut op = make_op("deposit");
         op.has_effect = true;
-        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
         op.has_guard = true;
         let spec = ParsedSpec {
             operations: vec![op],
@@ -1535,7 +1545,11 @@ mod tests {
     fn test_no_properties_skips_with_property() {
         let mut op = make_op("deposit");
         op.has_effect = true;
-        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
         op.has_guard = true;
         let spec = ParsedSpec {
             operations: vec![op],
@@ -1660,7 +1674,10 @@ mod tests {
                 .any(|w| w.rule == "lifecycle_unreachable_state"
                     && w.subject.as_deref() == Some("Closed")),
             "expected lifecycle_unreachable_state for Closed, got: {:?}",
-            warnings.iter().map(|w| (&w.rule, &w.subject)).collect::<Vec<_>>()
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1690,7 +1707,11 @@ mod tests {
         op.takes_params = vec![("amount".to_string(), "U64".to_string())];
         op.has_takes = true;
         op.has_effect = true;
-        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
         // no guard → priority 1: unguarded_arithmetic + missing_guard_from_takes
         // no properties → priority 3: no_properties
         let spec = ParsedSpec {
@@ -1718,8 +1739,7 @@ mod tests {
 
     #[test]
     fn test_complete_spec_clean() {
-        let spec_content =
-            include_str!("../../../examples/rust/escrow/escrow.qedspec");
+        let spec_content = include_str!("../../../examples/rust/escrow/escrow.qedspec");
         let spec = crate::parser::parse(spec_content).expect("escrow.qedspec should parse");
         let warnings = check_completeness(&spec);
         // A well-formed spec should have zero warnings

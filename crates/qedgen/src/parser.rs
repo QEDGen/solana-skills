@@ -1278,8 +1278,7 @@ fn parse_property(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> Pars
 mod tests {
     use super::*;
 
-    const MULTISIG_SPEC: &str =
-        include_str!("../../../examples/rust/multisig/multisig.qedspec");
+    const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
     #[test]
     fn parse_multisig_header() {
@@ -1429,8 +1428,7 @@ mod tests {
     // Multi-account (Lending) tests
     // ========================================================================
 
-    const LENDING_SPEC: &str =
-        include_str!("../../../examples/rust/lending/lending.qedspec");
+    const LENDING_SPEC: &str = include_str!("../../../examples/rust/lending/lending.qedspec");
 
     #[test]
     fn parse_lending_account_types() {
@@ -1516,8 +1514,7 @@ mod tests {
     // sBPF (Dropset) tests
     // ========================================================================
 
-    const DROPSET_SPEC: &str =
-        include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
+    const DROPSET_SPEC: &str = include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
 
     #[test]
     fn parse_dropset_header() {
