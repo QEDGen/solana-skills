@@ -182,16 +182,17 @@ $QEDGEN explain --spec Spec.lean --proofs formal_verification/
 | `--output` | Path | stdout | Output file |
 
 ### `lint`
-Lint a qedspec for completeness.
+Lint a qedspec for completeness. Returns priority-ordered findings with concrete fix suggestions.
 
 ```bash
-$QEDGEN lint --spec formal_verification/Spec.lean --json
+$QEDGEN lint --spec my_program.qedspec
+$QEDGEN lint --spec my_program.qedspec --json
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--spec` | Path | required | Spec file |
-| `--json` | bool | false | Output as JSON |
+| `--json` | bool | false | Output as JSON (includes `priority` field: 1=security, 2=correctness, 3=completeness, 4=quality, 5=polish) |
 
 ### `verify`
 Verify sBPF proofs: check source hash, regenerate if stale, run lake build.

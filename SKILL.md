@@ -95,17 +95,23 @@ For sBPF assembly programs, use `qedguards` instead. See `references/qedspec-dsl
 
 Present the spec to the user and get confirmation before proceeding.
 
-### Lint the spec
+### Lint the spec (iterative guide)
 
-After writing Spec.lean, **always** lint before proceeding:
+After writing or editing a .qedspec, **always** lint:
 
 ```bash
-$QEDGEN lint --spec formal_verification/Spec.lean --json
+$QEDGEN lint --spec <path-to-qedspec> --json
 ```
 
-For each warning, tell the user what's missing and offer to fix it. Group by operation. Re-run lint after fixes until clean.
+Lint output is priority-ordered (1=security, 2=correctness, 3=completeness, 4=quality, 5=polish). Work through findings top-down:
 
-**Do not skip this step.** A spec with warnings will generate code that can't be fully verified.
+1. **Priority 1-2 (security/correctness)**: Present each finding to the user. Offer to apply the suggested fix. Apply and re-lint.
+2. **Priority 3 (completeness)**: Ask the user whether each suggested property/invariant matches their intent. Write the ones they confirm.
+3. **Priority 4-5 (quality/polish)**: Mention these as optional improvements. Apply if the user agrees.
+
+Re-run lint after each round of fixes until clean or only priority 5 items remain.
+
+**Do not skip this step.** A spec with priority 1-2 warnings will generate code that can't be fully verified.
 
 ## Step 4: Set up the Lean project
 

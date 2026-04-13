@@ -532,6 +532,8 @@ pub struct CompletenessWarning {
     /// Rule identifier (e.g., "no_access_control", "unguarded_arithmetic")
     pub rule: String,
     pub severity: Severity,
+    /// Priority: 1=security, 2=correctness, 3=completeness, 4=quality, 5=polish
+    pub priority: u8,
     pub message: String,
     /// The operation or field this warning relates to
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -628,6 +630,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             warnings.push(CompletenessWarning {
                 rule: "no_access_control".to_string(),
                 severity: Severity::Warning,
+                priority: 1,
                 message: format!("operation '{}' has no `who:` — anyone can call it", op.name),
                 subject: Some(op.name.clone()),
                 fix: format!(
@@ -648,6 +651,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             warnings.push(CompletenessWarning {
                 rule: "uncovered_operation".to_string(),
                 severity: Severity::Info,
+                priority: 3,
                 message: format!(
                     "operation '{}' is not in any property's `preserved_by`",
                     op.name
@@ -681,6 +685,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             warnings.push(CompletenessWarning {
                 rule: "unguarded_arithmetic".to_string(),
                 severity: Severity::Warning,
+                priority: 1,
                 message: format!(
                     "operation '{}' has arithmetic effects but no `guard:` — potential overflow/underflow",
                     op.name
@@ -702,6 +707,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             warnings.push(CompletenessWarning {
                 rule: "no_lifecycle".to_string(),
                 severity: Severity::Info,
+                priority: 2,
                 message: format!(
                     "operation '{}' has no `when:`/`then:` — no state machine enforcement",
                     op.name
@@ -736,6 +742,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             warnings.push(CompletenessWarning {
                 rule: "unused_field".to_string(),
                 severity: Severity::Info,
+                priority: 4,
                 message: format!("state field '{}' is never modified by any effect", fname),
                 subject: Some(fname.clone()),
                 fix: format!(
@@ -758,6 +765,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 warnings.push(CompletenessWarning {
                     rule: "dangling_preserved_by".to_string(),
                     severity: Severity::Warning,
+                    priority: 1,
                     message: format!(
                         "property '{}' references nonexistent operation '{}'",
                         prop.name, op_name
@@ -773,6 +781,261 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             }
         }
     }
+
+    // Rule 7: takes params (U64) with no guard — suggest input validation
+    for op in &spec.operations {
+        if op.has_guard {
+            continue;
+        }
+        // Skip if rule 3 (unguarded_arithmetic) already fired for this op
+        let already_flagged = warnings
+            .iter()
+            .any(|w| w.rule == "unguarded_arithmetic" && w.subject.as_deref() == Some(&op.name));
+        if already_flagged {
+            continue;
+        }
+        let u64_params: Vec<&str> = op
+            .takes_params
+            .iter()
+            .filter(|(_, t)| t == "U64")
+            .map(|(n, _)| n.as_str())
+            .collect();
+        if !u64_params.is_empty() {
+            let guard_parts: Vec<String> =
+                u64_params.iter().map(|p| format!("{} > 0", p)).collect();
+            let guard_expr = guard_parts.join(" and ");
+            warnings.push(CompletenessWarning {
+                rule: "missing_guard_from_takes".to_string(),
+                severity: Severity::Warning,
+                priority: 1,
+                message: format!(
+                    "operation '{}' takes U64 params but has no guard — no input validation",
+                    op.name
+                ),
+                subject: Some(op.name.clone()),
+                fix: "Add input validation for takes parameters".to_string(),
+                example: Some(format!(
+                    "  operation {}\n    guard {}",
+                    op.name, guard_expr
+                )),
+            });
+        }
+    }
+
+    // Rule 8: takes params + lifecycle transition but no effect
+    for op in &spec.operations {
+        if op.has_effect {
+            continue;
+        }
+        let has_lifecycle = op.pre_status.is_some() || op.post_status.is_some();
+        let is_init_like = op.name.contains("init") || op.name.contains("create");
+        if !op.takes_params.is_empty() && (has_lifecycle || is_init_like) {
+            let param_names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
+            let effect_lines: Vec<String> = param_names
+                .iter()
+                .take(3)
+                .map(|p| {
+                    let matching_field = spec
+                        .state_fields
+                        .iter()
+                        .find(|(f, _)| f.contains(p) || p.contains(f.as_str()));
+                    if let Some((field, _)) = matching_field {
+                        if is_init_like {
+                            format!("    {} = {}", field, p)
+                        } else {
+                            format!("    {} += {}", field, p)
+                        }
+                    } else if is_init_like {
+                        format!("    <field> = {}", p)
+                    } else {
+                        format!("    <field> += {}", p)
+                    }
+                })
+                .collect();
+            warnings.push(CompletenessWarning {
+                rule: "missing_effect".to_string(),
+                severity: Severity::Warning,
+                priority: 2,
+                message: format!(
+                    "operation '{}' takes params and transitions state but has no effect",
+                    op.name
+                ),
+                subject: Some(op.name.clone()),
+                fix: "Add an effect block to describe state changes".to_string(),
+                example: Some(format!(
+                    "  operation {}\n  effect {{\n{}\n  }}",
+                    op.name,
+                    effect_lines.join("\n")
+                )),
+            });
+        }
+    }
+
+    // Rule 9: operations with effects but zero properties
+    let has_effects = spec.operations.iter().any(|op| op.has_effect);
+    if has_effects && spec.properties.is_empty() && spec.invariants.is_empty() {
+        // Suggest conservation if paired add/sub exist on same field
+        let mut modified_fields: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for op in &spec.operations {
+            for (field, kind, _) in &op.effects {
+                modified_fields
+                    .entry(field.as_str())
+                    .or_default()
+                    .push(kind.as_str());
+            }
+        }
+        let conservation_candidates: Vec<&str> = modified_fields
+            .iter()
+            .filter(|(_, kinds)| kinds.contains(&"add") && kinds.contains(&"sub"))
+            .map(|(f, _)| *f)
+            .collect();
+
+        let op_list: Vec<&str> = spec
+            .operations
+            .iter()
+            .filter(|op| op.has_effect)
+            .map(|op| op.name.as_str())
+            .collect();
+        let preserved_by = if op_list.len() <= 4 {
+            format!("[{}]", op_list.join(", "))
+        } else {
+            "all".to_string()
+        };
+
+        let example = if !conservation_candidates.is_empty() {
+            let field = conservation_candidates[0];
+            format!(
+                "  property conservation {{\n    expr state.{} >= 0\n    preserved_by {}\n  }}",
+                field, preserved_by
+            )
+        } else {
+            format!(
+                "  property my_invariant {{\n    expr <your invariant expression>\n    preserved_by {}\n  }}",
+                preserved_by
+            )
+        };
+
+        warnings.push(CompletenessWarning {
+            rule: "no_properties".to_string(),
+            severity: Severity::Warning,
+            priority: 3,
+            message: "spec has effects but no properties — verification has nothing to prove"
+                .to_string(),
+            subject: None,
+            fix: "Add at least one property to define what the verification should prove"
+                .to_string(),
+            example: Some(example),
+        });
+    }
+
+    // Rule 10: context has Token program but operation has no calls
+    for ctx in &spec.contexts {
+        let has_token_program = ctx.accounts.iter().any(|a| {
+            a.account_type == "Program" && a.inner_type.as_deref() == Some("Token")
+        });
+        if !has_token_program {
+            continue;
+        }
+        let op = spec.operations.iter().find(|o| o.name == ctx.operation);
+        if let Some(op) = op {
+            if !op.has_calls {
+                let writable_tokens: Vec<&str> = ctx
+                    .accounts
+                    .iter()
+                    .filter(|a| {
+                        a.is_mut
+                            && a.inner_type.as_deref() == Some("Token")
+                            && a.account_type == "Account"
+                    })
+                    .map(|a| a.name.as_str())
+                    .collect();
+                let signer_name = ctx
+                    .accounts
+                    .iter()
+                    .find(|a| a.account_type == "Signer")
+                    .map(|a| a.name.as_str())
+                    .unwrap_or("authority");
+                let accounts_str = if writable_tokens.len() >= 2 {
+                    format!(
+                        "{} writable, {} writable, {} signer",
+                        writable_tokens[0], writable_tokens[1], signer_name
+                    )
+                } else if writable_tokens.len() == 1 {
+                    format!("{} writable, {} signer", writable_tokens[0], signer_name)
+                } else {
+                    format!("source writable, dest writable, {} signer", signer_name)
+                };
+                warnings.push(CompletenessWarning {
+                    rule: "missing_cpi_for_token_context".to_string(),
+                    severity: Severity::Warning,
+                    priority: 2,
+                    message: format!(
+                        "operation '{}' has Token program in context but no `calls` clause",
+                        ctx.operation
+                    ),
+                    subject: Some(ctx.operation.clone()),
+                    fix: "Add a `calls` clause to verify the CPI invocation".to_string(),
+                    example: Some(format!(
+                        "  operation {}\n    calls TOKEN_PROGRAM_ID DISC_TRANSFER({})",
+                        ctx.operation, accounts_str
+                    )),
+                });
+            }
+        }
+    }
+
+    // Rule 11: no errors block but operations have guards
+    let any_guards = spec.operations.iter().any(|op| op.has_guard);
+    if any_guards && spec.error_codes.is_empty() {
+        warnings.push(CompletenessWarning {
+            rule: "no_errors_block".to_string(),
+            severity: Severity::Info,
+            priority: 4,
+            message: "spec has guards but no `errors` block — codegen can't generate error types"
+                .to_string(),
+            subject: None,
+            fix: "Add an errors block listing all failure modes".to_string(),
+            example: Some("  errors [InvalidAmount, Unauthorized, AlreadyClosed]".to_string()),
+        });
+    }
+
+    // Rule 12: lifecycle states unreachable by any operation transition
+    if spec.lifecycle_states.len() > 1 {
+        let mut reachable: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        // First state is always reachable (initial)
+        reachable.insert(&spec.lifecycle_states[0]);
+        for op in &spec.operations {
+            if let Some(ref pre) = op.pre_status {
+                reachable.insert(pre.as_str());
+            }
+            if let Some(ref post) = op.post_status {
+                reachable.insert(post.as_str());
+            }
+        }
+        for state in &spec.lifecycle_states {
+            if !reachable.contains(state.as_str()) {
+                warnings.push(CompletenessWarning {
+                    rule: "lifecycle_unreachable_state".to_string(),
+                    severity: Severity::Info,
+                    priority: 2,
+                    message: format!(
+                        "lifecycle state '{}' is never referenced by any operation's `when`/`then`",
+                        state
+                    ),
+                    subject: Some(state.clone()),
+                    fix: format!(
+                        "Add a `when: {}` or `then: {}` clause to an operation, or remove '{}' from the lifecycle",
+                        state, state, state
+                    ),
+                    example: None,
+                });
+            }
+        }
+    }
+
+    // Sort by priority (ascending), then by rule name for stability
+    warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
     warnings
 }
@@ -1135,4 +1398,340 @@ pub fn print_unified_report(spec_name: &str, report: &UnifiedReport) {
         if total_issues == 0 { "CLEAN" } else { "DRIFT" },
         total_issues
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_spec() -> ParsedSpec {
+        ParsedSpec::default()
+    }
+
+    fn make_op(name: &str) -> ParsedOperation {
+        ParsedOperation {
+            name: name.to_string(),
+            doc: None,
+            who: Some("authority".to_string()),
+            on_account: None,
+            has_when: false,
+            pre_status: Some("Active".to_string()),
+            post_status: Some("Active".to_string()),
+            has_calls: false,
+            program_id: None,
+            has_u64_fields: false,
+            has_takes: false,
+            has_guard: false,
+            guard_str: None,
+            has_effect: false,
+            takes_params: vec![],
+            effects: vec![],
+            calls_accounts: vec![],
+            calls_discriminator: None,
+            emits: vec![],
+        }
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_fires() {
+        let mut op = make_op("deposit");
+        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        let spec = ParsedSpec {
+            operations: vec![op],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "missing_guard_from_takes"),
+            "expected missing_guard_from_takes, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_skips_when_guard_exists() {
+        let mut op = make_op("deposit");
+        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        op.has_guard = true;
+        op.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            operations: vec![op],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_guard_from_takes"),
+            "should not fire when guard exists"
+        );
+    }
+
+    #[test]
+    fn test_missing_effect_fires() {
+        let mut op = make_op("deposit");
+        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        op.has_guard = true;
+        // has lifecycle (pre/post set via make_op) but no effect
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "missing_effect"),
+            "expected missing_effect, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_effect_skips_when_effect_exists() {
+        let mut op = make_op("deposit");
+        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        op.has_guard = true;
+        op.has_effect = true;
+        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_effect"),
+            "should not fire when effect exists"
+        );
+    }
+
+    #[test]
+    fn test_no_properties_fires() {
+        let mut op = make_op("deposit");
+        op.has_effect = true;
+        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.has_guard = true;
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_properties"),
+            "expected no_properties, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_properties_skips_with_property() {
+        let mut op = make_op("deposit");
+        op.has_effect = true;
+        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        op.has_guard = true;
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("state.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()],
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_properties"),
+            "should not fire when properties exist"
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context() {
+        let mut op = make_op("transfer");
+        op.has_calls = false;
+        let spec = ParsedSpec {
+            operations: vec![op],
+            contexts: vec![ParsedContext {
+                operation: "transfer".to_string(),
+                accounts: vec![
+                    ParsedAccountEntry {
+                        name: "authority".to_string(),
+                        account_type: "Signer".to_string(),
+                        inner_type: None,
+                        is_mut: false,
+                        is_init: false,
+                        is_init_if_needed: false,
+                        payer: None,
+                        seeds_ref: None,
+                        has_bump: false,
+                        close_target: None,
+                        has_one: None,
+                        token_mint: None,
+                        token_authority: None,
+                    },
+                    ParsedAccountEntry {
+                        name: "source".to_string(),
+                        account_type: "Account".to_string(),
+                        inner_type: Some("Token".to_string()),
+                        is_mut: true,
+                        is_init: false,
+                        is_init_if_needed: false,
+                        payer: None,
+                        seeds_ref: None,
+                        has_bump: false,
+                        close_target: None,
+                        has_one: None,
+                        token_mint: None,
+                        token_authority: None,
+                    },
+                    ParsedAccountEntry {
+                        name: "dest".to_string(),
+                        account_type: "Account".to_string(),
+                        inner_type: Some("Token".to_string()),
+                        is_mut: true,
+                        is_init: false,
+                        is_init_if_needed: false,
+                        payer: None,
+                        seeds_ref: None,
+                        has_bump: false,
+                        close_target: None,
+                        has_one: None,
+                        token_mint: None,
+                        token_authority: None,
+                    },
+                    ParsedAccountEntry {
+                        name: "token_program".to_string(),
+                        account_type: "Program".to_string(),
+                        inner_type: Some("Token".to_string()),
+                        is_mut: false,
+                        is_init: false,
+                        is_init_if_needed: false,
+                        payer: None,
+                        seeds_ref: None,
+                        has_bump: false,
+                        close_target: None,
+                        has_one: None,
+                        token_mint: None,
+                        token_authority: None,
+                    },
+                ],
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "expected missing_cpi_for_token_context, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_unreachable_state() {
+        let mut op = make_op("initialize");
+        op.pre_status = Some("Uninitialized".to_string());
+        op.post_status = Some("Active".to_string());
+        let spec = ParsedSpec {
+            operations: vec![op],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Closed".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "lifecycle_unreachable_state"
+                    && w.subject.as_deref() == Some("Closed")),
+            "expected lifecycle_unreachable_state for Closed, got: {:?}",
+            warnings.iter().map(|w| (&w.rule, &w.subject)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_errors_block_fires() {
+        let mut op = make_op("deposit");
+        op.has_guard = true;
+        op.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            operations: vec![op],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_errors_block"),
+            "expected no_errors_block, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        // Build a spec that triggers multiple rules at different priorities
+        let mut op = make_op("deposit");
+        op.who = None; // priority 1: no_access_control
+        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        op.has_effect = true;
+        op.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        // no guard → priority 1: unguarded_arithmetic + missing_guard_from_takes
+        // no properties → priority 3: no_properties
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![
+                ("authority".to_string(), "Pubkey".to_string()),
+                ("balance".to_string(), "U64".to_string()),
+            ],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        // Verify sorted ascending by priority
+        for window in warnings.windows(2) {
+            assert!(
+                window[0].priority <= window[1].priority,
+                "warnings not sorted by priority: {} ({}) should come before {} ({})",
+                window[0].rule,
+                window[0].priority,
+                window[1].rule,
+                window[1].priority
+            );
+        }
+    }
+
+    #[test]
+    fn test_complete_spec_clean() {
+        let spec_content =
+            include_str!("../../../examples/rust/escrow/escrow.qedspec");
+        let spec = crate::parser::parse(spec_content).expect("escrow.qedspec should parse");
+        let warnings = check_completeness(&spec);
+        // A well-formed spec should have zero warnings
+        let warning_rules: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.severity == Severity::Warning)
+            .map(|w| w.rule.as_str())
+            .collect();
+        assert!(
+            warning_rules.is_empty(),
+            "escrow.qedspec should be clean but got warnings: {:?}",
+            warning_rules
+        );
+    }
 }

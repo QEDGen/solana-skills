@@ -2,7 +2,7 @@
 set -e
 
 REPO="QEDGen/solana-skills"
-VERSION="v1.5.1"
+VERSION="v1.6.0"
 
 # Resolve the directory where this script lives (= skill root)
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
