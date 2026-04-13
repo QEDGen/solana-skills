@@ -2,6 +2,7 @@
 set -e
 
 REPO="QEDGen/solana-skills"
+VERSION="v1.5.0"
 
 # Resolve the directory where this script lives (= skill root)
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,48 +29,73 @@ detect_asset_name() {
     echo "qedgen-${arch}-${os}"
 }
 
+# ── Verify SHA256 checksum ──────────────────────────────────────────────
+verify_checksum() {
+    local file="$1" expected="$2"
+    local actual
+
+    if command -v sha256sum &> /dev/null; then
+        actual=$(sha256sum "$file" | awk '{print $1}')
+    elif command -v shasum &> /dev/null; then
+        actual=$(shasum -a 256 "$file" | awk '{print $1}')
+    else
+        echo "  ERROR: No sha256sum or shasum found. Cannot verify binary integrity."
+        return 1
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        echo "  ERROR: SHA256 checksum mismatch!"
+        echo "    Expected: $expected"
+        echo "    Actual:   $actual"
+        return 1
+    fi
+    return 0
+}
+
 # ── Download from GitHub release ─────────────────────────────────────────
 download_binary() {
     local asset_name="$1"
 
-    # Get the latest release download URL
-    local url="https://github.com/${REPO}/releases/latest/download/${asset_name}"
-    local checksum_url="https://github.com/${REPO}/releases/latest/download/${asset_name}.sha256"
-    echo "  Downloading from $url ..."
+    # Use pinned version, not /latest/
+    local url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}"
+    local checksum_url="https://github.com/${REPO}/releases/download/${VERSION}/${asset_name}.sha256"
+    echo "  Downloading ${VERSION} from ${url} ..."
 
     mkdir -p "$SKILL_DIR/bin"
-    if curl -fSL --retry 2 -o "$QEDGEN_BIN" "$url" 2>/dev/null; then
-        # Verify checksum if available
-        local checksum_file
-        checksum_file=$(mktemp)
-        if curl -fSL --retry 2 -o "$checksum_file" "$checksum_url" 2>/dev/null; then
-            local expected actual
-            expected=$(awk '{print $1}' "$checksum_file")
-            if command -v sha256sum &> /dev/null; then
-                actual=$(sha256sum "$QEDGEN_BIN" | awk '{print $1}')
-            elif command -v shasum &> /dev/null; then
-                actual=$(shasum -a 256 "$QEDGEN_BIN" | awk '{print $1}')
-            fi
-            rm -f "$checksum_file"
-            if [ -n "$actual" ] && [ "$actual" != "$expected" ]; then
-                echo "  ERROR: SHA256 checksum mismatch!"
-                echo "    Expected: $expected"
-                echo "    Actual:   $actual"
-                rm -f "$QEDGEN_BIN"
-                return 1
-            fi
-            echo "  Checksum verified."
-        else
-            rm -f "$checksum_file"
-            echo "  Warning: No checksum file available, skipping verification."
-        fi
 
-        chmod +x "$QEDGEN_BIN"
-        if "$QEDGEN_BIN" --version &> /dev/null; then
-            return 0
-        fi
-        rm -f "$QEDGEN_BIN"
+    local tmp_bin
+    tmp_bin=$(mktemp)
+    if ! curl -fSL --retry 2 -o "$tmp_bin" "$url" 2>/dev/null; then
+        rm -f "$tmp_bin"
+        return 1
     fi
+
+    # Checksum verification is mandatory
+    local checksum_file
+    checksum_file=$(mktemp)
+    if ! curl -fSL --retry 2 -o "$checksum_file" "$checksum_url" 2>/dev/null; then
+        echo "  ERROR: Could not download checksum file. Refusing to install unverified binary."
+        rm -f "$tmp_bin" "$checksum_file"
+        return 1
+    fi
+
+    local expected
+    expected=$(awk '{print $1}' "$checksum_file")
+    rm -f "$checksum_file"
+
+    if ! verify_checksum "$tmp_bin" "$expected"; then
+        rm -f "$tmp_bin"
+        return 1
+    fi
+    echo "  Checksum verified."
+
+    mv "$tmp_bin" "$QEDGEN_BIN"
+    chmod +x "$QEDGEN_BIN"
+
+    if "$QEDGEN_BIN" --version &> /dev/null; then
+        return 0
+    fi
+    rm -f "$QEDGEN_BIN"
     return 1
 }
 
@@ -78,9 +104,11 @@ build_from_source() {
     echo "  Building from source..."
 
     if ! command -v cargo &> /dev/null; then
-        echo "  Installing Rust toolchain via rustup..."
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
+        echo ""
+        echo "  ERROR: Rust toolchain not found."
+        echo "  Please install Rust first: https://rustup.rs"
+        echo "  Then re-run this install script."
+        exit 1
     fi
 
     cargo build --release --manifest-path "$SKILL_DIR/Cargo.toml"
@@ -101,7 +129,7 @@ else
     if [ -n "$asset_name" ]; then
         echo "  Trying GitHub release for $asset_name..."
         if download_binary "$asset_name"; then
-            echo "✓ Downloaded qedgen binary from release"
+            echo "✓ Downloaded qedgen binary from release (${VERSION})"
             installed=true
         fi
     fi
@@ -115,34 +143,33 @@ fi
 
 # ── Lean / elan ───────────────────────────────────────────────────────────
 if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
-    echo "  Installing Lean toolchain via elan..."
-    curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain leanprover/lean4:v4.24.0
-    export PATH="$HOME/.elan/bin:$PATH"
+    echo ""
+    echo "  Lean toolchain not found."
+    echo "  Please install elan (Lean version manager):"
+    echo "    https://github.com/leanprover/elan#installation"
+    echo ""
+    echo "  After installing elan, re-run this script or run:"
+    echo "    elan toolchain install leanprover/lean4:v4.30.0-rc1"
+    echo ""
 fi
 
 # ── Set up global validation workspace ────────────────────────────────────
-# Pre-fetch Mathlib cache so the first `qedgen verify --validate` is fast.
-# Runs in the background so it doesn't block the caller.
-
 setup_global_workspace() {
     local ws_dir
     if [ -n "$QEDGEN_VALIDATION_WORKSPACE" ]; then
         ws_dir="$QEDGEN_VALIDATION_WORKSPACE"
-    elif [ "$(uname)" = "Darwin" ]; then
-        ws_dir="$HOME/Library/Caches/qedgen-solana-skills/validation-workspace"
-    elif [ -n "$XDG_CACHE_HOME" ]; then
-        ws_dir="$XDG_CACHE_HOME/qedgen-solana-skills/validation-workspace"
+    elif [ -n "$QEDGEN_HOME" ]; then
+        ws_dir="$QEDGEN_HOME/workspace"
     else
-        ws_dir="$HOME/.cache/qedgen-solana-skills/validation-workspace"
+        ws_dir="$HOME/.qedgen/workspace"
     fi
 
-    if [ -f "$ws_dir/lakefile.lean" ] && [ -d "$ws_dir/.lake/packages/mathlib" ]; then
-        echo "✓ Global validation workspace already exists at $ws_dir"
+    if [ -f "$ws_dir/lakefile.lean" ]; then
+        echo "✓ Global validation workspace exists at $ws_dir"
         return 0
     fi
 
     echo "Setting up global validation workspace at $ws_dir..."
-    echo "  This downloads and caches Mathlib (~1-2 min with cache, 25+ min without)."
     echo "  Running in background — qedgen will work once this completes."
 
     mkdir -p "$ws_dir"
@@ -154,14 +181,13 @@ setup_global_workspace
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  qedgen installed successfully!"
+echo "  qedgen ${VERSION} installed successfully!"
 echo ""
 echo "  Binary: $QEDGEN_BIN"
 echo ""
 echo "  Requirements:"
-echo "    - MISTRAL_API_KEY environment variable must be set"
-echo "    - Lean toolchain (auto-installed via elan)"
+echo "    - MISTRAL_API_KEY environment variable (for fill-sorry)"
+echo "    - Lean toolchain via elan (https://github.com/leanprover/elan)"
 echo ""
-echo "  The global Mathlib cache may still be downloading in the background."
-echo "  First run of 'qedgen verify --validate' may be slow if not ready."
+echo "  Workspace: ~/.qedgen/"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
