@@ -185,7 +185,7 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     fs::write(output_dir.join("EscrowProofs.lean"), consolidated)?;
 
     // Write lean_solana from embedded sources
-    crate::project::update_lean_solana(output_dir)?;
+    crate::project::update_lean_solana(output_dir, false)?;
 
     // Write lean-toolchain
     let toolchain = include_str!("../../../lean_solana/lean-toolchain");

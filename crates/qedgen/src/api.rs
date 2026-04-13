@@ -724,6 +724,7 @@ pub async fn generate_proofs(
     max_tokens: usize,
     validate: bool,
     validation_workspace: Option<&Path>,
+    mathlib: bool,
 ) -> Result<()> {
     let api_key = std::env::var("MISTRAL_API_KEY")
         .context("MISTRAL_API_KEY environment variable not set.\nGet a free key at https://console.mistral.ai\nThen run: export MISTRAL_API_KEY=your_key_here")?;
@@ -734,7 +735,7 @@ pub async fn generate_proofs(
     std::fs::create_dir_all(&attempts_dir)?;
 
     // Set up Lean project files
-    crate::project::setup_lean_project(output_dir)?;
+    crate::project::setup_lean_project(output_dir, mathlib)?;
 
     // Save the prompt
     std::fs::write(output_dir.join("prompt.txt"), prompt)?;
@@ -827,6 +828,7 @@ pub async fn generate_proofs(
                 output_dir,
                 candidate.index,
                 validation_workspace,
+                mathlib,
             )
             .await?;
 

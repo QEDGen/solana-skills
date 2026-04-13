@@ -13,6 +13,7 @@ pub async fn validate_completion(
     output_dir: &Path,
     completion_index: usize,
     validation_workspace: Option<&Path>,
+    mathlib: bool,
 ) -> Result<ValidationResult> {
     let log_dir = output_dir.join("validation");
     std::fs::create_dir_all(&log_dir)?;
@@ -23,7 +24,7 @@ pub async fn validate_completion(
         None => validation_workspace_dir()?,
     };
     std::fs::create_dir_all(&workspace)?;
-    ensure_workspace_ready(&workspace).await?;
+    ensure_workspace_ready(&workspace, mathlib).await?;
 
     // Copy Best.lean to validation workspace
     std::fs::copy(output_dir.join("Best.lean"), workspace.join("Best.lean"))?;
@@ -56,7 +57,7 @@ pub async fn validate_completion(
 
 /// Set up the global validation workspace. Called by `qedgen setup` and
 /// by the install script to pre-fetch the Mathlib cache.
-pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
+pub async fn setup_workspace(workspace: Option<&Path>, mathlib: bool) -> Result<()> {
     let ws = match workspace {
         Some(ws) => ws.to_path_buf(),
         None => validation_workspace_dir()?,
@@ -65,13 +66,15 @@ pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
     std::fs::create_dir_all(&ws)?;
     eprintln!("Setting up validation workspace at {}...", ws.display());
 
-    crate::project::setup_lean_project(&ws)?;
+    crate::project::setup_lean_project(&ws, mathlib)?;
     eprintln!("  Project scaffold created.");
 
     eprintln!("  Running lake update...");
     let _update = run_command("lake", &["update"], &ws, &[]).await;
 
-    fetch_or_build_mathlib(&ws).await;
+    if mathlib {
+        fetch_or_build_mathlib(&ws).await;
+    }
 
     eprintln!("Workspace setup complete: {}", ws.display());
     Ok(())
@@ -84,16 +87,18 @@ pub async fn setup_workspace(workspace: Option<&Path>) -> Result<()> {
 ///
 /// On subsequent calls: only updates the lean_solana/ files (which may change
 /// when axioms are updated), preserving .lake/ build cache.
-async fn ensure_workspace_ready(workspace: &Path) -> Result<()> {
+async fn ensure_workspace_ready(workspace: &Path, mathlib: bool) -> Result<()> {
     if !workspace.join("lakefile.lean").exists() {
-        crate::project::setup_lean_project(workspace)?;
+        crate::project::setup_lean_project(workspace, mathlib)?;
 
         eprintln!("  Setting up validation workspace (first time)...");
         let _update = run_command("lake", &["update"], workspace, &[]).await;
 
-        fetch_or_build_mathlib(workspace).await;
+        if mathlib {
+            fetch_or_build_mathlib(workspace).await;
+        }
     } else {
-        crate::project::update_lean_solana(workspace)?;
+        crate::project::update_lean_solana(workspace, mathlib)?;
     }
 
     Ok(())
@@ -151,29 +156,19 @@ async fn run_command(
     Ok((stdout, stderr, code))
 }
 
+/// Returns the path to ~/.qedgen/ — the global QEDGen home directory.
+/// Override with QEDGEN_HOME env var.
+pub fn qedgen_home() -> Result<PathBuf> {
+    if let Ok(home) = std::env::var("QEDGEN_HOME") {
+        return Ok(PathBuf::from(home));
+    }
+    let home = std::env::var("HOME")?;
+    Ok(PathBuf::from(home).join(".qedgen"))
+}
+
 fn validation_workspace_dir() -> Result<PathBuf> {
     if let Ok(ws) = std::env::var("QEDGEN_VALIDATION_WORKSPACE") {
         return Ok(PathBuf::from(ws));
     }
-
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(xdg)
-            .join("qedgen-solana-skills")
-            .join("validation-workspace"));
-    }
-
-    if cfg!(target_os = "macos") {
-        let home = std::env::var("HOME")?;
-        return Ok(PathBuf::from(home)
-            .join("Library")
-            .join("Caches")
-            .join("qedgen-solana-skills")
-            .join("validation-workspace"));
-    }
-
-    let home = std::env::var("HOME")?;
-    Ok(PathBuf::from(home)
-        .join(".cache")
-        .join("qedgen-solana-skills")
-        .join("validation-workspace"))
+    Ok(qedgen_home()?.join("workspace"))
 }

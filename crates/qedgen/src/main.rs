@@ -58,6 +58,10 @@ enum Commands {
         /// Validate completions with 'lake build Best'
         #[arg(long)]
         validate: bool,
+
+        /// Include Mathlib dependency (enables u128 arithmetic helpers)
+        #[arg(long)]
+        mathlib: bool,
     },
 
     /// Fill sorry markers in a Lean file using Leanstral
@@ -137,11 +141,15 @@ enum Commands {
         namespace: Option<String>,
     },
 
-    /// Set up the global validation workspace (scaffold + Mathlib cache)
+    /// Set up the global validation workspace
     Setup {
         /// Directory for the validation workspace (default: platform cache dir)
         #[arg(long)]
         workspace: Option<PathBuf>,
+
+        /// Include Mathlib dependency (fetches ~8GB pre-built cache)
+        #[arg(long)]
+        mathlib: bool,
     },
 
     /// Initialize a new formal verification project
@@ -379,6 +387,7 @@ async fn main() -> Result<()> {
             temperature,
             max_tokens,
             validate,
+            mathlib,
         } => {
             ensure!(passes > 0, "passes must be greater than 0");
             ensure!(
@@ -395,6 +404,7 @@ async fn main() -> Result<()> {
                 max_tokens,
                 validate,
                 None,
+                mathlib,
             )
             .await?;
         }
@@ -491,8 +501,8 @@ async fn main() -> Result<()> {
             asm2lean::asm2lean(&input, &output, namespace.as_deref())?;
         }
 
-        Commands::Setup { workspace } => {
-            validate::setup_workspace(workspace.as_deref()).await?;
+        Commands::Setup { workspace, mathlib } => {
+            validate::setup_workspace(workspace.as_deref(), mathlib).await?;
         }
 
         Commands::Init {

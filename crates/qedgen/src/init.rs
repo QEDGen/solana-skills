@@ -2,7 +2,7 @@ use anyhow::{ensure, Context, Result};
 use std::path::Path;
 
 const LEAN_TOOLCHAIN: &str = "leanprover/lean4:v4.24.0\n";
-const GITIGNORE: &str = ".lake/\nbuild/\nlake-packages/\n";
+const GITIGNORE: &str = ".lake/\nbuild/\nlake-packages/\nlean_solana/.lake/\nlean_solana/build/\n";
 
 /// Scaffold a formal_verification/ project directory.
 pub fn init(
@@ -25,7 +25,7 @@ pub fn init(
     std::fs::create_dir_all(&proofs_dir)?;
 
     // Write lean_solana/ support library (embedded in binary)
-    crate::project::update_lean_solana(output_dir)?;
+    crate::project::update_lean_solana(output_dir, mathlib)?;
 
     // Lean toolchain
     std::fs::write(output_dir.join("lean-toolchain"), LEAN_TOOLCHAIN)?;

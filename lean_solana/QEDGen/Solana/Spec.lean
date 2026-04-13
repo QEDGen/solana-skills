@@ -199,12 +199,13 @@ private def validateFieldRefs (expr : String) (fields : Array (String × String)
   -- Skip parts[0] (before first "s."), check each subsequent occurrence
   for i in List.range (parts.length - 1) do
     let rest := parts[i + 1]!
-    let fieldRef := rest.takeWhile (fun c => c.isAlphanum || c == '_')
+    let fieldRef := (rest.takeWhile (fun c => c.isAlphanum || c == '_')).toString
     if !fieldRef.isEmpty then
       let qRef := quoteName fieldRef
       if !fields.any (fun (fn_, _) => fn_ == qRef) then
         Lean.throwError m!"qedspec: {context} references unknown field 's.{fieldRef}'. Available: {fields.map (·.1)}"
 
+set_option maxHeartbeats 800000 in
 open Lean in
 open Lean.Elab in
 open Lean.Elab.Command in
@@ -284,6 +285,8 @@ def elabQedspec : CommandElab := fun stx => do
   let mut cmds : Array String := #[]
   cmds := cmds.push (mkNamespace s!"{name}")
   cmds := cmds.push (mkOpen "QEDGen.Solana")
+  -- Bump heartbeats: Mathlib typeclass instances make elaboration heavier
+  cmds := cmds.push "set_option maxHeartbeats 400000"
 
   -- Generate Status inductive from when/then values
   if hasLifecycle then

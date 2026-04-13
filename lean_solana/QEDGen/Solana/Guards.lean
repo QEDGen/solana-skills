@@ -70,9 +70,9 @@ private def offsetRhs (val : Int) : String :=
 
 /-- Parse an integer from a string (handles negative values). -/
 private def parseIntStr (s : String) : Int :=
-  let s := s.trim
+  let s := s.trimAscii.toString
   if s.startsWith "-" then
-    let absStr := s.drop 1
+    let absStr := (s.drop 1).toString
     match absStr.toNat? with
     | some n => -(n : Int)
     | none => 0
@@ -88,13 +88,13 @@ private def parseIntStr (s : String) : Int :=
 /-- Parse a hypothesis string "(name : type)" into (name, type).
     Handles types containing " : " (e.g., `↑X : Int` inside expressions). -/
 private def parseHypStr (s : String) : Option (String × String) :=
-  let s := s.trim
+  let s := s.trimAscii.toString
   if s.startsWith "(" && s.endsWith ")" then
-    let inner := (s.drop 1).dropRight 1
+    let inner := ((s.drop 1).dropEnd 1).toString
     match inner.splitOn " : " with
     | name :: rest =>
       if rest.isEmpty then none
-      else some (name.trim, (" : ".intercalate rest).trim)
+      else some (name.trimAscii.toString, (" : ".intercalate rest).trimAscii.toString)
     | _ => none
   else none
 
@@ -125,14 +125,14 @@ private structure CondBinding where
 /-- Try to parse a read binding from the type string. -/
 private def tryParseRead (hypName type : String) : Option ReadBinding :=
   if type.startsWith "readU8 mem " then
-    let rest := type.drop "readU8 mem ".length
+    let rest := (type.drop "readU8 mem ".length).toString
     match rest.splitOn " = " with
-    | [expr, rhs] => some { hypName, readFn := "readU8", memExpr := expr.trim, varName := rhs.trim }
+    | [expr, rhs] => some { hypName, readFn := "readU8", memExpr := expr.trimAscii.toString, varName := rhs.trimAscii.toString }
     | _ => none
   else if type.startsWith "readU64 mem " then
-    let rest := type.drop "readU64 mem ".length
+    let rest := (type.drop "readU64 mem ".length).toString
     match rest.splitOn " = " with
-    | [expr, rhs] => some { hypName, readFn := "readU64", memExpr := expr.trim, varName := rhs.trim }
+    | [expr, rhs] => some { hypName, readFn := "readU64", memExpr := expr.trimAscii.toString, varName := rhs.trimAscii.toString }
     | _ => none
   else none
 
@@ -140,26 +140,26 @@ private def tryParseRead (hypName type : String) : Option ReadBinding :=
 private def tryParseCond (hypName type : String) : Option CondBinding :=
   -- Try ¬(VAR < CONST)
   if type.startsWith "¬(" && type.endsWith ")" then
-    let inner := (type.drop 2).dropRight 1
+    let inner := ((type.drop 2).dropEnd 1).toString
     match inner.splitOn " < " with
     | [var, const] =>
-      if isSimpleIdent var.trim then
-        some { hypName, varName := var.trim, kind := .negLt, constExpr := const.trim }
+      if isSimpleIdent var.trimAscii.toString then
+        some { hypName, varName := var.trimAscii.toString, kind := .negLt, constExpr := const.trimAscii.toString }
       else none
     | _ => none
   else
     -- Try VAR ≠ CONST
     match type.splitOn " ≠ " with
     | [var, const] =>
-      if isSimpleIdent var.trim then
-        some { hypName, varName := var.trim, kind := .neq, constExpr := const.trim }
+      if isSimpleIdent var.trimAscii.toString then
+        some { hypName, varName := var.trimAscii.toString, kind := .neq, constExpr := const.trimAscii.toString }
       else none
     | _ =>
       -- Try VAR < CONST
       match type.splitOn " < " with
       | [var, const] =>
-        if isSimpleIdent var.trim then
-          some { hypName, varName := var.trim, kind := .lt, constExpr := const.trim }
+        if isSimpleIdent var.trimAscii.toString then
+          some { hypName, varName := var.trimAscii.toString, kind := .lt, constExpr := const.trimAscii.toString }
         else none
       | _ => none
 
