@@ -380,6 +380,25 @@ enum AristotleCommands {
     },
 }
 
+fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
+    let icon = match warning.severity {
+        check::Severity::Warning => "!",
+        check::Severity::Info => "i",
+    };
+    let mut out = format!(
+        "  {} [P{}] [{}] {}\n    Fix: {}",
+        icon, warning.priority, warning.rule, warning.message, warning.fix
+    );
+    if let Some(ref example) = warning.example {
+        out.push_str("\n    Example:");
+        for line in example.lines() {
+            out.push_str("\n      ");
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -618,19 +637,7 @@ async fn main() -> Result<()> {
                         .filter(|w| w.severity == check::Severity::Info)
                         .count();
                     for w in &warnings {
-                        let icon = match w.severity {
-                            check::Severity::Warning => "!",
-                            check::Severity::Info => "i",
-                        };
-                        eprintln!("  {} [{}] {}", icon, w.rule, w.message);
-                        eprintln!("    Fix: {}", w.fix);
-                        if let Some(ref ex) = w.example {
-                            eprintln!("    Example:");
-                            for line in ex.lines() {
-                                eprintln!("      {}", line);
-                            }
-                        }
-                        eprintln!();
+                        eprintln!("{}\n", format_lint_warning(w));
                     }
                     eprintln!("{} warning(s), {} info", warns, infos);
                     if warns > 0 {
@@ -780,4 +787,31 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_lint_warning;
+    use crate::check::{CompletenessWarning, Severity};
+
+    #[test]
+    fn plain_text_lint_output_includes_priority() {
+        let warning = CompletenessWarning {
+            rule: "missing_effect".to_string(),
+            severity: Severity::Warning,
+            priority: 2,
+            message: "operation 'borrow' takes params and transitions state but has no effect"
+                .to_string(),
+            subject: Some("borrow".to_string()),
+            fix: "Add an effect block to describe state changes".to_string(),
+            example: Some(
+                "  operation borrow\n    effect: loan_amount add loan_amount".to_string(),
+            ),
+        };
+
+        let rendered = format_lint_warning(&warning);
+        assert!(rendered.contains("[P2] [missing_effect]"));
+        assert!(rendered.contains("Fix: Add an effect block to describe state changes"));
+        assert!(rendered.contains("Example:"));
+    }
 }

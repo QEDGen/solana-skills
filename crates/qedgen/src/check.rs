@@ -611,6 +611,81 @@ impl UnifiedReport {
     }
 }
 
+fn fields_for_operation<'a>(spec: &'a ParsedSpec, op: &ParsedOperation) -> &'a [(String, String)] {
+    if let Some(account_name) = op.on_account.as_deref() {
+        if let Some(account) = spec
+            .account_types
+            .iter()
+            .find(|acct| acct.name == account_name)
+        {
+            return &account.fields;
+        }
+    }
+    &spec.state_fields
+}
+
+fn suggested_effect_lines(
+    spec: &ParsedSpec,
+    op: &ParsedOperation,
+    is_init_like: bool,
+) -> Vec<String> {
+    op.takes_params
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .take(3)
+        .map(|param| {
+            let matching_field = fields_for_operation(spec, op)
+                .iter()
+                .find(|(field, _)| field.contains(param) || param.contains(field.as_str()));
+            if let Some((field, _)) = matching_field {
+                if is_init_like {
+                    format!("    {} = {}", field, param)
+                } else {
+                    format!("    {} += {}", field, param)
+                }
+            } else if is_init_like {
+                format!("    <field> = {}", param)
+            } else {
+                format!("    <field> += {}", param)
+            }
+        })
+        .collect()
+}
+
+fn reachable_lifecycle_states(spec: &ParsedSpec) -> std::collections::HashSet<String> {
+    let mut reachable: std::collections::HashSet<String> = spec
+        .account_types
+        .iter()
+        .filter_map(|acct| acct.lifecycle.first().cloned())
+        .collect();
+    // Always include the global initial state — account-level lifecycles
+    // may start at a later state (e.g. "Active") while the true entry
+    // state (e.g. "Uninitialized") is only declared globally.
+    if let Some(initial) = spec.lifecycle_states.first() {
+        reachable.insert(initial.clone());
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for op in &spec.operations {
+            let next_state = match op.post_status.as_ref() {
+                Some(post) => post,
+                None => continue,
+            };
+            let can_reach = match op.pre_status.as_ref() {
+                Some(pre) => reachable.contains(pre),
+                None => true,
+            };
+            if can_reach && reachable.insert(next_state.clone()) {
+                changed = true;
+            }
+        }
+    }
+
+    reachable
+}
+
 /// Check spec completeness — heuristic rules for under-specification.
 /// Returns structured warnings with fix suggestions for agent consumption.
 pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
@@ -827,28 +902,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         let has_lifecycle = op.pre_status.is_some() || op.post_status.is_some();
         let is_init_like = op.name.contains("init") || op.name.contains("create");
         if !op.takes_params.is_empty() && (has_lifecycle || is_init_like) {
-            let param_names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
-            let effect_lines: Vec<String> = param_names
-                .iter()
-                .take(3)
-                .map(|p| {
-                    let matching_field = spec
-                        .state_fields
-                        .iter()
-                        .find(|(f, _)| f.contains(p) || p.contains(f.as_str()));
-                    if let Some((field, _)) = matching_field {
-                        if is_init_like {
-                            format!("    {} = {}", field, p)
-                        } else {
-                            format!("    {} += {}", field, p)
-                        }
-                    } else if is_init_like {
-                        format!("    <field> = {}", p)
-                    } else {
-                        format!("    <field> += {}", p)
-                    }
-                })
-                .collect();
+            let effect_lines = suggested_effect_lines(spec, op, is_init_like);
             warnings.push(CompletenessWarning {
                 rule: "missing_effect".to_string(),
                 severity: Severity::Warning,
@@ -1000,25 +1054,15 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     // Rule 12: lifecycle states unreachable by any operation transition
     if spec.lifecycle_states.len() > 1 {
-        let mut reachable: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        // First state is always reachable (initial)
-        reachable.insert(&spec.lifecycle_states[0]);
-        for op in &spec.operations {
-            if let Some(ref pre) = op.pre_status {
-                reachable.insert(pre.as_str());
-            }
-            if let Some(ref post) = op.post_status {
-                reachable.insert(post.as_str());
-            }
-        }
+        let reachable = reachable_lifecycle_states(spec);
         for state in &spec.lifecycle_states {
-            if !reachable.contains(state.as_str()) {
+            if !reachable.contains(state) {
                 warnings.push(CompletenessWarning {
                     rule: "lifecycle_unreachable_state".to_string(),
                     severity: Severity::Info,
                     priority: 2,
                     message: format!(
-                        "lifecycle state '{}' is never referenced by any operation's `when`/`then`",
+                        "lifecycle state '{}' cannot be reached from any initial state via operation transitions",
                         state
                     ),
                     subject: Some(state.clone()),
@@ -1518,6 +1562,57 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_effect_uses_on_account_fields() {
+        let mut op = make_op("borrow");
+        op.on_account = Some("Loan".to_string());
+        op.takes_params = vec![("loan_amount".to_string(), "U64".to_string())];
+        op.has_takes = true;
+        op.has_guard = true;
+        op.pre_status = Some("Empty".to_string());
+        op.post_status = Some("Active".to_string());
+
+        let spec = ParsedSpec {
+            operations: vec![op],
+            account_types: vec![
+                ParsedAccountType {
+                    name: "Pool".to_string(),
+                    fields: vec![("total_deposits".to_string(), "U64".to_string())],
+                    lifecycle: vec!["Active".to_string()],
+                    pda_ref: None,
+                },
+                ParsedAccountType {
+                    name: "Loan".to_string(),
+                    fields: vec![("loan_amount".to_string(), "U64".to_string())],
+                    lifecycle: vec!["Empty".to_string(), "Active".to_string()],
+                    pda_ref: None,
+                },
+            ],
+            state_fields: vec![("total_deposits".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Empty".to_string(), "Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        let warning = warnings
+            .iter()
+            .find(|w| w.rule == "missing_effect")
+            .expect("expected missing_effect warning");
+        let example = warning
+            .example
+            .as_deref()
+            .expect("missing_effect should include example");
+        assert!(
+            example.contains("loan_amount += loan_amount"),
+            "expected account-aware suggestion, got: {}",
+            example
+        );
+        assert!(
+            !example.contains("total_deposits"),
+            "should not use fields from a different account type: {}",
+            example
+        );
+    }
+
+    #[test]
     fn test_no_properties_fires() {
         let mut op = make_op("deposit");
         op.has_effect = true;
@@ -1677,6 +1772,89 @@ mod tests {
             warnings
                 .iter()
                 .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_disconnected_subgraph_is_unreachable() {
+        let mut init = make_op("initialize");
+        init.pre_status = Some("Uninitialized".to_string());
+        init.post_status = Some("Active".to_string());
+
+        let mut close = make_op("close");
+        close.pre_status = Some("Frozen".to_string());
+        close.post_status = Some("Closed".to_string());
+
+        let spec = ParsedSpec {
+            operations: vec![init, close],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Frozen".to_string(),
+                "Closed".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| {
+                w.rule == "lifecycle_unreachable_state" && w.subject.as_deref() == Some("Frozen")
+            }),
+            "expected disconnected state Frozen to be unreachable, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            warnings.iter().any(|w| {
+                w.rule == "lifecycle_unreachable_state" && w.subject.as_deref() == Some("Closed")
+            }),
+            "expected downstream state Closed to be unreachable, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_global_initial_state_seeded_when_account_lifecycle_differs() {
+        // Account lifecycle starts at "Active", but the global initial state
+        // is "Uninitialized". Without always seeding the global initial state,
+        // "Uninitialized" would be flagged as unreachable even though it is
+        // the entry point of the lifecycle.
+        let mut init = make_op("initialize");
+        init.pre_status = Some("Uninitialized".to_string());
+        init.post_status = Some("Active".to_string());
+
+        let spec = ParsedSpec {
+            operations: vec![init],
+            account_types: vec![ParsedAccountType {
+                name: "Pool".to_string(),
+                fields: vec![],
+                lifecycle: vec!["Active".to_string(), "Frozen".to_string()],
+                pda_ref: None,
+            }],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Frozen".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| {
+                w.rule == "lifecycle_unreachable_state"
+                    && w.subject.as_deref() == Some("Uninitialized")
+            }),
+            "Uninitialized is the global initial state and should NOT be flagged as unreachable, got: {:?}",
+            warnings
+                .iter()
+                .filter(|w| w.rule == "lifecycle_unreachable_state")
+                .map(|w| &w.subject)
                 .collect::<Vec<_>>()
         );
     }
