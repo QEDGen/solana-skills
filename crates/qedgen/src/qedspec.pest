@@ -1,0 +1,249 @@
+// ============================================================================
+// QEDSpec Grammar — PEG definition for .qedspec files
+// ============================================================================
+
+// Top-level: a spec file is a sequence of top-level items
+spec_file = { SOI ~ COMMENT* ~ spec_header ~ top_level_item* ~ EOI }
+
+spec_header = { "spec" ~ ident }
+
+top_level_item = {
+    target_decl
+  | program_id_decl
+  | assembly_decl
+  | const_decl
+  | pubkey_decl
+  | state_block
+  | account_block
+  | lifecycle_decl
+  | pda_decl
+  | event_decl
+  | errors_decl
+  | instruction_block
+  | operation_block
+  | property_block
+  | invariant_decl
+  | COMMENT
+}
+
+// ============================================================================
+// Top-level declarations
+// ============================================================================
+
+// Target declaration: `target assembly` or `target quasar`
+target_decl = { "target" ~ target_kind }
+target_kind = { "assembly" | "quasar" }
+
+program_id_decl = { "program_id" ~ string_lit }
+
+// Assembly source path (sBPF mode): `assembly "src/dropset.s"`
+assembly_decl = { "assembly" ~ string_lit }
+
+// Named constant: `const MAX_TVL = 10_000_000`
+const_decl = { "const" ~ ident ~ "=" ~ integer }
+
+// Known pubkey as 4-chunk U64: `pubkey RENT [chunk0, chunk1, chunk2, chunk3]`
+pubkey_decl = { "pubkey" ~ ident ~ "[" ~ integer_list ~ "]" }
+integer_list = { integer ~ ("," ~ integer)* }
+
+// Bare `state { ... }` — sugar for a single unnamed account type.
+// Fields go into the primary account (named after the program).
+state_block = { "state" ~ "{" ~ field_decl* ~ "}" }
+
+// Named account type with its own fields and optional lifecycle.
+// Example:
+//   account Escrow {
+//     initializer : Pubkey
+//     amount      : U64
+//     lifecycle [Uninitialized, Open, Closed]
+//   }
+account_block = { "account" ~ ident ~ "{" ~ account_item* ~ "}" }
+account_item = {
+    field_decl
+  | account_lifecycle
+  | COMMENT
+}
+account_lifecycle = { "lifecycle" ~ "[" ~ ident_list ~ "]" }
+
+// Global lifecycle — applies to the primary account (backward compat).
+lifecycle_decl = { "lifecycle" ~ "[" ~ ident_list ~ "]" }
+
+pda_decl = { "pda" ~ ident ~ "[" ~ pda_seed_list ~ "]" }
+pda_seed_list = { pda_seed ~ ("," ~ pda_seed)* }
+pda_seed = { string_lit | ident }
+
+event_decl = { "event" ~ ident ~ "{" ~ field_decl* ~ "}" }
+
+// Errors: simple list `[A, B, C]` or valued `[A = 1 "desc", B = 2 "desc"]`
+errors_decl = { "errors" ~ "[" ~ (error_valued_list | ident_list) ~ "]" }
+error_valued_list = { error_valued_entry ~ ("," ~ error_valued_entry)* }
+error_valued_entry = { ident ~ "=" ~ integer ~ string_lit? }
+
+invariant_decl = { "invariant" ~ ident ~ string_lit }
+
+// ============================================================================
+// Instruction block (sBPF)
+// ============================================================================
+
+instruction_block = { doc_comment* ~ "instruction" ~ ident ~ "{" ~ instruction_item* ~ "}" }
+
+instruction_item = {
+    discriminant_clause
+  | entry_clause
+  | const_decl
+  | errors_decl
+  | input_layout_block
+  | insn_layout_block
+  | guard_block
+  | property_block
+  | COMMENT
+}
+
+discriminant_clause = { "discriminant" ~ (ident | integer) }
+entry_clause = { "entry" ~ integer }
+
+// Input buffer layout: fields with byte offsets and optional descriptions
+input_layout_block = { "input_layout" ~ "{" ~ layout_field* ~ "}" }
+insn_layout_block  = { "insn_layout" ~ "{" ~ layout_field* ~ "}" }
+layout_field = { ident ~ ":" ~ ident ~ "@" ~ signed_integer ~ string_lit? }
+signed_integer = @{ "-"? ~ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+
+// Guard block (sBPF validation guard)
+guard_block = { doc_comment* ~ "guard" ~ ident ~ "{" ~ guard_item* ~ "}" }
+guard_item = {
+    checks_clause
+  | error_clause
+  | fuel_clause
+  | COMMENT
+}
+fuel_clause = { "fuel" ~ integer }
+checks_clause = { "checks" ~ guard_expr }
+error_clause  = { "error" ~ ident }
+
+// ============================================================================
+// Operation block
+// ============================================================================
+
+operation_block = { doc_comment* ~ "operation" ~ ident ~ "{" ~ op_clause* ~ "}" }
+
+// Doc comments: /// lines preceding an item (captured, not discarded)
+doc_comment = @{ "///" ~ (!NEWLINE ~ ANY)* }
+
+op_clause = {
+    who_clause
+  | on_clause
+  | when_clause
+  | then_clause
+  | takes_block
+  | guard_clause
+  | effect_block
+  | calls_clause
+  | emits_clause
+  | context_block
+  | COMMENT
+}
+who_clause   = { "who" ~ ident }
+on_clause    = { "on" ~ ident }
+when_clause  = { "when" ~ ident }
+then_clause  = { "then" ~ ident }
+
+// Takes: block form `takes { x : U64 }` or inline `takes x : U64`
+takes_block  = { "takes" ~ "{" ~ field_decl* ~ "}" | "takes" ~ field_decl }
+
+guard_clause = { "guard" ~ guard_expr }
+
+// Guard expressions — parsed as structured AST, not strings
+guard_expr = { guard_or }
+guard_or   = { guard_and ~ ("or" ~ guard_and)* }
+guard_and  = { guard_atom ~ ("and" ~ guard_atom)* }
+guard_atom = {
+    "(" ~ guard_expr ~ ")"
+  | guard_comparison
+}
+guard_comparison = { guard_value ~ cmp_op ~ guard_value }
+cmp_op = { "<=" | ">=" | "!=" | "<" | ">" | "==" }
+guard_value = { guard_term ~ (add_op ~ guard_term)* }
+add_op = { "+" | "-" }
+guard_term = { integer | field_ref | ident }
+
+// Field references: state.field_name
+field_ref = ${ "state" ~ "." ~ ident }
+
+effect_block = { "effect" ~ "{" ~ effect_stmt* ~ "}" }
+effect_stmt = {
+    ident ~ "+=" ~ effect_value   // add
+  | ident ~ "-=" ~ effect_value   // sub
+  | ident ~ "=" ~ effect_value    // set
+}
+effect_value = { integer | field_ref | ident }
+
+calls_clause = { "calls" ~ ident ~ ident ~ "(" ~ call_account_list? ~ ")" }
+call_account_list = { call_account ~ ("," ~ call_account)* }
+call_account = { ident ~ ident }
+
+emits_clause = { "emits" ~ ident }
+
+context_block = { "context" ~ "{" ~ context_entry* ~ "}" }
+context_entry = { ident ~ ":" ~ context_attr ~ ("," ~ context_attr)* }
+// An attribute is an ident optionally followed by a parenthesized argument.
+// Examples: Signer, Account(Multisig), mut, payer(creator), seeds(vault), bump
+// Inner types use parens: Account(Multisig) not Account Multisig.
+context_attr = { ident ~ ("(" ~ ident ~ ")")? }
+
+// ============================================================================
+// Property block
+// ============================================================================
+
+property_block = { doc_comment* ~ "property" ~ ident ~ "{" ~ prop_clause* ~ "}" }
+
+prop_clause = {
+    expr_clause
+  | preserved_by_clause
+  | scope_clause
+  | flow_clause
+  | cpi_block
+  | after_clause
+  | exit_clause
+  | COMMENT
+}
+
+expr_clause = { "expr" ~ guard_expr }
+// preserved_by: list of operations, or `all` to mean every operation
+preserved_by_clause = { "preserved_by" ~ (preserved_by_all | "[" ~ ident_list ~ "]") }
+preserved_by_all = { "all" }
+
+// sBPF property clauses
+scope_clause = { "scope" ~ (scope_guards | "[" ~ ident_list ~ "]") }
+scope_guards = { "guards" }
+flow_clause  = { "flow" ~ ident ~ flow_kind }
+flow_kind    = {
+    "from" ~ "seeds" ~ "[" ~ ident_list ~ "]"
+  | "through" ~ "[" ~ ident_list ~ "]"
+}
+cpi_block    = { "cpi" ~ ident ~ ident ~ "{" ~ cpi_field* ~ "}" }
+cpi_field    = { ident ~ (("[" ~ ident_list ~ "]") | ident) }
+after_clause = { "after" ~ "all" ~ "guards" }
+exit_clause  = { "exit" ~ integer }
+
+// ============================================================================
+// Shared primitives
+// ============================================================================
+
+field_decl = { ident ~ ":" ~ ident }
+
+ident_list = { ident ~ ("," ~ ident)* }
+
+ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+
+// Integers allow underscores for readability: 10_000_000
+integer = @{ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+
+string_lit = ${ "\"" ~ string_inner ~ "\"" }
+string_inner = @{ (!("\"" | "\\") ~ ANY)* }
+
+// ============================================================================
+// Whitespace and comments
+// ============================================================================
+
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }

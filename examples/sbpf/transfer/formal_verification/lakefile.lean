@@ -9,6 +9,9 @@ require qedgenSupport from
 lean_lib TransferProg where
   roots := #[`TransferProg]
 
+lean_lib TransferSpec where
+  roots := #[`TransferSpec]
+
 @[default_target]
 lean_lib TransferProofs where
   roots := #[`TransferProofs]

@@ -28,19 +28,11 @@ set_option maxRecDepth 4096
   pc := 0
   exitCode := none
 
-/-! ## effectiveAddr helpers for named Int offsets -/
+/-! ## effectiveAddr helper for negative offset -/
 
-private theorem ea_neg_SIZE_OF_U64 (b : Nat) (h : b ≥ 8) :
+@[simp] private theorem ea_neg_SIZE_OF_U64 (b : Nat) (h : b ≥ 8) :
     effectiveAddr b (-SIZE_OF_U64) = b - 8 := by
   unfold effectiveAddr SIZE_OF_U64; omega
-
-private theorem ea_OFFSET_ZERO (b : Nat) :
-    effectiveAddr b OFFSET_ZERO = b := by
-  unfold effectiveAddr OFFSET_ZERO; omega
-
-private theorem ea_IB_N_ACCOUNTS_OFF (b : Nat) :
-    effectiveAddr b IB_N_ACCOUNTS_OFF = b := by
-  unfold effectiveAddr IB_N_ACCOUNTS_OFF; omega
 
 /-! ## P1: invalid discriminator → error 11
 
@@ -60,32 +52,7 @@ theorem rejects_invalid_discriminator
   have h1 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INSERT) := by rw [h_disc]; exact h_ne1
   have h2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; exact h_ne2
   have h3 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INITIALIZE) := by rw [h_disc]; exact h_ne0
-  -- 0: ldx r9, [r2 - 8]
-  rw [show (11 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 0 = _ from rfl)]
-  simp [step, treeInit, RegFile.get, RegFile.set, resolveSrc, readByWidth,
-        ea_neg_SIZE_OF_U64 _ h_insn]
-  -- 1: ldx r8, [r1 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 1 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_IB_N_ACCOUNTS_OFF]
-  -- 2: ldx r7, [r2 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 2 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_OFFSET_ZERO]
-  -- 3: jeq r7, 1, 114 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 3 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h1]
-  -- 4: jeq r7, 2, 325 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 4 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h2]
-  -- 5: jeq r7, 0, 8 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 5 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h3]
-  -- 6: mov64 r0, 11
-  rw [executeFn_step _ _ _ _ rfl (show progAt 6 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 7: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 7 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 /-! ## P2: initialize with wrong instruction data length → error 12
 
@@ -105,35 +72,7 @@ theorem init_rejects_wrong_data_len
   have h_ne2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; decide
   have h_ne_dl : ¬(readU64 mem (insn - 8) = SIZE_OF_INITIALIZE_INSTRUCTION) := by
     rw [h_dlen]; exact h_ne
-  -- 0: ldx r9, [r2 - 8]
-  rw [show (12 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1+1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 0 = _ from rfl)]
-  simp [step, treeInit, RegFile.get, RegFile.set, resolveSrc, readByWidth,
-        ea_neg_SIZE_OF_U64 _ h_insn]
-  -- 1: ldx r8, [r1 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 1 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_IB_N_ACCOUNTS_OFF]
-  -- 2: ldx r7, [r2 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 2 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_OFFSET_ZERO]
-  -- 3: jeq r7, 1, 114 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 3 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne1]
-  -- 4: jeq r7, 2, 325 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 4 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne2]
-  -- 5: jeq r7, 0, 8 → branch taken
-  rw [executeFn_step _ _ _ _ rfl (show progAt 5 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 8: jne r9, 1, 476 → branch taken
-  rw [executeFn_step _ _ _ _ rfl (show progAt 8 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne_dl]
-  -- 476: mov64 r0, 12
-  rw [executeFn_step _ _ _ _ rfl (show progAt 476 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 477: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 477 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 /-! ## P3: initialize with wrong account count → error 1
 
@@ -154,37 +93,6 @@ theorem init_rejects_wrong_account_count
   have h_ne1 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INSERT) := by rw [h_disc]; decide
   have h_ne2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; decide
   have h_ne_na : ¬(readU64 mem accts = IB_N_ACCOUNTS_INIT) := by rw [h_naccts]; exact h_ne
-  -- 0: ldx r9, [r2 - 8]
-  rw [show (13 : Nat) = 0+1+1+1+1+1+1+1+1+1+1+1+1+1 from rfl]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 0 = _ from rfl)]
-  simp [step, treeInit, RegFile.get, RegFile.set, resolveSrc, readByWidth,
-        ea_neg_SIZE_OF_U64 _ h_insn]
-  -- 1: ldx r8, [r1 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 1 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_IB_N_ACCOUNTS_OFF]
-  -- 2: ldx r7, [r2 + 0]
-  rw [executeFn_step _ _ _ _ rfl (show progAt 2 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc, readByWidth, ea_OFFSET_ZERO]
-  -- 3: jeq r7, 1, 114 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 3 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne1]
-  -- 4: jeq r7, 2, 325 → fall-through
-  rw [executeFn_step _ _ _ _ rfl (show progAt 4 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne2]
-  -- 5: jeq r7, 0, 8 → branch taken
-  rw [executeFn_step _ _ _ _ rfl (show progAt 5 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_disc]
-  -- 8: jne r9, 1, 476 → fall-through (data len correct)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 8 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_dlen]
-  -- 9: jne r8, 5, 478 → branch taken (wrong account count)
-  rw [executeFn_step _ _ _ _ rfl (show progAt 9 = _ from rfl)]
-  simp [step, RegFile.get, resolveSrc, h_ne_na]
-  -- 478: mov64 r0, 1
-  rw [executeFn_step _ _ _ _ rfl (show progAt 478 = _ from rfl)]
-  simp [step, RegFile.get, RegFile.set, resolveSrc]
-  -- 479: exit
-  rw [executeFn_step _ _ _ _ rfl (show progAt 479 = _ from rfl)]
-  simp [step, RegFile.get]
+  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 end TreeProofs

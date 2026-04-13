@@ -9,6 +9,9 @@ require qedgenSupport from
 lean_lib SlippageProg where
   roots := #[`SlippageProg]
 
+lean_lib SlippageSpec where
+  roots := #[`SlippageSpec]
+
 @[default_target]
 lean_lib SlippageProofs where
   roots := #[`SlippageProofs]

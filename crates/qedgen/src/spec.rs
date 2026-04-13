@@ -646,6 +646,177 @@ fn type_label(value: &serde_json::Value) -> String {
     }
 }
 
+// ── From-spec generator ─────────────────────────────────────────────────
+
+/// Generate SPEC.md from a .qedspec file.
+/// Optionally includes proof status from a proofs directory.
+pub fn generate_spec_from_qedspec(
+    spec_path: &Path,
+    proofs_dir: Option<&Path>,
+    output_path: &Path,
+) -> Result<()> {
+    let parsed = crate::check::parse_spec_file(spec_path)?;
+
+    let program_name = parsed.program_name.clone();
+    let state_fields = parsed.state_fields.clone();
+    let lifecycle_states = parsed.lifecycle_states.clone();
+
+    // Optionally check proof status
+    let proof_results = if let Some(proofs) = proofs_dir {
+        crate::check::check(spec_path, proofs).ok()
+    } else {
+        None
+    };
+
+    // Build SPEC.md
+    let mut s = String::new();
+
+    // Header
+    writeln!(s, "# {} Verification Spec\n", program_name).unwrap();
+
+    // §1 State Model
+    writeln!(s, "## 1. State Model\n").unwrap();
+    writeln!(s, "| Field | Type |").unwrap();
+    writeln!(s, "|-------|------|").unwrap();
+    for (name, typ) in &state_fields {
+        writeln!(s, "| {} | {} |", name, typ).unwrap();
+    }
+    writeln!(s).unwrap();
+
+    if !lifecycle_states.is_empty() {
+        writeln!(s, "**Lifecycle:** {}\n", lifecycle_states.join(" → ")).unwrap();
+    }
+
+    // §2 Operations
+    writeln!(s, "## 2. Operations\n").unwrap();
+    for op in &parsed.operations {
+        writeln!(s, "### {}\n", op.name).unwrap();
+        if let Some(ref doc) = op.doc {
+            writeln!(s, "{}\n", doc).unwrap();
+        }
+        if let Some(ref signer) = op.who {
+            writeln!(s, "- **Signer:** `{}`", signer).unwrap();
+        }
+        if op.has_when {
+            let pre = op.pre_status.as_deref().unwrap_or("?");
+            let post = op.post_status.as_deref().unwrap_or("?");
+            writeln!(s, "- **Lifecycle:** {} → {}", pre, post).unwrap();
+        }
+        if op.has_guard {
+            if let Some(ref guard) = op.guard_str {
+                writeln!(s, "- **Guard:** `{}`", guard).unwrap();
+            }
+        }
+        if op.has_calls {
+            let program = op.program_id.as_deref().unwrap_or("?");
+            writeln!(s, "- **CPI:** `{}`", program).unwrap();
+        }
+        writeln!(s).unwrap();
+    }
+
+    // §3 Formal Properties
+    writeln!(s, "## 3. Formal Properties\n").unwrap();
+
+    if let Some(ref results) = proof_results {
+        writeln!(s, "| Property | Intent | Status |").unwrap();
+        writeln!(s, "|----------|--------|--------|").unwrap();
+        for r in results {
+            let icon = match r.status {
+                crate::check::Status::Proven => "✓",
+                crate::check::Status::Sorry => "✗",
+                crate::check::Status::Missing => "—",
+            };
+            let intent = r.intent.as_deref().unwrap_or("");
+            writeln!(s, "| {} | {} | {} {} |", r.name, intent, icon, r.status).unwrap();
+        }
+    } else {
+        // No proof status available — list expected properties
+        writeln!(s, "| Property | Intent |").unwrap();
+        writeln!(s, "|----------|--------|").unwrap();
+        for op in &parsed.operations {
+            if op.who.is_some() {
+                writeln!(
+                    s,
+                    "| {}.access_control | Only {} can call {} |",
+                    op.name,
+                    op.who.as_deref().unwrap_or("?"),
+                    op.name
+                )
+                .unwrap();
+            }
+            if op.has_when {
+                writeln!(
+                    s,
+                    "| {}.state_machine | {} → {} |",
+                    op.name,
+                    op.pre_status.as_deref().unwrap_or("?"),
+                    op.post_status.as_deref().unwrap_or("?")
+                )
+                .unwrap();
+            }
+            if op.has_calls {
+                writeln!(
+                    s,
+                    "| {}.cpi_correct | CPI targets {} |",
+                    op.name,
+                    op.program_id.as_deref().unwrap_or("?")
+                )
+                .unwrap();
+            }
+        }
+        for (name, desc) in &parsed.invariants {
+            writeln!(s, "| {} | {} |", name, desc).unwrap();
+        }
+    }
+    writeln!(s).unwrap();
+
+    // §4 Trust Boundary
+    writeln!(s, "## 4. Trust Boundary\n").unwrap();
+    writeln!(s, "The following are axiomatic (not verified):\n").unwrap();
+
+    // Detect which programs are referenced
+    let mut programs = Vec::new();
+    for op in &parsed.operations {
+        if let Some(ref pid) = op.program_id {
+            if !programs.contains(pid) {
+                programs.push(pid.clone());
+            }
+        }
+    }
+    for pid in &programs {
+        if pid.contains("TOKEN") {
+            writeln!(s, "- **SPL Token program**: Transfer semantics are correct. We verify parameters passed, not the transfer itself.").unwrap();
+        } else if pid.contains("SYSTEM") {
+            writeln!(
+                s,
+                "- **System Program**: Account creation and SOL transfer semantics."
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        s,
+        "- **Solana runtime**: PDA derivation, account ownership enforcement."
+    )
+    .unwrap();
+    writeln!(s, "- **CPI mechanics**: `invoke_signed` faithfulness.").unwrap();
+    writeln!(s).unwrap();
+
+    writeln!(
+        s,
+        "---\n\n*Generated from `{}` by `qedgen spec --from-spec`*",
+        spec_path.display()
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(output_path)?;
+    let out_file = output_path.join("SPEC.md");
+    std::fs::write(&out_file, &s)?;
+    eprintln!("Wrote {}", out_file.display());
+
+    Ok(())
+}
+
 fn snake_to_title(s: &str) -> String {
     s.split('_')
         .map(|word| {

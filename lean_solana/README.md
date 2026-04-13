@@ -1,80 +1,167 @@
-# QEDGen.Solana Support Library
+# QEDGen.Solana — Lean 4 Support Library for Solana Verification
 
-This directory contains the **canonical** Lean support library for Solana program verification.
+Standalone Lean 4 library providing types, axioms, and the `qedspec` DSL for formally verifying Solana programs.
 
-## Purpose
+## Quick Start
 
-Provides pre-bundled axioms and types that model:
-- **Account**: Solana account structure (key, authority, balance)
-- **Cpi**: Generic CPI envelope (invoke_signed model with AccountMeta)
-- **State**: Lifecycle and state machine types
-- **Authority**: Authorization predicates
-- **Valid**: Numeric bounds and validity predicates
+```bash
+lake build                         # Build library
+lake env lean test_lemmas.lean     # Test axioms
+lake env lean test_spec.lean       # Test qedspec DSL
+```
+
+## Modules
+
+### QEDGen.Solana.Account
+
+Types and axioms for Solana account modeling.
+
+| Definition | Type | Description |
+|---|---|---|
+| `Pubkey` | `structure` | 4×U64 little-endian chunks, `DecidableEq` |
+| `U64` | `Nat` | Unbounded Nat alias (bounds via Valid) |
+| `U8` | `Nat` | Unbounded Nat alias |
+| `Account` | `structure` | key, authority, balance, writable |
+| `canWrite` | `Pubkey → Account → Prop` | Authority + writable check |
+| `findByKey` | `List Account → Pubkey → Option Account` | Lookup by key |
+| `findByAuthority` | `List Account → Pubkey → Option Account` | Lookup by authority |
+
+**Axioms** (trusted, not proven):
+- `find_map_pred_preserved` / `find_map_update_other` / `find_map_update_same` — list update properties
+- `find_by_key_map_update_other` / `find_by_key_map_update_same` — key-based lookup after update
+
+### QEDGen.Solana.Cpi
+
+CPI (Cross-Program Invocation) envelope model — structure + verification predicates.
+
+| Definition | Type | Description |
+|---|---|---|
+| `AccountMeta` | `structure` | pubkey, isSigner, isWritable |
+| `CpiInstruction` | `structure` | programId, accounts, data |
+| `targetsProgram` | `CpiInstruction → Pubkey → Prop` | Program ID match |
+| `accountAt` | `CpiInstruction → Nat → Pubkey → Bool → Bool → Prop` | Account at index with flags |
+| `hasDiscriminator` | `CpiInstruction → List Nat → Prop` | Instruction data prefix match |
+| `hasNAccounts` | `CpiInstruction → Nat → Prop` | Account count check |
+| `wellFormed` | `CpiInstruction → Prop` | Non-empty data + at least 1 account |
+
+**Constants:**
+- Program IDs: `TOKEN_PROGRAM_ID`, `SYSTEM_PROGRAM_ID`, `TOKEN_2022_PROGRAM_ID`, `ASSOCIATED_TOKEN_PROGRAM_ID`, `MEMO_PROGRAM_ID`, `COMPUTE_BUDGET_PROGRAM_ID`, `STAKE_PROGRAM_ID`
+- SPL Token discriminators (`List Nat`): `DISC_TRANSFER`, `DISC_BURN`, `DISC_MINT_TO`, `DISC_APPROVE`, `DISC_CLOSE_ACCOUNT`, `DISC_TRANSFER_CHECKED`, etc.
+- System Program discriminators (`List Nat`): `DISC_SYS_CREATE_ACCOUNT`, `DISC_SYS_TRANSFER`, `DISC_SYS_ASSIGN`, `DISC_SYS_ALLOCATE`
+- ATA discriminators (`List Nat`): `DISC_ATA_CREATE`, `DISC_ATA_CREATE_IDEMPOTENT`, `DISC_ATA_RECOVER_NESTED`
+
+All discriminators are `List Nat` — they map directly to `CpiInstruction.data`.
+
+### QEDGen.Solana.State
+
+Lifecycle state machine for one-shot patterns (escrow, auction, etc.).
+
+| Definition | Type | Description |
+|---|---|---|
+| `Lifecycle` | `inductive` | `open \| closed` |
+| `closes` | `Lifecycle → Lifecycle → Prop` | Valid close transition |
+| `closed_irreversible` | `theorem` | Closed state is terminal |
+| `closes_is_closed` | `theorem` | Post-state of close is closed |
+| `closes_was_open` | `theorem` | Pre-state of close was open |
+| `closed_cannot_close` | `theorem` | Cannot close from closed |
+
+### QEDGen.Solana.Valid
+
+Numeric bounds predicates for overflow/underflow safety.
+
+| Definition | Type | Description |
+|---|---|---|
+| `U8_MAX` .. `U128_MAX` | `Nat` | Bit-width max values |
+| `valid_u8` .. `valid_u128` | `Nat → Prop` | `n ≤ MAX` |
+| `valid_u64_zero` | `theorem` | `valid_u64 0` |
+
+### QEDGen.Solana.Spec
+
+The `qedspec` DSL — a single declarative block that generates Lean definitions and theorem stubs.
+
+```lean
+qedspec Escrow where
+  state
+    maker : Pubkey
+    offered : U64
+
+  operation initialize
+    who: maker
+    when: Uninitialized
+    then: Open
+
+  operation exchange
+    who: taker
+    when: Open
+    then: Complete
+    calls: TOKEN_PROGRAM_ID DISC_TRANSFER(src writable, dst writable, auth signer)
+
+  invariant conservation "total tokens preserved"
+```
+
+**Generates per-program:**
+- `inductive Status` — inferred from `when`/`then` values
+- `structure State` — fields + status
+
+**Generates per-operation:**
+- `<op>Transition : State → Pubkey → Option State` — signer + lifecycle guard
+- `<op>.access_control` theorem stub — signer must match
+- `<op>.state_machine` theorem stub — lifecycle pre/post
+- `<op>.u64_bounds` theorem stub — U64 fields stay in range (if any U64 fields)
+
+**Generates per-operation with `calls:`:**
+- `<op>CpiContext` structure — account pubkeys
+- `<op>_build_cpi : <op>CpiContext → CpiInstruction` — constructs the CPI
+- `<op>.cpi_correct` theorem stub — program + accounts + discriminator match
+
+**Account flags:** `readonly`, `writable`, `signer`, `signer_writable`
+
+All theorem stubs contain `sorry` — agents fill them, `lake build` enforces completeness.
+
+### QEDGen.Solana.SBPF
+
+Low-level sBPF virtual machine model for binary-level verification. Submodules: ISA, Memory, Execute, Tactic, WPTactic, Pubkey, Patterns, Region. See SKILL.md for sBPF proof workflow.
 
 ## Trust Boundary
 
-These axioms represent the **trust boundary** between:
-- ✅ **Program logic** (what we verify)
-- ⚠️ **External dependencies** (what we trust)
+These axioms model the boundary between what we verify and what we trust:
 
-CPI verification focuses on structural correctness: correct program, correct accounts
-with correct signer/writable flags, and correct instruction discriminator. Parameter
-serialization within instruction data is trusted (SDK territory).
+- **Verified**: program logic (authorization, conservation, state machines, arithmetic, CPI structure)
+- **Trusted**: SPL Token implementation, Solana runtime, CPI mechanics, Anchor framework
 
-## Usage in Projects
-
-### Option 1: Copy to Project (Recommended)
-
-When generating proofs for a project:
-
-```bash
-# The qedgen tool automatically copies this library
-./bin/qedgen generate ... --output-dir /tmp/proofs
-```
-
-The generated Lean project will include a `lean_solana/` directory with this library.
-
-### Option 2: Symlink (For Development)
-
-If you're actively developing the support library:
-
-```bash
-cd your-project/formal_verification/
-ln -s path/to/lean_solana .
-```
-
-## Adding New Axioms
-
-When adding axioms that are reusable across **all** Solana programs:
-
-1. Add to the appropriate module in `QEDGen/Solana/`
-2. Export in the `QEDGen.Solana` namespace
-3. Document the trust assumption
-4. Test by rebuilding: `lake build`
-
-## Design Principles
-
-1. **Axioms, not proofs**: External dependencies are trusted, not verified
-2. **Minimal surface**: Only include what's needed for common Solana patterns
-3. **Composable**: Axioms should compose to prove program properties
-4. **Clear trust boundary**: Document what we verify vs. what we trust
+CPI verification is structural: correct program, correct accounts with correct flags, correct discriminator. Parameter serialization is trusted (SDK territory).
 
 ## Testing
 
 ```bash
-# Build the support library
-lake build
-
-# Test that all axioms are well-typed
-lake env lean test_lemmas.lean
+lake build                         # Build all modules
+lake env lean test_lemmas.lean     # Axiom smoke tests (Account, Cpi, State)
+lake env lean test_spec.lean       # qedspec DSL behavioral tests
 ```
+
+`test_spec.lean` proves properties of generated code — not just `#check` existence. A regression in code generation will cause a proof failure.
+
+## Adding New Axioms
+
+1. Add to the appropriate module in `QEDGen/Solana/`
+2. Document the trust assumption with a comment
+3. Export in the `QEDGen.Solana` namespace (via `QEDGen.lean` or the module's export block)
+4. Add a test in `test_lemmas.lean`
+5. `lake build && lake env lean test_lemmas.lean`
 
 ## Files
 
-- `lakefile.lean`: Lake build configuration
-- `QEDGen.lean`: Root module that exports everything
-- `QEDGen/Solana/Account.lean`: Account structure and field access
-- `QEDGen/Solana/Cpi.lean`: Generic CPI envelope (invoke_signed model)
-- `QEDGen/Solana/State.lean`: Lifecycle and state machine types
-- `QEDGen/Solana/Valid.lean`: Numeric bounds and validity predicates
-- `test_lemmas.lean`: Smoke tests for type-checking axioms
+```
+lean_solana/
+├── lakefile.lean                  Build config
+├── QEDGen.lean                    Root export (imports all modules)
+├── QEDGen/Solana/
+│   ├── Account.lean               Pubkey, Account, lookup axioms
+│   ├── Cpi.lean                   CpiInstruction, predicates, constants
+│   ├── State.lean                 Lifecycle state machine
+│   ├── Valid.lean                 Numeric bounds predicates
+│   ├── Spec.lean                  qedspec DSL macro + elaborator
+│   └── SBPF/                     sBPF VM model (ISA, Memory, Execute, Tactic)
+├── test_lemmas.lean               Axiom tests
+└── test_spec.lean                 DSL behavioral tests
+```

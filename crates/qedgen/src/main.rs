@@ -1,10 +1,22 @@
 mod api;
 mod aristotle;
 mod asm2lean;
+mod check;
+mod ci;
+mod codegen;
 mod consolidate;
+mod explain;
+mod fingerprint;
+mod init;
+mod integration_test;
+mod kani;
+mod lean_gen;
+mod parser;
 mod project;
 mod spec;
+mod unit_test;
 mod validate;
+mod verify;
 
 use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
@@ -73,13 +85,25 @@ enum Commands {
         /// Validate filled file with 'lake build'
         #[arg(long)]
         validate: bool,
+
+        /// Auto-escalate to Aristotle if sorry markers remain after Leanstral
+        #[arg(long)]
+        escalate: bool,
     },
 
-    /// Generate a draft SPEC.md from an Anchor IDL
+    /// Generate SPEC.md from an Anchor IDL or a .qedspec file
     Spec {
         /// Path to Anchor IDL JSON file
+        #[arg(long, required_unless_present = "from_spec")]
+        idl: Option<PathBuf>,
+
+        /// Path to .qedspec file (alternative to --idl)
+        #[arg(long, conflicts_with = "idl")]
+        from_spec: Option<PathBuf>,
+
+        /// Path to proofs directory (for --from-spec status checking)
         #[arg(long)]
-        idl: PathBuf,
+        proofs: Option<PathBuf>,
 
         /// Directory to write SPEC.md (default: ./formal_verification)
         #[arg(long, default_value = "./formal_verification")]
@@ -118,6 +142,153 @@ enum Commands {
         /// Directory for the validation workspace (default: platform cache dir)
         #[arg(long)]
         workspace: Option<PathBuf>,
+    },
+
+    /// Initialize a new formal verification project
+    Init {
+        /// Project name (alphanumeric + underscores)
+        #[arg(long)]
+        name: String,
+
+        /// sBPF assembly source file (runs asm2lean automatically)
+        #[arg(long)]
+        asm: Option<PathBuf>,
+
+        /// Include Mathlib dependency
+        #[arg(long)]
+        mathlib: bool,
+
+        /// Also generate a Quasar program skeleton and Kani harnesses
+        #[arg(long)]
+        quasar: bool,
+
+        /// Output directory (default: ./formal_verification)
+        #[arg(long, default_value = "./formal_verification")]
+        output_dir: PathBuf,
+    },
+
+    /// Verify sBPF proofs: check source hash, regenerate if stale, run lake build
+    Verify {
+        /// Path to the sBPF assembly source file
+        #[arg(long)]
+        asm: PathBuf,
+
+        /// Path to the formal_verification directory containing proofs
+        #[arg(long, default_value = "./formal_verification")]
+        proofs: PathBuf,
+    },
+
+    /// Check spec coverage and drift detection across all verification layers
+    Check {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Path to the proofs directory
+        #[arg(long, default_value = "./formal_verification/Proofs")]
+        proofs: PathBuf,
+
+        /// Path to generated Quasar program directory (enables code drift detection)
+        #[arg(long)]
+        code: Option<PathBuf>,
+
+        /// Path to generated Kani harness file (enables Kani drift detection)
+        #[arg(long)]
+        kani: Option<PathBuf>,
+    },
+
+    /// Generate a Markdown verification report with intent descriptions
+    Explain {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Path to the proofs directory
+        #[arg(long, default_value = "./formal_verification")]
+        proofs: PathBuf,
+
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Lint a qedspec for completeness — structured warnings for agent consumption
+    Lint {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output as JSON (default: human-readable)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate a Quasar program skeleton from a qedspec Lean file
+    Codegen {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output directory for the generated Quasar project
+        #[arg(long, default_value = "./programs")]
+        output_dir: PathBuf,
+    },
+
+    /// Generate Kani proof harnesses from a qedspec Lean file
+    Kani {
+        /// Path to the spec file (Spec.lean)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output path for the generated harness file
+        #[arg(long, default_value = "./tests/kani.rs")]
+        output: PathBuf,
+    },
+
+    /// Generate unit tests from a qedspec (plain Rust, cargo test)
+    Test {
+        /// Path to the spec file (Spec.lean or .qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output path for the generated test file
+        #[arg(long, default_value = "./src/tests.rs")]
+        output: PathBuf,
+    },
+
+    /// Generate QuasarSVM integration test scaffolds from a qedspec
+    #[command(name = "integration-test")]
+    IntegrationTest {
+        /// Path to the spec file (.qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output path for the generated test file
+        #[arg(long, default_value = "./src/integration_tests.rs")]
+        output: PathBuf,
+    },
+
+    /// Generate a Lean 4 file from a .qedspec spec
+    #[command(name = "lean-gen")]
+    LeanGen {
+        /// Path to the .qedspec spec file
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output path for the generated Lean file
+        #[arg(long, default_value = "./formal_verification/Spec.lean")]
+        output: PathBuf,
+    },
+
+    /// Generate a GitHub Actions workflow for formal verification CI
+    Ci {
+        /// Output path for the workflow file
+        #[arg(long, default_value = ".github/workflows/verify.yml")]
+        output: PathBuf,
+
+        /// sBPF assembly source file (adds verify step to CI)
+        #[arg(long)]
+        asm: Option<String>,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -235,6 +406,7 @@ async fn main() -> Result<()> {
             temperature,
             max_tokens,
             validate,
+            escalate,
         } => {
             ensure!(passes > 0, "passes must be greater than 0");
             ensure!(
@@ -251,10 +423,57 @@ async fn main() -> Result<()> {
                 validate,
             )
             .await?;
+
+            // If --escalate: check for remaining sorry markers, submit to Aristotle
+            if escalate {
+                let result_path = output.as_deref().unwrap_or(&file);
+                let content = std::fs::read_to_string(result_path)?;
+                if content.contains("sorry") {
+                    eprintln!("\nSorry markers remain after Leanstral. Escalating to Aristotle...");
+                    // Derive project dir from the file path (go up to lakefile.lean)
+                    let project_dir = result_path
+                        .parent()
+                        .and_then(|p| {
+                            if p.join("lakefile.lean").exists() {
+                                Some(p.to_path_buf())
+                            } else {
+                                p.parent().and_then(|pp| {
+                                    if pp.join("lakefile.lean").exists() {
+                                        Some(pp.to_path_buf())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Could not find lakefile.lean above {}. \
+                                 Run `qedgen aristotle submit` manually with --project-dir.",
+                                result_path.display()
+                            )
+                        })?;
+                    let prompt = "Fill in all sorry placeholders with valid proofs".to_string();
+                    aristotle::fill_sorry(&project_dir, &project_dir, &prompt, true, None).await?;
+                } else {
+                    eprintln!("All sorry markers filled by Leanstral.");
+                }
+            }
         }
 
-        Commands::Spec { idl, output_dir } => {
-            spec::generate_spec(&idl, &output_dir)?;
+        Commands::Spec {
+            idl,
+            from_spec,
+            proofs,
+            output_dir,
+        } => {
+            if let Some(spec_path) = from_spec {
+                spec::generate_spec_from_qedspec(&spec_path, proofs.as_deref(), &output_dir)?;
+            } else if let Some(idl_path) = idl {
+                spec::generate_spec(&idl_path, &output_dir)?;
+            } else {
+                anyhow::bail!("Either --idl or --from-spec must be specified");
+            }
         }
 
         Commands::Consolidate {
@@ -274,6 +493,150 @@ async fn main() -> Result<()> {
 
         Commands::Setup { workspace } => {
             validate::setup_workspace(workspace.as_deref()).await?;
+        }
+
+        Commands::Init {
+            name,
+            asm,
+            mathlib,
+            quasar,
+            output_dir,
+        } => {
+            init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
+
+            if quasar {
+                let spec_path = output_dir.join("Spec.lean");
+                let program_dir = output_dir
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(format!("programs/{}", name));
+                let kani_path = output_dir
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("tests/kani.rs");
+
+                // Generate Quasar program skeleton
+                codegen::generate(&spec_path, &program_dir)?;
+
+                // Generate Kani proof harnesses
+                kani::generate(&spec_path, &kani_path)?;
+
+                // Generate unit tests
+                let test_path = program_dir.join("src/tests.rs");
+                unit_test::generate(&spec_path, &test_path)?;
+            }
+        }
+
+        Commands::Verify { asm, proofs } => {
+            verify::verify(&asm, &proofs)?;
+        }
+
+        Commands::Check {
+            spec,
+            proofs,
+            code,
+            kani,
+        } => {
+            let spec_name = spec
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Spec".to_string());
+
+            if code.is_some() || kani.is_some() {
+                // Unified drift detection mode
+                let report =
+                    check::check_unified(&spec, &proofs, code.as_deref(), kani.as_deref())?;
+                check::print_unified_report(&spec_name, &report);
+                if report.issue_count() > 0 {
+                    std::process::exit(1);
+                }
+            } else {
+                // Lean-only mode (backward compatible)
+                let results = check::check(&spec, &proofs)?;
+                check::print_report(&spec_name, &results);
+                let all_proven = results.iter().all(|r| r.status == check::Status::Proven);
+                if !all_proven {
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Explain {
+            spec,
+            proofs,
+            output,
+        } => {
+            let report = explain::explain(&spec, &proofs)?;
+            if let Some(ref path) = output {
+                std::fs::write(path, &report)?;
+                eprintln!("Wrote verification report to {}", path.display());
+            } else {
+                print!("{}", report);
+            }
+        }
+
+        Commands::Lint { spec, json } => {
+            let warnings = check::lint(&spec)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&warnings)?);
+            } else {
+                if warnings.is_empty() {
+                    eprintln!("Spec is complete — no issues found.");
+                } else {
+                    let warns = warnings
+                        .iter()
+                        .filter(|w| w.severity == check::Severity::Warning)
+                        .count();
+                    let infos = warnings
+                        .iter()
+                        .filter(|w| w.severity == check::Severity::Info)
+                        .count();
+                    for w in &warnings {
+                        let icon = match w.severity {
+                            check::Severity::Warning => "!",
+                            check::Severity::Info => "i",
+                        };
+                        eprintln!("  {} [{}] {}", icon, w.rule, w.message);
+                        eprintln!("    Fix: {}", w.fix);
+                        if let Some(ref ex) = w.example {
+                            eprintln!("    Example:");
+                            for line in ex.lines() {
+                                eprintln!("      {}", line);
+                            }
+                        }
+                        eprintln!();
+                    }
+                    eprintln!("{} warning(s), {} info", warns, infos);
+                    if warns > 0 {
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+
+        Commands::Codegen { spec, output_dir } => {
+            codegen::generate(&spec, &output_dir)?;
+        }
+
+        Commands::Kani { spec, output } => {
+            kani::generate(&spec, &output)?;
+        }
+
+        Commands::Test { spec, output } => {
+            unit_test::generate(&spec, &output)?;
+        }
+
+        Commands::IntegrationTest { spec, output } => {
+            integration_test::generate(&spec, &output)?;
+        }
+
+        Commands::LeanGen { spec, output } => {
+            let parsed = check::parse_spec_file(&spec)?;
+            lean_gen::generate(&parsed, &output)?;
+        }
+
+        Commands::Ci { output, asm } => {
+            ci::generate_ci(&output, asm.as_deref())?;
         }
 
         Commands::Aristotle(cmd) => match cmd {

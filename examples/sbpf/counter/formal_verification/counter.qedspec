@@ -1,0 +1,62 @@
+# Counter — sBPF PDA Counter Program
+#
+# Two operations dispatched by account count:
+#   2 accounts → increment (bump existing counter)
+#   3 accounts → initialize (create PDA via CPI)
+#
+# Validation prefix is shared; subsequent guards are path-specific.
+
+spec Counter
+
+target assembly
+assembly "src/counter.s"
+
+const N_ACCOUNTS_INCREMENT = 2
+const N_ACCOUNTS_INIT      = 3
+const NON_DUP_MARKER       = 255
+const DATA_LEN_ZERO        = 0
+
+errors [
+  InvalidAccountCount     = 1 "Invalid number of accounts",
+  UserDataLenNonzero      = 2 "User data length is nonzero",
+  PdaDataLenInvalid       = 3 "Invalid PDA data length",
+  SystemProgramDataLen    = 4 "System Program data length is nonzero",
+  PdaDuplicate            = 5 "PDA is a duplicate account",
+  SystemProgramDuplicate  = 6 "System Program is a duplicate account",
+  UnableToDerivePda       = 7 "Unable to derive PDA",
+  PdaMismatch             = 8 "Passed PDA does not match computed PDA",
+  InvalidInstructionDataLen = 9 "Invalid instruction data length"
+]
+
+# Proofs cover the initialize path (3 accounts).
+# Account-count dispatch is a multi-branch guard (not expressible as single checks clause).
+
+instruction Initialize {
+  entry 0
+
+  input_layout {
+    n_accounts     : U64 @ 0      "Number of accounts"
+    user_data_len  : U64 @ 88     "User data length"
+    pda_dup_marker : U8  @ 10344  "PDA non-duplicate marker"
+  }
+
+  /// Account count must be 2 (increment) or 3 (initialize)
+  guard rejects_wrong_account_count {
+    error InvalidAccountCount
+    fuel 8
+  }
+
+  /// User data length must be zero (initialize path)
+  guard init_rejects_user_data_len {
+    checks user_data_len == DATA_LEN_ZERO
+    error UserDataLenNonzero
+    fuel 10
+  }
+
+  /// PDA must not be a duplicate account (initialize path)
+  guard init_rejects_pda_duplicate {
+    checks pda_dup_marker == NON_DUP_MARKER
+    error PdaDuplicate
+    fuel 12
+  }
+}

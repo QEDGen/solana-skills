@@ -1,0 +1,68 @@
+# Red-Black Tree — sBPF On-Chain Data Structure
+#
+# Three operations dispatched by instruction discriminator:
+#   0 → initialize (create tree via CPI)
+#   1 → insert (add key, rebalance)
+#   2 → remove (delete key, rebalance)
+#
+# 498 instructions. Input model: r1 = accounts buffer, r2 = instruction data.
+
+spec Tree
+
+target assembly
+assembly "src/tree.s"
+
+const INSN_DISCRIMINATOR_INITIALIZE = 0
+const INSN_DISCRIMINATOR_INSERT     = 1
+const INSN_DISCRIMINATOR_REMOVE     = 2
+const SIZE_OF_INITIALIZE_INSTRUCTION = 1
+const IB_N_ACCOUNTS_INIT            = 5
+
+errors [
+  NAccounts                   = 1  "Invalid number of accounts",
+  UserDataLen                 = 2  "User data length is nonzero",
+  TreeDataLen                 = 3  "Tree data length invalid",
+  SystemProgramDataLen        = 4  "System program data length nonzero",
+  TreeDuplicate               = 5  "Tree account is a duplicate",
+  SystemProgramDuplicate      = 6  "System program is a duplicate",
+  RentDuplicate               = 7  "Rent sysvar is a duplicate",
+  RentAddress                 = 8  "Invalid rent sysvar address",
+  InstructionData             = 9  "Invalid instruction data",
+  PdaMismatch                 = 10 "PDA mismatch",
+  InstructionDiscriminator    = 11 "Invalid instruction discriminator",
+  InstructionDataLen          = 12 "Invalid instruction data length",
+  NAccountsInsertAllocation   = 13 "Invalid account count for insert allocation",
+  KeyExists                   = 14 "Key already exists in tree",
+  KeyDoesNotExist             = 15 "Key does not exist in tree"
+]
+
+instruction Dispatch {
+  entry 0
+
+  input_layout {
+    n_accounts : U64 @ 0 "Number of accounts"
+  }
+
+  insn_layout {
+    insn_len     : U64 @ -8 "Instruction data length"
+    discriminant : U8  @ 0  "Instruction discriminant byte"
+  }
+
+  /// Discriminator must be 0, 1, or 2
+  guard rejects_invalid_discriminator {
+    error InstructionDiscriminator
+    fuel 11
+  }
+
+  /// Initialize: instruction data must be 1 byte
+  guard init_rejects_wrong_data_len {
+    error InstructionDataLen
+    fuel 12
+  }
+
+  /// Initialize: must have 5 accounts
+  guard init_rejects_wrong_account_count {
+    error NAccounts
+    fuel 13
+  }
+}

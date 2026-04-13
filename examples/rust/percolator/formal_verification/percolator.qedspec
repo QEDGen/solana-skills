@@ -1,0 +1,99 @@
+# Percolator Risk Engine — Spec-Driven Verification
+#
+# A perpetual DEX risk engine managing protected principal, junior profit
+# claims, and lazy A/K side indices.
+#
+# Core properties:
+#   - Conservation: V >= C_tot + I (vault covers all obligations)
+#   - Vault bounded: V <= MAX_VAULT_TVL
+#   - ADL lifecycle: Active -> Draining -> Resetting -> Active
+
+spec Percolator
+
+target quasar
+const MAX_VAULT_TVL = 10_000_000_000_000_000
+
+state {
+  authority : Pubkey
+  V         : U64
+  C_tot     : U64
+  I         : U64
+}
+
+lifecycle [Active, Draining, Resetting]
+
+/// User adds capital — V and C_tot increase by same amount
+operation deposit {
+  who authority
+  when Active
+
+  takes amount : U64
+
+  guard state.V + amount <= MAX_VAULT_TVL
+
+  effect {
+    V += amount
+    C_tot += amount
+  }
+}
+
+/// User removes capital — V and C_tot decrease by same amount
+operation withdraw {
+  who authority
+  when Active
+
+  takes amount : U64
+
+  effect {
+    V -= amount
+    C_tot -= amount
+  }
+}
+
+/// External deposit into insurance fund
+operation top_up_insurance {
+  who authority
+  when Active
+
+  takes amount : U64
+
+  guard state.V + amount <= MAX_VAULT_TVL
+
+  effect {
+    V += amount
+    I += amount
+  }
+}
+
+/// Begin auto-deleveraging cycle
+operation trigger_adl {
+  who authority
+  when Active
+  then Draining
+}
+
+/// Complete the drain phase of ADL
+operation complete_drain {
+  who authority
+  when Draining
+  then Resetting
+}
+
+/// Reset risk engine after ADL cycle
+operation reset {
+  who authority
+  when Resetting
+  then Active
+}
+
+/// Vault always covers all obligations
+property conservation {
+  expr state.V >= state.C_tot + state.I
+  preserved_by all
+}
+
+/// Vault never exceeds max TVL
+property vault_bounded {
+  expr state.V <= MAX_VAULT_TVL
+  preserved_by [deposit, top_up_insurance]
+}

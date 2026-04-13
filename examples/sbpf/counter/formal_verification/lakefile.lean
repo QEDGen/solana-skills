@@ -9,6 +9,9 @@ require qedgenSupport from
 lean_lib CounterProg where
   roots := #[`CounterProg]
 
+lean_lib CounterSpec where
+  roots := #[`CounterSpec]
+
 @[default_target]
 lean_lib CounterProofs where
   roots := #[`CounterProofs]

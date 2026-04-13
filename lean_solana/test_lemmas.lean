@@ -21,7 +21,7 @@ example (accs : List Account) (auth : Pubkey) :
 
 -- Test 4: targetsProgram with real TOKEN_PROGRAM_ID
 example : targetsProgram
-    { programId := TOKEN_PROGRAM_ID, accounts := [⟨⟨1, 0, 0, 0⟩, true, false⟩], data := [DISC_TRANSFER] }
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨⟨1, 0, 0, 0⟩, true, false⟩], data := DISC_TRANSFER }
     TOKEN_PROGRAM_ID := by
   unfold targetsProgram
   rfl
@@ -31,16 +31,16 @@ def pk42 : Pubkey := ⟨42, 0, 0, 0⟩
 def pk99 : Pubkey := ⟨99, 0, 0, 0⟩
 
 example : accountAt
-    { programId := TOKEN_PROGRAM_ID, accounts := [⟨pk42, false, true⟩, ⟨pk99, true, false⟩], data := [DISC_TRANSFER] }
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨pk42, false, true⟩, ⟨pk99, true, false⟩], data := DISC_TRANSFER }
     1 pk99 true false := by
   unfold accountAt
   rfl
 
 -- Test 7: hasDiscriminator with SPL Token transfer discriminator
 example : hasDiscriminator
-    { programId := TOKEN_PROGRAM_ID, accounts := [], data := [DISC_TRANSFER, 0, 0, 0, 100] }
-    [DISC_TRANSFER] := by
-  unfold hasDiscriminator
+    { programId := TOKEN_PROGRAM_ID, accounts := [], data := [3, 0, 0, 0, 100] }
+    DISC_TRANSFER := by
+  unfold hasDiscriminator DISC_TRANSFER
   rfl
 
 -- Test 8: hasDiscriminator with System Program 4-byte discriminator
@@ -52,7 +52,7 @@ example : hasDiscriminator
 
 -- Test 9: hasNAccounts
 example : hasNAccounts
-    { programId := TOKEN_PROGRAM_ID, accounts := [⟨⟨1, 0, 0, 0⟩, false, true⟩, ⟨⟨2, 0, 0, 0⟩, false, true⟩, ⟨⟨3, 0, 0, 0⟩, true, false⟩], data := [DISC_TRANSFER] }
+    { programId := TOKEN_PROGRAM_ID, accounts := [⟨⟨1, 0, 0, 0⟩, false, true⟩, ⟨⟨2, 0, 0, 0⟩, false, true⟩, ⟨⟨3, 0, 0, 0⟩, true, false⟩], data := DISC_TRANSFER }
     3 := by
   unfold hasNAccounts
   rfl

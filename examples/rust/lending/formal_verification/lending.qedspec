@@ -1,0 +1,197 @@
+# Lending Protocol Verification Spec
+#
+# A simple lending pool: depositors add liquidity, borrowers take loans
+# against collateral, and repay or get liquidated.
+#
+# Two account types:
+#   Pool  — holds aggregate pool state (total deposits, total borrows)
+#   Loan  — per-borrower loan record (amount, collateral, status)
+#
+# This exercises multi-account lifecycle: Pool and Loan each have their
+# own lifecycle states and transitions.
+
+spec Lending
+
+target quasar
+program_id "Lend111111111111111111111111111111111111111"
+
+account Pool {
+  authority      : Pubkey
+  total_deposits : U64
+  total_borrows  : U64
+  interest_rate  : U64
+  lifecycle [Uninitialized, Active, Paused]
+}
+
+account Loan {
+  borrower   : Pubkey
+  pool       : Pubkey
+  amount     : U64
+  collateral : U64
+  lifecycle [Empty, Active, Liquidated]
+}
+
+pda pool ["pool", authority]
+pda loan ["loan", pool, borrower]
+
+event PoolInitialized {
+  authority : Pubkey
+  rate      : U64
+}
+
+event Deposited {
+  depositor : Pubkey
+  amount    : U64
+}
+
+event Borrowed {
+  borrower : Pubkey
+  amount   : U64
+}
+
+event Repaid {
+  borrower : Pubkey
+  amount   : U64
+}
+
+event LoanLiquidated {
+  borrower : Pubkey
+  amount   : U64
+}
+
+errors [InsufficientLiquidity, InsufficientCollateral, Unauthorized, AlreadyActive, InvalidAmount]
+
+/// Initialize the lending pool with an interest rate
+operation init_pool {
+  who authority
+  on Pool
+  when Uninitialized
+  then Active
+
+  takes rate : U64
+
+  guard rate > 0
+
+  effect {
+    interest_rate = rate
+    total_deposits = 0
+    total_borrows = 0
+  }
+
+  emits PoolInitialized
+
+  context {
+    authority      : Signer, mut
+    pool           : Account(Pool), init, payer(authority), seeds(pool), bump
+    system_program : Program(System)
+  }
+}
+
+/// Deposit tokens into the pool
+operation deposit {
+  on Pool
+  when Active
+
+  takes amount : U64
+
+  guard amount > 0
+
+  effect {
+    total_deposits += amount
+  }
+
+  emits Deposited
+
+  context {
+    depositor      : Signer, mut
+    pool           : Account(Pool), mut, seeds(pool), bump
+    pool_vault     : Account(Token), mut, token_authority(pool)
+    depositor_ta   : Account(Token), mut
+    token_program  : Program(Token)
+  }
+}
+
+/// Borrow tokens from the pool against collateral
+operation borrow {
+  who borrower
+  on Loan
+  when Empty
+  then Active
+
+  takes {
+    amount     : U64
+    collateral : U64
+  }
+
+  guard amount > 0 and collateral > 0
+
+  effect {
+    amount = amount
+    collateral = collateral
+  }
+
+  emits Borrowed
+
+  context {
+    borrower       : Signer, mut
+    loan           : Account(Loan), init, payer(borrower), seeds(loan), bump
+    pool           : Account(Pool), mut, seeds(pool), bump
+    pool_vault     : Account(Token), mut, token_authority(pool)
+    borrower_ta    : Account(Token), mut
+    token_program  : Program(Token)
+    system_program : Program(System)
+  }
+}
+
+/// Repay a loan in full
+operation repay {
+  who borrower
+  on Loan
+  when Active
+  then Empty
+
+  effect {
+    amount = 0
+    collateral = 0
+  }
+
+  emits Repaid
+
+  context {
+    borrower       : Signer, mut
+    loan           : Account(Loan), mut, seeds(loan), bump, close(borrower)
+    pool           : Account(Pool), mut, seeds(pool), bump
+    pool_vault     : Account(Token), mut, token_authority(pool)
+    borrower_ta    : Account(Token), mut
+    token_program  : Program(Token)
+  }
+}
+
+/// Liquidate an undercollateralized loan
+operation liquidate {
+  on Loan
+  when Active
+  then Liquidated
+
+  effect {
+    amount = 0
+  }
+
+  emits LoanLiquidated
+
+  context {
+    liquidator     : Signer, mut
+    loan           : Account(Loan), mut, seeds(loan), bump
+    pool           : Account(Pool), mut, seeds(pool), bump
+    pool_vault     : Account(Token), mut, token_authority(pool)
+    token_program  : Program(Token)
+  }
+}
+
+/// Pool deposits always cover borrows
+property pool_solvency {
+  expr state.total_deposits >= state.total_borrows
+  preserved_by all
+}
+
+invariant collateral_backing "all active loans have collateral > 0"

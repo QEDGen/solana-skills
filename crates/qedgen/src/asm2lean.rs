@@ -4,6 +4,7 @@
 //! a Lean 4 module with `abbrev` constants and `@[simp] def prog`.
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::Path;
@@ -616,6 +617,23 @@ fn emit_insn(
     bail!("line {}: unrecognized mnemonic '{}'", insn.line_no, mn)
 }
 
+/// Compute the SHA-256 hash of a source string.
+pub fn source_hash(source: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Extract the source hash embedded in a generated Lean file, if present.
+pub fn extract_source_hash(lean_content: &str) -> Option<String> {
+    for line in lean_content.lines() {
+        if let Some(rest) = line.strip_prefix("-- source-hash: sha256:") {
+            return Some(rest.trim().to_string());
+        }
+    }
+    None
+}
+
 pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<String> {
     let prog = parse(source)?;
     let equates_map: HashMap<String, i64> = prog.equates.iter().cloned().collect();
@@ -624,6 +642,8 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     for w in &prog.warnings {
         eprintln!("warning: {}", w);
     }
+
+    let hash = source_hash(source);
 
     let mut out = String::new();
 
@@ -635,9 +655,10 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     )?;
     writeln!(
         out,
-        "-- DO NOT EDIT — regenerate with: qedgen asm2lean --input {}\n",
+        "-- DO NOT EDIT — regenerate with: qedgen asm2lean --input {}",
         input_filename
     )?;
+    writeln!(out, "-- source-hash: sha256:{}\n", hash)?;
     writeln!(out, "import QEDGen.Solana.SBPF\n")?;
     writeln!(out, "namespace {}\n", namespace)?;
     writeln!(out, "open QEDGen.Solana.SBPF\n")?;

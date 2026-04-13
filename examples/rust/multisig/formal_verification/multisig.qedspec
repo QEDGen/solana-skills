@@ -1,0 +1,182 @@
+# Multisig Vault — Formal Specification
+#
+# A multisig vault allowing up to 32 members. Any member can propose a
+# transaction. Other members approve. Once a configurable n-of-m threshold
+# is reached the transaction can be executed.
+#
+# State machine:
+#   Uninitialized -> create_vault -> Active <-- execute/cancel --+
+#                                     |                          |
+#                                   propose                      |
+#                                     v                          |
+#                               HasProposal ---------------------+
+#                                  |  ^
+#                                  +--+ (approve)
+
+spec Multisig
+
+target quasar
+program_id "MSig111111111111111111111111111111111111111"
+
+const MAX_MEMBERS = 32
+
+state {
+  creator      : Pubkey
+  threshold    : U8
+  member_count : U8
+  approval_count : U8
+}
+
+lifecycle [Uninitialized, Active, HasProposal]
+
+pda vault ["vault", creator]
+
+event VaultCreated {
+  creator : Pubkey
+  threshold : U8
+  member_count : U8
+}
+
+event ProposalCreated {
+  proposer : Pubkey
+}
+
+event ProposalApproved {
+  approver : Pubkey
+  approval_count : U8
+}
+
+event ProposalExecuted {
+  executor : Pubkey
+}
+
+event ProposalCancelled {
+  canceller : Pubkey
+}
+
+errors [InvalidThreshold, TooManyMembers, AlreadyApproved, ThresholdNotMet, NotAMember]
+
+/// Create a new multisig vault with members and approval threshold
+operation create_vault {
+  who creator
+  when Uninitialized
+  then Active
+
+  takes {
+    threshold : U8
+    member_count : U8
+  }
+
+  guard threshold > 0 and threshold <= member_count and member_count <= MAX_MEMBERS
+
+  effect {
+    threshold = threshold
+    member_count = member_count
+    approval_count = 0
+  }
+
+  emits VaultCreated
+
+  context {
+    creator        : Signer, mut
+    vault          : Account(Multisig), init, payer(creator), seeds(vault), bump
+    system_program : Program(System)
+  }
+}
+
+/// Submit a new transaction proposal — any vault member can propose
+operation propose {
+  when Active
+  then HasProposal
+
+  effect {
+    approval_count = 0
+  }
+
+  emits ProposalCreated
+
+  context {
+    proposer : Signer
+    vault    : Account(Multisig), mut, seeds(vault), bump
+  }
+}
+
+/// Approve the current proposal — each member may approve once
+operation approve {
+  when HasProposal
+
+  takes member_index : U8
+
+  guard member_index < state.member_count
+
+  effect {
+    approval_count += 1
+  }
+
+  emits ProposalApproved
+
+  context {
+    approver : Signer
+    vault    : Account(Multisig), mut, seeds(vault), bump
+  }
+}
+
+/// Execute the proposal once the approval threshold is met
+operation execute {
+  when HasProposal
+  then Active
+
+  guard state.approval_count >= state.threshold
+
+  effect {
+    approval_count = 0
+  }
+
+  emits ProposalExecuted
+
+  context {
+    executor : Signer
+    vault    : Account(Multisig), mut, seeds(vault), bump
+  }
+}
+
+/// Cancel the current proposal and return to accepting new proposals
+operation cancel_proposal {
+  when HasProposal
+  then Active
+
+  effect {
+    approval_count = 0
+  }
+
+  emits ProposalCancelled
+
+  context {
+    canceller : Signer
+    vault     : Account(Multisig), mut, seeds(vault), bump
+  }
+}
+
+/// Remove a member from the vault — creator only
+operation remove_member {
+  who creator
+  when Active
+
+  guard state.member_count > state.threshold
+
+  effect {
+    member_count -= 1
+  }
+}
+
+/// Threshold is always valid: 0 < threshold <= member_count
+property threshold_bounded {
+  expr state.threshold <= state.member_count and state.threshold > 0
+  preserved_by all
+}
+
+/// Approvals never exceed member count
+property approvals_bounded {
+  expr state.approval_count <= state.member_count
+  preserved_by [create_vault, propose, approve, execute, cancel_proposal]
+}

@@ -32,9 +32,10 @@ You (Claude)                          Leanstral (fast)        Aristotle (deep)
 
 Check for existing artifacts in this priority order:
 
-1. **spec.md exists** → Read it. An existing spec captures the author's intent, state model, invariants, and operations. Extract security goals, state model, and formal properties. Skip the scoping quiz and go directly to Step 2.
-2. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path>` to generate a draft SPEC.md with TODO markers, then refine interactively.
-3. **Neither exists** → Read the source code directly. Ask broader scoping questions.
+1. **Spec.lean exists** → Read it. A `qedspec` block is the formal source of truth — it defines state, operations, invariants, and generates theorem signatures that proofs must fulfill. Skip the scoping quiz and go directly to Step 4.
+2. **SPEC.md exists** → Read it. An existing English spec captures the author's intent. Use it to write a `Spec.lean` with the `qedspec` macro (Step 3).
+3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path>` to generate a draft SPEC.md, then convert to `Spec.lean`.
+4. **Neither exists** → Read the source code directly. Ask broader scoping questions.
 
 ## Step 2: Scope the verification
 
@@ -56,65 +57,134 @@ Generate concrete risk scenarios from the program.
 
 Ask questions **one at a time**. Wait for the user's answer before presenting the next question.
 
-## Step 3: Write SPEC.md
+## Step 3: Write Spec.lean
 
-Write `formal_verification/SPEC.md` using normative language (MUST, MUST NOT, MAY). Structure:
+Write `formal_verification/Spec.lean` using the `qedspec` macro. This replaces the English SPEC.md — the spec is now Lean, validated by `lake build`.
 
-```markdown
-# <Program Name> Verification Spec v1.0
+```lean
+import QEDGen.Solana.Spec
 
-<1-2 sentences describing what the program does>
+qedspec Escrow where
 
-## 0. Security Goals
-1. **<Goal name>**: <normative statement>
+  state
+    maker         : Pubkey
+    src_mint      : Pubkey
+    dst_mint      : Pubkey
+    amount        : U64
+    taker_amount  : U64
+    status        : Open | Completed | Cancelled
 
-## 1. State Model
-<State struct with field names, types, and comments>
-<Lifecycle diagram if applicable>
+  operation cancel
+    who: maker
+    when: Open
+    then: Cancelled
+    effect: transfer escrow_token → maker
 
-## 2. Operations
-### 2.1 <Operation name>
-**Signers**: <who MUST sign>
-**Preconditions**: <what MUST be true before>
-**Effects**: <numbered steps>
-**Postconditions**: <what MUST be true after>
+  operation exchange
+    who: taker
+    when: Open
+    then: Completed
+    effect: transfer escrow_token → taker, transfer taker_token → maker
 
-## 3. Formal Properties
-### 3.1 <Category>
-**<property_id>**: For all <quantified variables>,
-if <transition predicate> then <conclusion>.
+  invariant token_conservation
+    over: [escrow_token, maker_token, taker_token]
+    sum amount is constant across exchange
 
-## 4. Trust Boundary
-<What is axiomatic and why>
+  invariant lifecycle
+    Open → Completed | Cancelled
+    terminal: Completed, Cancelled
 
-## 5. Verification Results
-| Property | Status | Proof |
-|---|---|---|
-| ... | **Open** | |
+  trust
+    spl_token, solana_runtime, anchor_framework
 ```
 
-Present SPEC.md to the user and get confirmation before proceeding.
+The `qedspec` macro generates:
+- State structure with `DecidableEq`
+- Transition functions (`Option State`)
+- Theorem **signatures** with `sorry` bodies — one per operation × property category, one per invariant
+- Status enum from `when`/`then` values
+
+**What the macro does NOT generate**: proof bodies. You fill those in Step 5.
+
+**DSL vocabulary**: `state`, `operation`, `invariant`, `trust`, `property`. Operations support `who:` (access control), `when:`/`then:` (lifecycle), `guard:` (domain constraints), `effect:` (state mutations), `takes:` (parameters), `calls:` (CPI declarations).
+
+For sBPF programs, use `qedguards` instead of `qedspec`:
+```lean
+import QEDGen.Solana.Guards
+
+qedguards Dropset where
+  guard P1 "wrong discriminant"
+    offset: DISCRIMINANT_OFFSET
+    expected: DISCRIMINANT_REGISTER_MARKET
+    proof auto
+
+  guard P9 "quote mint mismatch chunk 0"
+    offset: QUOTE_MINT_C0_OFFSET
+    expected_reg: EXPECTED_QUOTE_MINT_C0_OFFSET
+    proof phased [phase1_prefix, phase2_ptr_arith, phase3_read]
+```
+
+Present the spec to the user and get confirmation before proceeding.
+
+### Step 3b: Lint the spec
+
+After writing Spec.lean, **always** run the linter before generating code:
+
+```bash
+$QEDGEN lint --spec formal_verification/Spec.lean --json
+```
+
+This returns a JSON array of structured warnings. Each entry has:
+- `rule` — identifier (`no_access_control`, `unguarded_arithmetic`, `no_lifecycle`, `uncovered_operation`, `unused_field`, `dangling_preserved_by`)
+- `severity` — `"warning"` (should fix) or `"info"` (consider fixing)
+- `message` — what's wrong
+- `subject` — the operation or field affected
+- `fix` — concrete suggestion
+- `example` — DSL snippet showing the fix
+
+**How to present findings to the user:**
+
+For each warning, tell the user what's missing and offer to fix it. Group by operation so the conversation flows naturally:
+
+> Your `increment` operation is missing a few things:
+> 1. **No access control** — anyone can call it. Should I add `who: authority`?
+> 2. **No overflow guard** — `count + delta` could overflow. Should I add `guard: "s.count + delta ≤ 1000000"`?
+>
+> Your `decrement` operation isn't covered by any property. Want me to add it to `bounded`'s `preserved_by` list?
+
+Wait for the user's response, apply fixes, re-run lint, and repeat until clean (or the user explicitly accepts remaining infos).
+
+**Do not skip this step.** A spec with warnings will generate code that can't be fully verified.
 
 ## Step 4: Set up the Lean project
 
+Use `qedgen init` to generate the full project structure in one command:
+
 ```bash
-$QEDGEN setup            # Ensure global Mathlib cache exists (first time: 15-45 min)
+# Anchor/Rust project
+$QEDGEN init --name escrow
+
+# sBPF project (runs asm2lean automatically)
+$QEDGEN init --name dropset --asm src/dropset.s
+
+# With Mathlib (for advanced tactics)
+$QEDGEN init --name engine --mathlib
 ```
 
-Create the project structure:
+This generates:
 
 ```
 formal_verification/
-  lakefile.lean          # require qedgenSupport from path/to/lean_solana
-  lean-toolchain         # leanprover/lean4:v4.24.0
-  Proofs.lean            # root import: import Proofs.AccessControl etc.
-  Proofs/
-    AccessControl.lean
-    CpiCorrectness.lean
-    Conservation.lean
-    StateMachine.lean
-    ArithmeticSafety.lean
+  lakefile.lean          # Pre-configured with qedgenSupport (+ Mathlib if --mathlib)
+  lean-toolchain         # Pinned to current supported version
+  Spec.lean              # Skeleton qedspec block (human fills in)
+  Proofs.lean            # Root import
+  Proofs/                # Ready for agent-written proofs
+  lean_solana/           # Embedded support library
+  .gitignore             # .lake/, build/
 ```
+
+With `--asm`: also runs `asm2lean`, adds the generated module to lakefile.lean, and wires up imports.
 
 ### When to add Mathlib
 
@@ -676,12 +746,16 @@ Three rules that determine whether `wp_exec` completes in seconds or times out:
 When you have a proof with `sorry` markers you cannot fill after 2-3 attempts:
 
 ```bash
+# Try Leanstral first (fast, seconds)
 $QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+
+# Or use --escalate to auto-chain: Leanstral → Aristotle if sorry remains
+$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --escalate
 ```
 
-This sends each `sorry` location to Leanstral with focused context. Review the result — Leanstral may introduce tactics you can learn from for future proofs.
+The `--escalate` flag tries Leanstral first, then automatically submits to Aristotle if any sorry markers remain. No project ID management needed — single command, full pipeline.
 
-If `fill-sorry` fails after multiple passes, escalate to Aristotle (Harmonic's long-running theorem prover). Submit the **entire project directory** so Aristotle has full context.
+Without `--escalate`, you can manually escalate to Aristotle (Harmonic's long-running theorem prover). Submit the **entire project directory** so Aristotle has full context.
 
 **Option A — Submit and wait inline** (blocks until done):
 
@@ -711,13 +785,25 @@ If Aristotle also fails, simplify the theorem statement or split the property in
 ## Step 7: Verify and report
 
 ```bash
+# Build proofs (validates spec + proofs in one step)
 cd formal_verification && lake build
+
+# Check spec coverage (fast, no build required)
+$QEDGEN check --spec formal_verification/Spec.lean --proofs formal_verification/Proofs/
+
+# For sBPF: verify binary hasn't drifted from proofs
+$QEDGEN verify --asm src/program.s --proofs formal_verification/
 ```
 
-Update SPEC.md verification results table:
-- **Verified**: Theorem compiles, no `sorry`
-- **Partial**: Proof has `sorry` markers
-- **Open**: No compiling proof
+`qedgen check` reports per-theorem status:
+- **Proven**: theorem compiles, no `sorry`
+- **Sorry**: theorem has `sorry` markers
+- **Missing**: theorem declaration not found in proofs
+
+For CI integration, generate a GitHub Actions workflow:
+```bash
+$QEDGEN ci --output .github/workflows/verify.yml
+```
 
 ## Environment
 

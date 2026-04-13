@@ -57,6 +57,9 @@ bin/
 *.olean.trace
 *.old
 
+# PRDs (internal planning docs)
+docs/prds/
+
 # Local agent/editor state
 .agents/
 .claude/

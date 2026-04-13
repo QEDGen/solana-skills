@@ -9,6 +9,9 @@ require qedgenSupport from
 lean_lib DropsetProg where
   roots := #[`DropsetProg]
 
+lean_lib DropsetSpec where
+  roots := #[`DropsetSpec]
+
 @[default_target]
 lean_lib DropsetProofs where
   roots := #[`DropsetProofs]

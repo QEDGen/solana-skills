@@ -1,0 +1,200 @@
+# Dropset DEX — On-Chain Order Book
+#
+# sBPF assembly program implementing a permissionless order book.
+# Currently supports one instruction: RegisterMarket.
+#
+# Input model: flat memory buffer with accounts at computed offsets.
+# Each account: [dup_flag:1][is_signer:1][is_writable:1][executable:1]
+#               [resize_delta:4][address:32][owner:32][data_len:8][data:N]
+# Accounts are variable-length due to data; offsets after the first
+# account are computed at runtime from data_len fields.
+
+spec Dropset
+
+target assembly
+assembly "src/dropset.s"
+
+# ── Global constants ───────────────────────────────────────────────
+
+const DISC_REGISTER_MARKET     = 0
+const ACCT_NON_DUP_MARKER      = 255
+const DATA_LEN_ZERO             = 0
+const SIZE_OF_EMPTY_ACCOUNT     = 10_336
+const SIZE_OF_MARKET_HEADER     = 40
+const SIZE_OF_ADDRESS           = 32
+const SIZE_OF_CREATE_ACCOUNT    = 56
+
+# ── Known pubkeys (4-chunk U64 encoding) ──────────────────────────
+
+pubkey RENT [
+  5_862_609_301_215_225_606,
+  9_219_231_539_345_853_473,
+  4_971_307_250_928_769_624,
+  2_329_533_411
+]
+
+# ── Errors ─────────────────────────────────────────────────────────
+
+errors [
+  InvalidDiscriminant         = 1   "Discriminant is not REGISTER_MARKET",
+  InvalidInstructionLength    = 2   "Instruction data is not 1 byte",
+  InvalidNumberOfAccounts     = 3   "Fewer than 10 accounts provided",
+  UserHasData                 = 4   "User account already has data",
+  MarketAccountIsDuplicate    = 5   "Market account is a duplicate",
+  MarketHasData               = 6   "Market account already has data",
+  BaseMintIsDuplicate         = 7   "Base mint account is a duplicate",
+  QuoteMintIsDuplicate        = 8   "Quote mint account is a duplicate",
+  InvalidMarketPubkey         = 9   "Market pubkey does not match derived PDA",
+  SystemProgramIsDuplicate    = 10  "System Program account is a duplicate",
+  InvalidSystemProgramPubkey  = 11  "System Program pubkey is wrong",
+  RentSysvarIsDuplicate       = 12  "Rent sysvar account is a duplicate",
+  InvalidRentSysvarPubkey     = 13  "Rent sysvar pubkey is wrong"
+]
+
+# ── Instruction: RegisterMarket ────────────────────────────────────
+
+/// Validates accounts, derives market PDA, creates market account via CPI
+instruction RegisterMarket {
+  discriminant DISC_REGISTER_MARKET
+  entry 24
+
+  const ACCOUNTS_REQUIRED    = 10
+  const INSTRUCTION_DATA_LEN = 1
+
+  input_layout {
+    n_accounts       : U64    @ 0       "Number of accounts in input buffer"
+    user_data_len    : U64    @ 88      "Data length of user account"
+    market_dup       : U8     @ 10344   "Market account duplicate flag"
+    market_data_len  : U64    @ 10424   "Market account data length"
+    market_pubkey    : Pubkey @ 10352   "Market account address (4 chunks)"
+    base_mint_dup    : U8     @ 20680   "Base mint duplicate flag"
+    base_data_len    : U64    @ 20760   "Base mint data length"
+  }
+
+  insn_layout {
+    insn_len         : U64    @ -8      "Instruction data length"
+    discriminant     : U8     @ 0       "Instruction discriminant byte"
+  }
+
+  # ── Guards ───────────────────────────────────────────────────
+
+  /// Instruction byte must be REGISTER_MARKET
+  guard rejects_invalid_discriminant {
+    checks discriminant == DISC_REGISTER_MARKET
+    error InvalidDiscriminant
+    fuel 8
+  }
+
+  /// Must have at least 10 accounts
+  guard rejects_invalid_account_count {
+    checks n_accounts >= ACCOUNTS_REQUIRED
+    error InvalidNumberOfAccounts
+    fuel 10
+  }
+
+  /// Instruction data must be exactly 1 byte
+  guard rejects_invalid_instruction_length {
+    checks insn_len == INSTRUCTION_DATA_LEN
+    error InvalidInstructionLength
+    fuel 12
+  }
+
+  /// User account must be empty
+  guard rejects_user_has_data {
+    checks user_data_len == DATA_LEN_ZERO
+    error UserHasData
+    fuel 14
+  }
+
+  /// Market account must not be a duplicate
+  guard rejects_market_duplicate {
+    checks market_dup == ACCT_NON_DUP_MARKER
+    error MarketAccountIsDuplicate
+    fuel 16
+  }
+
+  /// Market account must be empty
+  guard rejects_market_has_data {
+    checks market_data_len == DATA_LEN_ZERO
+    error MarketHasData
+    fuel 18
+  }
+
+  /// Base mint must not be a duplicate
+  guard rejects_base_mint_duplicate {
+    checks base_mint_dup == ACCT_NON_DUP_MARKER
+    error BaseMintIsDuplicate
+    fuel 20
+  }
+
+  /// Quote mint at dynamic offset (align8(base_data_len + 7) + 31016)
+  guard rejects_quote_mint_duplicate {
+    error QuoteMintIsDuplicate
+    fuel 30
+  }
+
+  /// 4-chunk PDA comparison: stack-derived PDA vs market_pubkey
+  guard rejects_invalid_market_pubkey {
+    checks market_pubkey == derived_pda
+    error InvalidMarketPubkey
+    fuel 61
+  }
+
+  /// System program dup flag at register-computed r9 (step 47)
+  guard rejects_system_program_duplicate {
+    error SystemProgramIsDuplicate
+    fuel 74
+  }
+
+  /// 4-chunk comparison: r9 account vs stack system program pubkey
+  guard rejects_invalid_system_program_pubkey {
+    error InvalidSystemProgramPubkey
+    fuel 86
+  }
+
+  /// Rent sysvar dup flag at r9 advanced past system program (step 92)
+  guard rejects_rent_sysvar_duplicate {
+    error RentSysvarIsDuplicate
+    fuel 96
+  }
+
+  /// 4-chunk comparison: r9 account vs known PUBKEY_RENT
+  guard rejects_invalid_rent_sysvar_pubkey {
+    checks rent_pubkey == RENT
+    error InvalidRentSysvarPubkey
+    fuel 108
+  }
+
+  # ── Properties ───────────────────────────────────────────────
+
+  /// Stack frame [-664..-8] disjoint from input buffer
+  property memory_safety {
+    scope guards
+  }
+
+  /// try_find_program_address([base_mint, quote_mint]) stored at stack[-616]
+  property pda_derivation {
+    flow market_pda from seeds [base_mint_addr, quote_mint_addr]
+  }
+
+  /// r9 tracks account position: market -> system_program -> rent_sysvar
+  property account_pointer_flow {
+    flow r9 through [market, system_program, rent_sysvar]
+  }
+
+  /// CreateAccount CPI: system_program, payer=user, target=market_pda, space=40
+  property cpi_create_account {
+    cpi system_program CreateAccount {
+      payer        user
+      target       market_pda
+      space        SIZE_OF_MARKET_HEADER
+      signer_seeds [base_mint_addr, quote_mint_addr, bump]
+    }
+  }
+
+  /// All guards pass -> market created -> exit 0
+  property accepts_valid_input {
+    after all guards
+    exit 0
+  }
+}

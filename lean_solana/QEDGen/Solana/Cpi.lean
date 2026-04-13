@@ -91,27 +91,27 @@ def STAKE_PROGRAM_ID : Pubkey :=
 
    Anchor pattern:
      token::transfer(CpiContext::new(..., Transfer { from, to, authority }), amount)?;
-   maps to invoke_signed with data = [DISC_TRANSFER] ++ le_u64(amount)
+   maps to invoke_signed with data = DISC_TRANSFER ++ le_u64(amount)
    ============================================================================ -/
 
-def DISC_INITIALIZE_MINT     : Nat := 0
-def DISC_INITIALIZE_ACCOUNT  : Nat := 1
-def DISC_TRANSFER            : Nat := 3
-def DISC_APPROVE             : Nat := 4
-def DISC_REVOKE              : Nat := 5
-def DISC_SET_AUTHORITY       : Nat := 6
-def DISC_MINT_TO             : Nat := 7
-def DISC_BURN                : Nat := 8
-def DISC_CLOSE_ACCOUNT       : Nat := 9
-def DISC_FREEZE_ACCOUNT      : Nat := 10
-def DISC_THAW_ACCOUNT        : Nat := 11
-def DISC_TRANSFER_CHECKED    : Nat := 12
-def DISC_APPROVE_CHECKED     : Nat := 13
-def DISC_MINT_TO_CHECKED     : Nat := 14
-def DISC_BURN_CHECKED        : Nat := 15
-def DISC_SYNC_NATIVE         : Nat := 17
-def DISC_INITIALIZE_ACCOUNT3 : Nat := 18
-def DISC_INITIALIZE_MINT2    : Nat := 20
+def DISC_INITIALIZE_MINT     : List Nat := [0]
+def DISC_INITIALIZE_ACCOUNT  : List Nat := [1]
+def DISC_TRANSFER            : List Nat := [3]
+def DISC_APPROVE             : List Nat := [4]
+def DISC_REVOKE              : List Nat := [5]
+def DISC_SET_AUTHORITY       : List Nat := [6]
+def DISC_MINT_TO             : List Nat := [7]
+def DISC_BURN                : List Nat := [8]
+def DISC_CLOSE_ACCOUNT       : List Nat := [9]
+def DISC_FREEZE_ACCOUNT      : List Nat := [10]
+def DISC_THAW_ACCOUNT        : List Nat := [11]
+def DISC_TRANSFER_CHECKED    : List Nat := [12]
+def DISC_APPROVE_CHECKED     : List Nat := [13]
+def DISC_MINT_TO_CHECKED     : List Nat := [14]
+def DISC_BURN_CHECKED        : List Nat := [15]
+def DISC_SYNC_NATIVE         : List Nat := [17]
+def DISC_INITIALIZE_ACCOUNT3 : List Nat := [18]
+def DISC_INITIALIZE_MINT2    : List Nat := [20]
 
 /- ============================================================================
    System Program instruction discriminators (4-byte LE u32)
@@ -130,9 +130,9 @@ def DISC_SYS_ALLOCATE       : List Nat := [8, 0, 0, 0]
    Associated Token Account instruction discriminators (single u8 byte)
    ============================================================================ -/
 
-def DISC_ATA_CREATE            : Nat := 0
-def DISC_ATA_CREATE_IDEMPOTENT : Nat := 1
-def DISC_ATA_RECOVER_NESTED    : Nat := 2
+def DISC_ATA_CREATE            : List Nat := [0]
+def DISC_ATA_CREATE_IDEMPOTENT : List Nat := [1]
+def DISC_ATA_RECOVER_NESTED    : List Nat := [2]
 
 /- ============================================================================
    Verification predicates — all rfl-provable on concrete CpiInstruction values

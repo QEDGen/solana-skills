@@ -1,262 +1,204 @@
-import QEDGen.Solana
-import Mathlib
-
+import Spec
+import QEDGen.Solana.Verify
 open QEDGen.Solana
+open Percolator
 
-/- ============================================================================
-   Deposit Conservation Proof
+/-!
+# Percolator Risk Engine — Proofs
 
-   deposit(s, amount):
-     V' = V + amount, C_tot' = C_tot + amount, I' = I
-   Conservation: V >= C_tot + I  →  V' >= C_tot' + I'
-   ============================================================================ -/
+All properties proven against DSL-generated transitions in Spec.lean.
+No Mathlib dependency — `simp` + `omega` handle everything.
 
-namespace DepositConservation
+24 of 26 expected properties proven. The 2 missing (deposit.u64_bounds,
+top_up_insurance.u64_bounds) genuinely need conservation as a precondition
+— the guard bounds V+amount but not C_tot+amount or I+amount individually.
+-/
 
-structure EngineState where
-  V : Nat       -- vault TVL
-  C_tot : Nat   -- sum of all account capitals
-  I : Nat       -- insurance fund
+namespace Percolator.Proofs
 
-def conservation (p_s : EngineState) : Prop := p_s.V >= p_s.C_tot + p_s.I
+-- ============================================================================
+-- Access control: only authority can call operations
+-- ============================================================================
 
-def MAX_VAULT_TVL : Nat := 10000000000000000
+theorem deposit_access_control (s : State) (p : Pubkey) (amount : Nat)
+    (h : depositTransition s p amount ≠ none) : p = s.authority := by
+  simp [depositTransition] at h; exact h.1
 
-def depositTransition (p_s : EngineState) (p_amount : Nat) : Option EngineState :=
-  if p_s.V + p_amount ≤ MAX_VAULT_TVL then
-    some { V := p_s.V + p_amount, C_tot := p_s.C_tot + p_amount, I := p_s.I }
-  else
-    none
+theorem withdraw_access_control (s : State) (p : Pubkey) (amount : Nat)
+    (h : withdrawTransition s p amount ≠ none) : p = s.authority := by
+  simp [withdrawTransition] at h; exact h.1
 
-theorem deposit_conservation (p_s p_s' : EngineState) (p_amount : Nat)
-    (h_inv : conservation p_s)
-    (h : depositTransition p_s p_amount = some p_s') :
-    conservation p_s' := by
-  unfold depositTransition at h
-  split_ifs at h with h_le
-  cases h
-  unfold conservation at h_inv ⊢
-  dsimp only
-  omega
+theorem top_up_insurance_access_control (s : State) (p : Pubkey) (amount : Nat)
+    (h : top_up_insuranceTransition s p amount ≠ none) : p = s.authority := by
+  simp [top_up_insuranceTransition] at h; exact h.1
 
-end DepositConservation
+theorem trigger_adl_access_control (s : State) (p : Pubkey)
+    (h : trigger_adlTransition s p ≠ none) : p = s.authority := by
+  simp [trigger_adlTransition] at h; exact h.1
 
-/- ============================================================================
-   Top-Up Insurance Conservation Proof
+theorem complete_drain_access_control (s : State) (p : Pubkey)
+    (h : complete_drainTransition s p ≠ none) : p = s.authority := by
+  simp [complete_drainTransition] at h; exact h.1
 
-   top_up_insurance(s, amount):
-     V' = V + amount, I' = I + amount, C_tot' = C_tot
-   Conservation: V >= C_tot + I  →  V' >= C_tot' + I'
-   ============================================================================ -/
+theorem reset_access_control (s : State) (p : Pubkey)
+    (h : resetTransition s p ≠ none) : p = s.authority := by
+  simp [resetTransition] at h; exact h.1
 
-namespace TopUpInsuranceConservation
+-- ============================================================================
+-- State machine: ADL lifecycle Active → Draining → Resetting → Active
+-- ============================================================================
 
-structure EngineState where
-  V : Nat
-  C_tot : Nat
-  I : Nat
+theorem deposit_state_machine (s s' : State) (p : Pubkey) (amount : Nat)
+    (h : depositTransition s p amount = some s') :
+    s.status = .Active ∧ s'.status = .Active := by
+  simp [depositTransition] at h
+  obtain ⟨⟨_, h_pre, _⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-def conservation (p_s : EngineState) : Prop := p_s.V >= p_s.C_tot + p_s.I
+theorem withdraw_state_machine (s s' : State) (p : Pubkey) (amount : Nat)
+    (h : withdrawTransition s p amount = some s') :
+    s.status = .Active ∧ s'.status = .Active := by
+  simp [withdrawTransition] at h
+  obtain ⟨⟨_, h_pre, _⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-def MAX_VAULT_TVL : Nat := 10000000000000000
+theorem top_up_insurance_state_machine (s s' : State) (p : Pubkey) (amount : Nat)
+    (h : top_up_insuranceTransition s p amount = some s') :
+    s.status = .Active ∧ s'.status = .Active := by
+  simp [top_up_insuranceTransition] at h
+  obtain ⟨⟨_, h_pre, _⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-def topUpTransition (p_s : EngineState) (p_amount : Nat) : Option EngineState :=
-  if p_s.V + p_amount ≤ MAX_VAULT_TVL then
-    some { V := p_s.V + p_amount, C_tot := p_s.C_tot, I := p_s.I + p_amount }
-  else
-    none
+theorem trigger_adl_state_machine (s s' : State) (p : Pubkey)
+    (h : trigger_adlTransition s p = some s') :
+    s.status = .Active ∧ s'.status = .Draining := by
+  simp [trigger_adlTransition] at h
+  obtain ⟨⟨_, h_pre⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-theorem top_up_insurance_conservation (p_s p_s' : EngineState) (p_amount : Nat)
-    (h_inv : conservation p_s)
-    (h : topUpTransition p_s p_amount = some p_s') :
-    conservation p_s' := by
-  unfold topUpTransition at h
-  split_ifs at h with h_le
-  cases h
-  unfold conservation at h_inv ⊢
-  dsimp only
-  omega
+theorem complete_drain_state_machine (s s' : State) (p : Pubkey)
+    (h : complete_drainTransition s p = some s') :
+    s.status = .Draining ∧ s'.status = .Resetting := by
+  simp [complete_drainTransition] at h
+  obtain ⟨⟨_, h_pre⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-end TopUpInsuranceConservation
+theorem reset_state_machine (s s' : State) (p : Pubkey)
+    (h : resetTransition s p = some s') :
+    s.status = .Resetting ∧ s'.status = .Active := by
+  simp [resetTransition] at h
+  obtain ⟨⟨_, h_pre⟩, h_eq⟩ := h
+  exact ⟨h_pre, by subst h_eq; rfl⟩
 
-/- ============================================================================
-   Deposit Fee Credits Conservation Proof
+-- ============================================================================
+-- U64 bounds: all U64 fields remain in bounds after each operation
+-- ============================================================================
 
-   deposit_fee_credits(s, amount):
-     pay = min(amount, debt)  where debt = -fee_credits (fee_credits <= 0)
-     V' = V + pay, I' = I + pay, C_tot' = C_tot
-   Conservation: V >= C_tot + I  →  V' >= C_tot' + I'
-   ============================================================================ -/
+-- Note: deposit.u64_bounds and top_up_insurance.u64_bounds are NOT provable
+-- without conservation as a precondition. The guard bounds V+amount ≤ MAX
+-- but does not bound C_tot+amount or I+amount individually.
 
-namespace DepositFeeCreditsConservation
+theorem withdraw_u64_bounds (s s' : State) (p : Pubkey) (amount : Nat)
+    (h_valid : valid_u64 s.V ∧ valid_u64 s.C_tot ∧ valid_u64 s.I)
+    (h : withdrawTransition s p amount = some s') :
+    valid_u64 s'.V ∧ valid_u64 s'.C_tot ∧ valid_u64 s'.I := by
+  simp [withdrawTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  obtain ⟨hv, hc, hi⟩ := h_valid
+  have hv' : valid_u64 (s.V - amount) := by
+    simp only [valid_u64, Valid.valid_u64, Valid.U64_MAX] at hv ⊢; omega
+  have hc' : valid_u64 (s.C_tot - amount) := by
+    simp only [valid_u64, Valid.valid_u64, Valid.U64_MAX] at hc ⊢; omega
+  subst h_eq; exact ⟨hv', hc', hi⟩
 
-structure EngineState where
-  V : Nat
-  C_tot : Nat
-  I : Nat
+theorem trigger_adl_u64_bounds (s s' : State) (p : Pubkey)
+    (h_valid : valid_u64 s.V ∧ valid_u64 s.C_tot ∧ valid_u64 s.I)
+    (h : trigger_adlTransition s p = some s') :
+    valid_u64 s'.V ∧ valid_u64 s'.C_tot ∧ valid_u64 s'.I := by
+  simp [trigger_adlTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_valid
 
-def conservation (p_s : EngineState) : Prop := p_s.V >= p_s.C_tot + p_s.I
+theorem complete_drain_u64_bounds (s s' : State) (p : Pubkey)
+    (h_valid : valid_u64 s.V ∧ valid_u64 s.C_tot ∧ valid_u64 s.I)
+    (h : complete_drainTransition s p = some s') :
+    valid_u64 s'.V ∧ valid_u64 s'.C_tot ∧ valid_u64 s'.I := by
+  simp [complete_drainTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_valid
 
-def MAX_VAULT_TVL : Nat := 10000000000000000
+theorem reset_u64_bounds (s s' : State) (p : Pubkey)
+    (h_valid : valid_u64 s.V ∧ valid_u64 s.C_tot ∧ valid_u64 s.I)
+    (h : resetTransition s p = some s') :
+    valid_u64 s'.V ∧ valid_u64 s'.C_tot ∧ valid_u64 s'.I := by
+  simp [resetTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_valid
 
-def depositFeeCreditsTransition (p_s : EngineState) (p_pay : Nat) : Option EngineState :=
-  if p_s.V + p_pay ≤ MAX_VAULT_TVL then
-    some { V := p_s.V + p_pay, C_tot := p_s.C_tot, I := p_s.I + p_pay }
-  else
-    none
+-- ============================================================================
+-- Conservation: V ≥ C_tot + I (preserved by all 6 operations)
+-- ============================================================================
 
-theorem deposit_fee_credits_conservation (p_s p_s' : EngineState) (p_pay : Nat)
-    (h_inv : conservation p_s)
-    (h : depositFeeCreditsTransition p_s p_pay = some p_s') :
-    conservation p_s' := by
-  unfold depositFeeCreditsTransition at h
-  split_ifs at h with h_le
-  cases h
-  unfold conservation at h_inv ⊢
-  dsimp only
-  omega
+theorem deposit_preserves_conservation (s s' : State) (p : Pubkey) (amount : Nat)
+    (h_inv : conservation s) (h : depositTransition s p amount = some s') :
+    conservation s' := by
+  simp [depositTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; simp [conservation] at h_inv ⊢; omega
 
-end DepositFeeCreditsConservation
+theorem withdraw_preserves_conservation (s s' : State) (p : Pubkey) (amount : Nat)
+    (h_inv : conservation s) (h : withdrawTransition s p amount = some s') :
+    conservation s' := by
+  simp [withdrawTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; simp [conservation] at h_inv ⊢; omega
 
-/- ============================================================================
-   PNL Negation Safety Proof
+theorem top_up_insurance_preserves_conservation (s s' : State) (p : Pubkey) (amount : Nat)
+    (h_inv : conservation s) (h : top_up_insuranceTransition s p amount = some s') :
+    conservation s' := by
+  simp [top_up_insuranceTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; simp [conservation] at h_inv ⊢; omega
 
-   For all x : Int, if x > -(2^127) then -x ≤ 2^127 - 1.
-   i.e., negation of a valid i128 (excluding MIN) stays in i128 range.
-   ============================================================================ -/
+theorem trigger_adl_preserves_conservation (s s' : State) (p : Pubkey)
+    (h_inv : conservation s) (h : trigger_adlTransition s p = some s') :
+    conservation s' := by
+  simp [trigger_adlTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_inv
 
-namespace PnlNegationSafety
+theorem complete_drain_preserves_conservation (s s' : State) (p : Pubkey)
+    (h_inv : conservation s) (h : complete_drainTransition s p = some s') :
+    conservation s' := by
+  simp [complete_drainTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_inv
 
-def I128_MIN : Int := -(2 ^ 127)
-def I128_MAX : Int := 2 ^ 127 - 1
+theorem reset_preserves_conservation (s s' : State) (p : Pubkey)
+    (h_inv : conservation s) (h : resetTransition s p = some s') :
+    conservation s' := by
+  simp [resetTransition] at h
+  obtain ⟨_, h_eq⟩ := h
+  subst h_eq; exact h_inv
 
-theorem pnl_negation_safety (p_x : Int)
-    (h_lower : p_x ≥ I128_MIN)
-    (h_upper : p_x ≤ I128_MAX)
-    (h_not_min : p_x ≠ I128_MIN) :
-    -p_x ≥ I128_MIN ∧ -p_x ≤ I128_MAX := by
-  unfold I128_MIN at h_lower h_not_min ⊢
-  unfold I128_MAX at h_upper ⊢
-  omega
+-- ============================================================================
+-- Vault bounded: V ≤ 10_000_000_000_000_000 (preserved by deposit, top_up)
+-- ============================================================================
 
-end PnlNegationSafety
+theorem deposit_preserves_vault_bounded (s s' : State) (p : Pubkey) (amount : Nat)
+    (_ : vault_bounded s) (h : depositTransition s p amount = some s') :
+    vault_bounded s' := by
+  simp [depositTransition] at h
+  obtain ⟨⟨_, _, h_guard⟩, h_eq⟩ := h
+  subst h_eq; unfold vault_bounded; omega
 
-/- ============================================================================
-   Deposit Bounded Proof
+theorem top_up_insurance_preserves_vault_bounded (s s' : State) (p : Pubkey) (amount : Nat)
+    (_ : vault_bounded s) (h : top_up_insuranceTransition s p amount = some s') :
+    vault_bounded s' := by
+  simp [top_up_insuranceTransition] at h
+  obtain ⟨⟨_, _, h_guard⟩, h_eq⟩ := h
+  subst h_eq; unfold vault_bounded; omega
 
-   If deposit succeeds, V' ≤ MAX_VAULT_TVL.
-   ============================================================================ -/
+end Percolator.Proofs
 
-namespace DepositBounded
-
-def MAX_VAULT_TVL : Nat := 10000000000000000
-
-structure EngineState where
-  V : Nat
-  C_tot : Nat
-  I : Nat
-
-def depositTransition (p_s : EngineState) (p_amount : Nat) : Option EngineState :=
-  if p_s.V + p_amount ≤ MAX_VAULT_TVL then
-    some { V := p_s.V + p_amount, C_tot := p_s.C_tot + p_amount, I := p_s.I }
-  else
-    none
-
-theorem deposit_bounded (p_s p_s' : EngineState) (p_amount : Nat)
-    (h : depositTransition p_s p_amount = some p_s') :
-    p_s'.V ≤ MAX_VAULT_TVL := by
-  unfold depositTransition at h
-  split_ifs at h with h_le
-  cases h
-  exact h_le
-
-end DepositBounded
-
-/- ============================================================================
-   ADL Lifecycle Proof
-
-   SideMode transitions: Normal → DrainOnly → ResetPending → Normal
-   No other transitions are permitted.
-   ============================================================================ -/
-
-namespace AdlLifecycle
-
-inductive SideMode where
-  | Normal
-  | DrainOnly
-  | ResetPending
-  deriving DecidableEq
-
-def adlTransition (p_m : SideMode) : Option SideMode :=
-  match p_m with
-  | SideMode.Normal       => some SideMode.DrainOnly
-  | SideMode.DrainOnly    => some SideMode.ResetPending
-  | SideMode.ResetPending => some SideMode.Normal
-
-theorem adl_lifecycle_drain (p_m p_m' : SideMode)
-    (h : p_m = SideMode.Normal)
-    (h_t : adlTransition p_m = some p_m') :
-    p_m' = SideMode.DrainOnly := by
-  subst h
-  unfold adlTransition at h_t
-  cases h_t
-  rfl
-
-theorem adl_lifecycle_reset (p_m p_m' : SideMode)
-    (h : p_m = SideMode.DrainOnly)
-    (h_t : adlTransition p_m = some p_m') :
-    p_m' = SideMode.ResetPending := by
-  subst h
-  unfold adlTransition at h_t
-  cases h_t
-  rfl
-
-theorem adl_lifecycle_normal (p_m p_m' : SideMode)
-    (h : p_m = SideMode.ResetPending)
-    (h_t : adlTransition p_m = some p_m') :
-    p_m' = SideMode.Normal := by
-  subst h
-  unfold adlTransition at h_t
-  cases h_t
-  rfl
-
-theorem adl_lifecycle_total (p_m : SideMode) :
-    ∃ p_m', adlTransition p_m = some p_m' := by
-  cases p_m
-  · exact ⟨SideMode.DrainOnly, rfl⟩
-  · exact ⟨SideMode.ResetPending, rfl⟩
-  · exact ⟨SideMode.Normal, rfl⟩
-
-end AdlLifecycle
-
-/- ============================================================================
-   Fee Credits Nonpositive Proof
-
-   If fee_credits <= 0 and pay = min(amount, -fee_credits),
-   then fee_credits + pay <= 0.
-   ============================================================================ -/
-
-namespace FeeCreditsNonpositive
-
-theorem fee_credits_nonpositive (p_fee_credits : Int) (p_amount : Int)
-    (_h_neg : p_fee_credits ≤ 0)
-    (_h_amt_pos : p_amount ≥ 0)
-    (p_pay : Int)
-    (h_pay : p_pay = min p_amount (-p_fee_credits)) :
-    p_fee_credits + p_pay ≤ 0 := by
-  rw [h_pay]
-  cases le_total p_amount (-p_fee_credits) with
-  | inl h_le =>
-    have h_pay_eq : min p_amount (-p_fee_credits) = p_amount := by
-      apply min_eq_left
-      linarith
-    rw [h_pay_eq]
-    linarith
-  | inr h_le =>
-    have h_pay_eq : min p_amount (-p_fee_credits) = -p_fee_credits := by
-      apply min_eq_right
-      linarith
-    rw [h_pay_eq]
-    linarith
-
-end FeeCreditsNonpositive
+#qedgen_verify Percolator.Proofs
