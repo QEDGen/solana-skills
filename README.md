@@ -32,18 +32,22 @@ npx skills add qedgen/solana-skills
 ## How it works
 
 ```
-Your Code ──► Your Agent ──► SPEC.md ──► Lean 4 Proofs ──► lake build ──► ∎
-                  │                           ▲       │
-                  │                           │       ├─► Leanstral (fast)
-                  └─── iterate on errors ─────┘       └─► Aristotle (deep)
+.qedspec ──► lean-gen ──► Spec.lean ──► Lean 4 Proofs ──► lake build ──► ∎
+                │              │              ▲       │
+                │              │              │       ├─► Leanstral (fast)
+                ├─► codegen    │              │       └─► Aristotle (deep)
+                ├─► kani       └── iterate ───┘
+                └─► test
 ```
 
-1. Your agent reads the program source and IDL
-2. Generates a `SPEC.md` with verification goals and properties
-3. Writes Lean 4 proofs against the QEDGen support library
+1. Write a `.qedspec` file defining your program's properties, or let your agent generate one from the IDL
+2. Run `qedgen lean-gen` to produce `Spec.lean` from the spec
+3. Your agent writes Lean 4 proofs against the QEDGen support library
 4. Iterates on `lake build` errors until proofs compile
 5. Calls `qedgen fill-sorry` for hard sub-goals (Leanstral — seconds)
 6. Escalates to `qedgen aristotle submit` when Leanstral fails (Aristotle — minutes to hours)
+
+Optionally, generate downstream artifacts from the same `.qedspec`: Quasar program skeletons (`codegen`), Kani harnesses (`kani`), unit tests (`test`), and integration tests (`integration-test`).
 
 ## What it verifies
 
@@ -68,8 +72,9 @@ npx skills add qedgen/solana-skills
 export MISTRAL_API_KEY=your_key_here                    # https://console.mistral.ai (free tier available)
 export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harmonic.fun
 
-# 3. Run setup (installs Lean, Rust, Mathlib cache — first run takes 15-45 min)
-qedgen setup
+# 3. Run setup (installs Lean, Rust — first run takes a few minutes)
+qedgen setup                    # minimal setup
+qedgen setup --mathlib          # include Mathlib (adds 15-45 min for cache download)
 
 # 4. Verify an example
 cd examples/sbpf/dropset/formal_verification && lake build
@@ -79,15 +84,44 @@ If `lake build` completes with no errors, your setup is working. Every theorem c
 
 ## Usage
 
-### Full pipeline
+### Spec-driven pipeline (v1.5)
 
 ```bash
-qedgen verify \
-  --idl target/idl/my_program.json \
-  --validate
+# Initialize a new verification project from a .qedspec
+qedgen init --name my_program
+
+# Generate Lean spec from .qedspec
+qedgen lean-gen --spec my_program.qedspec
+
+# Generate downstream artifacts from .qedspec
+qedgen codegen --spec Spec.lean               # Quasar program skeleton
+qedgen kani --spec Spec.lean                  # Kani proof harnesses
+qedgen test --spec Spec.lean                  # Unit tests
+qedgen integration-test --spec my.qedspec     # QuasarSVM integration tests
+
+# Lint a spec for completeness
+qedgen lint --spec Spec.lean
+qedgen lint --spec Spec.lean --json           # machine-readable output
+
+# Check spec coverage and drift detection
+qedgen check --spec Spec.lean
+qedgen check --spec Spec.lean --code ./programs --kani ./tests/kani.rs
+
+# Generate a human-readable verification report
+qedgen explain --spec Spec.lean
 ```
 
-### Generate from an existing prompt
+### sBPF verification
+
+```bash
+# Transpile sBPF assembly to Lean 4
+qedgen asm2lean --input src/program.s --output formal_verification/Prog.lean
+
+# Verify sBPF proofs (checks source hash, regenerates if stale)
+qedgen verify --asm src/program.s
+```
+
+### Generate proofs from a prompt
 
 ```bash
 qedgen generate \
@@ -100,13 +134,21 @@ qedgen generate \
 ### Fill hard sub-goals
 
 ```bash
+# Leanstral (fast, seconds)
 qedgen fill-sorry \
   --file formal_verification/Proofs/Hard.lean \
   --passes 3 \
   --validate
+
+# Auto-escalate to Aristotle if sorry markers remain
+qedgen fill-sorry \
+  --file formal_verification/Proofs/Hard.lean \
+  --passes 3 \
+  --validate \
+  --escalate
 ```
 
-### Escalate to Aristotle (when Leanstral fails)
+### Aristotle (when Leanstral fails)
 
 ```bash
 # Submit and wait inline
@@ -115,6 +157,10 @@ qedgen aristotle submit --project-dir formal_verification --wait
 # Or submit, detach, and poll later
 qedgen aristotle submit --project-dir formal_verification
 qedgen aristotle status <project-id> --wait --output-dir formal_verification
+
+# List / cancel
+qedgen aristotle list
+qedgen aristotle cancel <project-id>
 ```
 
 ### Consolidate proofs
@@ -125,11 +171,20 @@ qedgen consolidate \
   --output-dir my_program/formal_verification
 ```
 
+### Generate CI workflow
+
+```bash
+qedgen ci                                     # Lean-only verification workflow
+qedgen ci --asm src/program.s                 # Add sBPF source hash check
+```
+
 ## Examples
 
 ### Rust / Anchor
 
 - **[Escrow](examples/rust/escrow/)** — Token escrow with authority checks, CPI transfer verification, and lifecycle proofs
+- **[Lending](examples/rust/lending/)** — Lending protocol verification
+- **[Multisig](examples/rust/multisig/)** — Multi-signature verification
 - **[Percolator](examples/rust/percolator/)** — Market maker with state machine verification and arithmetic safety
 
 ### sBPF Assembly
@@ -149,7 +204,14 @@ qedgen consolidate \
 
 Both API keys are optional — `qedgen` works without them, but unresolved sub-goals will remain as `sorry` markers in proofs.
 
-Override the Mathlib cache location with `QEDGEN_VALIDATION_WORKSPACE`.
+### Environment variables
+
+| Variable | Purpose |
+|---|---|
+| `MISTRAL_API_KEY` | Leanstral API access (`fill-sorry`, `generate`) |
+| `ARISTOTLE_API_KEY` | Aristotle long-running proof search |
+| `QEDGEN_HOME` | Override global home directory (default: `~/.qedgen`) |
+| `QEDGEN_VALIDATION_WORKSPACE` | Override validation workspace path |
 
 ## License
 

@@ -24,3 +24,6 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Check README drift
+        run: bash scripts/check-readme-drift.sh
