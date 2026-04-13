@@ -54,11 +54,13 @@ Optionally, generate downstream artifacts from the same `.qedspec`: Quasar progr
 | Property | Approach |
 |---|---|
 | **Access control** | Signer checks, authority constraints |
-| **CPI correctness** | Correct parameters passed to each transfer (axiomatic, pure `rfl`) |
+| **CPI correctness** | Correct program, accounts, flags, and discriminator for each invocation (axiomatic, pure `rfl`) |
 | **State machines** | Lifecycle correctness, one-shot safety |
-| **Arithmetic safety** | Overflow/underflow for fixed-width integers |
+| **Conservation** | Custom invariants (token totals, vault bounds) preserved across operations |
+| **Arithmetic safety** | Overflow/underflow for fixed-width integers, U64 bounds |
+| **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |
-| **PDA integrity** | Program-derived address validation (sBPF) |
+| **PDA integrity** | Program-derived address derivation and 4-chunk comparison (sBPF) |
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
 

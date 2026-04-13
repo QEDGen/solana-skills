@@ -1279,7 +1279,7 @@ mod tests {
     use super::*;
 
     const MULTISIG_SPEC: &str =
-        include_str!("../../../examples/rust/multisig/formal_verification/multisig.qedspec");
+        include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
     #[test]
     fn parse_multisig_header() {
@@ -1430,7 +1430,7 @@ mod tests {
     // ========================================================================
 
     const LENDING_SPEC: &str =
-        include_str!("../../../examples/rust/lending/formal_verification/lending.qedspec");
+        include_str!("../../../examples/rust/lending/lending.qedspec");
 
     #[test]
     fn parse_lending_account_types() {
@@ -1517,7 +1517,7 @@ mod tests {
     // ========================================================================
 
     const DROPSET_SPEC: &str =
-        include_str!("../../../examples/sbpf/dropset/formal_verification/dropset.qedspec");
+        include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
 
     #[test]
     fn parse_dropset_header() {

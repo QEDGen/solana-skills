@@ -1074,7 +1074,7 @@ mod tests {
     use crate::parser;
 
     const MULTISIG_SPEC: &str =
-        include_str!("../../../examples/rust/multisig/formal_verification/multisig.qedspec");
+        include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
     #[test]
     fn lean_gen_has_namespace() {
@@ -1157,7 +1157,7 @@ mod tests {
     // ========================================================================
 
     const LENDING_SPEC: &str =
-        include_str!("../../../examples/rust/lending/formal_verification/lending.qedspec");
+        include_str!("../../../examples/rust/lending/lending.qedspec");
 
     #[test]
     fn lean_gen_multi_per_account_status() {
@@ -1221,7 +1221,7 @@ mod tests {
     // ========================================================================
 
     const DROPSET_SPEC: &str =
-        include_str!("../../../examples/sbpf/dropset/formal_verification/dropset.qedspec");
+        include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
 
     #[test]
     fn lean_gen_sbpf_routes_to_sbpf_renderer() {
