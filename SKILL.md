@@ -46,8 +46,29 @@ Check for existing artifacts in this priority order:
 
 1. **Spec.lean exists** → Read it. A `qedspec` block is the formal source of truth. Skip to Step 4.
 2. **SPEC.md exists** → Read it. Use it to write `Spec.lean` with the `qedspec` macro (Step 3).
-3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path>` to generate a draft SPEC.md, then convert to `Spec.lean`.
-4. **Neither exists** → Read the source code directly. Ask scoping questions.
+3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path> --format qedspec` to generate a `.qedspec` scaffold, then review TODO items and run `$QEDGEN lean-gen` to produce `Spec.lean`.
+4. **Rust source only** (no IDL, no framework) → Extract the spec from source using LSP. See "Writing a .qedspec from Rust source" below.
+5. **Neither exists** → Read the source code directly. Ask scoping questions.
+
+### Writing a .qedspec from Rust source
+
+For native Rust programs without an IDL (no Anchor/Quasar), use LSP and source reading to extract the program structure into a `.qedspec`. Work through these in order:
+
+1. **Find the entry point** — Look for `process_instruction` or the instruction dispatcher. Use LSP to find all match arms or handler functions. Each handler becomes an `operation` block.
+
+2. **Find state structs** — Search for structs that are serialized/deserialized from account data (look for `borsh::BorshDeserialize`, `Pack`, or manual byte parsing). Each becomes a `state {}` or `account {} ` block. Map field types: `u64` → `U64`, `Pubkey` → `Pubkey`, etc.
+
+3. **Find account validation** — In each handler, identify which accounts are checked for `is_signer`, which are writable, and any PDA derivations (`Pubkey::find_program_address`). These map to `context {}` entries with `Signer`, `mut`, `seeds()`, `bump`.
+
+4. **Find guards** — Look for early-return error checks (`if !condition { return Err(...) }`). These become `guard` clauses. Map error codes to an `errors [...]` block.
+
+5. **Find state mutations** — Track which fields are modified in each handler. These become `effect {}` blocks (`field = value`, `field += value`, `field -= value`).
+
+6. **Find CPI calls** — Look for `invoke` or `invoke_signed`. These become `calls` clauses with the target program, discriminator, and account list.
+
+7. **Infer lifecycle** — If there's an init handler that creates the account and a close/cancel handler that closes it, use `lifecycle [Uninitialized, Active, Closed]`. Map each handler to `when`/`then` transitions.
+
+Write the `.qedspec` file at the program root, then run `$QEDGEN lean-gen` to produce `Spec.lean`.
 
 ## Step 2: Scope the verification
 

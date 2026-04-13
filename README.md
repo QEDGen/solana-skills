@@ -86,6 +86,21 @@ If `lake build` completes with no errors, your setup is working. Every theorem c
 
 ## Usage
 
+### Existing programs (brownfield)
+
+```bash
+# Generate a .qedspec scaffold from your Anchor IDL
+qedgen spec --idl target/idl/my_program.json --format qedspec
+
+# Review and complete the TODO items in the generated .qedspec
+# Then use the same pipeline as greenfield:
+qedgen lean-gen --spec my_program.qedspec
+qedgen init --name my_program
+cd formal_verification && lake build
+```
+
+The generated `.qedspec` auto-derives state fields, operations, contexts, PDAs, and errors from the IDL. Guards, effects, lifecycle transitions, and properties are stubbed with TODOs for you or your agent to fill in.
+
 ### Spec-driven pipeline (v1.5)
 
 ```bash

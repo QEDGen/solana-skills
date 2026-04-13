@@ -15,123 +15,128 @@ use std::path::Path;
 // ── IDL types (richer than analyzer's subset) ──────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct Idl {
-    metadata: IdlMetadata,
+pub(crate) struct Idl {
+    pub metadata: IdlMetadata,
     #[serde(default)]
-    instructions: Vec<IdlInstruction>,
+    pub instructions: Vec<IdlInstruction>,
     #[serde(default)]
-    types: Vec<IdlTypeDef>,
+    pub types: Vec<IdlTypeDef>,
     #[serde(default)]
-    errors: Vec<IdlError>,
+    pub errors: Vec<IdlError>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlMetadata {
-    name: String,
+pub(crate) struct IdlMetadata {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlInstruction {
-    name: String,
+pub(crate) struct IdlInstruction {
+    pub name: String,
     #[serde(default)]
-    docs: Vec<String>,
+    pub docs: Vec<String>,
     #[serde(default)]
-    accounts: Vec<IdlAccount>,
+    pub accounts: Vec<IdlAccount>,
     #[serde(default)]
-    args: Vec<IdlArg>,
+    pub args: Vec<IdlArg>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlAccount {
-    name: String,
+pub(crate) struct IdlAccount {
+    pub name: String,
     #[serde(default)]
-    signer: bool,
+    pub signer: bool,
     #[serde(default)]
-    writable: bool,
+    pub writable: bool,
     #[serde(default)]
-    pda: Option<IdlPda>,
+    pub pda: Option<IdlPda>,
     #[serde(default)]
-    relations: Vec<String>,
+    pub relations: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlPda {
+pub(crate) struct IdlPda {
     #[serde(default)]
-    seeds: Vec<IdlSeed>,
+    pub seeds: Vec<IdlSeed>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlSeed {
+pub(crate) struct IdlSeed {
     #[serde(default)]
     #[allow(dead_code)]
-    kind: String,
+    pub kind: String,
     #[serde(default)]
-    value: Option<serde_json::Value>,
+    pub value: Option<serde_json::Value>,
     #[serde(default)]
-    path: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlArg {
-    name: String,
+pub(crate) struct IdlArg {
+    pub name: String,
     #[serde(rename = "type")]
-    ty: serde_json::Value,
+    pub ty: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlTypeDef {
-    name: String,
+pub(crate) struct IdlTypeDef {
+    pub name: String,
     #[serde(rename = "type")]
-    ty: IdlTypeBody,
+    pub ty: IdlTypeBody,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlTypeBody {
+pub(crate) struct IdlTypeBody {
     #[serde(default)]
-    kind: String,
+    pub kind: String,
     #[serde(default)]
-    fields: Vec<IdlField>,
+    pub fields: Vec<IdlField>,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlField {
-    name: String,
+pub(crate) struct IdlField {
+    pub name: String,
     #[serde(rename = "type")]
-    ty: serde_json::Value,
+    pub ty: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct IdlError {
-    name: String,
-    msg: String,
+pub(crate) struct IdlError {
+    pub name: String,
+    #[allow(dead_code)]
+    pub msg: String,
 }
 
 // ── Inferred patterns ──────────────────────────────────────────────────────
 
-struct InstructionAnalysis {
-    name: String,
-    display_name: String,
-    docs: String,
-    signers: Vec<String>,
+pub(crate) struct InstructionAnalysis {
+    pub name: String,
+    pub display_name: String,
+    pub docs: String,
+    pub signers: Vec<String>,
     #[allow(dead_code)]
-    writable_accounts: Vec<String>,
+    pub writable_accounts: Vec<String>,
     #[allow(dead_code)]
-    pda_accounts: Vec<String>,
-    has_one_relations: Vec<(String, String)>, // (account, related_to)
-    args: Vec<(String, String)>,              // (name, type)
-    has_token_program: bool,
-    has_close_semantics: bool,
-    has_numeric_args: bool,
+    pub pda_accounts: Vec<String>,
+    pub has_one_relations: Vec<(String, String)>, // (account, related_to)
+    pub args: Vec<(String, String)>,              // (name, type)
+    pub has_token_program: bool,
+    pub has_close_semantics: bool,
+    pub has_numeric_args: bool,
 }
 
 // ── Generator ──────────────────────────────────────────────────────────────
 
-pub fn generate_spec(idl_path: &Path, output_path: &Path) -> Result<()> {
+pub(crate) fn parse_idl(idl_path: &Path) -> Result<(Idl, Vec<InstructionAnalysis>)> {
     let idl_source = std::fs::read_to_string(idl_path)?;
     let idl: Idl = serde_json::from_str(&idl_source)?;
-
     let analyses: Vec<InstructionAnalysis> =
         idl.instructions.iter().map(analyze_instruction).collect();
+    Ok((idl, analyses))
+}
+
+pub fn generate_spec(idl_path: &Path, output_path: &Path) -> Result<()> {
+    let (idl, analyses) = parse_idl(idl_path)?;
     let spec = build_spec(&idl, &analyses);
 
     std::fs::create_dir_all(output_path)?;
@@ -141,7 +146,7 @@ pub fn generate_spec(idl_path: &Path, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn analyze_instruction(ix: &IdlInstruction) -> InstructionAnalysis {
+pub(crate) fn analyze_instruction(ix: &IdlInstruction) -> InstructionAnalysis {
     let signers: Vec<String> = ix
         .accounts
         .iter()
@@ -639,7 +644,7 @@ fn build_spec(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     s
 }
 
-fn type_label(value: &serde_json::Value) -> String {
+pub(crate) fn type_label(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -817,7 +822,7 @@ pub fn generate_spec_from_qedspec(
     Ok(())
 }
 
-fn snake_to_title(s: &str) -> String {
+pub(crate) fn snake_to_title(s: &str) -> String {
     s.split('_')
         .map(|word| {
             let mut chars = word.chars();

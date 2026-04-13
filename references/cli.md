@@ -137,10 +137,11 @@ List recent projects.
 ## Spec and inspection
 
 ### `spec`
-Generate SPEC.md from IDL or .qedspec.
+Generate SPEC.md or .qedspec from IDL or .qedspec.
 
 ```bash
 $QEDGEN spec --idl target/idl/program.json
+$QEDGEN spec --idl target/idl/program.json --format qedspec
 $QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/Proofs/
 ```
 
@@ -150,6 +151,7 @@ $QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/Proofs/
 | `--from-spec` | Path | - | .qedspec file (alternative to --idl) |
 | `--proofs` | Path | - | Proofs directory (for status checking) |
 | `--output-dir` | Path | `./formal_verification` | Output directory |
+| `--format` | String | `md` | Output format: `md` (SPEC.md) or `qedspec` (.qedspec scaffold) |
 
 ### `check`
 Check spec coverage and drift detection.

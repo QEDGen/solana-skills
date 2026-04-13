@@ -7,6 +7,7 @@ mod codegen;
 mod consolidate;
 mod explain;
 mod fingerprint;
+mod idl2spec;
 mod init;
 mod integration_test;
 mod kani;
@@ -95,7 +96,7 @@ enum Commands {
         escalate: bool,
     },
 
-    /// Generate SPEC.md from an Anchor IDL or a .qedspec file
+    /// Generate SPEC.md or .qedspec from an Anchor IDL or a .qedspec file
     Spec {
         /// Path to Anchor IDL JSON file
         #[arg(long, required_unless_present = "from_spec")]
@@ -109,9 +110,13 @@ enum Commands {
         #[arg(long)]
         proofs: Option<PathBuf>,
 
-        /// Directory to write SPEC.md (default: ./formal_verification)
+        /// Directory to write output (default: ./formal_verification)
         #[arg(long, default_value = "./formal_verification")]
         output_dir: PathBuf,
+
+        /// Output format: "md" (default) or "qedspec"
+        #[arg(long, default_value = "md")]
+        format: String,
     },
 
     /// Consolidate multiple proof projects into a single Lean project
@@ -476,11 +481,22 @@ async fn main() -> Result<()> {
             from_spec,
             proofs,
             output_dir,
+            format,
         } => {
             if let Some(spec_path) = from_spec {
                 spec::generate_spec_from_qedspec(&spec_path, proofs.as_deref(), &output_dir)?;
             } else if let Some(idl_path) = idl {
-                spec::generate_spec(&idl_path, &output_dir)?;
+                if format == "qedspec" {
+                    let stem = idl_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let output_file = output_dir.join(format!("{}.qedspec", stem));
+                    idl2spec::generate_qedspec(&idl_path, &output_file)?;
+                } else {
+                    spec::generate_spec(&idl_path, &output_dir)?;
+                }
             } else {
                 anyhow::bail!("Either --idl or --from-spec must be specified");
             }
