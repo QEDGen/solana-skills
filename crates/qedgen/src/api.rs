@@ -716,6 +716,7 @@ fn count_sorry(code: &str) -> usize {
     re.find_iter(code).count()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_proofs(
     prompt: &str,
     output_dir: &Path,
