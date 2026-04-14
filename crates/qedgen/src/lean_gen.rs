@@ -1060,9 +1060,6 @@ fn render_overflow_obligations(
 fn render_sbpf(spec: &ParsedSpec) -> String {
     let mut out = String::new();
 
-    let instr = &spec.instructions[0]; // Currently single-instruction
-    let ns = &instr.name;
-
     // Derive Prog module name from spec program_name.
     // E.g., spec Slippage → "SlippageProg", spec Transfer → "TransferProg"
     let prog_module = format!("{}Prog", spec.program_name);
@@ -1081,13 +1078,7 @@ fn render_sbpf(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana.SBPF\n");
     out.push_str("open QEDGen.Solana.SBPF.Memory\n\n");
 
-    out.push_str(&format!("namespace {}\n\n", ns));
-
     // ── Global constants ─────────────────────────────────────────────────
-    // For sBPF specs with assembly_path, global constants (e.g., DISC_REGISTER_MARKET)
-    // are already defined in the prog module. We emit them as comments only.
-    // Instruction-level constants (e.g., ACCOUNTS_REQUIRED) are spec-specific
-    // and must be declared here.
     if !spec.constants.is_empty() {
         out.push_str("-- Global constants (from prog module, not re-declared):\n");
         for (name, val) in &spec.constants {
@@ -1096,17 +1087,8 @@ fn render_sbpf(spec: &ParsedSpec) -> String {
         }
         out.push('\n');
     }
-    if !instr.constants.is_empty() {
-        out.push_str("-- Instruction-level constants\n");
-        for (name, val) in &instr.constants {
-            let clean_val = val.replace('_', "");
-            out.push_str(&format!("abbrev {} : Nat := {}\n", name, clean_val));
-        }
-        out.push('\n');
-    }
 
     // ── Pubkey constants ───────────────────────────────────────────────────
-    // For sBPF, pubkey chunk constants are also in the prog module.
     if !spec.pubkeys.is_empty() {
         out.push_str("-- Known pubkey constants (from prog module, not re-declared):\n");
         for pk in &spec.pubkeys {
@@ -1123,196 +1105,201 @@ fn render_sbpf(spec: &ParsedSpec) -> String {
         out.push('\n');
     }
 
-    // ── Error constants ──────────────────────────────────────────────────
-    // Emitted as abbrevs in the instruction namespace. For sBPF specs, these
-    // may shadow same-named constants from the prog module — proofs that open
-    // both namespaces should use `hiding` on one to avoid ambiguity.
-    let errors = if !instr.errors.is_empty() {
-        &instr.errors
-    } else {
-        &spec.valued_errors
-    };
-    if !errors.is_empty() {
-        out.push_str("-- Error constants\n");
-        for err in errors {
-            if let Some(val) = err.value {
-                let lean_name = error_to_lean_name(&err.name);
-                out.push_str(&format!("abbrev {} : Nat := {}\n", lean_name, val));
+    // ── Per-instruction blocks ───────────────────────────────────────────
+    for instr in &spec.instructions {
+        let ns = &instr.name;
+        out.push_str(&format!("namespace {}\n\n", ns));
+
+        // Instruction-level constants
+        if !instr.constants.is_empty() {
+            out.push_str("-- Instruction-level constants\n");
+            for (name, val) in &instr.constants {
+                let clean_val = val.replace('_', "");
+                out.push_str(&format!("abbrev {} : Nat := {}\n", name, clean_val));
             }
-        }
-        out.push('\n');
-    }
-
-    // ── Offset constants (from input_layout + insn_layout) ───────────────
-    let all_offsets: Vec<(&str, &str, i64, bool)> = instr
-        .input_layout
-        .iter()
-        .map(|f| (f.name.as_str(), f.field_type.as_str(), f.offset, false))
-        .chain(
-            instr
-                .insn_layout
-                .iter()
-                .map(|f| (f.name.as_str(), f.field_type.as_str(), f.offset, true)),
-        )
-        .collect();
-
-    if !all_offsets.is_empty() {
-        out.push_str("-- Offset constants\n");
-        for (name, _ftype, offset, _is_insn) in &all_offsets {
-            let lean_name = offset_to_lean_name(name);
-            out.push_str(&format!("abbrev {} : Int := {}\n", lean_name, offset));
-        }
-        out.push('\n');
-
-        // ea_* lemmas
-        out.push_str("-- Effective address lemmas\n");
-        for (name, _ftype, offset, _is_insn) in &all_offsets {
-            let lean_name = offset_to_lean_name(name);
-            let rhs = if *offset == 0 {
-                "b".to_string()
-            } else if *offset > 0 {
-                format!("b + {}", offset)
-            } else {
-                format!("b - {}", offset.unsigned_abs())
-            };
-            out.push_str(&format!(
-                "@[simp] theorem ea_{} (b : Nat) : effectiveAddr b {} = {} := by\n  \
-                 unfold effectiveAddr {}; omega\n\n",
-                lean_name, lean_name, rhs, lean_name
-            ));
-        }
-    }
-
-    // ── Entry point ──────────────────────────────────────────────────────
-    let entry = instr.entry.unwrap_or(0);
-    let has_insn_reg = instr.insn_layout.iter().any(|_| true);
-    let init_expr = if has_insn_reg {
-        format!("initState2 inputAddr insnAddr mem {}", entry)
-    } else {
-        "initState inputAddr mem".to_string()
-    };
-
-    // ── Guard theorem stubs ──────────────────────────────────────────────
-    out.push_str("-- Guard theorem stubs\n");
-    out.push_str("-- Hypotheses derived from checks + layout. Fill proofs with wp_exec.\n\n");
-
-    // Build accumulated after-hypotheses for the Spec structure
-    let mut accumulated_after: Vec<(String, String)> = Vec::new(); // (var_name, type_expr)
-                                                                   // Track cumulative fuel for each guard
-    let mut _cumulative_fuel: u64 = 0;
-
-    for (i, guard) in instr.guards.iter().enumerate() {
-        let error_lean = error_to_lean_name(&guard.error);
-
-        // Derive hypotheses from checks expression + layout
-        let hyps = derive_guard_hypotheses(guard, &all_offsets, instr, spec);
-
-        // Doc comment
-        if let Some(ref doc) = guard.doc {
-            out.push_str(&format!("/-- {} -/\n", doc.trim()));
+            out.push('\n');
         }
 
-        // Theorem signature
-        out.push_str(&format!("theorem {}\n", guard.name));
-
-        // Base parameters
-        if has_insn_reg {
-            out.push_str("    (inputAddr insnAddr : Nat) (mem : Mem)\n");
+        // Error constants — use instruction-level if present, else global
+        let errors = if !instr.errors.is_empty() {
+            &instr.errors
         } else {
-            out.push_str("    (inputAddr : Nat) (mem : Mem)\n");
-        }
-
-        // Accumulated after-hypotheses from prior guards
-        for (var_decl, _) in &accumulated_after {
-            out.push_str(&format!("    {}\n", var_decl));
-        }
-
-        // This guard's hypotheses
-        for hyp in &hyps.bindings {
-            out.push_str(&format!("    {}\n", hyp));
-        }
-
-        // Conclusion — use per-guard fuel if specified, else FUEL placeholder
-        let fuel_str = match guard.fuel {
-            Some(f) => f.to_string(),
-            None => "FUEL".to_string(),
+            &spec.valued_errors
         };
-        out.push_str(&format!(
-            "    :\n    (executeFn {}.progAt ({}) {}).exitCode\n      \
-             = some {} := sorry\n\n",
-            prog_module, init_expr, fuel_str, error_lean
-        ));
+        if !errors.is_empty() {
+            out.push_str("-- Error constants\n");
+            for err in errors {
+                if let Some(val) = err.value {
+                    let lean_name = error_to_lean_name(&err.name);
+                    out.push_str(&format!("abbrev {} : Nat := {}\n", lean_name, val));
+                }
+            }
+            out.push('\n');
+        }
 
-        // Accumulate after-hypotheses for next guards
-        if let Some(ref after_hyps) = hyps.after {
-            for ah in after_hyps {
-                accumulated_after.push((ah.clone(), String::new()));
+        // Offset constants (from input_layout + insn_layout)
+        let all_offsets: Vec<(&str, &str, i64, bool)> = instr
+            .input_layout
+            .iter()
+            .map(|f| (f.name.as_str(), f.field_type.as_str(), f.offset, false))
+            .chain(
+                instr
+                    .insn_layout
+                    .iter()
+                    .map(|f| (f.name.as_str(), f.field_type.as_str(), f.offset, true)),
+            )
+            .collect();
+
+        if !all_offsets.is_empty() {
+            out.push_str("-- Offset constants\n");
+            for (name, _ftype, offset, _is_insn) in &all_offsets {
+                let lean_name = offset_to_lean_name(name);
+                out.push_str(&format!("abbrev {} : Int := {}\n", lean_name, offset));
+            }
+            out.push('\n');
+
+            // ea_* lemmas
+            out.push_str("-- Effective address lemmas\n");
+            for (name, _ftype, offset, _is_insn) in &all_offsets {
+                let lean_name = offset_to_lean_name(name);
+                let rhs = if *offset == 0 {
+                    "b".to_string()
+                } else if *offset > 0 {
+                    format!("b + {}", offset)
+                } else {
+                    format!("b - {}", offset.unsigned_abs())
+                };
+                out.push_str(&format!(
+                    "@[simp] theorem ea_{} (b : Nat) : effectiveAddr b {} = {} := by\n  \
+                     unfold effectiveAddr {}; omega\n\n",
+                    lean_name, lean_name, rhs, lean_name
+                ));
             }
         }
 
-        let _ = i; // suppress unused
-    }
-
-    // ── Spec completeness structure ──────────────────────────────────────
-    out.push_str("-- Completeness structure: fill all fields to prove every guard is covered\n");
-    out.push_str("structure Spec (progAt : Nat \u{2192} Option Insn) where\n");
-
-    // Reset accumulation for structure fields
-    let mut acc_after_for_spec: Vec<String> = Vec::new();
-    for guard in &instr.guards {
-        let error_lean = error_to_lean_name(&guard.error);
-        let hyps = derive_guard_hypotheses(guard, &all_offsets, instr, spec);
-
-        // Build the universal quantifier binders
-        let mut binders = Vec::new();
-        if has_insn_reg {
-            binders.push("(inputAddr insnAddr : Nat)".to_string());
-            binders.push("(mem : Mem)".to_string());
+        // Entry point
+        let entry = instr.entry.unwrap_or(0);
+        let has_insn_reg = !instr.insn_layout.is_empty();
+        let init_expr = if has_insn_reg {
+            format!("initState2 inputAddr insnAddr mem {}", entry)
         } else {
-            binders.push("(inputAddr : Nat)".to_string());
-            binders.push("(mem : Mem)".to_string());
-        }
-        for ah in &acc_after_for_spec {
-            binders.push(prefix_unused_binder(ah));
-        }
-        for b in &hyps.bindings {
-            // Skip TODO comments — they break ∀ binder syntax
-            if !b.starts_with("--") {
-                binders.push(prefix_unused_binder(b));
-            }
-        }
-
-        let binder_str = binders.join(" ");
-        let fuel_str = match guard.fuel {
-            Some(f) => f.to_string(),
-            None => "FUEL".to_string(),
+            "initState inputAddr mem".to_string()
         };
-        out.push_str(&format!(
-            "  {} :\n    \u{2200} {},\n    \
-             (executeFn progAt ({}) {}).exitCode = some {}\n",
-            guard.name, binder_str, init_expr, fuel_str, error_lean
-        ));
 
-        if let Some(ref after_hyps) = hyps.after {
-            for ah in after_hyps {
-                acc_after_for_spec.push(ah.clone());
+        // Guard theorem stubs
+        if !instr.guards.is_empty() {
+            out.push_str("-- Guard theorem stubs\n");
+            out.push_str(
+                "-- Hypotheses derived from checks + layout. Fill proofs with wp_exec.\n\n",
+            );
+
+            let mut accumulated_after: Vec<(String, String)> = Vec::new();
+
+            for (i, guard) in instr.guards.iter().enumerate() {
+                let error_lean = error_to_lean_name(&guard.error);
+                let hyps = derive_guard_hypotheses(guard, &all_offsets, instr, spec);
+
+                if let Some(ref doc) = guard.doc {
+                    out.push_str(&format!("/-- {} -/\n", doc.trim()));
+                }
+
+                out.push_str(&format!("theorem {}\n", guard.name));
+
+                if has_insn_reg {
+                    out.push_str("    (inputAddr insnAddr : Nat) (mem : Mem)\n");
+                } else {
+                    out.push_str("    (inputAddr : Nat) (mem : Mem)\n");
+                }
+
+                for (var_decl, _) in &accumulated_after {
+                    out.push_str(&format!("    {}\n", var_decl));
+                }
+
+                for hyp in &hyps.bindings {
+                    out.push_str(&format!("    {}\n", hyp));
+                }
+
+                let fuel_str = match guard.fuel {
+                    Some(f) => f.to_string(),
+                    None => "FUEL".to_string(),
+                };
+                out.push_str(&format!(
+                    "    :\n    (executeFn {}.progAt ({}) {}).exitCode\n      \
+                     = some {} := sorry\n\n",
+                    prog_module, init_expr, fuel_str, error_lean
+                ));
+
+                if let Some(ref after_hyps) = hyps.after {
+                    for ah in after_hyps {
+                        accumulated_after.push((ah.clone(), String::new()));
+                    }
+                }
+
+                let _ = i;
+            }
+
+            // Spec completeness structure
+            out.push_str(
+                "-- Completeness structure: fill all fields to prove every guard is covered\n",
+            );
+            out.push_str("structure Spec (progAt : Nat \u{2192} Option Insn) where\n");
+
+            let mut acc_after_for_spec: Vec<String> = Vec::new();
+            for guard in &instr.guards {
+                let error_lean = error_to_lean_name(&guard.error);
+                let hyps = derive_guard_hypotheses(guard, &all_offsets, instr, spec);
+
+                let mut binders = Vec::new();
+                if has_insn_reg {
+                    binders.push("(inputAddr insnAddr : Nat)".to_string());
+                    binders.push("(mem : Mem)".to_string());
+                } else {
+                    binders.push("(inputAddr : Nat)".to_string());
+                    binders.push("(mem : Mem)".to_string());
+                }
+                for ah in &acc_after_for_spec {
+                    binders.push(prefix_unused_binder(ah));
+                }
+                for b in &hyps.bindings {
+                    if !b.starts_with("--") {
+                        binders.push(prefix_unused_binder(b));
+                    }
+                }
+
+                let binder_str = binders.join(" ");
+                let fuel_str = match guard.fuel {
+                    Some(f) => f.to_string(),
+                    None => "FUEL".to_string(),
+                };
+                out.push_str(&format!(
+                    "  {} :\n    \u{2200} {},\n    \
+                     (executeFn progAt ({}) {}).exitCode = some {}\n",
+                    guard.name, binder_str, init_expr, fuel_str, error_lean
+                ));
+
+                if let Some(ref after_hyps) = hyps.after {
+                    for ah in after_hyps {
+                        acc_after_for_spec.push(ah.clone());
+                    }
+                }
+            }
+            out.push('\n');
+        }
+
+        // Property theorem stubs
+        if !instr.properties.is_empty() {
+            out.push_str("-- Property theorem stubs\n\n");
+            for prop in &instr.properties {
+                if let Some(ref doc) = prop.doc {
+                    out.push_str(&format!("/-- {} -/\n", doc.trim()));
+                }
+                out.push_str(&format!("theorem {} : True := trivial\n\n", prop.name));
             }
         }
-    }
-    out.push('\n');
 
-    // ── Property theorem stubs ───────────────────────────────────────────
-    if !instr.properties.is_empty() {
-        out.push_str("-- Property theorem stubs\n\n");
-        for prop in &instr.properties {
-            if let Some(ref doc) = prop.doc {
-                out.push_str(&format!("/-- {} -/\n", doc.trim()));
-            }
-            out.push_str(&format!("theorem {} : True := trivial\n\n", prop.name));
-        }
+        out.push_str(&format!("end {}\n\n", ns));
     }
 
-    out.push_str(&format!("end {}\n", ns));
     out
 }
 
