@@ -7,7 +7,7 @@
 -- data length, and account count checks.
 
 import QEDGen.Solana.SBPF
-import TreeProg
+import Program
 
 namespace TreeProofs
 

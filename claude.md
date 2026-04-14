@@ -67,8 +67,8 @@ qedgen consolidate \
 # Transpile sBPF assembly to Lean 4 program module
 qedgen asm2lean \
   --input examples/sbpf/transfer/src/transfer.s \
-  --output formal_verification/TransferProg.lean \
-  --namespace TransferProg
+  --output formal_verification/Program.lean \
+  --namespace Program
 ```
 
 ## Architecture

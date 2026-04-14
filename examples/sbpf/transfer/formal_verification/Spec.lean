@@ -6,7 +6,7 @@
 -- We verify the validation prefix: 7 input checks + balance check.
 
 import QEDGen.Solana.SBPF
-import TransferProg
+import Program
 
 namespace TransferProofs
 

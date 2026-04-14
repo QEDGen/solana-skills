@@ -109,7 +109,7 @@ operation approve {
 
   takes member_index : U8
 
-  guard member_index < state.member_count
+  guard member_index < state.member_count and state.approval_count < state.member_count
   aborts_if member_index >= state.member_count with NotAMember
 
   effect {

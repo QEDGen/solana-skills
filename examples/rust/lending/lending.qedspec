@@ -95,7 +95,7 @@ operation deposit {
 
   takes amount : U64
 
-  guard amount > 0
+  guard amount > 0 and state.total_deposits + amount <= 18446744073709551615
   aborts_if amount == 0 with InvalidAmount
 
   effect {

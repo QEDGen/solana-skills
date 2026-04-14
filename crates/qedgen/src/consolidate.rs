@@ -31,14 +31,14 @@ This will verify all theorems and ensure they compile correctly.
 
 ## Structure
 
-All proofs are contained in `EscrowProofs.lean`, organized into namespaces to avoid naming conflicts:
+All proofs are contained in `Proofs.lean`, organized into namespaces to avoid naming conflicts:
 - Each proof has its own namespace
 - Shared definitions from the QEDGen Solana library are imported at the top
 - The `lean_solana` directory contains the Solana modeling framework
 
 ## Generated Proofs
 
-See `EscrowProofs.lean` for the complete list of theorems and their proofs.
+See `Proofs.lean` for the complete list of theorems and their proofs.
 "#;
 
 const CONSOLIDATED_GITIGNORE: &str = r#"/.lake
@@ -182,7 +182,7 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     }
 
     // Write the consolidated proof file
-    fs::write(output_dir.join("EscrowProofs.lean"), consolidated)?;
+    fs::write(output_dir.join("Proofs.lean"), consolidated)?;
 
     // Write lean_solana from embedded sources
     crate::project::update_lean_solana(output_dir, false)?;
@@ -197,7 +197,7 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     fs::write(output_dir.join(".gitignore"), CONSOLIDATED_GITIGNORE)?;
 
     println!("Consolidated proofs written to {}", output_dir.display());
-    println!("  - EscrowProofs.lean");
+    println!("  - Proofs.lean");
     println!("  - lakefile.lean");
     println!("  - lean-toolchain");
     println!("  - lean_solana/");

@@ -14,11 +14,11 @@ This will verify all theorems and ensure they compile correctly.
 
 ## Structure
 
-All proofs are contained in `EscrowProofs.lean`, organized into namespaces to avoid naming conflicts:
+All proofs are contained in `Proofs.lean`, organized into namespaces to avoid naming conflicts:
 - Each proof has its own namespace
 - Shared definitions from the QEDGen Solana library are imported at the top
 - The `lean_solana` directory contains the Solana modeling framework
 
 ## Generated Proofs
 
-See `EscrowProofs.lean` for the complete list of theorems and their proofs.
+See `Proofs.lean` for the complete list of theorems and their proofs.

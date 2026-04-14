@@ -1,14 +1,11 @@
 import Lake
 open Lake DSL
 
-package treeProofs
+package lendingProofs
 
 require qedgenSupport from
   "../../../../lean_solana"
 
-lean_lib TreeProg where
-  roots := #[`Program]
-
 @[default_target]
-lean_lib TreeSpec where
+lean_lib LendingSpec where
   roots := #[`Spec]

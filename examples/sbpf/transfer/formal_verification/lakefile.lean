@@ -7,11 +7,8 @@ require qedgenSupport from
   "../../../../lean_solana"
 
 lean_lib TransferProg where
-  roots := #[`TransferProg]
-
-lean_lib TransferSpec where
-  roots := #[`TransferSpec]
+  roots := #[`Program]
 
 @[default_target]
-lean_lib TransferProofs where
-  roots := #[`TransferProofs]
+lean_lib TransferSpec where
+  roots := #[`Spec]

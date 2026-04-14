@@ -7,11 +7,8 @@ require qedgenSupport from
   "../../../../lean_solana"
 
 lean_lib DropsetProg where
-  roots := #[`DropsetProg]
-
-lean_lib DropsetSpec where
-  roots := #[`DropsetSpec]
+  roots := #[`Program]
 
 @[default_target]
-lean_lib DropsetProofs where
-  roots := #[`DropsetProofs]
+lean_lib DropsetSpec where
+  roots := #[`Spec]

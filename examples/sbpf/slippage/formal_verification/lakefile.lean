@@ -7,11 +7,8 @@ require qedgenSupport from
   "../../../../lean_solana"
 
 lean_lib SlippageProg where
-  roots := #[`SlippageProg]
-
-lean_lib SlippageSpec where
-  roots := #[`SlippageSpec]
+  roots := #[`Program]
 
 @[default_target]
-lean_lib SlippageProofs where
-  roots := #[`SlippageProofs]
+lean_lib SlippageSpec where
+  roots := #[`Spec]

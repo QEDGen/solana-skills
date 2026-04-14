@@ -7,11 +7,8 @@ require qedgenSupport from
   "../../../../lean_solana"
 
 lean_lib CounterProg where
-  roots := #[`CounterProg]
-
-lean_lib CounterSpec where
-  roots := #[`CounterSpec]
+  roots := #[`Program]
 
 @[default_target]
-lean_lib CounterProofs where
-  roots := #[`CounterProofs]
+lean_lib CounterSpec where
+  roots := #[`Spec]

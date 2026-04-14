@@ -4,7 +4,7 @@
 -- when the token balance drops below a minimum threshold.
 
 import QEDGen.Solana.SBPF
-import SlippageProg
+import Program
 
 namespace SlippageProofs
 

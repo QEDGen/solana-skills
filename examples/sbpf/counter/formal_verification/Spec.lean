@@ -13,7 +13,7 @@
 -- Each step is O(1) kernel depth.
 
 import QEDGen.Solana.SBPF
-import CounterProg
+import Program
 
 namespace CounterProofs
 

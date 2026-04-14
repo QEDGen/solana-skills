@@ -575,12 +575,13 @@ fn render_properties_inner(
             let trans_name = safe_name(&format!("{}Transition", op.name));
             let param_sig = param_sig_str(&op.takes_params);
 
+            let sub_lemma_name = safe_name(&format!(
+                "{}_preserved_by_{}",
+                prop.name, op.name
+            ));
             out.push_str(&format!(
-                "theorem {}_preserved_by_{} (s s' : {}) (signer : Pubkey){}\n",
-                prop.name,
-                safe_name(&op.name),
-                state_type,
-                param_sig
+                "theorem {} (s s' : {}) (signer : Pubkey){}\n",
+                sub_lemma_name, state_type, param_sig
             ));
             out.push_str(&format!(
                 "    (h_inv : {} s) (h : {} s signer{} = some s') :\n",
@@ -616,18 +617,21 @@ fn render_properties_inner(
             };
 
             if prop.preserved_by.contains(&op.name) {
+                let ref_name = safe_name(&format!(
+                    "{}_preserved_by_{}",
+                    prop.name, op.name
+                ));
                 out.push_str(&format!(
-                    "  | {}{} => exact {}_preserved_by_{} s s' signer{} h_inv h\n",
-                    ctor, param_bind, prop.name, ctor, param_pass
+                    "  | {}{} => exact {} s s' signer{} h_inv h\n",
+                    ctor, param_bind, ref_name, param_pass
                 ));
             } else {
-                // Operation not in preserved_by — transition doesn't change property-relevant state
-                // The proof is trivial: unfold applyOp, show transition preserves state
+                // Operation not in preserved_by — may not preserve the property
                 out.push_str(&format!(
-                    "  | {}{} => simp [{}] at h; try {{ subst h; exact h_inv }}; exact h_inv\n",
+                    "  | {}{} => sorry -- {} not in preserved_by; prove manually if needed\n",
                     ctor,
                     param_bind,
-                    safe_name(&format!("{}Transition", op.name))
+                    op.name
                 ));
             }
         }
@@ -658,12 +662,23 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
     }
 
     out.push_str(
-        "// ============================================================================\n",
+        "-- ============================================================================\n",
     );
-    out.push_str("// Cover properties — reachability (existential proofs)\n");
+    out.push_str("-- Cover properties — reachability (existential proofs)\n");
     out.push_str(
-        "// ============================================================================\n\n",
+        "-- ============================================================================\n\n",
     );
+
+    // Helper: resolve the state type for an operation
+    let resolve_state_type = |op_name: &str| -> String {
+        let op = spec.operations.iter().find(|o| o.name == op_name);
+        if let Some(op) = op {
+            if let Some(ref acct) = op.on_account {
+                return format!("{}State", acct);
+            }
+        }
+        state_type.to_string()
+    };
 
     for cover in &spec.covers {
         for (i, trace) in cover.traces.iter().enumerate() {
@@ -672,6 +687,24 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
             } else {
                 String::new()
             };
+
+            // For multi-account specs, check if all ops share the same state type
+            let trace_state_types: Vec<String> =
+                trace.iter().map(|op| resolve_state_type(op)).collect();
+            let all_same = trace_state_types.windows(2).all(|w| w[0] == w[1]);
+            let effective_type = if all_same && !trace_state_types.is_empty() {
+                trace_state_types[0].clone()
+            } else {
+                // Cross-account trace — skip with a comment
+                out.push_str(&format!(
+                    "-- cover_{}{}: trace [{}] spans multiple account types, skipped\n\n",
+                    cover.name,
+                    suffix,
+                    trace.join(", ")
+                ));
+                continue;
+            };
+
             // Generate existential proof: there exists initial state and signer such that
             // the trace sequence produces a valid final state
             out.push_str(&format!(
@@ -681,7 +714,7 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
             ));
             out.push_str(&format!(
                 "theorem cover_{}{} : ∃ (s0 : {}) (signer : Pubkey),\n",
-                cover.name, suffix, state_type
+                cover.name, suffix, effective_type
             ));
             // Build nested match chain
             let mut indent = "    ".to_string();
@@ -728,7 +761,7 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
                     };
                     out.push_str(&format!(
                         "∃ ({} : {}), {} {} signer{} = some {} ∧\n",
-                        s_next, state_type, trans, s_var, param_str, s_next
+                        s_next, effective_type, trans, s_var, param_str, s_next
                     ));
                     indent.push_str("  ");
                 } else {
@@ -795,22 +828,64 @@ fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
     }
 
     out.push_str(
-        "// ============================================================================\n",
+        "-- ============================================================================\n",
     );
-    out.push_str("// Liveness properties — bounded reachability (leads-to)\n");
+    out.push_str("-- Liveness properties — bounded reachability (leads-to)\n");
     out.push_str(
-        "// ============================================================================\n\n",
+        "-- ============================================================================\n\n",
     );
 
-    // Emit applyOps helper if not already present (check if any liveness exists)
-    out.push_str("def applyOps (s : State) (signer : Pubkey) : List Operation → Option State\n");
-    out.push_str("  | [] => some s\n");
-    out.push_str("  | op :: ops => match applyOp s signer op with\n");
-    out.push_str("    | some s' => applyOps s' signer ops\n");
-    out.push_str("    | none => none\n\n");
+    // Helper: resolve state type for a liveness block from its via operations
+    let resolve_liveness_state = |via_ops: &[String]| -> String {
+        if !spec.account_types.is_empty() && !via_ops.is_empty() {
+            // Check the first via op's on_account
+            if let Some(op) = spec.operations.iter().find(|o| o.name == via_ops[0]) {
+                if let Some(ref acct) = op.on_account {
+                    return format!("{}State", acct);
+                }
+            }
+        }
+        state_type.to_string()
+    };
+
+    // Track which applyOps helpers we've already emitted
+    let mut emitted_helpers: Vec<String> = Vec::new();
 
     for liveness in &spec.liveness_props {
+        let effective_type = resolve_liveness_state(&liveness.via_ops);
         let bound = liveness.within_steps.unwrap_or(10);
+
+        // Derive operation type and applyOp dispatcher
+        let (op_type, apply_fn, prefix) = if effective_type == "State" {
+            ("Operation".to_string(), "applyOp".to_string(), String::new())
+        } else if effective_type.ends_with("State") {
+            let p = effective_type[..effective_type.len() - 5].to_string();
+            (format!("{}Operation", p), format!("apply{}Op", p), p)
+        } else {
+            ("Operation".to_string(), "applyOp".to_string(), String::new())
+        };
+
+        let apply_ops_fn = format!("apply{}Ops", prefix);
+
+        // Emit applyOps helper if not already emitted for this type
+        if !emitted_helpers.contains(&effective_type) {
+            out.push_str(&format!(
+                "def {} (s : {}) (signer : Pubkey) : List {} → Option {}\n",
+                apply_ops_fn, effective_type, op_type, effective_type
+            ));
+            out.push_str("  | [] => some s\n");
+            out.push_str(&format!(
+                "  | op :: ops => match {} s signer op with\n",
+                apply_fn
+            ));
+            out.push_str(&format!(
+                "    | some s' => {} s' signer ops\n",
+                apply_ops_fn
+            ));
+            out.push_str("    | none => none\n\n");
+            emitted_helpers.push(effective_type.clone());
+        }
+
         out.push_str(&format!(
             "/-- {} — from {} leads to {} within {} steps via [{}]. -/\n",
             liveness.name,
@@ -821,15 +896,15 @@ fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
         ));
         out.push_str(&format!(
             "theorem liveness_{} (s : {}) (signer : Pubkey)\n",
-            liveness.name, state_type
+            liveness.name, effective_type
         ));
         out.push_str(&format!(
             "    (h : s.status = .{}) :\n",
             liveness.from_state
         ));
         out.push_str(&format!(
-            "    ∃ ops, ops.length ≤ {} ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .{} := sorry\n\n",
-            bound, liveness.leads_to_state
+            "    ∃ ops, ops.length ≤ {} ∧ ∀ s', {} s signer ops = some s' → s'.status = .{} := sorry\n\n",
+            bound, apply_ops_fn, liveness.leads_to_state
         ));
     }
 }
@@ -841,11 +916,11 @@ fn render_environments(out: &mut String, spec: &ParsedSpec, state_type: &str) {
     }
 
     out.push_str(
-        "// ============================================================================\n",
+        "-- ============================================================================\n",
     );
-    out.push_str("// Environment — properties hold under external state changes\n");
+    out.push_str("-- Environment — properties hold under external state changes\n");
     out.push_str(
-        "// ============================================================================\n\n",
+        "-- ============================================================================\n\n",
     );
 
     for env in &spec.environments {
@@ -912,11 +987,11 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedOperation], st
     }
 
     out.push_str(
-        "// ============================================================================\n",
+        "-- ============================================================================\n",
     );
-    out.push_str("// Abort conditions — operations must reject under specified conditions\n");
+    out.push_str("-- Abort conditions — operations must reject under specified conditions\n");
     out.push_str(
-        "// ============================================================================\n\n",
+        "-- ============================================================================\n\n",
     );
 
     for op in ops {
@@ -924,12 +999,13 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedOperation], st
             let trans_name = safe_name(&format!("{}Transition", op.name));
             let param_sig = param_sig_str(&op.takes_params);
 
+            let theorem_name = safe_name(&format!(
+                "{}_aborts_if_{}",
+                op.name, abort.error_name
+            ));
             out.push_str(&format!(
-                "theorem {}_aborts_if_{} (s : {}) (signer : Pubkey){}\n",
-                safe_name(&op.name),
-                abort.error_name,
-                state_type,
-                param_sig
+                "theorem {} (s : {}) (signer : Pubkey){}\n",
+                theorem_name, state_type, param_sig
             ));
             out.push_str(&format!(
                 "    (h : {}) : {} s signer{} = none := sorry\n\n",
@@ -995,13 +1071,13 @@ fn render_overflow_obligations(
     };
 
     out.push_str(
-        "// ============================================================================\n",
+        "-- ============================================================================\n",
     );
     out.push_str(
-        "// Overflow safety obligations (auto-generated for operations with add effects)\n",
+        "-- Overflow safety obligations (auto-generated for operations with add effects)\n",
     );
     out.push_str(
-        "// ============================================================================\n\n",
+        "-- ============================================================================\n\n",
     );
 
     for op in &add_ops {
