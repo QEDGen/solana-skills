@@ -150,12 +150,28 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         "// ============================================================================\n\n",
     );
 
-    // Emit constants
+    // Emit constants — infer type from value magnitude
     for (name, value) in &spec.constants {
         let upper = name.to_uppercase();
+        let clean_val = value.replace('_', "");
+        let const_type = if let Ok(v) = clean_val.parse::<u128>() {
+            if v <= u8::MAX as u128 {
+                "u8"
+            } else if v <= u16::MAX as u128 {
+                "u16"
+            } else if v <= u32::MAX as u128 {
+                "u32"
+            } else if v <= u64::MAX as u128 {
+                "u64"
+            } else {
+                "u128"
+            }
+        } else {
+            "u64" // fallback
+        };
         out.push_str(&format!(
-            "const {}: u8 = {};\n",
-            upper, value
+            "const {}: {} = {};\n",
+            upper, const_type, value
         ));
     }
     if !spec.constants.is_empty() {
