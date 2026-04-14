@@ -15,9 +15,9 @@ const MAX_VAULT_TVL = 10_000_000_000_000_000
 
 state {
   authority : Pubkey
-  V         : U64
-  C_tot     : U64
-  I         : U64
+  V         : U128
+  C_tot     : U128
+  I         : U128
 }
 
 lifecycle [Active, Draining, Resetting]
@@ -27,7 +27,7 @@ operation deposit {
   who authority
   when Active
 
-  takes amount : U64
+  takes amount : U128
 
   guard state.V + amount <= MAX_VAULT_TVL
 
@@ -42,7 +42,9 @@ operation withdraw {
   who authority
   when Active
 
-  takes amount : U64
+  takes amount : U128
+
+  guard state.C_tot >= amount
 
   effect {
     V -= amount
@@ -55,7 +57,7 @@ operation top_up_insurance {
   who authority
   when Active
 
-  takes amount : U64
+  takes amount : U128
 
   guard state.V + amount <= MAX_VAULT_TVL
 

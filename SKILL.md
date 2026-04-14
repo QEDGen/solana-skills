@@ -42,13 +42,19 @@ Spec-driven pipeline:
 
 ## Step 1: Understand the program
 
-Check for existing artifacts in this priority order:
+**Always read the source code first.** Then classify the project:
 
-1. **Spec.lean exists** → Read it. A `qedspec` block is the formal source of truth. Skip to Step 4.
-2. **SPEC.md exists** → Read it. Use it to write `Spec.lean` with the `qedspec` macro (Step 3).
-3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path> --format qedspec` to generate a `.qedspec` scaffold, then review TODO items and run `$QEDGEN lean-gen` to produce `Spec.lean`.
+### Returning qedgen project (`.qedspec` exists)
+Read the `.qedspec` alongside the source. The `.qedspec` is the spec source of truth. On secondary runs, skip to Step 4. (`Spec.lean` is generated from the `.qedspec` — never treat it as the primary source.)
+
+### Brownfield project (existing code, no `.qedspec`)
+An existing Rust program being onboarded to qedgen for the first time.
+
+1. **Read the source code** — Understand the program's state, instructions, guards, and invariants directly from Rust source. This is always the ground truth.
+2. **Check for existing Rust tests** — Look for `tests/`, `#[cfg(test)]`, or `#[cfg(kani)]` modules. Existing tests reveal the program's testing patterns, helper infrastructure, and what's already covered. These shape how you write Kani harnesses (see "Brownfield projects" under Code generation).
+3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path> --format qedspec` to generate a `.qedspec` scaffold, then review TODO items against the source and run `$QEDGEN lean-gen` to produce `Spec.lean`.
 4. **Rust source only** (no IDL, no framework) → Extract the spec from source using LSP. See "Writing a .qedspec from Rust source" below.
-5. **Neither exists** → Read the source code directly. Ask scoping questions.
+5. **Nothing to start from** → Read the source code and ask scoping questions (Step 2).
 
 ### Writing a .qedspec from Rust source
 
@@ -201,14 +207,14 @@ See `references/cli.md` for all Aristotle subcommands.
 # Build proofs
 cd formal_verification && lake build
 
-# Check spec coverage
-$QEDGEN check --spec formal_verification/Spec.lean --proofs formal_verification/Proofs/
+# Check spec coverage (accepts .qedspec or Spec.lean)
+$QEDGEN check --spec program.qedspec --proofs formal_verification/Proofs/
 
 # For sBPF: verify binary hasn't drifted from proofs
 $QEDGEN verify --asm src/program.s --proofs formal_verification/
 
 # Human-readable verification report
-$QEDGEN explain --spec formal_verification/Spec.lean --proofs formal_verification/
+$QEDGEN explain --spec program.qedspec --proofs formal_verification/
 ```
 
 `qedgen check` reports per-theorem status: **Proven**, **Sorry**, or **Missing**.
@@ -234,14 +240,50 @@ $QEDGEN ci --output .github/workflows/verify.yml
 The spec drives code generation across multiple layers:
 
 ```bash
-$QEDGEN codegen --spec Spec.lean --output-dir programs/my_program/   # Quasar program
-$QEDGEN kani --spec Spec.lean --output tests/kani.rs                  # Kani harnesses
-$QEDGEN test --spec Spec.lean --output src/tests.rs                   # Unit tests
+$QEDGEN codegen --spec program.qedspec --output-dir programs/my_program/   # Quasar program
+$QEDGEN kani --spec program.qedspec --output tests/kani.rs                  # Kani harnesses
+$QEDGEN test --spec program.qedspec --output src/tests.rs                   # Unit tests
 $QEDGEN integration-test --spec program.qedspec --output src/integration_tests.rs
 $QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
 ```
 
 With `qedgen init --quasar`, all of these are generated automatically.
+
+### Brownfield projects — leveraging existing tests
+
+For brownfield projects (existing codebase with existing tests), **always check for existing Rust tests before generating new ones.** Look for:
+
+1. `tests/` directory — Kani proofs, unit tests, integration tests, fuzz tests
+2. `src/tests.rs` or inline `#[cfg(test)]` modules
+3. Shared test helpers (`tests/common/mod.rs`, test param factories)
+
+**When existing tests are found:**
+
+- **Read them first.** Understand the test patterns, helper infrastructure, and what's already covered.
+- **Generate complementary Kani harnesses** that call the real program code — import actual structs, call real methods, check real invariants. Do NOT generate self-contained models that duplicate what the implementation already expresses.
+- **Reuse existing test helpers** (param factories, setup functions, shared constants) rather than creating new ones.
+- **Fill gaps** — use the `.qedspec` properties to identify which invariants lack Kani coverage, then write harnesses for those using the existing patterns.
+
+**Example — brownfield Kani harness (percolator-style):**
+```rust
+#![cfg(kani)]
+mod common;
+use common::*;
+
+#[kani::proof]
+#[kani::unwind(34)]
+#[kani::solver(cadical)]
+fn deposit_preserves_conservation() {
+    let mut engine = RiskEngine::new(zero_fee_params());
+    let idx = engine.add_user(0).unwrap();
+    let amount: u32 = kani::any();
+    kani::assume(amount > 0 && amount <= 10_000_000);
+    engine.deposit(idx, amount as u128, DEFAULT_ORACLE, DEFAULT_SLOT).unwrap();
+    assert!(engine.check_conservation());
+}
+```
+
+**Greenfield Kani harnesses** (self-contained models from `$QEDGEN kani`) are for new projects where no Rust implementation exists yet. They model the spec's state machine independently of any framework types.
 
 ## Git hygiene
 
