@@ -153,6 +153,16 @@ if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
     echo ""
 fi
 
+# ── Kani (optional) ──────────────────────────────────────────────────────
+if ! command -v cargo-kani &> /dev/null; then
+    echo ""
+    echo "  Kani verifier not found (optional — needed for Kani proof harnesses)."
+    echo "  To install:"
+    echo "    cargo install --locked kani-verifier"
+    echo "    cargo kani setup"
+    echo ""
+fi
+
 # ── Set up global validation workspace ────────────────────────────────────
 setup_global_workspace() {
     local ws_dir
