@@ -9,9 +9,10 @@ use pest_derive::Parser;
 use std::path::Path;
 
 use crate::check::{
-    FlowKind, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedErrorCode, ParsedEvent,
-    ParsedGuard, ParsedInstruction, ParsedLayoutField, ParsedOperation, ParsedPda, ParsedProperty,
-    ParsedPubkey, ParsedSbpfProperty, ParsedSpec, SbpfPropertyKind,
+    FlowKind, ParsedAbort, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover,
+    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedInstruction,
+    ParsedLayoutField, ParsedLiveness, ParsedOperation, ParsedPda, ParsedProperty, ParsedPubkey,
+    ParsedSbpfProperty, ParsedSpec, SbpfPropertyKind,
 };
 
 #[derive(Parser)]
@@ -55,6 +56,9 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     let mut properties: Vec<ParsedProperty> = Vec::new();
     let mut invariants: Vec<(String, String)> = Vec::new();
     let mut contexts: Vec<ParsedContext> = Vec::new();
+    let mut covers: Vec<ParsedCover> = Vec::new();
+    let mut liveness_props: Vec<ParsedLiveness> = Vec::new();
+    let mut environments: Vec<ParsedEnvironment> = Vec::new();
     let mut target: Option<String> = None;
 
     for pair in file.into_inner() {
@@ -123,6 +127,15 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                     }
                     Rule::property_block => {
                         properties.push(parse_property(inner, &constants));
+                    }
+                    Rule::cover_block => {
+                        covers.push(parse_cover(inner, &constants));
+                    }
+                    Rule::liveness_block => {
+                        liveness_props.push(parse_liveness(inner));
+                    }
+                    Rule::environment_block => {
+                        environments.push(parse_environment(inner, &constants));
                     }
                     Rule::invariant_decl => {
                         invariants.push(parse_invariant(inner));
@@ -225,6 +238,9 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
         instructions,
         valued_errors,
         constants: constants.into_iter().collect(),
+        covers,
+        liveness_props,
+        environments,
     })
 }
 
@@ -539,6 +555,7 @@ fn parse_operation(
     let mut calls_accounts: Vec<(String, String)> = Vec::new();
     let mut emits: Vec<String> = Vec::new();
     let mut ctx_accounts: Vec<ParsedAccountEntry> = Vec::new();
+    let mut aborts_if: Vec<ParsedAbort> = Vec::new();
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -574,6 +591,18 @@ fn parse_operation(
                         let expr = clause.into_inner().next().unwrap();
                         guard_str_lean = Some(guard_expr_to_lean(expr.clone(), consts));
                         _guard_str_rust = Some(guard_expr_to_rust(expr, consts));
+                    }
+                    Rule::aborts_if_clause => {
+                        let mut parts = clause.into_inner();
+                        let expr = parts.next().unwrap();
+                        let lean_expr = guard_expr_to_lean(expr.clone(), consts);
+                        let rust_expr = guard_expr_to_rust(expr, consts);
+                        let error_name = parts.next().unwrap().as_str().to_string();
+                        aborts_if.push(ParsedAbort {
+                            lean_expr,
+                            rust_expr,
+                            error_name,
+                        });
                     }
                     Rule::effect_block => {
                         effects = parse_effect_stmts(clause);
@@ -660,6 +689,7 @@ fn parse_operation(
         calls_accounts,
         calls_discriminator,
         emits,
+        aborts_if,
     };
 
     (op, ctx)
@@ -1271,6 +1301,161 @@ fn parse_property(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> Pars
         name,
         expression: expression_lean,
         preserved_by,
+    }
+}
+
+/// Parse a cover block (reachability).
+fn parse_cover(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> ParsedCover {
+    let mut name = String::new();
+    let mut traces = Vec::new();
+    let mut reachable = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+            }
+            Rule::cover_clause => {
+                let clause = inner.into_inner().next().unwrap();
+                match clause.as_rule() {
+                    Rule::trace_clause => {
+                        let mut ops = Vec::new();
+                        for p in clause.into_inner() {
+                            if p.as_rule() == Rule::ident_list {
+                                for id in p.into_inner() {
+                                    if id.as_rule() == Rule::ident {
+                                        ops.push(id.as_str().to_string());
+                                    }
+                                }
+                            }
+                        }
+                        traces.push(ops);
+                    }
+                    Rule::reachable_clause => {
+                        let mut op_name = String::new();
+                        let mut when_expr = None;
+                        for p in clause.into_inner() {
+                            match p.as_rule() {
+                                Rule::ident => {
+                                    op_name = p.as_str().to_string();
+                                }
+                                Rule::guard_expr => {
+                                    when_expr = Some(guard_expr_to_lean(p, consts));
+                                }
+                                _ => {}
+                            }
+                        }
+                        reachable.push((op_name, when_expr));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ParsedCover {
+        name,
+        traces,
+        reachable,
+    }
+}
+
+/// Parse a liveness block (leads-to).
+fn parse_liveness(pair: pest::iterators::Pair<Rule>) -> ParsedLiveness {
+    let mut name = String::new();
+    let mut from_state = String::new();
+    let mut leads_to_state = String::new();
+    let mut via_ops = Vec::new();
+    let mut within_steps = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+            }
+            Rule::liveness_clause => {
+                let clause = inner.into_inner().next().unwrap();
+                match clause.as_rule() {
+                    Rule::from_clause => {
+                        from_state = extract_ident(clause);
+                    }
+                    Rule::leads_to_clause => {
+                        leads_to_state = extract_ident(clause);
+                    }
+                    Rule::via_clause => {
+                        for p in clause.into_inner() {
+                            if p.as_rule() == Rule::ident_list {
+                                for id in p.into_inner() {
+                                    if id.as_rule() == Rule::ident {
+                                        via_ops.push(id.as_str().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rule::within_clause => {
+                        for p in clause.into_inner() {
+                            if p.as_rule() == Rule::integer {
+                                within_steps =
+                                    Some(clean_integer(p.as_str()).parse::<u64>().unwrap_or(0));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ParsedLiveness {
+        name,
+        from_state,
+        leads_to_state,
+        via_ops,
+        within_steps,
+    }
+}
+
+/// Parse an environment block (external state).
+fn parse_environment(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> ParsedEnvironment {
+    let mut name = String::new();
+    let mut mutates = Vec::new();
+    let mut constraints = Vec::new();
+    let mut constraints_rust = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = inner.as_str().to_string();
+            }
+            Rule::env_clause => {
+                let clause = inner.into_inner().next().unwrap();
+                match clause.as_rule() {
+                    Rule::mutates_clause => {
+                        let mut parts = clause.into_inner();
+                        let field_name = parts.next().unwrap().as_str().to_string();
+                        let field_type = parts.next().unwrap().as_str().to_string();
+                        mutates.push((field_name, field_type));
+                    }
+                    Rule::constraint_clause => {
+                        let expr = clause.into_inner().next().unwrap();
+                        constraints.push(guard_expr_to_lean(expr.clone(), consts));
+                        constraints_rust.push(guard_expr_to_rust(expr, consts));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    ParsedEnvironment {
+        name,
+        mutates,
+        constraints,
+        constraints_rust,
     }
 }
 

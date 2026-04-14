@@ -101,6 +101,21 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     // Property predicates and inductive theorems
     render_properties(&mut out, &spec.properties, &ops_refs, "State");
 
+    // Abort theorems (aborts_if clauses)
+    render_aborts_if(&mut out, &ops_refs, "State");
+
+    // Cover properties (reachability)
+    render_covers(&mut out, spec, "State");
+
+    // Liveness properties (leads-to)
+    render_liveness(&mut out, spec, "State");
+
+    // Environment blocks (external state)
+    render_environments(&mut out, spec, "State");
+
+    // Overflow obligations for operations with add effects
+    render_overflow_obligations(&mut out, spec, &ops_refs, &spec.state_fields, "State");
+
     out.push_str(&format!("end {}\n", name));
     out
 }
@@ -438,74 +453,76 @@ fn render_properties(
 
 /// Render properties for multi-account specs.
 fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
-    // For each property, determine which account's state type to use.
+    // Group properties by target account, then delegate to render_properties_inner.
     // Heuristic: look at the expression's `s.field` references and match against account fields.
+
+    // Collect properties by target account
+    let mut groups: std::collections::HashMap<String, Vec<&crate::check::ParsedProperty>> =
+        std::collections::HashMap::new();
+    let mut acct_for_prop: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
     for prop in &spec.properties {
-        // Find which account type this property's fields belong to
-        let target_acct = if let Some(ref expr) = prop.expression {
-            spec.account_types.iter().find(|a| {
-                a.fields
-                    .iter()
-                    .any(|(f, _)| expr.contains(&format!("s.{}", f)))
-            })
+        let target_name = if let Some(ref expr) = prop.expression {
+            spec.account_types
+                .iter()
+                .find(|a| {
+                    a.fields
+                        .iter()
+                        .any(|(f, _)| expr.contains(&format!("s.{}", f)))
+                })
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| spec.account_types[0].name.clone())
         } else {
-            None
+            spec.account_types[0].name.clone()
         };
+        acct_for_prop.insert(prop.name.clone(), target_name.clone());
+        groups.entry(target_name).or_default().push(prop);
+    }
 
-        let (state_type, op_type, apply_name) = if let Some(acct) = target_acct {
-            (
-                format!("{}State", acct.name),
-                format!("{}Operation", acct.name),
-                format!("apply{}Op", acct.name),
-            )
-        } else {
-            // Default to first account
-            let acct = &spec.account_types[0];
-            (
-                format!("{}State", acct.name),
-                format!("{}Operation", acct.name),
-                format!("apply{}Op", acct.name),
-            )
-        };
+    for (acct_name, props) in &groups {
+        let state_type = format!("{}State", acct_name);
+        let op_type = format!("{}Operation", acct_name);
+        let apply_name = format!("apply{}Op", acct_name);
 
-        if let Some(ref expr) = prop.expression {
-            out.push_str(&format!(
-                "def {} (s : {}) : Prop := {}\n\n",
-                prop.name, state_type, expr
-            ));
-        }
-
-        // Get operations for this account type
-        let target_name = target_acct
-            .map(|a| a.name.as_str())
-            .unwrap_or(&spec.account_types[0].name);
         let acct_ops: Vec<&crate::check::ParsedOperation> = spec
             .operations
             .iter()
             .filter(|op| {
-                op.on_account.as_deref() == Some(target_name)
-                    || (op.on_account.is_none() && target_name == spec.account_types[0].name)
+                op.on_account.as_deref() == Some(acct_name.as_str())
+                    || (op.on_account.is_none() && acct_name == &spec.account_types[0].name)
             })
             .collect();
 
-        if !acct_ops.is_empty() {
-            out.push_str(&format!(
-                "/-- {} is preserved by every operation. Prove by `cases op` with unfold/omega per case. -/\n",
-                prop.name
-            ));
-            out.push_str(&format!(
-                "theorem {}_inductive (s s' : {}) (signer : Pubkey) (op : {})\n    (h_inv : {} s) (h : {} s signer op = some s') : {} s' := sorry\n\n",
-                prop.name, state_type, op_type, prop.name, apply_name, prop.name
-            ));
-        }
+        // Convert &[&ParsedProperty] to &[ParsedProperty] by cloning
+        let owned_props: Vec<crate::check::ParsedProperty> = props
+            .iter()
+            .map(|p| crate::check::ParsedProperty {
+                name: p.name.clone(),
+                expression: p.expression.clone(),
+                preserved_by: p.preserved_by.clone(),
+            })
+            .collect();
+
+        render_properties_inner(
+            out,
+            &owned_props,
+            &acct_ops,
+            &state_type,
+            &op_type,
+            &apply_name,
+        );
     }
 }
 
 /// Inner helper for property rendering.
+///
+/// Emits per-operation sub-lemmas (with sorry) and a master theorem that
+/// is auto-proven by case split over the Operation type.
 fn render_properties_inner(
     out: &mut String,
     properties: &[crate::check::ParsedProperty],
-    _ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedOperation],
     state_type: &str,
     op_type: &str,
     apply_name: &str,
@@ -518,14 +535,487 @@ fn render_properties_inner(
             ));
         }
 
+        // Determine which operations this property covers
+        let covered_ops: Vec<&&crate::check::ParsedOperation> = ops
+            .iter()
+            .filter(|op| prop.preserved_by.contains(&op.name))
+            .collect();
+
+        // Emit per-operation sub-lemmas (one sorry per op)
+        for op in &covered_ops {
+            let trans_name = safe_name(&format!("{}Transition", op.name));
+            let param_sig = param_sig_str(&op.takes_params);
+
+            out.push_str(&format!(
+                "theorem {}_preserved_by_{} (s s' : {}) (signer : Pubkey){}\n",
+                prop.name,
+                safe_name(&op.name),
+                state_type,
+                param_sig
+            ));
+            out.push_str(&format!(
+                "    (h_inv : {} s) (h : {} s signer{} = some s') :\n",
+                prop.name,
+                trans_name,
+                param_args_str(&op.takes_params)
+            ));
+            out.push_str(&format!("    {} s' := sorry\n\n", prop.name));
+        }
+
+        // Emit master theorem auto-proven by case split
         out.push_str(&format!(
-            "/-- {} is preserved by every operation. Prove by `cases op` with unfold/omega per case. -/\n",
+            "/-- {} is preserved by every operation. Auto-proven by case split. -/\n",
             prop.name
         ));
         out.push_str(&format!(
-            "theorem {}_inductive (s s' : {}) (signer : Pubkey) (op : {})\n    (h_inv : {} s) (h : {} s signer op = some s') : {} s' := sorry\n\n",
+            "theorem {}_inductive (s s' : {}) (signer : Pubkey) (op : {})\n    (h_inv : {} s) (h : {} s signer op = some s') : {} s' := by\n",
             prop.name, state_type, op_type, prop.name, apply_name, prop.name
         ));
+        out.push_str("  cases op with\n");
+        for op in ops {
+            let ctor = safe_name(&op.name);
+            let param_names: Vec<String> = op.takes_params.iter().map(|(n, _)| n.clone()).collect();
+            let param_bind = if param_names.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", param_names.join(" "))
+            };
+            let param_pass = if param_names.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", param_names.join(" "))
+            };
+
+            if prop.preserved_by.contains(&op.name) {
+                out.push_str(&format!(
+                    "  | {}{} => exact {}_preserved_by_{} s s' signer{} h_inv h\n",
+                    ctor, param_bind, prop.name, ctor, param_pass
+                ));
+            } else {
+                // Operation not in preserved_by — transition doesn't change property-relevant state
+                // The proof is trivial: unfold applyOp, show transition preserves state
+                out.push_str(&format!(
+                    "  | {}{} => simp [{}] at h; try {{ subst h; exact h_inv }}; exact h_inv\n",
+                    ctor,
+                    param_bind,
+                    safe_name(&format!("{}Transition", op.name))
+                ));
+            }
+        }
+        out.push('\n');
+    }
+}
+
+/// Build " param1 param2" string for calling a transition function.
+fn param_args_str(params: &[(String, String)]) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            params
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }
+}
+
+/// Render cover properties — existential reachability proofs.
+fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
+    if spec.covers.is_empty() {
+        return;
+    }
+
+    out.push_str(
+        "// ============================================================================\n",
+    );
+    out.push_str("// Cover properties — reachability (existential proofs)\n");
+    out.push_str(
+        "// ============================================================================\n\n",
+    );
+
+    for cover in &spec.covers {
+        for (i, trace) in cover.traces.iter().enumerate() {
+            let suffix = if cover.traces.len() > 1 {
+                format!("_{}", i)
+            } else {
+                String::new()
+            };
+            // Generate existential proof: there exists initial state and signer such that
+            // the trace sequence produces a valid final state
+            out.push_str(&format!(
+                "/-- {} — trace [{}] is reachable. -/\n",
+                cover.name,
+                trace.join(", ")
+            ));
+            out.push_str(&format!(
+                "theorem cover_{}{} : ∃ (s0 : {}) (signer : Pubkey),\n",
+                cover.name, suffix, state_type
+            ));
+            // Build nested match chain
+            let mut indent = "    ".to_string();
+            for (j, op_name) in trace.iter().enumerate() {
+                let trans = safe_name(&format!("{}Transition", op_name));
+                let op = spec.operations.iter().find(|o| o.name == *op_name);
+                let param_args = op
+                    .map(|o| {
+                        o.takes_params
+                            .iter()
+                            .enumerate()
+                            .map(|(k, (_, _))| format!("v{}_{}", j, k))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                let extra_exists = op
+                    .map(|o| {
+                        o.takes_params
+                            .iter()
+                            .enumerate()
+                            .map(|(k, (_, t))| format!("(v{}_{} : {})", j, k, map_type(t)))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+
+                if !extra_exists.is_empty() {
+                    out.push_str(&format!("{}∃ {}, ", indent, extra_exists));
+                }
+
+                let s_var = if j == 0 {
+                    "s0".to_string()
+                } else {
+                    format!("s{}", j)
+                };
+                let s_next = format!("s{}", j + 1);
+
+                if j < trace.len() - 1 {
+                    let param_str = if param_args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", param_args)
+                    };
+                    out.push_str(&format!(
+                        "∃ ({} : {}), {} {} signer{} = some {} ∧\n",
+                        s_next, state_type, trans, s_var, param_str, s_next
+                    ));
+                    indent.push_str("  ");
+                } else {
+                    let param_str = if param_args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", param_args)
+                    };
+                    out.push_str(&format!(
+                        "{} {} signer{} ≠ none := sorry\n\n",
+                        trans, s_var, param_str
+                    ));
+                }
+            }
+        }
+
+        for (op_name, when_expr) in &cover.reachable {
+            out.push_str(&format!("/-- {} — {} is reachable", cover.name, op_name));
+            if let Some(ref expr) = when_expr {
+                out.push_str(&format!(" when {}. -/\n", expr));
+            } else {
+                out.push_str(". -/\n");
+            }
+            out.push_str(&format!(
+                "theorem cover_{}_{} : ∃ (s : {}) (signer : Pubkey),\n",
+                cover.name,
+                safe_name(op_name),
+                state_type
+            ));
+            if let Some(ref expr) = when_expr {
+                out.push_str(&format!("    {} ∧ ", expr));
+            } else {
+                out.push_str("    ");
+            }
+            let trans = safe_name(&format!("{}Transition", op_name));
+            let op = spec.operations.iter().find(|o| o.name == *op_name);
+            let param_exists = op
+                .map(|o| {
+                    o.takes_params
+                        .iter()
+                        .map(|(n, t)| format!("({} : {})", n, map_type(t)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let param_args = op
+                .map(|o| param_args_str(&o.takes_params))
+                .unwrap_or_default();
+            if !param_exists.is_empty() {
+                out.push_str(&format!("∃ {}, ", param_exists));
+            }
+            out.push_str(&format!(
+                "{} s signer{} ≠ none := sorry\n\n",
+                trans, param_args
+            ));
+        }
+    }
+}
+
+/// Render liveness properties — bounded reachability from one state to another.
+fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
+    if spec.liveness_props.is_empty() {
+        return;
+    }
+
+    out.push_str(
+        "// ============================================================================\n",
+    );
+    out.push_str("// Liveness properties — bounded reachability (leads-to)\n");
+    out.push_str(
+        "// ============================================================================\n\n",
+    );
+
+    // Emit applyOps helper if not already present (check if any liveness exists)
+    out.push_str("def applyOps (s : State) (signer : Pubkey) : List Operation → Option State\n");
+    out.push_str("  | [] => some s\n");
+    out.push_str("  | op :: ops => match applyOp s signer op with\n");
+    out.push_str("    | some s' => applyOps s' signer ops\n");
+    out.push_str("    | none => none\n\n");
+
+    for liveness in &spec.liveness_props {
+        let bound = liveness.within_steps.unwrap_or(10);
+        out.push_str(&format!(
+            "/-- {} — from {} leads to {} within {} steps via [{}]. -/\n",
+            liveness.name,
+            liveness.from_state,
+            liveness.leads_to_state,
+            bound,
+            liveness.via_ops.join(", ")
+        ));
+        out.push_str(&format!(
+            "theorem liveness_{} (s : {}) (signer : Pubkey)\n",
+            liveness.name, state_type
+        ));
+        out.push_str(&format!(
+            "    (h : s.status = .{}) :\n",
+            liveness.from_state
+        ));
+        out.push_str(&format!(
+            "    ∃ ops, ops.length ≤ {} ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .{} := sorry\n\n",
+            bound, liveness.leads_to_state
+        ));
+    }
+}
+
+/// Render environment block theorems — properties hold under external state changes.
+fn render_environments(out: &mut String, spec: &ParsedSpec, state_type: &str) {
+    if spec.environments.is_empty() {
+        return;
+    }
+
+    out.push_str(
+        "// ============================================================================\n",
+    );
+    out.push_str("// Environment — properties hold under external state changes\n");
+    out.push_str(
+        "// ============================================================================\n\n",
+    );
+
+    for env in &spec.environments {
+        // For each property, generate a theorem showing it holds after env mutation
+        for prop in &spec.properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+
+            // Build parameter signature for mutated fields
+            let param_sig: String = env
+                .mutates
+                .iter()
+                .map(|(name, typ)| format!(" (new_{} : {})", name, map_type(typ)))
+                .collect();
+
+            // Build constraint hypotheses
+            let constraint_hyps: String = env
+                .constraints
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    // Replace field refs with new_ prefixed versions
+                    let mut expr = c.clone();
+                    for (field, _) in &env.mutates {
+                        expr = expr
+                            .replace(&format!("s.{}", field), &format!("new_{}", field))
+                            .replace(&format!("state.{}", field), &format!("new_{}", field));
+                        // Bare field name in constraint
+                        if expr.trim() == *field || expr.contains(field) {
+                            expr = expr.replace(field, &format!("new_{}", field));
+                        }
+                    }
+                    format!("\n    (h_c{} : {})", i, expr)
+                })
+                .collect();
+
+            // Build with-update
+            let with_parts: String = env
+                .mutates
+                .iter()
+                .map(|(name, _)| format!("{} := new_{}", safe_name(name), name))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            out.push_str(&format!(
+                "theorem {}_under_{} (s : {}){}{}\n",
+                prop.name, env.name, state_type, param_sig, constraint_hyps
+            ));
+            out.push_str(&format!("    (h_inv : {} s) :\n", prop.name));
+            out.push_str(&format!(
+                "    {} {{ s with {} }} := sorry\n\n",
+                prop.name, with_parts
+            ));
+        }
+    }
+}
+
+/// Render aborts_if theorems — prove that operations reject under specified conditions.
+fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedOperation], state_type: &str) {
+    let has_aborts = ops.iter().any(|op| !op.aborts_if.is_empty());
+    if !has_aborts {
+        return;
+    }
+
+    out.push_str(
+        "// ============================================================================\n",
+    );
+    out.push_str("// Abort conditions — operations must reject under specified conditions\n");
+    out.push_str(
+        "// ============================================================================\n\n",
+    );
+
+    for op in ops {
+        for abort in &op.aborts_if {
+            let trans_name = safe_name(&format!("{}Transition", op.name));
+            let param_sig = param_sig_str(&op.takes_params);
+
+            out.push_str(&format!(
+                "theorem {}_aborts_if_{} (s : {}) (signer : Pubkey){}\n",
+                safe_name(&op.name),
+                abort.error_name,
+                state_type,
+                param_sig
+            ));
+            out.push_str(&format!(
+                "    (h : {}) : {} s signer{} = none := sorry\n\n",
+                abort.lean_expr,
+                trans_name,
+                param_args_str(&op.takes_params)
+            ));
+        }
+    }
+}
+
+/// Render overflow safety obligations for operations with add effects.
+///
+/// For each operation that has "add" effects on numeric fields, generates a
+/// theorem requiring that all numeric fields in the post-state remain valid
+/// (within their declared type's bounds).
+fn render_overflow_obligations(
+    out: &mut String,
+    _spec: &ParsedSpec,
+    ops: &[&crate::check::ParsedOperation],
+    fields: &[(String, String)],
+    state_type: &str,
+) {
+    // Collect operations that have add effects
+    let add_ops: Vec<&&crate::check::ParsedOperation> = ops
+        .iter()
+        .filter(|op| op.effects.iter().any(|(_, kind, _)| kind == "add"))
+        .collect();
+
+    if add_ops.is_empty() {
+        return;
+    }
+
+    // Collect numeric field names for the validity predicate
+    let numeric_fields: Vec<&str> = fields
+        .iter()
+        .filter(|(_, t)| {
+            matches!(
+                t.as_str(),
+                "U8" | "U16" | "U32" | "U64" | "U128" | "I64" | "I128"
+            )
+        })
+        .map(|(n, _)| n.as_str())
+        .collect();
+
+    if numeric_fields.is_empty() {
+        return;
+    }
+
+    // Determine the appropriate bounds predicate based on field types
+    // Use the widest type present to determine the bound
+    let valid_fn = |ftype: &str| -> &str {
+        match ftype {
+            "U8" => "valid_u8",
+            "U16" => "valid_u16",
+            "U32" => "valid_u32",
+            "U64" => "valid_u64",
+            "U128" => "valid_u128",
+            "I64" => "valid_i64",
+            "I128" => "valid_i128",
+            _ => "valid_u64",
+        }
+    };
+
+    out.push_str(
+        "// ============================================================================\n",
+    );
+    out.push_str(
+        "// Overflow safety obligations (auto-generated for operations with add effects)\n",
+    );
+    out.push_str(
+        "// ============================================================================\n\n",
+    );
+
+    for op in &add_ops {
+        let trans_name = safe_name(&format!("{}Transition", op.name));
+        let param_sig = param_sig_str(&op.takes_params);
+
+        // Build pre-condition: all numeric fields are valid
+        let pre_parts: Vec<String> = fields
+            .iter()
+            .filter(|(_, t)| {
+                matches!(
+                    t.as_str(),
+                    "U8" | "U16" | "U32" | "U64" | "U128" | "I64" | "I128"
+                )
+            })
+            .map(|(n, t)| format!("{} s.{}", valid_fn(t), safe_name(n)))
+            .collect();
+
+        // Build post-condition: all numeric fields remain valid
+        let post_parts: Vec<String> = fields
+            .iter()
+            .filter(|(_, t)| {
+                matches!(
+                    t.as_str(),
+                    "U8" | "U16" | "U32" | "U64" | "U128" | "I64" | "I128"
+                )
+            })
+            .map(|(n, t)| format!("{} s'.{}", valid_fn(t), safe_name(n)))
+            .collect();
+
+        out.push_str(&format!(
+            "theorem {}_overflow_safe (s s' : {}) (signer : Pubkey){}\n",
+            safe_name(&op.name),
+            state_type,
+            param_sig
+        ));
+        out.push_str(&format!("    (h_valid : {})\n", pre_parts.join(" ∧ ")));
+        out.push_str(&format!(
+            "    (h : {} s signer{} = some s') :\n",
+            trans_name,
+            param_args_str(&op.takes_params)
+        ));
+        out.push_str(&format!("    {} := sorry\n\n", post_parts.join(" ∧ ")));
     }
 }
 

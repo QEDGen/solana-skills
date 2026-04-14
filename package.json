@@ -1,7 +1,7 @@
 {
   "name": "qedgen-solana-skills",
-  "version": "1.7.0",
-  "description": "Agent skill for formally verifying Solana programs (Rust/Anchor and sBPF assembly) with machine-checked Lean 4 proofs",
+  "version": "2.0.0",
+  "description": "Agent skill for spec-driven formal verification of Solana programs — .qedspec specs generate Lean 4 proofs, Kani harnesses, coverage matrices, and Quasar code",
   "keywords": [
     "agent-skill",
     "lean4",

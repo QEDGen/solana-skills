@@ -22,6 +22,9 @@ top_level_item = {
   | instruction_block
   | operation_block
   | property_block
+  | cover_block
+  | liveness_block
+  | environment_block
   | invariant_decl
   | COMMENT
 }
@@ -136,12 +139,15 @@ op_clause = {
   | then_clause
   | takes_block
   | guard_clause
+  | aborts_if_clause
   | effect_block
   | calls_clause
   | emits_clause
   | context_block
   | COMMENT
 }
+
+aborts_if_clause = { "aborts_if" ~ guard_expr ~ "with" ~ ident }
 who_clause   = { "who" ~ ident }
 on_clause    = { "on" ~ ident }
 when_clause  = { "when" ~ ident }
@@ -224,6 +230,49 @@ cpi_block    = { "cpi" ~ ident ~ ident ~ "{" ~ cpi_field* ~ "}" }
 cpi_field    = { ident ~ (("[" ~ ident_list ~ "]") | ident) }
 after_clause = { "after" ~ "all" ~ "guards" }
 exit_clause  = { "exit" ~ integer }
+
+// ============================================================================
+// Cover block (reachability)
+// ============================================================================
+
+cover_block = { "cover" ~ ident ~ "{" ~ cover_clause* ~ "}" }
+cover_clause = {
+    trace_clause
+  | reachable_clause
+  | COMMENT
+}
+trace_clause     = { "trace" ~ "[" ~ ident_list ~ "]" }
+reachable_clause = { "reachable" ~ ident ~ ("when" ~ guard_expr)? }
+
+// ============================================================================
+// Liveness block (leads-to)
+// ============================================================================
+
+liveness_block = { "liveness" ~ ident ~ "{" ~ liveness_clause* ~ "}" }
+liveness_clause = {
+    from_clause
+  | leads_to_clause
+  | via_clause
+  | within_clause
+  | COMMENT
+}
+from_clause     = { "from" ~ ident }
+leads_to_clause = { "leads_to" ~ ident }
+via_clause      = { "via" ~ "[" ~ ident_list ~ "]" }
+within_clause   = { "within" ~ integer }
+
+// ============================================================================
+// Environment block (external state)
+// ============================================================================
+
+environment_block = { "environment" ~ ident ~ "{" ~ env_clause* ~ "}" }
+env_clause = {
+    mutates_clause
+  | constraint_clause
+  | COMMENT
+}
+mutates_clause    = { "mutates" ~ ident ~ ":" ~ ident }
+constraint_clause = { "constraint" ~ guard_expr }
 
 // ============================================================================
 // Shared primitives

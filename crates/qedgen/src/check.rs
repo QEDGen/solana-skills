@@ -41,6 +41,41 @@ pub struct ParsedAccountType {
     pub pda_ref: Option<String>,
 }
 
+/// Parsed aborts_if clause: condition → error name.
+#[derive(Debug, Clone)]
+pub struct ParsedAbort {
+    pub lean_expr: String,
+    pub rust_expr: String,
+    pub error_name: String,
+}
+
+/// Parsed cover block (reachability).
+#[derive(Debug, Clone)]
+pub struct ParsedCover {
+    pub name: String,
+    pub traces: Vec<Vec<String>>,
+    pub reachable: Vec<(String, Option<String>)>, // (op, when_lean_expr)
+}
+
+/// Parsed liveness block (leads-to).
+#[derive(Debug, Clone)]
+pub struct ParsedLiveness {
+    pub name: String,
+    pub from_state: String,
+    pub leads_to_state: String,
+    pub via_ops: Vec<String>,
+    pub within_steps: Option<u64>,
+}
+
+/// Parsed environment block (external state).
+#[derive(Debug, Clone)]
+pub struct ParsedEnvironment {
+    pub name: String,
+    pub mutates: Vec<(String, String)>, // (field, type)
+    pub constraints: Vec<String>,       // lean form
+    pub constraints_rust: Vec<String>,  // rust form
+}
+
 /// Parsed operation from a qedspec block with its clauses.
 #[derive(Debug)]
 pub struct ParsedOperation {
@@ -73,6 +108,9 @@ pub struct ParsedOperation {
     pub calls_discriminator: Option<String>,
     #[allow(dead_code)]
     pub emits: Vec<String>,
+    /// Abort conditions: (lean_expr, rust_expr, error_name)
+    #[allow(dead_code)]
+    pub aborts_if: Vec<ParsedAbort>,
 }
 
 /// Parsed property from a qedspec block.
@@ -277,6 +315,15 @@ pub struct ParsedSpec {
     /// Global named constants (`const NAME = VALUE`).
     #[allow(dead_code)]
     pub constants: Vec<(String, String)>,
+    /// Cover blocks (reachability properties).
+    #[allow(dead_code)]
+    pub covers: Vec<ParsedCover>,
+    /// Liveness properties (leads-to).
+    #[allow(dead_code)]
+    pub liveness_props: Vec<ParsedLiveness>,
+    /// Environment blocks (external state).
+    #[allow(dead_code)]
+    pub environments: Vec<ParsedEnvironment>,
 }
 
 /// Check spec coverage: which properties have proofs, which have sorry, which are missing.
@@ -367,22 +414,24 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
         props.push((name.clone(), intent, suggestion));
     }
 
-    // Inductive property preservation — one theorem per property (not per op)
-    // Lean generates: theorem {prop}_inductive (s s' : State) (signer : Pubkey) (op : Operation)
-    //   (h_inv : prop s) (h : applyOp s signer op = some s') : prop s'
+    // Per-operation sub-lemmas: one sorry per (property, operation) pair.
+    // The master theorem {prop}_inductive is auto-proven by case split.
     for prop in &spec.properties {
-        let ops_list = prop.preserved_by.join(", ");
-        let intent = format!(
-            "{} is preserved by every operation ({}). Inductive proof over Operation type.",
-            prop.name, ops_list
-        );
-        let suggestion = Some(format!(
-            "Prove by `cases op` then unfold/omega per case. Each case reduces to showing \
-             that {}Transition preserves {} — the Operation inductive gives you all cases.",
-            prop.preserved_by.first().unwrap_or(&"<op>".to_string()),
-            prop.name
-        ));
-        props.push((format!("{}_inductive", prop.name), intent, suggestion));
+        for op_name in &prop.preserved_by {
+            let intent = format!(
+                "{} is preserved by {}. Prove by unfold/omega.",
+                prop.name, op_name
+            );
+            let suggestion = Some(format!(
+                "unfold {} {}Transition at h_inv h ⊢; split_ifs at h with h_eq; simp_all; omega",
+                prop.name, op_name
+            ));
+            props.push((
+                format!("{}_preserved_by_{}", prop.name, op_name),
+                intent,
+                suggestion,
+            ));
+        }
     }
 
     props
@@ -1076,6 +1125,160 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
+    // Rule 13: write_without_read — state field written in effects but never read in guards/properties
+    {
+        let mut written_fields = std::collections::HashSet::new();
+        for op in &spec.operations {
+            for (field, _, _) in &op.effects {
+                written_fields.insert(field.as_str());
+            }
+        }
+        let mut read_fields = std::collections::HashSet::new();
+        for op in &spec.operations {
+            if let Some(ref guard) = op.guard_str {
+                for field in &written_fields {
+                    if guard.contains(&format!("s.{}", field))
+                        || guard.contains(&format!("state.{}", field))
+                        || guard.contains(field)
+                    {
+                        read_fields.insert(*field);
+                    }
+                }
+            }
+        }
+        for prop in &spec.properties {
+            if let Some(ref expr) = prop.expression {
+                for field in &written_fields {
+                    if expr.contains(&format!("s.{}", field))
+                        || expr.contains(&format!("state.{}", field))
+                        || expr.contains(field)
+                    {
+                        read_fields.insert(*field);
+                    }
+                }
+            }
+        }
+        for field in &written_fields {
+            if !read_fields.contains(field) {
+                warnings.push(CompletenessWarning {
+                    rule: "write_without_read".to_string(),
+                    severity: Severity::Info,
+                    priority: 3,
+                    message: format!(
+                        "state field '{}' is written in effects but never referenced in any guard or property",
+                        field
+                    ),
+                    subject: Some(field.to_string()),
+                    fix: format!(
+                        "Add '{}' to a property expression or guard, or verify that writing it without reading is intentional",
+                        field
+                    ),
+                    example: Some(format!(
+                        "  property my_invariant {{\n    expr state.{} >= 0\n    preserved_by all\n  }}",
+                        field
+                    )),
+                });
+            }
+        }
+    }
+
+    // Rule 14: dead_guard — a guard conjunct subsumed by another on the same operation
+    {
+        let cmp_re = Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap();
+        for op in &spec.operations {
+            if let Some(ref guard) = op.guard_str {
+                // Split on ∧ and "and" to get individual conjuncts
+                let conjuncts: Vec<&str> = guard
+                    .split('\u{2227}')
+                    .flat_map(|s| s.split(" and "))
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
+                // Parse each conjunct into (field, op, value) triples
+                let parsed: Vec<(usize, &str, &str, i64)> = conjuncts
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, c)| {
+                        cmp_re.captures(c).and_then(|caps| {
+                            let field = caps.get(1)?.as_str();
+                            let cmp = caps.get(2)?.as_str();
+                            let val: i64 = caps.get(3)?.as_str().parse().ok()?;
+                            Some((i, field, cmp, val))
+                        })
+                    })
+                    .collect();
+
+                // Check if any conjunct is subsumed by another
+                for &(i, field_a, cmp_a, val_a) in &parsed {
+                    for &(j, field_b, cmp_b, val_b) in &parsed {
+                        if i == j || field_a != field_b {
+                            continue;
+                        }
+                        // Check if conjunct j implies conjunct i (making i redundant)
+                        let subsumed = match (cmp_a, cmp_b) {
+                            (">=", ">=") => val_b >= val_a, // x >= 5 implies x >= 3
+                            (">", ">") => val_b >= val_a,   // x > 5 implies x > 3
+                            (">=", ">") => val_b >= val_a,  // x > 5 implies x >= 5
+                            ("<=", "<=") => val_b <= val_a, // x <= 3 implies x <= 5
+                            ("<", "<") => val_b <= val_a,
+                            ("<=", "<") => val_b <= val_a,
+                            _ => false,
+                        };
+                        if subsumed && i != j {
+                            warnings.push(CompletenessWarning {
+                                rule: "dead_guard".to_string(),
+                                severity: Severity::Info,
+                                priority: 4,
+                                message: format!(
+                                    "guard conjunct '{}' on operation '{}' is subsumed by '{}'",
+                                    conjuncts[i], op.name, conjuncts[j]
+                                ),
+                                subject: Some(op.name.clone()),
+                                fix: format!("Remove the redundant conjunct '{}'", conjuncts[i]),
+                                example: None,
+                            });
+                            break; // Only report once per subsumed conjunct
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Rule 15: circular_lifecycle_no_terminal — lifecycle where every state has outgoing transitions
+    if spec.lifecycle_states.len() > 1 {
+        let mut outgoing: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+            std::collections::HashMap::new();
+        for op in &spec.operations {
+            if let (Some(ref pre), Some(ref post)) = (&op.pre_status, &op.post_status) {
+                if pre != post {
+                    outgoing
+                        .entry(pre.as_str())
+                        .or_default()
+                        .insert(post.as_str());
+                }
+            }
+        }
+        // A terminal state has no outgoing transitions to a different state
+        let terminal_exists = spec
+            .lifecycle_states
+            .iter()
+            .any(|s| !outgoing.contains_key(s.as_str()) || outgoing[s.as_str()].is_empty());
+        if !terminal_exists {
+            warnings.push(CompletenessWarning {
+                rule: "circular_lifecycle_no_terminal".to_string(),
+                severity: Severity::Info,
+                priority: 3,
+                message: "lifecycle has no terminal state — every state has outgoing transitions"
+                    .to_string(),
+                subject: None,
+                fix: "Consider whether the cycle is intentional. If not, designate a terminal state by removing its outgoing transitions.".to_string(),
+                example: None,
+            });
+        }
+    }
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -1086,6 +1289,143 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 pub fn lint(spec_path: &std::path::Path) -> Result<Vec<CompletenessWarning>> {
     let spec = parse_spec_file(spec_path)?;
     Ok(check_completeness(&spec))
+}
+
+// ============================================================================
+// Coverage matrix (qedgen coverage)
+// ============================================================================
+
+/// A single cell in the operation × property coverage matrix.
+#[derive(Debug, serde::Serialize)]
+pub struct CoverageCell {
+    pub operation: String,
+    pub property: String,
+    pub covered: bool,
+}
+
+/// The full coverage matrix: which operations are covered by which properties.
+#[derive(Debug, serde::Serialize)]
+pub struct CoverageMatrix {
+    pub operations: Vec<String>,
+    pub properties: Vec<String>,
+    pub cells: Vec<CoverageCell>,
+    pub gaps: Vec<String>,
+    pub coverage_pct: f64,
+}
+
+/// Build a coverage matrix from a parsed spec.
+pub fn coverage_matrix(spec: &ParsedSpec) -> CoverageMatrix {
+    let op_names: Vec<String> = spec.operations.iter().map(|o| o.name.clone()).collect();
+    let prop_names: Vec<String> = spec
+        .properties
+        .iter()
+        .filter(|p| p.expression.is_some())
+        .map(|p| p.name.clone())
+        .collect();
+
+    let mut cells = Vec::new();
+    let mut covered_ops = std::collections::HashSet::new();
+
+    for op in &op_names {
+        for prop in &spec.properties {
+            if prop.expression.is_none() {
+                continue;
+            }
+            let covered = prop.preserved_by.contains(op);
+            if covered {
+                covered_ops.insert(op.clone());
+            }
+            cells.push(CoverageCell {
+                operation: op.clone(),
+                property: prop.name.clone(),
+                covered,
+            });
+        }
+    }
+
+    let gaps: Vec<String> = op_names
+        .iter()
+        .filter(|op| !covered_ops.contains(*op))
+        .cloned()
+        .collect();
+
+    let coverage_pct = if op_names.is_empty() {
+        100.0
+    } else {
+        (covered_ops.len() as f64 / op_names.len() as f64) * 100.0
+    };
+
+    CoverageMatrix {
+        operations: op_names,
+        properties: prop_names,
+        cells,
+        gaps,
+        coverage_pct,
+    }
+}
+
+/// Print a formatted coverage table to stderr.
+pub fn print_coverage_table(matrix: &CoverageMatrix) {
+    if matrix.properties.is_empty() {
+        eprintln!("No properties defined — nothing to show.");
+        return;
+    }
+
+    // Header row: operation name column + property columns
+    let op_col_width = matrix
+        .operations
+        .iter()
+        .map(|o| o.len())
+        .max()
+        .unwrap_or(9)
+        .max(9);
+    let prop_col_width = matrix
+        .properties
+        .iter()
+        .map(|p| p.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+
+    // Print header
+    eprint!("{:<width$}", "operation", width = op_col_width + 2);
+    for prop in &matrix.properties {
+        eprint!(" {:^width$}", prop, width = prop_col_width);
+    }
+    eprintln!();
+
+    // Separator
+    eprint!("{}", "-".repeat(op_col_width + 2));
+    for _ in &matrix.properties {
+        eprint!("-{}", "-".repeat(prop_col_width));
+    }
+    eprintln!();
+
+    // Data rows
+    for op in &matrix.operations {
+        eprint!("{:<width$}", op, width = op_col_width + 2);
+        for prop in &matrix.properties {
+            let covered = matrix
+                .cells
+                .iter()
+                .any(|c| &c.operation == op && &c.property == prop && c.covered);
+            let mark = if covered { "Y" } else { "-" };
+            eprint!(" {:^width$}", mark, width = prop_col_width);
+        }
+        eprintln!();
+    }
+
+    eprintln!();
+    eprintln!(
+        "Coverage: {:.0}% ({}/{} operations covered by at least one property)",
+        matrix.coverage_pct,
+        matrix.operations.len() - matrix.gaps.len(),
+        matrix.operations.len()
+    );
+
+    if !matrix.gaps.is_empty() {
+        eprintln!("Gaps: {}", matrix.gaps.join(", "));
+    }
 }
 
 /// Check code drift — compare generated files against current spec.
@@ -1471,6 +1811,7 @@ mod tests {
             calls_accounts: vec![],
             calls_discriminator: None,
             emits: vec![],
+            aborts_if: vec![],
         }
     }
 

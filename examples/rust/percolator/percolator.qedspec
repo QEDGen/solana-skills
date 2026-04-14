@@ -45,6 +45,7 @@ operation withdraw {
   takes amount : U128
 
   guard state.C_tot >= amount
+  aborts_if state.C_tot < amount with InsufficientFunds
 
   effect {
     V -= amount
@@ -98,4 +99,15 @@ property conservation {
 property vault_bounded {
   expr state.V <= MAX_VAULT_TVL
   preserved_by [deposit, top_up_insurance]
+}
+
+cover happy_path {
+  trace [deposit, withdraw]
+}
+
+liveness drain_completes {
+  from Draining
+  leads_to Active
+  via [complete_drain, reset]
+  within 2
 }

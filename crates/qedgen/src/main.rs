@@ -236,6 +236,17 @@ enum Commands {
         json: bool,
     },
 
+    /// Show operation × property coverage matrix
+    Coverage {
+        /// Path to the spec file (.qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output as JSON (default: human-readable table)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate a Quasar program skeleton from a qedspec Lean file
     Codegen {
         /// Path to the spec file (Spec.lean)
@@ -644,6 +655,16 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 }
+            }
+        }
+
+        Commands::Coverage { spec, json } => {
+            let parsed = check::parse_spec_file(&spec)?;
+            let matrix = check::coverage_matrix(&parsed);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&matrix)?);
+            } else {
+                check::print_coverage_table(&matrix);
             }
         }
 

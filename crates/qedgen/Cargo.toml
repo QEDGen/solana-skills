@@ -1,9 +1,9 @@
 [package]
 name = "qedgen-solana-skills"
-version = "1.7.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["abishekk92"]
-description = "CLI tool for generating formal Lean 4 proofs for Solana programs powered by Mistral's Leanstral model"
+description = "Spec-driven formal verification for Solana programs: .qedspec → Lean 4 proofs, Kani harnesses, coverage matrix, and Quasar codegen"
 license = "MIT"
 repository = "https://github.com/qedgen/solana-skills"
 
