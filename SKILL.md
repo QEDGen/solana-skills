@@ -140,9 +140,7 @@ Generated structure:
 formal_verification/
   lakefile.lean          # Pre-configured (+ Mathlib if --mathlib)
   lean-toolchain
-  Spec.lean              # Skeleton qedspec
-  Proofs.lean            # Root import
-  Proofs/
+  Spec.lean              # Definitions + proofs (single file)
   lean_solana/           # Embedded support library
   .gitignore
 ```
@@ -185,10 +183,10 @@ When you have `sorry` markers you cannot fill after 2-3 attempts:
 
 ```bash
 # Try Leanstral first (fast, seconds)
-$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
+$QEDGEN fill-sorry --file formal_verification/Spec.lean --validate
 
 # Auto-chain: Leanstral -> Aristotle if sorry remains
-$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --escalate
+$QEDGEN fill-sorry --file formal_verification/Spec.lean --escalate
 
 # Or manually escalate to Aristotle (minutes-hours)
 $QEDGEN aristotle submit --project-dir formal_verification --wait
@@ -208,13 +206,13 @@ See `references/cli.md` for all Aristotle subcommands.
 cd formal_verification && lake build
 
 # Check spec coverage (accepts .qedspec or Spec.lean)
-$QEDGEN check --spec program.qedspec --proofs formal_verification/Proofs/
+$QEDGEN check --spec program.qedspec --proofs formal_verification/Spec.lean
 
 # For sBPF: verify binary hasn't drifted from proofs
 $QEDGEN verify --asm src/program.s --proofs formal_verification/
 
 # Human-readable verification report
-$QEDGEN explain --spec program.qedspec --proofs formal_verification/
+$QEDGEN explain --spec program.qedspec --proofs formal_verification/Spec.lean
 ```
 
 `qedgen check` reports per-theorem status: **Proven**, **Sorry**, or **Missing**.
@@ -226,7 +224,7 @@ $QEDGEN explain --spec program.qedspec --proofs formal_verification/
 When code or Kani harnesses are generated from the spec:
 
 ```bash
-$QEDGEN check --spec Spec.lean --proofs Proofs/ --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec program.qedspec --proofs formal_verification/Spec.lean --code programs/my_program/ --kani tests/kani.rs
 ```
 
 ### CI integration

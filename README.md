@@ -132,7 +132,7 @@ qedgen explain --spec Spec.lean
 
 ```bash
 # Transpile sBPF assembly to Lean 4
-qedgen asm2lean --input src/program.s --output formal_verification/Prog.lean
+qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
 
 # Verify sBPF proofs (checks source hash, regenerates if stale)
 qedgen verify --asm src/program.s
@@ -153,13 +153,13 @@ qedgen generate \
 ```bash
 # Leanstral (fast, seconds)
 qedgen fill-sorry \
-  --file formal_verification/Proofs/Hard.lean \
+  --file formal_verification/Spec.lean \
   --passes 3 \
   --validate
 
 # Auto-escalate to Aristotle if sorry markers remain
 qedgen fill-sorry \
-  --file formal_verification/Proofs/Hard.lean \
+  --file formal_verification/Spec.lean \
   --passes 3 \
   --validate \
   --escalate

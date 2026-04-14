@@ -52,7 +52,7 @@ qedgen generate \
 
 # Fill sorry markers in a Lean file (Claude calls this for hard sub-goals)
 qedgen fill-sorry \
-  --file formal_verification/Proofs/Hard.lean \
+  --file formal_verification/Spec.lean \
   --passes 3 \
   --validate
 
@@ -165,14 +165,14 @@ If `lake build` fails:
 For sBPF assembly programs, use `qedgen asm2lean` to generate the program module instead of hand-transcribing:
 
 ```bash
-qedgen asm2lean --input src/program.s --output formal_verification/Prog.lean
+qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
 ```
 
-Then write proofs in a separate file that imports the generated module:
+Then write proofs in Spec.lean that imports the generated module:
 
 ```lean
 import QEDGen.Solana.SBPF
-import Prog
+import Program
 
 open QEDGen.Solana.SBPF
 open QEDGen.Solana.SBPF.Memory
