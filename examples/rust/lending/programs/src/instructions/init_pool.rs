@@ -16,6 +16,7 @@ pub struct InitPool {
 impl InitPool {
     /// Initialize the lending pool with an interest rate
     #[inline(always)]
+    #[qed(verified, hash = "b3a8119e013aa8fb")]
     pub fn handler(&mut self, rate: u64, bumps: &InitPoolBumps) -> Result<(), ProgramError> {
         // AGENT: implement business logic here
         // Spec guard: "rate > 0"

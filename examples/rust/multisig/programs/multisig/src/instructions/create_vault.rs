@@ -16,6 +16,7 @@ pub struct CreateVault {
 impl CreateVault {
     /// Create a new multisig vault with members and approval threshold
     #[inline(always)]
+    #[qed(verified, hash = "e12043734a8a5877")]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
         if threshold == 0 || threshold > member_count {
             return Err(ProgramError::Custom(MultisigError::InvalidThreshold as u32));

@@ -1,0 +1,16 @@
+[package]
+name = "qedgen-macros"
+version = "0.1.0"
+edition = "2021"
+authors = ["abishekk92"]
+description = "Compile-time verification drift detection for Solana programs"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+sha2 = { workspace = true }

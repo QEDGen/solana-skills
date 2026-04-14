@@ -206,6 +206,53 @@ $QEDGEN verify --asm src/program.s --proofs formal_verification/
 | `--asm` | Path | required | sBPF assembly source |
 | `--proofs` | Path | `./formal_verification` | Proofs directory |
 
+## Drift detection
+
+### `drift`
+Detect code drift in `#[qed(verified)]` functions. Computes content hashes and compares against stored hashes without compiling the program.
+
+```bash
+$QEDGEN drift --input programs/src/                # show status of all verified functions
+$QEDGEN drift --input programs/src/ --strict       # exit 1 on any drift (CI gate)
+$QEDGEN drift --input programs/src/ --update       # auto-stamp/update hashes in source
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--input` | Path | required | Rust source file or directory to scan |
+| `--strict` | bool | false | Exit 1 if any function has drifted or is unhashed |
+| `--update` | bool | false | Compute hashes and write them into source files |
+
+Output format:
+```
+  deposit.rs  handler     OK      5af369bb254368d3
+  borrow.rs   handler     DRIFT   expected 8ee45980 got f1a2b3c4
+  repay.rs    handler     NO HASH computed f923321b
+```
+
+**Hash algorithm**: Parse function with `syn`, strip all attributes and doc comments, normalize via round-trip, SHA-256, truncate to 16 hex chars. Same algorithm is used by the `qedgen-macros` proc macro at compile time.
+
+### `qedgen-macros` (proc macro crate)
+
+The `qedgen-macros` crate provides `#[qed(verified, hash = "...")]` for compile-time drift detection. Add it to your program's dependencies:
+
+```toml
+[dependencies]
+qedgen-macros = { version = "0.1" }
+```
+
+```rust
+use qedgen_macros::qed;
+
+#[qed(verified, hash = "5af369bb254368d3")]
+pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    // If this body changes, compilation fails with:
+    // "qed: verified function `deposit` has changed since verification"
+}
+```
+
+When `hash` is omitted, the macro emits a `compile_error!` with the computed hash (setup mode).
+
 ## Code generation
 
 ### `codegen`

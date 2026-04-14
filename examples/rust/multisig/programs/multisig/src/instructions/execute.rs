@@ -14,6 +14,7 @@ pub struct Execute {
 impl Execute {
     /// Execute the proposal once the approval threshold is met
     #[inline(always)]
+    #[qed(verified, hash = "fa9fb27e2a3ab8f3")]
     pub fn handler(&mut self, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
         if self.vault.approval_count < self.vault.threshold {
             return Err(ProgramError::Custom(MultisigError::ThresholdNotMet as u32));

@@ -14,6 +14,7 @@ pub struct CancelProposal {
 impl CancelProposal {
     /// Cancel the current proposal and return to accepting new proposals
     #[inline(always)]
+    #[qed(verified, hash = "dd32289c0989e624")]
     pub fn handler(&mut self, bumps: &CancelProposalBumps) -> Result<(), ProgramError> {
         self.vault.approval_count = 0;
         Ok(())

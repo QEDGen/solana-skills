@@ -14,6 +14,7 @@ pub struct Approve {
 impl Approve {
     /// Approve the current proposal — each member may approve once
     #[inline(always)]
+    #[qed(verified, hash = "7482dfa276ab763f")]
     pub fn handler(&mut self, member_index: u8, bumps: &ApproveBumps) -> Result<(), ProgramError> {
         if member_index >= self.vault.member_count {
             return Err(ProgramError::Custom(MultisigError::NotAMember as u32));

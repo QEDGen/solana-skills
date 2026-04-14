@@ -22,6 +22,7 @@ pub struct Repay {
 impl Repay {
     /// Repay a loan in full
     #[inline(always)]
+    #[qed(verified, hash = "f923321bea38880f")]
     pub fn handler(&mut self, bumps: &RepayBumps) -> Result<(), ProgramError> {
         // AGENT: implement business logic here
         // Spec effect: amount set 0

@@ -20,6 +20,7 @@ pub struct Deposit {
 impl Deposit {
     /// Deposit tokens into the pool
     #[inline(always)]
+    #[qed(verified, hash = "5af369bb254368d3")]
     pub fn handler(&mut self, amount: u64, bumps: &DepositBumps) -> Result<(), ProgramError> {
         // AGENT: implement business logic here
         // Spec guard: "amount > 0"

@@ -14,6 +14,7 @@ pub struct Propose {
 impl Propose {
     /// Submit a new transaction proposal — any vault member can propose
     #[inline(always)]
+    #[qed(verified, hash = "1fd7e9f374852b99")]
     pub fn handler(&mut self, bumps: &ProposeBumps) -> Result<(), ProgramError> {
         self.vault.approval_count = 0;
         Ok(())

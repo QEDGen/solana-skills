@@ -20,6 +20,7 @@ pub struct Liquidate {
 impl Liquidate {
     /// Liquidate an undercollateralized loan
     #[inline(always)]
+    #[qed(verified, hash = "4ad47ca42c8ad24a")]
     pub fn handler(&mut self, bumps: &LiquidateBumps) -> Result<(), ProgramError> {
         // AGENT: implement business logic here
         // Spec effect: amount set 0

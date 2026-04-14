@@ -23,6 +23,7 @@ pub struct Borrow {
 impl Borrow {
     /// Borrow tokens from the pool against collateral
     #[inline(always)]
+    #[qed(verified, hash = "8ee45980b6650c05")]
     pub fn handler(&mut self, amount: u64, collateral: u64, bumps: &BorrowBumps) -> Result<(), ProgramError> {
         // AGENT: implement business logic here
         // Spec guard: "amount > 0 ∧ collateral > 0"

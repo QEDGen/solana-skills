@@ -199,7 +199,66 @@ $QEDGEN aristotle submit --project-dir formal_verification --wait
 
 See `references/cli.md` for all Aristotle subcommands.
 
-## Step 7: Verify and report
+## Step 7: Stamp verified code
+
+After proofs compile and `qedgen check` passes, stamp the verified Rust handlers with `#[qed(verified)]` to detect future drift:
+
+```bash
+# Add #[qed(verified)] to handler functions, then stamp hashes
+$QEDGEN drift --input programs/src/ --update
+```
+
+This adds content hashes to every `#[qed(verified)]` annotation. If anyone later modifies a verified function:
+- **At compile time** (with `qedgen-macros`): `compile_error!` — the program won't build
+- **In CI** (with `qedgen drift`): `exit 1` — the pipeline fails
+
+### Adding annotations
+
+Add `#[qed(verified)]` to each handler function you've proven properties about:
+
+```rust
+use qedgen_macros::qed;
+
+impl Deposit {
+    #[qed(verified, hash = "5af369bb254368d3")]
+    pub fn handler(&mut self, amount: u64) -> Result<(), ProgramError> {
+        // ...
+    }
+}
+```
+
+For Anchor programs, annotate the instruction functions directly:
+
+```rust
+#[program]
+pub mod escrow {
+    #[qed(verified, hash = "c68230ca8a9e7c28")]
+    pub fn initialize(ctx: Context<Initialize>, amount: u64) -> Result<()> {
+        // ...
+    }
+}
+```
+
+### What the hash covers
+
+The hash is computed from the function signature + body, excluding attributes and comments. It changes when:
+- The function body changes (any statement added/removed/reordered)
+- Parameter names, types, or return type change
+- The function name changes
+
+It does NOT change for: whitespace, formatting, or comment changes.
+
+### CI integration
+
+Add to your CI pipeline:
+
+```bash
+$QEDGEN drift --input programs/src/ --strict
+```
+
+Exits 0 if all hashes match, 1 if any function has drifted. Pair with `lake build` to gate merges on both proof validity and code integrity.
+
+## Step 8: Verify and report
 
 ```bash
 # Build proofs

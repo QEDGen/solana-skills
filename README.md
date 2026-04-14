@@ -180,6 +180,28 @@ qedgen aristotle list
 qedgen aristotle cancel <project-id>
 ```
 
+### Verification drift detection
+
+After verifying a function, stamp it with `#[qed(verified)]` to detect future changes:
+
+```rust
+use qedgen_macros::qed;
+
+#[qed(verified, hash = "5af369bb254368d3")]
+pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    // Any change → compile_error! (with proc macro)
+    // Any change → exit 1 (with CLI)
+}
+```
+
+```bash
+# Scan and stamp hashes on all #[qed(verified)] functions
+qedgen drift --input programs/src/ --update
+
+# CI gate — exit 1 if any verified function has changed
+qedgen drift --input programs/src/ --strict
+```
+
 ### Consolidate proofs
 
 ```bash

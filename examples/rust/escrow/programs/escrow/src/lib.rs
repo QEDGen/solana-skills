@@ -12,6 +12,7 @@ pub mod escrow {
     /// This creates an escrow state that defines the terms of the exchange:
     /// - The initializer deposits token A
     /// - The taker must provide token B to complete the exchange
+    #[qed(verified, hash = "c68230ca8a9e7c28")]
     pub fn initialize(
         ctx: Context<Initialize>,
         amount: u64,
@@ -44,6 +45,7 @@ pub mod escrow {
     ///
     /// The taker deposits their tokens and receives the initializer's tokens.
     /// The initializer receives the taker's tokens.
+    #[qed(verified, hash = "d826df728501d433")]
     pub fn exchange(ctx: Context<Exchange>) -> Result<()> {
         let escrow = &ctx.accounts.escrow;
 
@@ -79,6 +81,7 @@ pub mod escrow {
     }
 
     /// Cancel the escrow and return tokens to initializer
+    #[qed(verified, hash = "63a674e9bd473ae9")]
     pub fn cancel(ctx: Context<Cancel>) -> Result<()> {
         let escrow = &ctx.accounts.escrow;
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/qedgen"]
+members = ["crates/qedgen", "crates/qedgen-macros"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -9,3 +9,7 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+syn = { version = "2", features = ["full", "parsing"] }
+quote = "1"
+proc-macro2 = "1"
+sha2 = "0.10"

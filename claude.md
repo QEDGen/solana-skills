@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 4 proofs. Claude (the local LLM) drives proof writing directly — reading code, writing Lean models/theorems/proofs, and iterating on `lake build` errors. Leanstral (Mistral's theorem prover) is called only for hard sub-goals via `fill-sorry`.
 
-**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `qedgen fill-sorry` for hard sub-goals
+**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `qedgen fill-sorry` for hard sub-goals → stamps verified code with `#[qed(verified)]`
 
 ## Build and Development Commands
 
@@ -69,17 +69,27 @@ qedgen asm2lean \
   --input examples/sbpf/transfer/src/transfer.s \
   --output formal_verification/Program.lean \
   --namespace Program
+
+# Detect drift in verified functions
+qedgen drift --input programs/src/           # show status
+qedgen drift --input programs/src/ --strict  # CI gate (exit 1 on drift)
+qedgen drift --input programs/src/ --update  # auto-stamp hashes
 ```
 
 ## Architecture
 
 ### Crate Structure
 
-**`crates/qedgen/`** - Single crate: CLI and Mistral API client
+**`crates/qedgen-macros/`** - Proc macro crate: compile-time drift detection
+- `lib.rs` - `#[qed]` attribute macro entry point, dispatches on keyword
+- `verified.rs` - Content hash computation + `compile_error!` on drift
+
+**`crates/qedgen/`** - Main crate: CLI and Mistral API client
 - `main.rs` - CLI entry points (generate, fill-sorry, spec, consolidate, asm2lean, setup)
 - `api.rs` - Mistral API client, pass@N sampling, sorry-filling, retry logic
 - `asm2lean.rs` - sBPF assembly → Lean 4 transpiler (parses `.s`, emits program module)
 - `validate.rs` - Lake build validation in persistent workspace
+- `drift.rs` - `#[qed(verified)]` drift detection: scan Rust source, compute hashes, report/update
 - `project.rs` - Lean project scaffolding generation
 - `consolidate.rs` - Merges multiple proof projects
 - `spec.rs` - SPEC.md generation from Anchor IDL

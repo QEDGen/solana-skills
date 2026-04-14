@@ -11,6 +11,7 @@ pub struct RemoveMember {
 impl RemoveMember {
     /// Remove a member from the vault — creator only
     #[inline(always)]
+    #[qed(verified, hash = "8e2131f707b2aa40")]
     pub fn handler(&self) -> Result<(), ProgramError> {
         // Note: vault account is not in context for this operation.
         // In a full implementation, add vault: Account<Multisig> to RemoveMember

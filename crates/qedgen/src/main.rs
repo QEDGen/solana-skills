@@ -5,6 +5,7 @@ mod check;
 mod ci;
 mod codegen;
 mod consolidate;
+mod drift;
 mod explain;
 mod fingerprint;
 mod idl2spec;
@@ -313,6 +314,21 @@ enum Commands {
         /// sBPF assembly source file (adds verify step to CI)
         #[arg(long)]
         asm: Option<String>,
+    },
+
+    /// Detect code drift in #[qed(verified)] functions
+    Drift {
+        /// Path to Rust source file or directory to scan
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Exit 1 on any drift (CI gate)
+        #[arg(long)]
+        strict: bool,
+
+        /// Auto-update hashes in source files
+        #[arg(long)]
+        update: bool,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -691,6 +707,28 @@ async fn main() -> Result<()> {
 
         Commands::Ci { output, asm } => {
             ci::generate_ci(&output, asm.as_deref())?;
+        }
+
+        Commands::Drift {
+            input,
+            strict,
+            update,
+        } => {
+            if update {
+                let count = drift::update(&input)?;
+                eprintln!("Updated {} hash(es).", count);
+            } else {
+                let entries = drift::check(&input)?;
+                drift::print_report(&entries);
+                if strict {
+                    let has_drift = entries
+                        .iter()
+                        .any(|e| !matches!(e.status, drift::DriftStatus::Ok));
+                    if has_drift {
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
 
         Commands::Aristotle(cmd) => match cmd {
