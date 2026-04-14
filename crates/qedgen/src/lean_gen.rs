@@ -204,6 +204,35 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     // fields contain X.
     render_properties_multi(&mut out, spec);
 
+    // v2.0 features: aborts_if, covers, liveness, environments, overflow
+    // Per-account: aborts_if and overflow need the ops for each account
+    for acct in &spec.account_types {
+        let state_name = format!("{}State", acct.name);
+        let ops: Vec<&crate::check::ParsedOperation> = spec
+            .operations
+            .iter()
+            .filter(|op| {
+                op.on_account.as_deref() == Some(acct.name.as_str())
+                    || (op.on_account.is_none() && acct.name == spec.account_types[0].name)
+            })
+            .collect();
+        if ops.is_empty() {
+            continue;
+        }
+        render_aborts_if(&mut out, &ops, &state_name);
+        render_overflow_obligations(&mut out, spec, &ops, &acct.fields, &state_name);
+    }
+
+    // Spec-level: covers, liveness, environments use the first account's state type
+    let primary_state = if spec.account_types.is_empty() {
+        "State".to_string()
+    } else {
+        format!("{}State", spec.account_types[0].name)
+    };
+    render_covers(&mut out, spec, &primary_state);
+    render_liveness(&mut out, spec, &primary_state);
+    render_environments(&mut out, spec, &primary_state);
+
     out.push_str(&format!("end {}\n", name));
     out
 }
@@ -1852,5 +1881,87 @@ mod tests {
         let lean = render(&spec);
         // Dropset entry is 24
         assert!(lean.contains("initState2 inputAddr insnAddr mem 24"));
+    }
+
+    // ========================================================================
+    // v2.0 feature tests
+    // ========================================================================
+
+    const PERCOLATOR_SPEC: &str =
+        include_str!("../../../examples/rust/percolator/percolator.qedspec");
+
+    #[test]
+    fn lean_gen_proof_decomposition_sub_lemmas() {
+        let spec = parser::parse(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        // Per-operation sub-lemmas for threshold_bounded
+        assert!(lean.contains("theorem threshold_bounded_preserved_by_create_vault"));
+        assert!(lean.contains("theorem threshold_bounded_preserved_by_propose"));
+        assert!(lean.contains("theorem threshold_bounded_preserved_by_approve"));
+        // Sub-lemmas have sorry
+        assert!(lean.contains("threshold_bounded_preserved_by_create_vault"));
+        // Master theorem uses exact
+        assert!(lean.contains("exact threshold_bounded_preserved_by_create_vault"));
+    }
+
+    #[test]
+    fn lean_gen_aborts_if_theorems() {
+        let spec = parser::parse(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        assert!(lean.contains("theorem create_vault_aborts_if_InvalidThreshold"));
+        assert!(lean.contains("theorem create_vault_aborts_if_TooManyMembers"));
+        assert!(lean.contains("theorem approve_aborts_if_NotAMember"));
+        assert!(lean.contains("theorem execute_aborts_if_ThresholdNotMet"));
+        // All should prove the transition returns none
+        assert!(lean.contains("= none := sorry"));
+    }
+
+    #[test]
+    fn lean_gen_cover_theorems() {
+        let spec = parser::parse(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        assert!(lean.contains("theorem cover_proposal_lifecycle"));
+        assert!(lean.contains("theorem cover_cancel_flow"));
+        // Should be existential proofs
+        assert!(lean.contains("∃ (s0 : State) (signer : Pubkey)"));
+    }
+
+    #[test]
+    fn lean_gen_liveness_theorem() {
+        let spec = parser::parse(PERCOLATOR_SPEC).unwrap();
+        let lean = render(&spec);
+        assert!(lean.contains("theorem liveness_drain_completes"));
+        assert!(lean.contains("s.status = .Draining"));
+        assert!(lean.contains("s'.status = .Active"));
+        assert!(lean.contains("ops.length ≤ 2"));
+    }
+
+    #[test]
+    fn lean_gen_overflow_obligations() {
+        let spec = parser::parse(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        // approve has an add effect (approval_count += 1)
+        assert!(lean.contains("theorem approve_overflow_safe"));
+        assert!(lean.contains("valid_u"));
+    }
+
+    #[test]
+    fn lean_gen_multi_aborts_if() {
+        let spec = parser::parse(LENDING_SPEC).unwrap();
+        let lean = render(&spec);
+        // Pool ops: init_pool and deposit have aborts_if
+        assert!(lean.contains("theorem init_pool_aborts_if_InvalidAmount"));
+        assert!(lean.contains("theorem deposit_aborts_if_InvalidAmount"));
+        // Loan ops: borrow has aborts_if
+        assert!(lean.contains("theorem borrow_aborts_if_InvalidAmount"));
+    }
+
+    #[test]
+    fn lean_gen_multi_environment() {
+        let spec = parser::parse(LENDING_SPEC).unwrap();
+        let lean = render(&spec);
+        assert!(lean.contains("theorem pool_solvency_under_interest_rate_change"));
+        assert!(lean.contains("new_interest_rate"));
+        assert!(lean.contains("{ s with interest_rate := new_interest_rate }"));
     }
 }

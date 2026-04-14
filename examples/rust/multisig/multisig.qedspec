@@ -68,6 +68,8 @@ operation create_vault {
   }
 
   guard threshold > 0 and threshold <= member_count and member_count <= MAX_MEMBERS
+  aborts_if threshold == 0 or threshold > member_count with InvalidThreshold
+  aborts_if member_count > MAX_MEMBERS with TooManyMembers
 
   effect {
     threshold = threshold
@@ -108,6 +110,7 @@ operation approve {
   takes member_index : U8
 
   guard member_index < state.member_count
+  aborts_if member_index >= state.member_count with NotAMember
 
   effect {
     approval_count += 1
@@ -127,6 +130,7 @@ operation execute {
   then Active
 
   guard state.approval_count >= state.threshold
+  aborts_if state.approval_count < state.threshold with ThresholdNotMet
 
   effect {
     approval_count = 0
@@ -179,4 +183,19 @@ property threshold_bounded {
 property approvals_bounded {
   expr state.approval_count <= state.member_count
   preserved_by [create_vault, propose, approve, execute, cancel_proposal]
+}
+
+cover proposal_lifecycle {
+  trace [create_vault, propose, approve, execute]
+}
+
+cover cancel_flow {
+  trace [create_vault, propose, cancel_proposal]
+}
+
+liveness proposal_resolves {
+  from HasProposal
+  leads_to Active
+  via [execute, cancel_proposal]
+  within 1
 }

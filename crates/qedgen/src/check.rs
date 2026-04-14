@@ -2273,4 +2273,107 @@ mod tests {
             warning_rules
         );
     }
+
+    // ========================================================================
+    // v2.0 tests: coverage matrix, write_without_read, circular_lifecycle
+    // ========================================================================
+
+    #[test]
+    fn test_coverage_matrix_full_coverage() {
+        let spec_content = include_str!("../../../examples/rust/multisig/multisig.qedspec");
+        let spec = crate::parser::parse(spec_content).expect("multisig.qedspec should parse");
+        let matrix = coverage_matrix(&spec);
+        assert_eq!(matrix.coverage_pct, 100.0);
+        assert!(matrix.gaps.is_empty());
+        assert_eq!(matrix.operations.len(), 6);
+        assert_eq!(matrix.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_coverage_matrix_detects_gaps() {
+        let mut op_covered = make_op("deposit");
+        op_covered.has_effect = true;
+        op_covered.effects = vec![("balance".into(), "add".into(), "amount".into())];
+        let mut op_uncovered = make_op("withdraw");
+        op_uncovered.has_effect = true;
+        op_uncovered.effects = vec![("balance".into(), "sub".into(), "amount".into())];
+
+        let spec = ParsedSpec {
+            operations: vec![op_covered, op_uncovered],
+            state_fields: vec![("balance".into(), "U64".into())],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("state.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()], // only covers deposit
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let matrix = coverage_matrix(&spec);
+        assert_eq!(matrix.gaps, vec!["withdraw"]);
+        assert!(matrix.coverage_pct < 100.0);
+    }
+
+    #[test]
+    fn test_write_without_read_lint() {
+        let mut op = make_op("deposit");
+        op.has_effect = true;
+        op.has_guard = true;
+        op.effects = vec![
+            ("balance".into(), "add".into(), "amount".into()),
+            ("counter".into(), "add".into(), "1".into()),
+        ];
+        let spec = ParsedSpec {
+            operations: vec![op],
+            state_fields: vec![
+                ("authority".into(), "Pubkey".into()),
+                ("balance".into(), "U64".into()),
+                ("counter".into(), "U64".into()),
+            ],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("s.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()],
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        // "counter" is written but never read in any guard or property
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read"
+                    && w.subject.as_deref() == Some("counter")),
+            "expected write_without_read for 'counter', got: {:?}",
+            warnings
+                .iter()
+                .filter(|w| w.rule == "write_without_read")
+                .map(|w| &w.subject)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_circular_lifecycle_no_terminal() {
+        let mut op1 = make_op("advance");
+        op1.pre_status = Some("A".to_string());
+        op1.post_status = Some("B".to_string());
+        let mut op2 = make_op("retreat");
+        op2.pre_status = Some("B".to_string());
+        op2.post_status = Some("A".to_string());
+        let spec = ParsedSpec {
+            operations: vec![op1, op2],
+            lifecycle_states: vec!["A".to_string(), "B".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "circular_lifecycle_no_terminal"),
+            "expected circular_lifecycle_no_terminal, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
 }

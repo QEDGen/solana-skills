@@ -245,9 +245,57 @@ $QEDGEN kani --spec program.qedspec --output tests/kani.rs                  # Ka
 $QEDGEN test --spec program.qedspec --output src/tests.rs                   # Unit tests
 $QEDGEN integration-test --spec program.qedspec --output src/integration_tests.rs
 $QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
+$QEDGEN coverage --spec program.qedspec                                     # Verification matrix
+$QEDGEN lint --spec program.qedspec                                         # Spec completeness lint
 ```
 
 With `qedgen init --quasar`, all of these are generated automatically.
+
+### v2.0 spec features
+
+The `.qedspec` DSL supports these advanced verification blocks:
+
+**`aborts_if`** — declare when an operation must reject, with a named error:
+```
+operation withdraw {
+  guard state.C_tot >= amount
+  aborts_if state.C_tot < amount with InsufficientFunds
+  effect { V -= amount; C_tot -= amount }
+}
+```
+
+**`cover`** — prove a sequence of operations is reachable:
+```
+cover happy_path {
+  trace [deposit, withdraw]
+}
+```
+
+**`liveness`** — prove bounded reachability between lifecycle states:
+```
+liveness drain_completes {
+  from Draining
+  leads_to Active
+  via [complete_drain, reset]
+  within 2
+}
+```
+
+**`environment`** — prove properties hold under external state changes:
+```
+environment oracle_update {
+  mutates oracle_price : U64
+  constraint oracle_price > 0
+}
+```
+
+**Proof decomposition** — properties now generate per-operation sub-lemmas (with `sorry`) plus an auto-proven master theorem. Users prove the sub-lemmas individually.
+
+**Auto-overflow** — operations with `add` effects automatically generate overflow safety obligations in both Lean and Kani.
+
+**`qedgen coverage`** — prints a verification matrix (operations × properties) showing coverage gaps.
+
+See `references/qedspec-dsl.md` for full syntax reference.
 
 ### Brownfield projects — leveraging existing tests
 

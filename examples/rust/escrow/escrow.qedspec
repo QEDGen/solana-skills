@@ -55,6 +55,7 @@ operation initialize {
   }
 
   guard deposit_amount > 0 and receive_amount > 0
+  aborts_if deposit_amount == 0 or receive_amount == 0 with InvalidAmount
 
   effect {
     initializer_amount = deposit_amount
@@ -116,3 +117,18 @@ operation cancel {
 }
 
 invariant conservation "total tokens preserved across initialize, exchange, cancel"
+
+cover happy_path {
+  trace [initialize, exchange]
+}
+
+cover cancel_path {
+  trace [initialize, cancel]
+}
+
+liveness escrow_settles {
+  from Open
+  leads_to Closed
+  via [exchange, cancel]
+  within 1
+}

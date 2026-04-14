@@ -1890,4 +1890,130 @@ mod tests {
             _ => panic!("expected HappyPath"),
         }
     }
+
+    // ========================================================================
+    // v2.0 feature parsing tests
+    // ========================================================================
+
+    const PERCOLATOR_SPEC: &str =
+        include_str!("../../../examples/rust/percolator/percolator.qedspec");
+
+    #[test]
+    fn parse_aborts_if_clause() {
+        let spec = parse(PERCOLATOR_SPEC).unwrap();
+        let withdraw = spec
+            .operations
+            .iter()
+            .find(|op| op.name == "withdraw")
+            .unwrap();
+        assert_eq!(withdraw.aborts_if.len(), 1);
+        assert_eq!(withdraw.aborts_if[0].error_name, "InsufficientFunds");
+        assert!(withdraw.aborts_if[0].rust_expr.contains("C_tot"));
+    }
+
+    #[test]
+    fn parse_aborts_if_multiple() {
+        let spec = parse(MULTISIG_SPEC).unwrap();
+        let create = spec
+            .operations
+            .iter()
+            .find(|op| op.name == "create_vault")
+            .unwrap();
+        assert_eq!(create.aborts_if.len(), 2);
+        assert_eq!(create.aborts_if[0].error_name, "InvalidThreshold");
+        assert_eq!(create.aborts_if[1].error_name, "TooManyMembers");
+    }
+
+    #[test]
+    fn parse_cover_blocks() {
+        let spec = parse(PERCOLATOR_SPEC).unwrap();
+        assert!(!spec.covers.is_empty());
+        let happy = spec.covers.iter().find(|c| c.name == "happy_path").unwrap();
+        assert_eq!(happy.traces[0], vec!["deposit", "withdraw"]);
+    }
+
+    #[test]
+    fn parse_cover_multi_trace() {
+        let spec = parse(MULTISIG_SPEC).unwrap();
+        assert_eq!(spec.covers.len(), 2);
+        let lifecycle = spec
+            .covers
+            .iter()
+            .find(|c| c.name == "proposal_lifecycle")
+            .unwrap();
+        assert_eq!(
+            lifecycle.traces[0],
+            vec!["create_vault", "propose", "approve", "execute"]
+        );
+        let cancel = spec
+            .covers
+            .iter()
+            .find(|c| c.name == "cancel_flow")
+            .unwrap();
+        assert_eq!(
+            cancel.traces[0],
+            vec!["create_vault", "propose", "cancel_proposal"]
+        );
+    }
+
+    #[test]
+    fn parse_liveness_block() {
+        let spec = parse(PERCOLATOR_SPEC).unwrap();
+        assert_eq!(spec.liveness_props.len(), 1);
+        let lv = &spec.liveness_props[0];
+        assert_eq!(lv.name, "drain_completes");
+        assert_eq!(lv.from_state, "Draining");
+        assert_eq!(lv.leads_to_state, "Active");
+        assert_eq!(lv.via_ops, vec!["complete_drain", "reset"]);
+        assert_eq!(lv.within_steps, Some(2));
+    }
+
+    #[test]
+    fn parse_liveness_multi_account() {
+        let spec = parse(LENDING_SPEC).unwrap();
+        assert_eq!(spec.liveness_props.len(), 1);
+        let lv = &spec.liveness_props[0];
+        assert_eq!(lv.name, "loan_settles");
+        assert_eq!(lv.from_state, "Active");
+        assert_eq!(lv.leads_to_state, "Empty");
+        assert_eq!(lv.via_ops, vec!["repay"]);
+        assert_eq!(lv.within_steps, Some(1));
+    }
+
+    #[test]
+    fn parse_environment_block() {
+        let spec = parse(LENDING_SPEC).unwrap();
+        assert_eq!(spec.environments.len(), 1);
+        let env = &spec.environments[0];
+        assert_eq!(env.name, "interest_rate_change");
+        assert_eq!(env.mutates, vec![("interest_rate".to_string(), "U64".to_string())]);
+        assert!(!env.constraints.is_empty());
+    }
+
+    #[test]
+    fn parse_escrow_cover_and_liveness() {
+        let escrow_spec = include_str!("../../../examples/rust/escrow/escrow.qedspec");
+        let spec = parse(escrow_spec).unwrap();
+
+        // Cover blocks
+        assert_eq!(spec.covers.len(), 2);
+        let happy = spec.covers.iter().find(|c| c.name == "happy_path").unwrap();
+        assert_eq!(happy.traces[0], vec!["initialize", "exchange"]);
+        let cancel = spec.covers.iter().find(|c| c.name == "cancel_path").unwrap();
+        assert_eq!(cancel.traces[0], vec!["initialize", "cancel"]);
+
+        // Liveness
+        assert_eq!(spec.liveness_props.len(), 1);
+        assert_eq!(spec.liveness_props[0].from_state, "Open");
+        assert_eq!(spec.liveness_props[0].leads_to_state, "Closed");
+
+        // aborts_if on initialize
+        let init = spec
+            .operations
+            .iter()
+            .find(|op| op.name == "initialize")
+            .unwrap();
+        assert_eq!(init.aborts_if.len(), 1);
+        assert_eq!(init.aborts_if[0].error_name, "InvalidAmount");
+    }
 }

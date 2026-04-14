@@ -95,6 +95,157 @@ qedspec Escrow where
 | `errors:` | Error enum for codegen | `errors: Unauthorized, InvalidAmount` |
 | `program_id:` | On-chain program ID | `program_id: "111..."` |
 | `doc:` | Documentation string | `doc: "Cancel the escrow"` |
+| `aborts_if` | Reject condition with named error (v2.0) | `aborts_if amount == 0 with InvalidAmount` |
+| `cover` | Reachability trace (v2.0) | `cover happy_path { trace [...] }` |
+| `liveness` | Bounded leads-to (v2.0) | `liveness drain { from A leads_to B ... }` |
+| `environment` | External state mutation (v2.0) | `environment oracle { mutates price : U64 }` |
+
+## v2.0 blocks
+
+### `aborts_if` clause
+
+Declares a condition under which an operation must reject. Generates a negative theorem (Lean: `= none`, Kani: `assert!(!transition(...))`).
+
+```
+operation withdraw {
+  guard state.C_tot >= amount
+  aborts_if state.C_tot < amount with InsufficientFunds
+
+  effect { V -= amount; C_tot -= amount }
+}
+```
+
+Multiple `aborts_if` clauses per operation are allowed (e.g., different error codes for different failure modes).
+
+**Lean output:**
+```lean
+theorem withdraw_aborts_if_InsufficientFunds (s : State) (signer : Pubkey) (amount : Nat)
+    (h : s.C_tot < amount) : withdrawTransition s signer amount = none := sorry
+```
+
+**Kani output:**
+```rust
+#[kani::proof]
+fn verify_withdraw_aborts_if_InsufficientFunds() {
+    let mut s = State { ... kani::any() ... };
+    let amount: u128 = kani::any();
+    kani::assume(s.C_tot < amount);
+    assert!(!withdraw(&mut s, amount));
+}
+```
+
+### `cover` block (reachability)
+
+Declares that a sequence of operations is reachable from some initial state. Generates existential proofs (Lean) and `kani::cover!` harnesses (Kani).
+
+```
+cover happy_path {
+  trace [deposit, withdraw]
+}
+
+cover cancel_always_available {
+  reachable cancel_proposal when state.approval_count > 0
+}
+```
+
+**Lean output:**
+```lean
+theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
+    ∃ (v0 : Nat), ∃ (s1 : State), depositTransition s0 signer v0 = some s1 ∧
+      withdrawTransition s1 signer ≠ none := sorry
+```
+
+### `liveness` block (leads-to)
+
+Declares that from a given lifecycle state, another state is reachable within a bounded number of steps via specified operations.
+
+```
+liveness drain_completes {
+  from Draining
+  leads_to Active
+  via [complete_drain, reset]
+  within 2
+}
+```
+
+**Lean output:**
+```lean
+theorem liveness_drain_completes (s : State) (signer : Pubkey)
+    (h : s.status = .Draining) :
+    ∃ ops, ops.length ≤ 2 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Active := sorry
+```
+
+**Kani output:** Multi-step harness with non-deterministic operation selection in a loop.
+
+### `environment` block (external state)
+
+Declares external state changes that can happen outside of operations (e.g., oracle price updates). Properties referencing mutated fields must still hold.
+
+```
+environment interest_rate_change {
+  mutates interest_rate : U64
+  constraint interest_rate > 0
+}
+```
+
+**Lean output:**
+```lean
+theorem pool_solvency_under_interest_rate_change (s : PoolState) (new_interest_rate : Nat)
+    (h_c0 : new_interest_rate > 0)
+    (h_inv : pool_solvency s) :
+    pool_solvency { s with interest_rate := new_interest_rate } := sorry
+```
+
+### `qedgen coverage` command
+
+Prints a verification matrix showing which operations are covered by which properties.
+
+```
+$ qedgen coverage --spec multisig.qedspec
+
+operation         threshold_bounded approvals_bounded
+-----------------------------------------------------
+create_vault              Y                 Y
+propose                   Y                 Y
+approve                   Y                 Y
+execute                   Y                 Y
+cancel_proposal           Y                 Y
+remove_member             Y                 -
+
+Coverage: 100% (6/6 operations covered by at least one property)
+```
+
+Use `--json` for machine-readable output.
+
+### Proof decomposition (v2.0)
+
+Properties with `preserved_by` now generate per-operation sub-lemmas instead of a monolithic theorem:
+
+```lean
+-- Per-op sub-lemma (user proves this)
+theorem conservation_preserved_by_deposit (s s' : State) ...
+    (h_inv : conservation s) (h : depositTransition s signer amount = some s') :
+    conservation s' := sorry
+
+-- Master theorem (auto-proven by case split)
+theorem conservation_inductive ... := by
+  cases op with
+  | deposit amount => exact conservation_preserved_by_deposit s s' signer amount h_inv h
+  | withdraw amount => exact conservation_preserved_by_withdraw s s' signer amount h_inv h
+```
+
+### Auto-overflow obligations (v2.0)
+
+Operations with `add` effects automatically generate overflow safety obligations:
+
+```lean
+theorem deposit_overflow_safe (s s' : State) ...
+    (h_valid : valid_u128 s.V ∧ valid_u128 s.C_tot ∧ valid_u128 s.I)
+    (h : depositTransition s signer amount = some s') :
+    valid_u128 s'.V ∧ valid_u128 s'.C_tot ∧ valid_u128 s'.I := sorry
+```
+
+Kani overflow harnesses use symbolic inputs and rely on Kani's built-in overflow detection.
 
 ## qedguards DSL (for sBPF programs)
 

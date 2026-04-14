@@ -71,6 +71,7 @@ operation init_pool {
   takes rate : U64
 
   guard rate > 0
+  aborts_if rate == 0 with InvalidAmount
 
   effect {
     interest_rate = rate
@@ -95,6 +96,7 @@ operation deposit {
   takes amount : U64
 
   guard amount > 0
+  aborts_if amount == 0 with InvalidAmount
 
   effect {
     total_deposits += amount
@@ -124,6 +126,7 @@ operation borrow {
   }
 
   guard amount > 0 and collateral > 0
+  aborts_if amount == 0 or collateral == 0 with InvalidAmount
 
   effect {
     amount = amount
@@ -195,3 +198,23 @@ property pool_solvency {
 }
 
 invariant collateral_backing "all active loans have collateral > 0"
+
+cover borrow_repay_cycle {
+  trace [init_pool, deposit, borrow, repay]
+}
+
+cover liquidation_path {
+  trace [init_pool, deposit, borrow, liquidate]
+}
+
+liveness loan_settles {
+  from Active
+  leads_to Empty
+  via [repay]
+  within 1
+}
+
+environment interest_rate_change {
+  mutates interest_rate : U64
+  constraint interest_rate > 0
+}
