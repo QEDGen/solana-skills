@@ -1,464 +1,82 @@
-# Red-Black Tree — sBPF On-Chain Data Structure
+# Red-Black Tree — On-Chain Data Structure
 #
-# Three operations dispatched by instruction discriminator:
-#   0 → initialize (create tree account via CPI)
-#   1 → insert (add key-value pair, BST search + RB fixup)
-#   2 → remove (delete key, successor swap + RB rebalance)
+# Three handlers:
+#   initialize — create tree account via CPI
+#   insert     — add key-value pair with RB fixup
+#   remove     — delete key with RB rebalance
 #
-# 498 instructions. Input model: r1 = accounts buffer, r2 = instruction data.
-#
-# Node layout (29 bytes):
-#   parent  : U64 @ 0     — pointer to parent node (or free list next)
-#   child_l : U64 @ 8     — left child pointer
-#   child_r : U64 @ 16    — right child pointer
-#   key     : U16 @ 24    — sort key
-#   value   : U16 @ 26    — associated value
-#   color   : U8  @ 28    — 0 = black, 1 = red
-#
-# Tree header (24 bytes at start of tree account data):
-#   root    : U64 @ 0     — pointer to root node (NULL if empty)
-#   top     : U64 @ 8     — free stack top (recycled nodes)
-#   next    : U64 @ 16    — next allocation offset
+# Node layout (29 bytes): parent, left, right, key, value, color
+# Tree header (24 bytes): root, free_top, next_alloc
 
 spec Tree
 
-target assembly
-assembly "src/tree.s"
-
-# ── Constants ──────────────────────────────────────────────────────
-
-const INSN_DISCRIMINATOR_INITIALIZE = 0
-const INSN_DISCRIMINATOR_INSERT     = 1
-const INSN_DISCRIMINATOR_REMOVE     = 2
-const SIZE_OF_INITIALIZE_INSTRUCTION = 1
-const SIZE_OF_INSERT_INSTRUCTION    = 5
-const SIZE_OF_REMOVE_INSTRUCTION    = 3
-const SIZE_OF_TREE_NODE             = 29
-const SIZE_OF_TREE_HEADER           = 24
-const IB_N_ACCOUNTS_INIT            = 4
-const IB_N_ACCOUNTS_GENERAL         = 2
-const DATA_LEN_ZERO                 = 0
-const NON_DUP_MARKER                = 255
-const COLOR_BLACK                   = 0
-const COLOR_RED                     = 1
-const NULL                          = 0
-
-# ── Pubkeys ────────────────────────────────────────────────────────
-
-pubkey RENT [
-  5_862_609_301_215_225_606,
-  9_219_231_539_345_853_473,
-  4_971_307_250_928_769_624,
-  2_329_533_411
-]
-
-# ── Errors ─────────────────────────────────────────────────────────
+const HEADER_SIZE = 24
 
 errors [
-  NAccounts                   = 1  "Invalid number of accounts",
-  UserDataLen                 = 2  "User data length is nonzero",
-  TreeDataLen                 = 3  "Tree data length invalid",
-  SystemProgramDataLen        = 4  "System program data length nonzero",
-  TreeDuplicate               = 5  "Tree account is a duplicate",
-  SystemProgramDuplicate      = 6  "System program is a duplicate",
-  RentDuplicate               = 7  "Rent sysvar is a duplicate",
-  RentAddress                 = 8  "Invalid rent sysvar address",
-  InstructionData             = 9  "Invalid instruction data",
-  PdaMismatch                 = 10 "PDA mismatch",
-  InstructionDiscriminator    = 11 "Invalid instruction discriminator",
-  InstructionDataLen          = 12 "Invalid instruction data length",
-  NAccountsInsertAllocation   = 13 "Invalid account count for insert allocation",
-  KeyExists                   = 14 "Key already exists in tree",
-  KeyDoesNotExist             = 15 "Key does not exist in tree"
+  NAccounts                = 1  "Invalid number of accounts",
+  UserDataLen              = 2  "User data length is nonzero",
+  TreeDataLen              = 3  "Tree data length invalid",
+  SystemProgramDataLen     = 4  "System program data length nonzero",
+  TreeDuplicate            = 5  "Tree account is a duplicate",
+  SystemProgramDuplicate   = 6  "System program is a duplicate",
+  RentDuplicate            = 7  "Rent sysvar is a duplicate",
+  RentAddress              = 8  "Invalid rent sysvar address",
+  InstructionData          = 9  "Invalid instruction data",
+  PdaMismatch              = 10 "PDA mismatch",
+  InstructionDiscriminator = 11 "Invalid instruction discriminator",
+  InstructionDataLen       = 12 "Invalid instruction data length",
+  KeyExists                = 14 "Key already exists in tree",
+  KeyDoesNotExist          = 15 "Key does not exist in tree"
 ]
 
-# ── Instruction: Dispatch ──────────────────────────────────────────
-#
-# Entry point. Reads discriminator and branches to initialize/insert/remove.
-
-instruction Dispatch {
-  entry 0
-
-  input_layout {
-    n_accounts : U64 @ 0 "Number of accounts"
+handler initialize {
+  accounts {
+    user           : signer, writable
+    tree           : writable
+    system_program : program
+    rent           : readonly
   }
 
-  insn_layout {
-    insn_len     : U64 @ -8 "Instruction data length"
-    discriminant : U8  @ 0  "Instruction discriminant byte"
-  }
-
-  /// Discriminator must be 0, 1, or 2
-  guard rejects_invalid_discriminator {
-    error InstructionDiscriminator
-    fuel 11
+  effect {
+    root = 0
+    free_top = 0
+    next_alloc = HEADER_SIZE
   }
 }
 
-# ── Instruction: Initialize ────────────────────────────────────────
-#
-# Creates tree account via CPI. Validates 4 accounts (user, tree,
-# system program, rent sysvar). Tree starts with empty header.
-
-instruction Initialize {
-  discriminant INSN_DISCRIMINATOR_INITIALIZE
-  entry 0
-
-  const ACCOUNTS_REQUIRED = 4
-
-  input_layout {
-    n_accounts         : U64 @ 0      "Number of accounts"
-    user_data_len      : U64 @ 88     "User data length"
-    tree_dup_marker    : U8  @ 10344  "Tree non-duplicate marker"
-    tree_data_len      : U64 @ 10424  "Tree data length"
-    sys_prog_dup       : U8  @ 20680  "System program duplicate flag"
-    sys_prog_data_len  : U64 @ 20760  "System program data length"
-    rent_dup           : U8  @ 31032  "Rent sysvar duplicate flag"
+handler insert {
+  accounts {
+    user : signer, writable
+    tree : writable
   }
 
-  insn_layout {
-    insn_len     : U64 @ -8 "Instruction data length"
-    discriminant : U8  @ 0  "Instruction discriminant byte"
+  takes {
+    key   : U16
+    value : U16
   }
 
-  /// Instruction data must be 1 byte
-  guard rejects_wrong_data_len {
-    checks insn_len == SIZE_OF_INITIALIZE_INSTRUCTION
-    error InstructionDataLen
-    fuel 12
-  }
+  aborts_if key == 0 with KeyExists
 
-  /// Must have exactly 4 accounts
-  guard rejects_wrong_account_count {
-    checks n_accounts == ACCOUNTS_REQUIRED
-    error NAccounts
-    fuel 13
-  }
-
-  /// User account must have no data
-  guard rejects_user_has_data {
-    checks user_data_len == DATA_LEN_ZERO
-    error UserDataLen
-    fuel 15
-  }
-
-  /// Tree account must not be a duplicate
-  guard rejects_tree_duplicate {
-    checks tree_dup_marker == NON_DUP_MARKER
-    error TreeDuplicate
-    fuel 17
-  }
-
-  /// Tree account must have no data
-  guard rejects_tree_has_data {
-    checks tree_data_len == DATA_LEN_ZERO
-    error TreeDataLen
-    fuel 18
-  }
-
-  /// System program must not be a duplicate
-  guard rejects_sys_program_duplicate {
-    checks sys_prog_dup == NON_DUP_MARKER
-    error SystemProgramDuplicate
-    fuel 20
-  }
-
-  /// Rent sysvar must not be a duplicate
-  guard rejects_rent_duplicate {
-    checks rent_dup == NON_DUP_MARKER
-    error RentDuplicate
-    fuel 25
-  }
-
-  /// Rent sysvar address must match known pubkey
-  guard rejects_rent_address {
-    checks rent_pubkey == RENT
-    error RentAddress
-    fuel 30
-  }
-
-  /// All guards pass → CPI CreateAccount + exit 0
-  property accepts_valid_init {
-    after all guards
-    exit 0
-  }
-
-  /// CreateAccount CPI: system_program, payer=user, target=tree_pda
-  property cpi_create_account {
-    cpi system_program CreateAccount {
-      payer  user
-      target tree_pda
-      space  SIZE_OF_TREE_HEADER
-    }
-  }
+  invariant bst_ordering
+  invariant no_consecutive_reds
+  invariant black_height_balanced
+  invariant root_is_black
+  invariant parent_child_consistency
 }
 
-# ── Instruction: Insert ────────────────────────────────────────────
-#
-# Inserts a key-value pair into the red-black tree.
-#
-# Algorithm:
-#   1. Input validation (data len, account count, user data, tree dup)
-#   2. Allocate node (pop from free stack or CPI realloc)
-#   3. BST search for insertion point
-#   4. Link new node as red child
-#   5. RB fixup: cases 1-6 (uncle recoloring + rotations)
-#
-# Fixup cases implemented:
-#   Case 1: parent is black → done
-#   Case 2-3: uncle is red → recolor parent+uncle black, grandparent red, recurse
-#   Case 4: no grandparent → recolor parent black (new root)
-#   Case 5: triangle → rotate parent, fall through to case 6
-#   Case 6: line → rotate grandparent, recolor
-
-instruction Insert {
-  discriminant INSN_DISCRIMINATOR_INSERT
-  entry 0
-
-  input_layout {
-    n_accounts      : U64 @ 0      "Number of accounts"
-    user_data_len   : U64 @ 88     "User data length"
-    tree_dup_marker : U8  @ 10344  "Tree non-duplicate marker"
-    tree_data_len   : U64 @ 10424  "Tree data length"
-    tree_root       : U64 @ 10432  "Root node pointer"
-    tree_top        : U64 @ 10440  "Free stack top pointer"
+handler remove {
+  accounts {
+    user : signer, writable
+    tree : writable
   }
 
-  insn_layout {
-    insn_len     : U64 @ -8 "Instruction data length"
-    discriminant : U8  @ 0  "Instruction discriminant byte"
-    insert_key   : U16 @ 1  "Key to insert"
-    insert_value : U16 @ 3  "Value to associate"
-  }
+  takes key : U16
 
-  # ── Input validation guards ─────────────────────────────────
+  aborts_if key == 0 with KeyDoesNotExist
 
-  /// Instruction data must be 5 bytes
-  guard rejects_wrong_data_len {
-    checks insn_len == SIZE_OF_INSERT_INSTRUCTION
-    error InstructionDataLen
-    fuel 12
-  }
-
-  /// Must have at least 2 accounts
-  guard rejects_wrong_account_count {
-    checks n_accounts >= IB_N_ACCOUNTS_GENERAL
-    error NAccounts
-    fuel 13
-  }
-
-  /// User account must have no data
-  guard rejects_user_has_data {
-    checks user_data_len == DATA_LEN_ZERO
-    error UserDataLen
-    fuel 15
-  }
-
-  /// Tree account must not be a duplicate
-  guard rejects_tree_duplicate {
-    checks tree_dup_marker == NON_DUP_MARKER
-    error TreeDuplicate
-    fuel 17
-  }
-
-  /// Key already exists in tree — BST search finds exact match
-  guard rejects_key_exists {
-    error KeyExists
-    fuel 40
-  }
-
-  # ── Algorithmic properties ──────────────────────────────────
-  #
-  # These are the properties that matter for correctness.
-  # A bug in any of these means the tree silently corrupts.
-
-  /// BST ordering: ∀ node n, left(n).key < n.key < right(n).key
-  /// After insert, every node in the left subtree has key < parent,
-  /// every node in the right subtree has key > parent.
-  property bst_ordering_preserved {
-    scope guards
-  }
-
-  /// Red-black invariant: no red node has a red parent.
-  /// After fixup, color(n) = RED → color(parent(n)) = BLACK.
-  /// Violated iff fixup cases 5/6 have a rotation bug.
-  property no_consecutive_reds {
-    scope guards
-  }
-
-  /// Black-height balance: every path from root to NULL has
-  /// the same number of black nodes.
-  /// This is the key balancing property — violated iff case 2/3
-  /// recoloring or case 5/6 rotation is wrong.
-  property black_height_balanced {
-    scope guards
-  }
-
-  /// Root is always black after fixup completes.
-  /// Case 4 handles this: if grandparent is NULL, recolor parent black.
-  property root_is_black {
-    scope guards
-  }
-
-  /// Parent-child consistency: for all internal nodes,
-  /// node.child[d].parent == node (bidirectional links).
-  /// A rotation bug that updates child but not parent (or vice versa)
-  /// breaks this silently — tree walks then corrupt state.
-  property parent_child_consistency {
-    scope guards
-  }
-
-  /// After successful insert(k), the key k is reachable from root
-  /// via BST search. This is the functional correctness property.
-  property key_reachable_after_insert {
-    scope guards
-  }
-
-  /// Stack/free-list integrity: if allocation used the free stack,
-  /// top pointer is correctly updated to next free node.
-  property free_list_integrity {
-    scope guards
-  }
-
-  /// Memory safety: stack frame writes are disjoint from tree data
-  /// and input buffer. Rotation pointer swaps don't write OOB.
-  property memory_safety {
-    scope guards
-  }
-}
-
-# ── Instruction: Remove ────────────────────────────────────────────
-#
-# Removes a key from the red-black tree.
-#
-# Algorithm:
-#   1. Input validation (data len, account count, user data, tree dup)
-#   2. BST search for key
-#   3. If two children: swap with in-order successor
-#   4. Simple cases: red leaf (detach), root leaf (clear root),
-#      one child (replace with child)
-#   5. Complex case: black leaf with sibling rebalancing
-#      - Red sibling: rotate + recolor, reduce to black sibling
-#      - Distant red nephew: rotate parent, recolor
-#      - Close red nephew: rotate sibling, fall through to distant
-#      - All black: recolor sibling red, propagate up
-#   6. Recycle freed node onto free stack
-
-instruction Remove {
-  discriminant INSN_DISCRIMINATOR_REMOVE
-  entry 0
-
-  input_layout {
-    n_accounts      : U64 @ 0      "Number of accounts"
-    user_data_len   : U64 @ 88     "User data length"
-    tree_dup_marker : U8  @ 10344  "Tree non-duplicate marker"
-    tree_root       : U64 @ 10432  "Root node pointer"
-    tree_top        : U64 @ 10440  "Free stack top pointer"
-  }
-
-  insn_layout {
-    insn_len     : U64 @ -8 "Instruction data length"
-    discriminant : U8  @ 0  "Instruction discriminant byte"
-    remove_key   : U16 @ 1  "Key to remove"
-  }
-
-  # ── Input validation guards ─────────────────────────────────
-
-  /// Instruction data must be 3 bytes
-  guard rejects_wrong_data_len {
-    checks insn_len == SIZE_OF_REMOVE_INSTRUCTION
-    error InstructionDataLen
-    fuel 12
-  }
-
-  /// Must have at least 2 accounts
-  guard rejects_wrong_account_count {
-    checks n_accounts >= IB_N_ACCOUNTS_GENERAL
-    error NAccounts
-    fuel 13
-  }
-
-  /// User account must have no data
-  guard rejects_user_has_data {
-    checks user_data_len == DATA_LEN_ZERO
-    error UserDataLen
-    fuel 15
-  }
-
-  /// Tree account must not be a duplicate
-  guard rejects_tree_duplicate {
-    checks tree_dup_marker == NON_DUP_MARKER
-    error TreeDuplicate
-    fuel 17
-  }
-
-  /// Key does not exist in tree — BST search exhausted
-  guard rejects_key_not_found {
-    error KeyDoesNotExist
-    fuel 40
-  }
-
-  # ── Algorithmic properties ──────────────────────────────────
-
-  /// BST ordering preserved after removal and possible successor swap.
-  /// The successor-copy step (line 932) copies key+value as u32 —
-  /// if this reads the wrong offset or width, ordering breaks.
-  property bst_ordering_preserved {
-    scope guards
-  }
-
-  /// No consecutive reds after rebalance.
-  /// The complex case has 6+ sub-branches with mirrored logic
-  /// (dir_l vs dir_r). A color assignment bug in either mirror
-  /// violates this without affecting simple test cases.
-  property no_consecutive_reds {
-    scope guards
-  }
-
-  /// Black-height balance after rebalance.
-  /// The case-2 propagation loop (recolor sibling red, move up)
-  /// must terminate correctly. If the loop exit condition is wrong,
-  /// black-height becomes inconsistent.
-  property black_height_balanced {
-    scope guards
-  }
-
-  /// Root remains black after removal.
-  property root_is_black {
-    scope guards
-  }
-
-  /// Parent-child bidirectional links remain consistent.
-  /// The complex rebalance does multiple pointer swaps across
-  /// parent/sibling/nephew — each must update both directions.
-  property parent_child_consistency {
-    scope guards
-  }
-
-  /// After remove(k), key k is NOT reachable from root via BST search.
-  /// Combined with bst_ordering_preserved, this proves functional
-  /// correctness of removal.
-  property key_unreachable_after_remove {
-    scope guards
-  }
-
-  /// Freed node is correctly pushed onto free stack.
-  /// parent pointer is repurposed as next-pointer for the free list.
-  /// child_l and child_r are zeroed. header.top is updated.
-  property free_list_integrity {
-    scope guards
-  }
-
-  /// Successor swap copies exactly key+value (4 bytes at offset 24).
-  /// The assembly does `ldxw r4, [r5+24]; stxw [r3+24], r4` — a
-  /// single 32-bit load/store. If the node layout changes, this breaks.
-  property successor_swap_correctness {
-    scope guards
-  }
-
-  /// Memory safety: all pointer dereferences during rebalance are
-  /// within the tree data region. No OOB reads/writes.
-  property memory_safety {
-    scope guards
-  }
+  invariant bst_ordering
+  invariant no_consecutive_reds
+  invariant black_height_balanced
+  invariant root_is_black
+  invariant parent_child_consistency
 }

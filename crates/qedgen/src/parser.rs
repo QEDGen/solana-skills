@@ -10,9 +10,10 @@ use std::path::Path;
 
 use crate::check::{
     FlowKind, ParsedAbort, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover,
-    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedInstruction,
-    ParsedLayoutField, ParsedLiveness, ParsedOperation, ParsedPda, ParsedProperty, ParsedPubkey,
-    ParsedSbpfProperty, ParsedSpec, SbpfPropertyKind,
+    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
+    ParsedHandlerAccount, ParsedInstruction, ParsedLayoutField, ParsedLiveness, ParsedOperation,
+    ParsedPda, ParsedProperty, ParsedPubkey, ParsedSbpfProperty, ParsedSpec, ParsedTransfer,
+    SbpfPropertyKind,
 };
 
 #[derive(Parser)]
@@ -53,6 +54,7 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     let mut valued_errors: Vec<ParsedErrorCode> = Vec::new();
     let mut instructions: Vec<ParsedInstruction> = Vec::new();
     let mut operations: Vec<ParsedOperation> = Vec::new();
+    let mut handlers: Vec<ParsedHandler> = Vec::new();
     let mut properties: Vec<ParsedProperty> = Vec::new();
     let mut invariants: Vec<(String, String)> = Vec::new();
     let mut contexts: Vec<ParsedContext> = Vec::new();
@@ -114,6 +116,9 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                         let (codes, valued) = parse_errors_decl(inner);
                         error_codes = codes;
                         valued_errors = valued;
+                    }
+                    Rule::handler_block => {
+                        handlers.push(parse_handler_block(inner, &constants));
                     }
                     Rule::instruction_block => {
                         instructions.push(parse_instruction_block(inner, &constants));
@@ -201,11 +206,44 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
         }
     }
 
-    // Expand `preserved_by all` → list of all operation names
-    let all_op_names: Vec<String> = operations.iter().map(|o| o.name.clone()).collect();
+    // Expand `preserved_by all` to include both operations and handlers
+    let all_handler_names: Vec<String> = handlers
+        .iter()
+        .map(|h| h.name.clone())
+        .chain(operations.iter().map(|o| o.name.clone()))
+        .collect();
     for prop in &mut properties {
         if prop.preserved_by.len() == 1 && prop.preserved_by[0] == "all" {
-            prop.preserved_by = all_op_names.clone();
+            prop.preserved_by = all_handler_names.clone();
+        }
+    }
+
+    // Populate unified handlers from legacy operation blocks (backward compat)
+    for op in &operations {
+        let ctx = contexts.iter().find(|c| c.operation == op.name);
+        handlers.push(operation_to_handler(op, ctx));
+    }
+
+    // Populate unified handlers from legacy instruction blocks (backward compat)
+    for instr in &instructions {
+        handlers.push(instruction_to_handler(instr));
+    }
+
+    // Reverse bridge: populate legacy operations + contexts from handler blocks.
+    // This lets consumers that still read `spec.operations` work with new-syntax specs.
+    // Only convert handlers that didn't come from operation/instruction blocks.
+    let existing_op_names: std::collections::HashSet<String> =
+        operations.iter().map(|o| o.name.clone()).collect();
+    let existing_instr_names: std::collections::HashSet<String> =
+        instructions.iter().map(|i| i.name.clone()).collect();
+    for handler in &handlers {
+        if !existing_op_names.contains(&handler.name)
+            && !existing_instr_names.contains(&handler.name)
+        {
+            operations.push(handler_to_operation(handler));
+            if let Some(ctx) = handler_to_context(handler) {
+                contexts.push(ctx);
+            }
         }
     }
 
@@ -218,6 +256,7 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     let has_u64_fields = !u64_field_names.is_empty();
 
     Ok(ParsedSpec {
+        handlers,
         operations,
         invariants,
         properties,
@@ -819,6 +858,425 @@ fn parse_context_entries(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedAccount
         }
     }
     accounts
+}
+
+// ============================================================================
+// Unified handler parsing (v3)
+// ============================================================================
+
+/// Parse a `handler Name { ... }` block into a ParsedHandler.
+fn parse_handler_block(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+) -> ParsedHandler {
+    let mut name = String::new();
+    let mut doc_lines: Vec<String> = Vec::new();
+    let mut who = None;
+    let mut on_account = None;
+    let mut pre_status = None;
+    let mut post_status = None;
+    let mut takes_params: Vec<(String, String)> = Vec::new();
+    let mut guard_str_lean = None;
+    let mut guard_str_rust = None;
+    let mut aborts_if: Vec<ParsedAbort> = Vec::new();
+    let mut effects: Vec<(String, String, String)> = Vec::new();
+    let mut accounts: Vec<ParsedHandlerAccount> = Vec::new();
+    let mut transfers: Vec<ParsedTransfer> = Vec::new();
+    let mut emits: Vec<String> = Vec::new();
+    let mut invariants: Vec<String> = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::doc_comment => {
+                let raw = inner.as_str();
+                let text = raw.strip_prefix("///").unwrap_or(raw);
+                let text = text.strip_prefix(' ').unwrap_or(text);
+                doc_lines.push(text.to_string());
+            }
+            Rule::ident => {
+                name = inner.as_str().to_string();
+            }
+            Rule::handler_clause => {
+                let clause = inner.into_inner().next().unwrap();
+                match clause.as_rule() {
+                    Rule::who_clause => who = Some(extract_ident(clause)),
+                    Rule::on_clause => on_account = Some(extract_ident(clause)),
+                    Rule::when_clause => pre_status = Some(extract_ident(clause)),
+                    Rule::then_clause => post_status = Some(extract_ident(clause)),
+                    Rule::takes_block => takes_params = parse_field_decls(clause),
+                    Rule::guard_clause => {
+                        let expr = clause.into_inner().next().unwrap();
+                        guard_str_lean = Some(guard_expr_to_lean(expr.clone(), consts));
+                        guard_str_rust = Some(guard_expr_to_rust(expr, consts));
+                    }
+                    Rule::aborts_if_clause => {
+                        let mut parts = clause.into_inner();
+                        let expr = parts.next().unwrap();
+                        let lean_expr = guard_expr_to_lean(expr.clone(), consts);
+                        let rust_expr = guard_expr_to_rust(expr, consts);
+                        let error_name = parts.next().unwrap().as_str().to_string();
+                        aborts_if.push(ParsedAbort {
+                            lean_expr,
+                            rust_expr,
+                            error_name,
+                        });
+                    }
+                    Rule::effect_block => effects = parse_effect_stmts(clause),
+                    Rule::accounts_block => accounts = parse_accounts_block(clause),
+                    Rule::transfers_block => transfers = parse_transfers_block(clause),
+                    Rule::emits_clause => emits.push(extract_ident(clause)),
+                    Rule::handler_invariant_clause => {
+                        invariants.push(extract_ident(clause));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Self-transition: `when X` without `then` implies `then X`
+    if pre_status.is_some() && post_status.is_none() {
+        post_status = pre_status.clone();
+    }
+
+    let doc = if doc_lines.is_empty() {
+        None
+    } else {
+        Some(doc_lines.join(" "))
+    };
+
+    ParsedHandler {
+        name,
+        doc,
+        who,
+        on_account,
+        pre_status,
+        post_status,
+        takes_params,
+        guard_str: guard_str_lean,
+        guard_str_rust,
+        aborts_if,
+        effects,
+        accounts,
+        transfers,
+        emits,
+        invariants,
+        properties: Vec::new(),
+    }
+}
+
+/// Parse `accounts { name : attr, attr, ... }` block into IDL-level descriptors.
+fn parse_accounts_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedHandlerAccount> {
+    let mut accounts = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::account_descriptor {
+            let mut parts = inner.into_inner();
+            let name = parts.next().unwrap().as_str().to_string();
+
+            let mut is_signer = false;
+            let mut is_writable = false;
+            let mut is_program = false;
+            let mut pda_seeds = None;
+            let mut account_type = None;
+            let mut authority = None;
+
+            for attr in parts {
+                if attr.as_rule() == Rule::acct_attr {
+                    let inner_attr = attr.into_inner().next().unwrap();
+                    match inner_attr.as_rule() {
+                        Rule::acct_simple_attr => {
+                            let kw = inner_attr.into_inner().next().unwrap().as_str();
+                            match kw {
+                                "signer" => is_signer = true,
+                                "writable" => is_writable = true,
+                                "readonly" => {} // default
+                                "program" => is_program = true,
+                                _ => {}
+                            }
+                        }
+                        Rule::acct_pda_attr => {
+                            let mut seeds = Vec::new();
+                            for seed_part in inner_attr.into_inner() {
+                                if seed_part.as_rule() == Rule::pda_seed_list {
+                                    for seed in seed_part.into_inner() {
+                                        if seed.as_rule() == Rule::pda_seed {
+                                            let val = seed.into_inner().next().unwrap();
+                                            match val.as_rule() {
+                                                Rule::string_lit => {
+                                                    let s = val
+                                                        .into_inner()
+                                                        .next()
+                                                        .map(|v| v.as_str().to_string())
+                                                        .unwrap_or_default();
+                                                    seeds.push(format!("\"{}\"", s));
+                                                }
+                                                Rule::ident => {
+                                                    seeds.push(val.as_str().to_string())
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            pda_seeds = Some(seeds);
+                        }
+                        Rule::acct_type_attr => {
+                            let ty = inner_attr.into_inner().next().unwrap().as_str().to_string();
+                            account_type = Some(ty);
+                        }
+                        Rule::acct_authority_attr => {
+                            let auth =
+                                inner_attr.into_inner().next().unwrap().as_str().to_string();
+                            authority = Some(auth);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            accounts.push(ParsedHandlerAccount {
+                name,
+                is_signer,
+                is_writable,
+                is_program,
+                pda_seeds,
+                account_type,
+                authority,
+            });
+        }
+    }
+    accounts
+}
+
+/// Parse `transfers { from A to B amount X authority Y }` block.
+fn parse_transfers_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedTransfer> {
+    let mut transfers = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::transfer_clause {
+            let mut parts = inner.into_inner();
+            let from = parts.next().unwrap().as_str().to_string();
+            let to = parts.next().unwrap().as_str().to_string();
+            let mut amount = None;
+            let mut authority = None;
+
+            for field in parts {
+                if field.as_rule() == Rule::transfer_fields {
+                    let raw = field.as_str();
+                    let inner_pair = field.into_inner().next().unwrap();
+                    if raw.starts_with("amount") {
+                        amount = Some(inner_pair.as_str().to_string());
+                    } else if raw.starts_with("authority") {
+                        authority = Some(inner_pair.as_str().to_string());
+                    }
+                }
+            }
+
+            transfers.push(ParsedTransfer {
+                from,
+                to,
+                amount,
+                authority,
+            });
+        }
+    }
+    transfers
+}
+
+/// Convert a legacy ParsedOperation into a ParsedHandler (backward compat).
+fn operation_to_handler(op: &ParsedOperation, ctx: Option<&ParsedContext>) -> ParsedHandler {
+    let accounts = if let Some(ctx) = ctx {
+        ctx.accounts
+            .iter()
+            .map(|a| ParsedHandlerAccount {
+                name: a.name.clone(),
+                is_signer: a.account_type == "Signer",
+                is_writable: a.is_mut || a.is_init,
+                is_program: a.account_type == "Program",
+                pda_seeds: a.seeds_ref.as_ref().map(|_s| Vec::new()), // seeds ref, not inline
+                account_type: a.inner_type.clone(),
+                authority: a.token_authority.clone(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let transfers = if op.has_calls {
+        vec![ParsedTransfer {
+            from: op
+                .calls_accounts
+                .first()
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default(),
+            to: op
+                .calls_accounts
+                .get(1)
+                .map(|(n, _)| n.clone())
+                .unwrap_or_default(),
+            amount: None,
+            authority: op
+                .calls_accounts
+                .last()
+                .map(|(n, _)| n.clone()),
+        }]
+    } else {
+        Vec::new()
+    };
+
+    ParsedHandler {
+        name: op.name.clone(),
+        doc: op.doc.clone(),
+        who: op.who.clone(),
+        on_account: op.on_account.clone(),
+        pre_status: op.pre_status.clone(),
+        post_status: op.post_status.clone(),
+        takes_params: op.takes_params.clone(),
+        guard_str: op.guard_str.clone(),
+        guard_str_rust: None,
+        aborts_if: op.aborts_if.clone(),
+        effects: op.effects.clone(),
+        accounts,
+        transfers,
+        emits: op.emits.clone(),
+        invariants: Vec::new(),
+        properties: Vec::new(),
+    }
+}
+
+/// Convert a legacy ParsedInstruction into a ParsedHandler (backward compat).
+fn instruction_to_handler(instr: &ParsedInstruction) -> ParsedHandler {
+    // Collect guard names and property names as handler-level properties
+    let properties: Vec<String> = instr
+        .guards
+        .iter()
+        .map(|g| g.name.clone())
+        .chain(instr.properties.iter().map(|p| p.name.clone()))
+        .collect();
+
+    ParsedHandler {
+        name: instr.name.clone(),
+        doc: instr.doc.clone(),
+        who: None,
+        on_account: None,
+        pre_status: None,
+        post_status: None,
+        takes_params: Vec::new(),
+        guard_str: None,
+        guard_str_rust: None,
+        aborts_if: Vec::new(),
+        effects: Vec::new(),
+        accounts: Vec::new(),
+        transfers: Vec::new(),
+        emits: Vec::new(),
+        invariants: Vec::new(),
+        properties,
+    }
+}
+
+/// Convert a ParsedHandler into a ParsedOperation (reverse bridge).
+/// This lets consumers that still read `spec.operations` work with handler-syntax specs.
+fn handler_to_operation(handler: &ParsedHandler) -> ParsedOperation {
+    ParsedOperation {
+        name: handler.name.clone(),
+        doc: handler.doc.clone(),
+        who: handler.who.clone(),
+        on_account: handler.on_account.clone(),
+        has_when: handler.pre_status.is_some(),
+        pre_status: handler.pre_status.clone(),
+        post_status: handler.post_status.clone(),
+        has_calls: !handler.transfers.is_empty(),
+        program_id: None,
+        has_u64_fields: handler
+            .takes_params
+            .iter()
+            .any(|(_, t)| t == "U64" || t == "U128"),
+        has_takes: !handler.takes_params.is_empty(),
+        has_guard: handler.guard_str.is_some(),
+        guard_str: handler.guard_str.clone(),
+        has_effect: !handler.effects.is_empty(),
+        takes_params: handler.takes_params.clone(),
+        effects: handler.effects.clone(),
+        calls_accounts: handler
+            .transfers
+            .iter()
+            .flat_map(|t| {
+                let mut accts = vec![(t.from.clone(), "writable".to_string())];
+                accts.push((t.to.clone(), "writable".to_string()));
+                if let Some(ref auth) = t.authority {
+                    accts.push((auth.clone(), "signer".to_string()));
+                }
+                accts
+            })
+            .collect(),
+        calls_discriminator: None,
+        emits: handler.emits.clone(),
+        aborts_if: handler.aborts_if.clone(),
+    }
+}
+
+/// Convert a ParsedHandler's accounts block into a ParsedContext (reverse bridge).
+/// Maps IDL-level descriptors to framework-level annotations heuristically.
+fn handler_to_context(handler: &ParsedHandler) -> Option<ParsedContext> {
+    if handler.accounts.is_empty() {
+        return None;
+    }
+
+    let accounts = handler
+        .accounts
+        .iter()
+        .map(|a| {
+            let (account_type, inner_type) = if a.is_signer {
+                ("Signer".to_string(), None)
+            } else if a.is_program {
+                ("Program".to_string(), None)
+            } else if a.account_type.as_deref() == Some("token") {
+                ("Account".to_string(), Some("Token".to_string()))
+            } else {
+                ("Account".to_string(), None)
+            };
+
+            // Infer init from lifecycle: handler creates the account (Uninitialized/Empty → Active)
+            let is_init = handler.pre_status.as_deref() == Some("Uninitialized")
+                || handler.pre_status.as_deref() == Some("Empty");
+
+            // Infer payer from the signer account
+            let payer = if is_init && !a.is_signer && a.pda_seeds.is_some() {
+                handler
+                    .accounts
+                    .iter()
+                    .find(|acc| acc.is_signer)
+                    .map(|acc| acc.name.clone())
+            } else {
+                None
+            };
+
+            // Map PDA seeds to a seeds_ref (the PDA name)
+            let seeds_ref = a.pda_seeds.as_ref().map(|_| a.name.clone());
+
+            ParsedAccountEntry {
+                name: a.name.clone(),
+                account_type,
+                inner_type,
+                is_mut: a.is_writable,
+                is_init: is_init && !a.is_signer && a.pda_seeds.is_some(),
+                is_init_if_needed: false,
+                payer,
+                seeds_ref,
+                has_bump: a.pda_seeds.is_some(),
+                close_target: None,
+                has_one: None,
+                token_mint: None,
+                token_authority: a.authority.clone(),
+            }
+        })
+        .collect();
+
+    Some(ParsedContext {
+        operation: handler.name.clone(),
+        accounts,
+    })
 }
 
 /// Parse `pubkey NAME [chunk0, chunk1, chunk2, chunk3]`.
@@ -1469,11 +1927,9 @@ mod tests {
     fn parse_multisig_header() {
         let spec = parse(MULTISIG_SPEC).unwrap();
         assert_eq!(spec.program_name, "Multisig");
-        assert_eq!(spec.target.as_deref(), Some("quasar"));
-        assert_eq!(
-            spec.program_id.as_deref(),
-            Some("MSig111111111111111111111111111111111111111")
-        );
+        // New unified syntax: no target or program_id
+        assert!(spec.target.is_none());
+        assert!(spec.program_id.is_none());
     }
 
     #[test]
@@ -1590,7 +2046,8 @@ mod tests {
     #[test]
     fn parse_multisig_contexts() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.contexts.len(), 5); // 5 operations have context blocks
+        // 6 handlers have accounts blocks → 6 contexts via reverse bridge
+        assert_eq!(spec.contexts.len(), 6);
         let create_ctx = &spec.contexts[0];
         assert_eq!(create_ctx.operation, "create_vault");
         assert_eq!(create_ctx.accounts.len(), 3);
@@ -1600,10 +2057,7 @@ mod tests {
 
         assert_eq!(create_ctx.accounts[1].name, "vault");
         assert_eq!(create_ctx.accounts[1].account_type, "Account");
-        assert_eq!(
-            create_ctx.accounts[1].inner_type.as_deref(),
-            Some("Multisig")
-        );
+        // Handler accounts use IDL-level descriptors; init + payer inferred
         assert!(create_ctx.accounts[1].is_init);
         assert_eq!(create_ctx.accounts[1].payer.as_deref(), Some("creator"));
         assert!(create_ctx.accounts[1].has_bump);
@@ -1696,10 +2150,155 @@ mod tests {
     }
 
     // ========================================================================
-    // sBPF (Dropset) tests
+    // sBPF (Dropset) tests — use inline old-syntax spec for backward compat
     // ========================================================================
 
-    const DROPSET_SPEC: &str = include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
+    const DROPSET_SPEC: &str = r#"
+spec Dropset
+
+target assembly
+assembly "src/dropset.s"
+
+const DISC_REGISTER_MARKET     = 0
+const ACCT_NON_DUP_MARKER      = 255
+const DATA_LEN_ZERO             = 0
+const SIZE_OF_EMPTY_ACCOUNT     = 10_336
+const SIZE_OF_MARKET_HEADER     = 40
+const SIZE_OF_ADDRESS           = 32
+const SIZE_OF_CREATE_ACCOUNT    = 56
+
+pubkey RENT [
+  5_862_609_301_215_225_606,
+  9_219_231_539_345_853_473,
+  4_971_307_250_928_769_624,
+  2_329_533_411
+]
+
+errors [
+  InvalidDiscriminant         = 1   "Discriminant is not REGISTER_MARKET",
+  InvalidInstructionLength    = 2   "Instruction data is not 1 byte",
+  InvalidNumberOfAccounts     = 3   "Fewer than 10 accounts provided",
+  UserHasData                 = 4   "User account already has data",
+  MarketAccountIsDuplicate    = 5   "Market account is a duplicate",
+  MarketHasData               = 6   "Market account already has data",
+  BaseMintIsDuplicate         = 7   "Base mint account is a duplicate",
+  QuoteMintIsDuplicate        = 8   "Quote mint account is a duplicate",
+  InvalidMarketPubkey         = 9   "Market pubkey does not match derived PDA",
+  SystemProgramIsDuplicate    = 10  "System Program account is a duplicate",
+  InvalidSystemProgramPubkey  = 11  "System Program pubkey is wrong",
+  RentSysvarIsDuplicate       = 12  "Rent sysvar account is a duplicate",
+  InvalidRentSysvarPubkey     = 13  "Rent sysvar pubkey is wrong"
+]
+
+/// Validates accounts, derives market PDA, creates market account via CPI
+instruction RegisterMarket {
+  discriminant DISC_REGISTER_MARKET
+  entry 24
+
+  const ACCOUNTS_REQUIRED    = 10
+  const INSTRUCTION_DATA_LEN = 1
+
+  input_layout {
+    n_accounts       : U64    @ 0       "Number of accounts in input buffer"
+    user_data_len    : U64    @ 88      "Data length of user account"
+    market_dup       : U8     @ 10344   "Market account duplicate flag"
+    market_data_len  : U64    @ 10424   "Market account data length"
+    market_pubkey    : Pubkey @ 10352   "Market account address (4 chunks)"
+    base_mint_dup    : U8     @ 20680   "Base mint duplicate flag"
+    base_data_len    : U64    @ 20760   "Base mint data length"
+  }
+
+  insn_layout {
+    insn_len         : U64    @ -8      "Instruction data length"
+    discriminant     : U8     @ 0       "Instruction discriminant byte"
+  }
+
+  /// Instruction byte must be REGISTER_MARKET
+  guard rejects_invalid_discriminant {
+    checks discriminant == DISC_REGISTER_MARKET
+    error InvalidDiscriminant
+    fuel 8
+  }
+  guard rejects_invalid_account_count {
+    checks n_accounts >= ACCOUNTS_REQUIRED
+    error InvalidNumberOfAccounts
+    fuel 10
+  }
+  guard rejects_invalid_instruction_length {
+    checks insn_len == INSTRUCTION_DATA_LEN
+    error InvalidInstructionLength
+    fuel 12
+  }
+  guard rejects_user_has_data {
+    checks user_data_len == DATA_LEN_ZERO
+    error UserHasData
+    fuel 14
+  }
+  guard rejects_market_duplicate {
+    checks market_dup == ACCT_NON_DUP_MARKER
+    error MarketAccountIsDuplicate
+    fuel 16
+  }
+  guard rejects_market_has_data {
+    checks market_data_len == DATA_LEN_ZERO
+    error MarketHasData
+    fuel 18
+  }
+  guard rejects_base_mint_duplicate {
+    checks base_mint_dup == ACCT_NON_DUP_MARKER
+    error BaseMintIsDuplicate
+    fuel 20
+  }
+  guard rejects_quote_mint_duplicate {
+    error QuoteMintIsDuplicate
+    fuel 30
+  }
+  guard rejects_invalid_market_pubkey {
+    checks market_pubkey == derived_pda
+    error InvalidMarketPubkey
+    fuel 61
+  }
+  guard rejects_system_program_duplicate {
+    error SystemProgramIsDuplicate
+    fuel 74
+  }
+  guard rejects_invalid_system_program_pubkey {
+    error InvalidSystemProgramPubkey
+    fuel 86
+  }
+  guard rejects_rent_sysvar_duplicate {
+    error RentSysvarIsDuplicate
+    fuel 96
+  }
+  guard rejects_invalid_rent_sysvar_pubkey {
+    checks rent_pubkey == RENT
+    error InvalidRentSysvarPubkey
+    fuel 108
+  }
+
+  property memory_safety {
+    scope guards
+  }
+  property pda_derivation {
+    flow market_pda from seeds [base_mint_addr, quote_mint_addr]
+  }
+  property account_pointer_flow {
+    flow r9 through [market, system_program, rent_sysvar]
+  }
+  property cpi_create_account {
+    cpi system_program CreateAccount {
+      payer        user
+      target       market_pda
+      space        SIZE_OF_MARKET_HEADER
+      signer_seeds [base_mint_addr, quote_mint_addr, bump]
+    }
+  }
+  property accepts_valid_input {
+    after all guards
+    exit 0
+  }
+}
+"#;
 
     #[test]
     fn parse_dropset_header() {

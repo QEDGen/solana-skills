@@ -1,36 +1,19 @@
-# Slippage Guard — sBPF Balance Check
+# Slippage Guard — Balance Check
 #
 # Compares token account balance against a minimum threshold.
-# If balance is below minimum, logs "Slippage exceeded" and exits 1.
-# Otherwise exits 0.
+# If balance is below minimum, rejects. Otherwise accepts.
 
 spec Slippage
-
-target assembly
-assembly "src/asm-slippage/asm-slippage.s"
 
 errors [
   SlippageExceeded = 1 "Token balance below minimum threshold"
 ]
 
-instruction Entrypoint {
-  entry 0
-
-  input_layout {
-    token_balance    : U64 @ 160    "Token account balance"
-    minimum_balance  : U64 @ 10520  "Minimum balance required"
+handler check_slippage {
+  accounts {
+    token_account : readonly
   }
 
-  /// Rejects when minimum balance >= token balance
-  guard rejects_insufficient_balance {
-    checks minimum_balance >= token_balance
-    error SlippageExceeded
-    fuel 10
-  }
-
-  /// Accepts when minimum balance < token balance
-  property accepts_sufficient_balance {
-    after all guards
-    exit 0
-  }
+  guard token_balance > minimum_balance
+  aborts_if minimum_balance >= token_balance with SlippageExceeded
 }

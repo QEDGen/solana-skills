@@ -5,15 +5,8 @@
 # cancels and reclaims their deposit.
 #
 # Lifecycle: initialize -> [Open] -> cancel | exchange -> [Closed]
-#
-# Note: exchange makes TWO SPL Token transfers (taker->initializer and
-# escrow->taker). The calls clause models the primary taker-side transfer.
-# The PDA-signed escrow->taker transfer is verified in hand-written proofs.
 
 spec Escrow
-
-target quasar
-program_id "Escr111111111111111111111111111111111111111"
 
 state {
   initializer          : Pubkey
@@ -44,10 +37,20 @@ event EscrowCancelled {
 errors [InvalidAmount, Unauthorized, AlreadyClosed]
 
 /// Initializer deposits tokens and opens the escrow
-operation initialize {
+handler initialize {
   who initializer
   when Uninitialized
   then Open
+
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    mint           : readonly
+    initializer_ta : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+    system_program : program
+  }
 
   takes {
     deposit_amount : U64
@@ -62,58 +65,55 @@ operation initialize {
     taker_amount = receive_amount
   }
 
-  emits EscrowInitialized
-
-  calls TOKEN_PROGRAM_ID DISC_TRANSFER(initializer_deposit writable, escrow_token writable, initializer signer)
-
-  context {
-    initializer    : Signer, mut
-    escrow         : Account(Escrow), init, payer(initializer), seeds(escrow), bump
-    mint           : Account(Mint)
-    initializer_ta : Account(Token), mut
-    escrow_ta      : Account(Token), mut, init_if_needed, payer(initializer), token_mint(mint), token_authority(escrow)
-    token_program  : Program(Token)
-    system_program : Program(System)
+  transfers {
+    from initializer_ta to escrow_ta amount deposit_amount authority initializer
   }
+
+  emits EscrowInitialized
 }
 
 /// Taker completes the trade by sending their tokens
-operation exchange {
+handler exchange {
   who taker
   when Open
   then Closed
 
-  calls TOKEN_PROGRAM_ID DISC_TRANSFER(taker_deposit writable, initializer_receive writable, taker signer)
+  accounts {
+    taker          : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    initializer_ta : writable, type token
+    taker_ta       : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+  }
+
+  transfers {
+    from taker_ta to initializer_ta amount taker_amount authority taker
+    from escrow_ta to taker_ta amount initializer_amount authority escrow
+  }
 
   emits EscrowExchanged
-
-  context {
-    taker           : Signer, mut
-    escrow          : Account(Escrow), mut, seeds(escrow), bump, close(initializer)
-    initializer_ta  : Account(Token), mut
-    taker_ta        : Account(Token), mut
-    escrow_ta       : Account(Token), mut, token_authority(escrow)
-    token_program   : Program(Token)
-  }
 }
 
 /// Initializer reclaims their deposit and closes the escrow
-operation cancel {
+handler cancel {
   who initializer
   when Open
   then Closed
 
-  calls TOKEN_PROGRAM_ID DISC_TRANSFER(escrow_token writable, initializer_deposit writable, escrow_pda signer)
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    escrow_ta      : writable, type token, authority escrow
+    initializer_ta : writable, type token
+    token_program  : program
+  }
+
+  transfers {
+    from escrow_ta to initializer_ta amount initializer_amount authority escrow
+  }
 
   emits EscrowCancelled
-
-  context {
-    initializer    : Signer, mut
-    escrow         : Account(Escrow), mut, seeds(escrow), bump, close(initializer)
-    escrow_ta      : Account(Token), mut, token_authority(escrow)
-    initializer_ta : Account(Token), mut
-    token_program  : Program(Token)
-  }
 }
 
 invariant conservation "total tokens preserved across initialize, exchange, cancel"

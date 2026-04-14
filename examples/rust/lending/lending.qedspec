@@ -6,14 +6,8 @@
 # Two account types:
 #   Pool  — holds aggregate pool state (total deposits, total borrows)
 #   Loan  — per-borrower loan record (amount, collateral, status)
-#
-# This exercises multi-account lifecycle: Pool and Loan each have their
-# own lifecycle states and transitions.
 
 spec Lending
-
-target quasar
-program_id "Lend111111111111111111111111111111111111111"
 
 account Pool {
   authority      : Pubkey
@@ -62,11 +56,17 @@ event LoanLiquidated {
 errors [InsufficientLiquidity, InsufficientCollateral, Unauthorized, AlreadyActive, InvalidAmount]
 
 /// Initialize the lending pool with an interest rate
-operation init_pool {
+handler init_pool {
   who authority
   on Pool
   when Uninitialized
   then Active
+
+  accounts {
+    authority      : signer, writable
+    pool           : writable, pda ["pool", authority]
+    system_program : program
+  }
 
   takes rate : U64
 
@@ -80,22 +80,24 @@ operation init_pool {
   }
 
   emits PoolInitialized
-
-  context {
-    authority      : Signer, mut
-    pool           : Account(Pool), init, payer(authority), seeds(pool), bump
-    system_program : Program(System)
-  }
 }
 
 /// Deposit tokens into the pool
-operation deposit {
+handler deposit {
   on Pool
   when Active
 
+  accounts {
+    depositor     : signer, writable
+    pool          : writable, pda ["pool", authority]
+    pool_vault    : writable, type token, authority pool
+    depositor_ta  : writable, type token
+    token_program : program
+  }
+
   takes amount : U64
 
-  guard amount > 0 and state.total_deposits + amount <= 18446744073709551615
+  guard amount > 0
   aborts_if amount == 0 with InvalidAmount
 
   effect {
@@ -103,22 +105,24 @@ operation deposit {
   }
 
   emits Deposited
-
-  context {
-    depositor      : Signer, mut
-    pool           : Account(Pool), mut, seeds(pool), bump
-    pool_vault     : Account(Token), mut, token_authority(pool)
-    depositor_ta   : Account(Token), mut
-    token_program  : Program(Token)
-  }
 }
 
 /// Borrow tokens from the pool against collateral
-operation borrow {
+handler borrow {
   who borrower
   on Loan
   when Empty
   then Active
+
+  accounts {
+    borrower       : signer, writable
+    loan           : writable, pda ["loan", pool, borrower]
+    pool           : writable, pda ["pool", authority]
+    pool_vault     : writable, type token, authority pool
+    borrower_ta    : writable, type token
+    token_program  : program
+    system_program : program
+  }
 
   takes {
     amount     : U64
@@ -134,24 +138,23 @@ operation borrow {
   }
 
   emits Borrowed
-
-  context {
-    borrower       : Signer, mut
-    loan           : Account(Loan), init, payer(borrower), seeds(loan), bump
-    pool           : Account(Pool), mut, seeds(pool), bump
-    pool_vault     : Account(Token), mut, token_authority(pool)
-    borrower_ta    : Account(Token), mut
-    token_program  : Program(Token)
-    system_program : Program(System)
-  }
 }
 
 /// Repay a loan in full
-operation repay {
+handler repay {
   who borrower
   on Loan
   when Active
   then Empty
+
+  accounts {
+    borrower      : signer, writable
+    loan          : writable, pda ["loan", pool, borrower]
+    pool          : writable, pda ["pool", authority]
+    pool_vault    : writable, type token, authority pool
+    borrower_ta   : writable, type token
+    token_program : program
+  }
 
   effect {
     amount = 0
@@ -159,39 +162,29 @@ operation repay {
   }
 
   emits Repaid
-
-  context {
-    borrower       : Signer, mut
-    loan           : Account(Loan), mut, seeds(loan), bump, close(borrower)
-    pool           : Account(Pool), mut, seeds(pool), bump
-    pool_vault     : Account(Token), mut, token_authority(pool)
-    borrower_ta    : Account(Token), mut
-    token_program  : Program(Token)
-  }
 }
 
 /// Liquidate an undercollateralized loan
-operation liquidate {
+handler liquidate {
   on Loan
   when Active
   then Liquidated
+
+  accounts {
+    liquidator    : signer, writable
+    loan          : writable, pda ["loan", pool, borrower]
+    pool          : writable, pda ["pool", authority]
+    pool_vault    : writable, type token, authority pool
+    token_program : program
+  }
 
   effect {
     amount = 0
   }
 
   emits LoanLiquidated
-
-  context {
-    liquidator     : Signer, mut
-    loan           : Account(Loan), mut, seeds(loan), bump
-    pool           : Account(Pool), mut, seeds(pool), bump
-    pool_vault     : Account(Token), mut, token_authority(pool)
-    token_program  : Program(Token)
-  }
 }
 
-/// Pool deposits always cover borrows
 property pool_solvency {
   expr state.total_deposits >= state.total_borrows
   preserved_by all

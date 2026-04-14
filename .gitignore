@@ -64,3 +64,4 @@ docs/prds/
 .agents/
 .claude/
 \n# Generated proof artifacts\nlean_project/\nqedgen_*/
+tests/kani.rs

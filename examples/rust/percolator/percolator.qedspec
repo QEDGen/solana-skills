@@ -10,7 +10,6 @@
 
 spec Percolator
 
-target quasar
 const MAX_VAULT_TVL = 10_000_000_000_000_000
 
 state {
@@ -22,10 +21,17 @@ state {
 
 lifecycle [Active, Draining, Resetting]
 
+errors [InsufficientFunds]
+
 /// User adds capital — V and C_tot increase by same amount
-operation deposit {
+handler deposit {
   who authority
   when Active
+
+  accounts {
+    authority : signer, writable
+    vault     : writable
+  }
 
   takes amount : U128
 
@@ -38,9 +44,14 @@ operation deposit {
 }
 
 /// User removes capital — V and C_tot decrease by same amount
-operation withdraw {
+handler withdraw {
   who authority
   when Active
+
+  accounts {
+    authority : signer, writable
+    vault     : writable
+  }
 
   takes amount : U128
 
@@ -54,9 +65,14 @@ operation withdraw {
 }
 
 /// External deposit into insurance fund
-operation top_up_insurance {
+handler top_up_insurance {
   who authority
   when Active
+
+  accounts {
+    authority : signer, writable
+    vault     : writable
+  }
 
   takes amount : U128
 
@@ -69,33 +85,46 @@ operation top_up_insurance {
 }
 
 /// Begin auto-deleveraging cycle
-operation trigger_adl {
+handler trigger_adl {
   who authority
   when Active
   then Draining
+
+  accounts {
+    authority : signer
+    vault     : writable
+  }
 }
 
 /// Complete the drain phase of ADL
-operation complete_drain {
+handler complete_drain {
   who authority
   when Draining
   then Resetting
+
+  accounts {
+    authority : signer
+    vault     : writable
+  }
 }
 
 /// Reset risk engine after ADL cycle
-operation reset {
+handler reset {
   who authority
   when Resetting
   then Active
+
+  accounts {
+    authority : signer
+    vault     : writable
+  }
 }
 
-/// Vault always covers all obligations
 property conservation {
   expr state.V >= state.C_tot + state.I
   preserved_by all
 }
 
-/// Vault never exceeds max TVL
 property vault_bounded {
   expr state.V <= MAX_VAULT_TVL
   preserved_by [deposit, top_up_insurance]

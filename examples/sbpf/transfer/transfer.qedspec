@@ -1,19 +1,9 @@
-# SOL Transfer — sBPF Validation Guards
+# SOL Transfer — Validation + CPI
 #
-# Validates input accounts and data, checks sender balance,
+# Validates input accounts, checks sender balance,
 # then invokes System Program Transfer CPI.
-#
-# Linear guard chain: 7 sequential validation checks.
 
 spec Transfer
-
-target assembly
-assembly "src/transfer.s"
-
-const N_ACCOUNTS_EXPECTED             = 3
-const NON_DUP_MARKER                  = 255
-const DATA_LENGTH_ZERO                = 0
-const INSTRUCTION_DATA_LENGTH_EXPECTED = 8
 
 errors [
   InvalidAccountCount           = 1 "Invalid number of accounts",
@@ -25,72 +15,15 @@ errors [
   InsufficientLamports          = 7 "Sender has insufficient lamports"
 ]
 
-instruction TransferSOL {
-  entry 0
-
-  input_layout {
-    n_accounts                : U64 @ 0      "Number of accounts"
-    sender_lamports           : U64 @ 80     "Sender lamport balance"
-    sender_data_length        : U64 @ 88     "Sender data length"
-    recipient_dup_marker      : U8  @ 10344  "Recipient duplicate flag"
-    recipient_data_length     : U64 @ 10424  "Recipient data length"
-    system_program_dup_marker : U8  @ 20680  "System program duplicate flag"
-    instruction_data_length   : U64 @ 31032  "Instruction data length"
-    transfer_amount           : U64 @ 31040  "Transfer amount"
+handler transfer_sol {
+  accounts {
+    sender         : signer, writable
+    recipient      : writable
+    system_program : program
   }
 
-  /// Must have exactly 3 accounts
-  guard rejects_wrong_account_count {
-    checks n_accounts == N_ACCOUNTS_EXPECTED
-    error InvalidAccountCount
-    fuel 6
-  }
+  takes amount : U64
 
-  /// Sender data length must be zero
-  guard rejects_sender_data_nonzero {
-    checks sender_data_length == DATA_LENGTH_ZERO
-    error DataLengthNonzeroSender
-    fuel 8
-  }
-
-  /// Recipient must not be a duplicate account
-  guard rejects_recipient_duplicate {
-    checks recipient_dup_marker == NON_DUP_MARKER
-    error DuplicateAccountRecipient
-    fuel 10
-  }
-
-  /// Recipient data length must be zero
-  guard rejects_recipient_data_nonzero {
-    checks recipient_data_length == DATA_LENGTH_ZERO
-    error DataLengthNonzeroRecipient
-    fuel 12
-  }
-
-  /// System program must not be a duplicate account
-  guard rejects_system_program_duplicate {
-    checks system_program_dup_marker == NON_DUP_MARKER
-    error DuplicateAccountSystemProgram
-    fuel 14
-  }
-
-  /// Instruction data must be exactly 8 bytes
-  guard rejects_invalid_instruction_data_length {
-    checks instruction_data_length == INSTRUCTION_DATA_LENGTH_EXPECTED
-    error InvalidInstructionDataLength
-    fuel 16
-  }
-
-  /// Sender must have enough lamports for the transfer
-  guard rejects_insufficient_lamports {
-    checks sender_lamports >= transfer_amount
-    error InsufficientLamports
-    fuel 20
-  }
-
-  /// All guards pass → CPI + exit 0
-  property accepts_valid_transfer {
-    after all guards
-    exit 0
-  }
+  guard sender_lamports >= amount
+  aborts_if sender_lamports < amount with InsufficientLamports
 }

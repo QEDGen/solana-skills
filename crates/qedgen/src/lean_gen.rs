@@ -1797,10 +1797,155 @@ mod tests {
     }
 
     // ========================================================================
-    // sBPF (Dropset) tests
+    // sBPF (Dropset) tests — inline old-syntax spec for backward compat
     // ========================================================================
 
-    const DROPSET_SPEC: &str = include_str!("../../../examples/sbpf/dropset/dropset.qedspec");
+    const DROPSET_SPEC: &str = r#"
+spec Dropset
+
+target assembly
+assembly "src/dropset.s"
+
+const DISC_REGISTER_MARKET     = 0
+const ACCT_NON_DUP_MARKER      = 255
+const DATA_LEN_ZERO             = 0
+const SIZE_OF_EMPTY_ACCOUNT     = 10_336
+const SIZE_OF_MARKET_HEADER     = 40
+const SIZE_OF_ADDRESS           = 32
+const SIZE_OF_CREATE_ACCOUNT    = 56
+
+pubkey RENT [
+  5_862_609_301_215_225_606,
+  9_219_231_539_345_853_473,
+  4_971_307_250_928_769_624,
+  2_329_533_411
+]
+
+errors [
+  InvalidDiscriminant         = 1   "Discriminant is not REGISTER_MARKET",
+  InvalidInstructionLength    = 2   "Instruction data is not 1 byte",
+  InvalidNumberOfAccounts     = 3   "Fewer than 10 accounts provided",
+  UserHasData                 = 4   "User account already has data",
+  MarketAccountIsDuplicate    = 5   "Market account is a duplicate",
+  MarketHasData               = 6   "Market account already has data",
+  BaseMintIsDuplicate         = 7   "Base mint account is a duplicate",
+  QuoteMintIsDuplicate        = 8   "Quote mint account is a duplicate",
+  InvalidMarketPubkey         = 9   "Market pubkey does not match derived PDA",
+  SystemProgramIsDuplicate    = 10  "System Program account is a duplicate",
+  InvalidSystemProgramPubkey  = 11  "System Program pubkey is wrong",
+  RentSysvarIsDuplicate       = 12  "Rent sysvar account is a duplicate",
+  InvalidRentSysvarPubkey     = 13  "Rent sysvar pubkey is wrong"
+]
+
+/// Validates accounts, derives market PDA, creates market account via CPI
+instruction RegisterMarket {
+  discriminant DISC_REGISTER_MARKET
+  entry 24
+
+  const ACCOUNTS_REQUIRED    = 10
+  const INSTRUCTION_DATA_LEN = 1
+
+  input_layout {
+    n_accounts       : U64    @ 0       "Number of accounts in input buffer"
+    user_data_len    : U64    @ 88      "Data length of user account"
+    market_dup       : U8     @ 10344   "Market account duplicate flag"
+    market_data_len  : U64    @ 10424   "Market account data length"
+    market_pubkey    : Pubkey @ 10352   "Market account address (4 chunks)"
+    base_mint_dup    : U8     @ 20680   "Base mint duplicate flag"
+    base_data_len    : U64    @ 20760   "Base mint data length"
+  }
+
+  insn_layout {
+    insn_len         : U64    @ -8      "Instruction data length"
+    discriminant     : U8     @ 0       "Instruction discriminant byte"
+  }
+
+  /// Instruction byte must be REGISTER_MARKET
+  guard rejects_invalid_discriminant {
+    checks discriminant == DISC_REGISTER_MARKET
+    error InvalidDiscriminant
+    fuel 8
+  }
+  guard rejects_invalid_account_count {
+    checks n_accounts >= ACCOUNTS_REQUIRED
+    error InvalidNumberOfAccounts
+    fuel 10
+  }
+  guard rejects_invalid_instruction_length {
+    checks insn_len == INSTRUCTION_DATA_LEN
+    error InvalidInstructionLength
+    fuel 12
+  }
+  guard rejects_user_has_data {
+    checks user_data_len == DATA_LEN_ZERO
+    error UserHasData
+    fuel 14
+  }
+  guard rejects_market_duplicate {
+    checks market_dup == ACCT_NON_DUP_MARKER
+    error MarketAccountIsDuplicate
+    fuel 16
+  }
+  guard rejects_market_has_data {
+    checks market_data_len == DATA_LEN_ZERO
+    error MarketHasData
+    fuel 18
+  }
+  guard rejects_base_mint_duplicate {
+    checks base_mint_dup == ACCT_NON_DUP_MARKER
+    error BaseMintIsDuplicate
+    fuel 20
+  }
+  guard rejects_quote_mint_duplicate {
+    error QuoteMintIsDuplicate
+    fuel 30
+  }
+  guard rejects_invalid_market_pubkey {
+    checks market_pubkey == derived_pda
+    error InvalidMarketPubkey
+    fuel 61
+  }
+  guard rejects_system_program_duplicate {
+    error SystemProgramIsDuplicate
+    fuel 74
+  }
+  guard rejects_invalid_system_program_pubkey {
+    error InvalidSystemProgramPubkey
+    fuel 86
+  }
+  guard rejects_rent_sysvar_duplicate {
+    error RentSysvarIsDuplicate
+    fuel 96
+  }
+  guard rejects_invalid_rent_sysvar_pubkey {
+    checks rent_pubkey == RENT
+    error InvalidRentSysvarPubkey
+    fuel 108
+  }
+
+  property memory_safety {
+    scope guards
+  }
+  property pda_derivation {
+    flow market_pda from seeds [base_mint_addr, quote_mint_addr]
+  }
+  property account_pointer_flow {
+    flow r9 through [market, system_program, rent_sysvar]
+  }
+  property cpi_create_account {
+    cpi system_program CreateAccount {
+      payer        user
+      target       market_pda
+      space        SIZE_OF_MARKET_HEADER
+      signer_seeds [base_mint_addr, quote_mint_addr, bump]
+    }
+  }
+  property accepts_valid_input {
+    after all guards
+    exit 0
+  }
+}
+"#;
 
     #[test]
     fn lean_gen_sbpf_routes_to_sbpf_renderer() {

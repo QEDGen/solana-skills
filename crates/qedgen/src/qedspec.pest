@@ -19,6 +19,7 @@ top_level_item = {
   | pda_decl
   | event_decl
   | errors_decl
+  | handler_block
   | instruction_block
   | operation_block
   | property_block
@@ -85,7 +86,56 @@ error_valued_entry = { ident ~ "=" ~ integer ~ string_lit? }
 invariant_decl = { "invariant" ~ ident ~ string_lit }
 
 // ============================================================================
-// Instruction block (sBPF)
+// Handler block (unified — replaces both operation and instruction)
+// ============================================================================
+
+handler_block = { doc_comment* ~ "handler" ~ ident ~ "{" ~ handler_clause* ~ "}" }
+
+handler_clause = {
+    who_clause
+  | on_clause
+  | when_clause
+  | then_clause
+  | takes_block
+  | guard_clause
+  | aborts_if_clause
+  | effect_block
+  | transfers_block
+  | emits_clause
+  | accounts_block
+  | handler_invariant_clause
+  | COMMENT
+}
+
+// IDL-level accounts block: `accounts { name : descriptor, ... }`
+accounts_block = { "accounts" ~ "{" ~ account_descriptor* ~ "}" }
+account_descriptor = { ident ~ ":" ~ acct_attr ~ ("," ~ acct_attr)* }
+// An account attribute: keyword or keyword with argument
+// Examples: signer, writable, readonly, program, pda ["seed", field], type token, authority escrow
+acct_attr = {
+    acct_pda_attr
+  | acct_type_attr
+  | acct_authority_attr
+  | acct_simple_attr
+}
+acct_pda_attr       = { "pda" ~ "[" ~ pda_seed_list ~ "]" }
+acct_type_attr      = { "type" ~ ident }
+acct_authority_attr = { "authority" ~ ident }
+acct_simple_attr    = { ident }  // signer, writable, readonly, program
+
+// Transfers block: business-level token movement
+transfers_block = { "transfers" ~ "{" ~ transfer_clause* ~ "}" }
+transfer_clause = { "from" ~ ident ~ "to" ~ ident ~ transfer_fields* }
+transfer_fields = {
+    "amount" ~ (field_ref | ident | integer)
+  | "authority" ~ ident
+}
+
+// Per-handler invariant reference: `invariant name`
+handler_invariant_clause = { "invariant" ~ ident }
+
+// ============================================================================
+// Instruction block (sBPF — legacy, kept for backward compat)
 // ============================================================================
 
 instruction_block = { doc_comment* ~ "instruction" ~ ident ~ "{" ~ instruction_item* ~ "}" }
