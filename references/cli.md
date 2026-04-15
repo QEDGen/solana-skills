@@ -157,14 +157,14 @@ $QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/Proofs/
 Check spec coverage and drift detection.
 
 ```bash
-$QEDGEN check --spec formal_verification/Spec.lean --proofs formal_verification/Proofs/
-$QEDGEN check --spec Spec.lean --proofs Proofs/ --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec my_program.qedspec --proofs formal_verification/
+$QEDGEN check --spec my_program.qedspec --proofs formal_verification/ --code programs/my_program/ --kani tests/kani.rs
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--spec` | Path | required | Spec file (Spec.lean) |
-| `--proofs` | Path | `./formal_verification/Proofs` | Proofs directory |
+| `--spec` | Path | required | Spec file (.qedspec) |
+| `--proofs` | Path | `./formal_verification` | Proofs directory |
 | `--code` | Path | - | Quasar program dir (enables code drift detection) |
 | `--kani` | Path | - | Kani harness file (enables Kani drift detection) |
 
@@ -172,7 +172,7 @@ $QEDGEN check --spec Spec.lean --proofs Proofs/ --code programs/my_program/ --ka
 Generate human-readable verification report.
 
 ```bash
-$QEDGEN explain --spec Spec.lean --proofs formal_verification/
+$QEDGEN explain --spec my_program.qedspec --proofs formal_verification/
 ```
 
 | Flag | Type | Default | Description |
@@ -259,7 +259,7 @@ When `hash` is omitted, the macro emits a `compile_error!` with the computed has
 Generate Quasar program skeleton from spec.
 
 ```bash
-$QEDGEN codegen --spec Spec.lean --output-dir programs/my_program/
+$QEDGEN codegen --spec my_program.qedspec --output-dir programs/my_program/
 ```
 
 ### `proptest`
@@ -286,14 +286,14 @@ For multi-account specs (e.g., lending with Pool + Loan), generates separate `mo
 Generate Kani proof harnesses from spec.
 
 ```bash
-$QEDGEN kani --spec Spec.lean --output tests/kani.rs
+$QEDGEN kani --spec my_program.qedspec --output tests/kani.rs
 ```
 
 ### `test`
 Generate unit tests (plain Rust, cargo test).
 
 ```bash
-$QEDGEN test --spec Spec.lean --output src/tests.rs
+$QEDGEN test --spec my_program.qedspec --output src/tests.rs
 ```
 
 ### `integration-test`

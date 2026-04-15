@@ -53,7 +53,7 @@ jobs:
         run: cd formal_verification && lake build
 
       - name: Check spec coverage
-        run: qedgen check --spec formal_verification/Spec.lean --proofs formal_verification/Proofs/
+        run: qedgen check --spec program.qedspec --proofs formal_verification/
 "#,
         verify_step
     );

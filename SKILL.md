@@ -336,13 +336,13 @@ The hash covers the function signature + body, excluding attributes and comments
 cd formal_verification && lake build
 
 # Check spec coverage (accepts .qedspec or Spec.lean)
-$QEDGEN check --spec program.qedspec --proofs formal_verification/Spec.lean
+$QEDGEN check --spec program.qedspec --proofs formal_verification/
 
 # For sBPF: verify binary hasn't drifted from proofs
 $QEDGEN verify --asm src/program.s --proofs formal_verification/
 
 # Human-readable verification report
-$QEDGEN explain --spec program.qedspec --proofs formal_verification/Spec.lean
+$QEDGEN explain --spec program.qedspec --proofs formal_verification/
 ```
 
 `qedgen check` reports per-theorem status: **Proven**, **Sorry**, or **Missing**.
@@ -352,7 +352,7 @@ $QEDGEN explain --spec program.qedspec --proofs formal_verification/Spec.lean
 **Unified drift detection** (when code or Kani harnesses are generated from the spec):
 
 ```bash
-$QEDGEN check --spec program.qedspec --proofs formal_verification/Spec.lean --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec program.qedspec --proofs formal_verification/ --code programs/my_program/ --kani tests/kani.rs
 ```
 
 **CI integration:**

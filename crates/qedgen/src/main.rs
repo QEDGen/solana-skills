@@ -196,12 +196,12 @@ enum Commands {
 
     /// Check spec coverage and drift detection across all verification layers
     Check {
-        /// Path to the spec file (Spec.lean)
+        /// Path to the spec file (.qedspec)
         #[arg(long)]
         spec: PathBuf,
 
         /// Path to the proofs directory
-        #[arg(long, default_value = "./formal_verification/Proofs")]
+        #[arg(long, default_value = "./formal_verification")]
         proofs: PathBuf,
 
         /// Path to generated Quasar program directory (enables code drift detection)
@@ -215,7 +215,7 @@ enum Commands {
 
     /// Generate a Markdown verification report with intent descriptions
     Explain {
-        /// Path to the spec file (Spec.lean)
+        /// Path to the spec file (.qedspec)
         #[arg(long)]
         spec: PathBuf,
 
@@ -230,7 +230,7 @@ enum Commands {
 
     /// Lint a qedspec for completeness — structured warnings for agent consumption
     Lint {
-        /// Path to the spec file (Spec.lean)
+        /// Path to the spec file (.qedspec)
         #[arg(long)]
         spec: PathBuf,
 
@@ -252,7 +252,7 @@ enum Commands {
 
     /// Generate a Quasar program skeleton from a qedspec Lean file
     Codegen {
-        /// Path to the spec file (Spec.lean)
+        /// Path to the spec file (.qedspec)
         #[arg(long)]
         spec: PathBuf,
 
@@ -263,7 +263,7 @@ enum Commands {
 
     /// Generate Kani proof harnesses from a qedspec Lean file
     Kani {
-        /// Path to the spec file (Spec.lean)
+        /// Path to the spec file (.qedspec)
         #[arg(long)]
         spec: PathBuf,
 

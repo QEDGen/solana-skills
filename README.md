@@ -101,7 +101,7 @@ cd formal_verification && lake build
 
 The generated `.qedspec` auto-derives state fields, operations, contexts, PDAs, and errors from the IDL. Guards, effects, lifecycle transitions, and properties are stubbed with TODOs for you or your agent to fill in.
 
-### Spec-driven pipeline (v1.5)
+### Spec-driven pipeline
 
 ```bash
 # Initialize a new verification project from a .qedspec
@@ -111,21 +111,21 @@ qedgen init --name my_program
 qedgen lean-gen --spec my_program.qedspec
 
 # Generate downstream artifacts from .qedspec
-qedgen codegen --spec Spec.lean               # Quasar program skeleton
-qedgen kani --spec Spec.lean                  # Kani proof harnesses
-qedgen test --spec Spec.lean                  # Unit tests
-qedgen integration-test --spec my.qedspec     # QuasarSVM integration tests
+qedgen codegen --spec my_program.qedspec               # Quasar program skeleton
+qedgen kani --spec my_program.qedspec                   # Kani proof harnesses
+qedgen test --spec my_program.qedspec                   # Unit tests
+qedgen integration-test --spec my_program.qedspec       # QuasarSVM integration tests
 
 # Lint a spec for completeness
-qedgen lint --spec Spec.lean
-qedgen lint --spec Spec.lean --json           # machine-readable output
+qedgen lint --spec my_program.qedspec
+qedgen lint --spec my_program.qedspec --json            # machine-readable output
 
 # Check spec coverage and drift detection
-qedgen check --spec Spec.lean
-qedgen check --spec Spec.lean --code ./programs --kani ./tests/kani.rs
+qedgen check --spec my_program.qedspec
+qedgen check --spec my_program.qedspec --code ./programs --kani ./tests/kani.rs
 
 # Generate a human-readable verification report
-qedgen explain --spec Spec.lean
+qedgen explain --spec my_program.qedspec
 ```
 
 ### sBPF verification
