@@ -99,10 +99,10 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     render_operation_inductive(&mut out, &ops_refs, "State");
 
     // Property predicates and inductive theorems
-    render_properties(&mut out, &spec.properties, &ops_refs, "State");
+    render_properties(&mut out, &spec.properties, &ops_refs, &spec.state_fields, "State");
 
     // Abort theorems (aborts_if clauses)
-    render_aborts_if(&mut out, &ops_refs, "State");
+    render_aborts_if(&mut out, &ops_refs, &spec.state_fields, &spec.state_fields, "State");
 
     // Post-condition theorems (ensures clauses)
     render_ensures(&mut out, &ops_refs, "State");
@@ -225,7 +225,7 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         if ops.is_empty() {
             continue;
         }
-        render_aborts_if(&mut out, &ops, &state_name);
+        render_aborts_if(&mut out, &ops, &acct.fields, &spec.state_fields, &state_name);
         render_ensures(&mut out, &ops, &state_name);
         render_frame_conditions(&mut out, &ops, &acct.fields, &state_name);
         render_overflow_obligations(&mut out, spec, &ops, &acct.fields, &state_name);
@@ -246,6 +246,155 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
 }
 
 /// Render transition functions for a set of handlers.
+/// Build the guard condition parts for a handler's transition function.
+///
+/// Returns the list of conjuncts that form the `if` condition. Each entry is a
+/// single proposition string; entries may contain internal `∧` (e.g., from a
+/// compound `requires` expression). The caller joins them with ` ∧ `.
+fn build_guard_cond_parts(
+    op: &crate::check::ParsedHandler,
+    fields: &[(String, String)],
+    fallback_fields: &[(String, String)],
+) -> Vec<String> {
+    let mut cond_parts: Vec<String> = Vec::new();
+    if let Some(ref who) = op.who {
+        cond_parts.push(format!("signer = s.{}", safe_name(who)));
+    }
+    if let Some(ref pre) = op.pre_status {
+        cond_parts.push(format!("s.status = .{}", pre));
+    }
+    // Auto-guards for sub effects (underflow prevention)
+    for (field, op_kind, _value) in &op.effects {
+        if op_kind == "sub" {
+            let ftype = fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .or_else(|| fallback_fields.iter().find(|(n, _)| n == field))
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("");
+            if map_type(ftype) != "Int" {
+                let val = &op
+                    .effects
+                    .iter()
+                    .find(|(f, o, _)| f == field && o == "sub")
+                    .unwrap()
+                    .2;
+                cond_parts.push(format!("{} \u{2264} s.{}", val, safe_name(field)));
+            }
+        }
+    }
+    if let Some(ref guard) = op.guard_str {
+        cond_parts.push(guard.clone());
+    }
+    // Requires clauses contribute their positive form as guard conditions
+    for req in &op.requires {
+        cond_parts.push(req.lean_expr.clone());
+    }
+    // Auto-guards for add effects (overflow prevention, type-aware).
+    for (field, op_kind, value) in &op.effects {
+        if op_kind == "add" {
+            let ftype = fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .or_else(|| fallback_fields.iter().find(|(n, _)| n == field))
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("");
+            if let Some(max_const) = type_max_const(ftype) {
+                let sf = safe_name(field);
+                let already_guarded = cond_parts.iter().any(|c| {
+                    c.contains(&format!("s.{} + {}", sf, value))
+                        || c.contains(&format!("{} + s.{}", value, sf))
+                });
+                if !already_guarded {
+                    cond_parts
+                        .push(format!("s.{} + {} \u{2264} {}", sf, value, max_const));
+                }
+            }
+        }
+    }
+    cond_parts
+}
+
+/// Count the number of top-level `∧` conjuncts in a Lean expression.
+///
+/// Respects parenthesis nesting: `(a ∧ b) ∧ c` has 2 top-level conjuncts,
+/// not 3. Used for computing projection paths into right-associative `∧` chains.
+fn count_top_level_conjuncts(expr: &str) -> usize {
+    let mut depth: i32 = 0;
+    let mut count = 0;
+    for ch in expr.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '\u{2227}' if depth == 0 => count += 1, // ∧
+            _ => {}
+        }
+    }
+    count + 1
+}
+
+/// Generate a projection path into a right-associative `∧` chain.
+///
+/// For `A ∧ (B ∧ (C ∧ (D ∧ E)))` with 5 total atoms:
+/// - Index 0 → `hg.1`
+/// - Index 1 → `hg.2.1`
+/// - Index 3 → `hg.2.2.2.1`
+/// - Index 4 → `hg.2.2.2.2` (last element: no trailing `.1`)
+fn conjunction_projection(flat_index: usize, total_atoms: usize) -> String {
+    let mut path = "hg".to_string();
+    for _ in 0..flat_index {
+        path.push_str(".2");
+    }
+    if flat_index < total_atoms - 1 {
+        path.push_str(".1");
+    }
+    path
+}
+
+/// Generate proof script for a requires-based abort theorem.
+///
+/// The `requires` expression appears as a conjunct (possibly compound) in the
+/// guard. The abort hypothesis `h : ¬(expr)` contradicts the extracted guard
+/// conjuncts, so the proof uses `if_neg` with a projection lambda.
+fn abort_requires_proof(
+    trans_name: &str,
+    cond_parts: &[String],
+    req_index_in_cond_parts: usize,
+) -> String {
+    // Count atoms per cond_part and compute totals
+    let atoms_per: Vec<usize> = cond_parts
+        .iter()
+        .map(|p| count_top_level_conjuncts(p))
+        .collect();
+    let total_atoms: usize = atoms_per.iter().sum();
+    let flat_start: usize = atoms_per[..req_index_in_cond_parts].iter().sum();
+    let target_atoms = atoms_per[req_index_in_cond_parts];
+
+    // Special case: requires is the entire guard (single part)
+    if total_atoms == 1 {
+        return format!(
+            " := by\n  unfold {}\n  rw [if_neg h]\n",
+            trans_name
+        );
+    }
+
+    // Build projections for each atom in this requires expression
+    let projections: Vec<String> = (0..target_atoms)
+        .map(|i| conjunction_projection(flat_start + i, total_atoms))
+        .collect();
+
+    let extraction = if projections.len() == 1 {
+        projections[0].clone()
+    } else {
+        format!("\u{27E8}{}\u{27E9}", projections.join(", ")) // ⟨...⟩
+    };
+
+    format!(
+        " := by\n  unfold {}\n  rw [if_neg (fun hg => h {})]\n",
+        trans_name, extraction
+    )
+}
+
 fn render_transitions(
     out: &mut String,
     spec: &ParsedSpec,
@@ -258,65 +407,7 @@ fn render_transitions(
         let trans_name = safe_name(&format!("{}Transition", op.name));
         let param_sig = param_sig_str(&op.takes_params);
 
-        // Build condition parts
-        let mut cond_parts: Vec<String> = Vec::new();
-        if let Some(ref who) = op.who {
-            cond_parts.push(format!("signer = s.{}", safe_name(who)));
-        }
-        if let Some(ref pre) = op.pre_status {
-            cond_parts.push(format!("s.status = .{}", pre));
-        }
-        // Auto-guards for sub effects (underflow prevention)
-        for (field, op_kind, _value) in &op.effects {
-            if op_kind == "sub" {
-                let ftype = fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .or_else(|| spec.state_fields.iter().find(|(n, _)| n == field))
-                    .map(|(_, t)| t.as_str())
-                    .unwrap_or("");
-                if map_type(ftype) != "Int" {
-                    let val = &op
-                        .effects
-                        .iter()
-                        .find(|(f, o, _)| f == field && o == "sub")
-                        .unwrap()
-                        .2;
-                    cond_parts.push(format!("{} \u{2264} s.{}", val, safe_name(field)));
-                }
-            }
-        }
-        if let Some(ref guard) = op.guard_str {
-            cond_parts.push(guard.clone());
-        }
-        // Requires clauses contribute their positive form as guard conditions
-        for req in &op.requires {
-            cond_parts.push(req.lean_expr.clone());
-        }
-        // Auto-guards for add effects (overflow prevention, type-aware).
-        // Only insert if no existing guard/requires already bounds the sum.
-        for (field, op_kind, value) in &op.effects {
-            if op_kind == "add" {
-                let ftype = fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .or_else(|| spec.state_fields.iter().find(|(n, _)| n == field))
-                    .map(|(_, t)| t.as_str())
-                    .unwrap_or("");
-                if let Some(max_const) = type_max_const(ftype) {
-                    let sf = safe_name(field);
-                    // Check if any existing condition already bounds this field's addition
-                    let already_guarded = cond_parts.iter().any(|c| {
-                        c.contains(&format!("s.{} + {}", sf, value))
-                            || c.contains(&format!("{} + s.{}", value, sf))
-                    });
-                    if !already_guarded {
-                        cond_parts
-                            .push(format!("s.{} + {} \u{2264} {}", sf, value, max_const));
-                    }
-                }
-            }
-        }
+        let cond_parts = build_guard_cond_parts(op, fields, &spec.state_fields);
 
         let has_cond = !cond_parts.is_empty();
         let if_cond = cond_parts.join(" \u{2227} "); // ∧
@@ -469,9 +560,10 @@ fn render_properties(
     out: &mut String,
     properties: &[crate::check::ParsedProperty],
     ops: &[&crate::check::ParsedHandler],
+    fields: &[(String, String)],
     state_type: &str,
 ) {
-    render_properties_inner(out, properties, ops, state_type, "Operation", "applyOp");
+    render_properties_inner(out, properties, ops, fields, state_type, "Operation", "applyOp");
 }
 
 /// Render properties for multi-account specs.
@@ -527,10 +619,19 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
             })
             .collect();
 
+        // Resolve fields for this account
+        let acct_fields: Vec<(String, String)> = spec
+            .account_types
+            .iter()
+            .find(|a| a.name == *acct_name)
+            .map(|a| a.fields.clone())
+            .unwrap_or_default();
+
         render_properties_inner(
             out,
             &owned_props,
             &acct_ops,
+            &acct_fields,
             &state_type,
             &op_type,
             &apply_name,
@@ -538,14 +639,119 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
     }
 }
 
+/// Check whether a handler's transition function has an `if` guard.
+///
+/// Mirrors the condition-building logic in `render_transitions` — if any
+/// condition source is present, the transition has an `if ... then ... else none`.
+fn handler_has_condition(
+    op: &crate::check::ParsedHandler,
+    fields: &[(String, String)],
+) -> bool {
+    if op.who.is_some()
+        || op.pre_status.is_some()
+        || op.guard_str.is_some()
+        || !op.requires.is_empty()
+    {
+        return true;
+    }
+    for (field, op_kind, _) in &op.effects {
+        if op_kind == "sub" {
+            let ftype = fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("");
+            if map_type(ftype) != "Int" {
+                return true;
+            }
+        }
+        if op_kind == "add" {
+            let ftype = fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("");
+            if type_max_const(ftype).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Generate a mechanical proof script for a preservation sub-lemma.
+///
+/// The proof strategy depends on whether the handler modifies fields
+/// referenced in the property expression:
+///
+/// - **No overlap**: After `cases h`, the property on `s'` is definitionally
+///   equal to the property on `s`, so `exact h_inv` works.
+///
+/// - **Field overlap**: Need to unfold the property in both hypothesis and
+///   goal, reduce struct field access with `dsimp`, and discharge with `omega`
+///   (which can destructure the guard conjunction for needed arithmetic facts).
+fn preservation_proof_script(
+    op: &crate::check::ParsedHandler,
+    prop: &crate::check::ParsedProperty,
+    fields: &[(String, String)],
+) -> String {
+    let trans_name = safe_name(&format!("{}Transition", op.name));
+    let has_cond = handler_has_condition(op, fields);
+
+    // Determine which property fields this handler touches
+    let prop_fields: Vec<&str> = if let Some(ref expr) = prop.expression {
+        fields_referenced_in_expr(expr)
+    } else {
+        Vec::new()
+    };
+    let touches_prop_field = op.effects.iter().any(|(f, _, _)| {
+        prop_fields.iter().any(|pf| *pf == f.as_str())
+    }) || (op.post_status.is_some() && prop_fields.iter().any(|pf| *pf == "status"));
+
+    if has_cond {
+        if touches_prop_field {
+            // Handler modifies property fields — need omega with guard facts
+            format!(
+                " := by\n  unfold {} at h; split at h\n  \
+                 · next hg => cases h; unfold {} at h_inv ⊢; dsimp; omega\n  \
+                 · contradiction\n",
+                trans_name, prop.name
+            )
+        } else {
+            // Handler doesn't modify property fields — trivially preserved
+            format!(
+                " := by\n  unfold {} at h; split at h\n  \
+                 · cases h; exact h_inv\n  \
+                 · contradiction\n",
+                trans_name
+            )
+        }
+    } else {
+        // Unconditional handler (no if guard)
+        if touches_prop_field {
+            format!(
+                " := by\n  unfold {} at h; cases h; \
+                 unfold {} at h_inv ⊢; dsimp; omega\n",
+                trans_name, prop.name
+            )
+        } else {
+            format!(
+                " := by\n  unfold {} at h; cases h; exact h_inv\n",
+                trans_name
+            )
+        }
+    }
+}
+
 /// Inner helper for property rendering.
 ///
-/// Emits per-operation sub-lemmas (with sorry) and a master theorem that
-/// is auto-proven by case split over the Operation type.
+/// Emits per-operation sub-lemmas with auto-generated proof scripts and a
+/// master theorem that is auto-proven by case split over the Operation type.
 fn render_properties_inner(
     out: &mut String,
     properties: &[crate::check::ParsedProperty],
     ops: &[&crate::check::ParsedHandler],
+    fields: &[(String, String)],
     state_type: &str,
     op_type: &str,
     apply_name: &str,
@@ -564,7 +770,7 @@ fn render_properties_inner(
             .filter(|op| prop.preserved_by.contains(&op.name))
             .collect();
 
-        // Emit per-operation sub-lemmas (one sorry per op)
+        // Emit per-operation sub-lemmas with auto-generated proofs
         for op in &covered_ops {
             let trans_name = safe_name(&format!("{}Transition", op.name));
             let param_sig = param_sig_str(&op.takes_params);
@@ -583,7 +789,8 @@ fn render_properties_inner(
                 trans_name,
                 param_args_str(&op.takes_params)
             ));
-            out.push_str(&format!("    {} s' := sorry\n\n", prop.name));
+            let proof = preservation_proof_script(op, prop, fields);
+            out.push_str(&format!("    {} s'{}\n", prop.name, proof));
         }
 
         // Emit master theorem auto-proven by case split
@@ -996,7 +1203,13 @@ fn render_environments(out: &mut String, spec: &ParsedSpec, state_type: &str) {
 
 /// Render aborts_if theorems — prove that operations reject under specified conditions.
 /// Also generates abort theorems from `requires ... else Error` clauses (negated form).
-fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], state_type: &str) {
+fn render_aborts_if(
+    out: &mut String,
+    ops: &[&crate::check::ParsedHandler],
+    fields: &[(String, String)],
+    fallback_fields: &[(String, String)],
+    state_type: &str,
+) {
     let has_aborts = ops.iter().any(|op| {
         !op.aborts_if.is_empty() || op.requires.iter().any(|r| r.error_name.is_some())
     });
@@ -1016,6 +1229,9 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
         let trans_name = safe_name(&format!("{}Transition", op.name));
         let param_sig = param_sig_str(&op.takes_params);
         let param_args = param_args_str(&op.takes_params);
+
+        // Build guard condition parts (same structure as render_transitions)
+        let cond_parts = build_guard_cond_parts(op, fields, fallback_fields);
 
         // Collect all abort conditions (negated form)
         let mut all_abort_conditions: Vec<String> = Vec::new();
@@ -1047,7 +1263,7 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
             let disjunction = all_abort_conditions.join(" \u{2228} "); // ∨
             out.push_str(&format!("    ({}) := sorry\n\n", disjunction));
         } else {
-            // Per-condition abort theorems (original behavior)
+            // Per-condition abort theorems
             for abort in &op.aborts_if {
                 let theorem_name = safe_name(&format!(
                     "{}_aborts_if_{}",
@@ -1063,6 +1279,7 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
                 ));
             }
 
+            // Requires-based abort theorems — auto-proven via if_neg projection
             for req in &op.requires {
                 if let Some(ref error_name) = req.error_name {
                     let theorem_name = safe_name(&format!(
@@ -1073,10 +1290,23 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
                         "theorem {} (s : {}) (signer : Pubkey){}\n",
                         theorem_name, state_type, param_sig
                     ));
-                    out.push_str(&format!(
-                        "    (h : \u{00AC}({})) : {} s signer{} = none := sorry\n\n",
-                        req.lean_expr, trans_name, param_args
-                    ));
+
+                    // Find the position of this requires expression in cond_parts
+                    let req_pos = cond_parts.iter().position(|c| c == &req.lean_expr);
+
+                    if let Some(pos) = req_pos {
+                        let proof = abort_requires_proof(&trans_name, &cond_parts, pos);
+                        out.push_str(&format!(
+                            "    (h : \u{00AC}({})) : {} s signer{} = none{}\n",
+                            req.lean_expr, trans_name, param_args, proof
+                        ));
+                    } else {
+                        // Fallback: can't locate in guard, emit sorry
+                        out.push_str(&format!(
+                            "    (h : \u{00AC}({})) : {} s signer{} = none := sorry\n\n",
+                            req.lean_expr, trans_name, param_args
+                        ));
+                    }
                 }
             }
         }
@@ -1311,7 +1541,139 @@ fn render_overflow_obligations(
             trans_name,
             param_args_str(&op.takes_params)
         ));
-        out.push_str(&format!("    {} := sorry\n\n", post_parts.join(" ∧ ")));
+        // Generate proof script
+        let has_cond = handler_has_condition(op, fields);
+        let proof = overflow_proof_script(op, fields, has_cond);
+        out.push_str(&format!("    {}{}\n", post_parts.join(" ∧ "), proof));
+    }
+}
+
+/// Generate a mechanical proof script for an overflow safety theorem.
+///
+/// For each numeric field in the post-state:
+/// - Unchanged fields: project from `h_valid` hypothesis
+/// - Add-modified fields: unfold the `valid_T` predicate and use `omega`
+///   (the guard provides the overflow bound)
+fn overflow_proof_script(
+    op: &crate::check::ParsedHandler,
+    fields: &[(String, String)],
+    has_cond: bool,
+) -> String {
+    let trans_name = safe_name(&format!("{}Transition", op.name));
+
+    // Collect numeric fields with their types (in order matching h_valid)
+    let numeric_fields: Vec<(&str, &str)> = fields
+        .iter()
+        .filter(|(_, t)| {
+            matches!(
+                t.as_str(),
+                "U8" | "U16" | "U32" | "U64" | "U128" | "I64" | "I128"
+            )
+        })
+        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .collect();
+
+    let n = numeric_fields.len();
+    if n == 0 {
+        return " := sorry\n".to_string();
+    }
+
+    // Build refine tuple: h_valid projections for unchanged fields, ?_ for changed
+    let mut refine_parts: Vec<String> = Vec::new();
+    let mut changed_types: Vec<&str> = Vec::new();
+
+    for (i, (name, ftype)) in numeric_fields.iter().enumerate() {
+        let is_add = op.effects.iter().any(|(f, k, _)| f == name && k == "add");
+        if is_add {
+            refine_parts.push("?_".to_string());
+            changed_types.push(ftype);
+        } else {
+            // h_valid projection (right-associative ∧ chain)
+            let proj = h_valid_projection(i, n);
+            refine_parts.push(proj);
+        }
+    }
+
+    // Build simp lemmas for each changed field
+    let simp_goals: Vec<String> = changed_types
+        .iter()
+        .map(|ftype| {
+            let vfn = valid_fn_name(ftype);
+            let vmod = valid_module_name(ftype);
+            let vmax = valid_max_name(ftype);
+            format!(
+                "    simp only [{}, {}, {}]; omega",
+                vfn, vmod, vmax
+            )
+        })
+        .collect();
+
+    let refine_str = format!("\u{27E8}{}\u{27E9}", refine_parts.join(", "));
+
+    if has_cond {
+        let mut proof = format!(" := by\n  unfold {} at h; split at h\n", trans_name);
+        proof.push_str("  · next hg =>\n    cases h\n");
+        proof.push_str(&format!("    refine {}\n", refine_str));
+        for goal in &simp_goals {
+            proof.push_str(&format!("{}\n", goal));
+        }
+        proof.push_str("  · contradiction\n");
+        proof
+    } else {
+        let mut proof = format!(" := by\n  unfold {} at h; cases h\n", trans_name);
+        proof.push_str(&format!("  refine {}\n", refine_str));
+        for goal in &simp_goals {
+            proof.push_str(&format!("{}\n", goal));
+        }
+        proof
+    }
+}
+
+/// Generate h_valid projection path for position `i` in `n` numeric fields.
+fn h_valid_projection(i: usize, n: usize) -> String {
+    let mut path = "h_valid".to_string();
+    for _ in 0..i {
+        path.push_str(".2");
+    }
+    if i < n - 1 {
+        path.push_str(".1");
+    }
+    path
+}
+
+/// Return the Lean `valid_*` function name for a DSL type.
+fn valid_fn_name(ftype: &str) -> &str {
+    match ftype {
+        "U8" => "valid_u8",
+        "U16" => "valid_u16",
+        "U32" => "valid_u32",
+        "U64" => "valid_u64",
+        "U128" => "valid_u128",
+        _ => "valid_u64",
+    }
+}
+
+/// Return the fully-qualified `Valid.valid_*` name for simp unfolding.
+fn valid_module_name(ftype: &str) -> &str {
+    match ftype {
+        "U8" => "Valid.valid_u8",
+        "U16" => "Valid.valid_u16",
+        "U32" => "Valid.valid_u32",
+        "U64" => "Valid.valid_u64",
+        "U128" => "Valid.valid_u128",
+        _ => "Valid.valid_u64",
+    }
+}
+
+/// Return the `Valid.*_MAX` constant name for simp unfolding.
+fn valid_max_name(ftype: &str) -> &str {
+    match ftype {
+        "U8" => "Valid.U8_MAX",
+        "U16" => "Valid.U16_MAX",
+        "U32" => "Valid.U32_MAX",
+        "U64" => "Valid.U64_MAX",
+        "U128" => "Valid.U128_MAX",
+        _ => "Valid.U64_MAX",
     }
 }
 
@@ -2334,8 +2696,8 @@ instruction RegisterMarket {
         assert!(lean.contains("theorem create_vault_aborts_if_TooManyMembers"));
         assert!(lean.contains("theorem approve_aborts_if_NotAMember"));
         assert!(lean.contains("theorem execute_aborts_if_ThresholdNotMet"));
-        // All should prove the transition returns none
-        assert!(lean.contains("= none := sorry"));
+        // Requires-based aborts are auto-proven via if_neg projection
+        assert!(lean.contains("rw [if_neg"));
     }
 
     #[test]
