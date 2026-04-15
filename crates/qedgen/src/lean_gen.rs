@@ -104,6 +104,12 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     // Abort theorems (aborts_if clauses)
     render_aborts_if(&mut out, &ops_refs, "State");
 
+    // Post-condition theorems (ensures clauses)
+    render_ensures(&mut out, &ops_refs, "State");
+
+    // Frame condition theorems (modifies clauses)
+    render_frame_conditions(&mut out, &ops_refs, &spec.state_fields, "State");
+
     // Cover properties (reachability)
     render_covers(&mut out, spec, "State");
 
@@ -220,6 +226,8 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
             continue;
         }
         render_aborts_if(&mut out, &ops, &state_name);
+        render_ensures(&mut out, &ops, &state_name);
+        render_frame_conditions(&mut out, &ops, &acct.fields, &state_name);
         render_overflow_obligations(&mut out, spec, &ops, &acct.fields, &state_name);
     }
 
@@ -258,7 +266,7 @@ fn render_transitions(
         if let Some(ref pre) = op.pre_status {
             cond_parts.push(format!("s.status = .{}", pre));
         }
-        // Auto-guards for sub effects
+        // Auto-guards for sub effects (underflow prevention)
         for (field, op_kind, _value) in &op.effects {
             if op_kind == "sub" {
                 let ftype = fields
@@ -280,6 +288,34 @@ fn render_transitions(
         }
         if let Some(ref guard) = op.guard_str {
             cond_parts.push(guard.clone());
+        }
+        // Requires clauses contribute their positive form as guard conditions
+        for req in &op.requires {
+            cond_parts.push(req.lean_expr.clone());
+        }
+        // Auto-guards for add effects (overflow prevention, type-aware).
+        // Only insert if no existing guard/requires already bounds the sum.
+        for (field, op_kind, value) in &op.effects {
+            if op_kind == "add" {
+                let ftype = fields
+                    .iter()
+                    .find(|(n, _)| n == field)
+                    .or_else(|| spec.state_fields.iter().find(|(n, _)| n == field))
+                    .map(|(_, t)| t.as_str())
+                    .unwrap_or("");
+                if let Some(max_const) = type_max_const(ftype) {
+                    let sf = safe_name(field);
+                    // Check if any existing condition already bounds this field's addition
+                    let already_guarded = cond_parts.iter().any(|c| {
+                        c.contains(&format!("s.{} + {}", sf, value))
+                            || c.contains(&format!("{} + s.{}", value, sf))
+                    });
+                    if !already_guarded {
+                        cond_parts
+                            .push(format!("s.{} + {} \u{2264} {}", sf, value, max_const));
+                    }
+                }
+            }
         }
 
         let has_cond = !cond_parts.is_empty();
@@ -310,6 +346,11 @@ fn render_transitions(
             "def {} (s : {}) (signer : Pubkey){} : Option {} :=\n",
             trans_name, state_type, param_sig, state_type
         ));
+
+        // Emit let bindings before the if condition
+        for (binding_name, lean_expr, _rust_expr) in &op.let_bindings {
+            out.push_str(&format!("  let {} := {}\n", safe_name(binding_name), lean_expr));
+        }
 
         if has_cond {
             out.push_str(&format!("  if {} then\n", if_cond));
@@ -579,13 +620,34 @@ fn render_properties_inner(
                     ctor, param_bind, ref_name, param_pass
                 ));
             } else {
-                // Operation not in preserved_by — may not preserve the property
-                out.push_str(&format!(
-                    "  | {}{} => sorry -- {} not in preserved_by; prove manually if needed\n",
-                    ctor,
-                    param_bind,
-                    op.name
-                ));
+                // Operation not in preserved_by — attempt inline proof if trivial.
+                // Collect field names referenced in the property expression.
+                let prop_fields: Vec<&str> = if let Some(ref expr) = prop.expression {
+                    fields_referenced_in_expr(expr)
+                } else {
+                    Vec::new()
+                };
+                // Check if the operation touches any field the property references.
+                let touches_prop_field = op.effects.iter().any(|(f, _, _)| {
+                    prop_fields.iter().any(|pf| *pf == f.as_str())
+                });
+                let trans_name = safe_name(&format!("{}Transition", op.name));
+                if !touches_prop_field {
+                    // Operation doesn't modify any field in the property → trivially preserved.
+                    out.push_str(&format!(
+                        "  | {}{} =>\n    simp [applyOp, {}] at h\n    obtain \u{27E8}_, h_eq\u{27E9} := h\n    subst h_eq; exact h_inv\n",
+                        ctor, param_bind, trans_name
+                    ));
+                } else {
+                    // Operation modifies property fields but isn't in preserved_by —
+                    // can't safely auto-prove without understanding the inequality direction.
+                    out.push_str(&format!(
+                        "  | {}{} => sorry -- {} not in preserved_by; prove manually if needed\n",
+                        ctor,
+                        param_bind,
+                        op.name
+                    ));
+                }
             }
         }
         out.push('\n');
@@ -933,8 +995,11 @@ fn render_environments(out: &mut String, spec: &ParsedSpec, state_type: &str) {
 }
 
 /// Render aborts_if theorems — prove that operations reject under specified conditions.
+/// Also generates abort theorems from `requires ... else Error` clauses (negated form).
 fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], state_type: &str) {
-    let has_aborts = ops.iter().any(|op| !op.aborts_if.is_empty());
+    let has_aborts = ops.iter().any(|op| {
+        !op.aborts_if.is_empty() || op.requires.iter().any(|r| r.error_name.is_some())
+    });
     if !has_aborts {
         return;
     }
@@ -948,23 +1013,185 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
     );
 
     for op in ops {
-        for abort in &op.aborts_if {
-            let trans_name = safe_name(&format!("{}Transition", op.name));
-            let param_sig = param_sig_str(&op.takes_params);
+        let trans_name = safe_name(&format!("{}Transition", op.name));
+        let param_sig = param_sig_str(&op.takes_params);
+        let param_args = param_args_str(&op.takes_params);
 
-            let theorem_name = safe_name(&format!(
-                "{}_aborts_if_{}",
-                op.name, abort.error_name
-            ));
+        // Collect all abort conditions (negated form)
+        let mut all_abort_conditions: Vec<String> = Vec::new();
+
+        // Traditional aborts_if clauses — the expression IS the abort condition
+        for abort in &op.aborts_if {
+            all_abort_conditions.push(abort.lean_expr.clone());
+        }
+
+        // Requires clauses with else Error — negated positive condition
+        for req in &op.requires {
+            if req.error_name.is_some() {
+                all_abort_conditions
+                    .push(format!("\u{00AC}({})", req.lean_expr)); // ¬(...)
+            }
+        }
+
+        if op.aborts_total && !all_abort_conditions.is_empty() {
+            // Aborts total: single IFF theorem with disjunction of all conditions
+            let theorem_name = safe_name(&format!("{}_aborts_iff", op.name));
             out.push_str(&format!(
-                "theorem {} (s : {}) (signer : Pubkey){}\n",
+                "theorem {} (s : {}) (signer : Pubkey){} :\n",
                 theorem_name, state_type, param_sig
             ));
             out.push_str(&format!(
-                "    (h : {}) : {} s signer{} = none := sorry\n\n",
-                abort.lean_expr,
+                "    {} s signer{} = none \u{2194}\n",
+                trans_name, param_args
+            ));
+            let disjunction = all_abort_conditions.join(" \u{2228} "); // ∨
+            out.push_str(&format!("    ({}) := sorry\n\n", disjunction));
+        } else {
+            // Per-condition abort theorems (original behavior)
+            for abort in &op.aborts_if {
+                let theorem_name = safe_name(&format!(
+                    "{}_aborts_if_{}",
+                    op.name, abort.error_name
+                ));
+                out.push_str(&format!(
+                    "theorem {} (s : {}) (signer : Pubkey){}\n",
+                    theorem_name, state_type, param_sig
+                ));
+                out.push_str(&format!(
+                    "    (h : {}) : {} s signer{} = none := sorry\n\n",
+                    abort.lean_expr, trans_name, param_args
+                ));
+            }
+
+            for req in &op.requires {
+                if let Some(ref error_name) = req.error_name {
+                    let theorem_name = safe_name(&format!(
+                        "{}_aborts_if_{}",
+                        op.name, error_name
+                    ));
+                    out.push_str(&format!(
+                        "theorem {} (s : {}) (signer : Pubkey){}\n",
+                        theorem_name, state_type, param_sig
+                    ));
+                    out.push_str(&format!(
+                        "    (h : \u{00AC}({})) : {} s signer{} = none := sorry\n\n",
+                        req.lean_expr, trans_name, param_args
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Render post-condition theorems from `ensures` clauses.
+///
+/// Each ensures clause generates a theorem of the form:
+/// ```lean
+/// theorem handler_ensures_N (s s' : State) (signer : Pubkey) ...
+///     (h : handlerTransition s signer ... = some s') :
+///     <ensures_expr> := sorry
+/// ```
+/// In the ensures expression, `state.field` is rendered as `s'.field` (post-state)
+/// and `old(state.field)` as `s.field` (pre-state).
+fn render_ensures(out: &mut String, ops: &[&crate::check::ParsedHandler], state_type: &str) {
+    let has_ensures = ops.iter().any(|op| !op.ensures.is_empty());
+    if !has_ensures {
+        return;
+    }
+
+    out.push_str(
+        "-- ============================================================================\n",
+    );
+    out.push_str("-- Post-conditions (ensures)\n");
+    out.push_str(
+        "-- ============================================================================\n\n",
+    );
+
+    for op in ops {
+        for (i, ens) in op.ensures.iter().enumerate() {
+            let trans_name = safe_name(&format!("{}Transition", op.name));
+            let param_sig = param_sig_str(&op.takes_params);
+
+            let theorem_name = safe_name(&format!("{}_ensures_{}", op.name, i));
+            out.push_str(&format!(
+                "theorem {} (s s' : {}) (signer : Pubkey){}\n",
+                theorem_name, state_type, param_sig
+            ));
+            out.push_str(&format!(
+                "    (h : {} s signer{} = some s') :\n",
                 trans_name,
                 param_args_str(&op.takes_params)
+            ));
+            out.push_str(&format!("    {} := sorry\n\n", ens.lean_expr));
+        }
+    }
+}
+
+/// Render frame condition theorems from `modifies` clauses.
+///
+/// For each handler with a `modifies` clause, generates a theorem proving that
+/// all fields NOT in the modifies list remain unchanged after the transition.
+/// If the handler also transitions lifecycle (pre/post status), `status` is
+/// implicitly considered modified.
+fn render_frame_conditions(
+    out: &mut String,
+    ops: &[&crate::check::ParsedHandler],
+    fields: &[(String, String)],
+    state_type: &str,
+) {
+    let has_modifies = ops.iter().any(|op| op.modifies.is_some());
+    if !has_modifies {
+        return;
+    }
+
+    out.push_str(
+        "-- ============================================================================\n",
+    );
+    out.push_str("-- Frame conditions (modifies)\n");
+    out.push_str(
+        "-- ============================================================================\n\n",
+    );
+
+    for op in ops {
+        if let Some(ref modified_fields) = op.modifies {
+            let trans_name = safe_name(&format!("{}Transition", op.name));
+            let param_sig = param_sig_str(&op.takes_params);
+
+            // Compute unchanged fields: all fields minus modified ones.
+            // If handler transitions lifecycle, status is implicitly modified.
+            let status_is_modified =
+                op.pre_status.is_some() && op.post_status.is_some();
+            let unchanged: Vec<&str> = fields
+                .iter()
+                .filter(|(name, _)| {
+                    !modified_fields.contains(name)
+                        && !(name == "status" && status_is_modified)
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+
+            if unchanged.is_empty() {
+                continue;
+            }
+
+            let theorem_name = safe_name(&format!("{}_frame", op.name));
+            out.push_str(&format!(
+                "theorem {} (s s' : {}) (signer : Pubkey){}\n",
+                theorem_name, state_type, param_sig
+            ));
+            out.push_str(&format!(
+                "    (h : {} s signer{} = some s') :\n",
+                trans_name,
+                param_args_str(&op.takes_params)
+            ));
+
+            let frame_conjuncts: Vec<String> = unchanged
+                .iter()
+                .map(|f| format!("s'.{} = s.{}", safe_name(f), safe_name(f)))
+                .collect();
+            out.push_str(&format!(
+                "    {} := sorry\n\n",
+                frame_conjuncts.join(" \u{2227} ") // ∧
             ));
         }
     }
@@ -977,7 +1204,7 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], stat
 /// (within their declared type's bounds).
 fn render_overflow_obligations(
     out: &mut String,
-    _spec: &ParsedSpec,
+    spec: &ParsedSpec,
     ops: &[&crate::check::ParsedHandler],
     fields: &[(String, String)],
     state_type: &str,
@@ -1061,6 +1288,14 @@ fn render_overflow_obligations(
             .map(|(n, t)| format!("{} s'.{}", valid_fn(t), safe_name(n)))
             .collect();
 
+        // Collect invariant hypotheses: all properties that cover this operation
+        let inv_hyps: Vec<String> = spec
+            .properties
+            .iter()
+            .filter(|p| p.preserved_by.contains(&op.name) && p.expression.is_some())
+            .map(|p| p.name.clone())
+            .collect();
+
         out.push_str(&format!(
             "theorem {}_overflow_safe (s s' : {}) (signer : Pubkey){}\n",
             safe_name(&op.name),
@@ -1068,6 +1303,9 @@ fn render_overflow_obligations(
             param_sig
         ));
         out.push_str(&format!("    (h_valid : {})\n", pre_parts.join(" ∧ ")));
+        for inv in &inv_hyps {
+            out.push_str(&format!("    (h_inv_{} : {} s)\n", safe_name(inv), inv));
+        }
         out.push_str(&format!(
             "    (h : {} s signer{} = some s') :\n",
             trans_name,
@@ -1551,7 +1789,40 @@ fn map_type(t: &str) -> &str {
     }
 }
 
+/// Return the Lean numeric literal for the maximum value of a DSL type.
+/// Returns None for non-numeric types (Pubkey, Bool, etc.)
+fn type_max_const(t: &str) -> Option<&str> {
+    match t {
+        "U8" => Some("255"),
+        "U16" => Some("65535"),
+        "U32" => Some("4294967295"),
+        "U64" => Some("18446744073709551615"),
+        "U128" => Some("340282366920938463463374607431768211455"),
+        _ => None,
+    }
+}
+
 /// Quote Lean keywords as «name».
+/// Extract field names referenced in a Lean property expression.
+///
+/// Looks for patterns like `s.field_name` and returns the field names.
+fn fields_referenced_in_expr(expr: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    for (i, _) in expr.match_indices("s.") {
+        let rest = &expr[i + 2..];
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(rest.len());
+        if end > 0 {
+            let field = &rest[..end];
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+    }
+    fields
+}
+
 fn safe_name(name: &str) -> String {
     let keywords = [
         "open",

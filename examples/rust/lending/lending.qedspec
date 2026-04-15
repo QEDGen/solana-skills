@@ -70,8 +70,7 @@ handler init_pool {
 
   takes rate : U64
 
-  guard rate > 0
-  aborts_if rate == 0 with InvalidAmount
+  requires rate > 0 else InvalidAmount
 
   effect {
     interest_rate = rate
@@ -97,8 +96,7 @@ handler deposit {
 
   takes amount : U64
 
-  guard amount > 0
-  aborts_if amount == 0 with InvalidAmount
+  requires amount > 0 else InvalidAmount
 
   effect {
     total_deposits += amount
@@ -129,8 +127,7 @@ handler borrow {
     collateral : U64
   }
 
-  guard amount > 0 and collateral > 0
-  aborts_if amount == 0 or collateral == 0 with InvalidAmount
+  requires amount > 0 and collateral > 0 else InvalidAmount
 
   effect {
     amount = amount

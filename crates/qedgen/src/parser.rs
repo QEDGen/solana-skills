@@ -62,6 +62,8 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     let mut liveness_props: Vec<ParsedLiveness> = Vec::new();
     let mut environments: Vec<ParsedEnvironment> = Vec::new();
     let mut target: Option<String> = None;
+    let mut schemas: std::collections::BTreeMap<String, ParsedHandler> =
+        std::collections::BTreeMap::new();
 
     for pair in file.into_inner() {
         match pair.as_rule() {
@@ -117,8 +119,19 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                         error_codes = codes;
                         valued_errors = valued;
                     }
+                    Rule::schema_block => {
+                        let (schema, _includes) = parse_handler_block(inner, &constants);
+                        schemas.insert(schema.name.clone(), schema);
+                    }
                     Rule::handler_block => {
-                        handlers.push(parse_handler_block(inner, &constants));
+                        let (mut handler, handler_includes) = parse_handler_block(inner, &constants);
+                        // Resolve schema includes: merge schema clauses as defaults
+                        for schema_name in &handler_includes {
+                            if let Some(schema) = schemas.get(schema_name) {
+                                merge_schema_into_handler(&mut handler, schema);
+                            }
+                        }
+                        handlers.push(handler);
                     }
                     Rule::instruction_block => {
                         instructions.push(parse_instruction_block(inner, &constants));
@@ -410,74 +423,181 @@ fn parse_event(pair: pest::iterators::Pair<Rule>) -> ParsedEvent {
 
 type Constants = std::collections::BTreeMap<String, String>;
 
+/// Expression context controls how `state.field` and `old(state.field)` are rendered.
+/// - Guard: `state.field` → `s.field` (Lean) / `state.field` (Rust). `old()` is invalid.
+/// - Ensures: `state.field` → `s'.field` (post-state), `old(state.field)` → `s.field` (pre-state).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ExprContext {
+    Guard,
+    Ensures,
+}
+
 /// Reconstruct a guard expression from the pest AST into two forms:
 /// 1. Lean form (with Unicode operators)
 /// 2. Rust/plain form (with ASCII operators)
 ///
 /// Named constants are expanded inline: `MAX_TVL` → `10000000`.
 fn guard_expr_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_expr_to_lean_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_expr_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
-        Rule::guard_expr => guard_expr_to_lean(pair.into_inner().next().unwrap(), consts),
+        Rule::guard_expr => guard_expr_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_or => {
             let parts: Vec<String> = pair
                 .into_inner()
-                .map(|p| guard_expr_to_lean(p, consts))
+                .map(|p| guard_expr_to_lean_ctx(p, consts, ctx))
                 .collect();
             parts.join(" \u{2228} ") // ∨
+        }
+        Rule::guard_implies => {
+            let parts: Vec<String> = pair
+                .into_inner()
+                .map(|p| guard_expr_to_lean_ctx(p, consts, ctx))
+                .collect();
+            parts.join(" \u{2192} ") // →
         }
         Rule::guard_and => {
             let parts: Vec<String> = pair
                 .into_inner()
-                .map(|p| guard_expr_to_lean(p, consts))
+                .map(|p| guard_expr_to_lean_ctx(p, consts, ctx))
                 .collect();
             parts.join(" \u{2227} ") // ∧
         }
-        Rule::guard_atom => guard_expr_to_lean(pair.into_inner().next().unwrap(), consts),
+        Rule::guard_not => {
+            let mut inner = pair.into_inner();
+            let first = inner.next().unwrap();
+            if first.as_rule() == Rule::kw_not {
+                // "not" ~ guard_not
+                let operand = guard_expr_to_lean_ctx(inner.next().unwrap(), consts, ctx);
+                format!("\u{00AC}({})", operand) // ¬(...)
+            } else {
+                // guard_atom passthrough
+                guard_expr_to_lean_ctx(first, consts, ctx)
+            }
+        }
+        Rule::guard_atom => guard_expr_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_comparison => {
             let mut inner = pair.into_inner();
-            let lhs = guard_value_to_lean(inner.next().unwrap(), consts);
+            let lhs = guard_value_to_lean_ctx(inner.next().unwrap(), consts, ctx);
             let op = inner.next().unwrap().as_str();
-            let rhs = guard_value_to_lean(inner.next().unwrap(), consts);
+            let rhs = guard_value_to_lean_ctx(inner.next().unwrap(), consts, ctx);
             let lean_op = match op {
                 "<=" => "\u{2264}", // ≤
                 ">=" => "\u{2265}", // ≥
                 "!=" => "\u{2260}", // ≠
+                // == maps to propositional = in Lean (all types derive DecidableEq)
+                "==" => "=",
                 other => other,
             };
             format!("{} {} {}", lhs, lean_op, rhs)
         }
+        // Quantifiers: forall/exists
+        Rule::quantifier_expr => {
+            let mut inner = pair.into_inner();
+            let kind = inner.next().unwrap().as_str(); // "forall" | "exists"
+            let var_name = inner.next().unwrap().as_str();
+            let var_type = inner.next().unwrap().as_str();
+            let body = guard_expr_to_lean_ctx(inner.next().unwrap(), consts, ctx);
+            let lean_q = match kind {
+                "forall" => "\u{2200}", // ∀
+                "exists" => "\u{2203}", // ∃
+                _ => kind,
+            };
+            let lean_type = match var_type {
+                "U64" | "U32" | "U16" | "U8" => "Nat",
+                "I64" | "I32" | "I16" | "I8" => "Int",
+                other => other,
+            };
+            format!("{} {} : {}, {}", lean_q, var_name, lean_type, body)
+        }
+        // guard_value can appear directly in guard_atom (non-comparison expressions)
+        Rule::guard_value => guard_value_to_lean_ctx(pair, consts, ctx),
+        Rule::guard_product => guard_product_to_lean_ctx(pair, consts, ctx),
+        Rule::guard_term => guard_term_to_lean_ctx(pair, consts, ctx),
         _ => pair.as_str().to_string(),
     }
 }
 
 fn guard_value_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_value_to_lean_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_value_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
         Rule::guard_value => {
-            // guard_value = { guard_term ~ (add_op ~ guard_term)* }
+            // guard_value = { guard_product ~ (add_op ~ guard_product)* }
             let mut parts = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
-                    Rule::guard_term => parts.push(guard_term_to_lean(inner, consts)),
+                    Rule::guard_product => parts.push(guard_product_to_lean_ctx(inner, consts, ctx)),
                     Rule::add_op => parts.push(format!(" {} ", inner.as_str())),
                     _ => parts.push(inner.as_str().to_string()),
                 }
             }
             parts.join("")
         }
-        Rule::guard_term => guard_term_to_lean(pair, consts),
+        Rule::guard_product => guard_product_to_lean_ctx(pair, consts, ctx),
+        Rule::guard_term => guard_term_to_lean_ctx(pair, consts, ctx),
+        _ => pair.as_str().to_string(),
+    }
+}
+
+fn guard_product_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_product_to_lean_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_product_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+    match pair.as_rule() {
+        Rule::guard_product => {
+            // guard_product = { guard_term ~ (mul_op ~ guard_term)* }
+            let mut parts = Vec::new();
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::guard_term => parts.push(guard_term_to_lean_ctx(inner, consts, ctx)),
+                    Rule::mul_op => parts.push(format!(" {} ", inner.as_str())),
+                    _ => parts.push(inner.as_str().to_string()),
+                }
+            }
+            parts.join("")
+        }
+        Rule::guard_term => guard_term_to_lean_ctx(pair, consts, ctx),
         _ => pair.as_str().to_string(),
     }
 }
 
 fn guard_term_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_term_to_lean_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_term_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
-        Rule::guard_term => guard_term_to_lean(pair.into_inner().next().unwrap(), consts),
+        Rule::guard_term => guard_term_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
+        Rule::old_expr => {
+            // old(state.field) — only valid in ensures context
+            let inner = pair.into_inner().next().unwrap(); // field_ref
+            let field = inner
+                .as_str()
+                .strip_prefix("state.")
+                .unwrap_or(inner.as_str());
+            match ctx {
+                ExprContext::Ensures => format!("s.{}", field),   // pre-state
+                ExprContext::Guard => {
+                    // old() in guard context is a spec error — render with marker
+                    format!("«old({})»", field)
+                }
+            }
+        }
         Rule::field_ref => {
             let field = pair
                 .as_str()
                 .strip_prefix("state.")
                 .unwrap_or(pair.as_str());
-            format!("s.{}", field)
+            match ctx {
+                ExprContext::Guard => format!("s.{}", field),
+                ExprContext::Ensures => format!("s'.{}", field),  // post-state
+            }
         }
         Rule::ident => {
             let name = pair.as_str();
@@ -494,56 +614,147 @@ fn guard_term_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> 
 
 /// Guard expression to Rust-compatible form (ASCII operators).
 fn guard_expr_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_expr_to_rust_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_expr_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
-        Rule::guard_expr => guard_expr_to_rust(pair.into_inner().next().unwrap(), consts),
+        Rule::guard_expr => guard_expr_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_or => {
             let parts: Vec<String> = pair
                 .into_inner()
-                .map(|p| guard_expr_to_rust(p, consts))
+                .map(|p| guard_expr_to_rust_ctx(p, consts, ctx))
                 .collect();
             parts.join(" || ")
+        }
+        Rule::guard_implies => {
+            let parts: Vec<String> = pair
+                .into_inner()
+                .map(|p| guard_expr_to_rust_ctx(p, consts, ctx))
+                .collect();
+            if parts.len() == 2 {
+                format!("!({})) || ({})", parts[0], parts[1])
+            } else {
+                // Single element, no implication
+                parts.join("")
+            }
         }
         Rule::guard_and => {
             let parts: Vec<String> = pair
                 .into_inner()
-                .map(|p| guard_expr_to_rust(p, consts))
+                .map(|p| guard_expr_to_rust_ctx(p, consts, ctx))
                 .collect();
             parts.join(" && ")
         }
-        Rule::guard_atom => guard_expr_to_rust(pair.into_inner().next().unwrap(), consts),
+        Rule::guard_not => {
+            let mut inner = pair.into_inner();
+            let first = inner.next().unwrap();
+            if first.as_rule() == Rule::kw_not {
+                let operand = guard_expr_to_rust_ctx(inner.next().unwrap(), consts, ctx);
+                format!("!({})", operand)
+            } else {
+                guard_expr_to_rust_ctx(first, consts, ctx)
+            }
+        }
+        Rule::guard_atom => guard_expr_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_comparison => {
             let mut inner = pair.into_inner();
-            let lhs = guard_value_to_rust(inner.next().unwrap(), consts);
+            let lhs = guard_value_to_rust_ctx(inner.next().unwrap(), consts, ctx);
             let op = inner.next().unwrap().as_str();
-            let rhs = guard_value_to_rust(inner.next().unwrap(), consts);
+            let rhs = guard_value_to_rust_ctx(inner.next().unwrap(), consts, ctx);
             format!("{} {} {}", lhs, op, rhs)
         }
+        // Quantifiers: rendered as comments in Rust (not runtime-checkable)
+        Rule::quantifier_expr => {
+            let mut inner = pair.into_inner();
+            let kind = inner.next().unwrap().as_str();
+            let var_name = inner.next().unwrap().as_str();
+            let var_type = inner.next().unwrap().as_str();
+            let body = guard_expr_to_rust_ctx(inner.next().unwrap(), consts, ctx);
+            format!("/* {} {} : {}, {} */", kind, var_name, var_type, body)
+        }
+        // guard_value can appear directly in guard_atom (non-comparison expressions)
+        Rule::guard_value => guard_value_to_rust_ctx(pair, consts, ctx),
+        Rule::guard_product => guard_product_to_rust_ctx(pair, consts, ctx),
+        Rule::guard_term => guard_term_to_rust_ctx(pair, consts, ctx),
         _ => pair.as_str().to_string(),
     }
 }
 
+#[allow(dead_code)]
 fn guard_value_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_value_to_rust_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_value_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
         Rule::guard_value => {
             let mut parts = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
-                    Rule::guard_term => parts.push(guard_term_to_rust(inner, consts)),
+                    Rule::guard_product => parts.push(guard_product_to_rust_ctx(inner, consts, ctx)),
                     Rule::add_op => parts.push(format!(" {} ", inner.as_str())),
                     _ => parts.push(inner.as_str().to_string()),
                 }
             }
             parts.join("")
         }
-        Rule::guard_term => guard_term_to_rust(pair, consts),
+        Rule::guard_product => guard_product_to_rust_ctx(pair, consts, ctx),
+        Rule::guard_term => guard_term_to_rust_ctx(pair, consts, ctx),
         _ => pair.as_str().to_string(),
     }
 }
 
-fn guard_term_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+#[allow(dead_code)]
+fn guard_product_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_product_to_rust_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_product_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
     match pair.as_rule() {
-        Rule::guard_term => guard_term_to_rust(pair.into_inner().next().unwrap(), consts),
-        Rule::field_ref => pair.as_str().to_string(),
+        Rule::guard_product => {
+            let mut parts = Vec::new();
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::guard_term => parts.push(guard_term_to_rust_ctx(inner, consts, ctx)),
+                    Rule::mul_op => parts.push(format!(" {} ", inner.as_str())),
+                    _ => parts.push(inner.as_str().to_string()),
+                }
+            }
+            parts.join("")
+        }
+        Rule::guard_term => guard_term_to_rust_ctx(pair, consts, ctx),
+        _ => pair.as_str().to_string(),
+    }
+}
+
+#[allow(dead_code)]
+fn guard_term_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
+    guard_term_to_rust_ctx(pair, consts, ExprContext::Guard)
+}
+
+fn guard_term_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+    match pair.as_rule() {
+        Rule::guard_term => guard_term_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
+        Rule::old_expr => {
+            // old(state.field) — only valid in ensures context
+            let inner = pair.into_inner().next().unwrap(); // field_ref
+            let raw = inner.as_str();
+            match ctx {
+                ExprContext::Ensures => format!("old_{}", raw),  // old_state.field
+                ExprContext::Guard => format!("/*old({})*/", raw),
+            }
+        }
+        Rule::field_ref => {
+            match ctx {
+                ExprContext::Guard => pair.as_str().to_string(),
+                ExprContext::Ensures => {
+                    // state.field → new_state.field in ensures
+                    let raw = pair.as_str();
+                    format!("new_{}", raw)
+                }
+            }
+        }
         Rule::ident => {
             let name = pair.as_str();
             if let Some(val) = consts.get(name) {
@@ -847,11 +1058,12 @@ fn parse_context_entries(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedAccount
 // Unified handler parsing (v3)
 // ============================================================================
 
-/// Parse a `handler Name { ... }` block into a ParsedHandler.
+/// Parse a `handler Name { ... }` or `schema Name { ... }` block into a ParsedHandler.
+/// Returns the handler and a list of schema names to include (resolved later).
 fn parse_handler_block(
     pair: pest::iterators::Pair<Rule>,
     consts: &Constants,
-) -> ParsedHandler {
+) -> (ParsedHandler, Vec<String>) {
     let mut name = String::new();
     let mut doc_lines: Vec<String> = Vec::new();
     let mut who = None;
@@ -859,9 +1071,12 @@ fn parse_handler_block(
     let mut pre_status = None;
     let mut post_status = None;
     let mut takes_params: Vec<(String, String)> = Vec::new();
-    let mut guard_str_lean = None;
-    let mut guard_str_rust = None;
-    let mut aborts_if: Vec<ParsedAbort> = Vec::new();
+    let mut requires: Vec<crate::check::ParsedRequires> = Vec::new();
+    let mut ensures: Vec<crate::check::ParsedEnsures> = Vec::new();
+    let mut modifies: Option<Vec<String>> = None;
+    let mut let_bindings: Vec<(String, String, String)> = Vec::new();
+    let mut aborts_total = false;
+    let mut includes: Vec<String> = Vec::new();
     let mut effects: Vec<(String, String, String)> = Vec::new();
     let mut accounts: Vec<ParsedHandlerAccount> = Vec::new();
     let mut transfers: Vec<ParsedTransfer> = Vec::new();
@@ -882,27 +1097,58 @@ fn parse_handler_block(
             Rule::handler_clause => {
                 let clause = inner.into_inner().next().unwrap();
                 match clause.as_rule() {
+                    Rule::include_clause => {
+                        includes.push(extract_ident(clause));
+                    }
+                    Rule::aborts_total_clause => {
+                        aborts_total = true;
+                    }
                     Rule::who_clause => who = Some(extract_ident(clause)),
                     Rule::on_clause => on_account = Some(extract_ident(clause)),
                     Rule::when_clause => pre_status = Some(extract_ident(clause)),
                     Rule::then_clause => post_status = Some(extract_ident(clause)),
                     Rule::takes_block => takes_params = parse_field_decls(clause),
-                    Rule::guard_clause => {
-                        let expr = clause.into_inner().next().unwrap();
-                        guard_str_lean = Some(guard_expr_to_lean(expr.clone(), consts));
-                        guard_str_rust = Some(guard_expr_to_rust(expr, consts));
-                    }
-                    Rule::aborts_if_clause => {
+                    Rule::requires_clause => {
                         let mut parts = clause.into_inner();
                         let expr = parts.next().unwrap();
                         let lean_expr = guard_expr_to_lean(expr.clone(), consts);
                         let rust_expr = guard_expr_to_rust(expr, consts);
-                        let error_name = parts.next().unwrap().as_str().to_string();
-                        aborts_if.push(ParsedAbort {
+                        let error_name = parts.next().map(|p| p.as_str().to_string());
+                        requires.push(crate::check::ParsedRequires {
                             lean_expr,
                             rust_expr,
                             error_name,
                         });
+                    }
+                    Rule::ensures_clause => {
+                        let expr = clause.into_inner().next().unwrap();
+                        let lean_expr = guard_expr_to_lean_ctx(expr.clone(), consts, ExprContext::Ensures);
+                        let rust_expr = guard_expr_to_rust_ctx(expr, consts, ExprContext::Ensures);
+                        ensures.push(crate::check::ParsedEnsures {
+                            lean_expr,
+                            rust_expr,
+                        });
+                    }
+                    Rule::modifies_clause => {
+                        let mut fields = Vec::new();
+                        for inner in clause.into_inner() {
+                            if inner.as_rule() == Rule::ident_list {
+                                for id in inner.into_inner() {
+                                    if id.as_rule() == Rule::ident {
+                                        fields.push(id.as_str().to_string());
+                                    }
+                                }
+                            }
+                        }
+                        modifies = Some(fields);
+                    }
+                    Rule::let_clause => {
+                        let mut parts = clause.into_inner();
+                        let binding_name = parts.next().unwrap().as_str().to_string();
+                        let expr = parts.next().unwrap();
+                        let lean_expr = guard_expr_to_lean(expr.clone(), consts);
+                        let rust_expr = guard_expr_to_rust(expr, consts);
+                        let_bindings.push((binding_name, lean_expr, rust_expr));
                     }
                     Rule::effect_block => effects = parse_effect_stmts(clause),
                     Rule::accounts_block => accounts = parse_accounts_block(clause),
@@ -929,7 +1175,7 @@ fn parse_handler_block(
         Some(doc_lines.join(" "))
     };
 
-    ParsedHandler {
+    (ParsedHandler {
         name,
         doc,
         who,
@@ -937,19 +1183,78 @@ fn parse_handler_block(
         pre_status,
         post_status,
         takes_params,
-        guard_str: guard_str_lean,
-        guard_str_rust,
-        aborts_if,
+        guard_str: None,
+        guard_str_rust: None,
+        aborts_if: Vec::new(),
+        requires,
+        ensures,
+        modifies,
+        let_bindings,
+        aborts_total,
         effects,
         accounts,
         transfers,
         emits,
         invariants,
         properties: Vec::new(),
-    }
+    }, includes)
 }
 
 /// Parse `accounts { name : attr, attr, ... }` block into IDL-level descriptors.
+/// Merge schema clauses into a handler. Schema provides defaults:
+/// - Scalar fields (who, on, when, then, guard): schema value used only if handler doesn't set it
+/// - Collection fields (requires, ensures, let_bindings, etc.): schema entries prepended
+/// - Boolean fields (aborts_total): OR'd together
+fn merge_schema_into_handler(handler: &mut ParsedHandler, schema: &ParsedHandler) {
+    // Scalar defaults
+    if handler.who.is_none() {
+        handler.who = schema.who.clone();
+    }
+    if handler.on_account.is_none() {
+        handler.on_account = schema.on_account.clone();
+    }
+    if handler.pre_status.is_none() {
+        handler.pre_status = schema.pre_status.clone();
+    }
+    if handler.post_status.is_none() {
+        handler.post_status = schema.post_status.clone();
+    }
+    if handler.modifies.is_none() {
+        handler.modifies = schema.modifies.clone();
+    }
+
+    // Collection prepend (schema clauses come before handler's own)
+    let mut merged_requires = schema.requires.clone();
+    merged_requires.append(&mut handler.requires);
+    handler.requires = merged_requires;
+
+    let mut merged_ensures = schema.ensures.clone();
+    merged_ensures.append(&mut handler.ensures);
+    handler.ensures = merged_ensures;
+
+    let mut merged_let = schema.let_bindings.clone();
+    merged_let.append(&mut handler.let_bindings);
+    handler.let_bindings = merged_let;
+
+    let mut merged_effects = schema.effects.clone();
+    merged_effects.append(&mut handler.effects);
+    handler.effects = merged_effects;
+
+    let mut merged_invariants = schema.invariants.clone();
+    merged_invariants.append(&mut handler.invariants);
+    handler.invariants = merged_invariants;
+
+    // Takes params: merge, avoiding duplicates by name
+    for param in &schema.takes_params {
+        if !handler.takes_params.iter().any(|(n, _)| n == &param.0) {
+            handler.takes_params.push(param.clone());
+        }
+    }
+
+    // Boolean OR
+    handler.aborts_total = handler.aborts_total || schema.aborts_total;
+}
+
 fn parse_accounts_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedHandlerAccount> {
     let mut accounts = Vec::new();
     for inner in pair.into_inner() {
@@ -1119,6 +1424,11 @@ fn operation_to_handler(op: &ParsedOperation, ctx: Option<&ParsedContext>) -> Pa
         guard_str: op.guard_str.clone(),
         guard_str_rust: None,
         aborts_if: op.aborts_if.clone(),
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        modifies: None,
+        let_bindings: Vec::new(),
+        aborts_total: false,
         effects: op.effects.clone(),
         accounts,
         transfers,
@@ -1149,6 +1459,11 @@ fn instruction_to_handler(instr: &ParsedInstruction) -> ParsedHandler {
         guard_str: None,
         guard_str_rust: None,
         aborts_if: Vec::new(),
+        requires: Vec::new(),
+        ensures: Vec::new(),
+        modifies: None,
+        let_bindings: Vec::new(),
+        aborts_total: false,
         effects: Vec::new(),
         accounts: Vec::new(),
         transfers: Vec::new(),
@@ -1892,21 +2207,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_multisig_guards_lean_form() {
+    fn parse_multisig_requires_lean_form() {
         let spec = parse(MULTISIG_SPEC).unwrap();
 
-        // create_vault guard: threshold > 0 and threshold <= member_count and member_count <= 32
+        // create_vault: requires threshold > 0 and threshold <= member_count else InvalidThreshold
         let create = &spec.handlers[0];
-        let guard = create.guard_str.as_deref().unwrap();
-        assert!(guard.contains("\u{2227}")); // ∧
-        assert!(guard.contains("\u{2264}")); // ≤
-        assert!(guard.contains("threshold > 0"));
+        assert!(create.requires.len() >= 1);
+        let req = &create.requires[0];
+        assert!(req.lean_expr.contains("\u{2227}")); // ∧
+        assert!(req.lean_expr.contains("\u{2264}")); // ≤
+        assert!(req.lean_expr.contains("threshold > 0"));
 
-        // approve guard: member_index < state.member_count
+        // approve: requires member_index < state.member_count else NotAMember
         let approve = &spec.handlers[2];
-        let guard = approve.guard_str.as_deref().unwrap();
+        assert!(approve.requires.len() >= 1);
+        let req = &approve.requires[0];
         // state.member_count -> s.member_count in Lean form
-        assert!(guard.contains("s.member_count"));
+        assert!(req.lean_expr.contains("s.member_count"));
     }
 
     #[test]
@@ -2375,29 +2692,31 @@ instruction RegisterMarket {
         include_str!("../../../examples/rust/percolator/percolator.qedspec");
 
     #[test]
-    fn parse_aborts_if_clause() {
+    fn parse_requires_from_percolator() {
         let spec = parse(PERCOLATOR_SPEC).unwrap();
         let withdraw = spec
             .handlers
             .iter()
             .find(|h| h.name == "withdraw")
             .unwrap();
-        assert_eq!(withdraw.aborts_if.len(), 1);
-        assert_eq!(withdraw.aborts_if[0].error_name, "InsufficientFunds");
-        assert!(withdraw.aborts_if[0].rust_expr.contains("C_tot"));
+        assert_eq!(withdraw.requires.len(), 1);
+        assert_eq!(withdraw.requires[0].error_name, Some("InsufficientFunds".to_string()));
+        assert!(withdraw.requires[0].rust_expr.contains("C_tot"));
     }
 
     #[test]
-    fn parse_aborts_if_multiple() {
+    fn parse_requires_multiple() {
         let spec = parse(MULTISIG_SPEC).unwrap();
         let create = spec
             .handlers
             .iter()
             .find(|h| h.name == "create_vault")
             .unwrap();
-        assert_eq!(create.aborts_if.len(), 2);
-        assert_eq!(create.aborts_if[0].error_name, "InvalidThreshold");
-        assert_eq!(create.aborts_if[1].error_name, "TooManyMembers");
+        // Two requires with error names
+        let with_errors: Vec<_> = create.requires.iter().filter(|r| r.error_name.is_some()).collect();
+        assert_eq!(with_errors.len(), 2);
+        assert_eq!(with_errors[0].error_name, Some("InvalidThreshold".to_string()));
+        assert_eq!(with_errors[1].error_name, Some("TooManyMembers".to_string()));
     }
 
     #[test]
@@ -2483,13 +2802,532 @@ instruction RegisterMarket {
         assert_eq!(spec.liveness_props[0].from_state, "Open");
         assert_eq!(spec.liveness_props[0].leads_to_state, "Closed");
 
-        // aborts_if on initialize
+        // requires on initialize
         let init = spec
             .handlers
             .iter()
             .find(|h| h.name == "initialize")
             .unwrap();
-        assert_eq!(init.aborts_if.len(), 1);
-        assert_eq!(init.aborts_if[0].error_name, "InvalidAmount");
+        let with_errors: Vec<_> = init.requires.iter().filter(|r| r.error_name.is_some()).collect();
+        assert_eq!(with_errors.len(), 1);
+        assert_eq!(with_errors[0].error_name, Some("InvalidAmount".to_string()));
+    }
+
+    // ========================================================================
+    // Phase 1 v2 tests: not, implies, *, /, %, requires
+    // ========================================================================
+
+    #[test]
+    fn parse_not_expr() {
+        let spec_str = r#"
+spec Test
+state { active : Bool }
+lifecycle [Off, On]
+handler toggle {
+  when On
+  requires not (state.active == 0)
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        let req = &handler.requires[0];
+        assert!(req.lean_expr.contains("\u{00AC}"), "should contain ¬: {}", req.lean_expr);
+        assert!(req.lean_expr.contains("s.active"), "should reference s.active: {}", req.lean_expr);
+    }
+
+    #[test]
+    fn parse_implies_expr() {
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+property positive_implies_nonzero {
+  expr state.balance > 0 implies state.balance >= 1
+  preserved_by all
+}
+handler noop {}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let prop = &spec.properties[0];
+        let expr = prop.expression.as_ref().unwrap();
+        assert!(
+            expr.contains("\u{2192}"),
+            "should contain → for implies: {}",
+            expr
+        );
+    }
+
+    #[test]
+    fn parse_mul_div_mod_expr() {
+        let spec_str = r#"
+spec Test
+state { fee : U64 }
+handler charge {
+  requires state.fee * 100 / 10000 >= 1
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        let req = &handler.requires[0];
+        assert!(req.lean_expr.contains("*"), "should contain *: {}", req.lean_expr);
+        assert!(req.lean_expr.contains("/"), "should contain /: {}", req.lean_expr);
+    }
+
+    #[test]
+    fn parse_requires_clause_with_error() {
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+errors [InsufficientBalance]
+handler withdraw {
+  requires state.balance > 0 else InsufficientBalance
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.requires.len(), 1);
+        let req = &handler.requires[0];
+        assert!(req.lean_expr.contains("s.balance > 0"));
+        assert_eq!(req.error_name, Some("InsufficientBalance".to_string()));
+    }
+
+    #[test]
+    fn parse_requires_clause_without_error() {
+        let spec_str = r#"
+spec Test
+state { count : U64 }
+handler increment {
+  requires state.count > 0
+  effect { count += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.requires.len(), 1);
+        let req = &handler.requires[0];
+        assert!(req.lean_expr.contains("s.count > 0"));
+        assert_eq!(req.error_name, None);
+    }
+
+    #[test]
+    fn parse_requires_replaces_guard_and_aborts_if() {
+        // Verify that requires with else is equivalent to guard + aborts_if
+        let spec_str = r#"
+spec Test
+state { amount : U64 }
+errors [InvalidAmount]
+handler deposit {
+  requires state.amount > 0 and state.amount <= 1000 else InvalidAmount
+  effect { amount += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.requires.len(), 1);
+        let req = &handler.requires[0];
+        // Positive form should have ∧
+        assert!(req.lean_expr.contains("\u{2227}"), "lean: {}", req.lean_expr);
+        // Rust form should have &&
+        assert!(req.rust_expr.contains("&&"), "rust: {}", req.rust_expr);
+        assert_eq!(req.error_name, Some("InvalidAmount".to_string()));
+    }
+
+    #[test]
+    fn parse_ensures_clause() {
+        let spec_str = r#"
+spec Test
+state { balance : U64  fee : U64 }
+handler deposit {
+  takes { amount : U64 }
+  ensures state.balance == old(state.balance) + amount
+  effect { balance += amount }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.ensures.len(), 1);
+        let ens = &handler.ensures[0];
+        // In ensures context: state.balance → s'.balance, old(state.balance) → s.balance
+        assert!(ens.lean_expr.contains("s'.balance"), "lean: {}", ens.lean_expr);
+        assert!(ens.lean_expr.contains("s.balance"), "lean should have pre-state: {}", ens.lean_expr);
+        assert!(!ens.lean_expr.contains("old"), "should not contain raw 'old': {}", ens.lean_expr);
+        // Rust form: state.balance → new_state.balance, old(state.balance) → old_state.field
+        assert!(ens.rust_expr.contains("new_state.balance"), "rust: {}", ens.rust_expr);
+        assert!(ens.rust_expr.contains("old_state.balance"), "rust: {}", ens.rust_expr);
+    }
+
+    #[test]
+    fn parse_ensures_multiple() {
+        let spec_str = r#"
+spec Test
+state { x : U64  y : U64 }
+handler update {
+  ensures state.x > old(state.x)
+  ensures state.y == old(state.y)
+  effect { x += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.ensures.len(), 2);
+        // First ensures: s'.x > s.x
+        assert!(handler.ensures[0].lean_expr.contains("s'.x"));
+        assert!(handler.ensures[0].lean_expr.contains("s.x"));
+        // Second ensures: s'.y == s.y (frame-like)
+        assert!(handler.ensures[1].lean_expr.contains("s'.y"));
+        assert!(handler.ensures[1].lean_expr.contains("s.y"));
+    }
+
+    #[test]
+    fn parse_modifies_clause() {
+        let spec_str = r#"
+spec Test
+state { balance : U64  fee : U64  owner : Pubkey }
+handler deposit {
+  modifies [balance]
+  effect { balance += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert!(handler.modifies.is_some());
+        let mods = handler.modifies.as_ref().unwrap();
+        assert_eq!(mods, &["balance"]);
+    }
+
+    #[test]
+    fn parse_modifies_multiple_fields() {
+        let spec_str = r#"
+spec Test
+state { x : U64  y : U64  z : U64 }
+handler swap {
+  modifies [x, y]
+  effect { x += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        let mods = handler.modifies.as_ref().unwrap();
+        assert_eq!(mods, &["x", "y"]);
+    }
+
+    #[test]
+    fn parse_let_binding() {
+        let spec_str = r#"
+spec Test
+state { total : U64  used : U64 }
+handler allocate {
+  takes { amount : U64 }
+  let available = state.total - state.used
+  requires available >= amount else InsufficientSpace
+  effect { used += amount }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let handler = &spec.handlers[0];
+        assert_eq!(handler.let_bindings.len(), 1);
+        let (name, lean, rust) = &handler.let_bindings[0];
+        assert_eq!(name, "available");
+        // In guard context: state.total → s.total
+        assert!(lean.contains("s.total"), "lean: {}", lean);
+        assert!(lean.contains("s.used"), "lean: {}", lean);
+        // Rust keeps state.field
+        assert!(rust.contains("state.total"), "rust: {}", rust);
+        assert!(rust.contains("state.used"), "rust: {}", rust);
+    }
+
+    #[test]
+    fn parse_handler_no_modifies_is_none() {
+        // Handlers without modifies should have modifies == None
+        let spec_str = r#"
+spec Test
+state { x : U64 }
+handler noop {
+  effect { x += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        assert!(spec.handlers[0].modifies.is_none());
+    }
+
+    #[test]
+    fn parse_old_in_ensures_renders_correctly() {
+        // Detailed check of old() rendering in both Lean and Rust
+        let spec_str = r#"
+spec Test
+state { count : U64 }
+handler increment {
+  ensures state.count == old(state.count) + 1
+  effect { count += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let ens = &spec.handlers[0].ensures[0];
+        // Lean: s'.count = s.count + 1 (propositional equality for theorem goals)
+        assert_eq!(ens.lean_expr, "s'.count = s.count + 1");
+        // Rust: new_state.count == old_state.count + 1
+        assert_eq!(ens.rust_expr, "new_state.count == old_state.count + 1");
+    }
+
+    #[test]
+    fn parse_all_phase2_constructs_together() {
+        // Integration test: handler with let + requires + ensures + modifies
+        let spec_str = r#"
+spec Test
+state { balance : U64  total_fees : U64 }
+const MAX_BALANCE = 1000000
+errors [Overflow, InvalidAmount]
+
+handler deposit {
+  takes { amount : U64 }
+  let new_balance = state.balance + amount
+  requires amount > 0 else InvalidAmount
+  requires new_balance <= MAX_BALANCE else Overflow
+  modifies [balance]
+  effect { balance += amount }
+  ensures state.balance == old(state.balance) + amount
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let h = &spec.handlers[0];
+
+        // Let bindings
+        assert_eq!(h.let_bindings.len(), 1);
+        assert_eq!(h.let_bindings[0].0, "new_balance");
+
+        // Requires
+        assert_eq!(h.requires.len(), 2);
+        assert_eq!(h.requires[0].error_name, Some("InvalidAmount".to_string()));
+        assert_eq!(h.requires[1].error_name, Some("Overflow".to_string()));
+        // MAX_BALANCE should be expanded
+        assert!(h.requires[1].lean_expr.contains("1000000"), "const expansion: {}", h.requires[1].lean_expr);
+
+        // Modifies
+        assert_eq!(h.modifies.as_ref().unwrap(), &["balance"]);
+
+        // Ensures
+        assert_eq!(h.ensures.len(), 1);
+        assert!(h.ensures[0].lean_expr.contains("s'.balance"));
+        assert!(h.ensures[0].lean_expr.contains("s.balance"));
+
+        // Effects still work
+        assert_eq!(h.effects.len(), 1);
+    }
+
+    // ========================================================================
+    // Phase 3 tests: schemas, include, quantifiers, aborts_total
+    // ========================================================================
+
+    #[test]
+    fn parse_schema_include_basic() {
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+errors [Unauthorized]
+
+schema authorized {
+  who owner
+  requires signer == state.balance else Unauthorized
+}
+
+handler deposit {
+  include authorized
+  takes { amount : U64 }
+  effect { balance += amount }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let h = &spec.handlers[0];
+        // Schema's `who` should be merged
+        assert_eq!(h.who, Some("owner".to_string()));
+        // Schema's `requires` should be merged
+        assert_eq!(h.requires.len(), 1);
+        assert_eq!(h.requires[0].error_name, Some("Unauthorized".to_string()));
+    }
+
+    #[test]
+    fn parse_schema_handler_override() {
+        // Handler's own values take precedence over schema defaults
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+
+schema base {
+  who creator
+}
+
+handler deposit {
+  include base
+  who admin
+  effect { balance += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let h = &spec.handlers[0];
+        // Handler's `who admin` overrides schema's `who creator`
+        assert_eq!(h.who, Some("admin".to_string()));
+    }
+
+    #[test]
+    fn parse_schema_collection_merge() {
+        // Schema's collection items are prepended to handler's
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+errors [Unauthorized, InvalidAmount]
+
+schema guarded {
+  requires state.balance > 0 else Unauthorized
+}
+
+handler withdraw {
+  include guarded
+  takes { amount : U64 }
+  requires amount > 0 else InvalidAmount
+  effect { balance -= amount }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let h = &spec.handlers[0];
+        // Schema's requires comes first, handler's second
+        assert_eq!(h.requires.len(), 2);
+        assert_eq!(h.requires[0].error_name, Some("Unauthorized".to_string()));
+        assert_eq!(h.requires[1].error_name, Some("InvalidAmount".to_string()));
+    }
+
+    #[test]
+    fn parse_aborts_total_flag() {
+        let spec_str = r#"
+spec Test
+state { balance : U64 }
+errors [InvalidAmount, Overflow]
+
+handler deposit {
+  takes { amount : U64 }
+  requires amount > 0 else InvalidAmount
+  requires state.balance + amount <= 1000000 else Overflow
+  aborts_total
+  effect { balance += amount }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let h = &spec.handlers[0];
+        assert!(h.aborts_total);
+        assert_eq!(h.requires.len(), 2);
+    }
+
+    #[test]
+    fn parse_aborts_total_default_false() {
+        let spec_str = r#"
+spec Test
+state { x : U64 }
+handler noop {
+  effect { x += 1 }
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        assert!(!spec.handlers[0].aborts_total);
+    }
+
+    #[test]
+    fn parse_quantifier_forall() {
+        let spec_str = r#"
+spec Test
+state { count : U64 }
+property all_positive {
+  expr forall i : Nat, i < state.count implies state.count > 0
+  preserved_by all
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let prop = &spec.properties[0];
+        // Lean form should contain ∀
+        assert!(prop.expression.as_ref().unwrap().contains("\u{2200}"), "lean: {}", prop.expression.as_ref().unwrap());
+        assert!(prop.expression.as_ref().unwrap().contains("Nat"), "lean: {}", prop.expression.as_ref().unwrap());
+        // Should contain → for implies
+        assert!(prop.expression.as_ref().unwrap().contains("\u{2192}"), "lean: {}", prop.expression.as_ref().unwrap());
+    }
+
+    #[test]
+    fn parse_quantifier_exists() {
+        let spec_str = r#"
+spec Test
+state { count : U64 }
+property some_active {
+  expr exists i : U64, i < state.count
+  preserved_by all
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+        let prop = &spec.properties[0];
+        // Lean form should contain ∃ and Nat (U64 → Nat)
+        assert!(prop.expression.as_ref().unwrap().contains("\u{2203}"), "lean: {}", prop.expression.as_ref().unwrap());
+        assert!(prop.expression.as_ref().unwrap().contains("Nat"), "lean: {}", prop.expression.as_ref().unwrap());
+    }
+
+    #[test]
+    fn parse_all_phase3_constructs_together() {
+        let spec_str = r#"
+spec Test
+state { balance : U64  owner : Pubkey }
+lifecycle [Uninitialized, Active]
+errors [Unauthorized, InvalidAmount, Overflow]
+
+schema authorized {
+  who owner
+  requires signer == state.owner else Unauthorized
+}
+
+handler initialize {
+  when Uninitialized
+  then Active
+  takes { initial_balance : U64 }
+  requires initial_balance > 0 else InvalidAmount
+  requires initial_balance <= 1000000 else Overflow
+  aborts_total
+  modifies [balance, owner]
+  effect {
+    balance = initial_balance
+    owner = signer
+  }
+  ensures state.balance == initial_balance
+}
+
+handler deposit {
+  include authorized
+  when Active
+  takes { amount : U64 }
+  requires amount > 0 else InvalidAmount
+  modifies [balance]
+  effect { balance += amount }
+  ensures state.balance == old(state.balance) + amount
+}
+
+property balance_bounded {
+  expr forall amt : Nat, amt <= state.balance implies state.balance > 0
+  preserved_by all
+}
+"#;
+        let spec = parse(spec_str).unwrap();
+
+        // Initialize handler has aborts_total
+        let init = &spec.handlers[0];
+        assert_eq!(init.name, "initialize");
+        assert!(init.aborts_total);
+        assert_eq!(init.requires.len(), 2);
+        assert_eq!(init.ensures.len(), 1);
+
+        // Deposit handler has schema-merged who + requires
+        let deposit = &spec.handlers[1];
+        assert_eq!(deposit.name, "deposit");
+        assert_eq!(deposit.who, Some("owner".to_string()));
+        // Schema requires + handler requires = 2
+        assert_eq!(deposit.requires.len(), 2);
+        assert_eq!(deposit.requires[0].error_name, Some("Unauthorized".to_string()));
+        assert_eq!(deposit.requires[1].error_name, Some("InvalidAmount".to_string()));
+        assert!(!deposit.aborts_total);
+
+        // Property with quantifier
+        let prop = &spec.properties[0];
+        assert!(prop.expression.as_ref().unwrap().contains("\u{2200}"));
     }
 }

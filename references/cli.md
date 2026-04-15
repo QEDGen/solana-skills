@@ -262,6 +262,26 @@ Generate Quasar program skeleton from spec.
 $QEDGEN codegen --spec Spec.lean --output-dir programs/my_program/
 ```
 
+### `proptest`
+Generate transient property-based test harnesses from spec. Tier 1 of the verification waterfall — finds counterexamples in ~100ms. Output is ephemeral (generate to `/tmp`, run, discard).
+
+```bash
+$QEDGEN proptest --spec my_program.qedspec --output /tmp/proptest_harness.rs
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | required | Path to `.qedspec` file |
+| `--output` | Path | `/tmp/proptest_harness.rs` | Output test file (transient) |
+
+Generated tests:
+- **Preservation tests**: For each (handler, property) pair, verify the invariant holds after the transition
+- **Guard enforcement**: Verify handlers reject invalid inputs
+- **Overflow detection**: Verify `add`/`sub` effects don't wrap around
+- **State machine fuzzer**: Random operation sequences preserving lifecycle + all invariants
+
+For multi-account specs (e.g., lending with Pool + Loan), generates separate `mod` blocks per account type.
+
 ### `kani`
 Generate Kani proof harnesses from spec.
 

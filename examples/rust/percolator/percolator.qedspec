@@ -35,7 +35,7 @@ handler deposit {
 
   takes amount : U128
 
-  guard state.V + amount <= MAX_VAULT_TVL
+  requires state.V + amount <= MAX_VAULT_TVL
 
   effect {
     V += amount
@@ -55,8 +55,7 @@ handler withdraw {
 
   takes amount : U128
 
-  guard state.C_tot >= amount
-  aborts_if state.C_tot < amount with InsufficientFunds
+  requires state.C_tot >= amount else InsufficientFunds
 
   effect {
     V -= amount
@@ -76,7 +75,7 @@ handler top_up_insurance {
 
   takes amount : U128
 
-  guard state.V + amount <= MAX_VAULT_TVL
+  requires state.V + amount <= MAX_VAULT_TVL
 
   effect {
     V += amount

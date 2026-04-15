@@ -56,6 +56,9 @@ qedgen fill-sorry \
   --passes 3 \
   --validate
 
+# Generate proptest harnesses from a .qedspec (Tier 1 of verification waterfall)
+qedgen proptest --spec program.qedspec --output tests/proptest.rs
+
 # Generate a draft SPEC.md from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
 

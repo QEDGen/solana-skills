@@ -14,6 +14,5 @@ handler check_slippage {
     token_account : readonly
   }
 
-  guard token_balance > minimum_balance
-  aborts_if minimum_balance >= token_balance with SlippageExceeded
+  requires token_balance > minimum_balance else SlippageExceeded
 }

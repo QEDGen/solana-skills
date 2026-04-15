@@ -16,6 +16,7 @@ mod lean_gen;
 mod parser;
 mod project;
 mod spec;
+mod proptest_gen;
 mod unit_test;
 mod validate;
 mod verify;
@@ -281,6 +282,17 @@ enum Commands {
         output: PathBuf,
     },
 
+    /// Generate transient proptest harnesses from a qedspec (property-based testing)
+    Proptest {
+        /// Path to the spec file (.qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Output path for the generated proptest file (transient, not committed)
+        #[arg(long, default_value = "/tmp/proptest_harness.rs")]
+        output: PathBuf,
+    },
+
     /// Generate QuasarSVM integration test scaffolds from a qedspec
     #[command(name = "integration-test")]
     IntegrationTest {
@@ -421,6 +433,32 @@ fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
         for line in example.lines() {
             out.push_str("\n      ");
             out.push_str(line);
+        }
+    }
+    if let Some(ref cx) = warning.counterexample {
+        out.push_str("\n    Counterexample:");
+        out.push_str(&format!("\n      Pre-state:  {}  →  {} ✓",
+            cx.pre_state.iter().map(|(f, v)| format!("{} = {}", f, v)).collect::<Vec<_>>().join(", "),
+            cx.pre_check,
+        ));
+        out.push_str(&format!("\n      Apply:      {} ({})",
+            cx.handler,
+            cx.effects.join(", "),
+        ));
+        out.push_str(&format!("\n      Post-state: {}  →  {} {}",
+            cx.post_state.iter().map(|(f, v)| format!("{} = {}", f, v)).collect::<Vec<_>>().join(", "),
+            cx.post_check,
+            if cx.invariant_holds { "✓" } else { "✗" },
+        ));
+    }
+    if !warning.fix_options.is_empty() {
+        out.push_str("\n    Fix options:");
+        for (i, opt) in warning.fix_options.iter().enumerate() {
+            let label = (b'A' + i as u8) as char;
+            out.push_str(&format!("\n      {}) {} — {}", label, opt.label, opt.rationale));
+            for line in opt.snippet.lines() {
+                out.push_str(&format!("\n         {}", line));
+            }
         }
     }
     out
@@ -696,6 +734,10 @@ async fn main() -> Result<()> {
             unit_test::generate(&spec, &output)?;
         }
 
+        Commands::Proptest { spec, output } => {
+            proptest_gen::generate(&spec, &output)?;
+        }
+
         Commands::IntegrationTest { spec, output } => {
             integration_test::generate(&spec, &output)?;
         }
@@ -866,6 +908,8 @@ mod tests {
             example: Some(
                 "  operation borrow\n    effect: loan_amount add loan_amount".to_string(),
             ),
+            counterexample: None,
+            fix_options: vec![],
         };
 
         let rendered = format_lint_warning(&warning);

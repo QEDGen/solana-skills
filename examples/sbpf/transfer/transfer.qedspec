@@ -24,6 +24,5 @@ handler transfer_sol {
 
   takes amount : U64
 
-  guard sender_lamports >= amount
-  aborts_if sender_lamports < amount with InsufficientLamports
+  requires sender_lamports >= amount else InsufficientLamports
 }

@@ -49,6 +49,25 @@ pub struct ParsedAbort {
     pub error_name: String,
 }
 
+/// Parsed requires clause: guard condition with optional abort error.
+/// When `error_name` is Some, generates both a guard (positive form in transition)
+/// and an abort theorem (negated form).
+#[derive(Debug, Clone)]
+pub struct ParsedRequires {
+    pub lean_expr: String,
+    pub rust_expr: String,
+    pub error_name: Option<String>,
+}
+
+/// Parsed ensures clause: post-condition relating pre and post state.
+/// In lean_expr, `old(state.x)` is rendered as `s.x` (pre-state) and
+/// `state.x` as `s'.x` (post-state).
+#[derive(Debug, Clone)]
+pub struct ParsedEnsures {
+    pub lean_expr: String,
+    pub rust_expr: String,
+}
+
 /// Parsed cover block (reachability).
 #[derive(Debug, Clone)]
 pub struct ParsedCover {
@@ -120,7 +139,7 @@ pub struct ParsedOperation {
 }
 
 /// Parsed property from a qedspec block.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedProperty {
     pub name: String,
     pub expression: Option<String>,
@@ -287,13 +306,24 @@ pub struct ParsedHandler {
     pub post_status: Option<String>,
     /// Input parameters.
     pub takes_params: Vec<(String, String)>,
-    /// Guard expression (Lean form).
+    /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
     pub guard_str: Option<String>,
-    /// Guard expression (Rust form).
+    /// Legacy guard expression (Rust form). Deprecated: use `requires` instead.
     #[allow(dead_code)]
     pub guard_str_rust: Option<String>,
-    /// Abort conditions.
+    /// Legacy abort conditions. Deprecated: use `requires ... else` instead.
     pub aborts_if: Vec<ParsedAbort>,
+    /// Requires clauses: guard + optional abort. When error_name is Some,
+    /// generates both transition guard and abort theorem.
+    pub requires: Vec<ParsedRequires>,
+    /// Post-conditions (ensures clauses). Uses s' for post-state, s for old().
+    pub ensures: Vec<ParsedEnsures>,
+    /// Frame condition: fields that may be modified. All others must stay unchanged.
+    pub modifies: Option<Vec<String>>,
+    /// Handler-level let bindings: (name, lean_expr, rust_expr).
+    pub let_bindings: Vec<(String, String, String)>,
+    /// All abort conditions are exhaustive — generates ↔ theorem instead of per-abort.
+    pub aborts_total: bool,
     /// State effects: (field, op, value) where op is "set"|"add"|"sub".
     pub effects: Vec<(String, String, String)>,
     /// IDL-level account descriptors.
@@ -310,7 +340,7 @@ pub struct ParsedHandler {
 
 impl ParsedHandler {
     pub fn has_guard(&self) -> bool {
-        self.guard_str.is_some()
+        self.guard_str.is_some() || !self.requires.is_empty()
     }
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()
@@ -814,6 +844,39 @@ pub enum Severity {
     Info,
 }
 
+/// A concrete counterexample showing how an operation breaks a property.
+/// Structured as data so the agent can reason about it and present it clearly.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Counterexample {
+    /// The property that breaks
+    pub property: String,
+    /// The handler that breaks it
+    pub handler: String,
+    /// Pre-state field values (boundary case where invariant barely holds)
+    pub pre_state: Vec<(String, i64)>,
+    /// The invariant expression evaluated on pre-state (e.g., "3 ≤ 3")
+    pub pre_check: String,
+    /// Effects applied (e.g., ["member_count -= 1"])
+    pub effects: Vec<String>,
+    /// Post-state field values
+    pub post_state: Vec<(String, i64)>,
+    /// The invariant expression evaluated on post-state (e.g., "3 ≤ 2")
+    pub post_check: String,
+    /// Whether the invariant holds after the operation
+    pub invariant_holds: bool,
+}
+
+/// A structured fix option for a lint warning.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FixOption {
+    /// Short label (e.g., "Add guard", "Strengthen property", "Add compensating effect")
+    pub label: String,
+    /// Explanation of why this fix works
+    pub rationale: String,
+    /// The concrete DSL code to add/change
+    pub snippet: String,
+}
+
 /// A spec completeness finding — structured for agent consumption.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CompletenessWarning {
@@ -831,6 +894,13 @@ pub struct CompletenessWarning {
     /// Example DSL snippet showing the fix
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<String>,
+    /// Structured counterexample (when applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterexample: Option<Counterexample>,
+    /// Structured fix options (when applicable)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
+    pub fix_options: Vec<FixOption>,
 }
 
 /// Drift status for a generated code file.
@@ -974,6 +1044,238 @@ fn reachable_lifecycle_states(spec: &ParsedSpec) -> std::collections::HashSet<St
     reachable
 }
 
+/// Look up the declared type of a field, checking the handler's target account
+/// first, then falling back to the global state_fields.
+fn find_field_type(spec: &ParsedSpec, op: &ParsedHandler, field: &str) -> Option<String> {
+    // Check the handler's target account type first
+    if let Some(ref acct_name) = op.on_account {
+        if let Some(acct) = spec.account_types.iter().find(|a| a.name == *acct_name) {
+            if let Some((_, t)) = acct.fields.iter().find(|(n, _)| n == field) {
+                return Some(t.clone());
+            }
+        }
+    }
+    // Fall back to global state fields
+    spec.state_fields
+        .iter()
+        .find(|(n, _)| n == field)
+        .map(|(_, t)| t.clone())
+}
+
+/// Detect the comparison operator and LHS/RHS in a property expression.
+/// Returns (lhs_field, operator, rhs_ref) where rhs_ref is either a field name
+/// or "__const" for constant comparisons (e.g., `s.V ≤ 10000`).
+fn parse_property_relation<'a>(
+    expr: &'a str,
+    prop_fields: &[&'a str],
+) -> Option<(&'a str, &'a str, &'a str)> {
+    // Look for common relational operators in the Lean-form expression
+    for op in &[" ≤ ", " ≥ ", " < ", " > ", " = "] {
+        if let Some(pos) = expr.find(op) {
+            let lhs = &expr[..pos];
+            let rhs = &expr[pos + op.len()..];
+            // Find which prop field is on each side
+            let lhs_field = prop_fields.iter().find(|f| lhs.contains(&format!("s.{}", f)));
+            let rhs_field = prop_fields.iter().find(|f| rhs.contains(&format!("s.{}", f)));
+            match (lhs_field, rhs_field) {
+                (Some(lf), Some(rf)) => return Some((lf, op.trim(), rf)),
+                // Single field vs constant (e.g., s.V ≤ 10000000)
+                (Some(lf), None) => return Some((lf, op.trim(), "__const")),
+                (None, Some(rf)) => return Some(("__const", op.trim(), rf)),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Build a structured counterexample showing why a handler breaks a property.
+fn build_counterexample(
+    expr: &str,
+    prop_name: &str,
+    prop_fields: &[&str],
+    op: &ParsedHandler,
+    modified_fields: &[&str],
+) -> Option<Counterexample> {
+    let relation = parse_property_relation(expr, prop_fields);
+
+    // Collect effects on modified fields
+    let effect_triples: Vec<(&str, &str, &str)> = op
+        .effects
+        .iter()
+        .filter(|(f, _, _)| modified_fields.contains(&f.as_str()))
+        .map(|(f, k, v)| (f.as_str(), k.as_str(), v.as_str()))
+        .collect();
+
+    if effect_triples.is_empty() {
+        return None;
+    }
+
+    let (lhs, op_sym, rhs) = relation?;
+
+    // Build a boundary pre-state where the invariant barely holds
+    let (lhs_val, rhs_val): (i64, i64) = match op_sym {
+        "≤" | "<=" => (3, 3),
+        "≥" | ">=" => (3, 3),
+        "<" => (2, 3),
+        ">" => (3, 2),
+        _ => (3, 3),
+    };
+
+    let mut pre_state = Vec::new();
+    if lhs != "__const" {
+        pre_state.push((lhs.to_string(), lhs_val));
+    }
+    if rhs != "__const" {
+        pre_state.push((rhs.to_string(), rhs_val));
+    }
+
+    let pre_check = format!("{} {} {}", lhs_val, op_sym, rhs_val);
+
+    // Apply each effect
+    let mut post_lhs = lhs_val;
+    let mut post_rhs = rhs_val;
+    let mut effects = Vec::new();
+    for (field, kind, value) in &effect_triples {
+        let v: i64 = value.parse().unwrap_or(1);
+        let desc = match *kind {
+            "add" => format!("{} += {}", field, value),
+            "sub" => format!("{} -= {}", field, value),
+            "set" => format!("{} = {}", field, value),
+            _ => continue,
+        };
+        effects.push(desc);
+        if *field == lhs {
+            match *kind {
+                "add" => post_lhs += v,
+                "sub" => post_lhs -= v,
+                "set" => post_lhs = v,
+                _ => {}
+            }
+        }
+        if *field == rhs {
+            match *kind {
+                "add" => post_rhs += v,
+                "sub" => post_rhs -= v,
+                "set" => post_rhs = v,
+                _ => {}
+            }
+        }
+    }
+
+    let mut post_state = Vec::new();
+    if lhs != "__const" {
+        post_state.push((lhs.to_string(), post_lhs));
+    }
+    if rhs != "__const" {
+        post_state.push((rhs.to_string(), post_rhs));
+    }
+
+    let holds = match op_sym {
+        "≤" | "<=" => post_lhs <= post_rhs,
+        "≥" | ">=" => post_lhs >= post_rhs,
+        "<" => post_lhs < post_rhs,
+        ">" => post_lhs > post_rhs,
+        _ => false,
+    };
+
+    let post_check = format!("{} {} {}", post_lhs, op_sym, post_rhs);
+
+    Some(Counterexample {
+        property: prop_name.to_string(),
+        handler: op.name.clone(),
+        pre_state,
+        pre_check,
+        effects,
+        post_state,
+        post_check,
+        invariant_holds: holds,
+    })
+}
+
+/// Build structured fix suggestions for a property preservation conflict.
+fn build_fix_suggestions(
+    expr: &str,
+    prop_name: &str,
+    op: &ParsedHandler,
+    prop_fields: &[&str],
+    modified_fields: &[&str],
+) -> Vec<FixOption> {
+    let relation = parse_property_relation(expr, prop_fields);
+    let unmodified: Vec<&&str> = prop_fields
+        .iter()
+        .filter(|f| !modified_fields.contains(f))
+        .collect();
+
+    let mut fixes = Vec::new();
+
+    // Fix A: add a guard that ensures the invariant holds after the effect
+    if let Some((lhs, op_sym, rhs)) = relation {
+        for (field, kind, _value) in &op.effects {
+            if !modified_fields.contains(&field.as_str()) {
+                continue;
+            }
+            if kind == "sub" {
+                if field.as_str() == rhs && (op_sym == "≤" || op_sym == "<=") {
+                    fixes.push(FixOption {
+                        label: "Add guard".to_string(),
+                        rationale: format!(
+                            "{} subtracts from {} (RHS of ≤). A strict inequality guard ensures the invariant survives.",
+                            op.name, rhs
+                        ),
+                        snippet: format!(
+                            "handler {}\n  requires state.{} < state.{}",
+                            op.name, lhs, rhs
+                        ),
+                    });
+                } else if field.as_str() == lhs && (op_sym == "≥" || op_sym == ">=") {
+                    fixes.push(FixOption {
+                        label: "Add guard".to_string(),
+                        rationale: format!(
+                            "{} subtracts from {} (LHS of ≥). A strict inequality guard ensures the invariant survives.",
+                            op.name, lhs
+                        ),
+                        snippet: format!(
+                            "handler {}\n  requires state.{} > state.{}",
+                            op.name, lhs, rhs
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fix B: add the handler to preserved_by
+    fixes.push(FixOption {
+        label: "Add to preserved_by".to_string(),
+        rationale: format!(
+            "Include '{}' in the property's preserved_by list. Requires a guard (option above) to make the proof go through.",
+            op.name
+        ),
+        snippet: format!(
+            "property {} {{\n  preserved_by [..., {}]\n}}",
+            prop_name, op.name
+        ),
+    });
+
+    // Fix C: add a compensating effect
+    if let Some(unmod) = unmodified.first() {
+        fixes.push(FixOption {
+            label: "Add compensating effect".to_string(),
+            rationale: format!(
+                "Adjust '{}' alongside the modified field(s) to maintain the invariant.",
+                unmod
+            ),
+            snippet: format!(
+                "handler {}\n  effect {{ {} = <adjusted_value> }}",
+                op.name, unmod
+            ),
+        });
+    }
+
+    fixes
+}
+
 /// Check spec completeness — heuristic rules for under-specification.
 /// Returns structured warnings with fix suggestions for agent consumption.
 pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
@@ -1001,6 +1303,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     signer_hint
                 ),
                 example: Some(format!("  handler {}\n    who {}", op.name, signer_hint)),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
 
@@ -1029,40 +1333,69 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     prop_names.first().unwrap_or(&"my_property"),
                     op.name
                 )),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
 
-        // Rule 3: arithmetic effect without guard
-        let arithmetic_effects: Vec<&(String, String, String)> = op
-            .effects
-            .iter()
-            .filter(|(_, kind, _)| kind == "add" || kind == "sub")
-            .collect();
-        if !arithmetic_effects.is_empty() && !op.has_guard() {
-            let (field, kind, val) = arithmetic_effects[0];
-            let guard_suggestion = if kind == "add" {
-                format!("s.{} + {} ≤ U64_MAX", field, val)
-            } else {
-                format!("s.{} ≥ {}", field, val)
+        // Rule 3: add effect without explicit overflow bound (type-aware).
+        // Fires per-field: for each add effect, check whether any existing guard/requires
+        // mentions both the field name and a bound (<=). Sub effects get auto-guarded
+        // for underflow by codegen, so we only warn about add overflow here.
+        {
+            // Collect all guard text for substring matching
+            let all_guards: String = {
+                let mut g = op.guard_str.clone().unwrap_or_default();
+                for req in &op.requires {
+                    g.push(' ');
+                    g.push_str(&req.lean_expr);
+                }
+                g
             };
-            warnings.push(CompletenessWarning {
-                rule: "unguarded_arithmetic".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "handler '{}' has arithmetic effects but no `guard` — potential overflow/underflow",
-                    op.name
-                ),
-                subject: Some(op.name.clone()),
-                fix: format!(
-                    "Add a `guard` clause to prevent {} overflow",
-                    if kind == "add" { "addition" } else { "subtraction" }
-                ),
-                example: Some(format!(
-                    "  handler {}\n    guard {}",
-                    op.name, guard_suggestion
-                )),
-            });
+
+            for (field, kind, val) in &op.effects {
+                if kind != "add" {
+                    continue;
+                }
+                // Check if any guard already bounds this field's addition
+                let field_bounded = all_guards.contains(&format!("state.{} + {}", field, val))
+                    || all_guards.contains(&format!("{} + state.{}", val, field))
+                    || all_guards.contains(&format!("s.{} + {}", field, val))
+                    || all_guards.contains(&format!("{} + s.{}", val, field));
+                if field_bounded {
+                    continue;
+                }
+
+                let field_type = find_field_type(spec, op, field);
+                let type_max = match field_type.as_deref() {
+                    Some("U8") => "U8_MAX (255)",
+                    Some("U16") => "U16_MAX (65535)",
+                    Some("U32") => "U32_MAX",
+                    Some("U128") => "U128_MAX",
+                    _ => "U64_MAX",
+                };
+                let type_label = field_type.as_deref().unwrap_or("U64");
+                warnings.push(CompletenessWarning {
+                    rule: "unguarded_arithmetic".to_string(),
+                    severity: Severity::Info,
+                    priority: 2,
+                    message: format!(
+                        "handler '{}' adds to {} field '{}' without an explicit bound — codegen auto-inserts a {} guard, but an explicit `requires` with a tighter domain bound produces stronger proofs",
+                        op.name, type_label, field, type_label
+                    ),
+                    subject: Some(op.name.clone()),
+                    fix: format!(
+                        "Add `requires state.{} + {} <= MY_BOUND` for a tighter bound than {} max",
+                        field, val, type_label
+                    ),
+                    example: Some(format!(
+                        "  handler {}\n    requires state.{} + {} <= {}",
+                        op.name, field, val, type_max
+                    )),
+                    counterexample: None,
+                    fix_options: vec![],
+                });
+            }
         }
 
         // Rule 6: handler has no when/then lifecycle
@@ -1081,6 +1414,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     "  handler {}\n    when Active\n    then Active",
                     op.name
                 )),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
     }
@@ -1116,6 +1451,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     "  operation {}\n    effect: {} set new_value",
                     op_hint, fname
                 )),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
     }
@@ -1140,6 +1477,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         op_names.join(", ")
                     ),
                     example: None,
+                    counterexample: None,
+                    fix_options: vec![],
                 });
             }
         }
@@ -1178,6 +1517,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 subject: Some(op.name.clone()),
                 fix: "Add input validation for takes parameters".to_string(),
                 example: Some(format!("  handler {}\n    guard {}", op.name, guard_expr)),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
     }
@@ -1206,6 +1547,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     op.name,
                     effect_lines.join("\n")
                 )),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
     }
@@ -1265,6 +1608,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             fix: "Add at least one property to define what the verification should prove"
                 .to_string(),
             example: Some(example),
+            counterexample: None,
+            fix_options: vec![],
         });
     }
 
@@ -1312,6 +1657,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     "  handler {}\n    transfers {{\n      {} amount <expr>\n    }}",
                     handler.name, accounts_str
                 )),
+                counterexample: None,
+                fix_options: vec![],
             });
         }
     }
@@ -1328,6 +1675,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             subject: None,
             fix: "Add an errors block listing all failure modes".to_string(),
             example: Some("  errors [InvalidAmount, Unauthorized, AlreadyClosed]".to_string()),
+            counterexample: None,
+            fix_options: vec![],
         });
     }
 
@@ -1350,6 +1699,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         state, state, state
                     ),
                     example: None,
+                    counterexample: None,
+                    fix_options: vec![],
                 });
             }
         }
@@ -1407,6 +1758,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         "  property my_invariant {{\n    expr state.{} >= 0\n    preserved_by all\n  }}",
                         field
                     )),
+                    counterexample: None,
+                    fix_options: vec![],
                 });
             }
         }
@@ -1467,6 +1820,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                                 subject: Some(op.name.clone()),
                                 fix: format!("Remove the redundant conjunct '{}'", conjuncts[i]),
                                 example: None,
+                                counterexample: None,
+                                fix_options: vec![],
                             });
                             break; // Only report once per subsumed conjunct
                         }
@@ -1505,7 +1860,112 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 subject: None,
                 fix: "Consider whether the cycle is intentional. If not, designate a terminal state by removing its outgoing transitions.".to_string(),
                 example: None,
+                counterexample: None,
+                fix_options: vec![],
             });
+        }
+    }
+
+    // Rule 16: excluded_op_modifies_property — handler NOT in preserved_by modifies fields
+    // referenced by the property. The inductive theorem will need a manual proof (not sorry).
+    for prop in &spec.properties {
+        if let Some(ref expr) = prop.expression {
+            // Extract field names from the property expression.
+            // The expression is in Lean form (s.field_name) from the parser.
+            let prop_fields: Vec<&str> = {
+                let mut fields = Vec::new();
+                // Check both "s." (Lean form) and "state." (DSL form) patterns
+                for prefix in &["s.", "state."] {
+                    for (i, _) in expr.match_indices(prefix) {
+                        let rest = &expr[i + prefix.len()..];
+                        let end = rest
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(rest.len());
+                        if end > 0 {
+                            let field = &rest[..end];
+                            if !fields.contains(&field) {
+                                fields.push(field);
+                            }
+                        }
+                    }
+                }
+                fields
+            };
+
+            let uses_all = prop.preserved_by.iter().any(|p| p == "all");
+            if uses_all {
+                continue; // all ops are in preserved_by, no exclusion
+            }
+
+            for op in &spec.handlers {
+                if prop.preserved_by.contains(&op.name) {
+                    continue; // this op IS covered
+                }
+                // Check if this excluded op modifies any field in the property expression
+                let modified_prop_fields: Vec<&str> = op
+                    .effects
+                    .iter()
+                    .filter(|(f, _, _)| prop_fields.contains(&f.as_str()))
+                    .map(|(f, _, _)| f.as_str())
+                    .collect();
+
+                if !modified_prop_fields.is_empty() {
+                    // Skip if ALL effects on property fields are monotonically safe.
+                    // e.g., sub on LHS of ≤ can only decrease the LHS → invariant still holds.
+                    if let Some((lhs, op_sym, _rhs)) = parse_property_relation(expr, &prop_fields) {
+                        let all_safe = op
+                            .effects
+                            .iter()
+                            .filter(|(f, _, _)| modified_prop_fields.contains(&f.as_str()))
+                            .all(|(f, kind, _)| {
+                                let on_lhs = f.as_str() == lhs;
+                                match (kind.as_str(), op_sym, on_lhs) {
+                                    ("sub", "≤", true) | ("sub", "<=", true) => true, // decreasing LHS of ≤
+                                    ("add", "≥", true) | ("add", ">=", true) => true, // increasing LHS of ≥
+                                    ("sub", "≥", false) | ("sub", ">=", false) => true, // decreasing RHS of ≥
+                                    ("add", "≤", false) | ("add", "<=", false) => true, // increasing RHS of ≤
+                                    _ => false,
+                                }
+                            });
+                        if all_safe {
+                            continue; // monotonically preserves the invariant
+                        }
+                    }
+
+                    // Build structured counterexample and fix options for agent consumption.
+                    let counterexample =
+                        build_counterexample(expr, &prop.name, &prop_fields, op, &modified_prop_fields);
+
+                    let fix_options =
+                        build_fix_suggestions(expr, &prop.name, op, &prop_fields, &modified_prop_fields);
+
+                    // Compose the human-readable fix string from the first fix option
+                    let fix = fix_options.first().map_or_else(
+                        || format!(
+                            "Add '{}' to property '{}' `preserved_by` with a guard, or restructure the property",
+                            op.name, prop.name
+                        ),
+                        |f| f.snippet.clone(),
+                    );
+
+                    warnings.push(CompletenessWarning {
+                        rule: "excluded_op_modifies_property".to_string(),
+                        severity: Severity::Warning,
+                        priority: 2,
+                        message: format!(
+                            "handler '{}' modifies field(s) [{}] used in property '{}' but is excluded from `preserved_by` — the inductive theorem arm will emit `sorry`",
+                            op.name,
+                            modified_prop_fields.join(", "),
+                            prop.name
+                        ),
+                        subject: Some(op.name.clone()),
+                        fix,
+                        example: None,
+                        counterexample,
+                        fix_options,
+                    });
+                }
+            }
         }
     }
 
@@ -2057,6 +2517,11 @@ mod tests {
             guard_str: None,
             guard_str_rust: None,
             aborts_if: vec![],
+            requires: vec![],
+            ensures: vec![],
+            modifies: None,
+            let_bindings: vec![],
+            aborts_total: false,
             effects: vec![],
             accounts: vec![],
             transfers: vec![],
@@ -2079,6 +2544,11 @@ mod tests {
             guard_str: op.guard_str.clone(),
             guard_str_rust: None,
             aborts_if: op.aborts_if.clone(),
+            requires: vec![],
+            ensures: vec![],
+            modifies: None,
+            let_bindings: vec![],
+            aborts_total: false,
             effects: op.effects.clone(),
             accounts: vec![],
             transfers: vec![],

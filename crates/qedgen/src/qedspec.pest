@@ -19,6 +19,7 @@ top_level_item = {
   | pda_decl
   | event_decl
   | errors_decl
+  | schema_block
   | handler_block
   | instruction_block
   | operation_block
@@ -86,19 +87,29 @@ error_valued_entry = { ident ~ "=" ~ integer ~ string_lit? }
 invariant_decl = { "invariant" ~ ident ~ string_lit }
 
 // ============================================================================
+// Schema block (reusable clause fragments for handlers)
+// ============================================================================
+
+schema_block = { "schema" ~ ident ~ "{" ~ handler_clause* ~ "}" }
+
+// ============================================================================
 // Handler block (unified — replaces both operation and instruction)
 // ============================================================================
 
 handler_block = { doc_comment* ~ "handler" ~ ident ~ "{" ~ handler_clause* ~ "}" }
 
 handler_clause = {
-    who_clause
+    include_clause
+  | who_clause
   | on_clause
   | when_clause
   | then_clause
   | takes_block
-  | guard_clause
-  | aborts_if_clause
+  | let_clause
+  | requires_clause
+  | aborts_total_clause
+  | ensures_clause
+  | modifies_clause
   | effect_block
   | transfers_block
   | emits_clause
@@ -106,6 +117,27 @@ handler_clause = {
   | handler_invariant_clause
   | COMMENT
 }
+
+// Include: merge clauses from a named schema into this handler.
+include_clause = { "include" ~ ident }
+
+// Aborts total: all abort conditions are exhaustive (generates ↔ theorem).
+aborts_total_clause = { "aborts_total" }
+
+// Requires: unified guard + abort. `requires X else Error` generates both the
+// transition guard (X) and an abort theorem (¬X → none). Without `else`, it is
+// just a guard condition (same as `guard`).
+requires_clause = { "requires" ~ guard_expr ~ ("else" ~ ident)? }
+
+// Ensures: declarative post-condition. `state.x` refers to post-state,
+// `old(state.x)` refers to pre-state.
+ensures_clause = { "ensures" ~ guard_expr }
+
+// Modifies: frame condition. Fields not listed must be unchanged after handler.
+modifies_clause = { "modifies" ~ "[" ~ ident_list ~ "]" }
+
+// Let: named intermediate value. Resolved in subsequent guards/ensures/requires.
+let_clause = { "let" ~ ident ~ "=" ~ guard_expr }
 
 // IDL-level accounts block: `accounts { name : descriptor, ... }`
 accounts_block = { "accounts" ~ "{" ~ account_descriptor* ~ "}" }
@@ -188,8 +220,12 @@ op_clause = {
   | when_clause
   | then_clause
   | takes_block
+  | let_clause
   | guard_clause
+  | requires_clause
   | aborts_if_clause
+  | ensures_clause
+  | modifies_clause
   | effect_block
   | calls_clause
   | emits_clause
@@ -209,18 +245,31 @@ takes_block  = { "takes" ~ "{" ~ field_decl* ~ "}" | "takes" ~ field_decl }
 guard_clause = { "guard" ~ guard_expr }
 
 // Guard expressions — parsed as structured AST, not strings
-guard_expr = { guard_or }
-guard_or   = { guard_and ~ ("or" ~ guard_and)* }
-guard_and  = { guard_atom ~ ("and" ~ guard_atom)* }
+// Precedence (lowest→highest): or < implies < and < not < cmp < +/- < */÷/% < atoms
+guard_expr    = { guard_or }
+guard_or      = { guard_implies ~ ("or" ~ guard_implies)* }
+guard_implies = { guard_and ~ ("implies" ~ guard_and)* }
+guard_and     = { guard_not ~ ("and" ~ guard_not)* }
+guard_not     = { kw_not ~ guard_not | guard_atom }
+kw_not        = @{ "not" ~ !(ASCII_ALPHANUMERIC | "_") }
 guard_atom = {
     "(" ~ guard_expr ~ ")"
+  | quantifier_expr
   | guard_comparison
+  | guard_value
 }
+quantifier_expr = { quantifier_kind ~ ident ~ ":" ~ ident ~ "," ~ guard_expr }
+quantifier_kind = { "forall" | "exists" }
 guard_comparison = { guard_value ~ cmp_op ~ guard_value }
 cmp_op = { "<=" | ">=" | "!=" | "<" | ">" | "==" }
-guard_value = { guard_term ~ (add_op ~ guard_term)* }
+guard_value   = { guard_product ~ (add_op ~ guard_product)* }
+guard_product = { guard_term ~ (mul_op ~ guard_term)* }
+mul_op = { "*" | "/" | "%" }
 add_op = { "+" | "-" }
-guard_term = { integer | field_ref | ident }
+guard_term = { integer | old_expr | field_ref | ident }
+
+// Pre-state reference: old(state.field_name) — only valid inside ensures clauses
+old_expr = { "old" ~ "(" ~ field_ref ~ ")" }
 
 // Field references: state.field_name
 field_ref = ${ "state" ~ "." ~ ident }

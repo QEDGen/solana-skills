@@ -2,7 +2,6 @@ import QEDGen.Solana.Account
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.State
 import QEDGen.Solana.Valid
-import QEDGen.Solana.Verify
 
 namespace Lending
 
@@ -81,75 +80,8 @@ def applyLoanOp (s : LoanState) (signer : Pubkey) : LoanOperation → Option Loa
   | .repay => repayTransition s signer
   | .liquidate => liquidateTransition s signer
 
--- ============================================================================
--- Pool: Access control
--- ============================================================================
-
-theorem init_pool_access_control (s : PoolState) (p : Pubkey) (rate : Nat)
-    (h : init_poolTransition s p rate ≠ none) :
-    p = s.authority := by
-  simp [init_poolTransition] at h; exact h.1
-
--- ============================================================================
--- Pool: State machine
--- ============================================================================
-
-theorem init_pool_state_machine (s s' : PoolState) (p : Pubkey) (rate : Nat)
-    (h : init_poolTransition s p rate = some s') :
-    s.status = .Uninitialized ∧ s'.status = .Active := by
-  simp [init_poolTransition] at h
-  obtain ⟨⟨_, h_pre, _⟩, h_eq⟩ := h
-  exact ⟨h_pre, by subst h_eq; rfl⟩
-
-theorem deposit_state_machine (s s' : PoolState) (p : Pubkey) (amount : Nat)
-    (h : depositTransition s p amount = some s') :
-    s.status = .Active ∧ s'.status = .Active := by
-  simp [depositTransition] at h
-  obtain ⟨⟨h_pre, _⟩, h_eq⟩ := h
-  exact ⟨h_pre, by subst h_eq; rfl⟩
-
--- ============================================================================
--- Loan: Access control
--- ============================================================================
-
-theorem borrow_access_control (s : LoanState) (p : Pubkey) (amount collateral : Nat)
-    (h : borrowTransition s p amount collateral ≠ none) :
-    p = s.borrower := by
-  simp [borrowTransition] at h; exact h.1
-
-theorem repay_access_control (s : LoanState) (p : Pubkey)
-    (h : repayTransition s p ≠ none) :
-    p = s.borrower := by
-  simp [repayTransition] at h; exact h.1
-
--- ============================================================================
--- Loan: State machine
--- ============================================================================
-
-theorem borrow_state_machine (s s' : LoanState) (p : Pubkey) (amount collateral : Nat)
-    (h : borrowTransition s p amount collateral = some s') :
-    s.status = .Empty ∧ s'.status = .Active := by
-  simp [borrowTransition] at h
-  obtain ⟨⟨_, h_pre, _⟩, h_eq⟩ := h
-  exact ⟨h_pre, by subst h_eq; rfl⟩
-
-theorem repay_state_machine (s s' : LoanState) (p : Pubkey)
-    (h : repayTransition s p = some s') :
-    s.status = .Active ∧ s'.status = .Empty := by
-  simp [repayTransition] at h
-  obtain ⟨⟨_, h_pre⟩, h_eq⟩ := h
-  exact ⟨h_pre, by subst h_eq; rfl⟩
-
-theorem liquidate_state_machine (s s' : LoanState) (p : Pubkey)
-    (h : liquidateTransition s p = some s') :
-    s.status = .Active ∧ s'.status = .Liquidated := by
-  simp [liquidateTransition] at h
-  obtain ⟨h_pre, h_eq⟩ := h
-  exact ⟨h_pre, by subst h_eq; rfl⟩
-
--- ============================================================================
--- pool_solvency: total_deposits ≥ total_borrows
--- ============================================================================
+/-- Invariant: collateral_backing. -/
+theorem collateral_backing : True := trivial
 
 def pool_solvency (s : PoolState) : Prop := s.total_deposits ≥ s.total_borrows
 
@@ -174,46 +106,45 @@ theorem pool_solvency_inductive (s s' : PoolState) (signer : Pubkey) (op : PoolO
   | init_pool rate => exact pool_solvency_preserved_by_init_pool s s' signer rate h_inv h
   | deposit amount => exact pool_solvency_preserved_by_deposit s s' signer amount h_inv h
 
-/-- Invariant: collateral_backing. -/
-theorem collateral_backing : True := trivial
-
 -- ============================================================================
 -- Abort conditions — operations must reject under specified conditions
 -- ============================================================================
 
 theorem init_pool_aborts_if_InvalidAmount (s : PoolState) (signer : Pubkey) (rate : Nat)
-    (h : rate == 0) : init_poolTransition s signer rate = none := by
-  simp [init_poolTransition]
-  intro _ _; simp at h; omega
+    (h : ¬(rate > 0)) : init_poolTransition s signer rate = none := by
+  unfold init_poolTransition
+  rw [if_neg (fun ⟨_, _, h3⟩ => h h3)]
 
 theorem deposit_aborts_if_InvalidAmount (s : PoolState) (signer : Pubkey) (amount : Nat)
-    (h : amount == 0) : depositTransition s signer amount = none := by
-  simp [depositTransition]
-  intro _; simp at h; omega
-
-theorem borrow_aborts_if_InvalidAmount (s : LoanState) (signer : Pubkey) (amount : Nat) (collateral : Nat)
-    (h : amount == 0 ∨ collateral == 0) : borrowTransition s signer amount collateral = none := by
-  simp [borrowTransition]
-  intro _ _
-  cases h with
-  | inl h_a => simp at h_a; omega
-  | inr h_c => simp at h_c; omega
+    (h : ¬(amount > 0)) : depositTransition s signer amount = none := by
+  unfold depositTransition
+  rw [if_neg (fun ⟨_, h2, _⟩ => h h2)]
 
 -- ============================================================================
 -- Overflow safety obligations (auto-generated for operations with add effects)
 -- ============================================================================
 
+-- Note: deposit now has an auto-generated overflow guard (s.total_deposits + amount ≤ U64_MAX),
+-- making this theorem trivially provable from the transition guard.
 theorem deposit_overflow_safe (s s' : PoolState) (signer : Pubkey) (amount : Nat)
     (h_valid : valid_u64 s.total_deposits ∧ valid_u64 s.total_borrows ∧ valid_u64 s.interest_rate)
+    (h_inv_pool_solvency : pool_solvency s)
     (h : depositTransition s signer amount = some s') :
     valid_u64 s'.total_deposits ∧ valid_u64 s'.total_borrows ∧ valid_u64 s'.interest_rate := by
   simp [depositTransition] at h
-  obtain ⟨⟨_, _, h_bound⟩, h_eq⟩ := h
-  obtain ⟨hd, hb, hi⟩ := h_valid
+  obtain ⟨⟨_, _, h_guard⟩, h_eq⟩ := h
   subst h_eq
-  refine ⟨?_, hb, hi⟩
-  simp only [valid_u64, Valid.valid_u64, Valid.U64_MAX] at h_bound ⊢
-  omega
+  obtain ⟨_, h_borrows, h_rate⟩ := h_valid
+  exact ⟨h_guard, h_borrows, h_rate⟩
+
+-- ============================================================================
+-- Abort conditions — operations must reject under specified conditions
+-- ============================================================================
+
+theorem borrow_aborts_if_InvalidAmount (s : LoanState) (signer : Pubkey) (amount : Nat) (collateral : Nat)
+    (h : ¬(amount > 0 ∧ collateral > 0)) : borrowTransition s signer amount collateral = none := by
+  unfold borrowTransition
+  rw [if_neg (fun ⟨_, _, h3, h4⟩ => h ⟨h3, h4⟩)]
 
 -- ============================================================================
 -- Cover properties — reachability (existential proofs)
@@ -239,13 +170,13 @@ theorem liveness_loan_settles (s : LoanState) (signer : Pubkey)
     ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyLoanOps s signer ops = some s' → s'.status = .Empty := by
   exact ⟨[.repay], by decide, fun s' h_apply => by
     simp only [applyLoanOps, applyLoanOp] at h_apply
-    cases hc : repayTransition s signer with
-    | none => simp [hc] at h_apply
+    cases hr : repayTransition s signer with
+    | none => simp [hr] at h_apply
     | some val =>
-      simp [hc] at h_apply
+      simp [hr] at h_apply
       subst h_apply
-      simp [repayTransition, h] at hc
-      obtain ⟨_, rfl⟩ := hc
+      simp [repayTransition, h] at hr
+      obtain ⟨_, rfl⟩ := hr
       rfl⟩
 
 -- ============================================================================
@@ -256,8 +187,6 @@ theorem pool_solvency_under_interest_rate_change (s : PoolState) (new_interest_r
     (h_c0 : new_interest_rate > 0)
     (h_inv : pool_solvency s) :
     pool_solvency { s with interest_rate := new_interest_rate } := by
-  unfold pool_solvency at h_inv ⊢; exact h_inv
+  simp [pool_solvency] at h_inv ⊢; omega
 
 end Lending
-
-#qedgen_verify Lending

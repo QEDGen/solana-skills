@@ -57,8 +57,7 @@ handler initialize {
     receive_amount : U64
   }
 
-  guard deposit_amount > 0 and receive_amount > 0
-  aborts_if deposit_amount == 0 or receive_amount == 0 with InvalidAmount
+  requires deposit_amount > 0 and receive_amount > 0 else InvalidAmount
 
   effect {
     initializer_amount = deposit_amount

@@ -61,9 +61,8 @@ handler create_vault {
     member_count : U8
   }
 
-  guard threshold > 0 and threshold <= member_count and member_count <= MAX_MEMBERS
-  aborts_if threshold == 0 or threshold > member_count with InvalidThreshold
-  aborts_if member_count > MAX_MEMBERS with TooManyMembers
+  requires threshold > 0 and threshold <= member_count else InvalidThreshold
+  requires member_count <= MAX_MEMBERS else TooManyMembers
 
   effect {
     threshold = threshold
@@ -102,8 +101,8 @@ handler approve {
 
   takes member_index : U8
 
-  guard member_index < state.member_count and state.approval_count < state.member_count
-  aborts_if member_index >= state.member_count with NotAMember
+  requires member_index < state.member_count else NotAMember
+  requires state.approval_count < state.member_count
 
   effect {
     approval_count += 1
@@ -122,8 +121,7 @@ handler execute {
     vault    : writable, pda ["vault", creator]
   }
 
-  guard state.approval_count >= state.threshold
-  aborts_if state.approval_count < state.threshold with ThresholdNotMet
+  requires state.approval_count >= state.threshold else ThresholdNotMet
 
   effect {
     approval_count = 0
@@ -159,7 +157,8 @@ handler remove_member {
     vault   : writable, pda ["vault", creator]
   }
 
-  guard state.member_count > state.threshold
+  requires state.member_count > state.threshold
+  requires state.approval_count == 0
 
   effect {
     member_count -= 1
@@ -173,7 +172,7 @@ property threshold_bounded {
 
 property approvals_bounded {
   expr state.approval_count <= state.member_count
-  preserved_by [create_vault, propose, approve, execute, cancel_proposal]
+  preserved_by all
 }
 
 cover proposal_lifecycle {

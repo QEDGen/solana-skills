@@ -23,21 +23,30 @@ QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 
 ## Architecture
 
-```
-You (Claude)                          Leanstral (fast)        Aristotle (deep)
-  ├── Read spec / source code           ├── Fill sorry          ├── Long-running agent
-  ├── Write Lean 4 models               └── Suggest tactics     └── Hard sub-goals
-  ├── Write theorem statements                                     (minutes-hours)
-  ├── Write proof attempts
-  ├── Run `lake build`, read errors
-  ├── Fix and iterate
-  └── Generate code (codegen/kani/test)
+The `.qedspec` is the **single source of truth** — the only artifact committed to the user's repo. Everything else (proptests, Lean theorems, generated code) is derived and disposable.
 
-Spec-driven pipeline:
-  qedspec ──→ Spec.lean ──→ Lean proofs (formal)
-          └──→ Quasar Rust program (codegen)
-          └──→ Kani harnesses (bounded model checking)
-          └──→ Unit tests + integration tests
+```
+Two phases:
+
+Phase 1 — Spec Design (interactive, all artifacts transient)
+  You + User ──→ iterate on .qedspec
+    ├── Lint         — structural validation           (instant)
+    ├── Proptest     — random counterexamples           (~100ms)
+    └── lean-gen     — type-level provability check     (~seconds)
+  Deliverable: .qedspec (committed)
+
+Phase 2 — Proof Engineering (on demand, formal certificates)
+  .qedspec ──→ Spec.lean ──→ Lean proofs ──→ lake build
+    ├── Leanstral    — fast sorry-filling               (seconds)
+    └── Aristotle    — deep agentic proof search         (minutes-hours)
+  Deliverable: zero-sorry Lean project + #[qed(verified)] stamps
+
+Spec-driven pipeline (all generated from the same .qedspec):
+  qedspec ──→ Proptest harnesses    (transient, /tmp)
+          ──→ Kani harnesses        (generated)
+          ──→ Spec.lean             (generated)
+          ──→ Quasar Rust program   (generated)
+          ──→ Unit + integration tests (generated)
 ```
 
 ## Step 1: Understand the program
@@ -45,7 +54,7 @@ Spec-driven pipeline:
 **Always read the source code first.** Then classify the project:
 
 ### Returning qedgen project (`.qedspec` exists)
-Read the `.qedspec` alongside the source. The `.qedspec` is the spec source of truth. On secondary runs, skip to Step 4. (`Spec.lean` is generated from the `.qedspec` — never treat it as the primary source.)
+Read the `.qedspec` alongside the source. The `.qedspec` is the spec source of truth — `Spec.lean` is generated from it, never treat it as the primary source. On returning visits, re-enter the spec design loop (Step 3) to validate or extend the spec, or proceed directly to proof engineering (Step 4) if the user wants formal certificates.
 
 ### Brownfield project (existing code, no `.qedspec`)
 An existing Rust program being onboarded to qedgen for the first time.
@@ -93,15 +102,43 @@ If no spec was found, run a short interactive quiz — one question at a time:
 
 Ask questions **one at a time**. Wait for the answer before the next.
 
-## Step 3: Write Spec.lean
+## Step 3: Write and refine the .qedspec
 
-Write `formal_verification/Spec.lean` using the `qedspec` macro. See `references/qedspec-dsl.md` for full DSL syntax.
+The spec design phase is an **interactive loop**. You iterate on the `.qedspec` with the user, using lint, proptest, and lean-gen as internal feedback tools. All verification artifacts (proptests, Lean theorems, Spec.lean) are **transient intermediary files** — generated to `/tmp`, used for validation, then discarded. Only the `.qedspec` gets committed to the user's repo.
 
-For sBPF assembly programs, use `qedguards` instead. See `references/qedspec-dsl.md`.
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Spec Design Loop                          │
+│                                                             │
+│   Write/edit .qedspec                                       │
+│        │                                                    │
+│        ▼                                                    │
+│   Lint ──→ priority 1-2 findings? ──→ fix spec, re-lint    │
+│        │                                                    │
+│        ▼                                                    │
+│   Proptest (transient) ──→ counterexample? ──→ fix spec     │
+│        │                                                    │
+│        ▼                                                    │
+│   lean-gen + lake build (transient) ──→ unprovable? ──→ fix │
+│        │                                                    │
+│        ▼                                                    │
+│   Present findings to user as spec-level issues             │
+│        │                                                    │
+│        ▼                                                    │
+│   User confirms ──→ finalize .qedspec                       │
+│                                                             │
+│   Deliverable: the .qedspec file (committed to repo)        │
+│   Everything else: disposable agent workspace               │
+└─────────────────────────────────────────────────────────────┘
+```
 
-Present the spec to the user and get confirmation before proceeding.
+### 3a. Write the initial .qedspec
 
-### Lint the spec (iterative guide)
+Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. For sBPF assembly programs, use `qedguards` instead.
+
+Present the spec to the user and get confirmation before proceeding to validation.
+
+### 3b. Lint (structural validation)
 
 After writing or editing a .qedspec, **always** lint:
 
@@ -117,9 +154,73 @@ Lint output is priority-ordered (1=security, 2=correctness, 3=completeness, 4=qu
 
 Re-run lint after each round of fixes until clean or only priority 5 items remain.
 
-**Do not skip this step.** A spec with priority 1-2 warnings will generate code that can't be fully verified.
+### 3c. Proptest (fast counterexamples)
 
-## Step 4: Set up the Lean project
+Run proptest to catch spec-level bugs in ~100ms. All proptest artifacts are **transient** — generated, run, and discarded within `/tmp`.
+
+```bash
+# Generate harness
+$QEDGEN proptest --spec <path-to-qedspec> --output /tmp/proptest_harness.rs
+
+# Run in a scratch project (create once per session, reuse across specs)
+mkdir -p /tmp/proptest_runner/tests /tmp/proptest_runner/src
+touch /tmp/proptest_runner/src/lib.rs
+cat > /tmp/proptest_runner/Cargo.toml << 'EOF'
+[package]
+name = "proptest-runner"
+version = "0.1.0"
+edition = "2021"
+[dev-dependencies]
+proptest = "1"
+EOF
+
+# Copy and run (repeat for each spec change)
+cp /tmp/proptest_harness.rs /tmp/proptest_runner/tests/proptest.rs
+cd /tmp/proptest_runner && cargo test --test proptest
+```
+
+**Interpreting failures:**
+- **Preservation test fails**: A handler violates a declared property — missing guard or overflow.
+- **Overflow test fails**: An `add`/`sub` effect wraps around without a guard.
+- **Guard test fails**: Guard logic has a bug (shouldn't happen if lint is clean).
+
+### 3d. lean-gen + lake build (type-level validation)
+
+Generate Lean theorems and attempt to build. This catches spec issues that proptest misses — theorems that are logically unprovable indicate a spec bug, not a proof engineering problem.
+
+```bash
+# Generate Spec.lean to /tmp
+$QEDGEN lean-gen --spec <path-to-qedspec> --output /tmp/lean_check/Spec.lean
+
+# Quick validation build
+$QEDGEN init --name check --output-dir /tmp/lean_check
+cp /tmp/lean_check/Spec.lean /tmp/lean_check/formal_verification/Spec.lean
+cd /tmp/lean_check/formal_verification && lake build
+```
+
+If `lake build` reveals structurally unprovable theorems (not just missing tactics — the theorem statement itself is wrong), that's feedback about the spec. Fix the `.qedspec` and re-run.
+
+### 3e. Present findings as spec-level issues
+
+**The user does not need to know which tier found the bug.** Present all findings as spec-level issues:
+
+- "Your `deposit` handler can overflow `total_deposits`, which violates `pool_solvency`. Add a guard: `guard total_deposits + amount >= total_deposits`."
+- "The `withdraw` handler's effect `V -= amount` can underflow when `V < amount`. The guard `C_tot >= amount` doesn't protect `V`."
+- "The `approve` transition allows re-approval — `approval_count` increments without checking if this signer already approved."
+
+The verification tier that found it (proptest, lean-gen, lint) is an implementation detail. Fix the spec, re-run the loop.
+
+### 3f. Finalize
+
+When all tiers pass clean, present the final `.qedspec` to the user. This is the deliverable — it gets committed to the repo. Everything else (proptests, Lean files, build artifacts) is disposed.
+
+## Step 4: Proof engineering (on demand)
+
+Steps 4-8 apply when the user wants **formal proof certificates** — mathematical guarantees backed by Lean 4 proofs. This is a separate phase from spec design. The `.qedspec` is the input; Lean proofs are the output.
+
+Not every project needs this. The `.qedspec` alone (validated by lint + proptest) provides significant assurance. Full formal proofs are for high-stakes programs (DeFi vaults, bridges, token contracts) where the cost of a bug justifies the investment.
+
+### 4a. Set up the Lean project
 
 ```bash
 # Anchor/Rust project
@@ -140,27 +241,30 @@ Generated structure:
 formal_verification/
   lakefile.lean          # Pre-configured (+ Mathlib if --mathlib)
   lean-toolchain
-  Spec.lean              # Definitions + proofs (single file)
+  Spec.lean              # Generated from .qedspec via lean-gen
   lean_solana/           # Embedded support library
   .gitignore
 ```
 
-### When to add Mathlib
+Generate `Spec.lean` from the finalized `.qedspec`:
+```bash
+$QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
+```
 
+**When to add Mathlib:**
 - **sBPF proofs do NOT need Mathlib.** Built-in tactics handle everything.
 - **Anchor/Rust proofs MAY need Mathlib** for u128 arithmetic, `linarith`, `ring`, or `norm_num`.
 - **Rule of thumb:** Start without. Add `--mathlib` if `lake build` fails on a missing tactic or lemma. Mathlib adds ~8GB and 15-45 min first build.
 
-## Step 5: Write Lean proofs
+### 4b. Write Lean proofs
 
-This is the core step. You write Lean 4 directly — models, transitions, theorems, and proofs.
+You write Lean 4 directly — filling the `sorry` markers generated by `lean-gen`.
 
 For each property in the spec:
-1. Define the state as a Lean structure
-2. Define the transition as `Option StateType` (return `none` on precondition failure)
-3. State the theorem matching the spec property
-4. Write the proof
-5. Run `lake build` and iterate on errors
+1. The state structure and transitions are already generated
+2. Theorem statements are already generated (with `sorry`)
+3. Write the proof for each theorem
+4. Run `lake build` and iterate on errors
 
 See `references/proof-patterns.md` for patterns (access control, CPI, state machine, conservation, arithmetic) and tactic rules.
 
@@ -168,7 +272,7 @@ See `references/support-library.md` for the full API (types, constants, function
 
 For sBPF assembly programs, see `references/sbpf.md` for `wp_exec` tactic usage, memory axioms, and simp performance rules.
 
-### Key tactic rules (quick reference)
+**Key tactic rules (quick reference):**
 
 | Do | Don't |
 |---|---|
@@ -177,7 +281,7 @@ For sBPF assembly programs, see `references/sbpf.md` for `wp_exec` tactic usage,
 | `cases h` after `split_ifs` on `some = some` | `injection h` (unnecessary) |
 | `omega` for linear arithmetic | `norm_num` for linear goals |
 
-## Step 6: Call Leanstral / Aristotle for hard sub-goals
+### 4c. Call Leanstral / Aristotle for hard sub-goals
 
 When you have `sorry` markers you cannot fill after 2-3 attempts:
 
@@ -199,7 +303,7 @@ $QEDGEN aristotle submit --project-dir formal_verification --wait
 
 See `references/cli.md` for all Aristotle subcommands.
 
-## Step 7: Stamp verified code
+### 4d. Stamp verified code
 
 After proofs compile and `qedgen check` passes, stamp the verified Rust handlers with `#[qed(verified)]` to detect future drift:
 
@@ -212,53 +316,20 @@ This adds content hashes to every `#[qed(verified)]` annotation. If anyone later
 - **At compile time** (with `qedgen-macros`): `compile_error!` — the program won't build
 - **In CI** (with `qedgen drift`): `exit 1` — the pipeline fails
 
-### Adding annotations
-
-Add `#[qed(verified)]` to each handler function you've proven properties about:
+**Adding annotations:**
 
 ```rust
 use qedgen_macros::qed;
 
-impl Deposit {
-    #[qed(verified, hash = "5af369bb254368d3")]
-    pub fn handler(&mut self, amount: u64) -> Result<(), ProgramError> {
-        // ...
-    }
+#[qed(verified, hash = "5af369bb254368d3")]
+pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+    // ...
 }
 ```
 
-For Anchor programs, annotate the instruction functions directly:
+The hash covers the function signature + body, excluding attributes and comments. It changes when the body, parameters, or return type change. It does NOT change for whitespace, formatting, or comment changes.
 
-```rust
-#[program]
-pub mod escrow {
-    #[qed(verified, hash = "c68230ca8a9e7c28")]
-    pub fn initialize(ctx: Context<Initialize>, amount: u64) -> Result<()> {
-        // ...
-    }
-}
-```
-
-### What the hash covers
-
-The hash is computed from the function signature + body, excluding attributes and comments. It changes when:
-- The function body changes (any statement added/removed/reordered)
-- Parameter names, types, or return type change
-- The function name changes
-
-It does NOT change for: whitespace, formatting, or comment changes.
-
-### CI integration
-
-Add to your CI pipeline:
-
-```bash
-$QEDGEN drift --input programs/src/ --strict
-```
-
-Exits 0 if all hashes match, 1 if any function has drifted. Pair with `lake build` to gate merges on both proof validity and code integrity.
-
-## Step 8: Verify and report
+### 4e. Verify and report
 
 ```bash
 # Build proofs
@@ -278,35 +349,41 @@ $QEDGEN explain --spec program.qedspec --proofs formal_verification/Spec.lean
 
 **IMPORTANT**: Always run `qedgen check` automatically after `lake build` succeeds with zero errors. Present the verification results to the user immediately — do not wait for them to ask. This is the final deliverable.
 
-### Unified drift detection
-
-When code or Kani harnesses are generated from the spec:
+**Unified drift detection** (when code or Kani harnesses are generated from the spec):
 
 ```bash
 $QEDGEN check --spec program.qedspec --proofs formal_verification/Spec.lean --code programs/my_program/ --kani tests/kani.rs
 ```
 
-### CI integration
+**CI integration:**
 
 ```bash
+# Generate CI workflow
 $QEDGEN ci --output .github/workflows/verify.yml
+
+# Or add to existing CI
+$QEDGEN drift --input programs/src/ --strict   # exits 1 on drift
 ```
 
 ## Code generation pipeline
 
-The spec drives code generation across multiple layers:
+Everything is derived from the `.qedspec`. Some outputs are transient (used during spec design, then discarded), others are generated into the project.
 
 ```bash
+# Transient (spec design feedback — generated to /tmp, never committed)
+$QEDGEN lint --spec program.qedspec                                         # Spec completeness lint
+$QEDGEN proptest --spec program.qedspec                                     # Property-based tests
+$QEDGEN coverage --spec program.qedspec                                     # Verification matrix
+
+# Generated (derived from spec, written to project)
+$QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
 $QEDGEN codegen --spec program.qedspec --output-dir programs/my_program/   # Quasar program
 $QEDGEN kani --spec program.qedspec --output tests/kani.rs                  # Kani harnesses
 $QEDGEN test --spec program.qedspec --output src/tests.rs                   # Unit tests
 $QEDGEN integration-test --spec program.qedspec --output src/integration_tests.rs
-$QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
-$QEDGEN coverage --spec program.qedspec                                     # Verification matrix
-$QEDGEN lint --spec program.qedspec                                         # Spec completeness lint
 ```
 
-With `qedgen init --quasar`, all of these are generated automatically.
+With `qedgen init --quasar`, the generated outputs are created automatically.
 
 ### v2.0 spec features
 
@@ -392,13 +469,20 @@ fn deposit_preserves_conservation() {
 
 ## Git hygiene
 
-**Never commit build artifacts:**
-- `.lake/`, `build/`, `lake-packages/`, `lean_solana/.lake/`, `lean_solana/build/`
+The `.qedspec` is the primary committed artifact. Everything else is derived.
 
-The generated `.gitignore` excludes these. When committing verification files:
-- **Do** commit: `.lean` source files, `lakefile.lean`, `lean-toolchain`, `.gitignore`, `SPEC.md`
-- **Never** commit: `.lake/`, `build/`, or any directory containing `.olean` files
-- **Never** use `git add -A` or `git add .` — always stage specific `.lean` files by name
+**Always commit:**
+- `.qedspec` file (the spec source of truth)
+
+**Commit when doing full proof engineering (Step 4):**
+- `formal_verification/*.lean` source files, `lakefile.lean`, `lean-toolchain`, `.gitignore`
+- Generated Rust code (`codegen`, `kani`, `test` outputs)
+
+**Never commit:**
+- Transient intermediary files (proptests, scratch Lean builds in `/tmp`)
+- `.lake/`, `build/`, `lake-packages/`, `lean_solana/.lake/`, `lean_solana/build/`
+- Any directory containing `.olean` files
+- Never use `git add -A` or `git add .` — always stage specific files by name
 
 ## Environment
 
