@@ -692,29 +692,28 @@ pub fn generate_spec_from_qedspec(
         writeln!(s, "**Lifecycle:** {}\n", lifecycle_states.join(" → ")).unwrap();
     }
 
-    // §2 Operations
-    writeln!(s, "## 2. Operations\n").unwrap();
-    for op in &parsed.operations {
-        writeln!(s, "### {}\n", op.name).unwrap();
-        if let Some(ref doc) = op.doc {
+    // §2 Handlers
+    writeln!(s, "## 2. Handlers\n").unwrap();
+    for h in &parsed.handlers {
+        writeln!(s, "### {}\n", h.name).unwrap();
+        if let Some(ref doc) = h.doc {
             writeln!(s, "{}\n", doc).unwrap();
         }
-        if let Some(ref signer) = op.who {
+        if let Some(ref signer) = h.who {
             writeln!(s, "- **Signer:** `{}`", signer).unwrap();
         }
-        if op.has_when {
-            let pre = op.pre_status.as_deref().unwrap_or("?");
-            let post = op.post_status.as_deref().unwrap_or("?");
+        if h.has_when() {
+            let pre = h.pre_status.as_deref().unwrap_or("?");
+            let post = h.post_status.as_deref().unwrap_or("?");
             writeln!(s, "- **Lifecycle:** {} → {}", pre, post).unwrap();
         }
-        if op.has_guard {
-            if let Some(ref guard) = op.guard_str {
+        if h.has_guard() {
+            if let Some(ref guard) = h.guard_str {
                 writeln!(s, "- **Guard:** `{}`", guard).unwrap();
             }
         }
-        if op.has_calls {
-            let program = op.program_id.as_deref().unwrap_or("?");
-            writeln!(s, "- **CPI:** `{}`", program).unwrap();
+        if h.has_calls() {
+            writeln!(s, "- **Transfers:** {} token transfer(s)", h.transfers.len()).unwrap();
         }
         writeln!(s).unwrap();
     }
@@ -738,33 +737,33 @@ pub fn generate_spec_from_qedspec(
         // No proof status available — list expected properties
         writeln!(s, "| Property | Intent |").unwrap();
         writeln!(s, "|----------|--------|").unwrap();
-        for op in &parsed.operations {
-            if op.who.is_some() {
+        for h in &parsed.handlers {
+            if h.who.is_some() {
                 writeln!(
                     s,
                     "| {}.access_control | Only {} can call {} |",
-                    op.name,
-                    op.who.as_deref().unwrap_or("?"),
-                    op.name
+                    h.name,
+                    h.who.as_deref().unwrap_or("?"),
+                    h.name
                 )
                 .unwrap();
             }
-            if op.has_when {
+            if h.has_when() {
                 writeln!(
                     s,
                     "| {}.state_machine | {} → {} |",
-                    op.name,
-                    op.pre_status.as_deref().unwrap_or("?"),
-                    op.post_status.as_deref().unwrap_or("?")
+                    h.name,
+                    h.pre_status.as_deref().unwrap_or("?"),
+                    h.post_status.as_deref().unwrap_or("?")
                 )
                 .unwrap();
             }
-            if op.has_calls {
+            if h.has_calls() {
                 writeln!(
                     s,
-                    "| {}.cpi_correct | CPI targets {} |",
-                    op.name,
-                    op.program_id.as_deref().unwrap_or("?")
+                    "| {}.transfer_correct | {} token transfer(s) |",
+                    h.name,
+                    h.transfers.len()
                 )
                 .unwrap();
             }
@@ -779,25 +778,20 @@ pub fn generate_spec_from_qedspec(
     writeln!(s, "## 4. Trust Boundary\n").unwrap();
     writeln!(s, "The following are axiomatic (not verified):\n").unwrap();
 
-    // Detect which programs are referenced
-    let mut programs = Vec::new();
-    for op in &parsed.operations {
-        if let Some(ref pid) = op.program_id {
-            if !programs.contains(pid) {
-                programs.push(pid.clone());
-            }
-        }
+    // Detect which programs are referenced from handler accounts
+    let has_token_program = parsed.handlers.iter().any(|h| h.has_token_program());
+    let has_system_program = parsed.handlers.iter().any(|h| {
+        h.accounts.iter().any(|a| a.is_program && a.name.contains("system"))
+    });
+    if has_token_program {
+        writeln!(s, "- **SPL Token program**: Transfer semantics are correct. We verify parameters passed, not the transfer itself.").unwrap();
     }
-    for pid in &programs {
-        if pid.contains("TOKEN") {
-            writeln!(s, "- **SPL Token program**: Transfer semantics are correct. We verify parameters passed, not the transfer itself.").unwrap();
-        } else if pid.contains("SYSTEM") {
-            writeln!(
-                s,
-                "- **System Program**: Account creation and SOL transfer semantics."
-            )
-            .unwrap();
-        }
+    if has_system_program {
+        writeln!(
+            s,
+            "- **System Program**: Account creation and SOL transfer semantics."
+        )
+        .unwrap();
     }
     writeln!(
         s,

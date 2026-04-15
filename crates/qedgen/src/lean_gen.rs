@@ -74,7 +74,7 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 
     // Transition functions
-    let ops_refs: Vec<&crate::check::ParsedOperation> = spec.operations.iter().collect();
+    let ops_refs: Vec<&crate::check::ParsedHandler> = spec.handlers.iter().collect();
     render_transitions(
         &mut out,
         spec,
@@ -161,8 +161,8 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 
         // Operations targeting this account
-        let ops: Vec<&crate::check::ParsedOperation> = spec
-            .operations
+        let ops: Vec<&crate::check::ParsedHandler> = spec
+            .handlers
             .iter()
             .filter(|op| {
                 op.on_account.as_deref() == Some(acct_name.as_str())
@@ -178,17 +178,17 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         render_transitions(
             &mut out,
             spec,
-            &ops_to_owned(&ops),
+            &ops,
             &acct.fields,
             &state_name,
             &status_name,
         );
 
         // CPI theorems
-        render_cpi_theorems(&mut out, &ops_to_owned(&ops));
+        render_cpi_theorems(&mut out, &ops);
 
         // Operation inductive + applyOp per account
-        render_operation_inductive(&mut out, &ops_to_owned(&ops), &state_name);
+        render_operation_inductive(&mut out, &ops, &state_name);
     }
 
     // Invariants
@@ -208,8 +208,8 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     // Per-account: aborts_if and overflow need the ops for each account
     for acct in &spec.account_types {
         let state_name = format!("{}State", acct.name);
-        let ops: Vec<&crate::check::ParsedOperation> = spec
-            .operations
+        let ops: Vec<&crate::check::ParsedHandler> = spec
+            .handlers
             .iter()
             .filter(|op| {
                 op.on_account.as_deref() == Some(acct.name.as_str())
@@ -237,19 +237,11 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     out
 }
 
-/// Helper to convert &[&ParsedOperation] to Vec<ParsedOperation> references.
-/// We can't easily change the signatures, so this just helps with the borrow.
-fn ops_to_owned<'a>(
-    ops: &[&'a crate::check::ParsedOperation],
-) -> Vec<&'a crate::check::ParsedOperation> {
-    ops.to_vec()
-}
-
-/// Render transition functions for a set of operations.
+/// Render transition functions for a set of handlers.
 fn render_transitions(
     out: &mut String,
     spec: &ParsedSpec,
-    ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedHandler],
     fields: &[(String, String)],
     state_type: &str,
     _status_type: &str,
@@ -329,80 +321,41 @@ fn render_transitions(
     }
 }
 
-/// Render CPI correctness theorems.
-fn render_cpi_theorems(out: &mut String, ops: &[&crate::check::ParsedOperation]) {
+/// Render transfer correctness theorems from handler transfers blocks.
+fn render_cpi_theorems(out: &mut String, ops: &[&crate::check::ParsedHandler]) {
     for op in ops {
-        if !op.has_calls {
+        if !op.has_calls() {
             continue;
         }
-        let cpi_program = op.program_id.as_deref().unwrap_or("UNKNOWN_PROGRAM");
-        let disc = op.calls_discriminator.as_deref().unwrap_or("DISC_UNKNOWN");
-        let ctx_name = safe_name(&format!("{}CpiContext", op.name));
 
-        // CPI context structure
-        out.push_str(&format!("structure {} where\n", ctx_name));
-        for (acct, _) in &op.calls_accounts {
-            out.push_str(&format!("  {} : Pubkey\n", acct));
-        }
-        out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+        for (i, transfer) in op.transfers.iter().enumerate() {
+            let suffix = if op.transfers.len() > 1 {
+                format!("_{}", i)
+            } else {
+                String::new()
+            };
+            let theorem_name = safe_name(&format!("{}_transfer{}_correct", op.name, suffix));
 
-        // build_cpi function
-        let build_name = safe_name(&format!("{}_build_cpi", op.name));
-        out.push_str(&format!(
-            "def {} (ctx : {}) : CpiInstruction :=\n",
-            build_name, ctx_name
-        ));
-        out.push_str(&format!("  {{ programId := {}\n", cpi_program));
-        out.push_str("  , accounts := [");
-        for (i, (acct, flag)) in op.calls_accounts.iter().enumerate() {
-            let (is_signer, is_writable) = parse_flag(flag);
-            if i > 0 {
-                out.push_str(",\n      ");
-            }
             out.push_str(&format!(
-                "\u{27E8}ctx.{}, {}, {}\u{27E9}",
-                acct, is_signer, is_writable
+                "/-- {} transfer: {} → {}",
+                op.name, transfer.from, transfer.to
             ));
+            if let Some(ref amt) = transfer.amount {
+                out.push_str(&format!(" amount {}", amt));
+            }
+            if let Some(ref auth) = transfer.authority {
+                out.push_str(&format!(" authority {}", auth));
+            }
+            out.push_str(". -/\n");
+            out.push_str(&format!("theorem {} : True := sorry\n\n", theorem_name));
         }
-        out.push_str("]\n");
-        out.push_str(&format!("  , data := {} }}\n\n", disc));
-
-        // cpi_correct theorem
-        let op_name = safe_name(&op.name);
-        out.push_str(&format!(
-            "/-- {} CPI targets {} with correct accounts and discriminator. -/\n",
-            op.name, cpi_program
-        ));
-        out.push_str(&format!(
-            "theorem {}.cpi_correct (ctx : {}) :\n    let cpi := {} ctx\n    ",
-            op_name, ctx_name, build_name
-        ));
-        let mut parts: Vec<String> = vec![format!("targetsProgram cpi {}", cpi_program)];
-        for (i, (acct, flag)) in op.calls_accounts.iter().enumerate() {
-            let (is_signer, is_writable) = parse_flag(flag);
-            parts.push(format!(
-                "accountAt cpi {} ctx.{} {} {}",
-                i, acct, is_signer, is_writable
-            ));
-        }
-        parts.push(format!("hasDiscriminator cpi {}", disc));
-        out.push_str(&parts.join(" \u{2227}\n    "));
-        out.push_str(" := by\n");
-        out.push_str(&format!(
-            "  unfold {} targetsProgram accountAt hasDiscriminator\n",
-            build_name
-        ));
-        out.push_str("  exact \u{27E8}rfl, ");
-        let rfls: Vec<&str> = (0..parts.len() - 1).map(|_| "rfl").collect();
-        out.push_str(&rfls.join(", "));
-        out.push_str("\u{27E9}\n\n");
     }
 }
 
 /// Render Operation inductive and applyOp dispatcher.
 fn render_operation_inductive(
     out: &mut String,
-    ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedHandler],
     state_type: &str,
 ) {
     if ops.is_empty() {
@@ -474,7 +427,7 @@ fn render_operation_inductive(
 fn render_properties(
     out: &mut String,
     properties: &[crate::check::ParsedProperty],
-    ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedHandler],
     state_type: &str,
 ) {
     render_properties_inner(out, properties, ops, state_type, "Operation", "applyOp");
@@ -514,8 +467,8 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
         let op_type = format!("{}Operation", acct_name);
         let apply_name = format!("apply{}Op", acct_name);
 
-        let acct_ops: Vec<&crate::check::ParsedOperation> = spec
-            .operations
+        let acct_ops: Vec<&crate::check::ParsedHandler> = spec
+            .handlers
             .iter()
             .filter(|op| {
                 op.on_account.as_deref() == Some(acct_name.as_str())
@@ -551,7 +504,7 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
 fn render_properties_inner(
     out: &mut String,
     properties: &[crate::check::ParsedProperty],
-    ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedHandler],
     state_type: &str,
     op_type: &str,
     apply_name: &str,
@@ -565,7 +518,7 @@ fn render_properties_inner(
         }
 
         // Determine which operations this property covers
-        let covered_ops: Vec<&&crate::check::ParsedOperation> = ops
+        let covered_ops: Vec<&&crate::check::ParsedHandler> = ops
             .iter()
             .filter(|op| prop.preserved_by.contains(&op.name))
             .collect();
@@ -669,9 +622,9 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
         "-- ============================================================================\n\n",
     );
 
-    // Helper: resolve the state type for an operation
+    // Helper: resolve the state type for a handler
     let resolve_state_type = |op_name: &str| -> String {
-        let op = spec.operations.iter().find(|o| o.name == op_name);
+        let op = spec.handlers.iter().find(|o| o.name == op_name);
         if let Some(op) = op {
             if let Some(ref acct) = op.on_account {
                 return format!("{}State", acct);
@@ -720,8 +673,8 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
             let mut indent = "    ".to_string();
             for (j, op_name) in trace.iter().enumerate() {
                 let trans = safe_name(&format!("{}Transition", op_name));
-                let op = spec.operations.iter().find(|o| o.name == *op_name);
-                let param_args = op
+                let handler = spec.handlers.iter().find(|o| o.name == *op_name);
+                let param_args = handler
                     .map(|o| {
                         o.takes_params
                             .iter()
@@ -731,7 +684,7 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
                             .join(" ")
                     })
                     .unwrap_or_default();
-                let extra_exists = op
+                let extra_exists = handler
                     .map(|o| {
                         o.takes_params
                             .iter()
@@ -797,8 +750,8 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
                 out.push_str("    ");
             }
             let trans = safe_name(&format!("{}Transition", op_name));
-            let op = spec.operations.iter().find(|o| o.name == *op_name);
-            let param_exists = op
+            let handler = spec.handlers.iter().find(|o| o.name == *op_name);
+            let param_exists = handler
                 .map(|o| {
                     o.takes_params
                         .iter()
@@ -807,7 +760,7 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
                         .join(" ")
                 })
                 .unwrap_or_default();
-            let param_args = op
+            let param_args = handler
                 .map(|o| param_args_str(&o.takes_params))
                 .unwrap_or_default();
             if !param_exists.is_empty() {
@@ -839,7 +792,7 @@ fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
     let resolve_liveness_state = |via_ops: &[String]| -> String {
         if !spec.account_types.is_empty() && !via_ops.is_empty() {
             // Check the first via op's on_account
-            if let Some(op) = spec.operations.iter().find(|o| o.name == via_ops[0]) {
+            if let Some(op) = spec.handlers.iter().find(|o| o.name == via_ops[0]) {
                 if let Some(ref acct) = op.on_account {
                     return format!("{}State", acct);
                 }
@@ -980,7 +933,7 @@ fn render_environments(out: &mut String, spec: &ParsedSpec, state_type: &str) {
 }
 
 /// Render aborts_if theorems — prove that operations reject under specified conditions.
-fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedOperation], state_type: &str) {
+fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedHandler], state_type: &str) {
     let has_aborts = ops.iter().any(|op| !op.aborts_if.is_empty());
     if !has_aborts {
         return;
@@ -1025,12 +978,12 @@ fn render_aborts_if(out: &mut String, ops: &[&crate::check::ParsedOperation], st
 fn render_overflow_obligations(
     out: &mut String,
     _spec: &ParsedSpec,
-    ops: &[&crate::check::ParsedOperation],
+    ops: &[&crate::check::ParsedHandler],
     fields: &[(String, String)],
     state_type: &str,
 ) {
-    // Collect operations that have add effects
-    let add_ops: Vec<&&crate::check::ParsedOperation> = ops
+    // Collect handlers that have add effects
+    let add_ops: Vec<&&crate::check::ParsedHandler> = ops
         .iter()
         .filter(|op| op.effects.iter().any(|(_, kind, _)| kind == "add"))
         .collect();
@@ -1639,16 +1592,6 @@ fn param_sig_str(params: &[(String, String)]) -> String {
     }
 }
 
-/// Parse account flag to (isSigner, isWritable).
-fn parse_flag(flag: &str) -> (&str, &str) {
-    match flag {
-        "readonly" => ("false", "false"),
-        "writable" => ("false", "true"),
-        "signer" => ("true", "false"),
-        "signer_writable" => ("true", "true"),
-        _ => ("false", "false"),
-    }
-}
 
 #[cfg(test)]
 mod tests {

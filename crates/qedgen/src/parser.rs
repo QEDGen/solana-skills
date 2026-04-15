@@ -229,23 +229,6 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
         handlers.push(instruction_to_handler(instr));
     }
 
-    // Reverse bridge: populate legacy operations + contexts from handler blocks.
-    // This lets consumers that still read `spec.operations` work with new-syntax specs.
-    // Only convert handlers that didn't come from operation/instruction blocks.
-    let existing_op_names: std::collections::HashSet<String> =
-        operations.iter().map(|o| o.name.clone()).collect();
-    let existing_instr_names: std::collections::HashSet<String> =
-        instructions.iter().map(|i| i.name.clone()).collect();
-    for handler in &handlers {
-        if !existing_op_names.contains(&handler.name)
-            && !existing_instr_names.contains(&handler.name)
-        {
-            operations.push(handler_to_operation(handler));
-            if let Some(ctx) = handler_to_context(handler) {
-                contexts.push(ctx);
-            }
-        }
-    }
 
     // Compute U64 field metadata
     let u64_field_names: Vec<String> = state_fields
@@ -1175,109 +1158,6 @@ fn instruction_to_handler(instr: &ParsedInstruction) -> ParsedHandler {
     }
 }
 
-/// Convert a ParsedHandler into a ParsedOperation (reverse bridge).
-/// This lets consumers that still read `spec.operations` work with handler-syntax specs.
-fn handler_to_operation(handler: &ParsedHandler) -> ParsedOperation {
-    ParsedOperation {
-        name: handler.name.clone(),
-        doc: handler.doc.clone(),
-        who: handler.who.clone(),
-        on_account: handler.on_account.clone(),
-        has_when: handler.pre_status.is_some(),
-        pre_status: handler.pre_status.clone(),
-        post_status: handler.post_status.clone(),
-        has_calls: !handler.transfers.is_empty(),
-        program_id: None,
-        has_u64_fields: handler
-            .takes_params
-            .iter()
-            .any(|(_, t)| t == "U64" || t == "U128"),
-        has_takes: !handler.takes_params.is_empty(),
-        has_guard: handler.guard_str.is_some(),
-        guard_str: handler.guard_str.clone(),
-        has_effect: !handler.effects.is_empty(),
-        takes_params: handler.takes_params.clone(),
-        effects: handler.effects.clone(),
-        calls_accounts: handler
-            .transfers
-            .iter()
-            .flat_map(|t| {
-                let mut accts = vec![(t.from.clone(), "writable".to_string())];
-                accts.push((t.to.clone(), "writable".to_string()));
-                if let Some(ref auth) = t.authority {
-                    accts.push((auth.clone(), "signer".to_string()));
-                }
-                accts
-            })
-            .collect(),
-        calls_discriminator: None,
-        emits: handler.emits.clone(),
-        aborts_if: handler.aborts_if.clone(),
-    }
-}
-
-/// Convert a ParsedHandler's accounts block into a ParsedContext (reverse bridge).
-/// Maps IDL-level descriptors to framework-level annotations heuristically.
-fn handler_to_context(handler: &ParsedHandler) -> Option<ParsedContext> {
-    if handler.accounts.is_empty() {
-        return None;
-    }
-
-    let accounts = handler
-        .accounts
-        .iter()
-        .map(|a| {
-            let (account_type, inner_type) = if a.is_signer {
-                ("Signer".to_string(), None)
-            } else if a.is_program {
-                ("Program".to_string(), None)
-            } else if a.account_type.as_deref() == Some("token") {
-                ("Account".to_string(), Some("Token".to_string()))
-            } else {
-                ("Account".to_string(), None)
-            };
-
-            // Infer init from lifecycle: handler creates the account (Uninitialized/Empty → Active)
-            let is_init = handler.pre_status.as_deref() == Some("Uninitialized")
-                || handler.pre_status.as_deref() == Some("Empty");
-
-            // Infer payer from the signer account
-            let payer = if is_init && !a.is_signer && a.pda_seeds.is_some() {
-                handler
-                    .accounts
-                    .iter()
-                    .find(|acc| acc.is_signer)
-                    .map(|acc| acc.name.clone())
-            } else {
-                None
-            };
-
-            // Map PDA seeds to a seeds_ref (the PDA name)
-            let seeds_ref = a.pda_seeds.as_ref().map(|_| a.name.clone());
-
-            ParsedAccountEntry {
-                name: a.name.clone(),
-                account_type,
-                inner_type,
-                is_mut: a.is_writable,
-                is_init: is_init && !a.is_signer && a.pda_seeds.is_some(),
-                is_init_if_needed: false,
-                payer,
-                seeds_ref,
-                has_bump: a.pda_seeds.is_some(),
-                close_target: None,
-                has_one: None,
-                token_mint: None,
-                token_authority: a.authority.clone(),
-            }
-        })
-        .collect();
-
-    Some(ParsedContext {
-        operation: handler.name.clone(),
-        accounts,
-    })
-}
 
 /// Parse `pubkey NAME [chunk0, chunk1, chunk2, chunk3]`.
 fn parse_pubkey_decl(pair: pest::iterators::Pair<Rule>) -> ParsedPubkey {
@@ -1975,16 +1855,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_multisig_operations() {
+    fn parse_multisig_handlers() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.operations.len(), 6);
+        assert_eq!(spec.handlers.len(), 6);
 
-        let create = &spec.operations[0];
+        let create = &spec.handlers[0];
         assert_eq!(create.name, "create_vault");
         assert_eq!(create.who.as_deref(), Some("creator"));
         assert_eq!(create.pre_status.as_deref(), Some("Uninitialized"));
         assert_eq!(create.post_status.as_deref(), Some("Active"));
-        assert!(create.has_guard);
+        assert!(create.has_guard());
         assert_eq!(create.takes_params.len(), 2);
         assert_eq!(create.effects.len(), 3);
         assert_eq!(
@@ -1996,14 +1876,14 @@ mod tests {
             ("approval_count".into(), "set".into(), "0".into())
         );
 
-        let approve = &spec.operations[2];
+        let approve = &spec.handlers[2];
         assert_eq!(approve.name, "approve");
         assert_eq!(
             approve.effects[0],
             ("approval_count".into(), "add".into(), "1".into())
         );
 
-        let remove = &spec.operations[5];
+        let remove = &spec.handlers[5];
         assert_eq!(remove.name, "remove_member");
         assert_eq!(
             remove.effects[0],
@@ -2016,14 +1896,14 @@ mod tests {
         let spec = parse(MULTISIG_SPEC).unwrap();
 
         // create_vault guard: threshold > 0 and threshold <= member_count and member_count <= 32
-        let create = &spec.operations[0];
+        let create = &spec.handlers[0];
         let guard = create.guard_str.as_deref().unwrap();
         assert!(guard.contains("\u{2227}")); // ∧
         assert!(guard.contains("\u{2264}")); // ≤
         assert!(guard.contains("threshold > 0"));
 
         // approve guard: member_index < state.member_count
-        let approve = &spec.operations[2];
+        let approve = &spec.handlers[2];
         let guard = approve.guard_str.as_deref().unwrap();
         // state.member_count -> s.member_count in Lean form
         assert!(guard.contains("s.member_count"));
@@ -2044,23 +1924,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_multisig_contexts() {
+    fn parse_multisig_handler_accounts() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        // 6 handlers have accounts blocks → 6 contexts via reverse bridge
-        assert_eq!(spec.contexts.len(), 6);
-        let create_ctx = &spec.contexts[0];
-        assert_eq!(create_ctx.operation, "create_vault");
-        assert_eq!(create_ctx.accounts.len(), 3);
-        assert_eq!(create_ctx.accounts[0].name, "creator");
-        assert_eq!(create_ctx.accounts[0].account_type, "Signer");
-        assert!(create_ctx.accounts[0].is_mut);
+        // 6 handlers have accounts blocks
+        assert_eq!(spec.handlers.len(), 6);
+        let create = &spec.handlers[0];
+        assert_eq!(create.name, "create_vault");
+        assert_eq!(create.accounts.len(), 3);
+        assert_eq!(create.accounts[0].name, "creator");
+        assert!(create.accounts[0].is_signer);
+        assert!(create.accounts[0].is_writable);
 
-        assert_eq!(create_ctx.accounts[1].name, "vault");
-        assert_eq!(create_ctx.accounts[1].account_type, "Account");
-        // Handler accounts use IDL-level descriptors; init + payer inferred
-        assert!(create_ctx.accounts[1].is_init);
-        assert_eq!(create_ctx.accounts[1].payer.as_deref(), Some("creator"));
-        assert!(create_ctx.accounts[1].has_bump);
+        assert_eq!(create.accounts[1].name, "vault");
+        assert!(create.accounts[1].is_writable);
+        assert!(create.accounts[1].pda_seeds.is_some());
     }
 
     // ========================================================================
@@ -2111,16 +1988,16 @@ mod tests {
     fn parse_lending_on_clause() {
         let spec = parse(LENDING_SPEC).unwrap();
 
-        let init_pool = &spec.operations[0];
+        let init_pool = &spec.handlers[0];
         assert_eq!(init_pool.name, "init_pool");
         assert_eq!(init_pool.on_account.as_deref(), Some("Pool"));
 
-        let borrow = &spec.operations[2];
+        let borrow = &spec.handlers[2];
         assert_eq!(borrow.name, "borrow");
         assert_eq!(borrow.on_account.as_deref(), Some("Loan"));
 
         // deposit has `on Pool` but no `who`
-        let deposit = &spec.operations[1];
+        let deposit = &spec.handlers[1];
         assert_eq!(deposit.on_account.as_deref(), Some("Pool"));
         assert_eq!(deposit.who, None);
     }
@@ -2501,9 +2378,9 @@ instruction RegisterMarket {
     fn parse_aborts_if_clause() {
         let spec = parse(PERCOLATOR_SPEC).unwrap();
         let withdraw = spec
-            .operations
+            .handlers
             .iter()
-            .find(|op| op.name == "withdraw")
+            .find(|h| h.name == "withdraw")
             .unwrap();
         assert_eq!(withdraw.aborts_if.len(), 1);
         assert_eq!(withdraw.aborts_if[0].error_name, "InsufficientFunds");
@@ -2514,9 +2391,9 @@ instruction RegisterMarket {
     fn parse_aborts_if_multiple() {
         let spec = parse(MULTISIG_SPEC).unwrap();
         let create = spec
-            .operations
+            .handlers
             .iter()
-            .find(|op| op.name == "create_vault")
+            .find(|h| h.name == "create_vault")
             .unwrap();
         assert_eq!(create.aborts_if.len(), 2);
         assert_eq!(create.aborts_if[0].error_name, "InvalidThreshold");
@@ -2608,9 +2485,9 @@ instruction RegisterMarket {
 
         // aborts_if on initialize
         let init = spec
-            .operations
+            .handlers
             .iter()
-            .find(|op| op.name == "initialize")
+            .find(|h| h.name == "initialize")
             .unwrap();
         assert_eq!(init.aborts_if.len(), 1);
         assert_eq!(init.aborts_if[0].error_name, "InvalidAmount");

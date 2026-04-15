@@ -86,17 +86,23 @@ pub struct ParsedOperation {
     /// None means the default (first/only) account.
     #[allow(dead_code)]
     pub on_account: Option<String>,
+    #[allow(dead_code)]
     pub has_when: bool,
     pub pre_status: Option<String>,
     pub post_status: Option<String>,
+    #[allow(dead_code)]
     pub has_calls: bool,
+    #[allow(dead_code)]
     pub program_id: Option<String>,
     #[allow(dead_code)]
     pub has_u64_fields: bool,
     #[allow(dead_code)]
     pub has_takes: bool,
+    #[allow(dead_code)]
     pub has_guard: bool,
+    #[allow(dead_code)]
     pub guard_str: Option<String>,
+    #[allow(dead_code)]
     pub has_effect: bool,
     #[allow(dead_code)]
     pub takes_params: Vec<(String, String)>,
@@ -284,6 +290,7 @@ pub struct ParsedHandler {
     /// Guard expression (Lean form).
     pub guard_str: Option<String>,
     /// Guard expression (Rust form).
+    #[allow(dead_code)]
     pub guard_str_rust: Option<String>,
     /// Abort conditions.
     pub aborts_if: Vec<ParsedAbort>,
@@ -299,6 +306,108 @@ pub struct ParsedHandler {
     pub invariants: Vec<String>,
     /// Per-handler properties (from inline property/invariant clauses).
     pub properties: Vec<String>,
+}
+
+impl ParsedHandler {
+    pub fn has_guard(&self) -> bool {
+        self.guard_str.is_some()
+    }
+    pub fn has_effect(&self) -> bool {
+        !self.effects.is_empty()
+    }
+    pub fn has_calls(&self) -> bool {
+        !self.transfers.is_empty()
+    }
+    pub fn has_when(&self) -> bool {
+        self.pre_status.is_some()
+    }
+    #[allow(dead_code)]
+    pub fn has_takes(&self) -> bool {
+        !self.takes_params.is_empty()
+    }
+    /// Find the first signer account in this handler.
+    pub fn signer_account(&self) -> Option<&ParsedHandlerAccount> {
+        self.accounts.iter().find(|a| a.is_signer)
+    }
+    /// Check if any account has a token type.
+    pub fn has_token_accounts(&self) -> bool {
+        self.accounts
+            .iter()
+            .any(|a| a.account_type.as_deref() == Some("token"))
+    }
+    /// Check if any account has a token program.
+    pub fn has_token_program(&self) -> bool {
+        self.accounts
+            .iter()
+            .any(|a| a.is_program && a.account_type.as_deref() == Some("token"))
+            || self.accounts.iter().any(|a| a.name.contains("token_program"))
+    }
+    /// Check if any account has bumps (PDA seeds).
+    pub fn has_bumps(&self) -> bool {
+        self.accounts.iter().any(|a| a.pda_seeds.is_some())
+    }
+}
+
+impl ParsedHandlerAccount {
+    /// Infer the Quasar/Anchor field type string for codegen.
+    pub fn quasar_field_type(&self) -> String {
+        if self.is_signer {
+            "Signer".to_string()
+        } else if self.is_program {
+            "Program<()>".to_string()
+        } else if self.account_type.as_deref() == Some("token") {
+            "Account<Token>".to_string()
+        } else {
+            "Account<()>".to_string()
+        }
+    }
+
+    /// Generate the #[account(...)] attribute for codegen.
+    pub fn quasar_account_attr(&self, handler: &ParsedHandler, state_name: &str) -> String {
+        let mut parts = Vec::new();
+
+        if self.is_writable && !self.is_signer {
+            parts.push("mut".to_string());
+        } else if self.is_writable && self.is_signer {
+            parts.push("mut".to_string());
+        }
+
+        // Infer init from lifecycle: handler creates the account
+        let is_init = (handler.pre_status.as_deref() == Some("Uninitialized")
+            || handler.pre_status.as_deref() == Some("Empty"))
+            && !self.is_signer
+            && self.pda_seeds.is_some();
+
+        if is_init {
+            parts.push("init".to_string());
+            if let Some(signer) = handler.signer_account() {
+                parts.push(format!("payer = {}", signer.name));
+            }
+        }
+
+        if let Some(ref _seeds) = self.pda_seeds {
+            let struct_name = if state_name.ends_with("Account") {
+                state_name.to_string()
+            } else {
+                format!("{}Account", state_name)
+            };
+            parts.push(format!(
+                "seeds = {}::seeds({})",
+                struct_name, self.name
+            ));
+            parts.push("bump".to_string());
+        }
+
+        if let Some(ref auth) = self.authority {
+            parts.push(format!("token::authority = {}", auth));
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("    #[account({})]\n", parts.join(", "))
+        }
+    }
 }
 
 /// An account descriptor within a handler's `accounts` block.
@@ -332,7 +441,8 @@ pub struct ParsedSpec {
     /// Unified handlers (v3). Populated from handler/operation/instruction blocks.
     pub handlers: Vec<ParsedHandler>,
 
-    // Legacy fields — populated for backward compat with existing consumers.
+    // Legacy fields — populated by forward bridge for backward compat.
+    #[allow(dead_code)]
     pub operations: Vec<ParsedOperation>,
     pub invariants: Vec<(String, String)>, // (name, description)
     pub properties: Vec<ParsedProperty>,
@@ -789,8 +899,8 @@ impl UnifiedReport {
     }
 }
 
-fn fields_for_operation<'a>(spec: &'a ParsedSpec, op: &ParsedOperation) -> &'a [(String, String)] {
-    if let Some(account_name) = op.on_account.as_deref() {
+fn fields_for_handler<'a>(spec: &'a ParsedSpec, handler: &ParsedHandler) -> &'a [(String, String)] {
+    if let Some(account_name) = handler.on_account.as_deref() {
         if let Some(account) = spec
             .account_types
             .iter()
@@ -804,15 +914,15 @@ fn fields_for_operation<'a>(spec: &'a ParsedSpec, op: &ParsedOperation) -> &'a [
 
 fn suggested_effect_lines(
     spec: &ParsedSpec,
-    op: &ParsedOperation,
+    handler: &ParsedHandler,
     is_init_like: bool,
 ) -> Vec<String> {
-    op.takes_params
+    handler.takes_params
         .iter()
         .map(|(name, _)| name.as_str())
         .take(3)
         .map(|param| {
-            let matching_field = fields_for_operation(spec, op)
+            let matching_field = fields_for_handler(spec, handler)
                 .iter()
                 .find(|(field, _)| field.contains(param) || param.contains(field.as_str()));
             if let Some((field, _)) = matching_field {
@@ -846,7 +956,7 @@ fn reachable_lifecycle_states(spec: &ParsedSpec) -> std::collections::HashSet<St
     let mut changed = true;
     while changed {
         changed = false;
-        for op in &spec.operations {
+        for op in &spec.handlers {
             let next_state = match op.post_status.as_ref() {
                 Some(post) => post,
                 None => continue,
@@ -877,24 +987,24 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         .map(|(n, _)| n.as_str())
         .unwrap_or("authority");
 
-    for op in &spec.operations {
-        // Rule 1: operation without who:
+    for op in &spec.handlers {
+        // Rule 1: handler without who:
         if op.who.is_none() {
             warnings.push(CompletenessWarning {
                 rule: "no_access_control".to_string(),
                 severity: Severity::Warning,
                 priority: 1,
-                message: format!("operation '{}' has no `who:` — anyone can call it", op.name),
+                message: format!("handler '{}' has no `who` — anyone can call it", op.name),
                 subject: Some(op.name.clone()),
                 fix: format!(
-                    "Add `who: {}` to restrict who can execute this operation",
+                    "Add `who {}` to restrict who can execute this handler",
                     signer_hint
                 ),
-                example: Some(format!("  operation {}\n    who: {}", op.name, signer_hint)),
+                example: Some(format!("  handler {}\n    who {}", op.name, signer_hint)),
             });
         }
 
-        // Rule 2: operation not covered by any property
+        // Rule 2: handler not covered by any property
         let covered = spec
             .properties
             .iter()
@@ -906,7 +1016,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 severity: Severity::Info,
                 priority: 3,
                 message: format!(
-                    "operation '{}' is not in any property's `preserved_by`",
+                    "handler '{}' is not in any property's `preserved_by`",
                     op.name
                 ),
                 subject: Some(op.name.clone()),
@@ -928,7 +1038,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             .iter()
             .filter(|(_, kind, _)| kind == "add" || kind == "sub")
             .collect();
-        if !arithmetic_effects.is_empty() && !op.has_guard {
+        if !arithmetic_effects.is_empty() && !op.has_guard() {
             let (field, kind, val) = arithmetic_effects[0];
             let guard_suggestion = if kind == "add" {
                 format!("s.{} + {} ≤ U64_MAX", field, val)
@@ -940,35 +1050,35 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 severity: Severity::Warning,
                 priority: 1,
                 message: format!(
-                    "operation '{}' has arithmetic effects but no `guard:` — potential overflow/underflow",
+                    "handler '{}' has arithmetic effects but no `guard` — potential overflow/underflow",
                     op.name
                 ),
                 subject: Some(op.name.clone()),
                 fix: format!(
-                    "Add a `guard:` clause to prevent {} overflow",
+                    "Add a `guard` clause to prevent {} overflow",
                     if kind == "add" { "addition" } else { "subtraction" }
                 ),
                 example: Some(format!(
-                    "  operation {}\n    guard: \"{}\"",
+                    "  handler {}\n    guard {}",
                     op.name, guard_suggestion
                 )),
             });
         }
 
-        // Rule 6: operation has no when:/then: lifecycle
+        // Rule 6: handler has no when/then lifecycle
         if op.pre_status.is_none() && op.post_status.is_none() {
             warnings.push(CompletenessWarning {
                 rule: "no_lifecycle".to_string(),
                 severity: Severity::Info,
                 priority: 2,
                 message: format!(
-                    "operation '{}' has no `when:`/`then:` — no state machine enforcement",
+                    "handler '{}' has no `when`/`then` — no state machine enforcement",
                     op.name
                 ),
                 subject: Some(op.name.clone()),
-                fix: "Add `when:` and `then:` clauses to enforce operation ordering".to_string(),
+                fix: "Add `when` and `then` clauses to enforce handler ordering".to_string(),
                 example: Some(format!(
-                    "  operation {}\n    when: Active\n    then: Active",
+                    "  handler {}\n    when Active\n    then Active",
                     op.name
                 )),
             });
@@ -981,17 +1091,17 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             continue;
         }
         let modified = spec
-            .operations
+            .handlers
             .iter()
             .any(|op| op.effects.iter().any(|(f, _, _)| f == fname));
         if !modified {
             let mutating_ops: Vec<&str> = spec
-                .operations
+                .handlers
                 .iter()
-                .filter(|op| op.has_effect)
+                .filter(|op| op.has_effect())
                 .map(|op| op.name.as_str())
                 .collect();
-            let op_hint = mutating_ops.first().copied().unwrap_or("some_operation");
+            let op_hint = mutating_ops.first().copied().unwrap_or("some_handler");
             warnings.push(CompletenessWarning {
                 rule: "unused_field".to_string(),
                 severity: Severity::Info,
@@ -1010,8 +1120,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // Rule 5: property references nonexistent operation
-    let op_names: Vec<&str> = spec.operations.iter().map(|o| o.name.as_str()).collect();
+    // Rule 5: property references nonexistent handler
+    let op_names: Vec<&str> = spec.handlers.iter().map(|o| o.name.as_str()).collect();
     for prop in &spec.properties {
         for op_name in &prop.preserved_by {
             if !op_names.contains(&op_name.as_str()) {
@@ -1020,12 +1130,12 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     severity: Severity::Warning,
                     priority: 1,
                     message: format!(
-                        "property '{}' references nonexistent operation '{}'",
+                        "property '{}' references nonexistent handler '{}'",
                         prop.name, op_name
                     ),
                     subject: Some(format!("{}.preserved_by.{}", prop.name, op_name)),
                     fix: format!(
-                        "Check the spelling of '{}' — available operations: {}",
+                        "Check the spelling of '{}' — available handlers: {}",
                         op_name,
                         op_names.join(", ")
                     ),
@@ -1036,8 +1146,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     }
 
     // Rule 7: takes params (U64) with no guard — suggest input validation
-    for op in &spec.operations {
-        if op.has_guard {
+    for op in &spec.handlers {
+        if op.has_guard() {
             continue;
         }
         // Skip if rule 3 (unguarded_arithmetic) already fired for this op
@@ -1062,19 +1172,19 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 severity: Severity::Warning,
                 priority: 1,
                 message: format!(
-                    "operation '{}' takes U64 params but has no guard — no input validation",
+                    "handler '{}' takes U64 params but has no guard — no input validation",
                     op.name
                 ),
                 subject: Some(op.name.clone()),
                 fix: "Add input validation for takes parameters".to_string(),
-                example: Some(format!("  operation {}\n    guard {}", op.name, guard_expr)),
+                example: Some(format!("  handler {}\n    guard {}", op.name, guard_expr)),
             });
         }
     }
 
     // Rule 8: takes params + lifecycle transition but no effect
-    for op in &spec.operations {
-        if op.has_effect {
+    for op in &spec.handlers {
+        if op.has_effect() {
             continue;
         }
         let has_lifecycle = op.pre_status.is_some() || op.post_status.is_some();
@@ -1086,13 +1196,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 severity: Severity::Warning,
                 priority: 2,
                 message: format!(
-                    "operation '{}' takes params and transitions state but has no effect",
+                    "handler '{}' takes params and transitions state but has no effect",
                     op.name
                 ),
                 subject: Some(op.name.clone()),
                 fix: "Add an effect block to describe state changes".to_string(),
                 example: Some(format!(
-                    "  operation {}\n  effect {{\n{}\n  }}",
+                    "  handler {}\n  effect {{\n{}\n  }}",
                     op.name,
                     effect_lines.join("\n")
                 )),
@@ -1100,13 +1210,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // Rule 9: operations with effects but zero properties
-    let has_effects = spec.operations.iter().any(|op| op.has_effect);
+    // Rule 9: handlers with effects but zero properties
+    let has_effects = spec.handlers.iter().any(|op| op.has_effect());
     if has_effects && spec.properties.is_empty() && spec.invariants.is_empty() {
         // Suggest conservation if paired add/sub exist on same field
         let mut modified_fields: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
-        for op in &spec.operations {
+        for op in &spec.handlers {
             for (field, kind, _) in &op.effects {
                 modified_fields
                     .entry(field.as_str())
@@ -1121,9 +1231,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             .collect();
 
         let op_list: Vec<&str> = spec
-            .operations
+            .handlers
             .iter()
-            .filter(|op| op.has_effect)
+            .filter(|op| op.has_effect())
             .map(|op| op.name.as_str())
             .collect();
         let preserved_by = if op_list.len() <= 4 {
@@ -1158,65 +1268,56 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         });
     }
 
-    // Rule 10: context has Token program but operation has no calls
-    for ctx in &spec.contexts {
-        let has_token_program = ctx
-            .accounts
-            .iter()
-            .any(|a| a.account_type == "Program" && a.inner_type.as_deref() == Some("Token"));
-        if !has_token_program {
+    // Rule 10: handler has token program in accounts but no transfers
+    for handler in &spec.handlers {
+        if !handler.has_token_program() {
             continue;
         }
-        let op = spec.operations.iter().find(|o| o.name == ctx.operation);
-        if let Some(op) = op {
-            if !op.has_calls {
-                let writable_tokens: Vec<&str> = ctx
-                    .accounts
-                    .iter()
-                    .filter(|a| {
-                        a.is_mut
-                            && a.inner_type.as_deref() == Some("Token")
-                            && a.account_type == "Account"
-                    })
-                    .map(|a| a.name.as_str())
-                    .collect();
-                let signer_name = ctx
-                    .accounts
-                    .iter()
-                    .find(|a| a.account_type == "Signer")
-                    .map(|a| a.name.as_str())
-                    .unwrap_or("authority");
-                let accounts_str = if writable_tokens.len() >= 2 {
-                    format!(
-                        "{} writable, {} writable, {} signer",
-                        writable_tokens[0], writable_tokens[1], signer_name
-                    )
-                } else if writable_tokens.len() == 1 {
-                    format!("{} writable, {} signer", writable_tokens[0], signer_name)
-                } else {
-                    format!("source writable, dest writable, {} signer", signer_name)
-                };
-                warnings.push(CompletenessWarning {
-                    rule: "missing_cpi_for_token_context".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
-                        "operation '{}' has Token program in context but no `calls` clause",
-                        ctx.operation
-                    ),
-                    subject: Some(ctx.operation.clone()),
-                    fix: "Add a `calls` clause to verify the CPI invocation".to_string(),
-                    example: Some(format!(
-                        "  operation {}\n    calls TOKEN_PROGRAM_ID DISC_TRANSFER({})",
-                        ctx.operation, accounts_str
-                    )),
-                });
-            }
+        if !handler.has_calls() {
+            let writable_tokens: Vec<&str> = handler
+                .accounts
+                .iter()
+                .filter(|a| {
+                    a.is_writable
+                        && a.account_type.as_deref() == Some("token")
+                        && !a.is_program
+                })
+                .map(|a| a.name.as_str())
+                .collect();
+            let signer_name = handler
+                .signer_account()
+                .map(|a| a.name.as_str())
+                .unwrap_or("authority");
+            let accounts_str = if writable_tokens.len() >= 2 {
+                format!(
+                    "from {} to {} authority {}",
+                    writable_tokens[0], writable_tokens[1], signer_name
+                )
+            } else if writable_tokens.len() == 1 {
+                format!("from {} to dest authority {}", writable_tokens[0], signer_name)
+            } else {
+                format!("from source to dest authority {}", signer_name)
+            };
+            warnings.push(CompletenessWarning {
+                rule: "missing_cpi_for_token_context".to_string(),
+                severity: Severity::Warning,
+                priority: 2,
+                message: format!(
+                    "handler '{}' has token_program in accounts but no `transfers` block",
+                    handler.name
+                ),
+                subject: Some(handler.name.clone()),
+                fix: "Add a `transfers` block to specify token movements".to_string(),
+                example: Some(format!(
+                    "  handler {}\n    transfers {{\n      {} amount <expr>\n    }}",
+                    handler.name, accounts_str
+                )),
+            });
         }
     }
 
-    // Rule 11: no errors block but operations have guards
-    let any_guards = spec.operations.iter().any(|op| op.has_guard);
+    // Rule 11: no errors block but handlers have guards
+    let any_guards = spec.handlers.iter().any(|op| op.has_guard());
     if any_guards && spec.error_codes.is_empty() {
         warnings.push(CompletenessWarning {
             rule: "no_errors_block".to_string(),
@@ -1257,13 +1358,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Rule 13: write_without_read — state field written in effects but never read in guards/properties
     {
         let mut written_fields = std::collections::HashSet::new();
-        for op in &spec.operations {
+        for op in &spec.handlers {
             for (field, _, _) in &op.effects {
                 written_fields.insert(field.as_str());
             }
         }
         let mut read_fields = std::collections::HashSet::new();
-        for op in &spec.operations {
+        for op in &spec.handlers {
             if let Some(ref guard) = op.guard_str {
                 for field in &written_fields {
                     if guard.contains(&format!("s.{}", field))
@@ -1314,7 +1415,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Rule 14: dead_guard — a guard conjunct subsumed by another on the same operation
     {
         let cmp_re = Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap();
-        for op in &spec.operations {
+        for op in &spec.handlers {
             if let Some(ref guard) = op.guard_str {
                 // Split on ∧ and "and" to get individual conjuncts
                 let conjuncts: Vec<&str> = guard
@@ -1379,7 +1480,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     if spec.lifecycle_states.len() > 1 {
         let mut outgoing: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
             std::collections::HashMap::new();
-        for op in &spec.operations {
+        for op in &spec.handlers {
             if let (Some(ref pre), Some(ref post)) = (&op.pre_status, &op.post_status) {
                 if pre != post {
                     outgoing
@@ -1444,7 +1545,7 @@ pub struct CoverageMatrix {
 
 /// Build a coverage matrix from a parsed spec.
 pub fn coverage_matrix(spec: &ParsedSpec) -> CoverageMatrix {
-    let op_names: Vec<String> = spec.operations.iter().map(|o| o.name.clone()).collect();
+    let op_names: Vec<String> = spec.handlers.iter().map(|o| o.name.clone()).collect();
     let prop_names: Vec<String> = spec
         .properties
         .iter()
@@ -1578,8 +1679,8 @@ pub fn check_code_drift(
     if !spec.error_codes.is_empty() {
         expected_files.push("src/errors.rs".to_string());
     }
-    for op in &spec.operations {
-        expected_files.push(format!("src/instructions/{}.rs", op.name));
+    for handler in &spec.handlers {
+        expected_files.push(format!("src/instructions/{}.rs", handler.name));
     }
 
     for file in &expected_files {
@@ -1636,7 +1737,7 @@ pub fn check_code_drift(
     let instr_dir = code_dir.join("src/instructions");
     if instr_dir.exists() {
         let expected_ops: Vec<String> = spec
-            .operations
+            .handlers
             .iter()
             .map(|o| format!("{}.rs", o.name))
             .collect();
@@ -1689,11 +1790,11 @@ pub fn check_kani_drift(
 
     // Build expected harness names (same logic as kani::generate)
     let mut expected_harnesses = Vec::new();
-    for op in &spec.operations {
+    for op in &spec.handlers {
         if op.who.is_some() {
             expected_harnesses.push(format!("verify_{}_access_control", op.name));
         }
-        if op.has_guard {
+        if op.has_guard() {
             expected_harnesses.push(format!("verify_{}_rejects_invalid", op.name));
         }
         if let (Some(pre_s), Some(post_s)) = (&op.pre_status, &op.post_status) {
@@ -1701,7 +1802,7 @@ pub fn check_kani_drift(
             let post = post_s.to_lowercase();
             expected_harnesses.push(format!("verify_{}_transition_{}_to_{}", op.name, pre, post));
         }
-        if op.has_effect {
+        if op.has_effect() {
             expected_harnesses.push(format!("verify_{}_effects", op.name));
         }
     }
@@ -1944,13 +2045,55 @@ mod tests {
         }
     }
 
+    fn make_handler(name: &str) -> ParsedHandler {
+        ParsedHandler {
+            name: name.to_string(),
+            doc: None,
+            who: Some("authority".to_string()),
+            on_account: None,
+            pre_status: Some("Active".to_string()),
+            post_status: Some("Active".to_string()),
+            takes_params: vec![],
+            guard_str: None,
+            guard_str_rust: None,
+            aborts_if: vec![],
+            effects: vec![],
+            accounts: vec![],
+            transfers: vec![],
+            emits: vec![],
+            invariants: vec![],
+            properties: vec![],
+        }
+    }
+
+    /// Convert a ParsedOperation into a ParsedHandler for backward compat in tests.
+    fn op_to_handler(op: &ParsedOperation) -> ParsedHandler {
+        ParsedHandler {
+            name: op.name.clone(),
+            doc: op.doc.clone(),
+            who: op.who.clone(),
+            on_account: op.on_account.clone(),
+            pre_status: op.pre_status.clone(),
+            post_status: op.post_status.clone(),
+            takes_params: op.takes_params.clone(),
+            guard_str: op.guard_str.clone(),
+            guard_str_rust: None,
+            aborts_if: op.aborts_if.clone(),
+            effects: op.effects.clone(),
+            accounts: vec![],
+            transfers: vec![],
+            emits: op.emits.clone(),
+            invariants: vec![],
+            properties: vec![],
+        }
+    }
+
     #[test]
     fn test_missing_guard_from_takes_fires() {
-        let mut op = make_op("deposit");
-        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
         };
@@ -1966,13 +2109,11 @@ mod tests {
 
     #[test]
     fn test_missing_guard_from_takes_skips_when_guard_exists() {
-        let mut op = make_op("deposit");
-        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
-        op.has_guard = true;
-        op.guard_str = Some("amount > 0".to_string());
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
         };
@@ -1987,13 +2128,12 @@ mod tests {
 
     #[test]
     fn test_missing_effect_fires() {
-        let mut op = make_op("deposit");
-        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
-        op.has_guard = true;
-        // has lifecycle (pre/post set via make_op) but no effect
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        // has lifecycle (pre/post set via make_handler) but no effect
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -2008,18 +2148,16 @@ mod tests {
 
     #[test]
     fn test_missing_effect_skips_when_effect_exists() {
-        let mut op = make_op("deposit");
-        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
-        op.has_guard = true;
-        op.has_effect = true;
-        op.effects = vec![(
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        h.effects = vec![(
             "balance".to_string(),
             "add".to_string(),
             "amount".to_string(),
         )];
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -2033,16 +2171,15 @@ mod tests {
 
     #[test]
     fn test_missing_effect_uses_on_account_fields() {
-        let mut op = make_op("borrow");
-        op.on_account = Some("Loan".to_string());
-        op.takes_params = vec![("loan_amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
-        op.has_guard = true;
-        op.pre_status = Some("Empty".to_string());
-        op.post_status = Some("Active".to_string());
+        let mut h = make_handler("borrow");
+        h.on_account = Some("Loan".to_string());
+        h.takes_params = vec![("loan_amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("loan_amount > 0".to_string());
+        h.pre_status = Some("Empty".to_string());
+        h.post_status = Some("Active".to_string());
 
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             account_types: vec![
                 ParsedAccountType {
                     name: "Pool".to_string(),
@@ -2084,16 +2221,15 @@ mod tests {
 
     #[test]
     fn test_no_properties_fires() {
-        let mut op = make_op("deposit");
-        op.has_effect = true;
-        op.effects = vec![(
+        let mut h = make_handler("deposit");
+        h.effects = vec![(
             "balance".to_string(),
             "add".to_string(),
             "amount".to_string(),
         )];
-        op.has_guard = true;
+        h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -2108,16 +2244,15 @@ mod tests {
 
     #[test]
     fn test_no_properties_skips_with_property() {
-        let mut op = make_op("deposit");
-        op.has_effect = true;
-        op.effects = vec![(
+        let mut h = make_handler("deposit");
+        h.effects = vec![(
             "balance".to_string(),
             "add".to_string(),
             "amount".to_string(),
         )];
-        op.has_guard = true;
+        h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
             properties: vec![ParsedProperty {
                 name: "conservation".to_string(),
@@ -2136,75 +2271,48 @@ mod tests {
 
     #[test]
     fn test_missing_cpi_for_token_context() {
-        let mut op = make_op("transfer");
-        op.has_calls = false;
+        let mut h = make_handler("transfer");
+        // Has token program in accounts but no transfers block
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+            },
+            ParsedHandlerAccount {
+                name: "source".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+            },
+            ParsedHandlerAccount {
+                name: "dest".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+            },
+        ];
         let spec = ParsedSpec {
-            operations: vec![op],
-            contexts: vec![ParsedContext {
-                operation: "transfer".to_string(),
-                accounts: vec![
-                    ParsedAccountEntry {
-                        name: "authority".to_string(),
-                        account_type: "Signer".to_string(),
-                        inner_type: None,
-                        is_mut: false,
-                        is_init: false,
-                        is_init_if_needed: false,
-                        payer: None,
-                        seeds_ref: None,
-                        has_bump: false,
-                        close_target: None,
-                        has_one: None,
-                        token_mint: None,
-                        token_authority: None,
-                    },
-                    ParsedAccountEntry {
-                        name: "source".to_string(),
-                        account_type: "Account".to_string(),
-                        inner_type: Some("Token".to_string()),
-                        is_mut: true,
-                        is_init: false,
-                        is_init_if_needed: false,
-                        payer: None,
-                        seeds_ref: None,
-                        has_bump: false,
-                        close_target: None,
-                        has_one: None,
-                        token_mint: None,
-                        token_authority: None,
-                    },
-                    ParsedAccountEntry {
-                        name: "dest".to_string(),
-                        account_type: "Account".to_string(),
-                        inner_type: Some("Token".to_string()),
-                        is_mut: true,
-                        is_init: false,
-                        is_init_if_needed: false,
-                        payer: None,
-                        seeds_ref: None,
-                        has_bump: false,
-                        close_target: None,
-                        has_one: None,
-                        token_mint: None,
-                        token_authority: None,
-                    },
-                    ParsedAccountEntry {
-                        name: "token_program".to_string(),
-                        account_type: "Program".to_string(),
-                        inner_type: Some("Token".to_string()),
-                        is_mut: false,
-                        is_init: false,
-                        is_init_if_needed: false,
-                        payer: None,
-                        seeds_ref: None,
-                        has_bump: false,
-                        close_target: None,
-                        has_one: None,
-                        token_mint: None,
-                        token_authority: None,
-                    },
-                ],
-            }],
+            handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
         };
@@ -2220,11 +2328,11 @@ mod tests {
 
     #[test]
     fn test_lifecycle_unreachable_state() {
-        let mut op = make_op("initialize");
-        op.pre_status = Some("Uninitialized".to_string());
-        op.post_status = Some("Active".to_string());
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninitialized".to_string());
+        h.post_status = Some("Active".to_string());
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             lifecycle_states: vec![
                 "Uninitialized".to_string(),
                 "Active".to_string(),
@@ -2248,16 +2356,16 @@ mod tests {
 
     #[test]
     fn test_lifecycle_disconnected_subgraph_is_unreachable() {
-        let mut init = make_op("initialize");
+        let mut init = make_handler("initialize");
         init.pre_status = Some("Uninitialized".to_string());
         init.post_status = Some("Active".to_string());
 
-        let mut close = make_op("close");
+        let mut close = make_handler("close");
         close.pre_status = Some("Frozen".to_string());
         close.post_status = Some("Closed".to_string());
 
         let spec = ParsedSpec {
-            operations: vec![init, close],
+            handlers: vec![init, close],
             lifecycle_states: vec![
                 "Uninitialized".to_string(),
                 "Active".to_string(),
@@ -2295,12 +2403,12 @@ mod tests {
         // is "Uninitialized". Without always seeding the global initial state,
         // "Uninitialized" would be flagged as unreachable even though it is
         // the entry point of the lifecycle.
-        let mut init = make_op("initialize");
+        let mut init = make_handler("initialize");
         init.pre_status = Some("Uninitialized".to_string());
         init.post_status = Some("Active".to_string());
 
         let spec = ParsedSpec {
-            operations: vec![init],
+            handlers: vec![init],
             account_types: vec![ParsedAccountType {
                 name: "Pool".to_string(),
                 fields: vec![],
@@ -2331,11 +2439,10 @@ mod tests {
 
     #[test]
     fn test_no_errors_block_fires() {
-        let mut op = make_op("deposit");
-        op.has_guard = true;
-        op.guard_str = Some("amount > 0".to_string());
+        let mut h = make_handler("deposit");
+        h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
         };
@@ -2350,12 +2457,10 @@ mod tests {
     #[test]
     fn test_priority_ordering() {
         // Build a spec that triggers multiple rules at different priorities
-        let mut op = make_op("deposit");
-        op.who = None; // priority 1: no_access_control
-        op.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        op.has_takes = true;
-        op.has_effect = true;
-        op.effects = vec![(
+        let mut h = make_handler("deposit");
+        h.who = None; // priority 1: no_access_control
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.effects = vec![(
             "balance".to_string(),
             "add".to_string(),
             "amount".to_string(),
@@ -2363,7 +2468,7 @@ mod tests {
         // no guard → priority 1: unguarded_arithmetic + missing_guard_from_takes
         // no properties → priority 3: no_properties
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![
                 ("authority".to_string(), "Pubkey".to_string()),
                 ("balance".to_string(), "U64".to_string()),
@@ -2420,15 +2525,13 @@ mod tests {
 
     #[test]
     fn test_coverage_matrix_detects_gaps() {
-        let mut op_covered = make_op("deposit");
-        op_covered.has_effect = true;
-        op_covered.effects = vec![("balance".into(), "add".into(), "amount".into())];
-        let mut op_uncovered = make_op("withdraw");
-        op_uncovered.has_effect = true;
-        op_uncovered.effects = vec![("balance".into(), "sub".into(), "amount".into())];
+        let mut h_covered = make_handler("deposit");
+        h_covered.effects = vec![("balance".into(), "add".into(), "amount".into())];
+        let mut h_uncovered = make_handler("withdraw");
+        h_uncovered.effects = vec![("balance".into(), "sub".into(), "amount".into())];
 
         let spec = ParsedSpec {
-            operations: vec![op_covered, op_uncovered],
+            handlers: vec![h_covered, h_uncovered],
             state_fields: vec![("balance".into(), "U64".into())],
             properties: vec![ParsedProperty {
                 name: "conservation".to_string(),
@@ -2445,15 +2548,14 @@ mod tests {
 
     #[test]
     fn test_write_without_read_lint() {
-        let mut op = make_op("deposit");
-        op.has_effect = true;
-        op.has_guard = true;
-        op.effects = vec![
+        let mut h = make_handler("deposit");
+        h.guard_str = Some("amount > 0".to_string());
+        h.effects = vec![
             ("balance".into(), "add".into(), "amount".into()),
             ("counter".into(), "add".into(), "1".into()),
         ];
         let spec = ParsedSpec {
-            operations: vec![op],
+            handlers: vec![h],
             state_fields: vec![
                 ("authority".into(), "Pubkey".into()),
                 ("balance".into(), "U64".into()),
@@ -2485,14 +2587,14 @@ mod tests {
 
     #[test]
     fn test_circular_lifecycle_no_terminal() {
-        let mut op1 = make_op("advance");
-        op1.pre_status = Some("A".to_string());
-        op1.post_status = Some("B".to_string());
-        let mut op2 = make_op("retreat");
-        op2.pre_status = Some("B".to_string());
-        op2.post_status = Some("A".to_string());
+        let mut h1 = make_handler("advance");
+        h1.pre_status = Some("A".to_string());
+        h1.post_status = Some("B".to_string());
+        let mut h2 = make_handler("retreat");
+        h2.pre_status = Some("B".to_string());
+        h2.post_status = Some("A".to_string());
         let spec = ParsedSpec {
-            operations: vec![op1, op2],
+            handlers: vec![h1, h2],
             lifecycle_states: vec!["A".to_string(), "B".to_string()],
             ..empty_spec()
         };

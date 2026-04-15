@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedOperation, ParsedProperty};
+use crate::check::{self, ParsedHandler, ParsedProperty};
 use crate::codegen::map_type;
 
 /// Translate a qedspec guard expression to Rust syntax.
@@ -76,7 +76,7 @@ fn find_upper_bound_field(field: &str, properties: &[ParsedProperty]) -> Option<
 
 /// Emit `kani::assume(s.field < s.bound)` for operations with "add" effects,
 /// to prevent arithmetic overflow and ensure bounded properties are preserved.
-fn emit_add_strict_bounds(out: &mut String, op: &ParsedOperation, properties: &[ParsedProperty]) {
+fn emit_add_strict_bounds(out: &mut String, op: &ParsedHandler, properties: &[ParsedProperty]) {
     for (field, eff_op, _) in &op.effects {
         if eff_op == "add" {
             if let Some(bound) = find_upper_bound_field(field, properties) {
@@ -96,7 +96,7 @@ fn emit_add_strict_bounds(out: &mut String, op: &ParsedOperation, properties: &[
 pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
-    if spec.operations.is_empty() {
+    if spec.handlers.is_empty() {
         anyhow::bail!(
             "No operations found in {}. Is this a valid qedspec file?",
             spec_path.display()
@@ -224,7 +224,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         "// ============================================================================\n\n",
     );
 
-    for op in &spec.operations {
+    for op in &spec.handlers {
         // Doc comment
         if let Some(ref doc) = op.doc {
             out.push_str(&format!("/// {}\n", doc.trim()));
@@ -242,7 +242,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         ));
 
         // Guard check
-        if op.has_guard {
+        if op.has_guard() {
             if let Some(ref guard) = op.guard_str {
                 let rust_guard = translate_guard_to_rust(guard);
                 out.push_str(&format!("    // guard: {}\n", guard));
@@ -290,8 +290,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────
-    let guard_ops: Vec<&ParsedOperation> =
-        spec.operations.iter().filter(|op| op.has_guard).collect();
+    let guard_ops: Vec<&ParsedHandler> =
+        spec.handlers.iter().filter(|op| op.has_guard()).collect();
     if !guard_ops.is_empty() {
         out.push_str(
             "// ============================================================================\n",
@@ -345,8 +345,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // ── Abort condition proofs ────────────────────────────────────────────
-    let abort_ops: Vec<&ParsedOperation> = spec
-        .operations
+    let abort_ops: Vec<&ParsedHandler> = spec
+        .handlers
         .iter()
         .filter(|op| !op.aborts_if.is_empty())
         .collect();
@@ -420,7 +420,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             }
 
             for op_name in &prop.preserved_by {
-                let op = spec.operations.iter().find(|o| &o.name == op_name);
+                let op = spec.handlers.iter().find(|o| &o.name == op_name);
 
                 out.push_str("#[kani::proof]\n");
                 out.push_str("#[kani::unwind(2)]\n");
@@ -515,8 +515,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // ── Effect conformance proofs ─────────────────────────────────────────
-    let effect_ops: Vec<&ParsedOperation> =
-        spec.operations.iter().filter(|op| op.has_effect).collect();
+    let effect_ops: Vec<&ParsedHandler> =
+        spec.handlers.iter().filter(|op| op.has_effect()).collect();
     if !effect_ops.is_empty() {
         out.push_str(
             "// ============================================================================\n",
@@ -682,7 +682,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 // Chain operations with nested ifs
                 let mut indent = "    ".to_string();
                 for (j, op_name) in trace.iter().enumerate() {
-                    let op = spec.operations.iter().find(|o| o.name == *op_name);
+                    let op = spec.handlers.iter().find(|o| o.name == *op_name);
                     // Generate symbolic params
                     if let Some(op) = op {
                         for (pname, ptype) in &op.takes_params {
@@ -754,7 +754,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             out.push_str("        let op: u8 = kani::any();\n");
             out.push_str("        match op {\n");
             for (i, op_name) in via_ops.iter().enumerate() {
-                let op = spec.operations.iter().find(|o| o.name == *op_name);
+                let op = spec.handlers.iter().find(|o| o.name == *op_name);
                 let param_decls: String = op
                     .map(|o| {
                         o.takes_params
@@ -860,8 +860,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // ── Overflow detection harnesses ─────────────────────────────────────
-    let overflow_ops: Vec<&ParsedOperation> = spec
-        .operations
+    let overflow_ops: Vec<&ParsedHandler> = spec
+        .handlers
         .iter()
         .filter(|op| op.effects.iter().any(|(_, kind, _)| kind == "add"))
         .collect();

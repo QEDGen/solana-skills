@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedOperation, ParsedSpec};
+use crate::check::{self, ParsedHandler, ParsedSpec};
 use crate::codegen::map_type;
 
 /// Generate unit tests from a spec file (.lean or .qedspec).
@@ -10,7 +10,7 @@ use crate::codegen::map_type;
 pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
-    if spec.operations.is_empty() {
+    if spec.handlers.is_empty() {
         anyhow::bail!(
             "No operations found in {}. Is this a valid qedspec file?",
             spec_path.display()
@@ -50,7 +50,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         spec.state_fields.iter().collect()
     };
     if all_fields.iter().any(|(_, t)| t == "Pubkey")
-        || spec.operations.iter().any(|op| op.who.is_some())
+        || spec.handlers.iter().any(|op| op.who.is_some())
     {
         out.push_str("type Address = [u8; 32];\n\n");
     }
@@ -91,8 +91,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // Helper: apply effects to state
-    for op in &spec.operations {
-        if !op.has_effect {
+    for op in &spec.handlers {
+        if !op.has_effect() {
             continue;
         }
         let (op_state_name, _) = resolve_state_for_op(op, &spec, is_multi);
@@ -143,8 +143,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // Helper: guard predicates
-    for op in &spec.operations {
-        if !op.has_guard {
+    for op in &spec.handlers {
+        if !op.has_guard() {
             continue;
         }
         let (op_state_name, _) = resolve_state_for_op(op, &spec, is_multi);
@@ -185,8 +185,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("    // Effect tests — verify state mutations match spec\n");
     out.push_str("    // ====================================================================\n\n");
 
-    for op in &spec.operations {
-        if !op.has_effect {
+    for op in &spec.handlers {
+        if !op.has_effect() {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
@@ -198,8 +198,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("    // Guard tests — verify boundary conditions\n");
     out.push_str("    // ====================================================================\n\n");
 
-    for op in &spec.operations {
-        if !op.has_guard {
+    for op in &spec.handlers {
+        if !op.has_guard() {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
@@ -220,8 +220,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             // Resolve property's state type based on expression field references
             let (prop_sn, prop_fields) = resolve_state_for_property(prop, &spec, is_multi);
             for op_name in &prop.preserved_by {
-                if let Some(op) = spec.operations.iter().find(|o| &o.name == op_name) {
-                    if !op.has_effect {
+                if let Some(op) = spec.handlers.iter().find(|o| &o.name == op_name) {
+                    if !op.has_effect() {
                         continue;
                     }
                     // For multi-account: skip if op targets a different account than the property
@@ -248,8 +248,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("    // Unchanged field tests — fields not in effects must not change\n");
     out.push_str("    // ====================================================================\n\n");
 
-    for op in &spec.operations {
-        if !op.has_effect {
+    for op in &spec.handlers {
+        if !op.has_effect() {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
@@ -257,8 +257,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // --- State machine tests ---
-    let transition_ops: Vec<&ParsedOperation> = spec
-        .operations
+    let transition_ops: Vec<&ParsedHandler> = spec
+        .handlers
         .iter()
         .filter(|op| op.pre_status.is_some() && op.post_status.is_some())
         .collect();
@@ -291,8 +291,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     std::fs::write(output_path, &out)?;
 
     // Count tests
-    let effect_count = spec.operations.iter().filter(|o| o.has_effect).count();
-    let guard_count = spec.operations.iter().filter(|o| o.has_guard).count() * 2; // pass + fail
+    let effect_count = spec.handlers.iter().filter(|o| o.has_effect()).count();
+    let guard_count = spec.handlers.iter().filter(|o| o.has_guard()).count() * 2; // pass + fail
     let prop_count: usize = spec
         .properties
         .iter()
@@ -300,10 +300,10 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             p.preserved_by
                 .iter()
                 .filter(|name| {
-                    spec.operations
+                    spec.handlers
                         .iter()
                         .find(|o| &&o.name == name)
-                        .is_some_and(|o| o.has_effect)
+                        .is_some_and(|o| o.has_effect())
                 })
                 .count()
         })
@@ -357,7 +357,7 @@ fn emit_state_struct(out: &mut String, state_name: &str, fields: &[(String, Stri
 
 /// Resolve the state name and fields for an operation.
 fn resolve_state_for_op<'a>(
-    op: &ParsedOperation,
+    op: &ParsedHandler,
     spec: &'a ParsedSpec,
     is_multi: bool,
 ) -> (String, &'a [(String, String)]) {
@@ -431,7 +431,7 @@ fn translate_guard(guard: &str, state_var: &str) -> String {
 }
 
 /// Build the argument list for calling apply_op / guard_op.
-fn call_args(op: &ParsedOperation) -> String {
+fn call_args(op: &ParsedHandler) -> String {
     if op.takes_params.is_empty() {
         return String::new();
     }
@@ -442,7 +442,7 @@ fn call_args(op: &ParsedOperation) -> String {
 /// Generate a test that applies an operation's effects and checks the result.
 fn generate_effect_test(
     out: &mut String,
-    op: &ParsedOperation,
+    op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
 ) {
@@ -512,7 +512,7 @@ fn generate_effect_test(
 /// Generate pass/fail guard tests with boundary values.
 fn generate_guard_tests(
     out: &mut String,
-    op: &ParsedOperation,
+    op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
 ) {
@@ -595,7 +595,7 @@ fn generate_guard_tests(
 /// Generate a property preservation test for a specific operation.
 fn generate_property_test(
     out: &mut String,
-    op: &ParsedOperation,
+    op: &ParsedHandler,
     prop: &crate::check::ParsedProperty,
     fields: &[(String, String)],
     state_name: &str,
@@ -657,7 +657,7 @@ fn generate_property_test(
 /// Generate unchanged field tests — fields not in effects must not change.
 fn generate_unchanged_test(
     out: &mut String,
-    op: &ParsedOperation,
+    op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
 ) {
@@ -716,7 +716,7 @@ fn generate_unchanged_test(
 }
 
 /// Generate a state machine test — verify the transition is valid.
-fn generate_state_machine_test(out: &mut String, op: &ParsedOperation, status_enum: &str) {
+fn generate_state_machine_test(out: &mut String, op: &ParsedHandler, status_enum: &str) {
     let pre = op.pre_status.as_ref().unwrap();
     let post = op.post_status.as_ref().unwrap();
 
@@ -749,7 +749,7 @@ fn generate_state_machine_test(out: &mut String, op: &ParsedOperation, status_en
 }
 
 /// Pick a sensible default value for a state field given the operation context.
-fn sensible_default(fname: &str, ftype: &str, op: &ParsedOperation) -> String {
+fn sensible_default(fname: &str, ftype: &str, op: &ParsedHandler) -> String {
     // Try to pick values that satisfy common guards
     match ftype {
         "Pubkey" => "[1u8; 32]".to_string(),
@@ -790,7 +790,7 @@ fn sensible_default(fname: &str, ftype: &str, op: &ParsedOperation) -> String {
 }
 
 /// Pick a sensible param value that satisfies the guard.
-fn sensible_param(pname: &str, ptype: &str, _op: &ParsedOperation) -> String {
+fn sensible_param(pname: &str, ptype: &str, _op: &ParsedHandler) -> String {
     match ptype {
         "U8" | "u8" => {
             if pname == "threshold" {
@@ -818,7 +818,7 @@ fn sensible_param(pname: &str, ptype: &str, _op: &ParsedOperation) -> String {
 /// Returns (state_overrides, param_overrides) — field name → value pairs.
 type Overrides = Vec<(String, String)>;
 
-fn derive_guard_violation(guard: &str, op: &ParsedOperation) -> (Overrides, Overrides) {
+fn derive_guard_violation(guard: &str, op: &ParsedHandler) -> (Overrides, Overrides) {
     let mut state_overrides = Vec::new();
     let mut param_overrides = Vec::new();
 

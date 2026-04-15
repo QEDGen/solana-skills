@@ -31,9 +31,9 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
             "id={}\n",
             spec.program_id.as_deref().unwrap_or("")
         ));
-        for op in &spec.operations {
-            c.push_str(&format!("op={}|", op.name));
-            for (pn, pt) in &op.takes_params {
+        for handler in &spec.handlers {
+            c.push_str(&format!("op={}|", handler.name));
+            for (pn, pt) in &handler.takes_params {
                 c.push_str(&format!("{}:{},", pn, pt));
             }
             c.push('\n');
@@ -81,36 +81,28 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         hashes.insert("src/errors.rs".to_string(), section_hash(&c));
     }
 
-    // src/instructions/{op}.rs — one hash per operation
-    for op in &spec.operations {
+    // src/instructions/{handler}.rs — one hash per handler
+    for handler in &spec.handlers {
         let mut c = String::new();
         c.push_str(&format!("name={}\n", spec.program_name));
-        c.push_str(&canonical_operation(op));
-        // Include context if present
-        if let Some(ctx) = spec.contexts.iter().find(|cx| cx.operation == op.name) {
-            c.push_str(&canonical_context(ctx));
-        }
-        hashes.insert(format!("src/instructions/{}.rs", op.name), section_hash(&c));
+        c.push_str(&canonical_handler(handler));
+        // Include accounts from the handler
+        c.push_str(&canonical_accounts(handler));
+        hashes.insert(format!("src/instructions/{}.rs", handler.name), section_hash(&c));
     }
 
     // src/instructions/mod.rs
     {
         let mut c = String::new();
-        for op in &spec.operations {
-            c.push_str(&format!("mod={}\n", op.name));
+        for handler in &spec.handlers {
+            c.push_str(&format!("mod={}\n", handler.name));
         }
         hashes.insert("src/instructions/mod.rs".to_string(), section_hash(&c));
     }
 
     // Cargo.toml
     {
-        let needs_spl = spec.contexts.iter().any(|ctx| {
-            ctx.accounts.iter().any(|a| {
-                a.inner_type
-                    .as_ref()
-                    .is_some_and(|t| t == "Token" || t == "Mint")
-            })
-        });
+        let needs_spl = spec.handlers.iter().any(|h| h.has_token_accounts());
         let c = format!("name={}\nneeds_spl={}\n", spec.program_name, needs_spl);
         hashes.insert("Cargo.toml".to_string(), section_hash(&c));
     }
@@ -121,8 +113,8 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         for (fname, ftype) in &spec.state_fields {
             c.push_str(&format!("state={}:{}\n", fname, ftype));
         }
-        for op in &spec.operations {
-            c.push_str(&canonical_operation(op));
+        for handler in &spec.handlers {
+            c.push_str(&canonical_handler(handler));
         }
         for prop in &spec.properties {
             c.push_str(&format!(
@@ -144,8 +136,8 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         for (fname, ftype) in &spec.state_fields {
             c.push_str(&format!("state={}:{}\n", fname, ftype));
         }
-        for op in &spec.operations {
-            c.push_str(&canonical_operation(op));
+        for handler in &spec.handlers {
+            c.push_str(&canonical_handler(handler));
         }
         for prop in &spec.properties {
             c.push_str(&format!(
@@ -162,56 +154,53 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
     }
 }
 
-/// Canonical string for an operation (deterministic, sorted).
-fn canonical_operation(op: &crate::check::ParsedOperation) -> String {
+/// Canonical string for a handler (deterministic, sorted).
+fn canonical_handler(handler: &crate::check::ParsedHandler) -> String {
     let mut c = String::new();
-    c.push_str(&format!("op={}\n", op.name));
-    if let Some(ref doc) = op.doc {
+    c.push_str(&format!("op={}\n", handler.name));
+    if let Some(ref doc) = handler.doc {
         c.push_str(&format!("doc={}\n", doc));
     }
-    if let Some(ref who) = op.who {
+    if let Some(ref who) = handler.who {
         c.push_str(&format!("who={}\n", who));
     }
-    if let Some(ref pre) = op.pre_status {
+    if let Some(ref pre) = handler.pre_status {
         c.push_str(&format!("when={}\n", pre));
     }
-    if let Some(ref post) = op.post_status {
+    if let Some(ref post) = handler.post_status {
         c.push_str(&format!("then={}\n", post));
     }
-    for (pn, pt) in &op.takes_params {
+    for (pn, pt) in &handler.takes_params {
         c.push_str(&format!("takes={}:{}\n", pn, pt));
     }
-    if let Some(ref g) = op.guard_str {
+    if let Some(ref g) = handler.guard_str {
         c.push_str(&format!("guard={}\n", g));
     }
-    for (field, kind, val) in &op.effects {
+    for (field, kind, val) in &handler.effects {
         c.push_str(&format!("effect={} {} {}\n", field, kind, val));
     }
-    for emit in &op.emits {
+    for emit in &handler.emits {
         c.push_str(&format!("emits={}\n", emit));
     }
     c
 }
 
-/// Canonical string for a context block.
-fn canonical_context(ctx: &crate::check::ParsedContext) -> String {
+/// Canonical string for a handler's accounts block.
+fn canonical_accounts(handler: &crate::check::ParsedHandler) -> String {
     let mut c = String::new();
-    for acct in &ctx.accounts {
+    for acct in &handler.accounts {
         c.push_str(&format!(
-            "acct={}|type={}|inner={}|mut={}|init={}|init_if_needed={}|payer={}|seeds={}|bump={}|close={}|has_one={}|token_mint={}|token_authority={}\n",
+            "acct={}|signer={}|writable={}|program={}|pda_seeds={}|account_type={}|authority={}\n",
             acct.name,
-            acct.account_type,
-            acct.inner_type.as_deref().unwrap_or(""),
-            acct.is_mut,
-            acct.is_init,
-            acct.is_init_if_needed,
-            acct.payer.as_deref().unwrap_or(""),
-            acct.seeds_ref.as_deref().unwrap_or(""),
-            acct.has_bump,
-            acct.close_target.as_deref().unwrap_or(""),
-            acct.has_one.as_deref().unwrap_or(""),
-            acct.token_mint.as_deref().unwrap_or(""),
-            acct.token_authority.as_deref().unwrap_or(""),
+            acct.is_signer,
+            acct.is_writable,
+            acct.is_program,
+            acct.pda_seeds
+                .as_ref()
+                .map(|s| s.join(","))
+                .unwrap_or_default(),
+            acct.account_type.as_deref().unwrap_or(""),
+            acct.authority.as_deref().unwrap_or(""),
         ));
     }
     c

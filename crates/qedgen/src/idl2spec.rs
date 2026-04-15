@@ -668,11 +668,11 @@ mod tests {
 
         assert_eq!(spec.program_name, "Escrow");
         assert_eq!(spec.target.as_deref(), Some("quasar"));
-        assert_eq!(spec.operations.len(), 3);
-        assert_eq!(spec.operations[0].name, "initialize");
-        assert_eq!(spec.operations[1].name, "exchange");
-        assert_eq!(spec.operations[2].name, "cancel");
-        assert!(spec.operations[0].who.as_deref() == Some("initializer"));
+        assert_eq!(spec.handlers.len(), 3);
+        assert_eq!(spec.handlers[0].name, "initialize");
+        assert_eq!(spec.handlers[1].name, "exchange");
+        assert_eq!(spec.handlers[2].name, "cancel");
+        assert!(spec.handlers[0].who.as_deref() == Some("initializer"));
         assert!(!spec.pdas.is_empty());
         assert_eq!(spec.error_codes.len(), 2);
         assert!(!spec.state_fields.is_empty());
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(spec.account_types.len(), 2);
         assert!(spec.account_types.iter().any(|a| a.name == "Pool"));
         assert!(spec.account_types.iter().any(|a| a.name == "Loan"));
-        assert_eq!(spec.operations.len(), 2);
+        assert_eq!(spec.handlers.len(), 2);
     }
 
     // ── Context generation ───────────────────────────────────────────────

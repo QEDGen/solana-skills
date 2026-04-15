@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedAccountEntry, ParsedContext, ParsedOperation, ParsedSpec};
+use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
 use crate::codegen::{map_type, to_pascal_case};
 
 /// Generate QuasarSVM integration test scaffolds from a spec file (.qedspec).
@@ -18,9 +18,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         anyhow::bail!("Integration tests are only supported for Quasar targets, not assembly/sBPF");
     }
 
-    if spec.operations.is_empty() {
+    if spec.handlers.is_empty() {
         anyhow::bail!(
-            "No operations found in {}. Is this a valid qedspec file?",
+            "No handlers found in {}. Is this a valid qedspec file?",
             spec_path.display()
         );
     }
@@ -48,13 +48,10 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> String {
     let mut out = String::new();
     let program_name = spec.program_name.to_lowercase();
     let state_name = format!("{}Account", to_pascal_case(&program_name));
-    let needs_token = spec.contexts.iter().any(|ctx| {
-        ctx.accounts.iter().any(|a| {
-            a.inner_type
-                .as_ref()
-                .is_some_and(|t| t == "Token" || t == "Mint")
-        })
-    });
+    let needs_token = spec
+        .handlers
+        .iter()
+        .any(|h| h.has_token_accounts());
 
     // Header
     out.push_str(&format!(
@@ -105,17 +102,15 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> String {
     // ── Account helpers ──────────────────────────────────────────────────────
     emit_account_helpers(&mut out, &state_name, spec, needs_token);
 
-    // ── Per-operation happy-path tests ────────────────────────────────────────
-    for (i, op) in spec.operations.iter().enumerate() {
-        let ctx = spec.contexts.iter().find(|c| c.operation == op.name);
-        emit_happy_path_test(&mut out, op, ctx, spec, i);
+    // ── Per-handler happy-path tests ────────────────────────────────────────
+    for (i, handler) in spec.handlers.iter().enumerate() {
+        emit_happy_path_test(&mut out, handler, spec, i);
     }
 
     // ── Unauthorized access tests ────────────────────────────────────────────
-    for op in &spec.operations {
-        if op.who.is_some() {
-            let ctx = spec.contexts.iter().find(|c| c.operation == op.name);
-            emit_unauthorized_test(&mut out, op, ctx, spec);
+    for handler in &spec.handlers {
+        if handler.who.is_some() {
+            emit_unauthorized_test(&mut out, handler, spec);
         }
     }
 
@@ -236,40 +231,39 @@ fn emit_account_helpers(out: &mut String, state_name: &str, spec: &ParsedSpec, n
 
 fn emit_happy_path_test(
     out: &mut String,
-    op: &ParsedOperation,
-    ctx: Option<&ParsedContext>,
+    handler: &ParsedHandler,
     spec: &ParsedSpec,
     _discriminator: usize,
 ) {
-    let test_name = format!("test_{}", op.name);
-    let pascal = to_pascal_case(&op.name);
+    let test_name = format!("test_{}", handler.name);
+    let pascal = to_pascal_case(&handler.name);
     let instr_struct = format!("{}Instruction", pascal);
 
-    out.push_str(&format!("// ── {} ──\n\n", op.name));
+    out.push_str(&format!("// ── {} ──\n\n", handler.name));
 
-    if let Some(ref doc) = op.doc {
+    if let Some(ref doc) = handler.doc {
         out.push_str(&format!("/// Happy path: {}\n", doc.trim()));
     }
     out.push_str(&format!("#[test]\nfn {}() {{\n", test_name));
     out.push_str("    let mut svm = setup();\n\n");
 
-    // Emit system_program + rent if context uses init
-    let ctx_accounts = ctx.map(|c| &c.accounts[..]).unwrap_or(&[]);
-    let has_init = ctx_accounts
+    // Emit system_program + rent if handler initializes accounts
+    let accounts = &handler.accounts;
+    let is_init_handler = handler.pre_status.as_deref() == Some("Uninitialized")
+        || handler.pre_status.as_deref() == Some("Empty");
+    let has_init = is_init_handler && accounts.iter().any(|a| a.pda_seeds.is_some());
+    let has_system = accounts
         .iter()
-        .any(|a| a.is_init || a.is_init_if_needed);
-    let has_system = ctx_accounts
-        .iter()
-        .any(|a| a.inner_type.as_deref() == Some("System"));
+        .any(|a| a.is_program && a.name.contains("system"));
 
-    // Emit Pubkey declarations for each account in context
+    // Emit Pubkey declarations for each account
     out.push_str("    // Account addresses\n");
     if has_system {
         out.push_str("    let system_program = quasar_svm::system_program::ID;\n");
     }
-    let has_token_program = ctx_accounts
+    let has_token_program = accounts
         .iter()
-        .any(|a| a.inner_type.as_deref() == Some("Token") && a.account_type == "Program");
+        .any(|a| a.is_program && a.account_type.as_deref() == Some("token"));
     if has_token_program {
         out.push_str("    let token_program = quasar_svm::SPL_TOKEN_PROGRAM_ID;\n");
     }
@@ -278,16 +272,16 @@ fn emit_happy_path_test(
     }
 
     // Emit unique keys for non-program, non-sysvar accounts
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" || acct.name == "rent" {
+    for acct in accounts {
+        if acct.is_program || acct.name == "rent" {
             continue;
         }
-        if acct.seeds_ref.is_some() {
+        if let Some(ref seeds) = acct.pda_seeds {
             // PDA — derive it
             let pda = spec
                 .pdas
                 .iter()
-                .find(|p| acct.seeds_ref.as_deref() == Some(&p.name));
+                .find(|p| !seeds.is_empty() && p.name == acct.name);
             if let Some(pda) = pda {
                 let seed_exprs: Vec<String> = pda
                     .seeds
@@ -318,9 +312,9 @@ fn emit_happy_path_test(
     out.push('\n');
 
     // Emit instruction parameters
-    if !op.takes_params.is_empty() {
+    if !handler.takes_params.is_empty() {
         out.push_str("    // Instruction parameters\n");
-        for (name, ty) in &op.takes_params {
+        for (name, ty) in &handler.takes_params {
             let rust_ty = map_type(ty);
             let default = default_value(rust_ty);
             out.push_str(&format!(
@@ -336,11 +330,11 @@ fn emit_happy_path_test(
         "    let instruction: Instruction = {} {{\n",
         instr_struct
     ));
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" {
-            if acct.inner_type.as_deref() == Some("System") {
+    for acct in accounts {
+        if acct.is_program {
+            if acct.name.contains("system") {
                 out.push_str("        system_program,\n");
-            } else if acct.inner_type.as_deref() == Some("Token") {
+            } else if acct.account_type.as_deref() == Some("token") {
                 out.push_str("        token_program,\n");
             } else {
                 out.push_str(&format!("        {},\n", acct.name));
@@ -349,7 +343,7 @@ fn emit_happy_path_test(
             out.push_str(&format!("        {},\n", acct.name));
         }
     }
-    for (name, _) in &op.takes_params {
+    for (name, _) in &handler.takes_params {
         out.push_str(&format!("        {},\n", name));
     }
     out.push_str("    }\n    .into();\n\n");
@@ -358,11 +352,11 @@ fn emit_happy_path_test(
     out.push_str("    let result = svm.process_instruction(\n");
     out.push_str("        &instruction,\n");
     out.push_str("        &[\n");
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" {
+    for acct in accounts {
+        if acct.is_program {
             continue; // programs are not passed as accounts
         }
-        let helper = account_helper_call(acct, spec);
+        let helper = account_helper_call(acct, handler, spec);
         out.push_str(&format!("            {},\n", helper));
     }
     out.push_str("        ],\n");
@@ -371,16 +365,17 @@ fn emit_happy_path_test(
     // Assertions
     out.push_str(&format!(
         "    assert!(result.is_ok(), \"{} failed: {{:?}}\", result.raw_result);\n",
-        op.name
+        handler.name
     ));
 
     // State verification hints
-    if op.has_effect {
+    if handler.has_effect() {
         out.push('\n');
         out.push_str("    // AGENT: verify account state after instruction\n");
-        for acct in ctx_accounts {
-            if acct.is_init || acct.is_mut {
-                if acct.account_type == "Signer" {
+        for acct in accounts {
+            let acct_is_init = is_init_handler && acct.pda_seeds.is_some() && !acct.is_signer;
+            if acct_is_init || acct.is_writable {
+                if acct.is_signer && !acct.is_program {
                     continue;
                 }
                 out.push_str(&format!(
@@ -389,7 +384,7 @@ fn emit_happy_path_test(
                 ));
             }
         }
-        for (field, kind, value) in &op.effects {
+        for (field, kind, value) in &handler.effects {
             out.push_str(&format!(
                 "    // Spec effect: {} {} {}\n",
                 field, kind, value
@@ -399,42 +394,41 @@ fn emit_happy_path_test(
 
     out.push_str(&format!(
         "\n    println!(\"  {} CU: {{}}\", result.compute_units_consumed);\n",
-        op.name.to_uppercase()
+        handler.name.to_uppercase()
     ));
     out.push_str("}\n\n");
 }
 
 fn emit_unauthorized_test(
     out: &mut String,
-    op: &ParsedOperation,
-    ctx: Option<&ParsedContext>,
+    handler: &ParsedHandler,
     spec: &ParsedSpec,
 ) {
-    let who = match &op.who {
+    let who = match &handler.who {
         Some(w) => w,
         None => return,
     };
-    let test_name = format!("test_{}_unauthorized", op.name);
-    let pascal = to_pascal_case(&op.name);
+    let test_name = format!("test_{}_unauthorized", handler.name);
+    let pascal = to_pascal_case(&handler.name);
     let instr_struct = format!("{}Instruction", pascal);
 
     out.push_str(&format!(
         "/// {} must reject unauthorized callers (wrong {}).\n",
-        op.name, who
+        handler.name, who
     ));
     out.push_str(&format!("#[test]\nfn {}() {{\n", test_name));
     out.push_str("    let mut svm = setup();\n\n");
 
-    let ctx_accounts = ctx.map(|c| &c.accounts[..]).unwrap_or(&[]);
-    let has_system = ctx_accounts
+    let accounts = &handler.accounts;
+    let has_system = accounts
         .iter()
-        .any(|a| a.inner_type.as_deref() == Some("System"));
-    let has_token_program = ctx_accounts
+        .any(|a| a.is_program && a.name.contains("system"));
+    let has_token_program = accounts
         .iter()
-        .any(|a| a.inner_type.as_deref() == Some("Token") && a.account_type == "Program");
-    let has_init = ctx_accounts
-        .iter()
-        .any(|a| a.is_init || a.is_init_if_needed);
+        .any(|a| a.is_program && a.account_type.as_deref() == Some("token"));
+    let is_init_handler = handler.pre_status.as_deref() == Some("Uninitialized")
+        || handler.pre_status.as_deref() == Some("Empty");
+    let has_init = is_init_handler && accounts.iter().any(|a| a.pda_seeds.is_some());
 
     if has_system {
         out.push_str("    let system_program = quasar_svm::system_program::ID;\n");
@@ -449,8 +443,8 @@ fn emit_unauthorized_test(
     // Create a wrong_signer that differs from the `who` account
     out.push_str(&format!("    let wrong_{} = Pubkey::new_unique();\n", who));
 
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" || acct.name == "rent" {
+    for acct in accounts {
+        if acct.is_program || acct.name == "rent" {
             continue;
         }
         if acct.name == *who {
@@ -466,11 +460,11 @@ fn emit_unauthorized_test(
         "    let instruction: Instruction = {} {{\n",
         instr_struct
     ));
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" {
-            if acct.inner_type.as_deref() == Some("System") {
+    for acct in accounts {
+        if acct.is_program {
+            if acct.name.contains("system") {
                 out.push_str("        system_program,\n");
-            } else if acct.inner_type.as_deref() == Some("Token") {
+            } else if acct.account_type.as_deref() == Some("token") {
                 out.push_str("        token_program,\n");
             } else {
                 out.push_str(&format!("        {},\n", acct.name));
@@ -481,7 +475,7 @@ fn emit_unauthorized_test(
             out.push_str(&format!("        {},\n", acct.name));
         }
     }
-    for (name, ty) in &op.takes_params {
+    for (name, ty) in &handler.takes_params {
         let default = default_value(map_type(ty));
         out.push_str(&format!("        {}: {},\n", name, default));
     }
@@ -491,14 +485,14 @@ fn emit_unauthorized_test(
     out.push_str("    let result = svm.process_instruction(\n");
     out.push_str("        &instruction,\n");
     out.push_str("        &[\n");
-    for acct in ctx_accounts {
-        if acct.account_type == "Program" {
+    for acct in accounts {
+        if acct.is_program {
             continue;
         }
         if acct.name == *who {
             out.push_str(&format!("            signer(wrong_{}),\n", who));
         } else {
-            let helper = account_helper_call(acct, spec);
+            let helper = account_helper_call(acct, handler, spec);
             out.push_str(&format!("            {},\n", helper));
         }
     }
@@ -507,7 +501,7 @@ fn emit_unauthorized_test(
 
     out.push_str(&format!(
         "    assert!(result.is_err(), \"{} should reject wrong {}\");\n",
-        op.name, who
+        handler.name, who
     ));
     out.push_str("}\n\n");
 }
@@ -519,31 +513,31 @@ fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
     out.push_str("#[test]\nfn test_lifecycle_sequence() {\n");
     out.push_str("    let mut svm = setup();\n\n");
 
-    // Group operations by lifecycle transitions
-    let lifecycle_ops: Vec<&ParsedOperation> = spec
-        .operations
+    // Group handlers by lifecycle transitions
+    let lifecycle_handlers: Vec<&ParsedHandler> = spec
+        .handlers
         .iter()
-        .filter(|op| op.pre_status.is_some() || op.post_status.is_some())
+        .filter(|h| h.pre_status.is_some() || h.post_status.is_some())
         .collect();
 
-    if lifecycle_ops.is_empty() {
+    if lifecycle_handlers.is_empty() {
         out.push_str("    // No lifecycle transitions found — nothing to sequence.\n");
         out.push_str("}\n\n");
         return;
     }
 
     out.push_str("    // Lifecycle transitions:\n");
-    for op in &lifecycle_ops {
-        let pre = op.pre_status.as_deref().unwrap_or("*");
-        let post = op.post_status.as_deref().unwrap_or(pre);
-        out.push_str(&format!("    //   {} : {} → {}\n", op.name, pre, post));
+    for h in &lifecycle_handlers {
+        let pre = h.pre_status.as_deref().unwrap_or("*");
+        let post = h.post_status.as_deref().unwrap_or(pre);
+        out.push_str(&format!("    //   {} : {} → {}\n", h.name, pre, post));
     }
     out.push('\n');
 
-    // Find an init operation (Uninitialized → X)
-    let init_op = lifecycle_ops
+    // Find an init handler (Uninitialized → X)
+    let init_op = lifecycle_handlers
         .iter()
-        .find(|op| op.pre_status.as_deref() == Some("Uninitialized"));
+        .find(|h| h.pre_status.as_deref() == Some("Uninitialized"));
 
     if let Some(op) = init_op {
         out.push_str(&format!(
@@ -570,21 +564,27 @@ fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
 // ============================================================================
 
 /// Return an appropriate helper function call for an account entry.
-fn account_helper_call(acct: &ParsedAccountEntry, _spec: &ParsedSpec) -> String {
-    if acct.account_type == "Signer" {
+fn account_helper_call(acct: &ParsedHandlerAccount, handler: &ParsedHandler, _spec: &ParsedSpec) -> String {
+    if acct.is_signer && !acct.is_program {
         return format!("signer({})", acct.name);
     }
 
     // Token accounts
-    if let Some(ref inner) = acct.inner_type {
-        if inner == "Mint" {
+    if let Some(ref account_type) = acct.account_type {
+        if account_type == "mint" {
             return format!(
                 "mint_account({}, Pubkey::new_unique()) /* AGENT: set authority */",
                 acct.name
             );
         }
-        if inner == "Token" {
-            if acct.is_init || acct.is_init_if_needed {
+        if account_type == "token" {
+            // Infer init from handler lifecycle + pda_seeds
+            let is_init = {
+                let init_lifecycle = handler.pre_status.as_deref() == Some("Uninitialized")
+                    || handler.pre_status.as_deref() == Some("Empty");
+                init_lifecycle && acct.pda_seeds.is_some()
+            };
+            if is_init {
                 return format!("empty({})", acct.name);
             }
             return format!(
@@ -594,13 +594,18 @@ fn account_helper_call(acct: &ParsedAccountEntry, _spec: &ParsedSpec) -> String 
         }
     }
 
-    // Init accounts start empty
-    if acct.is_init {
+    // Init accounts start empty (infer from handler lifecycle + pda_seeds)
+    let is_init = {
+        let init_lifecycle = handler.pre_status.as_deref() == Some("Uninitialized")
+            || handler.pre_status.as_deref() == Some("Empty");
+        init_lifecycle && !acct.is_signer && acct.pda_seeds.is_some()
+    };
+    if is_init {
         return format!("empty({})", acct.name);
     }
 
-    // Mutable program-owned accounts need pre-populated state
-    if acct.is_mut && acct.account_type == "Account" {
+    // Mutable non-signer, non-program accounts need pre-populated state
+    if acct.is_writable && !acct.is_signer && !acct.is_program {
         return format!(
             "empty({}) /* AGENT: use state_account() with appropriate fields */",
             acct.name
