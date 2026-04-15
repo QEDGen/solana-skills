@@ -3,105 +3,7 @@ use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedProperty, ParsedSpec};
 use crate::codegen::map_type;
-
-/// Translate a qedspec guard expression to Rust syntax.
-fn translate_guard_to_rust(guard: &str) -> String {
-    let result = guard
-        .replace("state.", "s.")
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
-        .replace(" and ", " && ")
-        .replace(" or ", " || ");
-    // Lean uses `=` for equality; Rust needs `==`. Replace ` = ` that isn't
-    // part of `<=`, `>=`, `!=`, or `==` (already handled above).
-    let mut result = result;
-    // Only fix standalone ` = ` (space-delimited) that isn't already part of a compound operator
-    let mut safe = String::with_capacity(result.len());
-    let bytes = result.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' && i > 0 && i + 1 < bytes.len()
-            && bytes[i - 1] == b' ' && bytes[i + 1] == b' '
-            && (i < 2 || (bytes[i - 2] != b'<' && bytes[i - 2] != b'>' && bytes[i - 2] != b'!'))
-            && (i + 2 >= bytes.len() || bytes[i + 1] != b'=')
-        {
-            safe.push_str("==");
-        } else {
-            safe.push(bytes[i] as char);
-        }
-        i += 1;
-    }
-    result = safe;
-    // Replace infix arithmetic with wrapping methods to avoid overflow panics.
-    // This is safe: if the guard value wraps, the comparison produces the wrong result,
-    // causing the guard to (correctly) reject the transition.
-    wrap_arithmetic(&result)
-}
-
-/// Convert infix `a + b` and `a - b` to `a.wrapping_add(b)` and `a.wrapping_sub(b)`
-/// within comparison sub-expressions. Only transforms arithmetic within individual
-/// conjuncts/disjuncts — doesn't break boolean structure.
-fn wrap_arithmetic(expr: &str) -> String {
-    // Split on boolean connectives, transform each part, rejoin
-    let parts: Vec<&str> = expr.split(" && ").collect();
-    let wrapped: Vec<String> = parts
-        .iter()
-        .map(|part| {
-            let sub_parts: Vec<&str> = part.split(" || ").collect();
-            sub_parts
-                .iter()
-                .map(|sub| wrap_arithmetic_atom(sub.trim()))
-                .collect::<Vec<_>>()
-                .join(" || ")
-        })
-        .collect();
-    wrapped.join(" && ")
-}
-
-fn wrap_arithmetic_atom(atom: &str) -> String {
-    // Match patterns like `a + b <= c` or `a >= b - c`
-    for cmp in &[" <= ", " >= ", " < ", " > ", " == ", " != "] {
-        if let Some(pos) = atom.find(cmp) {
-            let lhs = &atom[..pos];
-            let rhs = &atom[pos + cmp.len()..];
-            let lhs_wrapped = wrap_arith_expr(lhs.trim());
-            let rhs_wrapped = wrap_arith_expr(rhs.trim());
-            return format!("{}{}{}", lhs_wrapped, cmp, rhs_wrapped);
-        }
-    }
-    atom.to_string()
-}
-
-fn wrap_arith_expr(expr: &str) -> String {
-    if let Some(pos) = expr.rfind(" + ") {
-        let lhs = &expr[..pos];
-        let rhs = &expr[pos + 3..];
-        format!("{}.wrapping_add({})", lhs.trim(), rhs.trim())
-    } else if let Some(pos) = expr.rfind(" - ") {
-        let lhs = &expr[..pos];
-        let rhs = &expr[pos + 3..];
-        format!("{}.wrapping_sub({})", lhs.trim(), rhs.trim())
-    } else {
-        expr.to_string()
-    }
-}
-
-/// Translate a qedspec property expression to Rust.
-fn translate_property_to_rust(expr: &str) -> String {
-    let result = expr
-        .replace("state.", "s.")
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
-        .replace(" and ", " && ")
-        .replace(" or ", " || ");
-    wrap_arithmetic(&result)
-}
+use crate::rust_codegen_util;
 
 /// Return the proptest strategy string for a DSL type.
 fn strategy_for_type(dsl_type: &str) -> &str {
@@ -140,54 +42,6 @@ fn type_max(dsl_type: &str) -> Option<&str> {
         "U64" => Some("u64::MAX"),
         "U128" => Some("u128::MAX"),
         _ => None,
-    }
-}
-
-/// For a field with an "add" effect, find its upper-bound field in property expressions.
-fn find_upper_bound_field(field: &str, properties: &[ParsedProperty]) -> Option<String> {
-    for prop in properties {
-        if let Some(ref expr) = prop.expression {
-            let norm = expr.replace('\u{2264}', "<=").replace('\u{2265}', ">=");
-            let field_pat = format!("s.{}", field);
-            if !norm.contains(&field_pat) && !norm.contains(field) {
-                continue;
-            }
-            for segment in norm.split("&&").chain(norm.split('\u{2227}')) {
-                let segment = segment.trim();
-                if let Some((lhs, rhs)) = segment.split_once("<=") {
-                    let lhs = lhs.trim();
-                    let rhs = rhs.trim();
-                    if lhs.ends_with(field) || lhs == &format!("s.{}", field) {
-                        let bound = rhs
-                            .strip_prefix("s.")
-                            .or_else(|| rhs.strip_prefix("state."))
-                            .unwrap_or(rhs)
-                            .trim();
-                        if bound.chars().all(|c| c.is_alphanumeric() || c == '_')
-                            && !bound.is_empty()
-                            && !bound.chars().next().unwrap().is_ascii_digit()
-                        {
-                            return Some(bound.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Emit `prop_assume!(s.field < s.bound)` for add effects.
-fn emit_add_strict_bounds(out: &mut String, op: &ParsedHandler, properties: &[ParsedProperty]) {
-    for (field, eff_op, _) in &op.effects {
-        if eff_op == "add" {
-            if let Some(bound) = find_upper_bound_field(field, properties) {
-                out.push_str(&format!(
-                    "        prop_assume!(s.{} < s.{}); // strict bound for add\n",
-                    field, bound
-                ));
-            }
-        }
     }
 }
 
@@ -243,16 +97,6 @@ fn extract_field_upper_bounds(
     bounds
 }
 
-/// Resolve an effect value to a Rust expression (param name, constant, or literal).
-fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> String {
-    if op.takes_params.iter().any(|(n, _)| n == value) {
-        value.to_string()
-    } else if let Some((_, const_val)) = spec.constants.iter().find(|(n, _)| n == value) {
-        const_val.clone()
-    } else {
-        value.to_string()
-    }
-}
 
 /// Generate proptest harnesses from a spec file (.qedspec).
 ///
@@ -306,22 +150,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     if !spec.constants.is_empty() {
         for (name, value) in &spec.constants {
             let upper = name.to_uppercase();
-            let clean_val = value.replace('_', "");
-            let const_type = if let Ok(v) = clean_val.parse::<u128>() {
-                if v <= u8::MAX as u128 {
-                    "u8"
-                } else if v <= u16::MAX as u128 {
-                    "u16"
-                } else if v <= u32::MAX as u128 {
-                    "u32"
-                } else if v <= u64::MAX as u128 {
-                    "u64"
-                } else {
-                    "u128"
-                }
-            } else {
-                "u64"
-            };
+            let const_type = rust_codegen_util::infer_const_type(value);
             out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
         }
         out.push('\n');
@@ -448,7 +277,7 @@ fn emit_account_section(
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
             if let Some(ref expr) = prop.expression {
-                let rust_expr = translate_property_to_rust(expr);
+                let rust_expr = rust_codegen_util::translate_property_to_rust(expr, true);
                 out.push_str(&format!("/// {}: {}\n", prop.name, expr));
                 out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
                 out.push_str(&format!("    {}\n", rust_expr));
@@ -460,9 +289,11 @@ fn emit_account_section(
     // Transition functions
     emit_transition_functions_for(out, handlers, spec);
 
+    // Clone properties once for sections that need owned copies
+    let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
+
     // Property preservation tests
     if !props_with_expr.is_empty() {
-        let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
         emit_preservation_tests_for(out, handlers, &owned_props, mutable_fields, spec);
     }
 
@@ -480,12 +311,10 @@ fn emit_account_section(
         .collect();
     if !overflow_ops.is_empty() {
         let overflow_refs: Vec<&ParsedHandler> = overflow_ops.iter().map(|op| **op).collect();
-        let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
         emit_overflow_tests_for(out, &overflow_refs, mutable_fields, all_fields, spec, &owned_props);
     }
 
     // Sequence test
-    let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
     if !owned_props.is_empty() && handlers.len() > 1 {
         emit_sequence_test_for(out, handlers, &owned_props, mutable_fields, all_fields, lifecycle_states);
     }
@@ -581,10 +410,10 @@ fn emit_state_strategy_inner(
 fn collect_guard_rust(op: &ParsedHandler) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ref guard) = op.guard_str {
-        parts.push(translate_guard_to_rust(guard));
+        parts.push(rust_codegen_util::translate_guard_to_rust(guard, true));
     }
     for req in &op.requires {
-        parts.push(translate_guard_to_rust(&req.rust_expr));
+        parts.push(rust_codegen_util::translate_guard_to_rust(&req.rust_expr, true));
     }
     if parts.is_empty() {
         None
@@ -619,7 +448,7 @@ fn emit_transition_functions_for(out: &mut String, handlers: &[&ParsedHandler], 
 
         // Effects
         for (field, op_kind, value) in &op.effects {
-            let rust_value = resolve_value(value, op, spec);
+            let rust_value = rust_codegen_util::resolve_value(value, op, spec);
             match op_kind.as_str() {
                 "set" => out.push_str(&format!("    s.{} = {};\n", field, rust_value)),
                 "add" => out.push_str(&format!(
@@ -723,7 +552,7 @@ fn emit_preservation_tests_for(
 
             // Emit strict bounds for add effects
             if let Some(op) = op {
-                emit_add_strict_bounds(out, op, properties);
+                rust_codegen_util::emit_add_strict_bounds(out, op, properties, "        prop_assume!(s.{field} < s.{bound}); // strict bound for add\n");
             }
 
             // Call transition and assert

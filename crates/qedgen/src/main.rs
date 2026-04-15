@@ -17,6 +17,7 @@ mod parser;
 mod project;
 mod spec;
 mod proptest_gen;
+mod rust_codegen_util;
 mod unit_test;
 mod validate;
 mod verify;

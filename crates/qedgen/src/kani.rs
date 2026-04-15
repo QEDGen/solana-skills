@@ -1,93 +1,9 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedHandler, ParsedProperty};
+use crate::check::{self, ParsedHandler};
 use crate::codegen::map_type;
-
-/// Translate a qedspec guard expression to Rust syntax.
-/// Handles: s.field → s.field (kept as-is for transition fns),
-///          ≤ → <=, ≥ → >=, ∧/and → &&, ∨/or → ||, ≠ → !=
-fn translate_guard_to_rust(guard: &str) -> String {
-    guard
-        .replace("state.", "s.")
-        .replace("s.", "s.")
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
-        .replace(" and ", " && ")
-        .replace(" or ", " || ")
-}
-
-/// Translate a qedspec property expression to Rust.
-fn translate_property_to_rust(expr: &str) -> String {
-    expr.replace("state.", "s.")
-        .replace("s.", "s.")
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
-        .replace(" and ", " && ")
-        .replace(" or ", " || ")
-}
-
-/// For a field with an "add" effect, find what bounds it in property expressions.
-/// Property expressions are in Lean form (e.g. `s.approval_count ≤ s.member_count`).
-/// Returns the bounding field name if a `field ≤ bound` pattern is found.
-fn find_upper_bound_field(field: &str, properties: &[ParsedProperty]) -> Option<String> {
-    for prop in properties {
-        if let Some(ref expr) = prop.expression {
-            // Normalize Unicode operators to ASCII for matching
-            let norm = expr.replace('\u{2264}', "<=").replace('\u{2265}', ">=");
-            // Look for `s.field <=` or `field <=`
-            let field_pat = format!("s.{}", field);
-            if !norm.contains(&field_pat) && !norm.contains(field) {
-                continue;
-            }
-            // Split on <= and find the one where our field is on the LHS
-            for segment in norm.split("&&").chain(norm.split('\u{2227}')) {
-                let segment = segment.trim();
-                if let Some((lhs, rhs)) = segment.split_once("<=") {
-                    let lhs = lhs.trim();
-                    let rhs = rhs.trim();
-                    if lhs.ends_with(field) || lhs == &format!("s.{}", field) {
-                        // Extract the bound field from rhs
-                        let bound = rhs
-                            .strip_prefix("s.")
-                            .or_else(|| rhs.strip_prefix("state."))
-                            .unwrap_or(rhs)
-                            .trim();
-                        // Only return if it looks like a field name (not a literal)
-                        if bound.chars().all(|c| c.is_alphanumeric() || c == '_')
-                            && !bound.is_empty()
-                            && !bound.chars().next().unwrap().is_ascii_digit()
-                        {
-                            return Some(bound.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Emit `kani::assume(s.field < s.bound)` for operations with "add" effects,
-/// to prevent arithmetic overflow and ensure bounded properties are preserved.
-fn emit_add_strict_bounds(out: &mut String, op: &ParsedHandler, properties: &[ParsedProperty]) {
-    for (field, eff_op, _) in &op.effects {
-        if eff_op == "add" {
-            if let Some(bound) = find_upper_bound_field(field, properties) {
-                out.push_str(&format!(
-                    "    kani::assume(s.{} < s.{}); // strict bound: {} increments\n",
-                    field, bound, field
-                ));
-            }
-        }
-    }
-}
+use crate::rust_codegen_util;
 
 /// Generate Kani proof harnesses from a spec file (.lean or .qedspec).
 ///
@@ -151,22 +67,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     // Emit constants — infer type from value magnitude
     for (name, value) in &spec.constants {
         let upper = name.to_uppercase();
-        let clean_val = value.replace('_', "");
-        let const_type = if let Ok(v) = clean_val.parse::<u128>() {
-            if v <= u8::MAX as u128 {
-                "u8"
-            } else if v <= u16::MAX as u128 {
-                "u16"
-            } else if v <= u32::MAX as u128 {
-                "u32"
-            } else if v <= u64::MAX as u128 {
-                "u64"
-            } else {
-                "u128"
-            }
-        } else {
-            "u64" // fallback
-        };
+        let const_type = rust_codegen_util::infer_const_type(value);
         out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
     }
     if !spec.constants.is_empty() {
@@ -203,7 +104,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
         for prop in &spec.properties {
             if let Some(ref expr) = prop.expression {
-                let rust_expr = translate_property_to_rust(expr);
+                let rust_expr = rust_codegen_util::translate_property_to_rust(expr, false);
                 out.push_str(&format!("/// {}: {}\n", prop.name, expr));
                 out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
                 out.push_str(&format!("    {}\n", rust_expr));
@@ -244,7 +145,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         // Guard check
         if op.has_guard() {
             if let Some(ref guard) = op.guard_str {
-                let rust_guard = translate_guard_to_rust(guard);
+                let rust_guard = rust_codegen_util::translate_guard_to_rust(guard, false);
                 out.push_str(&format!("    // guard: {}\n", guard));
                 out.push_str(&format!("    if !({}) {{\n", rust_guard));
                 out.push_str("        return false;\n");
@@ -254,17 +155,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
         // Apply effects
         for (field, op_kind, value) in &op.effects {
-            // Resolve value: could be a param name or a literal
-            let rust_value = if op.takes_params.iter().any(|(n, _)| n == value) {
-                value.clone()
-            } else {
-                // Check if it's a constant name
-                if let Some((_, const_val)) = spec.constants.iter().find(|(n, _)| n == value) {
-                    const_val.clone()
-                } else {
-                    value.clone()
-                }
-            };
+            let rust_value = rust_codegen_util::resolve_value(value, op, &spec);
 
             match op_kind.as_str() {
                 "set" => {
@@ -303,7 +194,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
         for op in &guard_ops {
             let guard = op.guard_str.as_deref().unwrap_or("true");
-            let rust_guard = translate_guard_to_rust(guard);
+            let rust_guard = rust_codegen_util::translate_guard_to_rust(guard, false);
 
             out.push_str("#[kani::proof]\n");
             out.push_str("#[kani::unwind(2)]\n");
@@ -490,7 +381,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 // For operations that increment a field (add effect), assume
                 // the field is strictly less than its bound to prevent overflow
                 if let Some(op) = op {
-                    emit_add_strict_bounds(&mut out, op, &spec.properties);
+                    rust_codegen_util::emit_add_strict_bounds(&mut out, op, &spec.properties, "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n");
                 }
 
                 // Call transition and assert property
@@ -579,7 +470,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         }
                     }
                 }
-                emit_add_strict_bounds(&mut out, op, &spec.properties);
+                rust_codegen_util::emit_add_strict_bounds(&mut out, op, &spec.properties, "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n");
             }
 
             // Snapshot pre-state — only for fields that need it
@@ -809,17 +700,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     continue;
                 }
 
-                let rust_constraints: Vec<String> = env
-                    .constraints_rust
-                    .iter()
-                    .map(|c| {
-                        let mut expr = c.clone();
-                        for (field, _) in &env.mutates {
-                            expr = expr.replace(&format!("s.{}", field), &format!("s.{}", field));
-                        }
-                        expr
-                    })
-                    .collect();
+                let rust_constraints: &[String] = &env.constraints_rust;
 
                 out.push_str("#[kani::proof]\n");
                 out.push_str("#[kani::unwind(2)]\n");
@@ -844,7 +725,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 }
 
                 // Assume constraints
-                for constraint in &rust_constraints {
+                for constraint in rust_constraints {
                     out.push_str(&format!("    kani::assume({});\n", constraint));
                 }
 

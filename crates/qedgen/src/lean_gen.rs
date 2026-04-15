@@ -811,11 +811,6 @@ fn render_properties_inner(
             } else {
                 format!(" {}", param_names.join(" "))
             };
-            let param_pass = if param_names.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", param_names.join(" "))
-            };
 
             if prop.preserved_by.contains(&op.name) {
                 let ref_name = safe_name(&format!(
@@ -824,7 +819,7 @@ fn render_properties_inner(
                 ));
                 out.push_str(&format!(
                     "  | {}{} => exact {} s s' signer{} h_inv h\n",
-                    ctor, param_bind, ref_name, param_pass
+                    ctor, param_bind, ref_name, param_bind
                 ));
             } else {
                 // Operation not in preserved_by — attempt inline proof if trivial.
@@ -2338,7 +2333,7 @@ fn render_sbpf(spec: &ParsedSpec) -> String {
 
             let mut accumulated_after: Vec<(String, String)> = Vec::new();
 
-            for (i, guard) in instr.guards.iter().enumerate() {
+            for guard in &instr.guards {
                 let error_lean = error_to_lean_name(&guard.error);
                 let hyps = derive_guard_hypotheses(guard, &all_offsets, instr, spec);
 
@@ -2377,8 +2372,6 @@ fn render_sbpf(spec: &ParsedSpec) -> String {
                         accumulated_after.push((ah.clone(), String::new()));
                     }
                 }
-
-                let _ = i;
             }
 
             // Spec completeness structure

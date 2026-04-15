@@ -1,6 +1,7 @@
 use anyhow::Result;
 use regex::Regex;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[derive(Debug)]
 pub struct PropertyStatus {
@@ -742,9 +743,10 @@ fn check_property_status(property_name: &str, proof_content: &str) -> Status {
 
     // Extract theorem body: from the match to the next top-level keyword
     let rest = &proof_content[m.start()..];
-    let body_end_re =
-        Regex::new(r"\n(?:theorem|def|noncomputable def|namespace|end|section|#)").unwrap();
-    let body = match body_end_re.find(&rest[1..]) {
+    static BODY_END_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\n(?:theorem|def|noncomputable def|namespace|end|section|#)").unwrap()
+    });
+    let body = match BODY_END_RE.find(&rest[1..]) {
         Some(end_match) => &rest[..end_match.start() + 1],
         None => rest, // last theorem in file
     };
@@ -1767,7 +1769,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     // Rule 14: dead_guard — a guard conjunct subsumed by another on the same operation
     {
-        let cmp_re = Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap();
+        static CMP_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap()
+        });
+        let cmp_re = &*CMP_RE;
         for op in &spec.handlers {
             if let Some(ref guard) = op.guard_str {
                 // Split on ∧ and "and" to get individual conjuncts
@@ -2273,7 +2278,10 @@ pub fn check_kani_drift(
     }
 
     // Parse file for fn verify_* names
-    let fn_re = regex::Regex::new(r"fn\s+(verify_\w+)\s*\(").unwrap();
+    static FN_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"fn\s+(verify_\w+)\s*\(").unwrap()
+    });
+    let fn_re = &*FN_RE;
     let found_harnesses: Vec<String> = fn_re
         .captures_iter(&content)
         .map(|c| c[1].to_string())
