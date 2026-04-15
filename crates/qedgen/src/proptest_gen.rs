@@ -57,20 +57,18 @@ fn extract_field_upper_bounds(
         if let Some(ref expr) = prop.expression {
             // Match patterns like "state.FIELD <= CONST" or "state.FIELD ≤ NUMBER"
             // Split on "and" / "∧" to handle conjunctive properties
-            let parts_iter: Vec<&str> = expr.split(" and ")
-                .flat_map(|p| p.split('∧'))
-                .collect();
+            let parts_iter: Vec<&str> = expr.split(" and ").flat_map(|p| p.split('∧')).collect();
             for part in parts_iter {
                 let part = part.trim();
-                if let Some(rest) = part.strip_suffix(")")
-                    .or(Some(part))
-                {
+                if let Some(rest) = part.strip_suffix(")").or(Some(part)) {
                     for op in &[" ≤ ", " <= "] {
                         if let Some(pos) = rest.find(op) {
                             let lhs = rest[..pos].trim();
                             let rhs = rest[pos + op.len()..].trim();
-                            if let Some(field) = lhs.strip_prefix("state.")
-                                .or_else(|| lhs.strip_prefix("s.")) {
+                            if let Some(field) = lhs
+                                .strip_prefix("state.")
+                                .or_else(|| lhs.strip_prefix("s."))
+                            {
                                 // Check if RHS is a constant name or a number
                                 let resolved = constants
                                     .iter()
@@ -96,7 +94,6 @@ fn extract_field_upper_bounds(
     }
     bounds
 }
-
 
 /// Generate proptest harnesses from a spec file (.qedspec).
 ///
@@ -135,7 +132,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     ));
     out.push_str("//\n");
     out.push_str("// Proptest harnesses — property-based testing for the spec's state machine.\n");
-    out.push_str("// Tier 1 of the verification waterfall: finds counterexamples in milliseconds.\n");
+    out.push_str(
+        "// Tier 1 of the verification waterfall: finds counterexamples in milliseconds.\n",
+    );
     out.push_str("//\n");
     out.push_str("//   Proptest: random testing, fast counterexamples (~100ms)\n");
     out.push_str("//   Kani:     bounded model checking, exhaustive within bounds (~5-30s)\n");
@@ -143,7 +142,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("//\n");
     out.push_str("// To run:  cargo test --test proptest\n");
     out.push_str("// Deep:    PROPTEST_CASES=10000 cargo test --test proptest\n");
-    out.push_str("// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n\n");
+    out.push_str(
+        "// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n\n",
+    );
     out.push_str("use proptest::prelude::*;\n\n");
 
     // ── Constants ────────────────────────────────────────────────────────
@@ -225,10 +226,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     std::fs::write(output_path, &out)?;
-    eprintln!(
-        "Generated proptest harnesses at {}",
-        output_path.display()
-    );
+    eprintln!("Generated proptest harnesses at {}", output_path.display());
     Ok(())
 }
 
@@ -272,8 +270,10 @@ fn emit_account_section(
     emit_state_strategy(out, mutable_fields, all_fields, &field_bounds);
 
     // Property predicates
-    let props_with_expr: Vec<&&ParsedProperty> =
-        properties.iter().filter(|p| p.expression.is_some()).collect();
+    let props_with_expr: Vec<&&ParsedProperty> = properties
+        .iter()
+        .filter(|p| p.expression.is_some())
+        .collect();
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
             if let Some(ref expr) = prop.expression {
@@ -311,12 +311,26 @@ fn emit_account_section(
         .collect();
     if !overflow_ops.is_empty() {
         let overflow_refs: Vec<&ParsedHandler> = overflow_ops.iter().map(|op| **op).collect();
-        emit_overflow_tests_for(out, &overflow_refs, mutable_fields, all_fields, spec, &owned_props);
+        emit_overflow_tests_for(
+            out,
+            &overflow_refs,
+            mutable_fields,
+            all_fields,
+            spec,
+            &owned_props,
+        );
     }
 
     // Sequence test
     if !owned_props.is_empty() && handlers.len() > 1 {
-        emit_sequence_test_for(out, handlers, &owned_props, mutable_fields, all_fields, lifecycle_states);
+        emit_sequence_test_for(
+            out,
+            handlers,
+            &owned_props,
+            mutable_fields,
+            all_fields,
+            lifecycle_states,
+        );
     }
 }
 
@@ -328,9 +342,23 @@ fn emit_state_strategy(
     field_bounds: &std::collections::HashMap<String, String>,
 ) {
     // Full-range strategy (capped by property bounds when available)
-    emit_state_strategy_inner(out, "arb_state", mutable_fields, all_fields, StrategyMode::Full, field_bounds);
+    emit_state_strategy_inner(
+        out,
+        "arb_state",
+        mutable_fields,
+        all_fields,
+        StrategyMode::Full,
+        field_bounds,
+    );
     // Boundary-biased strategy for guard rejection tests
-    emit_state_strategy_inner(out, "arb_boundary_state", mutable_fields, all_fields, StrategyMode::Boundary, field_bounds);
+    emit_state_strategy_inner(
+        out,
+        "arb_boundary_state",
+        mutable_fields,
+        all_fields,
+        StrategyMode::Boundary,
+        field_bounds,
+    );
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -373,8 +401,12 @@ fn emit_state_strategy_inner(
             // Cap to the property-derived bound
             match mode {
                 StrategyMode::Boundary => {
-                    format!("prop_oneof![0{}..=3{rt}, ({b} - 3)..={b}{rt}]",
-                        rust_type, rt = rust_type, b = bound)
+                    format!(
+                        "prop_oneof![0{}..=3{rt}, ({b} - 3)..={b}{rt}]",
+                        rust_type,
+                        rt = rust_type,
+                        b = bound
+                    )
                 }
                 StrategyMode::Full => {
                     format!("0{}..={}{}", rust_type, bound, rust_type)
@@ -413,7 +445,10 @@ fn collect_guard_rust(op: &ParsedHandler) -> Option<String> {
         parts.push(rust_codegen_util::translate_guard_to_rust(guard, true));
     }
     for req in &op.requires {
-        parts.push(rust_codegen_util::translate_guard_to_rust(&req.rust_expr, true));
+        parts.push(rust_codegen_util::translate_guard_to_rust(
+            &req.rust_expr,
+            true,
+        ));
     }
     if parts.is_empty() {
         None
@@ -517,11 +552,9 @@ fn emit_preservation_tests_for(
                 }
             }
 
-            if param_parts.is_empty() {
-                if is_init {
-                    // Need at least a dummy parameter for proptest
-                    param_parts.push("_dummy in 0u8..1u8".to_string());
-                }
+            if param_parts.is_empty() && is_init {
+                // Need at least a dummy parameter for proptest
+                param_parts.push("_dummy in 0u8..1u8".to_string());
             }
 
             out.push_str(&format!(
@@ -542,17 +575,19 @@ fn emit_preservation_tests_for(
                 // Assume all declared properties hold before transition
                 for pre_prop in properties {
                     if pre_prop.expression.is_some() {
-                        out.push_str(&format!(
-                            "        prop_assume!({}(&s));\n",
-                            pre_prop.name
-                        ));
+                        out.push_str(&format!("        prop_assume!({}(&s));\n", pre_prop.name));
                     }
                 }
             }
 
             // Emit strict bounds for add effects
             if let Some(op) = op {
-                rust_codegen_util::emit_add_strict_bounds(out, op, properties, "        prop_assume!(s.{field} < s.{bound}); // strict bound for add\n");
+                rust_codegen_util::emit_add_strict_bounds(
+                    out,
+                    op,
+                    properties,
+                    "        prop_assume!(s.{field} < s.{bound}); // strict bound for add\n",
+                );
             }
 
             // Call transition and assert
@@ -565,10 +600,7 @@ fn emit_preservation_tests_for(
                 })
                 .unwrap_or_default();
             out.push_str(&format!("        if {}(&mut s{}) {{\n", op_name, args));
-            out.push_str(&format!(
-                "            prop_assert!({}(&s),\n",
-                prop.name
-            ));
+            out.push_str(&format!("            prop_assert!({}(&s),\n", prop.name));
             out.push_str(&format!(
                 "                \"{} must hold after {}\");\n",
                 prop.name, op_name
@@ -679,17 +711,11 @@ fn emit_overflow_tests_for(
             // Assume all properties hold (they constrain valid state space)
             for pre_prop in properties {
                 if pre_prop.expression.is_some() {
-                    out.push_str(&format!(
-                        "        prop_assume!({}(&s));\n",
-                        pre_prop.name
-                    ));
+                    out.push_str(&format!("        prop_assume!({}(&s));\n", pre_prop.name));
                 }
             }
 
-            out.push_str(&format!(
-                "        let pre = s.{};\n",
-                field
-            ));
+            out.push_str(&format!("        let pre = s.{};\n", field));
 
             let args: String = op
                 .takes_params
@@ -697,13 +723,8 @@ fn emit_overflow_tests_for(
                 .map(|(n, _)| format!(", {}", n))
                 .collect();
             out.push_str(&format!("        if {}(&mut s{}) {{\n", op.name, args));
-            out.push_str(&format!(
-                "            // If transition succeeded, the add must not have wrapped\n"
-            ));
-            out.push_str(&format!(
-                "            prop_assert!(s.{} >= pre,\n",
-                field
-            ));
+            out.push_str("            // If transition succeeded, the add must not have wrapped\n");
+            out.push_str(&format!("            prop_assert!(s.{} >= pre,\n", field));
             out.push_str(&format!(
                 "                \"overflow: {}.{} wrapped around after add\");\n",
                 op.name, field
@@ -737,7 +758,10 @@ fn emit_sequence_test_for(
             .collect::<Vec<_>>()
             .join(", ");
         if params.is_empty() {
-            out.push_str(&format!("    {},\n", crate::codegen::to_pascal_case(&op.name)));
+            out.push_str(&format!(
+                "    {},\n",
+                crate::codegen::to_pascal_case(&op.name)
+            ));
         } else {
             out.push_str(&format!(
                 "    {}({}),\n",
@@ -764,10 +788,7 @@ fn emit_sequence_test_for(
                     format!("0{}..={}::MAX", rust_type, rust_type)
                 })
                 .collect();
-            out.push_str(&format!(
-                "        ({}).prop_map(|",
-                strategies.join(", ")
-            ));
+            out.push_str(&format!("        ({}).prop_map(|", strategies.join(", ")));
             if op.takes_params.len() == 1 {
                 out.push_str("v| ");
                 out.push_str(&format!("Op::{}(v)", pascal));
@@ -801,22 +822,19 @@ fn emit_sequence_test_for(
     for op in handlers {
         let pascal = crate::codegen::to_pascal_case(&op.name);
         if op.takes_params.is_empty() {
-            out.push_str(&format!(
-                "        Op::{} => {}(s),\n",
-                pascal, op.name
-            ));
+            out.push_str(&format!("        Op::{} => {}(s),\n", pascal, op.name));
         } else {
-            let bindings: Vec<String> = op
-                .takes_params
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect();
+            let bindings: Vec<String> = op.takes_params.iter().map(|(n, _)| n.clone()).collect();
             out.push_str(&format!(
                 "        Op::{}({}) => {}(s, {}),\n",
                 pascal,
                 bindings.join(", "),
                 op.name,
-                bindings.iter().map(|b| format!("*{}", b)).collect::<Vec<_>>().join(", ")
+                bindings
+                    .iter()
+                    .map(|b| format!("*{}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
@@ -850,7 +868,9 @@ fn emit_sequence_test_for(
         out.push_str("}\n\n");
 
         // Lifecycle transition function
-        out.push_str("fn lifecycle_transition(current: Lifecycle, op: &Op) -> Option<Lifecycle> {\n");
+        out.push_str(
+            "fn lifecycle_transition(current: Lifecycle, op: &Op) -> Option<Lifecycle> {\n",
+        );
         out.push_str("    match (current, op) {\n");
         for op in handlers {
             if let (Some(ref pre), Some(ref post)) = (&op.pre_status, &op.post_status) {
@@ -912,7 +932,9 @@ fn emit_sequence_test_for(
         // Check lifecycle transition is valid before applying
         out.push_str("            let next_lifecycle = lifecycle_transition(lifecycle, op);\n");
         out.push_str("            if next_lifecycle.is_none() {\n");
-        out.push_str("                continue; // skip ops not valid in current lifecycle state\n");
+        out.push_str(
+            "                continue; // skip ops not valid in current lifecycle state\n",
+        );
         out.push_str("            }\n");
     }
 
@@ -926,7 +948,9 @@ fn emit_sequence_test_for(
         if initial_state.as_deref() == Some("Uninitialized") {
             out.push_str("                if !initialized {\n");
             out.push_str("                    initialized = true;\n");
-            out.push_str("                    continue; // skip property checks on init transition\n");
+            out.push_str(
+                "                    continue; // skip property checks on init transition\n",
+            );
             out.push_str("                }\n");
         }
     }

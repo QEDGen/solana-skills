@@ -99,10 +99,22 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     render_operation_inductive(&mut out, &ops_refs, "State");
 
     // Property predicates and inductive theorems
-    render_properties(&mut out, &spec.properties, &ops_refs, &spec.state_fields, "State");
+    render_properties(
+        &mut out,
+        &spec.properties,
+        &ops_refs,
+        &spec.state_fields,
+        "State",
+    );
 
     // Abort theorems (aborts_if clauses)
-    render_aborts_if(&mut out, &ops_refs, &spec.state_fields, &spec.state_fields, "State");
+    render_aborts_if(
+        &mut out,
+        &ops_refs,
+        &spec.state_fields,
+        &spec.state_fields,
+        "State",
+    );
 
     // Post-condition theorems (ensures clauses)
     render_ensures(&mut out, &ops_refs, "State");
@@ -225,7 +237,13 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         if ops.is_empty() {
             continue;
         }
-        render_aborts_if(&mut out, &ops, &acct.fields, &spec.state_fields, &state_name);
+        render_aborts_if(
+            &mut out,
+            &ops,
+            &acct.fields,
+            &spec.state_fields,
+            &state_name,
+        );
         render_ensures(&mut out, &ops, &state_name);
         render_frame_conditions(&mut out, &ops, &acct.fields, &state_name);
         render_overflow_obligations(&mut out, spec, &ops, &acct.fields, &state_name);
@@ -306,8 +324,7 @@ fn build_guard_cond_parts(
                         || c.contains(&format!("{} + s.{}", value, sf))
                 });
                 if !already_guarded {
-                    cond_parts
-                        .push(format!("s.{} + {} \u{2264} {}", sf, value, max_const));
+                    cond_parts.push(format!("s.{} + {} \u{2264} {}", sf, value, max_const));
                 }
             }
         }
@@ -372,10 +389,7 @@ fn abort_requires_proof(
 
     // Special case: requires is the entire guard (single part)
     if total_atoms == 1 {
-        return format!(
-            " := by\n  unfold {}\n  rw [if_neg h]\n",
-            trans_name
-        );
+        return format!(" := by\n  unfold {}\n  rw [if_neg h]\n", trans_name);
     }
 
     // Build projections for each atom in this requires expression
@@ -440,7 +454,11 @@ fn render_transitions(
 
         // Emit let bindings before the if condition
         for (binding_name, lean_expr, _rust_expr) in &op.let_bindings {
-            out.push_str(&format!("  let {} := {}\n", safe_name(binding_name), lean_expr));
+            out.push_str(&format!(
+                "  let {} := {}\n",
+                safe_name(binding_name),
+                lean_expr
+            ));
         }
 
         if has_cond {
@@ -563,7 +581,15 @@ fn render_properties(
     fields: &[(String, String)],
     state_type: &str,
 ) {
-    render_properties_inner(out, properties, ops, fields, state_type, "Operation", "applyOp");
+    render_properties_inner(
+        out,
+        properties,
+        ops,
+        fields,
+        state_type,
+        "Operation",
+        "applyOp",
+    );
 }
 
 /// Render properties for multi-account specs.
@@ -643,10 +669,7 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
 ///
 /// Mirrors the condition-building logic in `render_transitions` — if any
 /// condition source is present, the transition has an `if ... then ... else none`.
-fn handler_has_condition(
-    op: &crate::check::ParsedHandler,
-    fields: &[(String, String)],
-) -> bool {
+fn handler_has_condition(op: &crate::check::ParsedHandler, fields: &[(String, String)]) -> bool {
     if op.who.is_some()
         || op.pre_status.is_some()
         || op.guard_str.is_some()
@@ -704,9 +727,11 @@ fn preservation_proof_script(
     } else {
         Vec::new()
     };
-    let touches_prop_field = op.effects.iter().any(|(f, _, _)| {
-        prop_fields.iter().any(|pf| *pf == f.as_str())
-    }) || (op.post_status.is_some() && prop_fields.iter().any(|pf| *pf == "status"));
+    let touches_prop_field = op
+        .effects
+        .iter()
+        .any(|(f, _, _)| prop_fields.contains(&f.as_str()))
+        || (op.post_status.is_some() && prop_fields.contains(&"status"));
 
     if has_cond {
         if touches_prop_field {
@@ -775,10 +800,7 @@ fn render_properties_inner(
             let trans_name = safe_name(&format!("{}Transition", op.name));
             let param_sig = param_sig_str(&op.takes_params);
 
-            let sub_lemma_name = safe_name(&format!(
-                "{}_preserved_by_{}",
-                prop.name, op.name
-            ));
+            let sub_lemma_name = safe_name(&format!("{}_preserved_by_{}", prop.name, op.name));
             out.push_str(&format!(
                 "theorem {} (s s' : {}) (signer : Pubkey){}\n",
                 sub_lemma_name, state_type, param_sig
@@ -813,10 +835,7 @@ fn render_properties_inner(
             };
 
             if prop.preserved_by.contains(&op.name) {
-                let ref_name = safe_name(&format!(
-                    "{}_preserved_by_{}",
-                    prop.name, op.name
-                ));
+                let ref_name = safe_name(&format!("{}_preserved_by_{}", prop.name, op.name));
                 out.push_str(&format!(
                     "  | {}{} => exact {} s s' signer{} h_inv h\n",
                     ctor, param_bind, ref_name, param_bind
@@ -830,9 +849,10 @@ fn render_properties_inner(
                     Vec::new()
                 };
                 // Check if the operation touches any field the property references.
-                let touches_prop_field = op.effects.iter().any(|(f, _, _)| {
-                    prop_fields.iter().any(|pf| *pf == f.as_str())
-                });
+                let touches_prop_field = op
+                    .effects
+                    .iter()
+                    .any(|(f, _, _)| prop_fields.contains(&f.as_str()));
                 let trans_name = safe_name(&format!("{}Transition", op.name));
                 if !touches_prop_field {
                     // Operation doesn't modify any field in the property → trivially preserved.
@@ -916,11 +936,7 @@ impl WitnessState {
 
     /// Render as a Lean struct literal: `⟨pk, pk, 0, 0, pk, .Uninitialized⟩`
     fn to_lean(&self) -> String {
-        let mut parts: Vec<String> = self
-            .fields
-            .iter()
-            .map(|(_, v)| v.clone())
-            .collect();
+        let mut parts: Vec<String> = self.fields.iter().map(|(_, v)| v.clone()).collect();
         if let Some(ref s) = self.status {
             parts.push(format!(".{}", s));
         }
@@ -929,11 +945,7 @@ impl WitnessState {
 
     /// Apply a handler's effects, updating field values.
     /// `param_values` maps parameter names to chosen concrete values.
-    fn apply(
-        &mut self,
-        handler: &crate::check::ParsedHandler,
-        param_values: &[(String, String)],
-    ) {
+    fn apply(&mut self, handler: &crate::check::ParsedHandler, param_values: &[(String, String)]) {
         // Apply effects
         for (field, op_kind, value) in &handler.effects {
             let resolved = self.resolve_value(value, param_values);
@@ -1047,7 +1059,8 @@ fn cover_trace_proof(
     }
 
     let mut state = WitnessState::new(fields, lifecycle);
-    let mut steps: Vec<(String, Vec<(String, String)>, WitnessState)> = Vec::new();
+    type CoverStep = (String, Vec<(String, String)>, WitnessState);
+    let mut steps: Vec<CoverStep> = Vec::new();
 
     // Pre-step: for the first handler with a `who` clause, we need signer = s.who_field.
     // Since we init all Pubkeys to pk and signer to pk, this works automatically.
@@ -1085,9 +1098,9 @@ fn cover_trace_proof(
             // The post-state of step i becomes s{i+1}
             // We need the state AFTER applying step i
             let mut s = WitnessState::new(fields, lifecycle);
-            for j in 0..=i {
-                let handler = spec.handlers.iter().find(|o| o.name == steps[j].0)?;
-                s.apply(handler, &steps[j].1);
+            for step in steps.iter().take(i + 1) {
+                let handler = spec.handlers.iter().find(|o| o.name == step.0)?;
+                s.apply(handler, &step.1);
             }
             proof.push_str(&format!("  let s{} : State := {}\n", i + 1, s.to_lean()));
         }
@@ -1236,12 +1249,8 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
                         format!(" {}", param_args)
                     };
                     // Try to auto-prove with witness construction
-                    let proof = cover_trace_proof(
-                        spec,
-                        trace,
-                        &spec.state_fields,
-                        &spec.lifecycle_states,
-                    );
+                    let proof =
+                        cover_trace_proof(spec, trace, &spec.state_fields, &spec.lifecycle_states);
                     if let Some(proof_script) = proof {
                         out.push_str(&format!(
                             "{} {} signer{} ≠ none{}\n",
@@ -1336,12 +1345,20 @@ fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
 
         // Derive operation type and applyOp dispatcher
         let (op_type, apply_fn, prefix) = if effective_type == "State" {
-            ("Operation".to_string(), "applyOp".to_string(), String::new())
+            (
+                "Operation".to_string(),
+                "applyOp".to_string(),
+                String::new(),
+            )
         } else if effective_type.ends_with("State") {
             let p = effective_type[..effective_type.len() - 5].to_string();
             (format!("{}Operation", p), format!("apply{}Op", p), p)
         } else {
-            ("Operation".to_string(), "applyOp".to_string(), String::new())
+            (
+                "Operation".to_string(),
+                "applyOp".to_string(),
+                String::new(),
+            )
         };
 
         let apply_ops_fn = format!("apply{}Ops", prefix);
@@ -1510,7 +1527,9 @@ fn liveness_proof_script(
             proof.push_str("  split at h_apply\n");
             proof.push_str("  \u{B7} next heq =>\n");
             proof.push_str("    split at heq\n");
-            proof.push_str("    \u{B7} next hg => simp at heq h_apply; subst heq; subst h_apply; rfl\n");
+            proof.push_str(
+                "    \u{B7} next hg => simp at heq h_apply; subst heq; subst h_apply; rfl\n",
+            );
             proof.push_str("    \u{B7} simp at heq\n");
             proof.push_str("  \u{B7} simp at h_apply\n");
         } else {
@@ -1532,13 +1551,22 @@ fn liveness_proof_script(
             apply_ops_fn, apply_fn,
         ));
 
-        liveness_multi_step_proof(&mut proof, &trans_names, &needs_split, 0, "  ", apply_ops_fn, apply_fn);
+        liveness_multi_step_proof(
+            &mut proof,
+            &trans_names,
+            &needs_split,
+            0,
+            "  ",
+            apply_ops_fn,
+            apply_fn,
+        );
     }
 
     proof
 }
 
 /// Recursively generate the nested split proof for multi-step liveness.
+#[allow(clippy::only_used_in_recursion)]
 fn liveness_multi_step_proof(
     proof: &mut String,
     trans_names: &[String],
@@ -1555,10 +1583,7 @@ fn liveness_multi_step_proof(
     let trans = &trans_names[step];
     let is_last = step == trans_names.len() - 1;
 
-    proof.push_str(&format!(
-        "{}simp only [{}] at h_apply\n",
-        indent, trans
-    ));
+    proof.push_str(&format!("{}simp only [{}] at h_apply\n", indent, trans));
     proof.push_str(&format!("{}split at h_apply\n", indent));
 
     if is_last {
@@ -1719,9 +1744,9 @@ fn render_aborts_if(
     fallback_fields: &[(String, String)],
     state_type: &str,
 ) {
-    let has_aborts = ops.iter().any(|op| {
-        !op.aborts_if.is_empty() || op.requires.iter().any(|r| r.error_name.is_some())
-    });
+    let has_aborts = ops
+        .iter()
+        .any(|op| !op.aborts_if.is_empty() || op.requires.iter().any(|r| r.error_name.is_some()));
     if !has_aborts {
         return;
     }
@@ -1753,8 +1778,8 @@ fn render_aborts_if(
         // Requires clauses with else Error — negated positive condition
         for req in &op.requires {
             if req.error_name.is_some() {
-                all_abort_conditions
-                    .push(format!("\u{00AC}({})", req.lean_expr)); // ¬(...)
+                all_abort_conditions.push(format!("\u{00AC}({})", req.lean_expr));
+                // ¬(...)
             }
         }
 
@@ -1774,10 +1799,8 @@ fn render_aborts_if(
         } else {
             // Per-condition abort theorems
             for abort in &op.aborts_if {
-                let theorem_name = safe_name(&format!(
-                    "{}_aborts_if_{}",
-                    op.name, abort.error_name
-                ));
+                let theorem_name =
+                    safe_name(&format!("{}_aborts_if_{}", op.name, abort.error_name));
                 out.push_str(&format!(
                     "theorem {} (s : {}) (signer : Pubkey){}\n",
                     theorem_name, state_type, param_sig
@@ -1791,10 +1814,7 @@ fn render_aborts_if(
             // Requires-based abort theorems — auto-proven via if_neg projection
             for req in &op.requires {
                 if let Some(ref error_name) = req.error_name {
-                    let theorem_name = safe_name(&format!(
-                        "{}_aborts_if_{}",
-                        op.name, error_name
-                    ));
+                    let theorem_name = safe_name(&format!("{}_aborts_if_{}", op.name, error_name));
                     out.push_str(&format!(
                         "theorem {} (s : {}) (signer : Pubkey){}\n",
                         theorem_name, state_type, param_sig
@@ -1898,13 +1918,11 @@ fn render_frame_conditions(
 
             // Compute unchanged fields: all fields minus modified ones.
             // If handler transitions lifecycle, status is implicitly modified.
-            let status_is_modified =
-                op.pre_status.is_some() && op.post_status.is_some();
+            let status_is_modified = op.pre_status.is_some() && op.post_status.is_some();
             let unchanged: Vec<&str> = fields
                 .iter()
                 .filter(|(name, _)| {
-                    !modified_fields.contains(name)
-                        && !(name == "status" && status_is_modified)
+                    !(modified_fields.contains(name) || name == "status" && status_is_modified)
                 })
                 .map(|(name, _)| name.as_str())
                 .collect();
@@ -2110,10 +2128,7 @@ fn overflow_proof_script(
             let vfn = valid_fn_name(ftype);
             let vmod = valid_module_name(ftype);
             let vmax = valid_max_name(ftype);
-            format!(
-                "    simp only [{}, {}, {}]; omega",
-                vfn, vmod, vmax
-            )
+            format!("    simp only [{}, {}, {}]; omega", vfn, vmod, vmax)
         })
         .collect();
 
@@ -2732,7 +2747,6 @@ fn param_sig_str(params: &[(String, String)]) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2806,7 +2820,10 @@ mod tests {
         assert!(lean.contains("theorem approvals_bounded_inductive"));
         // Multisig is fully auto-proven: all preservation, abort, overflow, cover,
         // and liveness theorems have mechanical proofs — no sorry markers remain.
-        assert!(!lean.contains(":= sorry"), "multisig should be fully auto-proven");
+        assert!(
+            !lean.contains(":= sorry"),
+            "multisig should be fully auto-proven"
+        );
     }
 
     #[test]

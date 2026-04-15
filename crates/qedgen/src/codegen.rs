@@ -297,11 +297,7 @@ fn generate_errors(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 }
 
 /// Generate src/instructions/mod.rs and per-handler files.
-fn generate_instructions(
-    spec: &ParsedSpec,
-    fp: &SpecFingerprint,
-    output_dir: &Path,
-) -> Result<()> {
+fn generate_instructions(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
     let instr_dir = output_dir.join("src").join("instructions");
     std::fs::create_dir_all(&instr_dir)?;
 
@@ -421,9 +417,7 @@ fn infer_state_name(
 ) -> String {
     // Check if this account name matches any account type name (lowercase match)
     for at in &spec.account_types {
-        if acct.name == at.name.to_lowercase()
-            || acct.name.starts_with(&at.name.to_lowercase())
-        {
+        if acct.name == at.name.to_lowercase() || acct.name.starts_with(&at.name.to_lowercase()) {
             return format!("{}Account", at.name);
         }
     }
@@ -501,7 +495,8 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
     generate_instructions(&spec, &fp, output_dir)?;
     generate_cargo_toml(&spec, &fp, output_dir)?;
 
-    let file_count = 4 + spec.handlers.len()
+    let file_count = 4
+        + spec.handlers.len()
         + if spec.events.is_empty() { 0 } else { 1 }
         + if spec.error_codes.is_empty() { 0 } else { 1 };
 

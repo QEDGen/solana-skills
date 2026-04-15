@@ -124,7 +124,8 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                         schemas.insert(schema.name.clone(), schema);
                     }
                     Rule::handler_block => {
-                        let (mut handler, handler_includes) = parse_handler_block(inner, &constants);
+                        let (mut handler, handler_includes) =
+                            parse_handler_block(inner, &constants);
                         // Resolve schema includes: merge schema clauses as defaults
                         for schema_name in &handler_includes {
                             if let Some(schema) = schemas.get(schema_name) {
@@ -241,7 +242,6 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     for instr in &instructions {
         handlers.push(instruction_to_handler(instr));
     }
-
 
     // Compute U64 field metadata
     let u64_field_names: Vec<String> = state_fields
@@ -441,7 +441,11 @@ fn guard_expr_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> 
     guard_expr_to_lean_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_expr_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_expr_to_lean_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_expr => guard_expr_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_or => {
@@ -520,18 +524,25 @@ fn guard_expr_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants,
     }
 }
 
+#[allow(dead_code)]
 fn guard_value_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
     guard_value_to_lean_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_value_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_value_to_lean_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_value => {
             // guard_value = { guard_product ~ (add_op ~ guard_product)* }
             let mut parts = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
-                    Rule::guard_product => parts.push(guard_product_to_lean_ctx(inner, consts, ctx)),
+                    Rule::guard_product => {
+                        parts.push(guard_product_to_lean_ctx(inner, consts, ctx))
+                    }
                     Rule::add_op => parts.push(format!(" {} ", inner.as_str())),
                     _ => parts.push(inner.as_str().to_string()),
                 }
@@ -544,11 +555,16 @@ fn guard_value_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants
     }
 }
 
+#[allow(dead_code)]
 fn guard_product_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
     guard_product_to_lean_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_product_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_product_to_lean_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_product => {
             // guard_product = { guard_term ~ (mul_op ~ guard_term)* }
@@ -567,11 +583,16 @@ fn guard_product_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constan
     }
 }
 
+#[allow(dead_code)]
 fn guard_term_to_lean(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> String {
     guard_term_to_lean_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_term_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_term_to_lean_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_term => guard_term_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::old_expr => {
@@ -582,7 +603,7 @@ fn guard_term_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants,
                 .strip_prefix("state.")
                 .unwrap_or(inner.as_str());
             match ctx {
-                ExprContext::Ensures => format!("s.{}", field),   // pre-state
+                ExprContext::Ensures => format!("s.{}", field), // pre-state
                 ExprContext::Guard => {
                     // old() in guard context is a spec error — render with marker
                     format!("«old({})»", field)
@@ -596,7 +617,7 @@ fn guard_term_to_lean_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants,
                 .unwrap_or(pair.as_str());
             match ctx {
                 ExprContext::Guard => format!("s.{}", field),
-                ExprContext::Ensures => format!("s'.{}", field),  // post-state
+                ExprContext::Ensures => format!("s'.{}", field), // post-state
             }
         }
         Rule::ident => {
@@ -617,7 +638,11 @@ fn guard_expr_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> 
     guard_expr_to_rust_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_expr_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_expr_to_rust_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_expr => guard_expr_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::guard_or => {
@@ -686,13 +711,19 @@ fn guard_value_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) ->
     guard_value_to_rust_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_value_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_value_to_rust_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_value => {
             let mut parts = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
-                    Rule::guard_product => parts.push(guard_product_to_rust_ctx(inner, consts, ctx)),
+                    Rule::guard_product => {
+                        parts.push(guard_product_to_rust_ctx(inner, consts, ctx))
+                    }
                     Rule::add_op => parts.push(format!(" {} ", inner.as_str())),
                     _ => parts.push(inner.as_str().to_string()),
                 }
@@ -710,7 +741,11 @@ fn guard_product_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) 
     guard_product_to_rust_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_product_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_product_to_rust_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_product => {
             let mut parts = Vec::new();
@@ -733,7 +768,11 @@ fn guard_term_to_rust(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> 
     guard_term_to_rust_ctx(pair, consts, ExprContext::Guard)
 }
 
-fn guard_term_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants, ctx: ExprContext) -> String {
+fn guard_term_to_rust_ctx(
+    pair: pest::iterators::Pair<Rule>,
+    consts: &Constants,
+    ctx: ExprContext,
+) -> String {
     match pair.as_rule() {
         Rule::guard_term => guard_term_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::old_expr => {
@@ -741,7 +780,7 @@ fn guard_term_to_rust_ctx(pair: pest::iterators::Pair<Rule>, consts: &Constants,
             let inner = pair.into_inner().next().unwrap(); // field_ref
             let raw = inner.as_str();
             match ctx {
-                ExprContext::Ensures => format!("old_{}", raw),  // old_state.field
+                ExprContext::Ensures => format!("old_{}", raw), // old_state.field
                 ExprContext::Guard => format!("/*old({})*/", raw),
             }
         }
@@ -1122,7 +1161,8 @@ fn parse_handler_block(
                     }
                     Rule::ensures_clause => {
                         let expr = clause.into_inner().next().unwrap();
-                        let lean_expr = guard_expr_to_lean_ctx(expr.clone(), consts, ExprContext::Ensures);
+                        let lean_expr =
+                            guard_expr_to_lean_ctx(expr.clone(), consts, ExprContext::Ensures);
                         let rust_expr = guard_expr_to_rust_ctx(expr, consts, ExprContext::Ensures);
                         ensures.push(crate::check::ParsedEnsures {
                             lean_expr,
@@ -1175,29 +1215,32 @@ fn parse_handler_block(
         Some(doc_lines.join(" "))
     };
 
-    (ParsedHandler {
-        name,
-        doc,
-        who,
-        on_account,
-        pre_status,
-        post_status,
-        takes_params,
-        guard_str: None,
-        guard_str_rust: None,
-        aborts_if: Vec::new(),
-        requires,
-        ensures,
-        modifies,
-        let_bindings,
-        aborts_total,
-        effects,
-        accounts,
-        transfers,
-        emits,
-        invariants,
-        properties: Vec::new(),
-    }, includes)
+    (
+        ParsedHandler {
+            name,
+            doc,
+            who,
+            on_account,
+            pre_status,
+            post_status,
+            takes_params,
+            guard_str: None,
+            guard_str_rust: None,
+            aborts_if: Vec::new(),
+            requires,
+            ensures,
+            modifies,
+            let_bindings,
+            aborts_total,
+            effects,
+            accounts,
+            transfers,
+            emits,
+            invariants,
+            properties: Vec::new(),
+        },
+        includes,
+    )
 }
 
 /// Parse `accounts { name : attr, attr, ... }` block into IDL-level descriptors.
@@ -1299,9 +1342,7 @@ fn parse_accounts_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedHandlerA
                                                         .unwrap_or_default();
                                                     seeds.push(format!("\"{}\"", s));
                                                 }
-                                                Rule::ident => {
-                                                    seeds.push(val.as_str().to_string())
-                                                }
+                                                Rule::ident => seeds.push(val.as_str().to_string()),
                                                 _ => {}
                                             }
                                         }
@@ -1315,8 +1356,7 @@ fn parse_accounts_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedHandlerA
                             account_type = Some(ty);
                         }
                         Rule::acct_authority_attr => {
-                            let auth =
-                                inner_attr.into_inner().next().unwrap().as_str().to_string();
+                            let auth = inner_attr.into_inner().next().unwrap().as_str().to_string();
                             authority = Some(auth);
                         }
                         _ => {}
@@ -1404,10 +1444,7 @@ fn operation_to_handler(op: &ParsedOperation, ctx: Option<&ParsedContext>) -> Pa
                 .map(|(n, _)| n.clone())
                 .unwrap_or_default(),
             amount: None,
-            authority: op
-                .calls_accounts
-                .last()
-                .map(|(n, _)| n.clone()),
+            authority: op.calls_accounts.last().map(|(n, _)| n.clone()),
         }]
     } else {
         Vec::new()
@@ -1472,7 +1509,6 @@ fn instruction_to_handler(instr: &ParsedInstruction) -> ParsedHandler {
         properties,
     }
 }
-
 
 /// Parse `pubkey NAME [chunk0, chunk1, chunk2, chunk3]`.
 fn parse_pubkey_decl(pair: pest::iterators::Pair<Rule>) -> ParsedPubkey {
@@ -2694,13 +2730,12 @@ instruction RegisterMarket {
     #[test]
     fn parse_requires_from_percolator() {
         let spec = parse(PERCOLATOR_SPEC).unwrap();
-        let withdraw = spec
-            .handlers
-            .iter()
-            .find(|h| h.name == "withdraw")
-            .unwrap();
+        let withdraw = spec.handlers.iter().find(|h| h.name == "withdraw").unwrap();
         assert_eq!(withdraw.requires.len(), 1);
-        assert_eq!(withdraw.requires[0].error_name, Some("InsufficientFunds".to_string()));
+        assert_eq!(
+            withdraw.requires[0].error_name,
+            Some("InsufficientFunds".to_string())
+        );
         assert!(withdraw.requires[0].rust_expr.contains("C_tot"));
     }
 
@@ -2713,10 +2748,20 @@ instruction RegisterMarket {
             .find(|h| h.name == "create_vault")
             .unwrap();
         // Two requires with error names
-        let with_errors: Vec<_> = create.requires.iter().filter(|r| r.error_name.is_some()).collect();
+        let with_errors: Vec<_> = create
+            .requires
+            .iter()
+            .filter(|r| r.error_name.is_some())
+            .collect();
         assert_eq!(with_errors.len(), 2);
-        assert_eq!(with_errors[0].error_name, Some("InvalidThreshold".to_string()));
-        assert_eq!(with_errors[1].error_name, Some("TooManyMembers".to_string()));
+        assert_eq!(
+            with_errors[0].error_name,
+            Some("InvalidThreshold".to_string())
+        );
+        assert_eq!(
+            with_errors[1].error_name,
+            Some("TooManyMembers".to_string())
+        );
     }
 
     #[test]
@@ -2781,7 +2826,10 @@ instruction RegisterMarket {
         assert_eq!(spec.environments.len(), 1);
         let env = &spec.environments[0];
         assert_eq!(env.name, "interest_rate_change");
-        assert_eq!(env.mutates, vec![("interest_rate".to_string(), "U64".to_string())]);
+        assert_eq!(
+            env.mutates,
+            vec![("interest_rate".to_string(), "U64".to_string())]
+        );
         assert!(!env.constraints.is_empty());
     }
 
@@ -2794,7 +2842,11 @@ instruction RegisterMarket {
         assert_eq!(spec.covers.len(), 2);
         let happy = spec.covers.iter().find(|c| c.name == "happy_path").unwrap();
         assert_eq!(happy.traces[0], vec!["initialize", "exchange"]);
-        let cancel = spec.covers.iter().find(|c| c.name == "cancel_path").unwrap();
+        let cancel = spec
+            .covers
+            .iter()
+            .find(|c| c.name == "cancel_path")
+            .unwrap();
         assert_eq!(cancel.traces[0], vec!["initialize", "cancel"]);
 
         // Liveness
@@ -2808,7 +2860,11 @@ instruction RegisterMarket {
             .iter()
             .find(|h| h.name == "initialize")
             .unwrap();
-        let with_errors: Vec<_> = init.requires.iter().filter(|r| r.error_name.is_some()).collect();
+        let with_errors: Vec<_> = init
+            .requires
+            .iter()
+            .filter(|r| r.error_name.is_some())
+            .collect();
         assert_eq!(with_errors.len(), 1);
         assert_eq!(with_errors[0].error_name, Some("InvalidAmount".to_string()));
     }
@@ -2831,8 +2887,16 @@ handler toggle {
         let spec = parse(spec_str).unwrap();
         let handler = &spec.handlers[0];
         let req = &handler.requires[0];
-        assert!(req.lean_expr.contains("\u{00AC}"), "should contain ¬: {}", req.lean_expr);
-        assert!(req.lean_expr.contains("s.active"), "should reference s.active: {}", req.lean_expr);
+        assert!(
+            req.lean_expr.contains("\u{00AC}"),
+            "should contain ¬: {}",
+            req.lean_expr
+        );
+        assert!(
+            req.lean_expr.contains("s.active"),
+            "should reference s.active: {}",
+            req.lean_expr
+        );
     }
 
     #[test]
@@ -2868,8 +2932,16 @@ handler charge {
         let spec = parse(spec_str).unwrap();
         let handler = &spec.handlers[0];
         let req = &handler.requires[0];
-        assert!(req.lean_expr.contains("*"), "should contain *: {}", req.lean_expr);
-        assert!(req.lean_expr.contains("/"), "should contain /: {}", req.lean_expr);
+        assert!(
+            req.lean_expr.contains("*"),
+            "should contain *: {}",
+            req.lean_expr
+        );
+        assert!(
+            req.lean_expr.contains("/"),
+            "should contain /: {}",
+            req.lean_expr
+        );
     }
 
     #[test]
@@ -2925,7 +2997,11 @@ handler deposit {
         assert_eq!(handler.requires.len(), 1);
         let req = &handler.requires[0];
         // Positive form should have ∧
-        assert!(req.lean_expr.contains("\u{2227}"), "lean: {}", req.lean_expr);
+        assert!(
+            req.lean_expr.contains("\u{2227}"),
+            "lean: {}",
+            req.lean_expr
+        );
         // Rust form should have &&
         assert!(req.rust_expr.contains("&&"), "rust: {}", req.rust_expr);
         assert_eq!(req.error_name, Some("InvalidAmount".to_string()));
@@ -2947,12 +3023,32 @@ handler deposit {
         assert_eq!(handler.ensures.len(), 1);
         let ens = &handler.ensures[0];
         // In ensures context: state.balance → s'.balance, old(state.balance) → s.balance
-        assert!(ens.lean_expr.contains("s'.balance"), "lean: {}", ens.lean_expr);
-        assert!(ens.lean_expr.contains("s.balance"), "lean should have pre-state: {}", ens.lean_expr);
-        assert!(!ens.lean_expr.contains("old"), "should not contain raw 'old': {}", ens.lean_expr);
+        assert!(
+            ens.lean_expr.contains("s'.balance"),
+            "lean: {}",
+            ens.lean_expr
+        );
+        assert!(
+            ens.lean_expr.contains("s.balance"),
+            "lean should have pre-state: {}",
+            ens.lean_expr
+        );
+        assert!(
+            !ens.lean_expr.contains("old"),
+            "should not contain raw 'old': {}",
+            ens.lean_expr
+        );
         // Rust form: state.balance → new_state.balance, old(state.balance) → old_state.field
-        assert!(ens.rust_expr.contains("new_state.balance"), "rust: {}", ens.rust_expr);
-        assert!(ens.rust_expr.contains("old_state.balance"), "rust: {}", ens.rust_expr);
+        assert!(
+            ens.rust_expr.contains("new_state.balance"),
+            "rust: {}",
+            ens.rust_expr
+        );
+        assert!(
+            ens.rust_expr.contains("old_state.balance"),
+            "rust: {}",
+            ens.rust_expr
+        );
     }
 
     #[test]
@@ -3099,7 +3195,11 @@ handler deposit {
         assert_eq!(h.requires[0].error_name, Some("InvalidAmount".to_string()));
         assert_eq!(h.requires[1].error_name, Some("Overflow".to_string()));
         // MAX_BALANCE should be expanded
-        assert!(h.requires[1].lean_expr.contains("1000000"), "const expansion: {}", h.requires[1].lean_expr);
+        assert!(
+            h.requires[1].lean_expr.contains("1000000"),
+            "const expansion: {}",
+            h.requires[1].lean_expr
+        );
 
         // Modifies
         assert_eq!(h.modifies.as_ref().unwrap(), &["balance"]);
@@ -3241,10 +3341,22 @@ property all_positive {
         let spec = parse(spec_str).unwrap();
         let prop = &spec.properties[0];
         // Lean form should contain ∀
-        assert!(prop.expression.as_ref().unwrap().contains("\u{2200}"), "lean: {}", prop.expression.as_ref().unwrap());
-        assert!(prop.expression.as_ref().unwrap().contains("Nat"), "lean: {}", prop.expression.as_ref().unwrap());
+        assert!(
+            prop.expression.as_ref().unwrap().contains("\u{2200}"),
+            "lean: {}",
+            prop.expression.as_ref().unwrap()
+        );
+        assert!(
+            prop.expression.as_ref().unwrap().contains("Nat"),
+            "lean: {}",
+            prop.expression.as_ref().unwrap()
+        );
         // Should contain → for implies
-        assert!(prop.expression.as_ref().unwrap().contains("\u{2192}"), "lean: {}", prop.expression.as_ref().unwrap());
+        assert!(
+            prop.expression.as_ref().unwrap().contains("\u{2192}"),
+            "lean: {}",
+            prop.expression.as_ref().unwrap()
+        );
     }
 
     #[test]
@@ -3260,8 +3372,16 @@ property some_active {
         let spec = parse(spec_str).unwrap();
         let prop = &spec.properties[0];
         // Lean form should contain ∃ and Nat (U64 → Nat)
-        assert!(prop.expression.as_ref().unwrap().contains("\u{2203}"), "lean: {}", prop.expression.as_ref().unwrap());
-        assert!(prop.expression.as_ref().unwrap().contains("Nat"), "lean: {}", prop.expression.as_ref().unwrap());
+        assert!(
+            prop.expression.as_ref().unwrap().contains("\u{2203}"),
+            "lean: {}",
+            prop.expression.as_ref().unwrap()
+        );
+        assert!(
+            prop.expression.as_ref().unwrap().contains("Nat"),
+            "lean: {}",
+            prop.expression.as_ref().unwrap()
+        );
     }
 
     #[test]
@@ -3322,8 +3442,14 @@ property balance_bounded {
         assert_eq!(deposit.who, Some("owner".to_string()));
         // Schema requires + handler requires = 2
         assert_eq!(deposit.requires.len(), 2);
-        assert_eq!(deposit.requires[0].error_name, Some("Unauthorized".to_string()));
-        assert_eq!(deposit.requires[1].error_name, Some("InvalidAmount".to_string()));
+        assert_eq!(
+            deposit.requires[0].error_name,
+            Some("Unauthorized".to_string())
+        );
+        assert_eq!(
+            deposit.requires[1].error_name,
+            Some("InvalidAmount".to_string())
+        );
         assert!(!deposit.aborts_total);
 
         // Property with quantifier

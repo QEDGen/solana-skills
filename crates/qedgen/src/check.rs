@@ -66,6 +66,7 @@ pub struct ParsedRequires {
 #[derive(Debug, Clone)]
 pub struct ParsedEnsures {
     pub lean_expr: String,
+    #[allow(dead_code)]
     pub rust_expr: String,
 }
 
@@ -371,7 +372,10 @@ impl ParsedHandler {
         self.accounts
             .iter()
             .any(|a| a.is_program && a.account_type.as_deref() == Some("token"))
-            || self.accounts.iter().any(|a| a.name.contains("token_program"))
+            || self
+                .accounts
+                .iter()
+                .any(|a| a.name.contains("token_program"))
     }
     /// Check if any account has bumps (PDA seeds).
     pub fn has_bumps(&self) -> bool {
@@ -397,9 +401,7 @@ impl ParsedHandlerAccount {
     pub fn quasar_account_attr(&self, handler: &ParsedHandler, state_name: &str) -> String {
         let mut parts = Vec::new();
 
-        if self.is_writable && !self.is_signer {
-            parts.push("mut".to_string());
-        } else if self.is_writable && self.is_signer {
+        if self.is_writable {
             parts.push("mut".to_string());
         }
 
@@ -422,10 +424,7 @@ impl ParsedHandlerAccount {
             } else {
                 format!("{}Account", state_name)
             };
-            parts.push(format!(
-                "seeds = {}::seeds({})",
-                struct_name, self.name
-            ));
+            parts.push(format!("seeds = {}::seeds({})", struct_name, self.name));
             parts.push("bump".to_string());
         }
 
@@ -601,10 +600,7 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
     for handler in &spec.handlers {
         // CPI correctness: handler has transfers → needs CPI proof
         if !handler.transfers.is_empty() {
-            let intent = format!(
-                "{} transfers tokens — verify CPI correctness",
-                handler.name
-            );
+            let intent = format!("{} transfers tokens — verify CPI correctness", handler.name);
             let suggestion = Some(
                 "Prove CPI targets the correct program with correct accounts and discriminator."
                     .to_string(),
@@ -615,9 +611,8 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
         // Per-handler properties (from sBPF instruction guards/properties)
         for prop_name in &handler.properties {
             let intent = format!("{}: {}", handler.name, prop_name);
-            let suggestion = Some(
-                "Prove with wp_exec. See SKILL.md sBPF proof workflow.".to_string(),
-            );
+            let suggestion =
+                Some("Prove with wp_exec. See SKILL.md sBPF proof workflow.".to_string());
             props.push((
                 format!("{}.{}", handler.name, prop_name),
                 intent,
@@ -627,14 +622,8 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
 
         // Per-handler invariant obligations
         for inv_name in &handler.invariants {
-            let intent = format!(
-                "{} preserves invariant {}",
-                handler.name, inv_name
-            );
-            let suggestion = Some(format!(
-                "unfold {} at h_inv ⊢; omega",
-                inv_name
-            ));
+            let intent = format!("{} preserves invariant {}", handler.name, inv_name);
+            let suggestion = Some(format!("unfold {} at h_inv ⊢; omega", inv_name));
             props.push((
                 format!("{}.preserves_{}", handler.name, inv_name),
                 intent,
@@ -989,7 +978,8 @@ fn suggested_effect_lines(
     handler: &ParsedHandler,
     is_init_like: bool,
 ) -> Vec<String> {
-    handler.takes_params
+    handler
+        .takes_params
         .iter()
         .map(|(name, _)| name.as_str())
         .take(3)
@@ -1077,8 +1067,12 @@ fn parse_property_relation<'a>(
             let lhs = &expr[..pos];
             let rhs = &expr[pos + op.len()..];
             // Find which prop field is on each side
-            let lhs_field = prop_fields.iter().find(|f| lhs.contains(&format!("s.{}", f)));
-            let rhs_field = prop_fields.iter().find(|f| rhs.contains(&format!("s.{}", f)));
+            let lhs_field = prop_fields
+                .iter()
+                .find(|f| lhs.contains(&format!("s.{}", f)));
+            let rhs_field = prop_fields
+                .iter()
+                .find(|f| rhs.contains(&format!("s.{}", f)));
             match (lhs_field, rhs_field) {
                 (Some(lf), Some(rf)) => return Some((lf, op.trim(), rf)),
                 // Single field vs constant (e.g., s.V ≤ 10000000)
@@ -1625,9 +1619,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 .accounts
                 .iter()
                 .filter(|a| {
-                    a.is_writable
-                        && a.account_type.as_deref() == Some("token")
-                        && !a.is_program
+                    a.is_writable && a.account_type.as_deref() == Some("token") && !a.is_program
                 })
                 .map(|a| a.name.as_str())
                 .collect();
@@ -1641,7 +1633,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     writable_tokens[0], writable_tokens[1], signer_name
                 )
             } else if writable_tokens.len() == 1 {
-                format!("from {} to dest authority {}", writable_tokens[0], signer_name)
+                format!(
+                    "from {} to dest authority {}",
+                    writable_tokens[0], signer_name
+                )
             } else {
                 format!("from source to dest authority {}", signer_name)
             };
@@ -1938,11 +1933,21 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     }
 
                     // Build structured counterexample and fix options for agent consumption.
-                    let counterexample =
-                        build_counterexample(expr, &prop.name, &prop_fields, op, &modified_prop_fields);
+                    let counterexample = build_counterexample(
+                        expr,
+                        &prop.name,
+                        &prop_fields,
+                        op,
+                        &modified_prop_fields,
+                    );
 
-                    let fix_options =
-                        build_fix_suggestions(expr, &prop.name, op, &prop_fields, &modified_prop_fields);
+                    let fix_options = build_fix_suggestions(
+                        expr,
+                        &prop.name,
+                        op,
+                        &prop_fields,
+                        &modified_prop_fields,
+                    );
 
                     // Compose the human-readable fix string from the first fix option
                     let fix = fix_options.first().map_or_else(
@@ -2278,9 +2283,8 @@ pub fn check_kani_drift(
     }
 
     // Parse file for fn verify_* names
-    static FN_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"fn\s+(verify_\w+)\s*\(").unwrap()
-    });
+    static FN_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"fn\s+(verify_\w+)\s*\(").unwrap());
     let fn_re = &*FN_RE;
     let found_harnesses: Vec<String> = fn_re
         .captures_iter(&content)
@@ -3052,8 +3056,7 @@ mod tests {
         assert!(
             warnings
                 .iter()
-                .any(|w| w.rule == "write_without_read"
-                    && w.subject.as_deref() == Some("counter")),
+                .any(|w| w.rule == "write_without_read" && w.subject.as_deref() == Some("counter")),
             "expected write_without_read for 'counter', got: {:?}",
             warnings
                 .iter()

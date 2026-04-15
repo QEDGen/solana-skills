@@ -31,7 +31,10 @@ pub fn qed(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(result)
 }
 
-fn dispatch(attr: proc_macro2::TokenStream, item: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn dispatch(
+    attr: proc_macro2::TokenStream,
+    item: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     // Parse the first identifier from the attribute to determine the variant
     let parser = Punctuated::<proc_macro2::TokenTree, Token![,]>::parse_terminated;
     let tokens: Vec<proc_macro2::TokenTree> = match parser.parse2(attr.clone()) {
@@ -53,15 +56,15 @@ fn dispatch(attr: proc_macro2::TokenStream, item: proc_macro2::TokenStream) -> p
     match keyword.as_str() {
         "verified" => verified::expand(attr, item),
         other => {
-            let msg = format!(
-                "qed: unknown keyword `{}`. Available: `verified`",
-                other
-            );
+            let msg = format!("qed: unknown keyword `{}`. Available: `verified`", other);
             syn::Error::new(
-                tokens.first().map(|t| match t {
-                    proc_macro2::TokenTree::Ident(i) => i.span(),
-                    _ => proc_macro2::Span::call_site(),
-                }).unwrap_or_else(proc_macro2::Span::call_site),
+                tokens
+                    .first()
+                    .map(|t| match t {
+                        proc_macro2::TokenTree::Ident(i) => i.span(),
+                        _ => proc_macro2::Span::call_site(),
+                    })
+                    .unwrap_or_else(proc_macro2::Span::call_site),
                 msg,
             )
             .to_compile_error()

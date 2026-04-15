@@ -15,9 +15,9 @@ mod kani;
 mod lean_gen;
 mod parser;
 mod project;
-mod spec;
 mod proptest_gen;
 mod rust_codegen_util;
+mod spec;
 mod unit_test;
 mod validate;
 mod verify;
@@ -438,16 +438,27 @@ fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
     }
     if let Some(ref cx) = warning.counterexample {
         out.push_str("\n    Counterexample:");
-        out.push_str(&format!("\n      Pre-state:  {}  →  {} ✓",
-            cx.pre_state.iter().map(|(f, v)| format!("{} = {}", f, v)).collect::<Vec<_>>().join(", "),
+        out.push_str(&format!(
+            "\n      Pre-state:  {}  →  {} ✓",
+            cx.pre_state
+                .iter()
+                .map(|(f, v)| format!("{} = {}", f, v))
+                .collect::<Vec<_>>()
+                .join(", "),
             cx.pre_check,
         ));
-        out.push_str(&format!("\n      Apply:      {} ({})",
+        out.push_str(&format!(
+            "\n      Apply:      {} ({})",
             cx.handler,
             cx.effects.join(", "),
         ));
-        out.push_str(&format!("\n      Post-state: {}  →  {} {}",
-            cx.post_state.iter().map(|(f, v)| format!("{} = {}", f, v)).collect::<Vec<_>>().join(", "),
+        out.push_str(&format!(
+            "\n      Post-state: {}  →  {} {}",
+            cx.post_state
+                .iter()
+                .map(|(f, v)| format!("{} = {}", f, v))
+                .collect::<Vec<_>>()
+                .join(", "),
             cx.post_check,
             if cx.invariant_holds { "✓" } else { "✗" },
         ));
@@ -456,7 +467,10 @@ fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
         out.push_str("\n    Fix options:");
         for (i, opt) in warning.fix_options.iter().enumerate() {
             let label = (b'A' + i as u8) as char;
-            out.push_str(&format!("\n      {}) {} — {}", label, opt.label, opt.rationale));
+            out.push_str(&format!(
+                "\n      {}) {} — {}",
+                label, opt.label, opt.rationale
+            ));
             for line in opt.snippet.lines() {
                 out.push_str(&format!("\n         {}", line));
             }

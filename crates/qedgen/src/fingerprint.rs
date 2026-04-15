@@ -88,7 +88,10 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         c.push_str(&canonical_handler(handler));
         // Include accounts from the handler
         c.push_str(&canonical_accounts(handler));
-        hashes.insert(format!("src/instructions/{}.rs", handler.name), section_hash(&c));
+        hashes.insert(
+            format!("src/instructions/{}.rs", handler.name),
+            section_hash(&c),
+        );
     }
 
     // src/instructions/mod.rs

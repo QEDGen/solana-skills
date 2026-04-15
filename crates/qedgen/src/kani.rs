@@ -181,8 +181,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────
-    let guard_ops: Vec<&ParsedHandler> =
-        spec.handlers.iter().filter(|op| op.has_guard()).collect();
+    let guard_ops: Vec<&ParsedHandler> = spec.handlers.iter().filter(|op| op.has_guard()).collect();
     if !guard_ops.is_empty() {
         out.push_str(
             "// ============================================================================\n",

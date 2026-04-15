@@ -48,10 +48,7 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> String {
     let mut out = String::new();
     let program_name = spec.program_name.to_lowercase();
     let state_name = format!("{}Account", to_pascal_case(&program_name));
-    let needs_token = spec
-        .handlers
-        .iter()
-        .any(|h| h.has_token_accounts());
+    let needs_token = spec.handlers.iter().any(|h| h.has_token_accounts());
 
     // Header
     out.push_str(&format!(
@@ -399,11 +396,7 @@ fn emit_happy_path_test(
     out.push_str("}\n\n");
 }
 
-fn emit_unauthorized_test(
-    out: &mut String,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-) {
+fn emit_unauthorized_test(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     let who = match &handler.who {
         Some(w) => w,
         None => return,
@@ -564,7 +557,11 @@ fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
 // ============================================================================
 
 /// Return an appropriate helper function call for an account entry.
-fn account_helper_call(acct: &ParsedHandlerAccount, handler: &ParsedHandler, _spec: &ParsedSpec) -> String {
+fn account_helper_call(
+    acct: &ParsedHandlerAccount,
+    handler: &ParsedHandler,
+    _spec: &ParsedSpec,
+) -> String {
     if acct.is_signer && !acct.is_program {
         return format!("signer({})", acct.name);
     }

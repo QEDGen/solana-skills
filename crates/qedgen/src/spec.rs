@@ -713,7 +713,12 @@ pub fn generate_spec_from_qedspec(
             }
         }
         if h.has_calls() {
-            writeln!(s, "- **Transfers:** {} token transfer(s)", h.transfers.len()).unwrap();
+            writeln!(
+                s,
+                "- **Transfers:** {} token transfer(s)",
+                h.transfers.len()
+            )
+            .unwrap();
         }
         writeln!(s).unwrap();
     }
@@ -781,7 +786,9 @@ pub fn generate_spec_from_qedspec(
     // Detect which programs are referenced from handler accounts
     let has_token_program = parsed.handlers.iter().any(|h| h.has_token_program());
     let has_system_program = parsed.handlers.iter().any(|h| {
-        h.accounts.iter().any(|a| a.is_program && a.name.contains("system"))
+        h.accounts
+            .iter()
+            .any(|a| a.is_program && a.name.contains("system"))
     });
     if has_token_program {
         writeln!(s, "- **SPL Token program**: Transfer semantics are correct. We verify parameters passed, not the transfer itself.").unwrap();

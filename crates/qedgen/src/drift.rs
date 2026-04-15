@@ -132,11 +132,10 @@ fn collect_from_items(items: &[syn::Item], out: &mut Vec<ScannedEntry>) {
 
 /// Scan a single Rust source file for `#[qed(verified)]` functions.
 fn scan_file(path: &Path) -> Result<Vec<VerifiedEntry>> {
-    let source = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let source =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
-    let syntax = syn::parse_file(&source)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let syntax = syn::parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
 
     let mut scanned = Vec::new();
     collect_from_items(&syntax.items, &mut scanned);
@@ -218,11 +217,7 @@ pub fn print_report(entries: &[VerifiedEntry]) {
     }
 
     for entry in entries {
-        let file = entry
-            .file
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
+        let file = entry.file.file_name().unwrap_or_default().to_string_lossy();
         match &entry.status {
             DriftStatus::Ok => {
                 eprintln!("  {}  {}  OK", file, entry.fn_name);
@@ -242,7 +237,10 @@ pub fn print_report(entries: &[VerifiedEntry]) {
         }
     }
 
-    let ok = entries.iter().filter(|e| e.status == DriftStatus::Ok).count();
+    let ok = entries
+        .iter()
+        .filter(|e| e.status == DriftStatus::Ok)
+        .count();
     let drifted = entries
         .iter()
         .filter(|e| matches!(e.status, DriftStatus::Drifted { .. }))
@@ -251,7 +249,10 @@ pub fn print_report(entries: &[VerifiedEntry]) {
         .iter()
         .filter(|e| matches!(e.status, DriftStatus::NoHash { .. }))
         .count();
-    eprintln!("\n{} verified, {} drifted, {} unhashed", ok, drifted, no_hash);
+    eprintln!(
+        "\n{} verified, {} drifted, {} unhashed",
+        ok, drifted, no_hash
+    );
 }
 
 /// Update `#[qed(verified, hash = "...")]` in source files with computed hashes.

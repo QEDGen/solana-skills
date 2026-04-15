@@ -133,7 +133,7 @@ pub fn find_upper_bound_field(field: &str, properties: &[ParsedProperty]) -> Opt
                 if let Some((lhs, rhs)) = segment.split_once("<=") {
                     let lhs = lhs.trim();
                     let rhs = rhs.trim();
-                    if lhs.ends_with(field) || lhs == &format!("s.{}", field) {
+                    if lhs.ends_with(field) || lhs == format!("s.{}", field) {
                         let bound = rhs
                             .strip_prefix("s.")
                             .or_else(|| rhs.strip_prefix("state."))

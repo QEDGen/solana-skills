@@ -115,6 +115,7 @@ qedgen codegen --spec my_program.qedspec               # Quasar program skeleton
 qedgen kani --spec my_program.qedspec                   # Kani proof harnesses
 qedgen test --spec my_program.qedspec                   # Unit tests
 qedgen integration-test --spec my_program.qedspec       # QuasarSVM integration tests
+qedgen proptest --spec my_program.qedspec               # Property-based tests (transient)
 
 # Lint a spec for completeness
 qedgen lint --spec my_program.qedspec
