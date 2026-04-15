@@ -1,0 +1,2 @@
+# Syntax highlighting for .qedspec files on GitHub
+*.qedspec linguist-language=Ruby
