@@ -277,11 +277,7 @@ pub fn emit_state_struct(
 
 /// Emit property predicate functions from spec properties.
 /// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
-pub fn emit_property_predicates(
-    out: &mut String,
-    properties: &[ParsedProperty],
-    wrapping: bool,
-) {
+pub fn emit_property_predicates(out: &mut String, properties: &[ParsedProperty], wrapping: bool) {
     for prop in properties {
         if let Some(ref expr) = prop.expression {
             let rust_expr = translate_property_to_rust(expr, wrapping);

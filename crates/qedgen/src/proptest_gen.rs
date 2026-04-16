@@ -550,8 +550,8 @@ fn emit_guard_tests(
     all_fields: &[(String, String)],
 ) {
     for op in guard_ops {
-        let rust_guard = rust_codegen_util::collect_full_guard(op, true)
-            .unwrap_or_else(|| "true".to_string());
+        let rust_guard =
+            rust_codegen_util::collect_full_guard(op, true).unwrap_or_else(|| "true".to_string());
 
         out.push_str("proptest! {\n");
         // High reject limit: guard negation filters most inputs by design

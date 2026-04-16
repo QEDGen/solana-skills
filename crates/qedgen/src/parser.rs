@@ -9,11 +9,10 @@ use pest_derive::Parser;
 use std::path::Path;
 
 use crate::check::{
-    FlowKind, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover,
-    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
-    ParsedHandlerAccount, ParsedInstruction, ParsedLayoutField, ParsedLiveness, ParsedOperation,
-    ParsedPda, ParsedProperty, ParsedPubkey, ParsedSbpfProperty, ParsedSpec, ParsedTransfer,
-    SbpfPropertyKind,
+    FlowKind, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover, ParsedEnvironment,
+    ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler, ParsedHandlerAccount,
+    ParsedInstruction, ParsedLayoutField, ParsedLiveness, ParsedOperation, ParsedPda,
+    ParsedProperty, ParsedPubkey, ParsedSbpfProperty, ParsedSpec, ParsedTransfer, SbpfPropertyKind,
 };
 
 #[derive(Parser)]
@@ -415,6 +414,7 @@ fn parse_type_decl(
     valued_errors: &mut Vec<ParsedErrorCode>,
 ) {
     let mut type_name = String::new();
+    #[allow(clippy::type_complexity)]
     let mut variants: Vec<(String, Option<u64>, Option<String>, Vec<(String, String)>)> =
         Vec::new();
 
@@ -436,18 +436,12 @@ fn parse_type_decl(
                         }
                         Rule::variant_code => {
                             let val = v_inner.into_inner().next().unwrap();
-                            variant_code =
-                                clean_integer(val.as_str()).parse::<u64>().ok();
+                            variant_code = clean_integer(val.as_str()).parse::<u64>().ok();
                         }
                         Rule::variant_desc => {
-                            variant_desc = v_inner
-                                .into_inner()
-                                .next()
-                                .and_then(|sl| {
-                                    sl.into_inner()
-                                        .next()
-                                        .map(|s| s.as_str().to_string())
-                                });
+                            variant_desc = v_inner.into_inner().next().and_then(|sl| {
+                                sl.into_inner().next().map(|s| s.as_str().to_string())
+                            });
                         }
                         Rule::variant_fields => {
                             // of { typed_field_list }
@@ -456,8 +450,7 @@ fn parse_type_decl(
                                     for tf in vf_inner.into_inner() {
                                         if tf.as_rule() == Rule::typed_field {
                                             let mut parts = tf.into_inner();
-                                            let fname =
-                                                parts.next().unwrap().as_str().to_string();
+                                            let fname = parts.next().unwrap().as_str().to_string();
                                             let type_pair = parts.next().unwrap();
                                             let ftype = type_pair.as_str().to_string();
                                             variant_fields.push((fname, ftype));
@@ -491,10 +484,8 @@ fn parse_type_decl(
     } else {
         // State type: collect lifecycle from ALL variant names, fields from variant with `of { ... }`
         let lifecycle: Vec<String> = variants.iter().map(|(n, _, _, _)| n.clone()).collect();
-        let fields: Vec<(String, String)> = variants
-            .iter()
-            .flat_map(|(_, _, _, f)| f.clone())
-            .collect();
+        let fields: Vec<(String, String)> =
+            variants.iter().flat_map(|(_, _, _, f)| f.clone()).collect();
 
         account_types.push(ParsedAccountType {
             name: type_name,

@@ -11,11 +11,9 @@ const TIMEOUT_SECS: u64 = 180;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_MS: u64 = 2000;
 
-const SYSTEM_PROMPT: &str =
-    include_str!("../../../templates/prompts/system_prompt.txt");
+const SYSTEM_PROMPT: &str = include_str!("../../../templates/prompts/system_prompt.txt");
 
-const SBPF_SYSTEM_PROMPT: &str =
-    include_str!("../../../templates/prompts/sbpf_system_prompt.txt");
+const SBPF_SYSTEM_PROMPT: &str = include_str!("../../../templates/prompts/sbpf_system_prompt.txt");
 
 const SBPF_SORRY_FILL_SYSTEM_PROMPT: &str =
     include_str!("../../../templates/prompts/sbpf_sorry_fill_prompt.txt");

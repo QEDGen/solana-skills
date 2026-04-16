@@ -1327,9 +1327,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     format!("s.{} + {}", field, val),
                     format!("{} + s.{}", val, field),
                 ];
-                let field_bounded = patterns
-                    .iter()
-                    .any(|pat| contains_word(&all_guards, pat));
+                let field_bounded = patterns.iter().any(|pat| contains_word(&all_guards, pat));
                 if field_bounded {
                     continue;
                 }
@@ -3074,7 +3072,11 @@ mod tests {
     fn test_write_without_read_bare_word_match() {
         // Field "balance" written in effects, guard has "balance > 0" — should count as read
         let mut h = make_handler("deposit");
-        h.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
         h.guard_str = Some("balance > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -3107,10 +3109,12 @@ mod tests {
         assert!(
             !warnings
                 .iter()
-                .any(|w| w.rule == "write_without_read"
-                    && w.subject.as_deref() == Some("id")),
+                .any(|w| w.rule == "write_without_read" && w.subject.as_deref() == Some("id")),
             "field 'id' should NOT be flagged when guard contains 'state.id', got: {:?}",
-            warnings.iter().filter(|w| w.rule == "write_without_read").collect::<Vec<_>>()
+            warnings
+                .iter()
+                .filter(|w| w.rule == "write_without_read")
+                .collect::<Vec<_>>()
         );
     }
 }

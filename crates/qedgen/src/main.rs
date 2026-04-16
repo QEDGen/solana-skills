@@ -590,9 +590,7 @@ async fn main() -> Result<()> {
             output_dir,
         } => {
             // .qed/ lives at the program root (parent of formal_verification/)
-            let program_root = output_dir
-                .parent()
-                .unwrap_or(std::path::Path::new("."));
+            let program_root = output_dir.parent().unwrap_or(std::path::Path::new("."));
             init::init_qed_dir(program_root, &name)?;
 
             init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
@@ -651,7 +649,10 @@ async fn main() -> Result<()> {
                 } else {
                     let entries = drift::check(drift_path)?;
                     drift::print_report(&entries);
-                    if entries.iter().any(|e| !matches!(e.status, drift::DriftStatus::Ok)) {
+                    if entries
+                        .iter()
+                        .any(|e| !matches!(e.status, drift::DriftStatus::Ok))
+                    {
                         has_issues = true;
                     }
                     if deep {
@@ -677,13 +678,25 @@ async fn main() -> Result<()> {
             // Explain report (--explain) — inline markdown generation
             if explain {
                 let results = check::check(&spec, &proofs)?;
-                let proven = results.iter().filter(|r| r.status == check::Status::Proven).count();
-                let sorry = results.iter().filter(|r| r.status == check::Status::Sorry).count();
-                let missing = results.iter().filter(|r| r.status == check::Status::Missing).count();
+                let proven = results
+                    .iter()
+                    .filter(|r| r.status == check::Status::Proven)
+                    .count();
+                let sorry = results
+                    .iter()
+                    .filter(|r| r.status == check::Status::Sorry)
+                    .count();
+                let missing = results
+                    .iter()
+                    .filter(|r| r.status == check::Status::Missing)
+                    .count();
                 let total = results.len();
 
                 let mut md = format!("# {} Verification Report\n\n", spec_name);
-                md.push_str(&format!("**{}/{} properties verified** ({} sorry, {} missing)\n\n", proven, total, sorry, missing));
+                md.push_str(&format!(
+                    "**{}/{} properties verified** ({} sorry, {} missing)\n\n",
+                    proven, total, sorry, missing
+                ));
                 if proven == total {
                     md.push_str("> All properties verified (sorry-free).\n\n");
                 }

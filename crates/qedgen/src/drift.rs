@@ -133,11 +133,7 @@ fn collect_from_items(items: &[syn::Item], out: &mut Vec<ScannedEntry>) {
                                         sig: method.sig.clone(),
                                         block: Box::new(block.clone()),
                                     };
-                                    out.push((
-                                        method.sig.ident.to_string(),
-                                        hash,
-                                        item_fn,
-                                    ));
+                                    out.push((method.sig.ident.to_string(), hash, item_fn));
                                 }
                                 break;
                             }
@@ -305,8 +301,7 @@ fn collect_all_fns_from_items(items: &[syn::Item], map: &mut HashMap<String, Ite
 fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let syntax =
-        syn::parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
+    let syntax = syn::parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
 
     let all_fns = collect_all_fns(&syntax);
 
@@ -703,7 +698,9 @@ mod tests {
         let deep_entries = scan_file_deep(f2.path()).unwrap();
         assert_eq!(deep_entries.len(), 1);
         assert_eq!(deep_entries[0].fn_name, "main_fn");
-        assert!(deep_entries[0].changed_callees.contains(&"helper".to_string()));
+        assert!(deep_entries[0]
+            .changed_callees
+            .contains(&"helper".to_string()));
     }
 
     #[test]

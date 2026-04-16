@@ -53,7 +53,10 @@ pub fn init_qed_dir(dir: &Path, name: &str) -> Result<()> {
     std::fs::write(qed_path.join("config.json"), json)?;
 
     // Add .qed/ gitignore for internal state (config.json is committed)
-    std::fs::write(qed_path.join(".gitignore"), "# .qed/ is project metadata — commit config.json\n")?;
+    std::fs::write(
+        qed_path.join(".gitignore"),
+        "# .qed/ is project metadata — commit config.json\n",
+    )?;
 
     Ok(())
 }

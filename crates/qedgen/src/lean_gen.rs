@@ -13,11 +13,19 @@ use crate::check::ParsedSpec;
 /// "Pool" → "PoolState", "Pool" → "PoolStatus"
 /// "State" → "State" (not "StateState"), "State" → "Status" (not "StateStatus")
 fn lean_state_name(acct: &str) -> String {
-    if acct == "State" { "State".to_string() } else { format!("{}State", acct) }
+    if acct == "State" {
+        "State".to_string()
+    } else {
+        format!("{}State", acct)
+    }
 }
 
 fn lean_status_name(acct: &str) -> String {
-    if acct == "State" { "Status".to_string() } else { format!("{}Status", acct) }
+    if acct == "State" {
+        "Status".to_string()
+    } else {
+        format!("{}Status", acct)
+    }
 }
 
 /// Generate a Lean file from a `ParsedSpec` and write it to `output_path`.
@@ -797,7 +805,10 @@ fn render_properties_inner(
             // Strip leading ∀/forall quantifier if present, since the def already binds `s`
             // e.g., "∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows"
             //     → "s.total_deposits ≥ s.total_borrows"
-            let body = if let Some(rest) = expr.strip_prefix('\u{2200}').or_else(|| expr.strip_prefix("forall")) {
+            let body = if let Some(rest) = expr
+                .strip_prefix('\u{2200}')
+                .or_else(|| expr.strip_prefix("forall"))
+            {
                 // Skip past "var : Type, " to get the body
                 if let Some(comma_pos) = rest.find(',') {
                     rest[comma_pos + 1..].trim().to_string()

@@ -267,8 +267,7 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
             for state in &lifecycle {
                 if state == "Active" && !ty.ty.fields.is_empty() {
                     writeln!(s, "  | {} of {{", state).unwrap();
-                    let max_name =
-                        ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
+                    let max_name = ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
                     let field_strs: Vec<String> = ty
                         .ty
                         .fields
