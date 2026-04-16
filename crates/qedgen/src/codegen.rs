@@ -484,6 +484,14 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
         );
     }
 
+    // Check that the project is initialized (.qed/ next to the spec file)
+    if crate::init::find_qed_dir(spec_path).is_none() {
+        anyhow::bail!(
+            "No .qed/ directory found next to {} — run `qedgen init` first.",
+            spec_path.display()
+        );
+    }
+
     std::fs::create_dir_all(output_dir)?;
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
@@ -501,22 +509,6 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
         + if spec.error_codes.is_empty() { 0 } else { 1 };
 
     eprintln!("Generated {} files in {}", file_count, output_dir.display());
-    eprintln!("  src/lib.rs              — program entry point");
-    eprintln!("  src/state.rs            — account state struct");
-    if !spec.events.is_empty() {
-        eprintln!("  src/events.rs           — event structs");
-    }
-    if !spec.error_codes.is_empty() {
-        eprintln!("  src/errors.rs           — error codes");
-    }
-    eprintln!("  src/instructions/mod.rs — instruction exports");
-    for handler in &spec.handlers {
-        eprintln!(
-            "  src/instructions/{}.rs — {} handler (AGENT fills todo!())",
-            handler.name, handler.name
-        );
-    }
-    eprintln!("  Cargo.toml              — project manifest");
 
     Ok(())
 }

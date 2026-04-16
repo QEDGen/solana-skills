@@ -196,12 +196,12 @@ theorem pool_solvency_under_interest_rate_change (s : PoolState) (new_interest_r
     pool_solvency { s with interest_rate := new_interest_rate } := sorry
 ```
 
-### `qedgen coverage` command
+### `qedgen check --coverage` command
 
 Prints a verification matrix showing which operations are covered by which properties.
 
 ```
-$ qedgen coverage --spec multisig.qedspec
+$ qedgen check --spec multisig.qedspec --coverage
 
 operation         threshold_bounded approvals_bounded
 -----------------------------------------------------

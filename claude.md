@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 4 proofs. Claude (the local LLM) drives proof writing directly — reading code, writing Lean models/theorems/proofs, and iterating on `lake build` errors. Leanstral (Mistral's theorem prover) is called only for hard sub-goals via `fill-sorry`.
+QEDGen is a Claude Code skill for spec-driven verification of Solana programs. The `.qedspec` is the single source of truth — QEDGen validates it (proptest, Kani, Lean) and generates all downstream artifacts (Rust code, test harnesses, Lean proofs, CI workflows). Leanstral and Aristotle handle hard proof sub-goals when escalated.
 
-**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `qedgen fill-sorry` for hard sub-goals → stamps verified code with `#[qed(verified)]`
+**Core workflow**: User describes intent → agent writes `.qedspec` → `qedgen check` validates (lint + proptest + Lean) → iterate on spec → `qedgen codegen --all` generates committed artifacts → `#[qed(verified)]` stamps verified code
 
 ## Build and Development Commands
 
@@ -56,8 +56,18 @@ qedgen fill-sorry \
   --passes 3 \
   --validate
 
-# Generate proptest harnesses from a .qedspec (Tier 1 of verification waterfall)
-qedgen proptest --spec program.qedspec --output tests/proptest.rs
+# Validate a spec (lint, coverage, drift)
+qedgen check --spec program.qedspec                     # lint + coverage
+qedgen check --spec program.qedspec --json              # machine-readable
+qedgen check --spec program.qedspec --explain           # Markdown report
+qedgen check --spec program.qedspec --drift src/        # drift detection
+qedgen check --spec program.qedspec --drift src/ --deep # transitive drift
+
+# Generate committed artifacts from a .qedspec
+qedgen codegen --spec program.qedspec --all             # everything
+qedgen codegen --spec program.qedspec --lean            # Lean proofs only
+qedgen codegen --spec program.qedspec --kani            # Kani harnesses
+qedgen codegen --spec program.qedspec --proptest        # proptest harnesses
 
 # Generate a draft SPEC.md from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
@@ -72,11 +82,6 @@ qedgen asm2lean \
   --input examples/sbpf/transfer/src/transfer.s \
   --output formal_verification/Program.lean \
   --namespace Program
-
-# Detect drift in verified functions
-qedgen drift --input programs/src/           # show status
-qedgen drift --input programs/src/ --strict  # CI gate (exit 1 on drift)
-qedgen drift --input programs/src/ --update  # auto-stamp hashes
 ```
 
 ## Architecture

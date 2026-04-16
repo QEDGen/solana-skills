@@ -9,7 +9,7 @@ use pest_derive::Parser;
 use std::path::Path;
 
 use crate::check::{
-    FlowKind, ParsedAbort, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover,
+    FlowKind, ParsedAccountEntry, ParsedAccountType, ParsedContext, ParsedCover,
     ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
     ParsedHandlerAccount, ParsedInstruction, ParsedLayoutField, ParsedLiveness, ParsedOperation,
     ParsedPda, ParsedProperty, ParsedPubkey, ParsedSbpfProperty, ParsedSpec, ParsedTransfer,
@@ -53,11 +53,11 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
     let mut error_codes: Vec<String> = Vec::new();
     let mut valued_errors: Vec<ParsedErrorCode> = Vec::new();
     let mut instructions: Vec<ParsedInstruction> = Vec::new();
-    let mut operations: Vec<ParsedOperation> = Vec::new();
+    let operations: Vec<ParsedOperation> = Vec::new();
     let mut handlers: Vec<ParsedHandler> = Vec::new();
     let mut properties: Vec<ParsedProperty> = Vec::new();
     let mut invariants: Vec<(String, String)> = Vec::new();
-    let mut contexts: Vec<ParsedContext> = Vec::new();
+    let contexts: Vec<ParsedContext> = Vec::new();
     let mut covers: Vec<ParsedCover> = Vec::new();
     let mut liveness_props: Vec<ParsedLiveness> = Vec::new();
     let mut environments: Vec<ParsedEnvironment> = Vec::new();
@@ -99,11 +99,17 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                     Rule::pubkey_decl => {
                         pubkeys.push(parse_pubkey_decl(inner));
                     }
+                    Rule::type_decl => {
+                        parse_type_decl(
+                            inner,
+                            &mut account_types,
+                            &mut error_codes,
+                            &mut valued_errors,
+                        );
+                    }
+                    // Sugar: bare `state { ... }` and `lifecycle [...]`
                     Rule::state_block => {
                         state_fields = parse_field_decls(inner);
-                    }
-                    Rule::account_block => {
-                        account_types.push(parse_account_block(inner));
                     }
                     Rule::lifecycle_decl => {
                         global_lifecycle = parse_ident_list(inner);
@@ -137,12 +143,8 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                     Rule::instruction_block => {
                         instructions.push(parse_instruction_block(inner, &constants));
                     }
-                    Rule::operation_block => {
-                        let (op, ctx) = parse_operation(inner, &constants);
-                        if let Some(c) = ctx {
-                            contexts.push(c);
-                        }
-                        operations.push(op);
+                    Rule::theorem_block => {
+                        properties.push(parse_theorem(inner, &constants));
                     }
                     Rule::property_block => {
                         properties.push(parse_property(inner, &constants));
@@ -150,14 +152,14 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                     Rule::cover_block => {
                         covers.push(parse_cover(inner, &constants));
                     }
-                    Rule::liveness_block => {
+                    Rule::liveness_decl => {
                         liveness_props.push(parse_liveness(inner));
                     }
                     Rule::environment_block => {
                         environments.push(parse_environment(inner, &constants));
                     }
                     Rule::invariant_decl => {
-                        invariants.push(parse_invariant(inner));
+                        invariants.push(parse_invariant(inner, &constants));
                     }
                     _ => {}
                 }
@@ -298,6 +300,7 @@ fn parse_string_lit(pair: pest::iterators::Pair<Rule>) -> String {
 }
 
 /// Parse `{ name : Type \n ... }` field declarations.
+#[allow(dead_code)]
 fn parse_field_decls(pair: pest::iterators::Pair<Rule>) -> Vec<(String, String)> {
     let mut fields = Vec::new();
     for inner in pair.into_inner() {
@@ -312,6 +315,7 @@ fn parse_field_decls(pair: pest::iterators::Pair<Rule>) -> Vec<(String, String)>
 }
 
 /// Parse `[ident1, ident2, ...]` list.
+#[allow(dead_code)]
 fn parse_ident_list(pair: pest::iterators::Pair<Rule>) -> Vec<String> {
     let mut items = Vec::new();
     for inner in pair.into_inner() {
@@ -329,40 +333,14 @@ fn parse_ident_list(pair: pest::iterators::Pair<Rule>) -> Vec<String> {
 }
 
 /// Parse `account Name { fields... lifecycle [...] }` block.
-fn parse_account_block(pair: pest::iterators::Pair<Rule>) -> ParsedAccountType {
-    let mut name = String::new();
-    let mut fields = Vec::new();
-    let mut lifecycle = Vec::new();
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::ident => {
-                name = inner.as_str().to_string();
-            }
-            Rule::account_item => {
-                let item = inner.into_inner().next().unwrap();
-                match item.as_rule() {
-                    Rule::field_decl => {
-                        let mut parts = item.into_inner();
-                        let fname = parts.next().unwrap().as_str().to_string();
-                        let ftype = parts.next().unwrap().as_str().to_string();
-                        fields.push((fname, ftype));
-                    }
-                    Rule::account_lifecycle => {
-                        lifecycle = parse_ident_list(item);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
+/// Legacy: this grammar form no longer exists (replaced by `type_decl`).
+#[allow(dead_code)]
+fn parse_account_block(_pair: pest::iterators::Pair<Rule>) -> ParsedAccountType {
     ParsedAccountType {
-        name,
-        fields,
-        lifecycle,
-        pda_ref: None, // linked later in the main parse function
+        name: String::new(),
+        fields: Vec::new(),
+        lifecycle: Vec::new(),
+        pda_ref: None,
     }
 }
 
@@ -409,16 +387,173 @@ fn parse_event(pair: pest::iterators::Pair<Rule>) -> ParsedEvent {
             Rule::ident => {
                 name = inner.as_str().to_string();
             }
-            Rule::field_decl => {
-                let mut parts = inner.into_inner();
-                let fname = parts.next().unwrap().as_str().to_string();
-                let ftype = parts.next().unwrap().as_str().to_string();
-                fields.push((fname, ftype));
+            Rule::typed_field_list => {
+                for tf in inner.into_inner() {
+                    if tf.as_rule() == Rule::typed_field {
+                        let mut parts = tf.into_inner();
+                        let fname = parts.next().unwrap().as_str().to_string();
+                        let type_pair = parts.next().unwrap();
+                        let ftype = type_pair.as_str().to_string();
+                        fields.push((fname, ftype));
+                    }
+                }
             }
             _ => {}
         }
     }
     ParsedEvent { name, fields }
+}
+
+/// Parse a `type Name | Variant ...` declaration into account types or error codes.
+///
+/// For `type Error | X | Y = 1 "desc"`, populates error_codes and valued_errors.
+/// For `type Pool | Uninitialized | Active of { ... } | Paused`, populates account_types.
+fn parse_type_decl(
+    pair: pest::iterators::Pair<Rule>,
+    account_types: &mut Vec<ParsedAccountType>,
+    error_codes: &mut Vec<String>,
+    valued_errors: &mut Vec<ParsedErrorCode>,
+) {
+    let mut type_name = String::new();
+    let mut variants: Vec<(String, Option<u64>, Option<String>, Vec<(String, String)>)> =
+        Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                type_name = inner.as_str().to_string();
+            }
+            Rule::type_variant => {
+                let mut variant_name = String::new();
+                let mut variant_code: Option<u64> = None;
+                let mut variant_desc: Option<String> = None;
+                let mut variant_fields: Vec<(String, String)> = Vec::new();
+
+                for v_inner in inner.into_inner() {
+                    match v_inner.as_rule() {
+                        Rule::ident => {
+                            variant_name = v_inner.as_str().to_string();
+                        }
+                        Rule::variant_code => {
+                            let val = v_inner.into_inner().next().unwrap();
+                            variant_code =
+                                clean_integer(val.as_str()).parse::<u64>().ok();
+                        }
+                        Rule::variant_desc => {
+                            variant_desc = v_inner
+                                .into_inner()
+                                .next()
+                                .and_then(|sl| {
+                                    sl.into_inner()
+                                        .next()
+                                        .map(|s| s.as_str().to_string())
+                                });
+                        }
+                        Rule::variant_fields => {
+                            // of { typed_field_list }
+                            for vf_inner in v_inner.into_inner() {
+                                if vf_inner.as_rule() == Rule::typed_field_list {
+                                    for tf in vf_inner.into_inner() {
+                                        if tf.as_rule() == Rule::typed_field {
+                                            let mut parts = tf.into_inner();
+                                            let fname =
+                                                parts.next().unwrap().as_str().to_string();
+                                            let type_pair = parts.next().unwrap();
+                                            let ftype = type_pair.as_str().to_string();
+                                            variant_fields.push((fname, ftype));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                variants.push((variant_name, variant_code, variant_desc, variant_fields));
+            }
+            _ => {}
+        }
+    }
+
+    if type_name == "Error" {
+        // Error type: collect as error codes
+        for (vname, vcode, vdesc, _) in &variants {
+            error_codes.push(vname.clone());
+            if vcode.is_some() || vdesc.is_some() {
+                valued_errors.push(ParsedErrorCode {
+                    name: vname.clone(),
+                    value: *vcode,
+                    description: vdesc.clone(),
+                });
+            }
+        }
+    } else {
+        // State type: collect lifecycle from ALL variant names, fields from variant with `of { ... }`
+        let lifecycle: Vec<String> = variants.iter().map(|(n, _, _, _)| n.clone()).collect();
+        let fields: Vec<(String, String)> = variants
+            .iter()
+            .flat_map(|(_, _, _, f)| f.clone())
+            .collect();
+
+        account_types.push(ParsedAccountType {
+            name: type_name,
+            fields,
+            lifecycle,
+            pda_ref: None, // linked later in the main parse function
+        });
+    }
+}
+
+/// Parse a `theorem name : guard_expr preserved_by ...` block.
+fn parse_theorem(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> ParsedProperty {
+    let mut name = String::new();
+    let mut expression_lean = None;
+    let mut preserved_by = Vec::new();
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::doc_comment => {}
+            Rule::ident => {
+                name = inner.as_str().to_string();
+            }
+            Rule::guard_expr => {
+                expression_lean = Some(guard_expr_to_lean(inner, consts));
+            }
+            Rule::preserved_by_clause => {
+                // Same logic as in parse_property
+                let mut is_all = false;
+                let mut idents = Vec::new();
+                for p in inner.into_inner() {
+                    match p.as_rule() {
+                        Rule::preserved_by_all => {
+                            is_all = true;
+                        }
+                        Rule::ident_list => {
+                            for id in p.into_inner() {
+                                if id.as_rule() == Rule::ident {
+                                    idents.push(id.as_str().to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                preserved_by = if is_all {
+                    vec!["all".to_string()]
+                } else {
+                    idents
+                };
+            }
+            _ => {}
+        }
+    }
+
+    ParsedProperty {
+        name,
+        expression: expression_lean,
+        preserved_by,
+    }
 }
 
 type Constants = std::collections::BTreeMap<String, String>;
@@ -451,6 +586,7 @@ fn guard_expr_to_lean_ctx(
         Rule::guard_or => {
             let parts: Vec<String> = pair
                 .into_inner()
+                .filter(|p| p.as_rule() != Rule::or_op)
                 .map(|p| guard_expr_to_lean_ctx(p, consts, ctx))
                 .collect();
             parts.join(" \u{2228} ") // ∨
@@ -465,6 +601,7 @@ fn guard_expr_to_lean_ctx(
         Rule::guard_and => {
             let parts: Vec<String> = pair
                 .into_inner()
+                .filter(|p| p.as_rule() != Rule::and_op)
                 .map(|p| guard_expr_to_lean_ctx(p, consts, ctx))
                 .collect();
             parts.join(" \u{2227} ") // ∧
@@ -597,11 +734,9 @@ fn guard_term_to_lean_ctx(
         Rule::guard_term => guard_term_to_lean_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::old_expr => {
             // old(state.field) — only valid in ensures context
-            let inner = pair.into_inner().next().unwrap(); // field_ref
-            let field = inner
-                .as_str()
-                .strip_prefix("state.")
-                .unwrap_or(inner.as_str());
+            let inner = pair.into_inner().next().unwrap(); // qualified_ident
+            let raw = inner.as_str();
+            let field = raw.strip_prefix("state.").unwrap_or(raw);
             match ctx {
                 ExprContext::Ensures => format!("s.{}", field), // pre-state
                 ExprContext::Guard => {
@@ -610,22 +745,23 @@ fn guard_term_to_lean_ctx(
                 }
             }
         }
-        Rule::field_ref => {
-            let field = pair
-                .as_str()
-                .strip_prefix("state.")
-                .unwrap_or(pair.as_str());
-            match ctx {
-                ExprContext::Guard => format!("s.{}", field),
-                ExprContext::Ensures => format!("s'.{}", field), // post-state
-            }
-        }
-        Rule::ident => {
-            let name = pair.as_str();
-            if let Some(val) = consts.get(name) {
-                val.clone()
+        Rule::qualified_ident => {
+            let raw = pair.as_str();
+            if let Some(field) = raw.strip_prefix("state.") {
+                match ctx {
+                    ExprContext::Guard => format!("s.{}", field),
+                    ExprContext::Ensures => format!("s'.{}", field),
+                }
+            } else if raw.contains('.') {
+                // Qualified reference like s.total_deposits — pass through
+                raw.to_string()
             } else {
-                name.to_string()
+                // Plain ident — check constants
+                if let Some(val) = consts.get(raw) {
+                    val.clone()
+                } else {
+                    raw.to_string()
+                }
             }
         }
         Rule::integer => clean_integer(pair.as_str()),
@@ -648,6 +784,7 @@ fn guard_expr_to_rust_ctx(
         Rule::guard_or => {
             let parts: Vec<String> = pair
                 .into_inner()
+                .filter(|p| p.as_rule() != Rule::or_op)
                 .map(|p| guard_expr_to_rust_ctx(p, consts, ctx))
                 .collect();
             parts.join(" || ")
@@ -667,6 +804,7 @@ fn guard_expr_to_rust_ctx(
         Rule::guard_and => {
             let parts: Vec<String> = pair
                 .into_inner()
+                .filter(|p| p.as_rule() != Rule::and_op)
                 .map(|p| guard_expr_to_rust_ctx(p, consts, ctx))
                 .collect();
             parts.join(" && ")
@@ -777,29 +915,35 @@ fn guard_term_to_rust_ctx(
         Rule::guard_term => guard_term_to_rust_ctx(pair.into_inner().next().unwrap(), consts, ctx),
         Rule::old_expr => {
             // old(state.field) — only valid in ensures context
-            let inner = pair.into_inner().next().unwrap(); // field_ref
+            let inner = pair.into_inner().next().unwrap(); // qualified_ident
             let raw = inner.as_str();
             match ctx {
                 ExprContext::Ensures => format!("old_{}", raw), // old_state.field
                 ExprContext::Guard => format!("/*old({})*/", raw),
             }
         }
-        Rule::field_ref => {
-            match ctx {
-                ExprContext::Guard => pair.as_str().to_string(),
-                ExprContext::Ensures => {
-                    // state.field → new_state.field in ensures
-                    let raw = pair.as_str();
-                    format!("new_{}", raw)
+        Rule::qualified_ident => {
+            let raw = pair.as_str();
+            if let Some(_field) = raw.strip_prefix("state.") {
+                match ctx {
+                    ExprContext::Guard => raw.to_string(),
+                    ExprContext::Ensures => {
+                        format!("new_{}", raw)
+                    }
                 }
-            }
-        }
-        Rule::ident => {
-            let name = pair.as_str();
-            if let Some(val) = consts.get(name) {
-                val.clone()
+            } else if raw.contains('.') {
+                // Qualified reference — pass through
+                match ctx {
+                    ExprContext::Guard => raw.to_string(),
+                    ExprContext::Ensures => raw.to_string(),
+                }
             } else {
-                name.to_string()
+                // Plain ident — check constants
+                if let Some(val) = consts.get(raw) {
+                    val.clone()
+                } else {
+                    raw.to_string()
+                }
             }
         }
         Rule::integer => clean_integer(pair.as_str()),
@@ -808,163 +952,35 @@ fn guard_term_to_rust_ctx(
 }
 
 /// Parse operation block into ParsedOperation + optional ParsedContext.
+/// Legacy: this grammar form no longer exists (replaced by `handler_block`).
+#[allow(dead_code)]
 fn parse_operation(
-    pair: pest::iterators::Pair<Rule>,
-    consts: &Constants,
+    _pair: pest::iterators::Pair<Rule>,
+    _consts: &Constants,
 ) -> (ParsedOperation, Option<ParsedContext>) {
-    let mut name = String::new();
-    let mut doc_lines: Vec<String> = Vec::new();
-    let mut who = None;
-    let mut on_account = None;
-    let mut pre_status = None;
-    let mut post_status = None;
-    let mut takes_params: Vec<(String, String)> = Vec::new();
-    let mut guard_str_lean = None;
-    let mut _guard_str_rust = None;
-    let mut effects: Vec<(String, String, String)> = Vec::new();
-    let mut calls_program = None;
-    let mut calls_discriminator = None;
-    let mut calls_accounts: Vec<(String, String)> = Vec::new();
-    let mut emits: Vec<String> = Vec::new();
-    let mut ctx_accounts: Vec<ParsedAccountEntry> = Vec::new();
-    let mut aborts_if: Vec<ParsedAbort> = Vec::new();
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::doc_comment => {
-                // Strip "///" prefix and optional leading space
-                let raw = inner.as_str();
-                let text = raw.strip_prefix("///").unwrap_or(raw);
-                let text = text.strip_prefix(' ').unwrap_or(text);
-                doc_lines.push(text.to_string());
-            }
-            Rule::ident => {
-                name = inner.as_str().to_string();
-            }
-            Rule::op_clause => {
-                let clause = inner.into_inner().next().unwrap();
-                match clause.as_rule() {
-                    Rule::who_clause => {
-                        who = Some(extract_ident(clause));
-                    }
-                    Rule::on_clause => {
-                        on_account = Some(extract_ident(clause));
-                    }
-                    Rule::when_clause => {
-                        pre_status = Some(extract_ident(clause));
-                    }
-                    Rule::then_clause => {
-                        post_status = Some(extract_ident(clause));
-                    }
-                    Rule::takes_block => {
-                        takes_params = parse_field_decls(clause);
-                    }
-                    Rule::guard_clause => {
-                        let expr = clause.into_inner().next().unwrap();
-                        guard_str_lean = Some(guard_expr_to_lean(expr.clone(), consts));
-                        _guard_str_rust = Some(guard_expr_to_rust(expr, consts));
-                    }
-                    Rule::aborts_if_clause => {
-                        let mut parts = clause.into_inner();
-                        let expr = parts.next().unwrap();
-                        let lean_expr = guard_expr_to_lean(expr.clone(), consts);
-                        let rust_expr = guard_expr_to_rust(expr, consts);
-                        let error_name = parts.next().unwrap().as_str().to_string();
-                        aborts_if.push(ParsedAbort {
-                            lean_expr,
-                            rust_expr,
-                            error_name,
-                        });
-                    }
-                    Rule::effect_block => {
-                        effects = parse_effect_stmts(clause);
-                    }
-                    Rule::calls_clause => {
-                        let mut parts = clause.into_inner();
-                        calls_program = Some(parts.next().unwrap().as_str().to_string());
-                        calls_discriminator = Some(parts.next().unwrap().as_str().to_string());
-                        // Parse call accounts
-                        for p in parts {
-                            if p.as_rule() == Rule::call_account_list {
-                                for acct in p.into_inner() {
-                                    if acct.as_rule() == Rule::call_account {
-                                        let mut ap = acct.into_inner();
-                                        let aname = ap.next().unwrap().as_str().to_string();
-                                        let aflag = ap.next().unwrap().as_str().to_string();
-                                        calls_accounts.push((aname, aflag));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Rule::emits_clause => {
-                        emits.push(extract_ident(clause));
-                    }
-                    Rule::context_block => {
-                        ctx_accounts = parse_context_entries(clause);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Self-transition: `when X` without `then` implies `then X`
-    if pre_status.is_some() && post_status.is_none() {
-        post_status = pre_status.clone();
-    }
-
-    let has_when = pre_status.is_some();
-    let has_calls = calls_program.is_some();
-    let has_takes = !takes_params.is_empty();
-    let has_guard = guard_str_lean.is_some();
-    let has_effect = !effects.is_empty();
-    let has_u64_fields = false; // filled at spec level
-
-    let ctx = if !ctx_accounts.is_empty() {
-        Some(ParsedContext {
-            operation: name.clone(),
-            accounts: ctx_accounts,
-        })
-    } else {
-        None
-    };
-
-    // Store the Lean-form guard in guard_str for Lean generation
-    // The Rust-form is available via guard_str_rust for codegen/unit_test
-    // For now, store Lean form since that's what check.rs expects.
-    // The Rust parser's guard_str was previously a Lean string anyway.
-    let doc = if doc_lines.is_empty() {
-        None
-    } else {
-        Some(doc_lines.join(" "))
-    };
-
     let op = ParsedOperation {
-        name,
-        doc,
-        who,
-        on_account,
-        has_when,
-        pre_status,
-        post_status,
-        has_calls,
-        program_id: calls_program,
-        has_u64_fields,
-        has_takes,
-        has_guard,
-        guard_str: guard_str_lean,
-        has_effect,
-        takes_params,
-        effects,
-        calls_accounts,
-        calls_discriminator,
-        emits,
-        aborts_if,
+        name: String::new(),
+        doc: None,
+        who: None,
+        on_account: None,
+        has_when: false,
+        pre_status: None,
+        post_status: None,
+        has_calls: false,
+        program_id: None,
+        has_u64_fields: false,
+        has_takes: false,
+        has_guard: false,
+        guard_str: None,
+        has_effect: false,
+        takes_params: Vec::new(),
+        effects: Vec::new(),
+        calls_accounts: Vec::new(),
+        calls_discriminator: None,
+        emits: Vec::new(),
+        aborts_if: Vec::new(),
     };
-
-    (op, ctx)
+    (op, None)
 }
 
 /// Parse effect statements: `field = value`, `field += value`, `field -= value`.
@@ -978,8 +994,10 @@ fn parse_effect_stmts(pair: pest::iterators::Pair<Rule>) -> Vec<(String, String,
                 ("+=", "add")
             } else if raw.contains("-=") {
                 ("-=", "sub")
+            } else if raw.contains(":=") {
+                (":=", "set")
             } else {
-                ("=", "set")
+                ("=", "set") // backward compat
             };
 
             let mut parts = inner.into_inner();
@@ -996,101 +1014,20 @@ fn parse_effect_stmts(pair: pest::iterators::Pair<Rule>) -> Vec<(String, String,
 fn effect_value_to_string(pair: pest::iterators::Pair<Rule>) -> String {
     match pair.as_rule() {
         Rule::effect_value => effect_value_to_string(pair.into_inner().next().unwrap()),
-        Rule::field_ref => {
-            // state.field -> just the field name for effect values
-            pair.as_str()
-                .strip_prefix("state.")
-                .unwrap_or(pair.as_str())
-                .to_string()
+        Rule::qualified_ident => {
+            let raw = pair.as_str();
+            raw.strip_prefix("state.").unwrap_or(raw).to_string()
         }
-        Rule::ident => pair.as_str().to_string(),
         Rule::integer => clean_integer(pair.as_str()),
         _ => pair.as_str().to_string(),
     }
 }
 
 /// Parse context entries into ParsedAccountEntry list.
-///
-/// Grammar: `context_attr = { ident ~ ("(" ~ ident ~ ")")? }`
-/// First attr is the type. If it has a paren arg, that's the inner type.
-/// E.g., `Account(Multisig)` → type=Account, inner=Multisig.
-fn parse_context_entries(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedAccountEntry> {
-    let mut accounts = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::context_entry {
-            let mut parts = inner.into_inner();
-            let acct_name = parts.next().unwrap().as_str().to_string();
-
-            // Collect (name, optional_paren_arg) for each attr
-            let mut attrs: Vec<(String, Option<String>)> = Vec::new();
-            for attr in parts {
-                if attr.as_rule() == Rule::context_attr {
-                    let mut idents = attr.into_inner();
-                    let name = idents.next().unwrap().as_str().to_string();
-                    let arg = idents.next().map(|p| p.as_str().to_string());
-                    attrs.push((name, arg));
-                }
-            }
-
-            if attrs.is_empty() {
-                continue;
-            }
-
-            // First attr is account type; its paren arg is the inner type
-            let account_type = attrs[0].0.clone();
-            let inner_type = attrs[0].1.clone();
-
-            // Remaining attrs are modifiers
-            let modifiers = &attrs[1..];
-
-            let is_mut = modifiers.iter().any(|(n, _)| n == "mut");
-            let is_init = modifiers.iter().any(|(n, _)| n == "init");
-            let is_init_if_needed = modifiers.iter().any(|(n, _)| n == "init_if_needed");
-            let has_bump = modifiers.iter().any(|(n, _)| n == "bump");
-
-            let payer = modifiers
-                .iter()
-                .find(|(n, _)| n == "payer")
-                .and_then(|(_, v)| v.clone());
-            let seeds_ref = modifiers
-                .iter()
-                .find(|(n, _)| n == "seeds")
-                .and_then(|(_, v)| v.clone());
-            let close_target = modifiers
-                .iter()
-                .find(|(n, _)| n == "close")
-                .and_then(|(_, v)| v.clone());
-            let has_one = modifiers
-                .iter()
-                .find(|(n, _)| n == "has_one")
-                .and_then(|(_, v)| v.clone());
-            let token_mint = modifiers
-                .iter()
-                .find(|(n, _)| n == "token_mint")
-                .and_then(|(_, v)| v.clone());
-            let token_authority = modifiers
-                .iter()
-                .find(|(n, _)| n == "token_authority")
-                .and_then(|(_, v)| v.clone());
-
-            accounts.push(ParsedAccountEntry {
-                name: acct_name,
-                account_type,
-                inner_type,
-                is_mut,
-                is_init,
-                is_init_if_needed,
-                payer,
-                seeds_ref,
-                has_bump,
-                close_target,
-                has_one,
-                token_mint,
-                token_authority,
-            });
-        }
-    }
-    accounts
+/// Legacy: this grammar form no longer exists (replaced by `accounts_block`).
+#[allow(dead_code)]
+fn parse_context_entries(_pair: pest::iterators::Pair<Rule>) -> Vec<ParsedAccountEntry> {
+    Vec::new()
 }
 
 // ============================================================================
@@ -1133,6 +1070,34 @@ fn parse_handler_block(
             Rule::ident => {
                 name = inner.as_str().to_string();
             }
+            Rule::handler_params => {
+                for param in inner.into_inner() {
+                    if param.as_rule() == Rule::handler_param {
+                        let mut parts = param.into_inner();
+                        let pname = parts.next().unwrap().as_str().to_string();
+                        let type_pair = parts.next().unwrap();
+                        let ptype = type_pair.as_str().to_string();
+                        takes_params.push((pname, ptype));
+                    }
+                }
+            }
+            Rule::handler_transition => {
+                // : Pre -> Post
+                let mut qi_iter = inner.into_inner();
+                let pre_qid = qi_iter.next().unwrap().as_str().to_string();
+                let post_qid = qi_iter.next().unwrap().as_str().to_string();
+                if let Some(dot_pos) = pre_qid.rfind('.') {
+                    on_account = Some(pre_qid[..dot_pos].to_string());
+                    pre_status = Some(pre_qid[dot_pos + 1..].to_string());
+                } else {
+                    pre_status = Some(pre_qid);
+                }
+                if let Some(dot_pos) = post_qid.rfind('.') {
+                    post_status = Some(post_qid[dot_pos + 1..].to_string());
+                } else {
+                    post_status = Some(post_qid);
+                }
+            }
             Rule::handler_clause => {
                 let clause = inner.into_inner().next().unwrap();
                 match clause.as_rule() {
@@ -1142,7 +1107,8 @@ fn parse_handler_block(
                     Rule::aborts_total_clause => {
                         aborts_total = true;
                     }
-                    Rule::who_clause => who = Some(extract_ident(clause)),
+                    Rule::auth_clause => who = Some(extract_ident(clause)),
+                    // Sugar: on/when/then/takes inside handler body (backward compat)
                     Rule::on_clause => on_account = Some(extract_ident(clause)),
                     Rule::when_clause => pre_status = Some(extract_ident(clause)),
                     Rule::then_clause => post_status = Some(extract_ident(clause)),
@@ -1323,6 +1289,7 @@ fn parse_accounts_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedHandlerA
                                 "writable" => is_writable = true,
                                 "readonly" => {} // default
                                 "program" => is_program = true,
+                                "token" => account_type = Some("token".to_string()),
                                 _ => {}
                             }
                         }
@@ -1413,6 +1380,7 @@ fn parse_transfers_block(pair: pest::iterators::Pair<Rule>) -> Vec<ParsedTransfe
 }
 
 /// Convert a legacy ParsedOperation into a ParsedHandler (backward compat).
+#[allow(dead_code)]
 fn operation_to_handler(op: &ParsedOperation, ctx: Option<&ParsedContext>) -> ParsedHandler {
     let accounts = if let Some(ctx) = ctx {
         ctx.accounts
@@ -1910,8 +1878,8 @@ fn extract_ident(pair: pest::iterators::Pair<Rule>) -> String {
     String::new()
 }
 
-/// Parse `invariant name "description"`.
-fn parse_invariant(pair: pest::iterators::Pair<Rule>) -> (String, String) {
+/// Parse `invariant name : guard_expr` or `invariant name "description"`.
+fn parse_invariant(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> (String, String) {
     let mut name = String::new();
     let mut desc = String::new();
     for inner in pair.into_inner() {
@@ -1925,6 +1893,9 @@ fn parse_invariant(pair: pest::iterators::Pair<Rule>) -> (String, String) {
                     .next()
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_default();
+            }
+            Rule::guard_expr => {
+                desc = guard_expr_to_lean(inner, consts);
             }
             _ => {}
         }
@@ -2004,6 +1975,16 @@ fn parse_cover(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> ParsedC
             Rule::ident => {
                 name = inner.as_str().to_string();
             }
+            Rule::ident_list => {
+                // One-liner: cover name [op1, op2, ...]
+                let mut ops = Vec::new();
+                for id in inner.into_inner() {
+                    if id.as_rule() == Rule::ident {
+                        ops.push(id.as_str().to_string());
+                    }
+                }
+                traces.push(ops);
+            }
             Rule::cover_clause => {
                 let clause = inner.into_inner().next().unwrap();
                 match clause.as_rule() {
@@ -2050,49 +2031,44 @@ fn parse_cover(pair: pest::iterators::Pair<Rule>, consts: &Constants) -> ParsedC
     }
 }
 
-/// Parse a liveness block (leads-to).
+/// Parse a liveness declaration (one-liner leads-to).
 fn parse_liveness(pair: pest::iterators::Pair<Rule>) -> ParsedLiveness {
     let mut name = String::new();
     let mut from_state = String::new();
     let mut leads_to_state = String::new();
     let mut via_ops = Vec::new();
     let mut within_steps = None;
+    let mut qi_count = 0;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::ident => {
                 name = inner.as_str().to_string();
             }
-            Rule::liveness_clause => {
-                let clause = inner.into_inner().next().unwrap();
-                match clause.as_rule() {
-                    Rule::from_clause => {
-                        from_state = extract_ident(clause);
+            Rule::qualified_ident => {
+                if qi_count == 0 {
+                    from_state = inner.as_str().to_string();
+                    // Strip type prefix: "Loan.Active" → "Active"
+                    if let Some(dot) = from_state.rfind('.') {
+                        from_state = from_state[dot + 1..].to_string();
                     }
-                    Rule::leads_to_clause => {
-                        leads_to_state = extract_ident(clause);
+                } else {
+                    leads_to_state = inner.as_str().to_string();
+                    if let Some(dot) = leads_to_state.rfind('.') {
+                        leads_to_state = leads_to_state[dot + 1..].to_string();
                     }
-                    Rule::via_clause => {
-                        for p in clause.into_inner() {
-                            if p.as_rule() == Rule::ident_list {
-                                for id in p.into_inner() {
-                                    if id.as_rule() == Rule::ident {
-                                        via_ops.push(id.as_str().to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Rule::within_clause => {
-                        for p in clause.into_inner() {
-                            if p.as_rule() == Rule::integer {
-                                within_steps =
-                                    Some(clean_integer(p.as_str()).parse::<u64>().unwrap_or(0));
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                qi_count += 1;
+            }
+            Rule::ident_list => {
+                for id in inner.into_inner() {
+                    if id.as_rule() == Rule::ident {
+                        via_ops.push(id.as_str().to_string());
+                    }
+                }
+            }
+            Rule::integer => {
+                within_steps = Some(clean_integer(inner.as_str()).parse::<u64>().unwrap_or(0));
             }
             _ => {}
         }
@@ -3225,7 +3201,7 @@ state { balance : U64 }
 errors [Unauthorized]
 
 schema authorized {
-  who owner
+  auth owner
   requires signer == state.balance else Unauthorized
 }
 
@@ -3252,18 +3228,18 @@ spec Test
 state { balance : U64 }
 
 schema base {
-  who creator
+  auth creator
 }
 
 handler deposit {
   include base
-  who admin
+  auth admin
   effect { balance += 1 }
 }
 "#;
         let spec = parse(spec_str).unwrap();
         let h = &spec.handlers[0];
-        // Handler's `who admin` overrides schema's `who creator`
+        // Handler's `auth admin` overrides schema's `auth creator`
         assert_eq!(h.who, Some("admin".to_string()));
     }
 
@@ -3393,7 +3369,7 @@ lifecycle [Uninitialized, Active]
 errors [Unauthorized, InvalidAmount, Overflow]
 
 schema authorized {
-  who owner
+  auth owner
   requires signer == state.owner else Unauthorized
 }
 

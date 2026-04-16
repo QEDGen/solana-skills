@@ -6,7 +6,8 @@
   </picture>
 </p>
 
-<h3 align="center">Prove your Solana code is correct. Mathematically.</h3>
+<h3 align="center">Proofs, not promises.</h3>
+<p align="center"><em>Ship to mainnet without fear.</em></p>
 
 <p align="center">
   <a href="https://qedgen.dev">Website</a> &middot;
@@ -21,7 +22,7 @@
 
 ---
 
-An agent skill that formally verifies Solana programs — **Rust/Anchor** and **sBPF assembly** — by generating machine-checked **Lean 4 proofs**. Your agent writes the proofs; **Leanstral** handles routine sub-goals (seconds), **Aristotle** handles the hardest ones (minutes–hours).
+Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed. One spec file drives everything: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows**. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -32,22 +33,18 @@ npx skills add qedgen/solana-skills
 ## How it works
 
 ```
-.qedspec ──► lean-gen ──► Spec.lean ──► Lean 4 Proofs ──► lake build ──► ∎
-                │              │              ▲       │
-                │              │              │       ├─► Leanstral (fast)
-                ├─► codegen    │              │       └─► Aristotle (deep)
-                ├─► kani       └── iterate ───┘
-                └─► test
+.qedspec ──► check (validate spec) ──► codegen --all ──► lake build ──► ∎
+                │                          │                  ▲       │
+                ├── lint (instant)          ├── Rust skeleton  │       ├─► Leanstral (fast)
+                ├── proptest (~100ms)       ├── Lean proofs    │       └─► Aristotle (deep)
+                └── lean-gen (seconds)      ├── Kani harnesses └── iterate
+                                            └── tests
 ```
 
-1. Write a `.qedspec` file defining your program's properties, or let your agent generate one from the IDL
-2. Run `qedgen lean-gen` to produce `Spec.lean` from the spec
-3. Your agent writes Lean 4 proofs against the QEDGen support library
-4. Iterates on `lake build` errors until proofs compile
-5. Calls `qedgen fill-sorry` for hard sub-goals (Leanstral — seconds)
-6. Escalates to `qedgen aristotle submit` when Leanstral fails (Aristotle — minutes to hours)
-
-Optionally, generate downstream artifacts from the same `.qedspec`: Quasar program skeletons (`codegen`), Kani harnesses (`kani`), unit tests (`test`), and integration tests (`integration-test`).
+1. **Define guarantees** — write a `.qedspec` describing what your program must guarantee, or let your agent generate one from the code or IDL
+2. **Validate** — `qedgen check` runs the verification waterfall: lint catches structural issues, property tests find counterexamples in milliseconds, Lean catches what tests can't
+3. **Generate** — `qedgen codegen --all` produces program code, test harnesses, Lean proofs, and CI workflows from the single spec
+4. **Prove** — your agent fills proof obligations; Leanstral handles routine sub-goals (seconds), Aristotle handles the hardest ones (minutes–hours)
 
 ## What it verifies
 
@@ -94,8 +91,8 @@ qedgen spec --idl target/idl/my_program.json --format qedspec
 
 # Review and complete the TODO items in the generated .qedspec
 # Then use the same pipeline as greenfield:
-qedgen lean-gen --spec my_program.qedspec
 qedgen init --name my_program
+qedgen codegen --spec my_program.qedspec --lean
 cd formal_verification && lake build
 ```
 
@@ -107,26 +104,25 @@ The generated `.qedspec` auto-derives state fields, operations, contexts, PDAs, 
 # Initialize a new verification project from a .qedspec
 qedgen init --name my_program
 
-# Generate Lean spec from .qedspec
-qedgen lean-gen --spec my_program.qedspec
-
-# Generate downstream artifacts from .qedspec
-qedgen codegen --spec my_program.qedspec               # Quasar program skeleton
-qedgen kani --spec my_program.qedspec                   # Kani proof harnesses
-qedgen test --spec my_program.qedspec                   # Unit tests
-qedgen integration-test --spec my_program.qedspec       # QuasarSVM integration tests
-qedgen proptest --spec my_program.qedspec               # Property-based tests (transient)
-
-# Lint a spec for completeness
-qedgen lint --spec my_program.qedspec
-qedgen lint --spec my_program.qedspec --json            # machine-readable output
-
-# Check spec coverage and drift detection
+# Validate the spec (lint + coverage)
 qedgen check --spec my_program.qedspec
-qedgen check --spec my_program.qedspec --code ./programs --kani ./tests/kani.rs
+qedgen check --spec my_program.qedspec --json           # machine-readable output
 
-# Generate a human-readable verification report
-qedgen explain --spec my_program.qedspec
+# Generate all committed artifacts from .qedspec
+qedgen codegen --spec my_program.qedspec --all          # everything: Rust, Lean, Kani, tests
+
+# Or generate selectively
+qedgen codegen --spec my_program.qedspec                # Quasar Rust skeleton only
+qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
+qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
+qedgen codegen --spec my_program.qedspec --test         # + unit tests
+qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
+qedgen codegen --spec my_program.qedspec --integration  # + QuasarSVM integration tests
+
+# Check with drift detection and verification report
+qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
+qedgen check --spec my_program.qedspec --explain        # Markdown verification report
+qedgen check --spec my_program.qedspec --code ./programs --kani ./tests/kani.rs  # drift detection
 ```
 
 ### sBPF verification
@@ -136,7 +132,7 @@ qedgen explain --spec my_program.qedspec
 qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
 
 # Verify sBPF proofs (checks source hash, regenerates if stale)
-qedgen verify --asm src/program.s
+qedgen check --spec my_program.qedspec --asm src/program.s
 ```
 
 ### Generate proofs from a prompt
@@ -197,10 +193,13 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 
 ```bash
 # Scan and stamp hashes on all #[qed(verified)] functions
-qedgen drift --input programs/src/ --update
+qedgen check --spec my_program.qedspec --drift programs/src/ --update-hashes
 
 # CI gate — exit 1 if any verified function has changed
-qedgen drift --input programs/src/ --strict
+qedgen check --spec my_program.qedspec --drift programs/src/
+
+# Transitive drift — also check if callees of verified functions changed
+qedgen check --spec my_program.qedspec --drift programs/src/ --deep
 ```
 
 ### Consolidate proofs
@@ -214,8 +213,8 @@ qedgen consolidate \
 ### Generate CI workflow
 
 ```bash
-qedgen ci                                     # Lean-only verification workflow
-qedgen ci --asm src/program.s                 # Add sBPF source hash check
+qedgen codegen --spec my_program.qedspec --ci                    # Lean-only verification workflow
+qedgen codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF source hash check
 ```
 
 ## Examples

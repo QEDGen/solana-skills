@@ -1,8 +1,8 @@
 # QEDGen
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Supports Rust/Anchor programs and native sBPF assembly. Your agent writes the proofs; Leanstral (fast, seconds) handles routine sub-goals, Aristotle (deep, minutes-hours) handles hard ones. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
+> Find the bugs your tests miss. Define what your Solana program must guarantee in a `.qedspec` — QEDGen validates it and generates the tests, proofs, and CI to keep it fixed. Supports Anchor, Quasar, and native sBPF assembly. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
 
-QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls external theorem provers only for hard sub-goals.
+One spec file drives everything: property tests, Kani harnesses, Lean 4 proofs, program code, and CI workflows.
 
 ## Docs
 

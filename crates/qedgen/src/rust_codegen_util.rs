@@ -206,3 +206,162 @@ pub fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> Stri
         value.to_string()
     }
 }
+
+// ============================================================================
+// Shared helpers — used by kani, proptest, unit_test, integration generators
+// ============================================================================
+
+/// Resolve state fields for the spec, handling multi-account layout.
+/// Returns the fields for the primary account type.
+pub fn resolve_state_fields(spec: &ParsedSpec) -> &[(String, String)] {
+    if spec.account_types.len() > 1 {
+        &spec.account_types[0].fields
+    } else {
+        &spec.state_fields
+    }
+}
+
+/// Filter state fields to mutable-only (skip Pubkey identity fields).
+pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
+    fields.iter().filter(|(_, t)| t != "Pubkey").collect()
+}
+
+/// Collect all guard conditions from a handler (guard_str + requires clauses)
+/// as a single Rust expression. Returns None if no guards exist.
+pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ref guard) = op.guard_str {
+        parts.push(translate_guard_to_rust(guard, wrapping));
+    }
+    for req in &op.requires {
+        parts.push(translate_guard_to_rust(&req.rust_expr, wrapping));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" && "))
+    }
+}
+
+// ============================================================================
+// Shared emitters
+// ============================================================================
+
+/// Emit constant declarations from spec constants.
+pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
+    for (name, value) in constants {
+        let upper = name.to_uppercase();
+        let const_type = infer_const_type(value);
+        out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
+    }
+    if !constants.is_empty() {
+        out.push('\n');
+    }
+}
+
+/// Emit a State struct with configurable `#[derive(...)]` attributes.
+/// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types.
+pub fn emit_state_struct(
+    out: &mut String,
+    fields: &[&(String, String)],
+    derives: &str,
+    map_type_fn: fn(&str) -> &str,
+) {
+    out.push_str(&format!("#[derive({})]\n", derives));
+    out.push_str("struct State {\n");
+    for (fname, ftype) in fields {
+        out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)));
+    }
+    out.push_str("}\n\n");
+}
+
+/// Emit property predicate functions from spec properties.
+/// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
+pub fn emit_property_predicates(
+    out: &mut String,
+    properties: &[ParsedProperty],
+    wrapping: bool,
+) {
+    for prop in properties {
+        if let Some(ref expr) = prop.expression {
+            let rust_expr = translate_property_to_rust(expr, wrapping);
+            out.push_str(&format!("/// {}: {}\n", prop.name, expr));
+            out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
+            out.push_str(&format!("    {}\n", rust_expr));
+            out.push_str("}\n\n");
+        }
+    }
+}
+
+/// Emit transition functions for handlers. Each returns true if guard passes.
+/// `wrapping` controls whether add/sub effects use wrapping arithmetic.
+pub fn emit_transition_fn(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    map_type_fn: fn(&str) -> &str,
+) {
+    if let Some(ref doc) = op.doc {
+        out.push_str(&format!("/// {}\n", doc.trim()));
+    }
+
+    let params: String = op
+        .takes_params
+        .iter()
+        .map(|(n, t)| format!(", {}: {}", n, map_type_fn(t)))
+        .collect();
+    out.push_str(&format!(
+        "fn {}(s: &mut State{}) -> bool {{\n",
+        op.name, params
+    ));
+
+    // Guard check (merges guard_str + requires clauses)
+    if let Some(guard_expr) = collect_full_guard(op, wrapping) {
+        if let Some(ref raw) = op.guard_str {
+            out.push_str(&format!("    // guard: {}\n", raw));
+        }
+        out.push_str(&format!("    if !({}) {{\n", guard_expr));
+        out.push_str("        return false;\n");
+        out.push_str("    }\n");
+    }
+
+    // Apply effects
+    for (field, op_kind, value) in &op.effects {
+        let rust_value = resolve_value(value, op, spec);
+        match op_kind.as_str() {
+            "set" => {
+                out.push_str(&format!("    s.{} = {};\n", field, rust_value));
+            }
+            "add" => {
+                if wrapping {
+                    out.push_str(&format!(
+                        "    s.{} = s.{}.wrapping_add({});\n",
+                        field, field, rust_value
+                    ));
+                } else {
+                    out.push_str(&format!("    s.{} += {};\n", field, rust_value));
+                }
+            }
+            "sub" => {
+                if wrapping {
+                    out.push_str(&format!(
+                        "    s.{} = s.{}.wrapping_sub({});\n",
+                        field, field, rust_value
+                    ));
+                } else {
+                    out.push_str(&format!("    s.{} -= {};\n", field, rust_value));
+                }
+            }
+            _ => {
+                out.push_str(&format!(
+                    "    // unknown effect: {} {} {}\n",
+                    field, op_kind, value
+                ));
+            }
+        }
+    }
+
+    out.push_str("    true\n");
+    out.push_str("}\n\n");
+}

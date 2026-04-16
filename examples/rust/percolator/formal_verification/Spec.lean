@@ -73,44 +73,44 @@ def conservation (s : State) : Prop := s.V ≥ s.C_tot + s.I
 theorem conservation_preserved_by_deposit (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv : conservation s) (h : depositTransition s signer amount = some s') :
     conservation s' := by
-  simp [depositTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; simp [conservation] at h_inv ⊢; omega
+  unfold depositTransition at h; split at h
+  · next hg => cases h; unfold conservation at h_inv ⊢; dsimp; omega
+  · contradiction
 
 theorem conservation_preserved_by_withdraw (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv : conservation s) (h : withdrawTransition s signer amount = some s') :
     conservation s' := by
-  simp [withdrawTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; simp [conservation] at h_inv ⊢; omega
+  unfold withdrawTransition at h; split at h
+  · next hg => cases h; unfold conservation at h_inv ⊢; dsimp; omega
+  · contradiction
 
 theorem conservation_preserved_by_top_up_insurance (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv : conservation s) (h : top_up_insuranceTransition s signer amount = some s') :
     conservation s' := by
-  simp [top_up_insuranceTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; simp [conservation] at h_inv ⊢; omega
+  unfold top_up_insuranceTransition at h; split at h
+  · next hg => cases h; unfold conservation at h_inv ⊢; dsimp; omega
+  · contradiction
 
 theorem conservation_preserved_by_trigger_adl (s s' : State) (signer : Pubkey)
     (h_inv : conservation s) (h : trigger_adlTransition s signer = some s') :
     conservation s' := by
-  simp [trigger_adlTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; exact h_inv
+  unfold trigger_adlTransition at h; split at h
+  · cases h; exact h_inv
+  · contradiction
 
 theorem conservation_preserved_by_complete_drain (s s' : State) (signer : Pubkey)
     (h_inv : conservation s) (h : complete_drainTransition s signer = some s') :
     conservation s' := by
-  simp [complete_drainTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; exact h_inv
+  unfold complete_drainTransition at h; split at h
+  · cases h; exact h_inv
+  · contradiction
 
 theorem conservation_preserved_by_reset (s s' : State) (signer : Pubkey)
     (h_inv : conservation s) (h : resetTransition s signer = some s') :
     conservation s' := by
-  simp [resetTransition] at h
-  obtain ⟨_, h_eq⟩ := h
-  subst h_eq; exact h_inv
+  unfold resetTransition at h; split at h
+  · cases h; exact h_inv
+  · contradiction
 
 /-- conservation is preserved by every operation. Auto-proven by case split. -/
 theorem conservation_inductive (s s' : State) (signer : Pubkey) (op : Operation)
@@ -128,16 +128,16 @@ def vault_bounded (s : State) : Prop := s.V ≤ 10000000000000000
 theorem vault_bounded_preserved_by_deposit (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv : vault_bounded s) (h : depositTransition s signer amount = some s') :
     vault_bounded s' := by
-  simp [depositTransition] at h
-  obtain ⟨⟨_, _, h_guard, _⟩, h_eq⟩ := h
-  subst h_eq; unfold vault_bounded; omega
+  unfold depositTransition at h; split at h
+  · next hg => cases h; unfold vault_bounded at h_inv ⊢; dsimp; omega
+  · contradiction
 
 theorem vault_bounded_preserved_by_top_up_insurance (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv : vault_bounded s) (h : top_up_insuranceTransition s signer amount = some s') :
     vault_bounded s' := by
-  simp [top_up_insuranceTransition] at h
-  obtain ⟨⟨_, _, h_guard, _⟩, h_eq⟩ := h
-  subst h_eq; unfold vault_bounded; omega
+  unfold top_up_insuranceTransition at h; split at h
+  · next hg => cases h; unfold vault_bounded at h_inv ⊢; dsimp; omega
+  · contradiction
 
 /-- vault_bounded is preserved by every operation. Auto-proven by case split. -/
 theorem vault_bounded_inductive (s s' : State) (signer : Pubkey) (op : Operation)
@@ -145,9 +145,10 @@ theorem vault_bounded_inductive (s s' : State) (signer : Pubkey) (op : Operation
   cases op with
   | deposit amount => exact vault_bounded_preserved_by_deposit s s' signer amount h_inv h
   | withdraw amount =>
-    simp [applyOp, withdrawTransition] at h
-    obtain ⟨_, h_eq⟩ := h
-    subst h_eq; simp [vault_bounded] at h_inv ⊢; omega
+    simp [applyOp] at h
+    unfold withdrawTransition at h; split at h
+    · next hg => cases h; unfold vault_bounded at h_inv ⊢; dsimp; omega
+    · contradiction
   | top_up_insurance amount => exact vault_bounded_preserved_by_top_up_insurance s s' signer amount h_inv h
   | trigger_adl =>
     simp [applyOp, trigger_adlTransition] at h
@@ -169,7 +170,7 @@ theorem vault_bounded_inductive (s s' : State) (signer : Pubkey) (op : Operation
 theorem withdraw_aborts_if_InsufficientFunds (s : State) (signer : Pubkey) (amount : Nat)
     (h : ¬(s.C_tot ≥ amount)) : withdrawTransition s signer amount = none := by
   unfold withdrawTransition
-  rw [if_neg (fun ⟨_, _, _, _, h5⟩ => h h5)]
+  rw [if_neg (fun hg => h hg.2.2.2.2)]
 
 -- ============================================================================
 -- Cover properties — reachability (existential proofs)
@@ -180,9 +181,9 @@ theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
     ∃ (v0_0 : Nat), ∃ (s1 : State), depositTransition s0 signer v0_0 = some s1 ∧
       ∃ (v1_0 : Nat), withdrawTransition s1 signer v1_0 ≠ none := by
   let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  exact ⟨⟨pk, 0, 0, 0, .Active⟩, pk, 1,
-    ⟨pk, 1, 1, 0, .Active⟩, by decide,
-    1, by decide⟩
+  let s0 : State := ⟨pk, 0, 0, 0, .Active⟩
+  let s1 : State := ⟨pk, 1, 1, 0, .Active⟩
+  exact ⟨s0, pk, 1, s1, by decide, 1, by decide⟩
 
 -- ============================================================================
 -- Liveness properties — bounded reachability (leads-to)
@@ -198,22 +199,24 @@ def applyOps (s : State) (signer : Pubkey) : List Operation → Option State
 theorem liveness_drain_completes (s : State) (signer : Pubkey)
     (h : s.status = .Draining) :
     ∃ ops, ops.length ≤ 2 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Active := by
-  exact ⟨[.complete_drain, .reset], by decide, fun s' h_apply => by
-    simp only [applyOps, applyOp] at h_apply
-    cases hcd : complete_drainTransition s signer with
-    | none => simp [hcd] at h_apply
-    | some s1 =>
-      simp [hcd] at h_apply
-      cases hr : resetTransition s1 signer with
-      | none => simp [hr] at h_apply
-      | some s2 =>
-        simp [hr] at h_apply
-        subst h_apply
-        simp [complete_drainTransition, h] at hcd
-        obtain ⟨h_auth, rfl⟩ := hcd
-        simp [resetTransition] at hr
-        obtain ⟨_, rfl⟩ := hr
-        rfl⟩
+  refine ⟨[.complete_drain, .reset], by decide, fun s' h_apply => ?_⟩
+  simp only [applyOps, applyOp] at h_apply
+  simp only [complete_drainTransition] at h_apply
+  split at h_apply
+  · next heq =>
+    split at heq
+    · next hg =>
+      simp at heq
+      subst heq
+      simp only [resetTransition] at h_apply
+      split at h_apply
+      · next heq =>
+        split at heq
+        · next hg => simp at heq h_apply; subst heq; subst h_apply; rfl
+        · simp at heq
+      · simp at h_apply
+    · simp at heq
+  · simp at h_apply
 
 -- ============================================================================
 -- Overflow safety obligations (auto-generated for operations with add effects)
@@ -225,14 +228,13 @@ theorem deposit_overflow_safe (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_inv_vault_bounded : vault_bounded s)
     (h : depositTransition s signer amount = some s') :
     valid_u128 s'.V ∧ valid_u128 s'.C_tot ∧ valid_u128 s'.I := by
-  simp [depositTransition] at h
-  obtain ⟨⟨_, _, h_guard_v, h_guard_c⟩, h_eq⟩ := h
-  subst h_eq
-  obtain ⟨_, _, h_i⟩ := h_valid
-  refine ⟨?_, ?_, h_i⟩
-  · change s.V + amount ≤ U128_MAX
-    exact Nat.le_trans h_guard_v (by native_decide)
-  · exact h_guard_c
+  unfold depositTransition at h; split at h
+  · next hg =>
+    cases h
+    refine ⟨?_, ?_, h_valid.2.2⟩
+    simp only [valid_u128, Valid.valid_u128, Valid.U128_MAX]; omega
+    simp only [valid_u128, Valid.valid_u128, Valid.U128_MAX]; omega
+  · contradiction
 
 theorem top_up_insurance_overflow_safe (s s' : State) (signer : Pubkey) (amount : Nat)
     (h_valid : valid_u128 s.V ∧ valid_u128 s.C_tot ∧ valid_u128 s.I)
@@ -240,13 +242,12 @@ theorem top_up_insurance_overflow_safe (s s' : State) (signer : Pubkey) (amount 
     (h_inv_vault_bounded : vault_bounded s)
     (h : top_up_insuranceTransition s signer amount = some s') :
     valid_u128 s'.V ∧ valid_u128 s'.C_tot ∧ valid_u128 s'.I := by
-  simp [top_up_insuranceTransition] at h
-  obtain ⟨⟨_, _, h_guard_v, h_guard_i⟩, h_eq⟩ := h
-  subst h_eq
-  obtain ⟨_, h_c, _⟩ := h_valid
-  refine ⟨?_, h_c, ?_⟩
-  · change s.V + amount ≤ U128_MAX
-    exact Nat.le_trans h_guard_v (by native_decide)
-  · exact h_guard_i
+  unfold top_up_insuranceTransition at h; split at h
+  · next hg =>
+    cases h
+    refine ⟨?_, h_valid.2.1, ?_⟩
+    simp only [valid_u128, Valid.valid_u128, Valid.U128_MAX]; omega
+    simp only [valid_u128, Valid.valid_u128, Valid.U128_MAX]; omega
+  · contradiction
 
 end Percolator

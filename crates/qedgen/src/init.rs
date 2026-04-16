@@ -1,8 +1,71 @@
 use anyhow::{ensure, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 const LEAN_TOOLCHAIN: &str = "leanprover/lean4:v4.24.0\n";
 const GITIGNORE: &str = ".lake/\nbuild/\nlake-packages/\nlean_solana/.lake/\nlean_solana/build/\n";
+const QED_DIR: &str = ".qed";
+
+/// Persistent project metadata stored in `.qed/config.json`.
+#[derive(Serialize, Deserialize)]
+pub struct QedConfig {
+    pub name: String,
+    pub spec: Option<String>,
+    pub created_at: String,
+}
+
+/// Check whether `.qed/` exists in the same directory as `spec_path`.
+/// `.qed/` is program-level, not repo-level — it lives next to the `.qedspec` file.
+pub fn find_qed_dir(spec_path: &Path) -> Option<std::path::PathBuf> {
+    let dir = if spec_path.is_file() {
+        spec_path.parent()?
+    } else {
+        spec_path
+    };
+    let candidate = dir.join(QED_DIR);
+    if candidate.is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Initialize `.qed/` in the given directory. Returns error if already initialized.
+/// `dir` should be the program root — the directory where the `.qedspec` lives.
+pub fn init_qed_dir(dir: &Path, name: &str) -> Result<()> {
+    let qed_path = dir.join(QED_DIR);
+    if qed_path.exists() {
+        anyhow::bail!(
+            "Already initialized — .qed/ exists in {}\n\
+             To reinitialize, remove it first: rm -rf {}",
+            dir.display(),
+            qed_path.display()
+        );
+    }
+    std::fs::create_dir_all(&qed_path)?;
+
+    let config = QedConfig {
+        name: name.to_string(),
+        spec: None,
+        created_at: chrono_now(),
+    };
+    let json = serde_json::to_string_pretty(&config)?;
+    std::fs::write(qed_path.join("config.json"), json)?;
+
+    // Add .qed/ gitignore for internal state (config.json is committed)
+    std::fs::write(qed_path.join(".gitignore"), "# .qed/ is project metadata — commit config.json\n")?;
+
+    Ok(())
+}
+
+/// Simple ISO-8601 timestamp without pulling in chrono.
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{}s-since-epoch", d.as_secs())
+}
 
 /// Scaffold a formal_verification/ project directory.
 pub fn init(

@@ -9,6 +9,17 @@ use std::path::Path;
 
 use crate::check::ParsedSpec;
 
+/// Build a Lean type name from an account name, avoiding double-suffix.
+/// "Pool" → "PoolState", "Pool" → "PoolStatus"
+/// "State" → "State" (not "StateState"), "State" → "Status" (not "StateStatus")
+fn lean_state_name(acct: &str) -> String {
+    if acct == "State" { "State".to_string() } else { format!("{}State", acct) }
+}
+
+fn lean_status_name(acct: &str) -> String {
+    if acct == "State" { "Status".to_string() } else { format!("{}Status", acct) }
+}
+
 /// Generate a Lean file from a `ParsedSpec` and write it to `output_path`.
 pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
     let content = render(spec);
@@ -156,8 +167,8 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     // Per-account sections
     for acct in &spec.account_types {
         let acct_name = &acct.name;
-        let status_name = format!("{}Status", acct_name);
-        let state_name = format!("{}State", acct_name);
+        let status_name = lean_status_name(acct_name);
+        let state_name = lean_state_name(acct_name);
 
         // Status inductive
         if !acct.lifecycle.is_empty() {
@@ -225,7 +236,7 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     // v2.0 features: aborts_if, covers, liveness, environments, overflow
     // Per-account: aborts_if and overflow need the ops for each account
     for acct in &spec.account_types {
-        let state_name = format!("{}State", acct.name);
+        let state_name = lean_state_name(&acct.name);
         let ops: Vec<&crate::check::ParsedHandler> = spec
             .handlers
             .iter()
@@ -622,7 +633,7 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
     }
 
     for (acct_name, props) in &groups {
-        let state_type = format!("{}State", acct_name);
+        let state_type = lean_state_name(acct_name);
         let op_type = format!("{}Operation", acct_name);
         let apply_name = format!("apply{}Op", acct_name);
 
@@ -783,9 +794,22 @@ fn render_properties_inner(
 ) {
     for prop in properties {
         if let Some(ref expr) = prop.expression {
+            // Strip leading ∀/forall quantifier if present, since the def already binds `s`
+            // e.g., "∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows"
+            //     → "s.total_deposits ≥ s.total_borrows"
+            let body = if let Some(rest) = expr.strip_prefix('\u{2200}').or_else(|| expr.strip_prefix("forall")) {
+                // Skip past "var : Type, " to get the body
+                if let Some(comma_pos) = rest.find(',') {
+                    rest[comma_pos + 1..].trim().to_string()
+                } else {
+                    expr.clone()
+                }
+            } else {
+                expr.clone()
+            };
             out.push_str(&format!(
                 "def {} (s : {}) : Prop := {}\n\n",
-                prop.name, state_type, expr
+                prop.name, state_type, body
             ));
         }
 
@@ -1152,7 +1176,11 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
         let op = spec.handlers.iter().find(|o| o.name == op_name);
         if let Some(op) = op {
             if let Some(ref acct) = op.on_account {
-                return format!("{}State", acct);
+                // If on_account matches the primary state type name, use it directly
+                if acct == state_type {
+                    return state_type.to_string();
+                }
+                return lean_state_name(acct);
             }
         }
         state_type.to_string()
@@ -1329,7 +1357,7 @@ fn render_liveness(out: &mut String, spec: &ParsedSpec, state_type: &str) {
             // Check the first via op's on_account
             if let Some(op) = spec.handlers.iter().find(|o| o.name == via_ops[0]) {
                 if let Some(ref acct) = op.on_account {
-                    return format!("{}State", acct);
+                    return lean_state_name(acct);
                 }
             }
         }

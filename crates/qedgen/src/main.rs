@@ -2,11 +2,9 @@ mod api;
 mod aristotle;
 mod asm2lean;
 mod check;
-mod ci;
 mod codegen;
 mod consolidate;
 mod drift;
-mod explain;
 mod fingerprint;
 mod idl2spec;
 mod init;
@@ -26,7 +24,7 @@ use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// CLI tool for formal Lean 4 verification of Solana programs
+/// Find the bugs your tests miss — from one spec file
 #[derive(Parser)]
 #[command(name = "qedgen")]
 #[command(version, about, long_about = None)]
@@ -183,18 +181,11 @@ enum Commands {
         output_dir: PathBuf,
     },
 
-    /// Verify sBPF proofs: check source hash, regenerate if stale, run lake build
-    Verify {
-        /// Path to the sBPF assembly source file
-        #[arg(long)]
-        asm: PathBuf,
-
-        /// Path to the formal_verification directory containing proofs
-        #[arg(long, default_value = "./formal_verification")]
-        proofs: PathBuf,
-    },
-
-    /// Check spec coverage and drift detection across all verification layers
+    /// Validate a spec — lint, coverage, drift, and verification report
+    ///
+    /// Default (no flags): runs lint + coverage.
+    /// With --explain: generates a Markdown verification report.
+    /// With --drift: detects code drift in #[qed(verified)] functions.
     Check {
         /// Path to the spec file (.qedspec)
         #[arg(long)]
@@ -204,53 +195,51 @@ enum Commands {
         #[arg(long, default_value = "./formal_verification")]
         proofs: PathBuf,
 
+        /// Show operation × property coverage matrix
+        #[arg(long)]
+        coverage: bool,
+
+        /// Generate a Markdown verification report with intent descriptions
+        #[arg(long)]
+        explain: bool,
+
+        /// Output file for --explain report (default: stdout)
+        #[arg(long)]
+        output: Option<PathBuf>,
+
         /// Path to generated Quasar program directory (enables code drift detection)
         #[arg(long)]
         code: Option<PathBuf>,
 
+        /// Path to Rust source for #[qed(verified)] drift detection
+        #[arg(long)]
+        drift: Option<PathBuf>,
+
+        /// Auto-update drift hashes in source files
+        #[arg(long)]
+        update_hashes: bool,
+
+        /// Enable transitive drift detection (check if callees have changed)
+        #[arg(long)]
+        deep: bool,
+
         /// Path to generated Kani harness file (enables Kani drift detection)
         #[arg(long)]
         kani: Option<PathBuf>,
-    },
 
-    /// Generate a Markdown verification report with intent descriptions
-    Explain {
-        /// Path to the spec file (.qedspec)
+        /// Path to sBPF assembly source (hash check + lake build)
         #[arg(long)]
-        spec: PathBuf,
+        asm: Option<PathBuf>,
 
-        /// Path to the proofs directory
-        #[arg(long, default_value = "./formal_verification")]
-        proofs: PathBuf,
-
-        /// Output file (default: stdout)
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-
-    /// Lint a qedspec for completeness — structured warnings for agent consumption
-    Lint {
-        /// Path to the spec file (.qedspec)
-        #[arg(long)]
-        spec: PathBuf,
-
-        /// Output as JSON (default: human-readable)
+        /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
     },
 
-    /// Show operation × property coverage matrix
-    Coverage {
-        /// Path to the spec file (.qedspec)
-        #[arg(long)]
-        spec: PathBuf,
-
-        /// Output as JSON (default: human-readable table)
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Generate a Quasar program skeleton from a qedspec Lean file
+    /// Generate committed artifacts from a qedspec
+    ///
+    /// Default (no flags): generates Quasar Rust skeleton only.
+    /// Use flags to generate additional artifacts, or --all for everything.
     Codegen {
         /// Path to the spec file (.qedspec)
         #[arg(long)]
@@ -259,89 +248,62 @@ enum Commands {
         /// Output directory for the generated Quasar project
         #[arg(long, default_value = "./programs")]
         output_dir: PathBuf,
-    },
 
-    /// Generate Kani proof harnesses from a qedspec Lean file
-    Kani {
-        /// Path to the spec file (.qedspec)
+        /// Generate Kani proof harnesses
         #[arg(long)]
-        spec: PathBuf,
+        kani: bool,
 
-        /// Output path for the generated harness file
+        /// Output path for Kani harnesses (default: ./tests/kani.rs)
         #[arg(long, default_value = "./tests/kani.rs")]
-        output: PathBuf,
-    },
+        kani_output: PathBuf,
 
-    /// Generate unit tests from a qedspec (plain Rust, cargo test)
-    Test {
-        /// Path to the spec file (Spec.lean or .qedspec)
+        /// Generate unit tests (plain Rust, cargo test)
         #[arg(long)]
-        spec: PathBuf,
+        test: bool,
 
-        /// Output path for the generated test file
+        /// Output path for unit tests (default: ./src/tests.rs)
         #[arg(long, default_value = "./src/tests.rs")]
-        output: PathBuf,
-    },
+        test_output: PathBuf,
 
-    /// Generate transient proptest harnesses from a qedspec (property-based testing)
-    Proptest {
-        /// Path to the spec file (.qedspec)
+        /// Generate proptest harnesses (property-based testing)
         #[arg(long)]
-        spec: PathBuf,
+        proptest: bool,
 
-        /// Output path for the generated proptest file (transient, not committed)
-        #[arg(long, default_value = "/tmp/proptest_harness.rs")]
-        output: PathBuf,
-    },
+        /// Output path for proptest harnesses (default: ./tests/proptest.rs)
+        #[arg(long, default_value = "./tests/proptest.rs")]
+        proptest_output: PathBuf,
 
-    /// Generate QuasarSVM integration test scaffolds from a qedspec
-    #[command(name = "integration-test")]
-    IntegrationTest {
-        /// Path to the spec file (.qedspec)
+        /// Generate QuasarSVM integration test scaffolds
         #[arg(long)]
-        spec: PathBuf,
+        integration: bool,
 
-        /// Output path for the generated test file
+        /// Output path for integration tests (default: ./src/integration_tests.rs)
         #[arg(long, default_value = "./src/integration_tests.rs")]
-        output: PathBuf,
-    },
+        integration_output: PathBuf,
 
-    /// Generate a Lean 4 file from a .qedspec spec
-    #[command(name = "lean-gen")]
-    LeanGen {
-        /// Path to the .qedspec spec file
+        /// Generate Lean 4 proofs from qedspec
         #[arg(long)]
-        spec: PathBuf,
+        lean: bool,
 
-        /// Output path for the generated Lean file
+        /// Output path for Lean file (default: ./formal_verification/Spec.lean)
         #[arg(long, default_value = "./formal_verification/Spec.lean")]
-        output: PathBuf,
-    },
+        lean_output: PathBuf,
 
-    /// Generate a GitHub Actions workflow for formal verification CI
-    Ci {
-        /// Output path for the workflow file
+        /// Generate GitHub Actions CI workflow
+        #[arg(long)]
+        ci: bool,
+
+        /// Output path for CI workflow (default: .github/workflows/verify.yml)
         #[arg(long, default_value = ".github/workflows/verify.yml")]
-        output: PathBuf,
+        ci_output: PathBuf,
 
-        /// sBPF assembly source file (adds verify step to CI)
+        /// sBPF assembly source file (for CI workflow)
         #[arg(long)]
-        asm: Option<String>,
-    },
+        ci_asm: Option<String>,
 
-    /// Detect code drift in #[qed(verified)] functions
-    Drift {
-        /// Path to Rust source file or directory to scan
+        /// Generate all artifacts
         #[arg(long)]
-        input: PathBuf,
-
-        /// Exit 1 on any drift (CI gate)
-        #[arg(long)]
-        strict: bool,
-
-        /// Auto-update hashes in source files
-        #[arg(long)]
-        update: bool,
+        all: bool,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -627,18 +589,18 @@ async fn main() -> Result<()> {
             quasar,
             output_dir,
         } => {
+            // .qed/ lives at the program root (parent of formal_verification/)
+            let program_root = output_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            init::init_qed_dir(program_root, &name)?;
+
             init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
 
             if quasar {
                 let spec_path = output_dir.join("Spec.lean");
-                let program_dir = output_dir
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(format!("programs/{}", name));
-                let kani_path = output_dir
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("tests/kani.rs");
+                let program_dir = program_root.join(format!("programs/{}", name));
+                let kani_path = program_root.join("tests/kani.rs");
 
                 // Generate Quasar program skeleton
                 codegen::generate(&spec_path, &program_dir)?;
@@ -652,60 +614,122 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Verify { asm, proofs } => {
-            verify::verify(&asm, &proofs)?;
-        }
-
+        // ==================================================================
+        // check — unified spec validation
+        // ==================================================================
         Commands::Check {
             spec,
             proofs,
+            coverage,
+            explain,
+            output,
             code,
+            drift,
+            update_hashes,
+            deep,
             kani,
+            asm,
+            json,
         } => {
             let spec_name = spec
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Spec".to_string());
 
+            let mut has_issues = false;
+
+            // sBPF verification (--asm)
+            if let Some(ref asm_path) = asm {
+                verify::verify(asm_path, &proofs)?;
+            }
+
+            // Drift detection (--drift)
+            if let Some(ref drift_path) = drift {
+                if update_hashes {
+                    let count = drift::update(drift_path)?;
+                    eprintln!("Updated {} hash(es).", count);
+                } else {
+                    let entries = drift::check(drift_path)?;
+                    drift::print_report(&entries);
+                    if entries.iter().any(|e| !matches!(e.status, drift::DriftStatus::Ok)) {
+                        has_issues = true;
+                    }
+                    if deep {
+                        let deep_entries = drift::check_deep(drift_path)?;
+                        drift::print_deep_report(&deep_entries);
+                        if !deep_entries.is_empty() {
+                            has_issues = true;
+                        }
+                    }
+                }
+            }
+
+            // Unified code/kani drift (--code, --kani)
             if code.is_some() || kani.is_some() {
-                // Unified drift detection mode
                 let report =
                     check::check_unified(&spec, &proofs, code.as_deref(), kani.as_deref())?;
                 check::print_unified_report(&spec_name, &report);
                 if report.issue_count() > 0 {
-                    std::process::exit(1);
+                    has_issues = true;
                 }
-            } else {
-                // Lean-only mode (backward compatible)
+            }
+
+            // Explain report (--explain) — inline markdown generation
+            if explain {
                 let results = check::check(&spec, &proofs)?;
-                check::print_report(&spec_name, &results);
-                let all_proven = results.iter().all(|r| r.status == check::Status::Proven);
-                if !all_proven {
-                    std::process::exit(1);
+                let proven = results.iter().filter(|r| r.status == check::Status::Proven).count();
+                let sorry = results.iter().filter(|r| r.status == check::Status::Sorry).count();
+                let missing = results.iter().filter(|r| r.status == check::Status::Missing).count();
+                let total = results.len();
+
+                let mut md = format!("# {} Verification Report\n\n", spec_name);
+                md.push_str(&format!("**{}/{} properties verified** ({} sorry, {} missing)\n\n", proven, total, sorry, missing));
+                if proven == total {
+                    md.push_str("> All properties verified (sorry-free).\n\n");
+                }
+                md.push_str("## Properties\n\n");
+                for r in &results {
+                    let (icon, label) = match r.status {
+                        check::Status::Proven => ("✓", "PROVEN"),
+                        check::Status::Sorry => ("✗", "SORRY"),
+                        check::Status::Missing => ("✗", "MISSING"),
+                    };
+                    md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
+                    if let Some(ref intent) = r.intent {
+                        md.push_str(&format!("**Intent:** {}\n\n", intent));
+                    }
+                    if r.status != check::Status::Proven {
+                        if let Some(ref suggestion) = r.suggestion {
+                            md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
+                        }
+                    }
+                }
+
+                if let Some(ref path) = output {
+                    std::fs::write(path, &md)?;
+                    eprintln!("Wrote verification report to {}", path.display());
+                } else {
+                    print!("{}", md);
                 }
             }
-        }
 
-        Commands::Explain {
-            spec,
-            proofs,
-            output,
-        } => {
-            let report = explain::explain(&spec, &proofs)?;
-            if let Some(ref path) = output {
-                std::fs::write(path, &report)?;
-                eprintln!("Wrote verification report to {}", path.display());
-            } else {
-                print!("{}", report);
+            // Coverage matrix (--coverage)
+            if coverage {
+                let parsed = check::parse_spec_file(&spec)?;
+                let matrix = check::coverage_matrix(&parsed);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&matrix)?);
+                } else {
+                    check::print_coverage_table(&matrix);
+                }
             }
-        }
 
-        Commands::Lint { spec, json } => {
-            let warnings = check::lint(&spec)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&warnings)?);
-            } else {
-                if warnings.is_empty() {
+            // Lint — always runs (core of spec validation)
+            {
+                let warnings = check::lint(&spec)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&warnings)?);
+                } else if warnings.is_empty() {
                     eprintln!("Spec is complete — no issues found.");
                 } else {
                     let warns = warnings
@@ -721,70 +745,69 @@ async fn main() -> Result<()> {
                     }
                     eprintln!("{} warning(s), {} info", warns, infos);
                     if warns > 0 {
-                        std::process::exit(1);
+                        has_issues = true;
                     }
                 }
             }
-        }
 
-        Commands::Coverage { spec, json } => {
-            let parsed = check::parse_spec_file(&spec)?;
-            let matrix = check::coverage_matrix(&parsed);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&matrix)?);
-            } else {
-                check::print_coverage_table(&matrix);
+            if has_issues {
+                std::process::exit(1);
             }
         }
 
-        Commands::Codegen { spec, output_dir } => {
-            codegen::generate(&spec, &output_dir)?;
-        }
-
-        Commands::Kani { spec, output } => {
-            kani::generate(&spec, &output)?;
-        }
-
-        Commands::Test { spec, output } => {
-            unit_test::generate(&spec, &output)?;
-        }
-
-        Commands::Proptest { spec, output } => {
-            proptest_gen::generate(&spec, &output)?;
-        }
-
-        Commands::IntegrationTest { spec, output } => {
-            integration_test::generate(&spec, &output)?;
-        }
-
-        Commands::LeanGen { spec, output } => {
-            let parsed = check::parse_spec_file(&spec)?;
-            lean_gen::generate(&parsed, &output)?;
-        }
-
-        Commands::Ci { output, asm } => {
-            ci::generate_ci(&output, asm.as_deref())?;
-        }
-
-        Commands::Drift {
-            input,
-            strict,
-            update,
+        // ==================================================================
+        // codegen — generate committed artifacts
+        // ==================================================================
+        Commands::Codegen {
+            spec,
+            output_dir,
+            kani,
+            kani_output,
+            test,
+            test_output,
+            proptest,
+            proptest_output,
+            integration,
+            integration_output,
+            lean,
+            lean_output,
+            ci,
+            ci_output,
+            ci_asm,
+            all,
         } => {
-            if update {
-                let count = drift::update(&input)?;
-                eprintln!("Updated {} hash(es).", count);
-            } else {
-                let entries = drift::check(&input)?;
-                drift::print_report(&entries);
-                if strict {
-                    let has_drift = entries
-                        .iter()
-                        .any(|e| !matches!(e.status, drift::DriftStatus::Ok));
-                    if has_drift {
-                        std::process::exit(1);
-                    }
+            // Rust skeleton (always)
+            codegen::generate(&spec, &output_dir)?;
+
+            if kani || all {
+                kani::generate(&spec, &kani_output)?;
+            }
+            if test || all {
+                unit_test::generate(&spec, &test_output)?;
+            }
+            if proptest || all {
+                proptest_gen::generate(&spec, &proptest_output)?;
+            }
+            if integration || all {
+                integration_test::generate(&spec, &integration_output)?;
+            }
+            if lean || all {
+                let parsed = check::parse_spec_file(&spec)?;
+                lean_gen::generate(&parsed, &lean_output)?;
+            }
+            if ci || all {
+                const CI_TEMPLATE: &str = include_str!("../../../templates/verify.yml");
+                let verify_step = if let Some(ref asm) = ci_asm {
+                    format!("\n      - name: Verify sBPF binary\n        run: qedgen check --spec program.qedspec --asm {}\n", asm)
+                } else {
+                    String::new()
+                };
+                let workflow = CI_TEMPLATE.replace("{{VERIFY_STEP}}", &verify_step);
+                if let Some(parent) = ci_output.parent() {
+                    std::fs::create_dir_all(parent)?;
                 }
+                std::fs::write(&ci_output, workflow)?;
+                eprintln!("Generated CI workflow: {}", ci_output.display());
             }
         }
 

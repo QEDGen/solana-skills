@@ -1,6 +1,6 @@
 # QEDGen
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Supports Rust/Anchor and native sBPF assembly. Your agent writes the proofs; Leanstral handles routine sub-goals (seconds), Aristotle handles hard ones (minutes-hours).
+> Find the bugs your tests miss. Define what your Solana program must guarantee in a `.qedspec` — QEDGen validates it and generates the tests, proofs, and CI to keep it fixed. Supports Anchor, Quasar, and native sBPF assembly.
 
 ## Installation
 
@@ -20,14 +20,14 @@ export MISTRAL_API_KEY=your_key_here
 
 ## What It Does
 
-QEDGen verifies your core business logic. Your agent reads the codebase, writes Lean 4 models and proofs, iterates on compiler errors, and calls external theorem provers only for hard sub-goals.
+Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed.
 
 ### How It Works
 
-1. **Agent reads your code** — checks for existing specs or IDLs, reads Rust source or sBPF assembly directly, and builds a model of the program's state, transitions, and invariants.
-2. **Writes spec and proofs** — generates SPEC.md with security goals and formal properties, then writes Lean 4 theorems and proofs. For sBPF, uses `qedgen asm2lean` to transpile assembly into a Lean program module. Runs `lake build` and iterates on errors.
-3. **Hard sub-goals go to Leanstral** — when the agent can't close a `sorry`, it calls Leanstral via `fill-sorry` with pass@N sampling. First compilable result wins.
-4. **Hardest goals go to Aristotle** — when Leanstral fails, the agent escalates to Aristotle (Harmonic), which runs agentic proof search for minutes to hours. Submit the full project and poll for results.
+1. **Define guarantees** — write a `.qedspec` describing your program's properties, or let the agent generate one from your code or IDL.
+2. **Validate the spec** — `qedgen check` runs the verification waterfall: property tests catch bugs in milliseconds, Kani finds edge cases via bounded model checking, Lean proves properties universally.
+3. **Generate everything** — `qedgen codegen --all` produces program code, test harnesses, Lean proofs, and CI workflows from the single spec.
+4. **Escalate hard proofs** — Leanstral handles routine sub-goals (seconds). Aristotle handles the hardest ones (minutes–hours).
 
 ### Supported Agents
 
