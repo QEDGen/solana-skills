@@ -70,7 +70,7 @@ def applyOp (s : State) (signer : Pubkey) : Operation → Option State
 theorem initialize_aborts_if_InvalidAmount (s : State) (signer : Pubkey) (deposit_amount : Nat) (receive_amount : Nat)
     (h : ¬(deposit_amount > 0 ∧ receive_amount > 0)) : initializeTransition s signer deposit_amount receive_amount = none := by
   unfold initializeTransition
-  rw [if_neg (fun ⟨_, _, h3, h4⟩ => h ⟨h3, h4⟩)]
+  rw [if_neg (fun hg => h ⟨hg.2.2.1, hg.2.2.2⟩)]
 
 -- ============================================================================
 -- Cover properties — reachability (existential proofs)
@@ -81,40 +81,40 @@ theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
     ∃ (v0_0 : Nat) (v0_1 : Nat), ∃ (s1 : State), initializeTransition s0 signer v0_0 v0_1 = some s1 ∧
 exchangeTransition s1 signer ≠ none := by
   let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  refine ⟨⟨pk, pk, 0, 0, pk, .Uninitialized⟩, pk, 1, 1, ?_⟩
-  simp [initializeTransition, exchangeTransition]
+  let s0 : State := ⟨pk, pk, 0, 0, pk, .Uninitialized⟩
+  let s1 : State := ⟨pk, pk, 1, 1, pk, .Open⟩
+  exact ⟨s0, pk, 1, 1, s1, by decide, by decide⟩
 
 /-- cancel_path — trace [initialize, cancel] is reachable. -/
 theorem cover_cancel_path : ∃ (s0 : State) (signer : Pubkey),
     ∃ (v0_0 : Nat) (v0_1 : Nat), ∃ (s1 : State), initializeTransition s0 signer v0_0 v0_1 = some s1 ∧
 cancelTransition s1 signer ≠ none := by
   let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  refine ⟨⟨pk, pk, 0, 0, pk, .Uninitialized⟩, pk, 1, 1, ?_⟩
-  simp [initializeTransition, cancelTransition]
+  let s0 : State := ⟨pk, pk, 0, 0, pk, .Uninitialized⟩
+  let s1 : State := ⟨pk, pk, 1, 1, pk, .Open⟩
+  exact ⟨s0, pk, 1, 1, s1, by decide, by decide⟩
 
 -- ============================================================================
 -- Liveness properties — bounded reachability (leads-to)
 -- ============================================================================
 
-def applyOps (s : State) (signer : Pubkey) : List Operation → Option State
+def applyStateOps (s : StateState) (signer : Pubkey) : List StateOperation → Option StateState
   | [] => some s
-  | op :: ops => match applyOp s signer op with
-    | some s' => applyOps s' signer ops
+  | op :: ops => match applyStateOp s signer op with
+    | some s' => applyStateOps s' signer ops
     | none => none
 
 /-- escrow_settles — from Open leads to Closed within 1 steps via [exchange, cancel]. -/
-theorem liveness_escrow_settles (s : State) (signer : Pubkey)
+theorem liveness_escrow_settles (s : StateState) (signer : Pubkey)
     (h : s.status = .Open) :
-    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Closed := by
-  exact ⟨[.cancel], by decide, fun s' h_apply => by
-    simp only [applyOps, applyOp] at h_apply
-    cases hc : cancelTransition s signer with
-    | none => simp [hc] at h_apply
-    | some val =>
-      simp [hc] at h_apply
-      subst h_apply
-      simp [cancelTransition, h] at hc
-      obtain ⟨_, rfl⟩ := hc
-      rfl⟩
+    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyStateOps s signer ops = some s' → s'.status = .Closed := by
+  refine ⟨[.exchange], by decide, fun s' h_apply => ?_⟩
+  simp only [applyStateOps, applyStateOp, exchangeTransition] at h_apply
+  split at h_apply
+  · next heq =>
+    split at heq
+    · next hg => simp at heq h_apply; subst heq; subst h_apply; rfl
+    · simp at heq
+  · simp at h_apply
 
 end Escrow
