@@ -2138,7 +2138,10 @@ mod tests {
         assert_eq!(spec.state_fields[1], ("threshold".into(), "U8".into()));
         assert_eq!(spec.state_fields[2], ("member_count".into(), "U8".into()));
         assert_eq!(spec.state_fields[3], ("approval_count".into(), "U8".into()));
-        assert_eq!(spec.state_fields[4], ("rejection_count".into(), "U8".into()));
+        assert_eq!(
+            spec.state_fields[4],
+            ("rejection_count".into(), "U8".into())
+        );
     }
 
     #[test]
