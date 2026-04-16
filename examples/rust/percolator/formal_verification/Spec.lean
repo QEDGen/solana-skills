@@ -189,18 +189,18 @@ theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
 -- Liveness properties — bounded reachability (leads-to)
 -- ============================================================================
 
-def applyStateOps (s : StateState) (signer : Pubkey) : List StateOperation → Option StateState
+def applyOps (s : State) (signer : Pubkey) : List Operation → Option State
   | [] => some s
-  | op :: ops => match applyStateOp s signer op with
-    | some s' => applyStateOps s' signer ops
+  | op :: ops => match applyOp s signer op with
+    | some s' => applyOps s' signer ops
     | none => none
 
 /-- drain_completes — from Draining leads to Active within 2 steps via [complete_drain, reset]. -/
-theorem liveness_drain_completes (s : StateState) (signer : Pubkey)
+theorem liveness_drain_completes (s : State) (signer : Pubkey)
     (h : s.status = .Draining) :
-    ∃ ops, ops.length ≤ 2 ∧ ∀ s', applyStateOps s signer ops = some s' → s'.status = .Active := by
+    ∃ ops, ops.length ≤ 2 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Active := by
   refine ⟨[.complete_drain, .reset], by decide, fun s' h_apply => ?_⟩
-  simp only [applyStateOps, applyStateOp] at h_apply
+  simp only [applyOps, applyOp] at h_apply
   simp only [complete_drainTransition] at h_apply
   split at h_apply
   · next heq =>

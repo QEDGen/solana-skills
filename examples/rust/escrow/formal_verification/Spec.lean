@@ -98,18 +98,18 @@ cancelTransition s1 signer ≠ none := by
 -- Liveness properties — bounded reachability (leads-to)
 -- ============================================================================
 
-def applyStateOps (s : StateState) (signer : Pubkey) : List StateOperation → Option StateState
+def applyOps (s : State) (signer : Pubkey) : List Operation → Option State
   | [] => some s
-  | op :: ops => match applyStateOp s signer op with
-    | some s' => applyStateOps s' signer ops
+  | op :: ops => match applyOp s signer op with
+    | some s' => applyOps s' signer ops
     | none => none
 
 /-- escrow_settles — from Open leads to Closed within 1 steps via [exchange, cancel]. -/
-theorem liveness_escrow_settles (s : StateState) (signer : Pubkey)
+theorem liveness_escrow_settles (s : State) (signer : Pubkey)
     (h : s.status = .Open) :
-    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyStateOps s signer ops = some s' → s'.status = .Closed := by
+    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Closed := by
   refine ⟨[.exchange], by decide, fun s' h_apply => ?_⟩
-  simp only [applyStateOps, applyStateOp, exchangeTransition] at h_apply
+  simp only [applyOps, applyOp, exchangeTransition] at h_apply
   split at h_apply
   · next heq =>
     split at heq

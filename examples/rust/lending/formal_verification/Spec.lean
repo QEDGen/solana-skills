@@ -83,7 +83,7 @@ def applyLoanOp (s : LoanState) (signer : Pubkey) : LoanOperation → Option Loa
 /-- Invariant: collateral_backing. -/
 theorem collateral_backing : True := trivial
 
-def pool_solvency (s : PoolState) : Prop := ∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows
+def pool_solvency (s : PoolState) : Prop := s.total_deposits ≥ s.total_borrows
 
 theorem pool_solvency_preserved_by_init_pool (s s' : PoolState) (signer : Pubkey) (rate : Nat)
     (h_inv : pool_solvency s) (h : init_poolTransition s signer rate = some s') :

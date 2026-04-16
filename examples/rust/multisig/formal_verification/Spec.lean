@@ -234,18 +234,18 @@ cancel_proposalTransition s2 signer ≠ none := by
 -- Liveness properties — bounded reachability (leads-to)
 -- ============================================================================
 
-def applyStateOps (s : StateState) (signer : Pubkey) : List StateOperation → Option StateState
+def applyOps (s : State) (signer : Pubkey) : List Operation → Option State
   | [] => some s
-  | op :: ops => match applyStateOp s signer op with
-    | some s' => applyStateOps s' signer ops
+  | op :: ops => match applyOp s signer op with
+    | some s' => applyOps s' signer ops
     | none => none
 
 /-- proposal_resolves — from HasProposal leads to Active within 1 steps via [execute, cancel_proposal]. -/
-theorem liveness_proposal_resolves (s : StateState) (signer : Pubkey)
+theorem liveness_proposal_resolves (s : State) (signer : Pubkey)
     (h : s.status = .HasProposal) :
-    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyStateOps s signer ops = some s' → s'.status = .Active := by
+    ∃ ops, ops.length ≤ 1 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Active := by
   refine ⟨[.execute], by decide, fun s' h_apply => ?_⟩
-  simp only [applyStateOps, applyStateOp, executeTransition] at h_apply
+  simp only [applyOps, applyOp, executeTransition] at h_apply
   split at h_apply
   · next heq =>
     split at heq
