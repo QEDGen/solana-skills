@@ -1,11 +1,11 @@
 ---
 name: qedgen
-description: Formally verify programs by writing Lean 4 proofs. Trigger this skill whenever the user wants to formally verify code, generate Lean 4 proofs, prove properties about algorithms or smart contracts, verify invariants, convert program logic into formal specifications, or anything involving Lean 4 and formal verification. Also trigger when the user mentions "qedgen", "lean proof", "formal proof", "verify my code", "prove correctness", "formal verification", or wants mathematical guarantees about their implementation.
+description: Spec-driven verification for Solana programs. Trigger this skill whenever the user wants to verify code, write a .qedspec, generate tests or proofs, check program properties, or ensure correctness of smart contracts. Also trigger when the user mentions "qedgen", "qedspec", "verify my code", "prove correctness", "formal verification", "property testing", or wants guarantees about their implementation.
 ---
 
-# QEDGen — Agent-Driven Formal Verification
+# QEDGen — Spec-Driven Verification
 
-You (Claude) are the proof engineer. You read the codebase, write Lean 4 models and proofs, iterate on compiler errors, and call external theorem provers only for hard sub-goals you cannot fill yourself.
+You (Claude) help the user **specify** what their program must guarantee. The `.qedspec` is the deliverable — everything else (property tests, Kani harnesses, Lean proofs, Rust code) is derived from it. You iterate on the spec with the user, using the verification waterfall (proptest → Kani → Lean) to surface bugs as spec-level feedback.
 
 **Reference files** (read on demand — do NOT load all at once):
 - `references/qedspec-dsl.md` — qedspec, qedguards, qedbridge DSL syntax

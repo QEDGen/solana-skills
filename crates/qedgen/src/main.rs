@@ -24,7 +24,7 @@ use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// CLI tool for formal Lean 4 verification of Solana programs
+/// Spec-driven verification for Solana programs
 #[derive(Parser)]
 #[command(name = "qedgen")]
 #[command(version, about, long_about = None)]

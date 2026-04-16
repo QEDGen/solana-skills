@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<h3 align="center">Prove your Solana code is correct. Mathematically.</h3>
+<h3 align="center">Spec-driven verification for Solana programs.</h3>
 
 <p align="center">
   <a href="https://qedgen.dev">Website</a> &middot;
@@ -21,7 +21,7 @@
 
 ---
 
-An agent skill that formally verifies Solana programs — **Rust/Anchor** and **sBPF assembly** — by generating machine-checked **Lean 4 proofs**. Your agent writes the proofs; **Leanstral** handles routine sub-goals (seconds), **Aristotle** handles the hardest ones (minutes–hours).
+An agent skill for verifying Solana programs — **Rust/Anchor** and **sBPF assembly**. Write a `.qedspec` describing what your program must guarantee. QEDGen validates it and generates everything: **property tests**, **Kani proof harnesses**, **Lean 4 proofs**, **Rust code**, and **CI workflows** — all from the single spec.
 
 ```bash
 npx skills add qedgen/solana-skills
