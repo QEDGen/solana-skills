@@ -3,6 +3,27 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
+/// Check whether `needle` appears in `haystack` as a whole word (not as a substring
+/// of a longer identifier). Word boundaries are: start/end of string, or any character
+/// that is not alphanumeric or underscore.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    for (i, _) in haystack.match_indices(needle) {
+        let before_ok = i == 0 || {
+            let b = haystack.as_bytes()[i - 1];
+            !b.is_ascii_alphanumeric() && b != b'_'
+        };
+        let after = i + needle.len();
+        let after_ok = after >= haystack.len() || {
+            let b = haystack.as_bytes()[after];
+            !b.is_ascii_alphanumeric() && b != b'_'
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Debug)]
 pub struct PropertyStatus {
     pub name: String,
@@ -1353,11 +1374,17 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 if kind != "add" {
                     continue;
                 }
-                // Check if any guard already bounds this field's addition
-                let field_bounded = all_guards.contains(&format!("state.{} + {}", field, val))
-                    || all_guards.contains(&format!("{} + state.{}", val, field))
-                    || all_guards.contains(&format!("s.{} + {}", field, val))
-                    || all_guards.contains(&format!("{} + s.{}", val, field));
+                // Check if any guard already bounds this field's addition.
+                // Use contains_word on the val side to avoid "1" matching "10".
+                let patterns = [
+                    format!("state.{} + {}", field, val),
+                    format!("{} + state.{}", val, field),
+                    format!("s.{} + {}", field, val),
+                    format!("{} + s.{}", val, field),
+                ];
+                let field_bounded = patterns
+                    .iter()
+                    .any(|pat| contains_word(&all_guards, pat));
                 if field_bounded {
                     continue;
                 }
@@ -1717,7 +1744,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 for field in &written_fields {
                     if guard.contains(&format!("s.{}", field))
                         || guard.contains(&format!("state.{}", field))
-                        || guard.contains(field)
+                        || contains_word(guard, field)
                     {
                         read_fields.insert(*field);
                     }
@@ -1729,7 +1756,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 for field in &written_fields {
                     if expr.contains(&format!("s.{}", field))
                         || expr.contains(&format!("state.{}", field))
-                        || expr.contains(field)
+                        || contains_word(expr, field)
                     {
                         read_fields.insert(*field);
                     }
@@ -3086,6 +3113,111 @@ mod tests {
                 .any(|w| w.rule == "circular_lifecycle_no_terminal"),
             "expected circular_lifecycle_no_terminal, got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ---- contains_word unit tests ----
+
+    #[test]
+    fn test_contains_word_basic() {
+        assert!(contains_word("balance > 0", "balance"));
+        assert!(contains_word("check balance here", "balance"));
+        assert!(!contains_word("imbalance > 0", "balance"));
+        assert!(!contains_word("rebalance_flag", "balance"));
+        assert!(!contains_word("my_balance_v2", "balance"));
+    }
+
+    #[test]
+    fn test_contains_word_short_field() {
+        // Field "id" must not match inside "valid", "provide", "identity"
+        assert!(!contains_word("valid > 0", "id"));
+        assert!(!contains_word("provide_service", "id"));
+        assert!(!contains_word("identity = true", "id"));
+        // But should match when standalone
+        assert!(contains_word("id > 0", "id"));
+        assert!(contains_word("state.id > 0", "id"));
+        assert!(contains_word("check id here", "id"));
+    }
+
+    #[test]
+    fn test_contains_word_at_boundaries() {
+        assert!(contains_word("id", "id"));
+        assert!(contains_word("id ", "id"));
+        assert!(contains_word(" id", "id"));
+        assert!(contains_word("(id)", "id"));
+        assert!(contains_word("id+1", "id"));
+        assert!(!contains_word("kid", "id"));
+        assert!(!contains_word("ids", "id"));
+    }
+
+    // ---- write_without_read word-boundary tests ----
+
+    #[test]
+    fn test_write_without_read_no_substring_match() {
+        // Field "id" written in effects, guard only has "valid" — should NOT count as read
+        let mut h = make_handler("update");
+        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.guard_str = Some("valid > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![
+                ("id".to_string(), "U64".to_string()),
+                ("valid".to_string(), "U64".to_string()),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read"
+                    && w.subject.as_deref() == Some("id")),
+            "field 'id' should be flagged as write_without_read when guard only contains 'valid', got: {:?}",
+            warnings.iter().filter(|w| w.rule == "write_without_read").collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_write_without_read_bare_word_match() {
+        // Field "balance" written in effects, guard has "balance > 0" — should count as read
+        let mut h = make_handler("deposit");
+        h.effects = vec![("balance".to_string(), "add".to_string(), "amount".to_string())];
+        h.guard_str = Some("balance > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read"
+                    && w.subject.as_deref() == Some("balance")),
+            "field 'balance' should NOT be flagged when guard contains bare word 'balance', got: {:?}",
+            warnings.iter().filter(|w| w.rule == "write_without_read").collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_write_without_read_prefixed_match() {
+        // Field "id" written, guard has "state.id > 0" — should count as read
+        let mut h = make_handler("update");
+        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.guard_str = Some("state.id > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("id".to_string(), "U64".to_string())],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read"
+                    && w.subject.as_deref() == Some("id")),
+            "field 'id' should NOT be flagged when guard contains 'state.id', got: {:?}",
+            warnings.iter().filter(|w| w.rule == "write_without_read").collect::<Vec<_>>()
         );
     }
 }

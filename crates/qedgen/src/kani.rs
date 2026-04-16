@@ -65,14 +65,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     );
 
     // Emit constants — infer type from value magnitude
-    for (name, value) in &spec.constants {
-        let upper = name.to_uppercase();
-        let const_type = rust_codegen_util::infer_const_type(value);
-        out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
-    }
-    if !spec.constants.is_empty() {
-        out.push('\n');
-    }
+    rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     // Collect mutable state fields (skip Pubkey — those are identity, not mutable state)
     let is_multi = spec.account_types.len() > 1;
@@ -85,12 +78,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let mutable_fields: Vec<&(String, String)> =
         state_fields.iter().filter(|(_, t)| t != "Pubkey").collect();
 
-    out.push_str("#[derive(Clone, Copy)]\n");
-    out.push_str("struct State {\n");
-    for (fname, ftype) in &mutable_fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype)));
-    }
-    out.push_str("}\n\n");
+    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", map_type);
 
     // ── Property predicates ──────────────────────────────────────────────
     if !spec.properties.is_empty() {
@@ -102,15 +90,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "// ============================================================================\n\n",
         );
 
-        for prop in &spec.properties {
-            if let Some(ref expr) = prop.expression {
-                let rust_expr = rust_codegen_util::translate_property_to_rust(expr, false);
-                out.push_str(&format!("/// {}: {}\n", prop.name, expr));
-                out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
-                out.push_str(&format!("    {}\n", rust_expr));
-                out.push_str("}\n\n");
-            }
-        }
+        rust_codegen_util::emit_property_predicates(&mut out, &spec.properties, false);
     }
 
     // ── Transition functions ─────────────────────────────────────────────
@@ -126,58 +106,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     );
 
     for op in &spec.handlers {
-        // Doc comment
-        if let Some(ref doc) = op.doc {
-            out.push_str(&format!("/// {}\n", doc.trim()));
-        }
-
-        // Function signature with params
-        let params: String = op
-            .takes_params
-            .iter()
-            .map(|(n, t)| format!(", {}: {}", n, map_type(t)))
-            .collect();
-        out.push_str(&format!(
-            "fn {}(s: &mut State{}) -> bool {{\n",
-            op.name, params
-        ));
-
-        // Guard check
-        if op.has_guard() {
-            if let Some(ref guard) = op.guard_str {
-                let rust_guard = rust_codegen_util::translate_guard_to_rust(guard, false);
-                out.push_str(&format!("    // guard: {}\n", guard));
-                out.push_str(&format!("    if !({}) {{\n", rust_guard));
-                out.push_str("        return false;\n");
-                out.push_str("    }\n");
-            }
-        }
-
-        // Apply effects
-        for (field, op_kind, value) in &op.effects {
-            let rust_value = rust_codegen_util::resolve_value(value, op, &spec);
-
-            match op_kind.as_str() {
-                "set" => {
-                    out.push_str(&format!("    s.{} = {};\n", field, rust_value));
-                }
-                "add" => {
-                    out.push_str(&format!("    s.{} += {};\n", field, rust_value));
-                }
-                "sub" => {
-                    out.push_str(&format!("    s.{} -= {};\n", field, rust_value));
-                }
-                _ => {
-                    out.push_str(&format!(
-                        "    // unknown effect: {} {} {}\n",
-                        field, op_kind, value
-                    ));
-                }
-            }
-        }
-
-        out.push_str("    true\n");
-        out.push_str("}\n\n");
+        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, map_type);
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────

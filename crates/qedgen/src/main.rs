@@ -342,6 +342,10 @@ enum Commands {
         /// Auto-update hashes in source files
         #[arg(long)]
         update: bool,
+
+        /// Enable transitive drift detection (check if callees have changed)
+        #[arg(long)]
+        deep: bool,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -627,18 +631,18 @@ async fn main() -> Result<()> {
             quasar,
             output_dir,
         } => {
+            // .qed/ lives at the program root (parent of formal_verification/)
+            let program_root = output_dir
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            init::init_qed_dir(program_root, &name)?;
+
             init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
 
             if quasar {
                 let spec_path = output_dir.join("Spec.lean");
-                let program_dir = output_dir
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(format!("programs/{}", name));
-                let kani_path = output_dir
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("tests/kani.rs");
+                let program_dir = program_root.join(format!("programs/{}", name));
+                let kani_path = program_root.join("tests/kani.rs");
 
                 // Generate Quasar program skeleton
                 codegen::generate(&spec_path, &program_dir)?;
@@ -770,6 +774,7 @@ async fn main() -> Result<()> {
             input,
             strict,
             update,
+            deep,
         } => {
             if update {
                 let count = drift::update(&input)?;
@@ -777,13 +782,21 @@ async fn main() -> Result<()> {
             } else {
                 let entries = drift::check(&input)?;
                 drift::print_report(&entries);
-                if strict {
-                    let has_drift = entries
-                        .iter()
-                        .any(|e| !matches!(e.status, drift::DriftStatus::Ok));
-                    if has_drift {
-                        std::process::exit(1);
+
+                let mut has_drift = entries
+                    .iter()
+                    .any(|e| !matches!(e.status, drift::DriftStatus::Ok));
+
+                if deep {
+                    let deep_entries = drift::check_deep(&input)?;
+                    drift::print_deep_report(&deep_entries);
+                    if !deep_entries.is_empty() {
+                        has_drift = true;
                     }
+                }
+
+                if strict && has_drift {
+                    std::process::exit(1);
                 }
             }
         }

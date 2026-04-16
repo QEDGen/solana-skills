@@ -206,3 +206,127 @@ pub fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> Stri
         value.to_string()
     }
 }
+
+// ============================================================================
+// Shared emitters — used by kani, proptest, unit_test generators
+// ============================================================================
+
+/// Emit constant declarations from spec constants.
+pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
+    for (name, value) in constants {
+        let upper = name.to_uppercase();
+        let const_type = infer_const_type(value);
+        out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
+    }
+    if !constants.is_empty() {
+        out.push('\n');
+    }
+}
+
+/// Emit a State struct with configurable `#[derive(...)]` attributes.
+/// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types.
+pub fn emit_state_struct(
+    out: &mut String,
+    fields: &[&(String, String)],
+    derives: &str,
+    map_type_fn: fn(&str) -> &str,
+) {
+    out.push_str(&format!("#[derive({})]\n", derives));
+    out.push_str("struct State {\n");
+    for (fname, ftype) in fields {
+        out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)));
+    }
+    out.push_str("}\n\n");
+}
+
+/// Emit property predicate functions from spec properties.
+/// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
+pub fn emit_property_predicates(
+    out: &mut String,
+    properties: &[ParsedProperty],
+    wrapping: bool,
+) {
+    for prop in properties {
+        if let Some(ref expr) = prop.expression {
+            let rust_expr = translate_property_to_rust(expr, wrapping);
+            out.push_str(&format!("/// {}: {}\n", prop.name, expr));
+            out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
+            out.push_str(&format!("    {}\n", rust_expr));
+            out.push_str("}\n\n");
+        }
+    }
+}
+
+/// Emit transition functions for handlers. Each returns true if guard passes.
+/// `wrapping` controls whether add/sub effects use wrapping arithmetic.
+pub fn emit_transition_fn(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    map_type_fn: fn(&str) -> &str,
+) {
+    if let Some(ref doc) = op.doc {
+        out.push_str(&format!("/// {}\n", doc.trim()));
+    }
+
+    let params: String = op
+        .takes_params
+        .iter()
+        .map(|(n, t)| format!(", {}: {}", n, map_type_fn(t)))
+        .collect();
+    out.push_str(&format!(
+        "fn {}(s: &mut State{}) -> bool {{\n",
+        op.name, params
+    ));
+
+    // Guard check
+    if op.has_guard() {
+        if let Some(ref guard) = op.guard_str {
+            let rust_guard = translate_guard_to_rust(guard, wrapping);
+            out.push_str(&format!("    // guard: {}\n", guard));
+            out.push_str(&format!("    if !({}) {{\n", rust_guard));
+            out.push_str("        return false;\n");
+            out.push_str("    }\n");
+        }
+    }
+
+    // Apply effects
+    for (field, op_kind, value) in &op.effects {
+        let rust_value = resolve_value(value, op, spec);
+        match op_kind.as_str() {
+            "set" => {
+                out.push_str(&format!("    s.{} = {};\n", field, rust_value));
+            }
+            "add" => {
+                if wrapping {
+                    out.push_str(&format!(
+                        "    s.{} = s.{}.wrapping_add({});\n",
+                        field, field, rust_value
+                    ));
+                } else {
+                    out.push_str(&format!("    s.{} += {};\n", field, rust_value));
+                }
+            }
+            "sub" => {
+                if wrapping {
+                    out.push_str(&format!(
+                        "    s.{} = s.{}.wrapping_sub({});\n",
+                        field, field, rust_value
+                    ));
+                } else {
+                    out.push_str(&format!("    s.{} -= {};\n", field, rust_value));
+                }
+            }
+            _ => {
+                out.push_str(&format!(
+                    "    // unknown effect: {} {} {}\n",
+                    field, op_kind, value
+                ));
+            }
+        }
+    }
+
+    out.push_str("    true\n");
+    out.push_str("}\n\n");
+}

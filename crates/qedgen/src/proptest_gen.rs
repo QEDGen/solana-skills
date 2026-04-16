@@ -148,14 +148,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str("use proptest::prelude::*;\n\n");
 
     // ── Constants ────────────────────────────────────────────────────────
-    if !spec.constants.is_empty() {
-        for (name, value) in &spec.constants {
-            let upper = name.to_uppercase();
-            let const_type = rust_codegen_util::infer_const_type(value);
-            out.push_str(&format!("const {}: {} = {};\n", upper, const_type, value));
-        }
-        out.push('\n');
-    }
+    rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     if is_multi {
         // Multi-account: generate per-account sections in separate modules
