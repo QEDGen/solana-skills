@@ -56,8 +56,18 @@ qedgen fill-sorry \
   --passes 3 \
   --validate
 
-# Generate proptest harnesses from a .qedspec (Tier 1 of verification waterfall)
-qedgen proptest --spec program.qedspec --output tests/proptest.rs
+# Validate a spec (lint, coverage, drift)
+qedgen check --spec program.qedspec                     # lint + coverage
+qedgen check --spec program.qedspec --json              # machine-readable
+qedgen check --spec program.qedspec --explain           # Markdown report
+qedgen check --spec program.qedspec --drift src/        # drift detection
+qedgen check --spec program.qedspec --drift src/ --deep # transitive drift
+
+# Generate committed artifacts from a .qedspec
+qedgen codegen --spec program.qedspec --all             # everything
+qedgen codegen --spec program.qedspec --lean            # Lean proofs only
+qedgen codegen --spec program.qedspec --kani            # Kani harnesses
+qedgen codegen --spec program.qedspec --proptest        # proptest harnesses
 
 # Generate a draft SPEC.md from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
@@ -72,11 +82,6 @@ qedgen asm2lean \
   --input examples/sbpf/transfer/src/transfer.s \
   --output formal_verification/Program.lean \
   --namespace Program
-
-# Detect drift in verified functions
-qedgen drift --input programs/src/           # show status
-qedgen drift --input programs/src/ --strict  # CI gate (exit 1 on drift)
-qedgen drift --input programs/src/ --update  # auto-stamp hashes
 ```
 
 ## Architecture

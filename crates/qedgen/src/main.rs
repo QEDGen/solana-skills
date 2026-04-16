@@ -2,11 +2,9 @@ mod api;
 mod aristotle;
 mod asm2lean;
 mod check;
-mod ci;
 mod codegen;
 mod consolidate;
 mod drift;
-mod explain;
 mod fingerprint;
 mod idl2spec;
 mod init;
@@ -676,14 +674,42 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Explain report (--explain)
+            // Explain report (--explain) — inline markdown generation
             if explain {
-                let report = explain::explain(&spec, &proofs)?;
+                let results = check::check(&spec, &proofs)?;
+                let proven = results.iter().filter(|r| r.status == check::Status::Proven).count();
+                let sorry = results.iter().filter(|r| r.status == check::Status::Sorry).count();
+                let missing = results.iter().filter(|r| r.status == check::Status::Missing).count();
+                let total = results.len();
+
+                let mut md = format!("# {} Verification Report\n\n", spec_name);
+                md.push_str(&format!("**{}/{} properties verified** ({} sorry, {} missing)\n\n", proven, total, sorry, missing));
+                if proven == total {
+                    md.push_str("> All properties verified (sorry-free).\n\n");
+                }
+                md.push_str("## Properties\n\n");
+                for r in &results {
+                    let (icon, label) = match r.status {
+                        check::Status::Proven => ("✓", "PROVEN"),
+                        check::Status::Sorry => ("✗", "SORRY"),
+                        check::Status::Missing => ("✗", "MISSING"),
+                    };
+                    md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
+                    if let Some(ref intent) = r.intent {
+                        md.push_str(&format!("**Intent:** {}\n\n", intent));
+                    }
+                    if r.status != check::Status::Proven {
+                        if let Some(ref suggestion) = r.suggestion {
+                            md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
+                        }
+                    }
+                }
+
                 if let Some(ref path) = output {
-                    std::fs::write(path, &report)?;
+                    std::fs::write(path, &md)?;
                     eprintln!("Wrote verification report to {}", path.display());
                 } else {
-                    print!("{}", report);
+                    print!("{}", md);
                 }
             }
 
@@ -770,7 +796,21 @@ async fn main() -> Result<()> {
                 lean_gen::generate(&parsed, &lean_output)?;
             }
             if ci || all {
-                ci::generate_ci(&ci_output, ci_asm.as_deref())?;
+                // Inline CI workflow generation
+                let verify_step = if let Some(ref asm) = ci_asm {
+                    format!("\n      - name: Verify sBPF binary\n        run: qedgen check --spec program.qedspec --asm {}", asm)
+                } else {
+                    String::new()
+                };
+                let workflow = format!(
+                    "name: Formal Verification\n\non:\n  push:\n    branches: [main]\n    paths:\n      - 'src/**'\n      - 'formal_verification/**'\n  pull_request:\n    paths:\n      - 'src/**'\n      - 'formal_verification/**'\n\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Install Lean\n        uses: leanprover/lean4-action@v1\n\n      - name: Cache lake packages\n        uses: actions/cache@v4\n        with:\n          path: formal_verification/.lake\n          key: lake-${{{{ hashFiles('formal_verification/lean-toolchain', 'formal_verification/lakefile.lean') }}}}\n\n      - name: Install Rust toolchain\n        uses: dtolnay/rust-toolchain@stable\n\n      - name: Install qedgen\n        run: cargo install --path crates/qedgen\n{}\n      - name: Build proofs\n        run: cd formal_verification && lake build\n\n      - name: Check spec coverage\n        run: qedgen check --spec program.qedspec\n",
+                    verify_step
+                );
+                if let Some(parent) = ci_output.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&ci_output, workflow)?;
+                eprintln!("Generated CI workflow: {}", ci_output.display());
             }
         }
 
