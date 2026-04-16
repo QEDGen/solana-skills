@@ -183,15 +183,6 @@ enum Commands {
         output_dir: PathBuf,
     },
 
-    /// Verify sBPF proofs
-    #[command(hide = true)]
-    Verify {
-        #[arg(long)]
-        asm: PathBuf,
-        #[arg(long, default_value = "./formal_verification")]
-        proofs: PathBuf,
-    },
-
     /// Validate a spec — lint, coverage, drift, and verification report
     ///
     /// Default (no flags): runs lint + coverage.
@@ -245,49 +236,6 @@ enum Commands {
         /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
-    },
-
-    // Hidden aliases for backward compatibility
-    /// Lint a qedspec for completeness
-    #[command(hide = true)]
-    Lint {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show operation × property coverage matrix
-    #[command(hide = true)]
-    Coverage {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Generate a Markdown verification report
-    #[command(hide = true)]
-    Explain {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "./formal_verification")]
-        proofs: PathBuf,
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-
-    /// Detect code drift in #[qed(verified)] functions
-    #[command(hide = true)]
-    Drift {
-        #[arg(long)]
-        input: PathBuf,
-        #[arg(long)]
-        strict: bool,
-        #[arg(long)]
-        update: bool,
-        #[arg(long)]
-        deep: bool,
     },
 
     /// Generate committed artifacts from a qedspec
@@ -358,61 +306,6 @@ enum Commands {
         /// Generate all artifacts
         #[arg(long)]
         all: bool,
-    },
-
-    // Hidden aliases for backward compatibility
-    /// Generate Kani proof harnesses
-    #[command(hide = true)]
-    Kani {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "./tests/kani.rs")]
-        output: PathBuf,
-    },
-
-    /// Generate unit tests
-    #[command(hide = true)]
-    Test {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "./src/tests.rs")]
-        output: PathBuf,
-    },
-
-    /// Generate proptest harnesses
-    #[command(hide = true)]
-    Proptest {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "/tmp/proptest_harness.rs")]
-        output: PathBuf,
-    },
-
-    /// Generate integration test scaffolds
-    #[command(name = "integration-test", hide = true)]
-    IntegrationTest {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "./src/integration_tests.rs")]
-        output: PathBuf,
-    },
-
-    /// Generate Lean 4 from qedspec
-    #[command(name = "lean-gen", hide = true)]
-    LeanGen {
-        #[arg(long)]
-        spec: PathBuf,
-        #[arg(long, default_value = "./formal_verification/Spec.lean")]
-        output: PathBuf,
-    },
-
-    /// Generate CI workflow
-    #[command(hide = true)]
-    Ci {
-        #[arg(long, default_value = ".github/workflows/verify.yml")]
-        output: PathBuf,
-        #[arg(long)]
-        asm: Option<String>,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -879,115 +772,6 @@ async fn main() -> Result<()> {
             if ci || all {
                 ci::generate_ci(&ci_output, ci_asm.as_deref())?;
             }
-        }
-
-        // ==================================================================
-        // Hidden aliases (backward compatibility)
-        // ==================================================================
-        Commands::Verify { asm, proofs } => {
-            verify::verify(&asm, &proofs)?;
-        }
-
-        Commands::Lint { spec, json } => {
-            let warnings = check::lint(&spec)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&warnings)?);
-            } else if warnings.is_empty() {
-                eprintln!("Spec is complete — no issues found.");
-            } else {
-                let warns = warnings
-                    .iter()
-                    .filter(|w| w.severity == check::Severity::Warning)
-                    .count();
-                let infos = warnings
-                    .iter()
-                    .filter(|w| w.severity == check::Severity::Info)
-                    .count();
-                for w in &warnings {
-                    eprintln!("{}\n", format_lint_warning(w));
-                }
-                eprintln!("{} warning(s), {} info", warns, infos);
-                if warns > 0 {
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Commands::Coverage { spec, json } => {
-            let parsed = check::parse_spec_file(&spec)?;
-            let matrix = check::coverage_matrix(&parsed);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&matrix)?);
-            } else {
-                check::print_coverage_table(&matrix);
-            }
-        }
-
-        Commands::Explain {
-            spec,
-            proofs,
-            output,
-        } => {
-            let report = explain::explain(&spec, &proofs)?;
-            if let Some(ref path) = output {
-                std::fs::write(path, &report)?;
-                eprintln!("Wrote verification report to {}", path.display());
-            } else {
-                print!("{}", report);
-            }
-        }
-
-        Commands::Drift {
-            input,
-            strict,
-            update,
-            deep,
-        } => {
-            if update {
-                let count = drift::update(&input)?;
-                eprintln!("Updated {} hash(es).", count);
-            } else {
-                let entries = drift::check(&input)?;
-                drift::print_report(&entries);
-                let mut has_drift = entries
-                    .iter()
-                    .any(|e| !matches!(e.status, drift::DriftStatus::Ok));
-                if deep {
-                    let deep_entries = drift::check_deep(&input)?;
-                    drift::print_deep_report(&deep_entries);
-                    if !deep_entries.is_empty() {
-                        has_drift = true;
-                    }
-                }
-                if strict && has_drift {
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Commands::Kani { spec, output } => {
-            kani::generate(&spec, &output)?;
-        }
-
-        Commands::Test { spec, output } => {
-            unit_test::generate(&spec, &output)?;
-        }
-
-        Commands::Proptest { spec, output } => {
-            proptest_gen::generate(&spec, &output)?;
-        }
-
-        Commands::IntegrationTest { spec, output } => {
-            integration_test::generate(&spec, &output)?;
-        }
-
-        Commands::LeanGen { spec, output } => {
-            let parsed = check::parse_spec_file(&spec)?;
-            lean_gen::generate(&parsed, &output)?;
-        }
-
-        Commands::Ci { output, asm } => {
-            ci::generate_ci(&output, asm.as_deref())?;
         }
 
         Commands::Aristotle(cmd) => match cmd {
