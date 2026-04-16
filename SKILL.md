@@ -143,7 +143,7 @@ Present the spec to the user and get confirmation before proceeding to validatio
 After writing or editing a .qedspec, **always** lint:
 
 ```bash
-$QEDGEN lint --spec <path-to-qedspec> --json
+$QEDGEN check --spec <path-to-qedspec> --json
 ```
 
 Lint output is priority-ordered (1=security, 2=correctness, 3=completeness, 4=quality, 5=polish). Work through findings top-down:
@@ -160,7 +160,7 @@ Run proptest to catch spec-level bugs in ~100ms. All proptest artifacts are **tr
 
 ```bash
 # Generate harness
-$QEDGEN proptest --spec <path-to-qedspec> --output /tmp/proptest_harness.rs
+$QEDGEN codegen --spec <path-to-qedspec> --proptest --proptest-output /tmp/proptest_harness.rs
 
 # Run in a scratch project (create once per session, reuse across specs)
 mkdir -p /tmp/proptest_runner/tests /tmp/proptest_runner/src
@@ -190,7 +190,7 @@ Generate Lean theorems and attempt to build. This catches spec issues that propt
 
 ```bash
 # Generate Spec.lean to /tmp
-$QEDGEN lean-gen --spec <path-to-qedspec> --output /tmp/lean_check/Spec.lean
+$QEDGEN codegen --spec <path-to-qedspec> --lean --lean-output /tmp/lean_check/Spec.lean
 
 # Quick validation build
 $QEDGEN init --name check --output-dir /tmp/lean_check
@@ -248,7 +248,7 @@ formal_verification/
 
 Generate `Spec.lean` from the finalized `.qedspec`:
 ```bash
-$QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
+$QEDGEN codegen --spec program.qedspec --lean --lean-output formal_verification/Spec.lean
 ```
 
 **When to add Mathlib:**
@@ -309,7 +309,7 @@ After proofs compile and `qedgen check` passes, stamp the verified Rust handlers
 
 ```bash
 # Add #[qed(verified)] to handler functions, then stamp hashes
-$QEDGEN drift --input programs/src/ --update
+$QEDGEN check --spec program.qedspec --drift programs/src/ --update-hashes
 ```
 
 This adds content hashes to every `#[qed(verified)]` annotation. If anyone later modifies a verified function:
@@ -339,10 +339,13 @@ cd formal_verification && lake build
 $QEDGEN check --spec program.qedspec --proofs formal_verification/
 
 # For sBPF: verify binary hasn't drifted from proofs
-$QEDGEN verify --asm src/program.s --proofs formal_verification/
+$QEDGEN check --spec program.qedspec --asm src/program.s
 
 # Human-readable verification report
-$QEDGEN explain --spec program.qedspec --proofs formal_verification/
+$QEDGEN check --spec program.qedspec --explain
+
+# Coverage matrix
+$QEDGEN check --spec program.qedspec --coverage
 ```
 
 `qedgen check` reports per-theorem status: **Proven**, **Sorry**, or **Missing**.
@@ -352,17 +355,17 @@ $QEDGEN explain --spec program.qedspec --proofs formal_verification/
 **Unified drift detection** (when code or Kani harnesses are generated from the spec):
 
 ```bash
-$QEDGEN check --spec program.qedspec --proofs formal_verification/ --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec program.qedspec --code programs/my_program/ --kani tests/kani.rs
 ```
 
 **CI integration:**
 
 ```bash
 # Generate CI workflow
-$QEDGEN ci --output .github/workflows/verify.yml
+$QEDGEN codegen --spec program.qedspec --ci
 
-# Or add to existing CI
-$QEDGEN drift --input programs/src/ --strict   # exits 1 on drift
+# Or add drift detection to existing CI
+$QEDGEN check --spec program.qedspec --drift programs/src/   # exits 1 on drift
 ```
 
 ## Code generation pipeline
@@ -370,17 +373,17 @@ $QEDGEN drift --input programs/src/ --strict   # exits 1 on drift
 Everything is derived from the `.qedspec`. Some outputs are transient (used during spec design, then discarded), others are generated into the project.
 
 ```bash
-# Transient (spec design feedback — generated to /tmp, never committed)
-$QEDGEN lint --spec program.qedspec                                         # Spec completeness lint
-$QEDGEN proptest --spec program.qedspec                                     # Property-based tests
-$QEDGEN coverage --spec program.qedspec                                     # Verification matrix
+# Validation (spec design feedback — transient, agent-driven)
+$QEDGEN check --spec program.qedspec                    # lint + coverage (default)
+$QEDGEN check --spec program.qedspec --json              # machine-readable for agent
 
 # Generated (derived from spec, written to project)
-$QEDGEN lean-gen --spec program.qedspec --output formal_verification/Spec.lean
-$QEDGEN codegen --spec program.qedspec --output-dir programs/my_program/   # Quasar program
-$QEDGEN kani --spec program.qedspec --output tests/kani.rs                  # Kani harnesses
-$QEDGEN test --spec program.qedspec --output src/tests.rs                   # Unit tests
-$QEDGEN integration-test --spec program.qedspec --output src/integration_tests.rs
+$QEDGEN codegen --spec program.qedspec --all             # everything at once
+$QEDGEN codegen --spec program.qedspec --lean            # Lean proofs only
+$QEDGEN codegen --spec program.qedspec --kani            # Kani harnesses only
+$QEDGEN codegen --spec program.qedspec --test            # Unit tests only
+$QEDGEN codegen --spec program.qedspec --proptest        # Proptest harnesses only
+$QEDGEN codegen --spec program.qedspec --integration     # Integration tests only
 ```
 
 With `qedgen init --quasar`, the generated outputs are created automatically.
@@ -427,7 +430,7 @@ environment oracle_update {
 
 **Auto-overflow** — operations with `add` effects automatically generate overflow safety obligations in both Lean and Kani.
 
-**`qedgen coverage`** — prints a verification matrix (operations × properties) showing coverage gaps.
+**`qedgen check --coverage`** — prints a verification matrix (operations × properties) showing coverage gaps.
 
 See `references/qedspec-dsl.md` for full syntax reference.
 
@@ -465,7 +468,7 @@ fn deposit_preserves_conservation() {
 }
 ```
 
-**Greenfield Kani harnesses** (self-contained models from `$QEDGEN kani`) are for new projects where no Rust implementation exists yet. They model the spec's state machine independently of any framework types.
+**Greenfield Kani harnesses** (self-contained models from `$QEDGEN codegen --kani`) are for new projects where no Rust implementation exists yet. They model the spec's state machine independently of any framework types.
 
 ## Git hygiene
 
