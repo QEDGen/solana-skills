@@ -337,19 +337,17 @@ fn parse(source: &str) -> Result<ParsedProgram> {
             continue; // operand is a syscall name, not a symbol
         }
         for op in &insn.operands {
-            match op {
-                Operand::Imm(Value::Sym(s))
-                | Operand::Mem(_, Value::Sym(s))
-                | Operand::Imm(Value::NegSym(s))
-                | Operand::Mem(_, Value::NegSym(s)) => {
-                    if !equates_map.contains_key(s) && !labels.contains_key(s) {
-                        warnings.push(format!(
-                            "line {}: undefined symbol '{}', using 0",
-                            insn.line_no, s
-                        ));
-                    }
+            if let Operand::Imm(Value::Sym(s))
+            | Operand::Mem(_, Value::Sym(s))
+            | Operand::Imm(Value::NegSym(s))
+            | Operand::Mem(_, Value::NegSym(s)) = op
+            {
+                if !equates_map.contains_key(s) && !labels.contains_key(s) {
+                    warnings.push(format!(
+                        "line {}: undefined symbol '{}', using 0",
+                        insn.line_no, s
+                    ));
                 }
-                _ => {}
             }
         }
     }
