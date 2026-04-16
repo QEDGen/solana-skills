@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-QEDGen is a Claude Code skill for formally verifying Solana programs using Lean 4 proofs. Claude (the local LLM) drives proof writing directly — reading code, writing Lean models/theorems/proofs, and iterating on `lake build` errors. Leanstral (Mistral's theorem prover) is called only for hard sub-goals via `fill-sorry`.
+QEDGen is a Claude Code skill for spec-driven verification of Solana programs. The `.qedspec` is the single source of truth — QEDGen validates it (proptest, Kani, Lean) and generates all downstream artifacts (Rust code, test harnesses, Lean proofs, CI workflows). Leanstral and Aristotle handle hard proof sub-goals when escalated.
 
-**Core workflow**: Claude reads source → writes SPEC.md → writes Lean 4 proofs → `lake build` → iterates → calls `qedgen fill-sorry` for hard sub-goals → stamps verified code with `#[qed(verified)]`
+**Core workflow**: User describes intent → agent writes `.qedspec` → `qedgen check` validates (lint + proptest + Lean) → iterate on spec → `qedgen codegen --all` generates committed artifacts → `#[qed(verified)]` stamps verified code
 
 ## Build and Development Commands
 
