@@ -796,16 +796,13 @@ async fn main() -> Result<()> {
                 lean_gen::generate(&parsed, &lean_output)?;
             }
             if ci || all {
-                // Inline CI workflow generation
+                const CI_TEMPLATE: &str = include_str!("../../../templates/verify.yml");
                 let verify_step = if let Some(ref asm) = ci_asm {
-                    format!("\n      - name: Verify sBPF binary\n        run: qedgen check --spec program.qedspec --asm {}", asm)
+                    format!("\n      - name: Verify sBPF binary\n        run: qedgen check --spec program.qedspec --asm {}\n", asm)
                 } else {
                     String::new()
                 };
-                let workflow = format!(
-                    "name: Formal Verification\n\non:\n  push:\n    branches: [main]\n    paths:\n      - 'src/**'\n      - 'formal_verification/**'\n  pull_request:\n    paths:\n      - 'src/**'\n      - 'formal_verification/**'\n\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Install Lean\n        uses: leanprover/lean4-action@v1\n\n      - name: Cache lake packages\n        uses: actions/cache@v4\n        with:\n          path: formal_verification/.lake\n          key: lake-${{{{ hashFiles('formal_verification/lean-toolchain', 'formal_verification/lakefile.lean') }}}}\n\n      - name: Install Rust toolchain\n        uses: dtolnay/rust-toolchain@stable\n\n      - name: Install qedgen\n        run: cargo install --path crates/qedgen\n{}\n      - name: Build proofs\n        run: cd formal_verification && lake build\n\n      - name: Check spec coverage\n        run: qedgen check --spec program.qedspec\n",
-                    verify_step
-                );
+                let workflow = CI_TEMPLATE.replace("{{VERIFY_STEP}}", &verify_step);
                 if let Some(parent) = ci_output.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
