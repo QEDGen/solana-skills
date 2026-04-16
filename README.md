@@ -6,7 +6,8 @@
   </picture>
 </p>
 
-<h3 align="center">Spec-driven verification for Solana programs.</h3>
+<h3 align="center">Proofs, not promises.</h3>
+<p align="center"><em>Ship to mainnet without fear.</em></p>
 
 <p align="center">
   <a href="https://qedgen.dev">Website</a> &middot;
@@ -21,7 +22,7 @@
 
 ---
 
-An agent skill for verifying Solana programs — **Rust/Anchor** and **sBPF assembly**. Write a `.qedspec` describing what your program must guarantee. QEDGen validates it and generates everything: **property tests**, **Kani proof harnesses**, **Lean 4 proofs**, **Rust code**, and **CI workflows** — all from the single spec.
+Spec-driven verification for Solana programs — **Rust/Anchor**, **Quasar**, and **sBPF assembly**. Describe what your program must guarantee in a `.qedspec`. QEDGen validates it and generates everything: **property tests**, **Kani proof harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from one spec.
 
 ```bash
 npx skills add qedgen/solana-skills
