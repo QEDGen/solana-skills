@@ -1,8 +1,8 @@
 # QEDGen
 
-> Spec-driven verification for Solana programs. Write a `.qedspec` describing what your program must guarantee — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, program code, and CI workflows. Supports Anchor, Quasar, and native sBPF assembly. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
+> Find the bugs your tests miss. Define what your Solana program must guarantee in a `.qedspec` — QEDGen validates it and generates the tests, proofs, and CI to keep it fixed. Supports Anchor, Quasar, and native sBPF assembly. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
 
-QEDGen helps you specify and verify your program's guarantees. The `.qedspec` is the single source of truth — everything else is derived from it.
+One spec file drives everything: property tests, Kani harnesses, Lean 4 proofs, program code, and CI workflows.
 
 ## Docs
 

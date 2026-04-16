@@ -24,7 +24,7 @@ use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Spec-driven verification for Solana programs
+/// Find the bugs your tests miss — from one spec file
 #[derive(Parser)]
 #[command(name = "qedgen")]
 #[command(version, about, long_about = None)]

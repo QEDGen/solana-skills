@@ -1,6 +1,6 @@
 ---
 name: qedgen
-description: Spec-driven verification for Solana programs. Trigger this skill whenever the user wants to verify code, write a .qedspec, generate tests or proofs, check program properties, or ensure correctness of smart contracts. Also trigger when the user mentions "qedgen", "qedspec", "verify my code", "prove correctness", "formal verification", "property testing", or wants guarantees about their implementation.
+description: Find the bugs your tests miss. Define what your Solana program must guarantee in a .qedspec — QEDGen validates it and generates tests, proofs, and CI to keep it fixed. Trigger when the user wants to verify code, write a .qedspec, generate tests or proofs, check program properties, or ship to mainnet with confidence. Also trigger on "qedgen", "qedspec", "verify my code", "prove correctness", "formal verification", "property testing".
 ---
 
 # QEDGen — Spec-Driven Verification

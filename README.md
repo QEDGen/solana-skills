@@ -41,13 +41,10 @@ npx skills add qedgen/solana-skills
                                             └── tests
 ```
 
-1. Write a `.qedspec` file defining your program's properties, or let your agent generate one from the IDL
-2. Run `qedgen check` to validate the spec (lint + proptest + lean-gen)
-3. Run `qedgen codegen --all` to generate all committed artifacts
-4. Your agent writes Lean 4 proofs against the QEDGen support library
-5. Iterates on `lake build` errors until proofs compile
-6. Calls `qedgen fill-sorry` for hard sub-goals (Leanstral — seconds)
-7. Escalates to `qedgen aristotle submit` when Leanstral fails (Aristotle — minutes to hours)
+1. **Define guarantees** — write a `.qedspec` describing what your program must guarantee, or let your agent generate one from the code or IDL
+2. **Validate** — `qedgen check` runs the verification waterfall: lint catches structural issues, property tests find counterexamples in milliseconds, Lean catches what tests can't
+3. **Generate** — `qedgen codegen --all` produces program code, test harnesses, Lean proofs, and CI workflows from the single spec
+4. **Prove** — your agent fills proof obligations; Leanstral handles routine sub-goals (seconds), Aristotle handles the hardest ones (minutes–hours)
 
 ## What it verifies
 
