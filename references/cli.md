@@ -5,7 +5,7 @@ All commands are run via the wrapper: `$QEDGEN <command> [flags]`
 ## Project setup
 
 ### `init`
-Scaffold a new formal verification project.
+Scaffold a new formal verification project. Creates `.qed/` project state directory.
 
 ```bash
 $QEDGEN init --name escrow
@@ -48,6 +48,107 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/Prog.lean
 | `--output` | Path | required | Output Lean 4 file |
 | `--namespace` | String | derived from filename | Lean namespace |
 
+## Spec and validation
+
+### `spec`
+Generate SPEC.md or .qedspec from IDL or .qedspec.
+
+```bash
+$QEDGEN spec --idl target/idl/program.json
+$QEDGEN spec --idl target/idl/program.json --format qedspec
+$QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--idl` | Path | - | Anchor IDL JSON file |
+| `--from-spec` | Path | - | .qedspec file (alternative to --idl) |
+| `--proofs` | Path | - | Proofs directory (for status checking) |
+| `--output-dir` | Path | `./formal_verification` | Output directory |
+| `--format` | String | `md` | Output format: `md` or `qedspec` |
+
+### `check`
+Validate a spec — lint, coverage, drift, and verification report. Default (no flags) runs lint.
+
+```bash
+# Lint (always runs)
+$QEDGEN check --spec my_program.qedspec
+$QEDGEN check --spec my_program.qedspec --json
+
+# Coverage matrix
+$QEDGEN check --spec my_program.qedspec --coverage
+
+# Verification report
+$QEDGEN check --spec my_program.qedspec --explain
+$QEDGEN check --spec my_program.qedspec --explain --output report.md
+
+# Drift detection
+$QEDGEN check --spec my_program.qedspec --drift programs/src/
+$QEDGEN check --spec my_program.qedspec --drift programs/src/ --deep
+$QEDGEN check --spec my_program.qedspec --drift programs/src/ --update-hashes
+
+# Unified code + kani drift
+$QEDGEN check --spec my_program.qedspec --code programs/my_program/ --kani tests/kani.rs
+
+# sBPF verification (hash check + lake build)
+$QEDGEN check --spec my_program.qedspec --asm src/program.s
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | required | Spec file (.qedspec) |
+| `--proofs` | Path | `./formal_verification` | Proofs directory |
+| `--coverage` | bool | false | Show operation × property matrix |
+| `--explain` | bool | false | Generate Markdown verification report |
+| `--output` | Path | stdout | Output file for --explain |
+| `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection |
+| `--update-hashes` | bool | false | Auto-stamp hashes in source files |
+| `--deep` | bool | false | Transitive drift detection (check callees) |
+| `--code` | Path | - | Quasar program dir (code drift detection) |
+| `--kani` | Path | - | Kani harness file (Kani drift detection) |
+| `--asm` | Path | - | sBPF assembly source (hash check + lake build) |
+| `--json` | bool | false | Machine-readable output |
+
+## Code generation
+
+### `codegen`
+Generate committed artifacts from a qedspec. Default (no flags) generates Quasar Rust skeleton only.
+
+```bash
+# Rust skeleton only
+$QEDGEN codegen --spec my_program.qedspec
+
+# Everything
+$QEDGEN codegen --spec my_program.qedspec --all
+
+# Selective
+$QEDGEN codegen --spec my_program.qedspec --lean
+$QEDGEN codegen --spec my_program.qedspec --kani
+$QEDGEN codegen --spec my_program.qedspec --test
+$QEDGEN codegen --spec my_program.qedspec --proptest
+$QEDGEN codegen --spec my_program.qedspec --integration
+$QEDGEN codegen --spec my_program.qedspec --ci
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | required | Spec file (.qedspec) |
+| `--output-dir` | Path | `./programs` | Output directory for Rust skeleton |
+| `--all` | bool | false | Generate all artifacts |
+| `--lean` | bool | false | Generate Lean 4 proofs |
+| `--lean-output` | Path | `./formal_verification/Spec.lean` | Lean output path |
+| `--kani` | bool | false | Generate Kani proof harnesses |
+| `--kani-output` | Path | `./tests/kani.rs` | Kani output path |
+| `--test` | bool | false | Generate unit tests |
+| `--test-output` | Path | `./src/tests.rs` | Unit test output path |
+| `--proptest` | bool | false | Generate proptest harnesses |
+| `--proptest-output` | Path | `./tests/proptest.rs` | Proptest output path |
+| `--integration` | bool | false | Generate QuasarSVM integration tests |
+| `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
+| `--ci` | bool | false | Generate GitHub Actions CI workflow |
+| `--ci-output` | Path | `.github/workflows/verify.yml` | CI workflow output path |
+| `--ci-asm` | String | - | sBPF assembly source (for CI verify step) |
+
 ## Proof generation
 
 ### `generate`
@@ -62,7 +163,7 @@ $QEDGEN generate --prompt-file /tmp/prompt.txt --output-dir /tmp/proof --passes 
 | `--prompt-file` | Path | required | Path to prompt file |
 | `--output-dir` | Path | required | Output directory |
 | `--passes` | int | 4 | Number of independent completions |
-| `--temperature` | float | 0.6 | Sampling temperature (0.0-2.0) |
+| `--temperature` | float | 0.6 | Sampling temperature |
 | `--max-tokens` | int | 16384 | Max tokens per completion |
 | `--validate` | bool | false | Validate with `lake build` |
 | `--mathlib` | bool | false | Include Mathlib in validation workspace |
@@ -71,8 +172,8 @@ $QEDGEN generate --prompt-file /tmp/prompt.txt --output-dir /tmp/proof --passes 
 Fill sorry markers in a Lean file using Leanstral.
 
 ```bash
-$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --validate
-$QEDGEN fill-sorry --file formal_verification/Proofs/Hard.lean --escalate
+$QEDGEN fill-sorry --file formal_verification/Spec.lean --validate
+$QEDGEN fill-sorry --file formal_verification/Spec.lean --escalate
 ```
 
 | Flag | Type | Default | Description |
@@ -110,12 +211,6 @@ $QEDGEN aristotle status <project-id>
 $QEDGEN aristotle status <project-id> --wait --output-dir formal_verification
 ```
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--wait` | bool | false | Poll until terminal state + auto-download |
-| `--poll-interval` | int (sec) | 30 | Polling interval (5-3600) |
-| `--output-dir` | Path | `.` | Download destination |
-
 ### `aristotle result`
 Download completed result.
 
@@ -123,123 +218,12 @@ Download completed result.
 $QEDGEN aristotle result <project-id> --output-dir formal_verification
 ```
 
-### `aristotle cancel`
-Cancel a running project.
+### `aristotle cancel` / `aristotle list`
+Cancel a running project or list recent projects.
 
-### `aristotle list`
-List recent projects.
+## Drift detection (`qedgen-macros`)
 
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--limit` | int | 10 | Max projects to show |
-| `--status` | String | - | Filter by status (IN_PROGRESS, COMPLETE, FAILED) |
-
-## Spec and inspection
-
-### `spec`
-Generate SPEC.md or .qedspec from IDL or .qedspec.
-
-```bash
-$QEDGEN spec --idl target/idl/program.json
-$QEDGEN spec --idl target/idl/program.json --format qedspec
-$QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/Proofs/
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--idl` | Path | - | Anchor IDL JSON file |
-| `--from-spec` | Path | - | .qedspec file (alternative to --idl) |
-| `--proofs` | Path | - | Proofs directory (for status checking) |
-| `--output-dir` | Path | `./formal_verification` | Output directory |
-| `--format` | String | `md` | Output format: `md` (SPEC.md) or `qedspec` (.qedspec scaffold) |
-
-### `check`
-Check spec coverage and drift detection.
-
-```bash
-$QEDGEN check --spec my_program.qedspec --proofs formal_verification/
-$QEDGEN check --spec my_program.qedspec --proofs formal_verification/ --code programs/my_program/ --kani tests/kani.rs
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--spec` | Path | required | Spec file (.qedspec) |
-| `--proofs` | Path | `./formal_verification` | Proofs directory |
-| `--code` | Path | - | Quasar program dir (enables code drift detection) |
-| `--kani` | Path | - | Kani harness file (enables Kani drift detection) |
-
-### `explain`
-Generate human-readable verification report.
-
-```bash
-$QEDGEN explain --spec my_program.qedspec --proofs formal_verification/
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--spec` | Path | required | Spec file |
-| `--proofs` | Path | `./formal_verification` | Proofs directory |
-| `--output` | Path | stdout | Output file |
-
-### `lint`
-Lint a qedspec for completeness. Returns priority-ordered findings with concrete fix suggestions.
-
-```bash
-$QEDGEN lint --spec my_program.qedspec
-$QEDGEN lint --spec my_program.qedspec --json
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--spec` | Path | required | Spec file |
-| `--json` | bool | false | Output as JSON (includes `priority` field: 1=security, 2=correctness, 3=completeness, 4=quality, 5=polish) |
-
-### `verify`
-Verify sBPF proofs: check source hash, regenerate if stale, run lake build.
-
-```bash
-$QEDGEN verify --asm src/program.s --proofs formal_verification/
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--asm` | Path | required | sBPF assembly source |
-| `--proofs` | Path | `./formal_verification` | Proofs directory |
-
-## Drift detection
-
-### `drift`
-Detect code drift in `#[qed(verified)]` functions. Computes content hashes and compares against stored hashes without compiling the program.
-
-```bash
-$QEDGEN drift --input programs/src/                # show status of all verified functions
-$QEDGEN drift --input programs/src/ --strict       # exit 1 on any drift (CI gate)
-$QEDGEN drift --input programs/src/ --update       # auto-stamp/update hashes in source
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--input` | Path | required | Rust source file or directory to scan |
-| `--strict` | bool | false | Exit 1 if any function has drifted or is unhashed |
-| `--update` | bool | false | Compute hashes and write them into source files |
-
-Output format:
-```
-  deposit.rs  handler     OK      5af369bb254368d3
-  borrow.rs   handler     DRIFT   expected 8ee45980 got f1a2b3c4
-  repay.rs    handler     NO HASH computed f923321b
-```
-
-**Hash algorithm**: Parse function with `syn`, strip all attributes and doc comments, normalize via round-trip, SHA-256, truncate to 16 hex chars. Same algorithm is used by the `qedgen-macros` proc macro at compile time.
-
-### `qedgen-macros` (proc macro crate)
-
-The `qedgen-macros` crate provides `#[qed(verified, hash = "...")]` for compile-time drift detection. Add it to your program's dependencies:
-
-```toml
-[dependencies]
-qedgen-macros = { version = "0.1" }
-```
+The `qedgen-macros` crate provides `#[qed(verified, hash = "...")]` for compile-time drift detection:
 
 ```rust
 use qedgen_macros::qed;
@@ -251,79 +235,7 @@ pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
 }
 ```
 
-When `hash` is omitted, the macro emits a `compile_error!` with the computed hash (setup mode).
-
-## Code generation
-
-### `codegen`
-Generate Quasar program skeleton from spec.
-
-```bash
-$QEDGEN codegen --spec my_program.qedspec --output-dir programs/my_program/
-```
-
-### `proptest`
-Generate transient property-based test harnesses from spec. Tier 1 of the verification waterfall — finds counterexamples in ~100ms. Output is ephemeral (generate to `/tmp`, run, discard).
-
-```bash
-$QEDGEN proptest --spec my_program.qedspec --output /tmp/proptest_harness.rs
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--spec` | Path | required | Path to `.qedspec` file |
-| `--output` | Path | `/tmp/proptest_harness.rs` | Output test file (transient) |
-
-Generated tests:
-- **Preservation tests**: For each (handler, property) pair, verify the invariant holds after the transition
-- **Guard enforcement**: Verify handlers reject invalid inputs
-- **Overflow detection**: Verify `add`/`sub` effects don't wrap around
-- **State machine fuzzer**: Random operation sequences preserving lifecycle + all invariants
-
-For multi-account specs (e.g., lending with Pool + Loan), generates separate `mod` blocks per account type.
-
-### `kani`
-Generate Kani proof harnesses from spec.
-
-```bash
-$QEDGEN kani --spec my_program.qedspec --output tests/kani.rs
-```
-
-### `test`
-Generate unit tests (plain Rust, cargo test).
-
-```bash
-$QEDGEN test --spec my_program.qedspec --output src/tests.rs
-```
-
-### `integration-test`
-Generate QuasarSVM integration test scaffolds.
-
-```bash
-$QEDGEN integration-test --spec my_program.qedspec --output src/integration_tests.rs
-```
-
-### `lean-gen`
-Generate Lean 4 file from .qedspec format.
-
-```bash
-$QEDGEN lean-gen --spec my_program.qedspec --output formal_verification/Spec.lean
-```
-
-## CI
-
-### `ci`
-Generate GitHub Actions workflow for verification CI.
-
-```bash
-$QEDGEN ci --output .github/workflows/verify.yml
-$QEDGEN ci --output .github/workflows/verify.yml --asm src/program.s
-```
-
-| Flag | Type | Default | Description |
-|---|---|---|---|
-| `--output` | Path | `.github/workflows/verify.yml` | Workflow file |
-| `--asm` | String | - | sBPF assembly source (adds verify step) |
+Hash covers function signature + body, excluding attributes and comments. Use `check --drift --update-hashes` to stamp hashes, `check --drift` to detect changes.
 
 ## Utility
 
@@ -341,7 +253,7 @@ $QEDGEN consolidate --input-dir /tmp/proofs --output-dir formal_verification
 | `MISTRAL_API_KEY` | `generate`, `fill-sorry` | Mistral API key. Free at [console.mistral.ai](https://console.mistral.ai) |
 | `ARISTOTLE_API_KEY` | `aristotle` commands | Harmonic API key. Get at [aristotle.harmonic.fun](https://aristotle.harmonic.fun) |
 | `QEDGEN_HOME` | - | Override global home directory (default: `~/.qedgen/`) |
-| `QEDGEN_VALIDATION_WORKSPACE` | - | Override validation workspace path (default: `~/.qedgen/workspace/`) |
+| `QEDGEN_VALIDATION_WORKSPACE` | - | Override validation workspace path |
 
 ## Error handling
 
