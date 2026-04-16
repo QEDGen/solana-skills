@@ -153,8 +153,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     if is_multi {
         // Multi-account: generate per-account sections in separate modules
         for acct in &spec.account_types {
-            let acct_fields: Vec<&(String, String)> =
-                acct.fields.iter().filter(|(_, t)| t != "Pubkey").collect();
+            let acct_fields = rust_codegen_util::mutable_fields(&acct.fields);
             if acct_fields.is_empty() {
                 continue;
             }
@@ -202,8 +201,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     } else {
         // Single-account: generate flat (no module wrapper)
         let state_fields: &[(String, String)] = &spec.state_fields;
-        let mutable_fields: Vec<&(String, String)> =
-            state_fields.iter().filter(|(_, t)| t != "Pubkey").collect();
+        let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
         let all_handlers: Vec<&ParsedHandler> = spec.handlers.iter().collect();
         let all_props: Vec<&ParsedProperty> = spec.properties.iter().collect();
         emit_account_section(
@@ -431,71 +429,10 @@ fn emit_state_strategy_inner(
     out.push_str("}\n\n");
 }
 
-/// Collect all guard conditions from a handler (guard_str + requires) as a single Rust expression.
-fn collect_guard_rust(op: &ParsedHandler) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(ref guard) = op.guard_str {
-        parts.push(rust_codegen_util::translate_guard_to_rust(guard, true));
-    }
-    for req in &op.requires {
-        parts.push(rust_codegen_util::translate_guard_to_rust(
-            &req.rust_expr,
-            true,
-        ));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" && "))
-    }
-}
-
 /// Emit transition functions for a slice of handlers.
 fn emit_transition_functions_for(out: &mut String, handlers: &[&ParsedHandler], spec: &ParsedSpec) {
     for op in handlers {
-        if let Some(ref doc) = op.doc {
-            out.push_str(&format!("/// {}\n", doc.trim()));
-        }
-
-        let params: String = op
-            .takes_params
-            .iter()
-            .map(|(n, t)| format!(", {}: {}", n, map_type(t)))
-            .collect();
-        out.push_str(&format!(
-            "fn {}(s: &mut State{}) -> bool {{\n",
-            op.name, params
-        ));
-
-        // Guard (merged from guard_str + requires)
-        if let Some(guard_expr) = collect_guard_rust(op) {
-            out.push_str(&format!("    if !({}) {{\n", guard_expr));
-            out.push_str("        return false;\n");
-            out.push_str("    }\n");
-        }
-
-        // Effects
-        for (field, op_kind, value) in &op.effects {
-            let rust_value = rust_codegen_util::resolve_value(value, op, spec);
-            match op_kind.as_str() {
-                "set" => out.push_str(&format!("    s.{} = {};\n", field, rust_value)),
-                "add" => out.push_str(&format!(
-                    "    s.{} = s.{}.wrapping_add({});\n",
-                    field, field, rust_value
-                )),
-                "sub" => out.push_str(&format!(
-                    "    s.{} = s.{}.wrapping_sub({});\n",
-                    field, field, rust_value
-                )),
-                _ => out.push_str(&format!(
-                    "    // unknown effect: {} {} {}\n",
-                    field, op_kind, value
-                )),
-            }
-        }
-
-        out.push_str("    true\n");
-        out.push_str("}\n\n");
+        rust_codegen_util::emit_transition_fn(out, op, spec, true, map_type);
     }
 }
 
@@ -613,7 +550,8 @@ fn emit_guard_tests(
     all_fields: &[(String, String)],
 ) {
     for op in guard_ops {
-        let rust_guard = collect_guard_rust(op).unwrap_or_else(|| "true".to_string());
+        let rust_guard = rust_codegen_util::collect_full_guard(op, true)
+            .unwrap_or_else(|| "true".to_string());
 
         out.push_str("proptest! {\n");
         // High reject limit: guard negation filters most inputs by design

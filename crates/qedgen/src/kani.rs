@@ -68,15 +68,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     // Collect mutable state fields (skip Pubkey — those are identity, not mutable state)
-    let is_multi = spec.account_types.len() > 1;
-    let state_fields: &[(String, String)] = if is_multi {
-        &spec.account_types[0].fields
-    } else {
-        &spec.state_fields
-    };
-
-    let mutable_fields: Vec<&(String, String)> =
-        state_fields.iter().filter(|(_, t)| t != "Pubkey").collect();
+    let state_fields = rust_codegen_util::resolve_state_fields(&spec);
+    let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
 
     rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", map_type);
 

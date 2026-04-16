@@ -208,7 +208,43 @@ pub fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> Stri
 }
 
 // ============================================================================
-// Shared emitters — used by kani, proptest, unit_test generators
+// Shared helpers — used by kani, proptest, unit_test, integration generators
+// ============================================================================
+
+/// Resolve state fields for the spec, handling multi-account layout.
+/// Returns the fields for the primary account type.
+pub fn resolve_state_fields(spec: &ParsedSpec) -> &[(String, String)] {
+    if spec.account_types.len() > 1 {
+        &spec.account_types[0].fields
+    } else {
+        &spec.state_fields
+    }
+}
+
+/// Filter state fields to mutable-only (skip Pubkey identity fields).
+pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
+    fields.iter().filter(|(_, t)| t != "Pubkey").collect()
+}
+
+/// Collect all guard conditions from a handler (guard_str + requires clauses)
+/// as a single Rust expression. Returns None if no guards exist.
+pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ref guard) = op.guard_str {
+        parts.push(translate_guard_to_rust(guard, wrapping));
+    }
+    for req in &op.requires {
+        parts.push(translate_guard_to_rust(&req.rust_expr, wrapping));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" && "))
+    }
+}
+
+// ============================================================================
+// Shared emitters
 // ============================================================================
 
 /// Emit constant declarations from spec constants.
@@ -280,15 +316,14 @@ pub fn emit_transition_fn(
         op.name, params
     ));
 
-    // Guard check
-    if op.has_guard() {
-        if let Some(ref guard) = op.guard_str {
-            let rust_guard = translate_guard_to_rust(guard, wrapping);
-            out.push_str(&format!("    // guard: {}\n", guard));
-            out.push_str(&format!("    if !({}) {{\n", rust_guard));
-            out.push_str("        return false;\n");
-            out.push_str("    }\n");
+    // Guard check (merges guard_str + requires clauses)
+    if let Some(guard_expr) = collect_full_guard(op, wrapping) {
+        if let Some(ref raw) = op.guard_str {
+            out.push_str(&format!("    // guard: {}\n", raw));
         }
+        out.push_str(&format!("    if !({}) {{\n", guard_expr));
+        out.push_str("        return false;\n");
+        out.push_str("    }\n");
     }
 
     // Apply effects
