@@ -22,7 +22,7 @@
 
 ---
 
-Spec-driven verification for Solana programs — **Rust/Anchor**, **Quasar**, and **sBPF assembly**. Describe what your program must guarantee in a `.qedspec`. QEDGen validates it and generates everything: **property tests**, **Kani proof harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from one spec.
+Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed. One spec file drives everything: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows**. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
 
 ```bash
 npx skills add qedgen/solana-skills
