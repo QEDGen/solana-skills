@@ -789,61 +789,6 @@ fn collect_lean_files(dir: &Path, out: &mut String) -> Result<()> {
     Ok(())
 }
 
-/// Print a formatted coverage report with intent descriptions.
-pub fn print_report(spec_name: &str, results: &[PropertyStatus]) {
-    let proven = results
-        .iter()
-        .filter(|r| r.status == Status::Proven)
-        .count();
-    let sorry = results.iter().filter(|r| r.status == Status::Sorry).count();
-    let missing = results
-        .iter()
-        .filter(|r| r.status == Status::Missing)
-        .count();
-    let total = results.len();
-
-    eprintln!(
-        "{} spec coverage ({}/{} proven):\n",
-        spec_name, proven, total
-    );
-    for r in results {
-        let icon = match r.status {
-            Status::Proven => "✓",
-            Status::Sorry => "✗",
-            Status::Missing => "✗",
-        };
-        let intent_str = r
-            .intent
-            .as_deref()
-            .map(|i| format!(" — {}", i))
-            .unwrap_or_default();
-
-        let status_tag = match r.status {
-            Status::Proven => "".to_string(),
-            Status::Sorry => " [SORRY]".to_string(),
-            Status::Missing => " [MISSING]".to_string(),
-        };
-
-        eprintln!("  {} {}{}{}", icon, r.name, intent_str, status_tag);
-
-        // Print suggestion for unproven properties
-        if r.status != Status::Proven {
-            if let Some(ref suggestion) = r.suggestion {
-                eprintln!("    → {}", suggestion);
-            }
-        }
-    }
-    eprintln!();
-    eprintln!(
-        "Summary: {} proven, {} sorry, {} missing ({} total)",
-        proven, sorry, missing, total
-    );
-
-    if proven == total {
-        eprintln!("All properties verified.");
-    }
-}
-
 // ============================================================================
 // Unified drift detection (qedgen check --code --kani)
 // ============================================================================
@@ -2519,31 +2464,6 @@ mod tests {
         ParsedSpec::default()
     }
 
-    fn make_op(name: &str) -> ParsedOperation {
-        ParsedOperation {
-            name: name.to_string(),
-            doc: None,
-            who: Some("authority".to_string()),
-            on_account: None,
-            has_when: false,
-            pre_status: Some("Active".to_string()),
-            post_status: Some("Active".to_string()),
-            has_calls: false,
-            program_id: None,
-            has_u64_fields: false,
-            has_takes: false,
-            has_guard: false,
-            guard_str: None,
-            has_effect: false,
-            takes_params: vec![],
-            effects: vec![],
-            calls_accounts: vec![],
-            calls_discriminator: None,
-            emits: vec![],
-            aborts_if: vec![],
-        }
-    }
-
     fn make_handler(name: &str) -> ParsedHandler {
         ParsedHandler {
             name: name.to_string(),
@@ -2565,33 +2485,6 @@ mod tests {
             accounts: vec![],
             transfers: vec![],
             emits: vec![],
-            invariants: vec![],
-            properties: vec![],
-        }
-    }
-
-    /// Convert a ParsedOperation into a ParsedHandler for backward compat in tests.
-    fn op_to_handler(op: &ParsedOperation) -> ParsedHandler {
-        ParsedHandler {
-            name: op.name.clone(),
-            doc: op.doc.clone(),
-            who: op.who.clone(),
-            on_account: op.on_account.clone(),
-            pre_status: op.pre_status.clone(),
-            post_status: op.post_status.clone(),
-            takes_params: op.takes_params.clone(),
-            guard_str: op.guard_str.clone(),
-            guard_str_rust: None,
-            aborts_if: op.aborts_if.clone(),
-            requires: vec![],
-            ensures: vec![],
-            modifies: None,
-            let_bindings: vec![],
-            aborts_total: false,
-            effects: op.effects.clone(),
-            accounts: vec![],
-            transfers: vec![],
-            emits: op.emits.clone(),
             invariants: vec![],
             properties: vec![],
         }
