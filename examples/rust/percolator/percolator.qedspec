@@ -1,39 +1,38 @@
-# Percolator Risk Engine — Spec-Driven Verification
-#
-# A perpetual DEX risk engine managing protected principal, junior profit
-# claims, and lazy A/K side indices.
-#
-# Core properties:
-#   - Conservation: V >= C_tot + I (vault covers all obligations)
-#   - Vault bounded: V <= MAX_VAULT_TVL
-#   - ADL lifecycle: Active -> Draining -> Resetting -> Active
+// Percolator Risk Engine — Spec-Driven Verification
+//
+// A perpetual DEX risk engine managing protected principal, junior profit
+// claims, and lazy A/K side indices.
+//
+// Core properties:
+//   - Conservation: V >= C_tot + I (vault covers all obligations)
+//   - Vault bounded: V <= MAX_VAULT_TVL
+//   - ADL lifecycle: Active -> Draining -> Resetting -> Active
 
 spec Percolator
 
 const MAX_VAULT_TVL = 10_000_000_000_000_000
 
-state {
-  authority : Pubkey
-  V         : U128
-  C_tot     : U128
-  I         : U128
-}
+type State
+  | Active of {
+      authority : Pubkey,
+      V         : U128,
+      C_tot     : U128,
+      I         : U128,
+    }
+  | Draining
+  | Resetting
 
-lifecycle [Active, Draining, Resetting]
-
-errors [InsufficientFunds]
+type Error
+  | InsufficientFunds
 
 /// User adds capital — V and C_tot increase by same amount
-handler deposit {
-  who authority
-  when Active
+handler deposit (amount : U128) : State.Active -> State.Active {
+  auth authority
 
   accounts {
     authority : signer, writable
     vault     : writable
   }
-
-  takes amount : U128
 
   requires state.V + amount <= MAX_VAULT_TVL
 
@@ -44,16 +43,13 @@ handler deposit {
 }
 
 /// User removes capital — V and C_tot decrease by same amount
-handler withdraw {
-  who authority
-  when Active
+handler withdraw (amount : U128) : State.Active -> State.Active {
+  auth authority
 
   accounts {
     authority : signer, writable
     vault     : writable
   }
-
-  takes amount : U128
 
   requires state.C_tot >= amount else InsufficientFunds
 
@@ -64,16 +60,13 @@ handler withdraw {
 }
 
 /// External deposit into insurance fund
-handler top_up_insurance {
-  who authority
-  when Active
+handler top_up_insurance (amount : U128) : State.Active -> State.Active {
+  auth authority
 
   accounts {
     authority : signer, writable
     vault     : writable
   }
-
-  takes amount : U128
 
   requires state.V + amount <= MAX_VAULT_TVL
 
@@ -84,10 +77,8 @@ handler top_up_insurance {
 }
 
 /// Begin auto-deleveraging cycle
-handler trigger_adl {
-  who authority
-  when Active
-  then Draining
+handler trigger_adl : State.Active -> State.Draining {
+  auth authority
 
   accounts {
     authority : signer
@@ -96,10 +87,8 @@ handler trigger_adl {
 }
 
 /// Complete the drain phase of ADL
-handler complete_drain {
-  who authority
-  when Draining
-  then Resetting
+handler complete_drain : State.Draining -> State.Resetting {
+  auth authority
 
   accounts {
     authority : signer
@@ -108,10 +97,8 @@ handler complete_drain {
 }
 
 /// Reset risk engine after ADL cycle
-handler reset {
-  who authority
-  when Resetting
-  then Active
+handler reset : State.Resetting -> State.Active {
+  auth authority
 
   accounts {
     authority : signer
@@ -119,23 +106,14 @@ handler reset {
   }
 }
 
-property conservation {
-  expr state.V >= state.C_tot + state.I
+theorem conservation :
+  state.V >= state.C_tot + state.I
   preserved_by all
-}
 
-property vault_bounded {
-  expr state.V <= MAX_VAULT_TVL
+theorem vault_bounded :
+  state.V <= MAX_VAULT_TVL
   preserved_by [deposit, top_up_insurance]
-}
 
-cover happy_path {
-  trace [deposit, withdraw]
-}
+cover happy_path [deposit, withdraw]
 
-liveness drain_completes {
-  from Draining
-  leads_to Active
-  via [complete_drain, reset]
-  within 2
-}
+liveness drain_completes : State.Draining ~> State.Active via [complete_drain, reset] within 2

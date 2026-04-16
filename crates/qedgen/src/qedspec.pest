@@ -1,10 +1,20 @@
 // ============================================================================
-// QEDSpec Grammar — PEG definition for .qedspec files
+// QEDSpec Grammar v2 — ML-flavored PEG for .qedspec files
+//
+// Key changes from v1:
+//   - `type` ADTs replace state/account/lifecycle/errors
+//   - Handler signature: `handler name (args) : Pre -> Post { ... }`
+//   - `:=` for effect assignment (no ambiguity with `==`)
+//   - `theorem` replaces `property` for Quasar specs
+//   - `invariant name : forall ...` (quantified, not just string)
+//   - `cover name [trace]` one-liner
+//   - `liveness name : A ~> B via [...] within N` one-liner
+//   - `//` comments, `///` doc comments
+//   - `/\` and `\/` as aliases for `and`/`or`
+//   - Qualified identifiers: Pool.Active, Loan.Empty
 // ============================================================================
 
-// Top-level: a spec file is a sequence of top-level items
-spec_file = { SOI ~ COMMENT* ~ spec_header ~ top_level_item* ~ EOI }
-
+spec_file   = { SOI ~ COMMENT* ~ spec_header ~ top_level_item* ~ EOI }
 spec_header = { "spec" ~ ident }
 
 top_level_item = {
@@ -13,98 +23,124 @@ top_level_item = {
   | assembly_decl
   | const_decl
   | pubkey_decl
-  | state_block
-  | account_block
-  | lifecycle_decl
+  | type_decl
+  | state_block          // sugar: state { ... } ≡ type State | Active of { ... }
+  | lifecycle_decl       // sugar: lifecycle [...] ≡ variant names in type decl
   | pda_decl
   | event_decl
-  | errors_decl
+  | errors_decl          // sugar / sBPF compat
   | schema_block
   | handler_block
-  | instruction_block
-  | operation_block
-  | property_block
+  | instruction_block    // sBPF
+  | property_block       // sugar / sBPF compat
+  | theorem_block
   | cover_block
-  | liveness_block
+  | liveness_decl
   | environment_block
   | invariant_decl
   | COMMENT
 }
 
 // ============================================================================
-// Top-level declarations
+// Sugar: backward-compatible shorthand forms
 // ============================================================================
 
-// Target declaration: `target assembly` or `target quasar`
-target_decl = { "target" ~ target_kind }
-target_kind = { "assembly" | "quasar" }
-
-program_id_decl = { "program_id" ~ string_lit }
-
-// Assembly source path (sBPF mode): `assembly "src/dropset.s"`
-assembly_decl = { "assembly" ~ string_lit }
-
-// Named constant: `const MAX_TVL = 10_000_000`
-const_decl = { "const" ~ ident ~ "=" ~ integer }
-
-// Known pubkey as 4-chunk U64: `pubkey RENT [chunk0, chunk1, chunk2, chunk3]`
-pubkey_decl = { "pubkey" ~ ident ~ "[" ~ integer_list ~ "]" }
-integer_list = { integer ~ ("," ~ integer)* }
-
-// Bare `state { ... }` — sugar for a single unnamed account type.
-// Fields go into the primary account (named after the program).
-state_block = { "state" ~ "{" ~ field_decl* ~ "}" }
-
-// Named account type with its own fields and optional lifecycle.
-// Example:
-//   account Escrow {
-//     initializer : Pubkey
-//     amount      : U64
-//     lifecycle [Uninitialized, Open, Closed]
-//   }
-account_block = { "account" ~ ident ~ "{" ~ account_item* ~ "}" }
-account_item = {
-    field_decl
-  | account_lifecycle
-  | COMMENT
-}
-account_lifecycle = { "lifecycle" ~ "[" ~ ident_list ~ "]" }
-
-// Global lifecycle — applies to the primary account (backward compat).
+// Bare `state { ... }` — sugar for single unnamed account type.
+state_block    = { "state" ~ "{" ~ field_decl* ~ "}" }
 lifecycle_decl = { "lifecycle" ~ "[" ~ ident_list ~ "]" }
 
-pda_decl = { "pda" ~ ident ~ "[" ~ pda_seed_list ~ "]" }
-pda_seed_list = { pda_seed ~ ("," ~ pda_seed)* }
-pda_seed = { string_lit | ident }
+// ============================================================================
+// Declarations
+// ============================================================================
 
-event_decl = { "event" ~ ident ~ "{" ~ field_decl* ~ "}" }
-
-// Errors: simple list `[A, B, C]` or valued `[A = 1 "desc", B = 2 "desc"]`
-errors_decl = { "errors" ~ "[" ~ (error_valued_list | ident_list) ~ "]" }
-error_valued_list = { error_valued_entry ~ ("," ~ error_valued_entry)* }
-error_valued_entry = { ident ~ "=" ~ integer ~ string_lit? }
-
-invariant_decl = { "invariant" ~ ident ~ string_lit }
+target_decl     = { "target" ~ target_kind }
+target_kind     = { "assembly" | "quasar" }
+program_id_decl = { "program_id" ~ string_lit }
+assembly_decl   = { "assembly" ~ string_lit }
+const_decl      = { "const" ~ ident ~ "=" ~ integer }
+pubkey_decl     = { "pubkey" ~ ident ~ "[" ~ integer_list ~ "]" }
 
 // ============================================================================
-// Schema block (reusable clause fragments for handlers)
+// Type declarations (algebraic data types)
+//
+//   type Pool
+//     | Uninitialized
+//     | Active of {
+//         authority      : Pubkey,
+//         total_deposits : U64,
+//       }
+//     | Paused
+//
+//   type Error
+//     | InvalidAmount
+//     | Unauthorized = 1 "not authorized"
+// ============================================================================
+
+type_decl    = { "type" ~ ident ~ type_variant+ }
+type_variant = { "|" ~ ident ~ variant_code? ~ variant_desc? ~ variant_fields? }
+
+variant_code   = { "=" ~ integer }
+variant_desc   = { string_lit }
+variant_fields = { "of" ~ "{" ~ typed_field_list ~ "}" }
+
+typed_field_list = { typed_field ~ ("," ~ typed_field)* ~ ","? }
+typed_field      = { ident ~ ":" ~ type_expr }
+
+// Type expressions: simple ident or parameterized (e.g., Vec U64, Option Pubkey)
+type_expr = { ident ~ ident? }
+
+// ============================================================================
+// PDA, events
+// ============================================================================
+
+pda_decl      = { "pda" ~ ident ~ "[" ~ pda_seed_list ~ "]" }
+pda_seed_list = { pda_seed ~ ("," ~ pda_seed)* }
+pda_seed      = { string_lit | ident }
+
+event_decl = { "event" ~ ident ~ "{" ~ typed_field_list? ~ "}" }
+
+// ============================================================================
+// Errors (sBPF compat — Quasar uses `type Error | ...`)
+// ============================================================================
+
+errors_decl         = { "errors" ~ "[" ~ (error_valued_list | ident_list) ~ "]" }
+error_valued_list   = { error_valued_entry ~ ("," ~ error_valued_entry)* }
+error_valued_entry  = { ident ~ "=" ~ integer ~ string_lit? }
+
+// ============================================================================
+// Schema block (reusable clause fragments)
 // ============================================================================
 
 schema_block = { "schema" ~ ident ~ "{" ~ handler_clause* ~ "}" }
 
 // ============================================================================
-// Handler block (unified — replaces both operation and instruction)
+// Handler block — ML-style signature
+//
+//   /// Initialize the pool with an interest rate
+//   handler init_pool (rate : U64) : Pool.Uninitialized -> Pool.Active {
+//     who authority
+//     accounts { ... }
+//     requires rate > 0 else InvalidAmount
+//     effect {
+//       interest_rate  := rate
+//       total_deposits := 0
+//     }
+//     emits PoolInitialized
+//   }
 // ============================================================================
 
-handler_block = { doc_comment* ~ "handler" ~ ident ~ "{" ~ handler_clause* ~ "}" }
+handler_block  = { doc_comment* ~ "handler" ~ ident ~ handler_params? ~ handler_transition? ~ "{" ~ handler_clause* ~ "}" }
+handler_transition = { ":" ~ qualified_ident ~ "->" ~ qualified_ident }
+handler_params = { handler_param+ }
+handler_param  = { "(" ~ ident ~ ":" ~ type_expr ~ ")" }
 
 handler_clause = {
     include_clause
-  | who_clause
-  | on_clause
-  | when_clause
-  | then_clause
-  | takes_block
+  | auth_clause
+  | on_clause             // sugar (prefer transition signature)
+  | when_clause           // sugar (prefer transition signature)
+  | then_clause           // sugar (prefer transition signature)
+  | takes_block           // sugar (prefer params in signature)
   | let_clause
   | requires_clause
   | aborts_total_clause
@@ -118,32 +154,29 @@ handler_clause = {
   | COMMENT
 }
 
-// Include: merge clauses from a named schema into this handler.
-include_clause = { "include" ~ ident }
+// Sugar clauses — backward compat for handlers without transition signature
+on_clause   = { "on" ~ ident }
+when_clause = { "when" ~ ident }
+then_clause = { "then" ~ ident }
+takes_block = { "takes" ~ "{" ~ field_decl* ~ "}" | "takes" ~ field_decl }
 
-// Aborts total: all abort conditions are exhaustive (generates ↔ theorem).
-aborts_total_clause = { "aborts_total" }
+include_clause           = { "include" ~ ident }
+aborts_total_clause      = { "aborts_total" }
+auth_clause               = { "auth" ~ ident }
+requires_clause          = { "requires" ~ guard_expr ~ ("else" ~ ident)? }
+ensures_clause           = { "ensures" ~ guard_expr }
+modifies_clause          = { "modifies" ~ "[" ~ ident_list ~ "]" }
+let_clause               = { "let" ~ ident ~ "=" ~ guard_expr }
+emits_clause             = { "emits" ~ ident }
+handler_invariant_clause = { "invariant" ~ ident }
 
-// Requires: unified guard + abort. `requires X else Error` generates both the
-// transition guard (X) and an abort theorem (¬X → none). Without `else`, it is
-// just a guard condition (same as `guard`).
-requires_clause = { "requires" ~ guard_expr ~ ("else" ~ ident)? }
+// ============================================================================
+// Accounts block
+// ============================================================================
 
-// Ensures: declarative post-condition. `state.x` refers to post-state,
-// `old(state.x)` refers to pre-state.
-ensures_clause = { "ensures" ~ guard_expr }
-
-// Modifies: frame condition. Fields not listed must be unchanged after handler.
-modifies_clause = { "modifies" ~ "[" ~ ident_list ~ "]" }
-
-// Let: named intermediate value. Resolved in subsequent guards/ensures/requires.
-let_clause = { "let" ~ ident ~ "=" ~ guard_expr }
-
-// IDL-level accounts block: `accounts { name : descriptor, ... }`
-accounts_block = { "accounts" ~ "{" ~ account_descriptor* ~ "}" }
+accounts_block     = { "accounts" ~ "{" ~ account_descriptor* ~ "}" }
 account_descriptor = { ident ~ ":" ~ acct_attr ~ ("," ~ acct_attr)* }
-// An account attribute: keyword or keyword with argument
-// Examples: signer, writable, readonly, program, pda ["seed", field], type token, authority escrow
+
 acct_attr = {
     acct_pda_attr
   | acct_type_attr
@@ -151,23 +184,141 @@ acct_attr = {
   | acct_simple_attr
 }
 acct_pda_attr       = { "pda" ~ "[" ~ pda_seed_list ~ "]" }
-acct_type_attr      = { "type" ~ ident }
+acct_type_attr      = { "type" ~ ident }       // backward compat: `type token`
 acct_authority_attr = { "authority" ~ ident }
-acct_simple_attr    = { ident }  // signer, writable, readonly, program
+acct_simple_attr    = { ident }                 // signer, writable, readonly, program, token
 
-// Transfers block: business-level token movement
+// ============================================================================
+// Effect block — `:=` for assignment, `+=` / `-=` for arithmetic
+//
+//   effect {
+//     interest_rate  := rate
+//     total_deposits += amount
+//     balance        -= fee
+//   }
+// ============================================================================
+
+effect_block = { "effect" ~ "{" ~ effect_stmt* ~ "}" }
+effect_stmt  = {
+    ident ~ "+=" ~ effect_value
+  | ident ~ "-=" ~ effect_value
+  | ident ~ ":=" ~ effect_value
+  | ident ~ "=" ~ effect_value    // sugar (prefer :=)
+}
+effect_value = { integer | qualified_ident }
+
+// ============================================================================
+// Transfers block
+// ============================================================================
+
 transfers_block = { "transfers" ~ "{" ~ transfer_clause* ~ "}" }
 transfer_clause = { "from" ~ ident ~ "to" ~ ident ~ transfer_fields* }
 transfer_fields = {
-    "amount" ~ (field_ref | ident | integer)
+    "amount" ~ (qualified_ident | integer)
   | "authority" ~ ident
 }
 
-// Per-handler invariant reference: `invariant name`
-handler_invariant_clause = { "invariant" ~ ident }
+// ============================================================================
+// Theorem — quantified property with preservation clause
+//
+//   theorem pool_solvency :
+//     forall s : Pool.Active, s.total_deposits >= s.total_borrows
+//     preserved_by all
+//
+//   theorem approvals_bounded :
+//     forall s : State, s.approval_count <= s.member_count
+//     preserved_by [create_vault, approve, execute]
+// ============================================================================
+
+theorem_block       = { doc_comment* ~ "theorem" ~ ident ~ ":" ~ guard_expr ~ preserved_by_clause }
+preserved_by_clause = { "preserved_by" ~ (preserved_by_all | "[" ~ ident_list ~ "]") }
+preserved_by_all    = { "all" }
 
 // ============================================================================
-// Instruction block (sBPF — legacy, kept for backward compat)
+// Invariant — quantified proposition or string description
+//
+//   invariant collateral_backing :
+//     forall l : Loan.Active, l.collateral > 0
+//
+//   invariant conservation "total tokens preserved"
+// ============================================================================
+
+invariant_decl = { "invariant" ~ ident ~ (":" ~ guard_expr | string_lit) }
+
+// ============================================================================
+// Cover — one-liner trace or block with reachable
+//
+//   cover happy_path [initialize, exchange]
+//
+//   cover cancel_available {
+//     reachable cancel when state.approval_count > 0
+//   }
+// ============================================================================
+
+cover_block      = { "cover" ~ ident ~ ("[" ~ ident_list ~ "]" | "{" ~ cover_clause* ~ "}") }
+cover_clause     = { trace_clause | reachable_clause | COMMENT }
+trace_clause     = { "trace" ~ "[" ~ ident_list ~ "]" }
+reachable_clause = { "reachable" ~ ident ~ ("when" ~ guard_expr)? }
+
+// ============================================================================
+// Liveness — one-liner leads-to
+//
+//   liveness loan_settles : Loan.Active ~> Loan.Empty via [repay] within 1
+// ============================================================================
+
+liveness_decl = { "liveness" ~ ident ~ ":" ~ qualified_ident ~ "~>" ~ qualified_ident ~ "via" ~ "[" ~ ident_list ~ "]" ~ "within" ~ integer }
+
+// ============================================================================
+// Environment block (external state mutations)
+// ============================================================================
+
+environment_block = { "environment" ~ ident ~ "{" ~ env_clause* ~ "}" }
+env_clause        = { mutates_clause | constraint_clause | COMMENT }
+mutates_clause    = { "mutates" ~ ident ~ ":" ~ ident }
+constraint_clause = { "constraint" ~ guard_expr }
+
+// ============================================================================
+// Guard expressions
+//
+// Precedence (lowest → highest):
+//   or, \/  <  implies  <  and, /\  <  not  <  cmp  <  +/-  <  */÷/%  <  atoms
+// ============================================================================
+
+guard_expr    = { guard_or }
+guard_or      = { guard_implies ~ (or_op ~ guard_implies)* }
+guard_implies = { guard_and ~ ("implies" ~ guard_and)* }
+guard_and     = { guard_not ~ (and_op ~ guard_not)* }
+guard_not     = { kw_not ~ guard_not | guard_atom }
+
+or_op  = @{ "or" ~ !(ASCII_ALPHANUMERIC | "_") | "\\/" }
+and_op = @{ "and" ~ !(ASCII_ALPHANUMERIC | "_") | "/\\" }
+kw_not = @{ "not" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+guard_atom = {
+    "(" ~ guard_expr ~ ")"
+  | quantifier_expr
+  | guard_comparison
+  | guard_value
+}
+
+quantifier_expr = { quantifier_kind ~ ident ~ ":" ~ qualified_ident ~ "," ~ guard_expr }
+quantifier_kind = { "forall" | "exists" }
+
+guard_comparison = { guard_value ~ cmp_op ~ guard_value }
+cmp_op           = { "<=" | ">=" | "!=" | "<" | ">" | "==" }
+
+guard_value   = { guard_product ~ (add_op ~ guard_product)* }
+guard_product = { guard_term ~ (mul_op ~ guard_term)* }
+mul_op = { "*" | "/" | "%" }
+add_op = { "+" | "-" }
+
+guard_term = { integer | old_expr | qualified_ident }
+
+// Pre-state reference: old(s.field) — only valid inside ensures
+old_expr = { "old" ~ "(" ~ qualified_ident ~ ")" }
+
+// ============================================================================
+// Instruction block (sBPF — kept for assembly target specs)
 // ============================================================================
 
 instruction_block = { doc_comment* ~ "instruction" ~ ident ~ "{" ~ instruction_item* ~ "}" }
@@ -185,122 +336,21 @@ instruction_item = {
 }
 
 discriminant_clause = { "discriminant" ~ (ident | integer) }
-entry_clause = { "entry" ~ integer }
+entry_clause        = { "entry" ~ integer }
 
-// Input buffer layout: fields with byte offsets and optional descriptions
 input_layout_block = { "input_layout" ~ "{" ~ layout_field* ~ "}" }
 insn_layout_block  = { "insn_layout" ~ "{" ~ layout_field* ~ "}" }
-layout_field = { ident ~ ":" ~ ident ~ "@" ~ signed_integer ~ string_lit? }
-signed_integer = @{ "-"? ~ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+layout_field       = { ident ~ ":" ~ ident ~ "@" ~ signed_integer ~ string_lit? }
+signed_integer     = @{ "-"? ~ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
 
-// Guard block (sBPF validation guard)
 guard_block = { doc_comment* ~ "guard" ~ ident ~ "{" ~ guard_item* ~ "}" }
-guard_item = {
-    checks_clause
-  | error_clause
-  | fuel_clause
-  | COMMENT
-}
-fuel_clause = { "fuel" ~ integer }
+guard_item  = { checks_clause | error_clause | fuel_clause | COMMENT }
+fuel_clause   = { "fuel" ~ integer }
 checks_clause = { "checks" ~ guard_expr }
 error_clause  = { "error" ~ ident }
 
-// ============================================================================
-// Operation block
-// ============================================================================
-
-operation_block = { doc_comment* ~ "operation" ~ ident ~ "{" ~ op_clause* ~ "}" }
-
-// Doc comments: /// lines preceding an item (captured, not discarded)
-doc_comment = @{ "///" ~ (!NEWLINE ~ ANY)* }
-
-op_clause = {
-    who_clause
-  | on_clause
-  | when_clause
-  | then_clause
-  | takes_block
-  | let_clause
-  | guard_clause
-  | requires_clause
-  | aborts_if_clause
-  | ensures_clause
-  | modifies_clause
-  | effect_block
-  | calls_clause
-  | emits_clause
-  | context_block
-  | COMMENT
-}
-
-aborts_if_clause = { "aborts_if" ~ guard_expr ~ "with" ~ ident }
-who_clause   = { "who" ~ ident }
-on_clause    = { "on" ~ ident }
-when_clause  = { "when" ~ ident }
-then_clause  = { "then" ~ ident }
-
-// Takes: block form `takes { x : U64 }` or inline `takes x : U64`
-takes_block  = { "takes" ~ "{" ~ field_decl* ~ "}" | "takes" ~ field_decl }
-
-guard_clause = { "guard" ~ guard_expr }
-
-// Guard expressions — parsed as structured AST, not strings
-// Precedence (lowest→highest): or < implies < and < not < cmp < +/- < */÷/% < atoms
-guard_expr    = { guard_or }
-guard_or      = { guard_implies ~ ("or" ~ guard_implies)* }
-guard_implies = { guard_and ~ ("implies" ~ guard_and)* }
-guard_and     = { guard_not ~ ("and" ~ guard_not)* }
-guard_not     = { kw_not ~ guard_not | guard_atom }
-kw_not        = @{ "not" ~ !(ASCII_ALPHANUMERIC | "_") }
-guard_atom = {
-    "(" ~ guard_expr ~ ")"
-  | quantifier_expr
-  | guard_comparison
-  | guard_value
-}
-quantifier_expr = { quantifier_kind ~ ident ~ ":" ~ ident ~ "," ~ guard_expr }
-quantifier_kind = { "forall" | "exists" }
-guard_comparison = { guard_value ~ cmp_op ~ guard_value }
-cmp_op = { "<=" | ">=" | "!=" | "<" | ">" | "==" }
-guard_value   = { guard_product ~ (add_op ~ guard_product)* }
-guard_product = { guard_term ~ (mul_op ~ guard_term)* }
-mul_op = { "*" | "/" | "%" }
-add_op = { "+" | "-" }
-guard_term = { integer | old_expr | field_ref | ident }
-
-// Pre-state reference: old(state.field_name) — only valid inside ensures clauses
-old_expr = { "old" ~ "(" ~ field_ref ~ ")" }
-
-// Field references: state.field_name
-field_ref = ${ "state" ~ "." ~ ident }
-
-effect_block = { "effect" ~ "{" ~ effect_stmt* ~ "}" }
-effect_stmt = {
-    ident ~ "+=" ~ effect_value   // add
-  | ident ~ "-=" ~ effect_value   // sub
-  | ident ~ "=" ~ effect_value    // set
-}
-effect_value = { integer | field_ref | ident }
-
-calls_clause = { "calls" ~ ident ~ ident ~ "(" ~ call_account_list? ~ ")" }
-call_account_list = { call_account ~ ("," ~ call_account)* }
-call_account = { ident ~ ident }
-
-emits_clause = { "emits" ~ ident }
-
-context_block = { "context" ~ "{" ~ context_entry* ~ "}" }
-context_entry = { ident ~ ":" ~ context_attr ~ ("," ~ context_attr)* }
-// An attribute is an ident optionally followed by a parenthesized argument.
-// Examples: Signer, Account(Multisig), mut, payer(creator), seeds(vault), bump
-// Inner types use parens: Account(Multisig) not Account Multisig.
-context_attr = { ident ~ ("(" ~ ident ~ ")")? }
-
-// ============================================================================
-// Property block
-// ============================================================================
-
+// sBPF property block
 property_block = { doc_comment* ~ "property" ~ ident ~ "{" ~ prop_clause* ~ "}" }
-
 prop_clause = {
     expr_clause
   | preserved_by_clause
@@ -312,12 +362,7 @@ prop_clause = {
   | COMMENT
 }
 
-expr_clause = { "expr" ~ guard_expr }
-// preserved_by: list of operations, or `all` to mean every operation
-preserved_by_clause = { "preserved_by" ~ (preserved_by_all | "[" ~ ident_list ~ "]") }
-preserved_by_all = { "all" }
-
-// sBPF property clauses
+expr_clause  = { "expr" ~ guard_expr }
 scope_clause = { "scope" ~ (scope_guards | "[" ~ ident_list ~ "]") }
 scope_guards = { "guards" }
 flow_clause  = { "flow" ~ ident ~ flow_kind }
@@ -331,67 +376,26 @@ after_clause = { "after" ~ "all" ~ "guards" }
 exit_clause  = { "exit" ~ integer }
 
 // ============================================================================
-// Cover block (reachability)
-// ============================================================================
-
-cover_block = { "cover" ~ ident ~ "{" ~ cover_clause* ~ "}" }
-cover_clause = {
-    trace_clause
-  | reachable_clause
-  | COMMENT
-}
-trace_clause     = { "trace" ~ "[" ~ ident_list ~ "]" }
-reachable_clause = { "reachable" ~ ident ~ ("when" ~ guard_expr)? }
-
-// ============================================================================
-// Liveness block (leads-to)
-// ============================================================================
-
-liveness_block = { "liveness" ~ ident ~ "{" ~ liveness_clause* ~ "}" }
-liveness_clause = {
-    from_clause
-  | leads_to_clause
-  | via_clause
-  | within_clause
-  | COMMENT
-}
-from_clause     = { "from" ~ ident }
-leads_to_clause = { "leads_to" ~ ident }
-via_clause      = { "via" ~ "[" ~ ident_list ~ "]" }
-within_clause   = { "within" ~ integer }
-
-// ============================================================================
-// Environment block (external state)
-// ============================================================================
-
-environment_block = { "environment" ~ ident ~ "{" ~ env_clause* ~ "}" }
-env_clause = {
-    mutates_clause
-  | constraint_clause
-  | COMMENT
-}
-mutates_clause    = { "mutates" ~ ident ~ ":" ~ ident }
-constraint_clause = { "constraint" ~ guard_expr }
-
-// ============================================================================
 // Shared primitives
 // ============================================================================
 
+qualified_ident = ${ ident ~ ("." ~ ident)* }
+ident           = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
+integer         = @{ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
+integer_list    =  { integer ~ ("," ~ integer)* }
+ident_list      =  { ident ~ ("," ~ ident)* }
+string_lit      = ${ "\"" ~ string_inner ~ "\"" }
+string_inner    = @{ (!("\"" | "\\") ~ ANY)* }
+
+// Legacy — kept for sBPF layout fields
 field_decl = { ident ~ ":" ~ ident }
 
-ident_list = { ident ~ ("," ~ ident)* }
-
-ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
-
-// Integers allow underscores for readability: 10_000_000
-integer = @{ ASCII_DIGIT ~ (ASCII_DIGIT | "_")* }
-
-string_lit = ${ "\"" ~ string_inner ~ "\"" }
-string_inner = @{ (!("\"" | "\\") ~ ANY)* }
+// Doc comments: /// lines preceding an item (captured, not discarded)
+doc_comment = @{ "///" ~ (!NEWLINE ~ ANY)* }
 
 // ============================================================================
 // Whitespace and comments
 // ============================================================================
 
 WHITESPACE = _{ " " | "\t" | NEWLINE }
-COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+COMMENT    = _{ "//" ~ !"/" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }

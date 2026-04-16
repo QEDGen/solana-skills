@@ -1,7 +1,7 @@
 // IDL → .qedspec generator
 //
 // Generates a valid .qedspec scaffold from an Anchor IDL JSON file.
-// Structural elements (state, accounts, operations, contexts, PDAs, errors) are
+// Structural elements (state, accounts, handlers, contexts, PDAs, errors) are
 // auto-derived. Semantic elements (guards, effects, properties) are stubbed with
 // TODO comments for agent or human completion.
 
@@ -124,28 +124,31 @@ fn render_pda_seeds(pda: &spec::IdlPda) -> Vec<String> {
 
 // ── Context attribute inference ──────────────────────────────────────────
 
-fn render_context_entry(
+fn render_account_entry(
     acct: &spec::IdlAccount,
-    is_init_ix: bool,
-    first_signer: Option<&str>,
+    _is_init_ix: bool,
+    _first_signer: Option<&str>,
     type_names: &HashSet<String>,
     pda_names: &std::collections::HashMap<String, String>,
 ) -> String {
     let mut attrs = Vec::new();
 
-    // Type inference
+    // Type inference — emit v2 grammar attributes
     if acct.signer && acct.pda.is_none() {
-        attrs.push("Signer".to_string());
-    } else if acct.name.contains("token_program") {
-        attrs.push("Program(Token)".to_string());
-    } else if acct.name.contains("system_program") {
-        attrs.push("Program(System)".to_string());
-    } else if acct.name.contains("associated_token") {
-        attrs.push("Program(AssociatedToken)".to_string());
+        attrs.push("signer".to_string());
+    } else if acct.name.contains("token_program")
+        || acct.name.contains("system_program")
+        || acct.name.contains("associated_token")
+    {
+        attrs.push("program".to_string());
     } else if acct.name.contains("rent") {
-        attrs.push("Sysvar(Rent)".to_string());
+        attrs.push("readonly".to_string());
+    } else if (acct.name.contains("token") && !acct.name.contains("program"))
+        || acct.name.ends_with("_ta")
+    {
+        attrs.push("token".to_string());
     } else {
-        // Try to infer Account(<Type>) from relations or type name matching
+        // Try to infer type from relations or type name matching
         let inner = acct
             .relations
             .first()
@@ -157,35 +160,43 @@ fn render_context_entry(
                 }
             })
             .or_else(|| {
-                // Match account name against known type names (case-insensitive)
                 let name_lower = acct.name.to_lowercase();
                 type_names
                     .iter()
                     .find(|t| name_lower.contains(&t.to_lowercase()))
                     .cloned()
-            })
-            .unwrap_or_else(|| "Account".to_string());
+            });
 
-        if inner == "Account" {
-            attrs.push("Account".to_string());
-        } else {
-            attrs.push(format!("Account({})", inner));
+        if let Some(type_name) = inner {
+            attrs.push(format!("type {}", type_name));
         }
     }
 
     // Modifier flags
     if acct.writable {
-        attrs.push("mut".to_string());
+        attrs.push("writable".to_string());
     }
-    if is_init_ix && acct.writable && acct.pda.is_some() {
-        attrs.push("init".to_string());
-        if let Some(signer) = first_signer {
-            attrs.push(format!("payer({})", signer));
+
+    // PDA seeds — v2 uses `pda [seed1, seed2]` inline
+    if let Some(pda_name) = pda_names.get(&acct.name) {
+        attrs.push(format!("pda [{}]", pda_name));
+    }
+
+    // Authority from relations (first non-type relation)
+    if let Some(rel) = acct.relations.first() {
+        if !type_names.contains(rel) || acct.relations.len() > 1 {
+            let auth_rel = acct
+                .relations
+                .iter()
+                .find(|r| !type_names.contains(r.as_str()))
+                .unwrap_or(rel);
+            attrs.push(format!("authority {}", auth_rel));
         }
     }
-    if let Some(pda_name) = pda_names.get(&acct.name) {
-        attrs.push(format!("seeds({})", pda_name));
-        attrs.push("bump".to_string());
+
+    // Ensure at least one attribute — grammar requires `ident : acct_attr+`
+    if attrs.is_empty() {
+        attrs.push("readonly".to_string());
     }
 
     format!("    {} : {}", acct.name, attrs.join(", "))
@@ -221,18 +232,18 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     // ── Header ───────────────────────────────────────────────────────────
     writeln!(
         s,
-        "# Generated from Anchor IDL — review and complete TODO items"
+        "// Generated from Anchor IDL — review and complete TODO items"
     )
     .unwrap();
-    writeln!(s, "#").unwrap();
+    writeln!(s, "//").unwrap();
     writeln!(
         s,
-        "# Auto-derived: state fields, operations, contexts, PDAs, errors"
+        "// Auto-derived: state fields, handlers, contexts, PDAs, errors"
     )
     .unwrap();
     writeln!(
         s,
-        "# TODO: guards, effects, lifecycle transitions, properties, invariants"
+        "// TODO: guards, effects, lifecycle transitions, properties, invariants"
     )
     .unwrap();
     writeln!(s).unwrap();
@@ -241,7 +252,7 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s, "spec {}", program_name).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "target quasar").unwrap();
-    writeln!(s, "# TODO: Replace with deployed program ID").unwrap();
+    writeln!(s, "// TODO: Replace with deployed program ID").unwrap();
     writeln!(s, "program_id \"11111111111111111111111111111111\"").unwrap();
     writeln!(s).unwrap();
 
@@ -250,20 +261,33 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
 
     if multi_account {
         for ty in &struct_types {
-            writeln!(s, "account {} {{", ty.name).unwrap();
-            let max_name = ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
-            for field in &ty.ty.fields {
-                writeln!(
-                    s,
-                    "  {:<width$} : {}",
-                    field.name,
-                    map_type(&field.ty),
-                    width = max_name
-                )
-                .unwrap();
+            writeln!(s, "type {}", ty.name).unwrap();
+            // Emit lifecycle variants as ADT constructors.
+            // The "Active" variant carries the account fields.
+            for state in &lifecycle {
+                if state == "Active" && !ty.ty.fields.is_empty() {
+                    writeln!(s, "  | {} of {{", state).unwrap();
+                    let max_name =
+                        ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
+                    let field_strs: Vec<String> = ty
+                        .ty
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            format!(
+                                "      {:<width$} : {}",
+                                f.name,
+                                map_type(&f.ty),
+                                width = max_name
+                            )
+                        })
+                        .collect();
+                    writeln!(s, "{}", field_strs.join(",\n")).unwrap();
+                    writeln!(s, "    }}").unwrap();
+                } else {
+                    writeln!(s, "  | {}", state).unwrap();
+                }
             }
-            writeln!(s, "  lifecycle [{}]", lifecycle.join(", ")).unwrap();
-            writeln!(s, "}}").unwrap();
             writeln!(s).unwrap();
         }
     } else if let Some(ty) = struct_types.first() {
@@ -308,18 +332,18 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         writeln!(s).unwrap();
     }
 
-    // ── Operations ───────────────────────────────────────────────────────
+    // ── Handlers ────────────────────────────────────────────────────────
     for (ix, analysis) in idl.instructions.iter().zip(analyses.iter()) {
         // Doc comment
         if !analysis.docs.is_empty() {
             writeln!(s, "/// {}", analysis.docs).unwrap();
         }
 
-        writeln!(s, "operation {} {{", ix.name).unwrap();
+        writeln!(s, "handler {} {{", ix.name).unwrap();
 
-        // who
+        // auth
         if let Some(signer) = analysis.signers.first() {
-            writeln!(s, "  who {}", signer).unwrap();
+            writeln!(s, "  auth {}", signer).unwrap();
         }
 
         // on (multi-account)
@@ -355,12 +379,12 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         }
 
         // guard stub
-        writeln!(s, "  # TODO: Add guard clause").unwrap();
+        writeln!(s, "  // TODO: Add guard clause").unwrap();
 
         // effect stub
-        writeln!(s, "  # TODO: Add effect block").unwrap();
+        writeln!(s, "  // TODO: Add effect block").unwrap();
 
-        // calls (if token program present)
+        // transfers hint (if token program present)
         if analysis.has_token_program {
             let writable_token: Vec<&spec::IdlAccount> = ix
                 .accounts
@@ -368,36 +392,24 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
                 .filter(|a| a.writable && a.name.contains("token") && !a.name.contains("program"))
                 .collect();
             if writable_token.len() >= 2 {
-                let call_accounts: Vec<String> = writable_token
-                    .iter()
-                    .take(2)
-                    .map(|a| format!("{} writable", a.name))
-                    .chain(
-                        analysis
-                            .signers
-                            .first()
-                            .map(|s| format!("{} signer", s))
-                            .into_iter(),
-                    )
-                    .collect();
                 writeln!(
                     s,
-                    "  calls TOKEN_PROGRAM_ID DISC_TRANSFER({})",
-                    call_accounts.join(", ")
+                    "  // TODO: Add transfers block for token transfer between {} and {}",
+                    writable_token[0].name, writable_token[1].name
                 )
                 .unwrap();
             }
         }
 
-        // context
+        // accounts
         let is_init_ix = ix.name.contains("init") || ix.name.contains("create");
         let first_signer = analysis.signers.first().map(|s| s.as_str());
-        writeln!(s, "  context {{").unwrap();
+        writeln!(s, "  accounts {{").unwrap();
         for acct in &ix.accounts {
             writeln!(
                 s,
                 "{}",
-                render_context_entry(acct, is_init_ix, first_signer, &type_names, &pda_names)
+                render_account_entry(acct, is_init_ix, first_signer, &type_names, &pda_names)
             )
             .unwrap();
         }
@@ -408,17 +420,17 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     }
 
     // ── Properties / invariants stub ─────────────────────────────────────
-    writeln!(s, "# TODO: Add properties").unwrap();
+    writeln!(s, "// TODO: Add properties").unwrap();
     writeln!(
         s,
-        "# Example: property conservation {{ expr state.total_in >= state.total_out  preserved_by all }}"
+        "// Example: property conservation {{ expr state.total_in >= state.total_out  preserved_by all }}"
     )
     .unwrap();
     writeln!(s).unwrap();
-    writeln!(s, "# TODO: Add invariants").unwrap();
+    writeln!(s, "// TODO: Add invariants").unwrap();
     writeln!(
         s,
-        "# Example: invariant conservation \"total tokens preserved\""
+        "// Example: invariant conservation \"total tokens preserved\""
     )
     .unwrap();
 
@@ -700,19 +712,18 @@ mod tests {
         assert_eq!(spec.handlers.len(), 2);
     }
 
-    // ── Context generation ───────────────────────────────────────────────
+    // ── Accounts generation ─────────────────────────────────────────────
 
     #[test]
-    fn context_has_signer_and_program() {
+    fn accounts_has_signer_and_program() {
         let (idl, analyses) = parse_test_idl(ESCROW_IDL);
         let content = render(&idl, &analyses);
 
-        // Verify key context attributes appear
-        assert!(content.contains("Signer"));
-        assert!(content.contains("Program(Token)"));
-        assert!(content.contains("Program(System)"));
-        assert!(content.contains("seeds(escrow)"));
-        assert!(content.contains("bump"));
+        // Verify key accounts attributes appear
+        assert!(content.contains("signer"));
+        assert!(content.contains("program"));
+        assert!(content.contains("writable"));
+        assert!(content.contains("pda [escrow]"));
     }
 
     // ── PDA extraction ───────────────────────────────────────────────────

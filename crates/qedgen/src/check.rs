@@ -1258,13 +1258,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 rule: "no_access_control".to_string(),
                 severity: Severity::Warning,
                 priority: 1,
-                message: format!("handler '{}' has no `who` — anyone can call it", op.name),
+                message: format!("handler '{}' has no `auth` — anyone can call it", op.name),
                 subject: Some(op.name.clone()),
                 fix: format!(
-                    "Add `who {}` to restrict who can execute this handler",
+                    "Add `auth {}` to restrict who can execute this handler",
                     signer_hint
                 ),
-                example: Some(format!("  handler {}\n    who {}", op.name, signer_hint)),
+                example: Some(format!("  handler {}\n    auth {}", op.name, signer_hint)),
                 counterexample: None,
                 fix_options: vec![],
             });

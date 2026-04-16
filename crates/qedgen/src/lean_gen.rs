@@ -1152,6 +1152,10 @@ fn render_covers(out: &mut String, spec: &ParsedSpec, state_type: &str) {
         let op = spec.handlers.iter().find(|o| o.name == op_name);
         if let Some(op) = op {
             if let Some(ref acct) = op.on_account {
+                // If on_account matches the primary state type name, use it directly
+                if acct == state_type {
+                    return state_type.to_string();
+                }
                 return format!("{}State", acct);
             }
         }

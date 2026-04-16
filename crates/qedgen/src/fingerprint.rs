@@ -281,17 +281,9 @@ state {
 
 lifecycle [Active]
 
-operation increment {
-  who authority
-  when Active
-  then Active
-
-  takes {
-    delta : U64
-  }
-
-  guard state.count + delta <= 1000000
-
+handler increment (delta : U64) : Active -> Active {
+  auth authority
+  requires state.count + delta <= 1000000
   effect {
     count += delta
   }
@@ -318,7 +310,7 @@ state {
   count : U64
 }
 
-operation increment {
+handler increment {
   effect {
     count += delta
   }
@@ -331,7 +323,7 @@ state {
   count : U64
 }
 
-operation increment {
+handler increment {
   effect {
     count -= delta
   }
@@ -359,7 +351,7 @@ event Foo {
   x : U64
 }
 
-operation increment {
+handler increment {
   effect {
     count += delta
   }
@@ -376,7 +368,7 @@ event Bar {
   y : U64
 }
 
-operation increment {
+handler increment {
   effect {
     count += delta
   }

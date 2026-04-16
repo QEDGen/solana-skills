@@ -1,46 +1,48 @@
-# Escrow Verification Spec
-#
-# A token escrow that lets two parties trade safely. The initializer deposits
-# tokens and sets terms, a taker completes the trade, or the initializer
-# cancels and reclaims their deposit.
-#
-# Lifecycle: initialize -> [Open] -> cancel | exchange -> [Closed]
+// Escrow Verification Spec
+//
+// A token escrow that lets two parties trade safely. The initializer deposits
+// tokens and sets terms, a taker completes the trade, or the initializer
+// cancels and reclaims their deposit.
+//
+// Lifecycle: initialize -> [Open] -> cancel | exchange -> [Closed]
 
 spec Escrow
 
-state {
-  initializer          : Pubkey
-  taker                : Pubkey
-  initializer_amount   : U64
-  taker_amount         : U64
-  escrow_token_account : Pubkey
-}
-
-lifecycle [Uninitialized, Open, Closed]
+type State
+  | Uninitialized
+  | Open of {
+      initializer          : Pubkey,
+      taker                : Pubkey,
+      initializer_amount   : U64,
+      taker_amount         : U64,
+      escrow_token_account : Pubkey,
+    }
+  | Closed
 
 pda escrow ["escrow", initializer]
 
 event EscrowInitialized {
-  initializer : Pubkey
-  amount      : U64
+  initializer : Pubkey,
+  amount      : U64,
 }
 
 event EscrowExchanged {
-  taker  : Pubkey
-  amount : U64
+  taker  : Pubkey,
+  amount : U64,
 }
 
 event EscrowCancelled {
-  initializer : Pubkey
+  initializer : Pubkey,
 }
 
-errors [InvalidAmount, Unauthorized, AlreadyClosed]
+type Error
+  | InvalidAmount
+  | Unauthorized
+  | AlreadyClosed
 
 /// Initializer deposits tokens and opens the escrow
-handler initialize {
-  who initializer
-  when Uninitialized
-  then Open
+handler initialize (deposit_amount : U64) (receive_amount : U64) : State.Uninitialized -> State.Open {
+  auth initializer
 
   accounts {
     initializer    : signer, writable
@@ -52,16 +54,11 @@ handler initialize {
     system_program : program
   }
 
-  takes {
-    deposit_amount : U64
-    receive_amount : U64
-  }
-
   requires deposit_amount > 0 and receive_amount > 0 else InvalidAmount
 
   effect {
-    initializer_amount = deposit_amount
-    taker_amount = receive_amount
+    initializer_amount := deposit_amount
+    taker_amount := receive_amount
   }
 
   transfers {
@@ -72,10 +69,8 @@ handler initialize {
 }
 
 /// Taker completes the trade by sending their tokens
-handler exchange {
-  who taker
-  when Open
-  then Closed
+handler exchange : State.Open -> State.Closed {
+  auth taker
 
   accounts {
     taker          : signer, writable
@@ -95,10 +90,8 @@ handler exchange {
 }
 
 /// Initializer reclaims their deposit and closes the escrow
-handler cancel {
-  who initializer
-  when Open
-  then Closed
+handler cancel : State.Open -> State.Closed {
+  auth initializer
 
   accounts {
     initializer    : signer, writable
@@ -117,17 +110,8 @@ handler cancel {
 
 invariant conservation "total tokens preserved across initialize, exchange, cancel"
 
-cover happy_path {
-  trace [initialize, exchange]
-}
+cover happy_path [initialize, exchange]
 
-cover cancel_path {
-  trace [initialize, cancel]
-}
+cover cancel_path [initialize, cancel]
 
-liveness escrow_settles {
-  from Open
-  leads_to Closed
-  via [exchange, cancel]
-  within 1
-}
+liveness escrow_settles : State.Open ~> State.Closed via [exchange, cancel] within 1

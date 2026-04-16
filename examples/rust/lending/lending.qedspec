@@ -1,66 +1,54 @@
-# Lending Protocol Verification Spec
-#
-# A simple lending pool: depositors add liquidity, borrowers take loans
-# against collateral, and repay or get liquidated.
-#
-# Two account types:
-#   Pool  — holds aggregate pool state (total deposits, total borrows)
-#   Loan  — per-borrower loan record (amount, collateral, status)
+// Lending Protocol Verification Spec
+//
+// A simple lending pool: depositors add liquidity, borrowers take loans
+// against collateral, and repay or get liquidated.
 
 spec Lending
 
-account Pool {
-  authority      : Pubkey
-  total_deposits : U64
-  total_borrows  : U64
-  interest_rate  : U64
-  lifecycle [Uninitialized, Active, Paused]
-}
+// State as algebraic data types: fields live inside the variant they belong to.
+// An Uninitialized pool has no fields. An Active pool has authority, balances, etc.
 
-account Loan {
-  borrower   : Pubkey
-  pool       : Pubkey
-  amount     : U64
-  collateral : U64
-  lifecycle [Empty, Active, Liquidated]
-}
+type Pool
+  | Uninitialized
+  | Active of {
+      authority      : Pubkey,
+      total_deposits : U64,
+      total_borrows  : U64,
+      interest_rate  : U64,
+    }
+  | Paused
+
+type Loan
+  | Empty
+  | Active of {
+      borrower   : Pubkey,
+      pool       : Pubkey,
+      amount     : U64,
+      collateral : U64,
+    }
+  | Liquidated
+
+type Error
+  | InsufficientLiquidity
+  | InsufficientCollateral
+  | Unauthorized
+  | AlreadyActive
+  | InvalidAmount
 
 pda pool ["pool", authority]
 pda loan ["loan", pool, borrower]
 
-event PoolInitialized {
-  authority : Pubkey
-  rate      : U64
-}
+event PoolInitialized { authority : Pubkey, rate : U64 }
+event Deposited       { depositor : Pubkey, amount : U64 }
+event Borrowed        { borrower : Pubkey, amount : U64 }
+event Repaid          { borrower : Pubkey, amount : U64 }
+event LoanLiquidated  { borrower : Pubkey, amount : U64 }
 
-event Deposited {
-  depositor : Pubkey
-  amount    : U64
-}
-
-event Borrowed {
-  borrower : Pubkey
-  amount   : U64
-}
-
-event Repaid {
-  borrower : Pubkey
-  amount   : U64
-}
-
-event LoanLiquidated {
-  borrower : Pubkey
-  amount   : U64
-}
-
-errors [InsufficientLiquidity, InsufficientCollateral, Unauthorized, AlreadyActive, InvalidAmount]
+// Handlers: name (inputs) : PreState -> PostState
 
 /// Initialize the lending pool with an interest rate
-handler init_pool {
-  who authority
-  on Pool
-  when Uninitialized
-  then Active
+handler init_pool (rate : U64) : Pool.Uninitialized -> Pool.Active {
+  auth authority
 
   accounts {
     authority      : signer, writable
@@ -68,33 +56,26 @@ handler init_pool {
     system_program : program
   }
 
-  takes rate : U64
-
   requires rate > 0 else InvalidAmount
 
   effect {
-    interest_rate = rate
-    total_deposits = 0
-    total_borrows = 0
+    interest_rate  := rate
+    total_deposits := 0
+    total_borrows  := 0
   }
 
   emits PoolInitialized
 }
 
 /// Deposit tokens into the pool
-handler deposit {
-  on Pool
-  when Active
-
+handler deposit (amount : U64) : Pool.Active -> Pool.Active {
   accounts {
     depositor     : signer, writable
     pool          : writable, pda ["pool", authority]
-    pool_vault    : writable, type token, authority pool
-    depositor_ta  : writable, type token
+    pool_vault    : writable, token, authority pool
+    depositor_ta  : writable, token
     token_program : program
   }
-
-  takes amount : U64
 
   requires amount > 0 else InvalidAmount
 
@@ -106,103 +87,80 @@ handler deposit {
 }
 
 /// Borrow tokens from the pool against collateral
-handler borrow {
-  who borrower
-  on Loan
-  when Empty
-  then Active
+handler borrow (amount : U64) (collateral : U64) : Loan.Empty -> Loan.Active {
+  auth borrower
 
   accounts {
     borrower       : signer, writable
     loan           : writable, pda ["loan", pool, borrower]
     pool           : writable, pda ["pool", authority]
-    pool_vault     : writable, type token, authority pool
-    borrower_ta    : writable, type token
+    pool_vault     : writable, token, authority pool
+    borrower_ta    : writable, token
     token_program  : program
     system_program : program
   }
 
-  takes {
-    amount     : U64
-    collateral : U64
-  }
-
-  requires amount > 0 and collateral > 0 else InvalidAmount
+  requires amount > 0 /\ collateral > 0 else InvalidAmount
 
   effect {
-    amount = amount
-    collateral = collateral
+    amount     := amount
+    collateral := collateral
   }
 
   emits Borrowed
 }
 
 /// Repay a loan in full
-handler repay {
-  who borrower
-  on Loan
-  when Active
-  then Empty
+handler repay : Loan.Active -> Loan.Empty {
+  auth borrower
 
   accounts {
     borrower      : signer, writable
     loan          : writable, pda ["loan", pool, borrower]
     pool          : writable, pda ["pool", authority]
-    pool_vault    : writable, type token, authority pool
-    borrower_ta   : writable, type token
+    pool_vault    : writable, token, authority pool
+    borrower_ta   : writable, token
     token_program : program
   }
 
   effect {
-    amount = 0
-    collateral = 0
+    amount     := 0
+    collateral := 0
   }
 
   emits Repaid
 }
 
 /// Liquidate an undercollateralized loan
-handler liquidate {
-  on Loan
-  when Active
-  then Liquidated
-
+handler liquidate : Loan.Active -> Loan.Liquidated {
   accounts {
     liquidator    : signer, writable
     loan          : writable, pda ["loan", pool, borrower]
     pool          : writable, pda ["pool", authority]
-    pool_vault    : writable, type token, authority pool
+    pool_vault    : writable, token, authority pool
     token_program : program
   }
 
   effect {
-    amount = 0
+    amount := 0
   }
 
   emits LoanLiquidated
 }
 
-property pool_solvency {
-  expr state.total_deposits >= state.total_borrows
+// Properties
+
+theorem pool_solvency :
+  forall s : Pool.Active, s.total_deposits >= s.total_borrows
   preserved_by all
-}
 
-invariant collateral_backing "all active loans have collateral > 0"
+invariant collateral_backing :
+  forall l : Loan.Active, l.collateral > 0
 
-cover borrow_repay_cycle {
-  trace [init_pool, deposit, borrow, repay]
-}
+cover borrow_repay_cycle [init_pool, deposit, borrow, repay]
+cover liquidation_path   [init_pool, deposit, borrow, liquidate]
 
-cover liquidation_path {
-  trace [init_pool, deposit, borrow, liquidate]
-}
-
-liveness loan_settles {
-  from Active
-  leads_to Empty
-  via [repay]
-  within 1
-}
+liveness loan_settles : Loan.Active ~> Loan.Empty via [repay] within 1
 
 environment interest_rate_change {
   mutates interest_rate : U64
