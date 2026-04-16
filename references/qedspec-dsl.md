@@ -1,229 +1,332 @@
 # qedspec DSL Reference
 
-## qedspec macro
+The `.qedspec` file is the single source of truth for a program's formal specification.
+QEDGen parses it (pest PEG grammar), validates it (`qedgen check`), and generates all
+downstream artifacts: Quasar Rust code, Lean proofs, Kani harnesses, proptest suites,
+and CI workflows.
 
-```lean
-import QEDGen.Solana.Spec
-open QEDGen.Solana.SpecDSL
+## File structure
 
-qedspec Escrow where
-  program_id: "11111111111111111111111111111111"
+```
+spec ProgramName
 
-  state
-    maker         : Pubkey
-    src_mint      : Pubkey
-    dst_mint      : Pubkey
-    amount        : U64
-    taker_amount  : U64
+// Top-level declarations (any order)
+target quasar              // or: target assembly
+program_id "1111...1111"
+assembly "src/program.s"   // sBPF only
 
-  event ExchangeEvent { maker : Pubkey, taker : Pubkey, amount : U64 }
+const MAX_MEMBERS = 32
 
-  errors: Unauthorized, InvalidAmount, AlreadyCompleted
+type State
+  | Uninitialized
+  | Active of { authority : Pubkey, balance : U64 }
+  | Closed
 
-  operation cancel
-    doc: "Cancel the escrow and return tokens to maker"
-    who: maker
-    when: Open
-    then: Cancelled
-    effect: transfer escrow_token -> maker
-    context: {
-      maker : Signer, mut
-      escrow_token : TokenAccount, mut
-    }
-
-  operation exchange
-    doc: "Execute the exchange"
-    who: taker
-    when: Open
-    then: Completed
-    takes: taker_amount U64
-    guard: "taker_amount >= s.taker_amount"
-    effect: transfer escrow_token -> taker, transfer taker_token -> maker
-    emits: ExchangeEvent
-    calls: TOKEN_PROGRAM_ID DISC_TRANSFER(escrow_token writable, dest writable, authority signer)
-    context: {
-      taker : Signer, mut
-      escrow_token : TokenAccount, mut
-      taker_token : TokenAccount, mut
-      system_program : Program, System
-    }
-
-  invariant token_conservation
-    over: [escrow_token, maker_token, taker_token]
-    sum amount is constant across exchange
-
-  invariant lifecycle
-    Open -> Completed | Cancelled
-    terminal: Completed, Cancelled
-
-  property bounded :
-    s.amount <= U64_MAX
-    preserved_by: exchange
-
-  trust
-    spl_token, solana_runtime, anchor_framework
+handler initialize ...
+property conservation ...
+invariant backing ...
+cover happy_path [...]
+liveness settles ...
+environment oracle { ... }
 ```
 
-## What the macro generates
+Comments: `//` line comments, `///` doc comments (attached to the next item).
 
-- `State` structure with `DecidableEq`
-- `Status` enum from `when`/`then` values (with `DecidableEq`)
-- Transition functions (`Option State`) per operation
-- `Operation` inductive + `applyOp` dispatcher
-- Theorem **signatures** with `sorry` bodies — one per operation x property, one per invariant
-- CPI correctness theorem stubs
+## Top-level declarations
 
-**What the macro does NOT generate**: proof bodies. You fill those in the proof-writing step.
+### `spec`
 
-## DSL vocabulary
+Required header. Names the program.
+
+```
+spec Escrow
+```
+
+### `target`
+
+Declares the compilation target. Affects which codegen backends and sBPF-specific
+constructs are available.
+
+```
+target quasar       // Anchor/Quasar Rust programs (default)
+target assembly     // sBPF assembly programs
+```
+
+### `program_id`
+
+On-chain program address.
+
+```
+program_id "11111111111111111111111111111111"
+```
+
+### `assembly`
+
+Path to the sBPF assembly source (assembly target only).
+
+```
+assembly "src/program.s"
+```
+
+### `const`
+
+Named integer constants. Underscores allowed for readability.
+
+```
+const MAX_MEMBERS = 32
+const MAX_VAULT_TVL = 10_000_000_000_000_000
+```
+
+### `pubkey`
+
+Named pubkey as a byte array.
+
+```
+pubkey SYSTEM_PROGRAM_ID [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6]
+```
+
+## Type system
+
+### `type` (algebraic data types)
+
+ML-style sum types with optional fields, error codes, and descriptions.
+
+```
+// State ADT — variants with optional fields
+type Pool
+  | Uninitialized
+  | Active of {
+      authority      : Pubkey,
+      total_deposits : U64,
+      total_borrows  : U64,
+      interest_rate  : U64,
+    }
+  | Paused
+
+// Multiple types per spec
+type Loan
+  | Empty
+  | Active of { borrower : Pubkey, amount : U64, collateral : U64 }
+  | Liquidated
+
+// Error type — variants with optional code + description
+type Error
+  | InvalidAmount
+  | Unauthorized
+  | InvalidDiscriminant = 1 "Discriminant is not REGISTER_MARKET"
+  | InvalidLength       = 2 "Instruction data wrong length"
+```
+
+Type expressions: `Pubkey`, `U8`, `U16`, `U64`, `U128`, `Vec U64`, `Option Pubkey`.
+
+### `state` (sugar)
+
+Shorthand for a single unnamed account type. Equivalent to a `type` with one variant.
+
+```
+state {
+  balance : U64
+  owner   : Pubkey
+}
+```
+
+### `lifecycle` (sugar)
+
+Shorthand for declaring lifecycle variant names.
+
+```
+lifecycle [Open, Closed, Cancelled]
+```
+
+## PDA and events
+
+### `pda`
+
+PDA seed derivation. Seeds can be string literals or identifiers.
+
+```
+pda escrow ["escrow", initializer]
+pda market ["base_mint", "quote_mint"]
+pda loan ["loan", pool, borrower]
+```
+
+### `event`
+
+Event type with typed fields.
+
+```
+event PoolInitialized { authority : Pubkey, rate : U64 }
+event Deposited       { depositor : Pubkey, amount : U64 }
+```
+
+## Error declarations
+
+### `errors` (sugar)
+
+Simple error list or valued error list. Prefer `type Error | ...` for new specs.
+
+```
+// Simple list
+errors [Unauthorized, InvalidAmount, AlreadyClosed]
+
+// Valued list (sBPF compat)
+errors [
+  InvalidAccountCount = 1 "Invalid number of accounts",
+  InsufficientLamports = 7 "Sender has insufficient lamports",
+]
+```
+
+## Handlers
+
+Handlers are the core building block — each one models a program instruction.
+They use an ML-style signature with optional parameters and state transition.
+
+### Syntax
+
+```
+/// Doc comment (optional, captured)
+handler name (param1 : Type) (param2 : Type) : PreState -> PostState {
+  // clauses
+}
+```
+
+All parts of the signature are optional:
+
+```
+// Full signature
+handler initialize (amount : U64) : State.Uninitialized -> State.Active { ... }
+
+// No params
+handler cancel : State.Open -> State.Closed { ... }
+
+// No transition (pure guard program)
+handler check_slippage { ... }
+
+// No params, no transition
+handler transfer_sol { ... }
+```
+
+### Handler clauses
 
 | Clause | Purpose | Example |
 |---|---|---|
-| `state` | Declare program state fields | `amount : U64` |
-| `operation` | Define an operation | `operation cancel` |
-| `who:` | Access control (signer must match field) | `who: maker` |
-| `when:` / `then:` | Lifecycle transition | `when: Open then: Cancelled` |
-| `takes:` | Operation parameters | `takes: amount U64` |
-| `guard:` | Domain constraint (generates proof obligation) | `guard: "amount > 0"` |
-| `effect:` | State mutation | `effect: balance add amount` |
-| `calls:` | CPI declaration | `calls: TOKEN_PROGRAM_ID DISC_TRANSFER(...)` |
-| `emits:` | Event emission | `emits: ExchangeEvent` |
-| `context:` | Account context (for codegen) | `authority : Signer, mut` |
-| `property` | Named property with `preserved_by` | `property bounded "expr"` |
-| `invariant` | Global invariant | `invariant conservation` |
-| `trust` | Trust boundary | `trust spl_token, solana_runtime` |
-| `event` | Event type declaration | `event E { field : Type }` |
-| `errors:` | Error enum for codegen | `errors: Unauthorized, InvalidAmount` |
-| `program_id:` | On-chain program ID | `program_id: "111..."` |
-| `doc:` | Documentation string | `doc: "Cancel the escrow"` |
-| `aborts_if` | Reject condition with named error (v2.0) | `aborts_if amount == 0 with InvalidAmount` |
-| `cover` | Reachability trace (v2.0) | `cover happy_path { trace [...] }` |
-| `liveness` | Bounded leads-to (v2.0) | `liveness drain { from A leads_to B ... }` |
-| `environment` | External state mutation (v2.0) | `environment oracle { mutates price : U64 }` |
+| `auth` | Access control (signer must match field) | `auth authority` |
+| `accounts { ... }` | Account descriptors | see below |
+| `requires expr else Error` | Guard with error code | `requires amount > 0 else InvalidAmount` |
+| `requires expr` | Guard without error code | `requires state.member_count > state.threshold` |
+| `ensures expr` | Postcondition | `ensures state.balance >= 0` |
+| `modifies [fields]` | Modification set | `modifies [balance, counter]` |
+| `let name = expr` | Local binding | `let fee = amount * 3 / 100` |
+| `effect { ... }` | State mutations | see below |
+| `transfers { ... }` | Token transfer declarations | see below |
+| `emits Event` | Event emission | `emits PoolInitialized` |
+| `aborts_total` | Handler must reject on all guard failures | `aborts_total` |
+| `invariant name` | Reference a global invariant | `invariant conservation` |
+| `include schema` | Include a schema's clauses | `include base_validation` |
+| `takes { ... }` | Parameters (sugar, prefer signature) | `takes amount : U64` |
+| `on ident` | Instruction selector (sugar) | `on cancel` |
+| `when ident` | Pre-state (sugar, prefer signature) | `when Open` |
+| `then ident` | Post-state (sugar, prefer signature) | `then Closed` |
 
-## v2.0 blocks
+### `accounts` block
 
-### `aborts_if` clause
-
-Declares a condition under which an operation must reject. Generates a negative theorem (Lean: `= none`, Kani: `assert!(!transition(...))`).
+Declares the instruction's account context with attributes.
 
 ```
-operation withdraw {
-  guard state.C_tot >= amount
-  aborts_if state.C_tot < amount with InsufficientFunds
-
-  effect { V -= amount; C_tot -= amount }
+accounts {
+  authority      : signer, writable
+  vault          : writable, pda ["vault", authority]
+  pool_vault     : writable, token, authority pool
+  depositor_ta   : writable, type token
+  mint           : readonly
+  token_program  : program
+  system_program : program
 }
 ```
 
-Multiple `aborts_if` clauses per operation are allowed (e.g., different error codes for different failure modes).
+Account attributes:
+- `signer` — must sign the transaction
+- `writable` — mutable account
+- `readonly` — immutable account
+- `program` — program account
+- `token` — SPL token account (shorthand)
+- `type ident` — explicit account type
+- `authority ident` — token authority reference
+- `pda [seeds]` — PDA derivation inline
 
-**Lean output:**
-```lean
-theorem withdraw_aborts_if_InsufficientFunds (s : State) (signer : Pubkey) (amount : Nat)
-    (h : s.C_tot < amount) : withdrawTransition s signer amount = none := sorry
+### `effect` block
+
+State mutations using `:=` (assignment), `+=` (increment), `-=` (decrement).
+
 ```
-
-**Kani output:**
-```rust
-#[kani::proof]
-fn verify_withdraw_aborts_if_InsufficientFunds() {
-    let mut s = State { ... kani::any() ... };
-    let amount: u128 = kani::any();
-    kani::assume(s.C_tot < amount);
-    assert!(!withdraw(&mut s, amount));
+effect {
+  interest_rate  := rate
+  total_deposits += amount
+  balance        -= fee
+  counter        += 1
 }
 ```
 
-### `cover` block (reachability)
+Values can be integers or qualified identifiers (e.g., `deposit_amount`, `state.balance`).
 
-Declares that a sequence of operations is reachable from some initial state. Generates existential proofs (Lean) and `kani::cover!` harnesses (Kani).
+### `transfers` block
 
-```
-cover happy_path {
-  trace [deposit, withdraw]
-}
-
-cover cancel_always_available {
-  reachable cancel_proposal when state.approval_count > 0
-}
-```
-
-**Lean output:**
-```lean
-theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
-    ∃ (v0 : Nat), ∃ (s1 : State), depositTransition s0 signer v0 = some s1 ∧
-      withdrawTransition s1 signer ≠ none := sorry
-```
-
-### `liveness` block (leads-to)
-
-Declares that from a given lifecycle state, another state is reachable within a bounded number of steps via specified operations.
+Token transfer declarations with source, destination, amount, and authority.
 
 ```
-liveness drain_completes {
-  from Draining
-  leads_to Active
-  via [complete_drain, reset]
-  within 2
+transfers {
+  from initializer_ta to escrow_ta amount deposit_amount authority initializer
+  from escrow_ta to taker_ta amount initializer_amount authority escrow
 }
 ```
 
-**Lean output:**
-```lean
-theorem liveness_drain_completes (s : State) (signer : Pubkey)
-    (h : s.status = .Draining) :
-    ∃ ops, ops.length ≤ 2 ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .Active := sorry
-```
+### `schema` block
 
-**Kani output:** Multi-step harness with non-deterministic operation selection in a loop.
-
-### `environment` block (external state)
-
-Declares external state changes that can happen outside of operations (e.g., oracle price updates). Properties referencing mutated fields must still hold.
+Reusable clause fragments. Handlers include them with `include`.
 
 ```
-environment interest_rate_change {
-  mutates interest_rate : U64
-  constraint interest_rate > 0
+schema base_validation {
+  requires accounts.count >= 3 else InvalidAccountCount
+  requires user.data_len == 0 else UserDataLen
+}
+
+handler initialize : State.Uninitialized -> State.Active {
+  include base_validation
+  // additional clauses...
 }
 ```
 
-**Lean output:**
-```lean
-theorem pool_solvency_under_interest_rate_change (s : PoolState) (new_interest_rate : Nat)
-    (h_c0 : new_interest_rate > 0)
-    (h_inv : pool_solvency s) :
-    pool_solvency { s with interest_rate := new_interest_rate } := sorry
-```
+## Properties
 
-### `qedgen check --coverage` command
-
-Prints a verification matrix showing which operations are covered by which properties.
+Quantified properties with a preservation clause. Generates per-handler sub-lemmas.
 
 ```
-$ qedgen check --spec multisig.qedspec --coverage
+// Preserved by all handlers
+property conservation :
+  state.V >= state.C_tot + state.I
+  preserved_by all
 
-operation         threshold_bounded approvals_bounded
------------------------------------------------------
-create_vault              Y                 Y
-propose                   Y                 Y
-approve                   Y                 Y
-execute                   Y                 Y
-cancel_proposal           Y                 Y
-remove_member             Y                 -
+// Preserved by specific handlers
+property vault_bounded :
+  state.V <= MAX_VAULT_TVL
+  preserved_by [deposit, top_up_insurance]
 
-Coverage: 100% (6/6 operations covered by at least one property)
+// Quantified over a type
+property pool_solvency :
+  forall s : Pool.Active, s.total_deposits >= s.total_borrows
+  preserved_by all
+
+// Simple bound
+property threshold_bounded :
+  state.threshold <= state.member_count and state.threshold > 0
+  preserved_by all
 ```
 
-Use `--json` for machine-readable output.
-
-### Proof decomposition (v2.0)
-
-Properties with `preserved_by` now generate per-operation sub-lemmas instead of a monolithic theorem:
+**Generated Lean output** — per-handler sub-lemmas + master inductive theorem:
 
 ```lean
--- Per-op sub-lemma (user proves this)
+-- Per-handler sub-lemma (user proves this)
 theorem conservation_preserved_by_deposit (s s' : State) ...
     (h_inv : conservation s) (h : depositTransition s signer amount = some s') :
     conservation s' := sorry
@@ -235,9 +338,7 @@ theorem conservation_inductive ... := by
   | withdraw amount => exact conservation_preserved_by_withdraw s s' signer amount h_inv h
 ```
 
-### Auto-overflow obligations (v2.0)
-
-Operations with `add` effects automatically generate overflow safety obligations:
+Operations with `+=` effects also generate **auto-overflow obligations**:
 
 ```lean
 theorem deposit_overflow_safe (s s' : State) ...
@@ -246,11 +347,277 @@ theorem deposit_overflow_safe (s s' : State) ...
     valid_u128 s'.V ∧ valid_u128 s'.C_tot ∧ valid_u128 s'.I := sorry
 ```
 
-Kani overflow harnesses use symbolic inputs and rely on Kani's built-in overflow detection.
+## Invariants
 
-## qedguards DSL (for sBPF programs)
+Named invariants — either a quantified expression or a string description.
 
-For sBPF assembly programs, use `qedguards` instead of `qedspec`:
+```
+// Quantified
+invariant collateral_backing :
+  forall l : Loan.Active, l.collateral > 0
+
+// String description (for documentation / Lean comment)
+invariant conservation "total tokens preserved across initialize, exchange, cancel"
+
+invariant pda_integrity "derived PDA matches provided account on initialize"
+```
+
+## Cover (reachability)
+
+Declares that a sequence of handlers is reachable. Generates existential proofs (Lean) and `kani::cover!` harnesses.
+
+```
+// One-liner trace
+cover happy_path [initialize, exchange]
+cover cancel_path [initialize, cancel]
+cover bulk_insert [initialize, insert, insert, insert]
+
+// Block form with trace and/or reachable clauses
+cover cancel_available {
+  trace [create_vault, propose, reject, cancel_proposal]
+  reachable cancel_proposal when state.approval_count > 0
+}
+```
+
+## Liveness (bounded leads-to)
+
+One-liner declaring that from state A, state B is reachable within N steps via specified handlers.
+
+```
+liveness escrow_settles : State.Open ~> State.Closed via [exchange, cancel] within 1
+
+liveness drain_completes : State.Draining ~> State.Active via [complete_drain, reset] within 2
+
+liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, cancel_proposal] within 1
+```
+
+## Environment (external state)
+
+Declares external state changes that happen outside of handlers (e.g., oracle price updates). Properties referencing mutated fields must still hold.
+
+```
+environment interest_rate_change {
+  mutates interest_rate : U64
+  constraint interest_rate > 0
+}
+```
+
+## Guard expressions
+
+Guards are the expression language used in `requires`, `ensures`, `property`, `invariant`, and other clauses.
+
+### Precedence (lowest to highest)
+
+| Level | Operators |
+|---|---|
+| 1 | `or`, `\/` |
+| 2 | `implies` |
+| 3 | `and`, `/\` |
+| 4 | `not` |
+| 5 | `<=`, `>=`, `!=`, `<`, `>`, `==` |
+| 6 | `+`, `-` |
+| 7 | `*`, `/`, `%` |
+| 8 | atoms: integers, identifiers, `old(...)`, quantifiers, parenthesized |
+
+### Atoms
+
+```
+// Integers (underscores allowed)
+42
+10_000_000
+
+// Qualified identifiers
+amount
+state.balance
+Pool.Active
+state.approval_count
+
+// Pre-state reference (only inside ensures)
+old(state.balance)
+
+// Quantifiers
+forall s : Pool.Active, s.total_deposits >= s.total_borrows
+exists l : Loan.Active, l.collateral > 0
+
+// Parenthesized
+(amount + fee) * rate
+```
+
+### Examples
+
+```
+// Simple comparison
+amount > 0
+
+// Compound with logical operators
+threshold > 0 and threshold <= member_count
+
+// ML-style logical operators
+amount > 0 /\ collateral > 0
+
+// Arithmetic
+state.V + amount <= MAX_VAULT_TVL
+state.approval_count + state.rejection_count < state.member_count
+
+// Implication
+sender.lamports < amount implies exit_code == 7
+
+// Negation
+not (state.is_closed)
+
+// Quantified
+forall s : Pool.Active, s.total_deposits >= s.total_borrows
+```
+
+## sBPF-specific constructs
+
+For `target assembly` specs, additional constructs model sBPF program structure.
+
+### `instruction` block
+
+Groups discriminant, entry point, layouts, guards, and properties for a single sBPF instruction.
+
+```
+instruction register_market {
+  discriminant 0
+  entry 0
+
+  const QUOTE_MINT_OFFSET = 32
+
+  errors [InvalidDiscriminant = 1, InvalidLength = 2]
+
+  input_layout {
+    discriminant : U8  @0 "Instruction discriminant"
+    base_mint    : Pubkey @1
+    quote_mint   : Pubkey @33
+  }
+
+  insn_layout {
+    opcode : U8 @0
+    amount : U64 @1
+  }
+
+  guard check_discriminant {
+    checks discriminant == 0
+    error InvalidDiscriminant
+    fuel 8
+  }
+
+  guard check_length {
+    checks instruction_data_len == 1
+    error InvalidLength
+    fuel 4
+  }
+
+  property rejects_wrong_discriminant {
+    expr discriminant != 0 implies exit_code == 1
+    scope guards
+    exit 1
+  }
+}
+```
+
+### sBPF `property` block (top-level or inside `instruction`)
+
+Properties for sBPF programs support additional clauses for low-level verification.
+
+```
+property all_guards_reject_invalid {
+  expr forall i : Error, register_market rejects with error i when guard i fails
+  preserved_by all
+}
+
+property rejects_wrong_account_count {
+  expr accounts.count != 3 implies exit_code == 1
+  scope guards
+  exit 1
+}
+
+property accepts_valid_transfer {
+  expr all_guards_pass implies exit_code == 0
+  scope [transfer_sol]
+  after all guards
+  exit 0
+}
+```
+
+sBPF property clauses:
+
+| Clause | Purpose | Example |
+|---|---|---|
+| `expr` | Property expression | `expr amount > 0` |
+| `preserved_by` | Handler scope | `preserved_by all` or `preserved_by [h1, h2]` |
+| `scope guards` | Scope to all guard blocks | `scope guards` |
+| `scope [names]` | Scope to specific guards/instructions | `scope [check_disc, check_len]` |
+| `flow name from seeds [...]` | Data flow from PDA seeds | `flow market from seeds [base_mint, quote_mint]` |
+| `flow name through [...]` | Data flow through registers | `flow amount through [r2, r3]` |
+| `cpi program target { ... }` | CPI correctness | see below |
+| `after all guards` | Property holds after all guards pass | `after all guards` |
+| `exit code` | Expected exit code | `exit 0` |
+
+### CPI block (inside sBPF property)
+
+```
+property transfer_cpi_correct {
+  cpi system_program transfer {
+    accounts [sender, recipient, system_program]
+    data amount
+  }
+  after all guards
+  exit 0
+}
+```
+
+### Guard block (inside `instruction`)
+
+```
+guard check_discriminant {
+  checks discriminant == 0
+  error InvalidDiscriminant
+  fuel 8
+}
+```
+
+## `qedgen check` coverage
+
+Prints a verification matrix showing which handlers are covered by which properties.
+
+```
+$ qedgen check --spec multisig.qedspec --coverage
+
+handler           threshold_bounded votes_bounded
+-------------------------------------------------
+create_vault              Y               Y
+propose                   Y               Y
+approve                   Y               Y
+reject                    Y               Y
+execute                   Y               Y
+cancel_proposal           Y               Y
+remove_member             Y               -
+
+Coverage: 100% (7/7 handlers covered by at least one property)
+```
+
+Use `--json` for machine-readable output.
+
+## What `qedgen codegen` generates
+
+From a `.qedspec`, codegen produces:
+
+- **Lean proofs** (`--lean`): State structures, transition functions, theorem stubs with `sorry`
+- **Kani harnesses** (`--kani`): BMC harnesses for each property + overflow detection
+- **Proptest suites** (`--proptest`): Randomized testing of all properties
+- **Quasar Rust code** (`--rust`): Program skeleton with Anchor-compatible handlers
+- **Unit tests** (`--unit-test`): Rust unit tests for handler logic
+- **Integration tests** (`--integration-test`): QuasarSVM integration tests
+- **CI workflows** (`--ci`): GitHub Actions workflow for the verification waterfall
+
+`qedgen codegen --spec program.qedspec --all` generates everything.
+
+## qedguards Lean macro
+
+For direct Lean proof authoring on sBPF programs, the `qedguards` macro generates guard
+chain infrastructure. This is the Lean-side companion to `.qedspec` instruction blocks.
 
 ```lean
 import QEDGen.Solana.Guards
@@ -307,9 +674,9 @@ qedguards Dropset where
 - For `proof auto`: full wp_exec proofs with hypothesis lifting
 - For `proof phased`: main composition theorem + phase sorry stubs
 
-## qedbridge DSL (refinement bridge)
+## qedbridge Lean macro
 
-Connects qedspec (abstract state) to sBPF bytecode (concrete memory):
+Refinement bridge connecting qedspec (abstract state) to sBPF bytecode (concrete memory).
 
 ```lean
 import QEDGen.Solana.Bridge
