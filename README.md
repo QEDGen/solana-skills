@@ -22,7 +22,7 @@
 
 ---
 
-Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed. One spec file drives everything: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows**. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -67,19 +67,23 @@ CPI calls are axiomatic — we verify the program passes correct parameters. SPL
 # 1. Install
 npx skills add qedgen/solana-skills
 
-# 2. Set API keys
-export MISTRAL_API_KEY=your_key_here                    # https://console.mistral.ai (free tier available)
-export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harmonic.fun
+# 2. Write a spec and validate it
+qedgen check --spec my_program.qedspec
 
-# 3. Run setup (installs Lean, Rust — first run takes a few minutes)
-qedgen setup                    # minimal setup
-qedgen setup --mathlib          # include Mathlib (adds 15-45 min for cache download)
-
-# 4. Verify an example
-cd examples/sbpf/dropset/formal_verification && lake build
+# 3. Generate all artifacts
+qedgen codegen --spec my_program.qedspec --all
 ```
 
-If `lake build` completes with no errors, your setup is working. Every theorem compiled = every property proven.
+Lean proofs, Kani harnesses, and API keys are set up automatically when first needed. To configure them manually:
+
+```bash
+# Lean + Mathlib (only needed for formal proofs)
+qedgen setup --mathlib
+
+# API keys (only needed for sorry-filling and deep proof search)
+export MISTRAL_API_KEY=your_key_here                    # https://console.mistral.ai (free tier available)
+export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harmonic.fun
+```
 
 ## Usage
 
@@ -221,36 +225,37 @@ qedgen codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF
 
 ### Rust / Anchor
 
-- **[Escrow](examples/rust/escrow/)** — Token escrow with authority checks, CPI transfer verification, and lifecycle proofs
-- **[Lending](examples/rust/lending/)** — Lending protocol verification
-- **[Multisig](examples/rust/multisig/)** — Multi-signature verification
-- **[Percolator](examples/rust/percolator/)** — Market maker with state machine verification and arithmetic safety
+- **[Escrow](examples/rust/escrow/)** — Token escrow with lifecycle proofs
+- **[Lending](examples/rust/lending/)** — Lending pool with multi-account state
+- **[Multisig](examples/rust/multisig/)** — Multi-signature vault with voting
+- **[Percolator](examples/rust/percolator/)** — Perpetual DEX risk engine
 
 ### sBPF Assembly
 
-- **[Counter](examples/sbpf/counter/)** — Account counter with 3 verified validation guards (178 instructions)
-- **[Tree](examples/sbpf/tree/)** — Red-black tree with 3 verified validation guards (498 instructions)
-- **[Dropset](examples/sbpf/dropset/)** — On-chain order book RegisterMarket — 13/13 security properties verified (180 instructions)
-- **[Transfer](examples/sbpf/transfer/)** — Lamport transfer with account count and data length checks
-- **[Slippage](examples/sbpf/slippage/)** — AMM slippage protection with overflow safety
+- **[Counter](examples/sbpf/counter/)** — PDA counter
+- **[Tree](examples/sbpf/tree/)** — Red-black tree
+- **[Dropset](examples/sbpf/dropset/)** — On-chain order book
+- **[Transfer](examples/sbpf/transfer/)** — SOL transfer via System Program CPI
+- **[Slippage](examples/sbpf/slippage/)** — AMM slippage guard
 
 ## Requirements
 
 - Rust toolchain (auto-installed if missing)
-- Lean 4 / elan (auto-installed if missing)
-- `MISTRAL_API_KEY` — for `fill-sorry` and `generate` ([console.mistral.ai](https://console.mistral.ai), free tier available)
-- `ARISTOTLE_API_KEY` — for `aristotle` commands ([aristotle.harmonic.fun](https://aristotle.harmonic.fun))
 
-Both API keys are optional — `qedgen` works without them, but unresolved sub-goals will remain as `sorry` markers in proofs.
+The following are only needed when working with Lean proofs and are set up automatically on first use:
+
+- Lean 4 / elan — for `lake build` and formal proofs
+- `MISTRAL_API_KEY` — for `fill-sorry` and `generate` ([console.mistral.ai](https://console.mistral.ai), free tier available)
+- `ARISTOTLE_API_KEY` — for `aristotle` deep proof search ([aristotle.harmonic.fun](https://aristotle.harmonic.fun))
 
 ### Environment variables
 
-| Variable | Purpose |
-|---|---|
-| `MISTRAL_API_KEY` | Leanstral API access (`fill-sorry`, `generate`) |
-| `ARISTOTLE_API_KEY` | Aristotle long-running proof search |
-| `QEDGEN_HOME` | Override global home directory (default: `~/.qedgen`) |
-| `QEDGEN_VALIDATION_WORKSPACE` | Override validation workspace path |
+| Variable | Purpose | When needed |
+|---|---|---|
+| `MISTRAL_API_KEY` | Leanstral API access (`fill-sorry`, `generate`) | Lean proofs |
+| `ARISTOTLE_API_KEY` | Aristotle long-running proof search | Hard sub-goals |
+| `QEDGEN_HOME` | Override global home directory (default: `~/.qedgen`) | Always |
+| `QEDGEN_VALIDATION_WORKSPACE` | Override validation workspace path | Lean proofs |
 
 ## License
 

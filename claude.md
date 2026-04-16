@@ -92,15 +92,28 @@ qedgen asm2lean \
 - `lib.rs` - `#[qed]` attribute macro entry point, dispatches on keyword
 - `verified.rs` - Content hash computation + `compile_error!` on drift
 
-**`crates/qedgen/`** - Main crate: CLI and Mistral API client
-- `main.rs` - CLI entry points (generate, fill-sorry, spec, consolidate, asm2lean, setup)
+**`crates/qedgen/`** - Main crate: CLI, parsers, code generators
+- `main.rs` - CLI entry points (init, check, codegen, generate, fill-sorry, aristotle, spec, asm2lean, setup, consolidate)
+- `parser.rs` - pest PEG parser for `.qedspec` files
+- `check.rs` - Spec validation: lint, coverage matrix, drift detection
+- `lean_gen.rs` - Lean 4 code generation from parsed spec (Rust + sBPF renderers)
+- `codegen.rs` - Quasar Rust skeleton generation from spec
+- `kani.rs` - Kani BMC harness generation
+- `proptest_gen.rs` - Proptest harness generation
+- `unit_test.rs` - Unit test generation
+- `integration_test.rs` - QuasarSVM integration test generation
+- `init.rs` - Project scaffolding (`qedgen init`, `.qed/` directory)
 - `api.rs` - Mistral API client, pass@N sampling, sorry-filling, retry logic
+- `aristotle.rs` - Aristotle (Harmonic) client for long-running proof search
 - `asm2lean.rs` - sBPF assembly → Lean 4 transpiler (parses `.s`, emits program module)
+- `deps.rs` - Point-of-use dependency checks (Lean, Kani)
 - `validate.rs` - Lake build validation in persistent workspace
 - `drift.rs` - `#[qed(verified)]` drift detection: scan Rust source, compute hashes, report/update
+- `idl2spec.rs` - Anchor IDL → `.qedspec` scaffold generation
+- `fingerprint.rs` - Spec section hashing for generated artifact staleness detection
 - `project.rs` - Lean project scaffolding generation
 - `consolidate.rs` - Merges multiple proof projects
-- `spec.rs` - SPEC.md generation from Anchor IDL
+- `spec.rs` - SPEC.md generation from Anchor IDL or `.qedspec`
 
 **`lean_solana/`** - Standalone Lean 4 library: Solana axioms (QEDGen.Solana)
 - `QEDGen/Solana/Account.lean` - Account structure
@@ -304,9 +317,11 @@ qedgen aristotle cancel <project-id>
 
 ## Environment Variables
 
-- `MISTRAL_API_KEY` - Required for `fill-sorry` and `generate` commands
-- `ARISTOTLE_API_KEY` - Required for `aristotle` commands (get at https://aristotle.harmonic.fun)
+- `MISTRAL_API_KEY` - For `fill-sorry` and `generate` commands (only needed for Lean proof sorry-filling)
+- `ARISTOTLE_API_KEY` - For `aristotle` commands (only needed for hard sub-goals; get at https://aristotle.harmonic.fun)
 - `QEDGEN_VALIDATION_WORKSPACE` - Override validation workspace path (default: platform cache dir)
+
+API keys and Lean toolchain are not needed for spec writing, validation, or code generation.
 
 ## Common Lean Proof Patterns
 
@@ -369,3 +384,14 @@ After `qedgen generate`:
 - If `lake build` fails with "could not resolve 'HEAD' to a commit", remove `.lake/packages/mathlib` and run `lake update`.
 - Binary: `cargo build --release` outputs to `target/release/qedgen`. Always copy to `bin/qedgen` after building: `cp target/release/qedgen bin/qedgen`.
 - The SKILL.md file defines the full proof-writing workflow that Claude follows.
+
+## Pre-release checklist
+
+Before cutting a new release or tag:
+
+1. **Bump version** in `crates/qedgen/Cargo.toml` — `install.sh` derives its version from there
+2. **`cargo test`** — all tests must pass
+3. **`cargo clippy`** — no warnings
+4. **`lake build` all examples** — run in each `examples/*/formal_verification/` directory; all must build successfully
+5. **Zero `sorry`** — `grep -r '\bsorry\b' examples/**/*.lean` must return nothing
+6. **README, SKILL.md, references/ are up to date** — check commands, flags, examples match current CLI

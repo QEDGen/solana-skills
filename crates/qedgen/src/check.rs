@@ -2919,7 +2919,7 @@ mod tests {
         let matrix = coverage_matrix(&spec);
         assert_eq!(matrix.coverage_pct, 100.0);
         assert!(matrix.gaps.is_empty());
-        assert_eq!(matrix.operations.len(), 6);
+        assert_eq!(matrix.operations.len(), 7);
         assert_eq!(matrix.properties.len(), 2);
     }
 

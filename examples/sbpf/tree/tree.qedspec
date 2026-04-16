@@ -1,35 +1,46 @@
-# Red-Black Tree — On-Chain Data Structure
-#
-# Three handlers:
-#   initialize — create tree account via CPI
-#   insert     — add key-value pair with RB fixup
-#   remove     — delete key with RB rebalance
-#
-# Node layout (29 bytes): parent, left, right, key, value, color
-# Tree header (24 bytes): root, free_top, next_alloc
+// Red-Black Tree — On-Chain Data Structure
+//
+// Three handlers:
+//   initialize — create tree account via CPI, initialize header
+//   insert     — add key-value pair with RB fixup (rotation + recolor)
+//   remove     — delete key with RB rebalance
+//
+// Node layout (29 bytes): parent(2), left(2), right(2), key(2), value(2), color(1)
+// Tree header (24 bytes): root(8), free_top(8), next_alloc(8)
 
 spec Tree
 
+target assembly
+
 const HEADER_SIZE = 24
+const NODE_SIZE   = 29
 
-errors [
-  NAccounts                = 1  "Invalid number of accounts",
-  UserDataLen              = 2  "User data length is nonzero",
-  TreeDataLen              = 3  "Tree data length invalid",
-  SystemProgramDataLen     = 4  "System program data length nonzero",
-  TreeDuplicate            = 5  "Tree account is a duplicate",
-  SystemProgramDuplicate   = 6  "System program is a duplicate",
-  RentDuplicate            = 7  "Rent sysvar is a duplicate",
-  RentAddress              = 8  "Invalid rent sysvar address",
-  InstructionData          = 9  "Invalid instruction data",
-  PdaMismatch              = 10 "PDA mismatch",
-  InstructionDiscriminator = 11 "Invalid instruction discriminator",
-  InstructionDataLen       = 12 "Invalid instruction data length",
-  KeyExists                = 14 "Key already exists in tree",
-  KeyDoesNotExist          = 15 "Key does not exist in tree"
-]
+type State
+  | Uninitialized
+  | Active of {
+      root       : U64,
+      free_top   : U64,
+      next_alloc : U64,
+    }
 
-handler initialize {
+type Error
+  | NAccounts                = 1  "Invalid number of accounts"
+  | UserDataLen              = 2  "User data length is nonzero"
+  | TreeDataLen              = 3  "Tree data length invalid"
+  | SystemProgramDataLen     = 4  "System program data length nonzero"
+  | TreeDuplicate            = 5  "Tree account is a duplicate"
+  | SystemProgramDuplicate   = 6  "System program is a duplicate"
+  | RentDuplicate            = 7  "Rent sysvar is a duplicate"
+  | RentAddress              = 8  "Invalid rent sysvar address"
+  | InstructionData          = 9  "Invalid instruction data"
+  | PdaMismatch              = 10 "PDA mismatch"
+  | InstructionDiscriminator = 11 "Invalid instruction discriminator"
+  | InstructionDataLen       = 12 "Invalid instruction data length"
+  | KeyExists                = 14 "Key already exists in tree"
+  | KeyDoesNotExist          = 15 "Key does not exist in tree"
+
+/// Create tree account via System Program CPI, initialize header
+handler initialize : State.Uninitialized -> State.Active {
   accounts {
     user           : signer, writable
     tree           : writable
@@ -37,46 +48,75 @@ handler initialize {
     rent           : readonly
   }
 
+  requires accounts.count == 4 else NAccounts
+  requires user.data_len == 0 else UserDataLen
+  requires tree.is_unique else TreeDuplicate
+  requires system_program.is_unique else SystemProgramDuplicate
+  requires rent.is_unique else RentDuplicate
+  requires rent.pubkey == RENT_SYSVAR_ID else RentAddress
+
   effect {
-    root = 0
-    free_top = 0
-    next_alloc = HEADER_SIZE
+    root       := 0
+    free_top   := 0
+    next_alloc := HEADER_SIZE
   }
 }
 
-handler insert {
+/// Insert a key-value pair — performs RB fixup after insertion
+handler insert (key : U16) (value : U16) : State.Active -> State.Active {
   accounts {
     user : signer, writable
     tree : writable
   }
 
-  takes {
-    key   : U16
-    value : U16
-  }
-
+  requires accounts.count == 2 else NAccounts
   requires key != 0 else KeyExists
+  requires discriminant == 1 else InstructionDiscriminator
+  requires instruction_data_len == 5 else InstructionDataLen
 
-  invariant bst_ordering
-  invariant no_consecutive_reds
-  invariant black_height_balanced
-  invariant root_is_black
-  invariant parent_child_consistency
+  effect {
+    next_alloc += NODE_SIZE
+  }
 }
 
-handler remove {
+/// Remove a key — performs RB rebalance after deletion
+handler remove (key : U16) : State.Active -> State.Active {
   accounts {
     user : signer, writable
     tree : writable
   }
 
-  takes key : U16
-
+  requires accounts.count == 2 else NAccounts
   requires key != 0 else KeyDoesNotExist
-
-  invariant bst_ordering
-  invariant no_consecutive_reds
-  invariant black_height_balanced
-  invariant root_is_black
-  invariant parent_child_consistency
+  requires discriminant == 2 else InstructionDiscriminator
+  requires instruction_data_len == 3 else InstructionDataLen
 }
+
+// Red-black tree structural invariants — preserved by insert and remove
+property bst_ordering :
+  forall n : Node, left(n).key < n.key and n.key < right(n).key
+  preserved_by [insert, remove]
+
+property no_consecutive_reds :
+  forall n : Node, n.color == Red implies parent(n).color == Black
+  preserved_by [insert, remove]
+
+property black_height_balanced :
+  forall p1 p2 : Path, black_count(p1) == black_count(p2)
+  preserved_by [insert, remove]
+
+property root_is_black :
+  root.color == Black
+  preserved_by [insert, remove]
+
+property parent_child_consistency :
+  forall n : Node, left(parent(n)) == n or right(parent(n)) == n
+  preserved_by [insert, remove]
+
+invariant allocation_monotonic "next_alloc only increases on insert"
+
+cover init_insert [initialize, insert]
+
+cover init_insert_remove [initialize, insert, remove]
+
+cover bulk_insert [initialize, insert, insert, insert]

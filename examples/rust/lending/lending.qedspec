@@ -150,7 +150,7 @@ handler liquidate : Loan.Active -> Loan.Liquidated {
 
 // Properties
 
-theorem pool_solvency :
+property pool_solvency :
   forall s : Pool.Active, s.total_deposits >= s.total_borrows
   preserved_by all
 

@@ -142,10 +142,10 @@ pub fn parse(content: &str) -> Result<ParsedSpec> {
                     Rule::instruction_block => {
                         instructions.push(parse_instruction_block(inner, &constants));
                     }
-                    Rule::theorem_block => {
+                    Rule::property_block => {
                         properties.push(parse_theorem(inner, &constants));
                     }
-                    Rule::property_block => {
+                    Rule::sbpf_property_block => {
                         properties.push(parse_property(inner, &constants));
                     }
                     Rule::cover_block => {
@@ -1588,7 +1588,7 @@ fn parse_instruction_block(
                     Rule::guard_block => {
                         guards.push(parse_guard_block(item, &local_consts));
                     }
-                    Rule::property_block => {
+                    Rule::sbpf_property_block => {
                         properties.push(parse_sbpf_property(item));
                     }
                     _ => {}
@@ -2133,11 +2133,12 @@ mod tests {
     #[test]
     fn parse_multisig_state() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.state_fields.len(), 4);
+        assert_eq!(spec.state_fields.len(), 5);
         assert_eq!(spec.state_fields[0], ("creator".into(), "Pubkey".into()));
         assert_eq!(spec.state_fields[1], ("threshold".into(), "U8".into()));
         assert_eq!(spec.state_fields[2], ("member_count".into(), "U8".into()));
         assert_eq!(spec.state_fields[3], ("approval_count".into(), "U8".into()));
+        assert_eq!(spec.state_fields[4], ("rejection_count".into(), "U8".into()));
     }
 
     #[test]
@@ -2160,7 +2161,7 @@ mod tests {
     #[test]
     fn parse_multisig_events() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.events.len(), 5);
+        assert_eq!(spec.events.len(), 6);
         assert_eq!(spec.events[0].name, "VaultCreated");
         assert_eq!(spec.events[0].fields.len(), 3);
     }
@@ -2168,14 +2169,14 @@ mod tests {
     #[test]
     fn parse_multisig_errors() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.error_codes.len(), 5);
+        assert_eq!(spec.error_codes.len(), 6);
         assert_eq!(spec.error_codes[0], "InvalidThreshold");
     }
 
     #[test]
     fn parse_multisig_handlers() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.handlers.len(), 6);
+        assert_eq!(spec.handlers.len(), 7);
 
         let create = &spec.handlers[0];
         assert_eq!(create.name, "create_vault");
@@ -2184,7 +2185,7 @@ mod tests {
         assert_eq!(create.post_status.as_deref(), Some("Active"));
         assert!(create.has_guard());
         assert_eq!(create.takes_params.len(), 2);
-        assert_eq!(create.effects.len(), 3);
+        assert_eq!(create.effects.len(), 4);
         assert_eq!(
             create.effects[0],
             ("threshold".into(), "set".into(), "threshold".into())
@@ -2192,6 +2193,10 @@ mod tests {
         assert_eq!(
             create.effects[2],
             ("approval_count".into(), "set".into(), "0".into())
+        );
+        assert_eq!(
+            create.effects[3],
+            ("rejection_count".into(), "set".into(), "0".into())
         );
 
         let approve = &spec.handlers[2];
@@ -2201,7 +2206,14 @@ mod tests {
             ("approval_count".into(), "add".into(), "1".into())
         );
 
-        let remove = &spec.handlers[5];
+        let reject = &spec.handlers[3];
+        assert_eq!(reject.name, "reject");
+        assert_eq!(
+            reject.effects[0],
+            ("rejection_count".into(), "add".into(), "1".into())
+        );
+
+        let remove = &spec.handlers[6];
         assert_eq!(remove.name, "remove_member");
         assert_eq!(
             remove.effects[0],
@@ -2240,14 +2252,14 @@ mod tests {
         let expr = tb.expression.as_ref().unwrap();
         assert!(expr.contains("s.threshold"));
         assert!(expr.contains("\u{2264}")); // ≤
-        assert_eq!(tb.preserved_by.len(), 6);
+        assert_eq!(tb.preserved_by.len(), 7);
     }
 
     #[test]
     fn parse_multisig_handler_accounts() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        // 6 handlers have accounts blocks
-        assert_eq!(spec.handlers.len(), 6);
+        // 7 handlers have accounts blocks
+        assert_eq!(spec.handlers.len(), 7);
         let create = &spec.handlers[0];
         assert_eq!(create.name, "create_vault");
         assert_eq!(create.accounts.len(), 3);
@@ -2742,7 +2754,7 @@ instruction RegisterMarket {
     #[test]
     fn parse_cover_multi_trace() {
         let spec = parse(MULTISIG_SPEC).unwrap();
-        assert_eq!(spec.covers.len(), 2);
+        assert_eq!(spec.covers.len(), 3);
         let lifecycle = spec
             .covers
             .iter()
@@ -2752,14 +2764,14 @@ instruction RegisterMarket {
             lifecycle.traces[0],
             vec!["create_vault", "propose", "approve", "execute"]
         );
-        let cancel = spec
+        let rejection = spec
             .covers
             .iter()
-            .find(|c| c.name == "cancel_flow")
+            .find(|c| c.name == "rejection_flow")
             .unwrap();
         assert_eq!(
-            cancel.traces[0],
-            vec!["create_vault", "propose", "cancel_proposal"]
+            rejection.traces[0],
+            vec!["create_vault", "propose", "reject", "cancel_proposal"]
         );
     }
 

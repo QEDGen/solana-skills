@@ -106,11 +106,11 @@ handler reset : State.Resetting -> State.Active {
   }
 }
 
-theorem conservation :
+property conservation :
   state.V >= state.C_tot + state.I
   preserved_by all
 
-theorem vault_bounded :
+property vault_bounded :
   state.V <= MAX_VAULT_TVL
   preserved_by [deposit, top_up_insurance]
 

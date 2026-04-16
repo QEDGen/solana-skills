@@ -2,10 +2,12 @@
 set -e
 
 REPO="QEDGen/solana-skills"
-VERSION="v1.6.0"
 
 # Resolve the directory where this script lives (= skill root)
 SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Derive version from Cargo.toml (single source of truth)
+VERSION="v$(grep '^version' "$SKILL_DIR/crates/qedgen/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')"
 QEDGEN_BIN="$SKILL_DIR/bin/qedgen"
 
 # ── Detect platform ──────────────────────────────────────────────────────
@@ -141,63 +143,20 @@ else
     fi
 fi
 
-# ── Lean / elan ───────────────────────────────────────────────────────────
-if ! command -v lean &> /dev/null && ! command -v elan &> /dev/null; then
-    echo ""
-    echo "  Lean toolchain not found."
-    echo "  Please install elan (Lean version manager):"
-    echo "    https://github.com/leanprover/elan#installation"
-    echo ""
-    echo "  After installing elan, re-run this script or run:"
-    echo "    elan toolchain install leanprover/lean4:v4.30.0-rc1"
-    echo ""
-fi
-
-# ── Kani (optional) ──────────────────────────────────────────────────────
-if ! command -v cargo-kani &> /dev/null; then
-    echo ""
-    echo "  Kani verifier not found (optional — needed for Kani proof harnesses)."
-    echo "  To install:"
-    echo "    cargo install --locked kani-verifier"
-    echo "    cargo kani setup"
-    echo ""
-fi
-
-# ── Set up global validation workspace ────────────────────────────────────
-setup_global_workspace() {
-    local ws_dir
-    if [ -n "$QEDGEN_VALIDATION_WORKSPACE" ]; then
-        ws_dir="$QEDGEN_VALIDATION_WORKSPACE"
-    elif [ -n "$QEDGEN_HOME" ]; then
-        ws_dir="$QEDGEN_HOME/workspace"
-    else
-        ws_dir="$HOME/.qedgen/workspace"
-    fi
-
-    if [ -f "$ws_dir/lakefile.lean" ]; then
-        echo "✓ Global validation workspace exists at $ws_dir"
-        return 0
-    fi
-
-    echo "Setting up global validation workspace at $ws_dir..."
-    echo "  Running in background — qedgen will work once this completes."
-
-    mkdir -p "$ws_dir"
-    "$QEDGEN_BIN" setup --workspace "$ws_dir" &
-    echo "  Background PID: $!"
-}
-
-setup_global_workspace
-
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  qedgen ${VERSION} installed successfully!"
 echo ""
 echo "  Binary: $QEDGEN_BIN"
 echo ""
-echo "  Requirements:"
-echo "    - MISTRAL_API_KEY environment variable (for fill-sorry)"
-echo "    - Lean toolchain via elan (https://github.com/leanprover/elan)"
+echo "  Next steps:"
+echo "    1. Write a .qedspec for your program (or let your agent generate one)"
+echo "    2. Run: qedgen check --spec my_program.qedspec"
+echo "    3. Run: qedgen codegen --spec my_program.qedspec --all"
+echo ""
+echo "  Lean proofs, Kani harnesses, and API keys (MISTRAL_API_KEY,"
+echo "  ARISTOTLE_API_KEY) are set up automatically when first needed."
+echo "  Run 'qedgen setup' to configure them manually."
 echo ""
 echo "  Workspace: ~/.qedgen/"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

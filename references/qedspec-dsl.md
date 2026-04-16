@@ -56,7 +56,8 @@ qedspec Escrow where
     Open -> Completed | Cancelled
     terminal: Completed, Cancelled
 
-  property bounded "s.amount <= U64_MAX"
+  property bounded :
+    s.amount <= U64_MAX
     preserved_by: exchange
 
   trust

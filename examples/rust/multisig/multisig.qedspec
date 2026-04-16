@@ -1,8 +1,10 @@
 // Multisig Vault — Formal Specification
 //
 // A multisig vault allowing up to 32 members. Any member can propose a
-// transaction. Other members approve. Once a configurable n-of-m threshold
-// is reached the transaction can be executed.
+// transaction. Members vote yes (approve) or no (reject). Once a
+// configurable n-of-m threshold is reached the transaction executes.
+// If enough rejections accumulate to make the threshold unreachable,
+// the proposal is dead and can be cancelled.
 
 spec Multisig
 
@@ -11,18 +13,20 @@ const MAX_MEMBERS = 32
 type State
   | Uninitialized
   | Active of {
-      creator        : Pubkey,
-      threshold      : U8,
-      member_count   : U8,
-      approval_count : U8,
+      creator          : Pubkey,
+      threshold        : U8,
+      member_count     : U8,
+      approval_count   : U8,
+      rejection_count  : U8,
     }
   | HasProposal
 
 type Error
   | InvalidThreshold
   | TooManyMembers
-  | AlreadyApproved
+  | AlreadyVoted
   | ThresholdNotMet
+  | ThresholdUnreachable
   | NotAMember
 
 pda vault ["vault", creator]
@@ -40,6 +44,11 @@ event ProposalCreated {
 event ProposalApproved {
   approver       : Pubkey,
   approval_count : U8,
+}
+
+event ProposalRejected {
+  rejecter        : Pubkey,
+  rejection_count : U8,
 }
 
 event ProposalExecuted {
@@ -64,9 +73,10 @@ handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized 
   requires member_count <= MAX_MEMBERS else TooManyMembers
 
   effect {
-    threshold      := threshold
-    member_count   := member_count
-    approval_count := 0
+    threshold        := threshold
+    member_count     := member_count
+    approval_count   := 0
+    rejection_count  := 0
   }
 
   emits VaultCreated
@@ -80,13 +90,14 @@ handler propose : State.Active -> State.HasProposal {
   }
 
   effect {
-    approval_count := 0
+    approval_count  := 0
+    rejection_count := 0
   }
 
   emits ProposalCreated
 }
 
-/// Approve the current proposal — each member may approve once
+/// Approve the current proposal — each member may vote once
 handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
   accounts {
     approver : signer
@@ -94,13 +105,30 @@ handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
   }
 
   requires member_index < state.member_count else NotAMember
-  requires state.approval_count < state.member_count
+  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
 
   effect {
     approval_count += 1
   }
 
   emits ProposalApproved
+}
+
+/// Reject the current proposal — each member may vote once
+handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
+  accounts {
+    rejecter : signer
+    vault    : writable, pda ["vault", creator]
+  }
+
+  requires member_index < state.member_count else NotAMember
+  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+
+  effect {
+    rejection_count += 1
+  }
+
+  emits ProposalRejected
 }
 
 /// Execute the proposal once the approval threshold is met
@@ -113,27 +141,31 @@ handler execute : State.HasProposal -> State.Active {
   requires state.approval_count >= state.threshold else ThresholdNotMet
 
   effect {
-    approval_count := 0
+    approval_count  := 0
+    rejection_count := 0
   }
 
   emits ProposalExecuted
 }
 
-/// Cancel the current proposal and return to accepting new proposals
+/// Cancel a proposal that can no longer reach the approval threshold
 handler cancel_proposal : State.HasProposal -> State.Active {
   accounts {
     canceller : signer
     vault     : writable, pda ["vault", creator]
   }
 
+  requires state.member_count - state.rejection_count < state.threshold else ThresholdUnreachable
+
   effect {
-    approval_count := 0
+    approval_count  := 0
+    rejection_count := 0
   }
 
   emits ProposalCancelled
 }
 
-/// Remove a member from the vault — creator only
+/// Remove a member from the vault — creator only, no active proposal
 handler remove_member : State.Active -> State.Active {
   auth creator
 
@@ -143,23 +175,25 @@ handler remove_member : State.Active -> State.Active {
   }
 
   requires state.member_count > state.threshold
-  requires state.approval_count == 0
+  requires state.approval_count == 0 and state.rejection_count == 0
 
   effect {
     member_count -= 1
   }
 }
 
-theorem threshold_bounded :
+property threshold_bounded :
   state.threshold <= state.member_count and state.threshold > 0
   preserved_by all
 
-theorem approvals_bounded :
-  state.approval_count <= state.member_count
+property votes_bounded :
+  state.approval_count + state.rejection_count <= state.member_count
   preserved_by all
 
 cover proposal_lifecycle [create_vault, propose, approve, execute]
 
-cover cancel_flow [create_vault, propose, cancel_proposal]
+cover rejection_flow [create_vault, propose, reject, cancel_proposal]
+
+cover mixed_voting [create_vault, propose, approve, reject, approve, execute]
 
 liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, cancel_proposal] within 1

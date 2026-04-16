@@ -489,12 +489,14 @@ The `.qedspec` is the primary committed artifact. Everything else is derived.
 
 ## Environment
 
-| Variable | Purpose |
-|---|---|
-| `MISTRAL_API_KEY` | Required for `fill-sorry` and `generate` |
-| `ARISTOTLE_API_KEY` | Required for `aristotle` commands |
-| `QEDGEN_HOME` | Override global home directory (default: `~/.qedgen/`) |
-| `QEDGEN_VALIDATION_WORKSPACE` | Override validation workspace (default: `~/.qedgen/workspace/`) |
+| Variable | Purpose | When needed |
+|---|---|---|
+| `MISTRAL_API_KEY` | Leanstral API access (`fill-sorry`, `generate`) | Lean proof sorry-filling |
+| `ARISTOTLE_API_KEY` | Aristotle deep proof search | Hard sub-goals Leanstral can't solve |
+| `QEDGEN_HOME` | Override global home directory (default: `~/.qedgen/`) | Always |
+| `QEDGEN_VALIDATION_WORKSPACE` | Override validation workspace (default: `~/.qedgen/workspace/`) | Lean proofs |
+
+API keys and Lean toolchain are **not required** for spec writing, validation (`check`), or code generation (`codegen`). They are only needed when filling proof obligations (`fill-sorry`, `generate`, `aristotle`). Prompt the user to set them up only when they reach the proof engineering phase.
 
 ## Error handling
 

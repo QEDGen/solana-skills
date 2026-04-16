@@ -1,34 +1,83 @@
-# Counter — PDA Counter Program
-#
-# Two handlers dispatched by account count:
-#   initialize — create PDA counter via CPI (3 accounts)
-#   increment  — bump existing counter (2 accounts)
+// Counter — PDA Counter Program
+//
+// Two handlers dispatched by account count:
+//   initialize — create PDA counter via CPI (3 accounts)
+//   increment  — bump existing counter (2 accounts)
+//
+// Validation flow:
+//   1. Check account count (2 or 3)
+//   2. Verify user data length is zero
+//   3. (init only) Verify PDA data length, duplicate markers,
+//      derive PDA, compare to provided pubkey
+//   4. (init only) CPI CreateAccount with derived bump seed
 
 spec Counter
 
-errors [
-  InvalidAccountCount       = 1 "Invalid number of accounts",
-  UserDataLenNonzero        = 2 "User data length is nonzero",
-  PdaDataLenInvalid         = 3 "Invalid PDA data length",
-  SystemProgramDataLen      = 4 "System Program data length is nonzero",
-  PdaDuplicate              = 5 "PDA is a duplicate account",
-  SystemProgramDuplicate    = 6 "System Program is a duplicate account",
-  UnableToDerivePda         = 7 "Unable to derive PDA",
-  PdaMismatch               = 8 "Passed PDA does not match computed PDA",
-  InvalidInstructionDataLen = 9 "Invalid instruction data length"
-]
+target assembly
 
-handler initialize {
+const MAX_COUNTER = 18446744073709551615
+
+type State
+  | Uninitialized
+  | Active of {
+      owner   : Pubkey,
+      counter : U64,
+    }
+
+type Error
+  | InvalidAccountCount       = 1
+  | UserDataLenNonzero        = 2
+  | PdaDataLenInvalid         = 3
+  | SystemProgramDataLen      = 4
+  | PdaDuplicate              = 5
+  | SystemProgramDuplicate    = 6
+  | UnableToDerivePda         = 7
+  | PdaMismatch               = 8
+  | InvalidInstructionDataLen = 9
+
+/// Create a new PDA counter via System Program CPI
+handler initialize : State.Uninitialized -> State.Active {
   accounts {
     user           : signer, writable
     pda            : writable
     system_program : program
   }
+
+  requires accounts.count == 3 else InvalidAccountCount
+  requires user.data_len == 0 else UserDataLenNonzero
+  requires pda.data_len == 0 else PdaDataLenInvalid
+  requires system_program.data_len == 14 else SystemProgramDataLen
+  requires pda.is_unique else PdaDuplicate
+  requires system_program.is_unique else SystemProgramDuplicate
+  requires pda_derivation_succeeds else UnableToDerivePda
+  requires derived_pda == pda.pubkey else PdaMismatch
+
+  effect {
+    counter := 0
+  }
 }
 
-handler increment {
+/// Increment an existing counter
+handler increment : State.Active -> State.Active {
   accounts {
     user : signer, writable
     pda  : writable
   }
+
+  requires accounts.count == 2 else InvalidAccountCount
+  requires user.data_len == 0 else UserDataLenNonzero
+
+  effect {
+    counter += 1
+  }
 }
+
+property counter_monotonic :
+  state.counter >= 0
+  preserved_by all
+
+invariant pda_integrity "derived PDA matches provided account on initialize"
+
+cover init_then_increment [initialize, increment]
+
+cover double_increment [initialize, increment, increment]

@@ -1,31 +1,54 @@
-# Dropset DEX — On-Chain Order Book
-#
-# Permissionless order book. Currently supports one instruction:
-# RegisterMarket — validates accounts, derives market PDA,
-# creates market account via CPI.
+// Dropset DEX — On-Chain Order Book
+//
+// Permissionless order book. Currently supports one instruction:
+// RegisterMarket — validates 10+ accounts, derives market PDA
+// from [base_mint, quote_mint] seeds, creates market account via CPI.
+//
+// Validation flow (13 sequential guards):
+//   1. Discriminant check (must be REGISTER_MARKET = 0)
+//   2. Instruction length (exactly 1 byte)
+//   3. Account count (>= 10)
+//   4. User data freshness
+//   5-6. Market account: duplicate + data freshness
+//   7-8. Base/quote mint duplicate checks (dynamic offset)
+//   9. Market PDA derivation (4-chunk comparison)
+//   10-11. System program: duplicate + pubkey identity
+//   12-13. Rent sysvar: duplicate + pubkey identity
 
 spec Dropset
 
-errors [
-  InvalidDiscriminant        = 1  "Discriminant is not REGISTER_MARKET",
-  InvalidInstructionLength   = 2  "Instruction data is not 1 byte",
-  InvalidNumberOfAccounts    = 3  "Fewer than 10 accounts provided",
-  UserHasData                = 4  "User account already has data",
-  MarketAccountIsDuplicate   = 5  "Market account is a duplicate",
-  MarketHasData              = 6  "Market account already has data",
-  BaseMintIsDuplicate        = 7  "Base mint account is a duplicate",
-  QuoteMintIsDuplicate       = 8  "Quote mint account is a duplicate",
-  InvalidMarketPubkey        = 9  "Market pubkey does not match derived PDA",
-  SystemProgramIsDuplicate   = 10 "System Program account is a duplicate",
-  InvalidSystemProgramPubkey = 11 "System Program pubkey is wrong",
-  RentSysvarIsDuplicate      = 12 "Rent sysvar account is a duplicate",
-  InvalidRentSysvarPubkey    = 13 "Rent sysvar pubkey is wrong"
-]
+target assembly
 
-handler register_market {
+type State
+  | Uninitialized
+  | Registered of {
+      base_mint  : Pubkey,
+      quote_mint : Pubkey,
+      market     : Pubkey,
+    }
+
+type Error
+  | InvalidDiscriminant        = 1  "Discriminant is not REGISTER_MARKET"
+  | InvalidInstructionLength   = 2  "Instruction data is not 1 byte"
+  | InvalidNumberOfAccounts    = 3  "Fewer than 10 accounts provided"
+  | UserHasData                = 4  "User account already has data"
+  | MarketAccountIsDuplicate   = 5  "Market account is a duplicate"
+  | MarketHasData              = 6  "Market account already has data"
+  | BaseMintIsDuplicate        = 7  "Base mint account is a duplicate"
+  | QuoteMintIsDuplicate       = 8  "Quote mint account is a duplicate"
+  | InvalidMarketPubkey        = 9  "Market pubkey does not match derived PDA"
+  | SystemProgramIsDuplicate   = 10 "System Program account is a duplicate"
+  | InvalidSystemProgramPubkey = 11 "System Program pubkey is wrong"
+  | RentSysvarIsDuplicate      = 12 "Rent sysvar account is a duplicate"
+  | InvalidRentSysvarPubkey    = 13 "Rent sysvar pubkey is wrong"
+
+pda market ["base_mint", "quote_mint"]
+
+/// Register a new market — derives PDA from token pair, creates via CPI
+handler register_market : State.Uninitialized -> State.Registered {
   accounts {
     user           : signer, writable
-    market         : writable
+    market         : writable, pda ["base_mint", "quote_mint"]
     base_mint      : readonly
     quote_mint     : readonly
     event_queue    : writable
@@ -37,5 +60,33 @@ handler register_market {
     rent           : readonly
   }
 
-  invariant pda_derivation
+  requires discriminant == 0 else InvalidDiscriminant
+  requires instruction_data_len == 1 else InvalidInstructionLength
+  requires accounts.count >= 10 else InvalidNumberOfAccounts
+  requires user.data_len == 0 else UserHasData
+  requires market.is_unique else MarketAccountIsDuplicate
+  requires market.data_len == 0 else MarketHasData
+  requires base_mint.is_unique else BaseMintIsDuplicate
+  requires quote_mint.is_unique else QuoteMintIsDuplicate
+  requires derived_pda == market.pubkey else InvalidMarketPubkey
+  requires system_program.is_unique else SystemProgramIsDuplicate
+  requires system_program.pubkey == SYSTEM_PROGRAM_ID else InvalidSystemProgramPubkey
+  requires rent.is_unique else RentSysvarIsDuplicate
+  requires rent.pubkey == RENT_SYSVAR_ID else InvalidRentSysvarPubkey
+
+  effect {
+    base_mint  := base_mint.pubkey
+    quote_mint := quote_mint.pubkey
+    market     := market.pubkey
+  }
 }
+
+property all_guards_reject_invalid :
+  forall i : Error, register_market rejects with error i when guard i fails
+  preserved_by all
+
+invariant pda_integrity "market PDA derived from [base_mint, quote_mint] — 4-chunk comparison"
+
+invariant market_uniqueness "one market per (base_mint, quote_mint) pair enforced by PDA derivation"
+
+cover register_market_happy_path [register_market]

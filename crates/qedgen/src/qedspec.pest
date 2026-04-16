@@ -5,7 +5,7 @@
 //   - `type` ADTs replace state/account/lifecycle/errors
 //   - Handler signature: `handler name (args) : Pre -> Post { ... }`
 //   - `:=` for effect assignment (no ambiguity with `==`)
-//   - `theorem` replaces `property` for Quasar specs
+//   - `property ... preserved_by` for Quasar quantified properties
 //   - `invariant name : forall ...` (quantified, not just string)
 //   - `cover name [trace]` one-liner
 //   - `liveness name : A ~> B via [...] within N` one-liner
@@ -32,8 +32,8 @@ top_level_item = {
   | schema_block
   | handler_block
   | instruction_block    // sBPF
-  | property_block       // sugar / sBPF compat
-  | theorem_block
+  | sbpf_property_block  // sugar / sBPF compat
+  | property_block
   | cover_block
   | liveness_decl
   | environment_block
@@ -219,18 +219,18 @@ transfer_fields = {
 }
 
 // ============================================================================
-// Theorem — quantified property with preservation clause
+// Property — quantified property with preservation clause
 //
-//   theorem pool_solvency :
+//   property pool_solvency :
 //     forall s : Pool.Active, s.total_deposits >= s.total_borrows
 //     preserved_by all
 //
-//   theorem approvals_bounded :
+//   property approvals_bounded :
 //     forall s : State, s.approval_count <= s.member_count
 //     preserved_by [create_vault, approve, execute]
 // ============================================================================
 
-theorem_block       = { doc_comment* ~ "theorem" ~ ident ~ ":" ~ guard_expr ~ preserved_by_clause }
+property_block      = { doc_comment* ~ "property" ~ ident ~ ":" ~ guard_expr ~ preserved_by_clause }
 preserved_by_clause = { "preserved_by" ~ (preserved_by_all | "[" ~ ident_list ~ "]") }
 preserved_by_all    = { "all" }
 
@@ -331,7 +331,7 @@ instruction_item = {
   | input_layout_block
   | insn_layout_block
   | guard_block
-  | property_block
+  | sbpf_property_block
   | COMMENT
 }
 
@@ -350,7 +350,7 @@ checks_clause = { "checks" ~ guard_expr }
 error_clause  = { "error" ~ ident }
 
 // sBPF property block
-property_block = { doc_comment* ~ "property" ~ ident ~ "{" ~ prop_clause* ~ "}" }
+sbpf_property_block = { doc_comment* ~ "property" ~ ident ~ "{" ~ prop_clause* ~ "}" }
 prop_clause = {
     expr_clause
   | preserved_by_clause

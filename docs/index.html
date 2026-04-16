@@ -47,7 +47,7 @@
     <div class="hero-copy">
       <div class="badge"><span class="badge-dot"></span> Proofs, not promises</div>
       <h1>Ship to mainnet<br><span class="accent-text">without fear. &#x220E;</span></h1>
-      <p class="subtitle">Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed.</p>
+      <p class="subtitle">Write what your Solana program must guarantee in a <code>.qedspec</code> file. QEDGen validates it, finds the bugs your tests miss, then generates the tests, proofs, and CI to keep them fixed — all from a single source of truth.</p>
       <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code><button class="copy-btn" aria-label="Copy to clipboard" onclick="navigator.clipboard.writeText('npx skills add qedgen/solana-skills').then(()=>{this.classList.add('copied');setTimeout(()=>this.classList.remove('copied'),1500)})"><svg class="icon-copy" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1.5 1.5 0 0 0-1.5-1.5H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg><svg class="icon-check" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5L6.5 12L13 4"/></svg></button></pre>
       <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">Agent Skills</a>.</p>
       <div class="cta">
@@ -56,7 +56,7 @@
       </div>
     </div>
     <div class="hero-diagram">
-      <svg viewBox="0 0 360 420" xmlns="http://www.w3.org/2000/svg">
+      <svg viewBox="0 0 420 520" xmlns="http://www.w3.org/2000/svg">
         <defs>
           <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#e2e8f0"/>
@@ -69,72 +69,80 @@
           </marker>
         </defs>
 
-        <!-- Box 1: Your Code -->
-        <rect x="95" y="8" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-        <svg x="173" y="16" width="14" height="14" viewBox="0 0 16 16">
-          <path fill="#71717a" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-        </svg>
-        <text x="180" y="46" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Your Code</text>
-        <text x="180" y="60" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">Anchor / Quasar / sBPF</text>
-
-        <!-- Arrow 1 → 2 -->
-        <line x1="180" y1="74" x2="180" y2="94" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
-
-        <!-- Box 2: Your Agent -->
-        <rect x="95" y="96" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-        <svg x="173" y="104" width="14" height="14" viewBox="0 0 16 16">
-          <path fill="#71717a" d="M8 1 L9.5 6.5 L15 8 L9.5 9.5 L8 15 L6.5 9.5 L1 8 L6.5 6.5 Z"/>
-        </svg>
-        <text x="180" y="134" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Your Agent</text>
-        <text x="180" y="149" text-anchor="middle" fill="#52525b" font-size="7.5" font-family="'Geist Mono',monospace" letter-spacing="0.5">Claude &#xb7; Cursor &#xb7; Copilot</text>
-
-        <!-- Arrow 2 → 3 -->
-        <line x1="180" y1="162" x2="180" y2="182" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
-
-        <!-- Box 3: SPEC.md -->
-        <rect x="95" y="184" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-        <svg x="173" y="192" width="14" height="14" viewBox="0 0 16 16">
+        <!-- Box 1: .qedspec -->
+        <rect x="120" y="8" width="170" height="56" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <svg x="198" y="14" width="14" height="14" viewBox="0 0 16 16">
           <path fill="none" stroke="#71717a" stroke-width="1.3" stroke-linejoin="round" d="M4 1 h5 l4 4 v10 h-9 z"/>
           <path fill="none" stroke="#71717a" stroke-width="1.3" d="M9 1 v4 h4"/>
         </svg>
-        <text x="180" y="222" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">.qedspec</text>
-        <text x="180" y="236" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">guarantees &amp; properties</text>
+        <text x="205" y="42" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">.qedspec</text>
+        <text x="205" y="55" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">guarantees &amp; properties</text>
+
+        <!-- Arrow 1 → 2 -->
+        <line x1="205" y1="64" x2="205" y2="84" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+
+        <!-- Box 2: check -->
+        <rect x="120" y="86" width="170" height="56" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <text x="205" y="110" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">check</text>
+        <text x="205" y="124" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">validate spec</text>
+
+        <!-- Check sub-items (left side) -->
+        <text x="108" y="98" text-anchor="end" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">lint</text>
+        <text x="108" y="110" text-anchor="end" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">proptest</text>
+        <text x="108" y="122" text-anchor="end" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">lean-gen</text>
+        <line x1="112" y1="95" x2="118" y2="95" stroke="#52525b" stroke-width="0.5"/>
+        <line x1="112" y1="107" x2="118" y2="107" stroke="#52525b" stroke-width="0.5"/>
+        <line x1="112" y1="119" x2="118" y2="119" stroke="#52525b" stroke-width="0.5"/>
+
+        <!-- Arrow 2 → 3 -->
+        <line x1="205" y1="142" x2="205" y2="162" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+
+        <!-- Box 3: codegen -->
+        <rect x="120" y="164" width="170" height="56" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+        <text x="205" y="188" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">codegen --all</text>
+        <text x="205" y="202" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">generate artifacts</text>
+
+        <!-- Codegen sub-items (right side) -->
+        <text x="302" y="176" text-anchor="start" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">Rust skeleton</text>
+        <text x="302" y="188" text-anchor="start" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">Lean proofs</text>
+        <text x="302" y="200" text-anchor="start" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">Kani harnesses</text>
+        <text x="302" y="212" text-anchor="start" fill="#52525b" font-size="8" font-family="'Geist Mono',monospace">tests</text>
+        <line x1="292" y1="173" x2="298" y2="173" stroke="#52525b" stroke-width="0.5"/>
+        <line x1="292" y1="185" x2="298" y2="185" stroke="#52525b" stroke-width="0.5"/>
+        <line x1="292" y1="197" x2="298" y2="197" stroke="#52525b" stroke-width="0.5"/>
+        <line x1="292" y1="209" x2="298" y2="209" stroke="#52525b" stroke-width="0.5"/>
 
         <!-- Arrow 3 → 4 -->
-        <line x1="180" y1="250" x2="180" y2="270" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
+        <line x1="205" y1="220" x2="205" y2="240" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
 
-        <!-- Box 4: Lean 4 Proofs -->
-        <rect x="95" y="272" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.25)"/>
-        <text x="180" y="292" text-anchor="middle" fill="#38bdf8" font-size="16" font-weight="600" font-family="Georgia,serif" font-style="italic">&#x03BB;</text>
-        <text x="180" y="310" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Verify</text>
-        <text x="180" y="324" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">proptest &#x2192; kani &#x2192; lean</text>
+        <!-- Box 4: lake build (verify) -->
+        <rect x="120" y="242" width="170" height="56" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.25)"/>
+        <text x="205" y="262" text-anchor="middle" fill="#38bdf8" font-size="14" font-weight="600" font-family="Georgia,serif" font-style="italic">&#x03BB;</text>
+        <text x="205" y="278" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">lake build</text>
+        <text x="205" y="290" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">verify proofs</text>
 
         <!-- Arrow 4 → ∎ -->
-        <line x1="180" y1="338" x2="180" y2="366" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr-a)"/>
+        <line x1="205" y1="298" x2="205" y2="326" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr-a)"/>
 
         <!-- QED tombstone -->
-        <rect x="155" y="368" width="50" height="42" rx="8" fill="#38bdf8"/>
-        <text x="180" y="395" text-anchor="middle" fill="#09090b" font-size="18" font-weight="800">&#x220E;</text>
+        <rect x="180" y="328" width="50" height="42" rx="8" fill="#38bdf8"/>
+        <text x="205" y="355" text-anchor="middle" fill="#09090b" font-size="18" font-weight="800">&#x220E;</text>
 
-        <!-- Leanstral -->
-        <rect x="5" y="275" width="74" height="44" rx="6" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)" stroke-dasharray="4 3"/>
-        <text x="42" y="292" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">Leanstral</text>
-        <text x="42" y="306" text-anchor="middle" fill="#6b7280" font-size="8" font-family="'Geist Mono',monospace">fast (seconds)</text>
+        <!-- Leanstral (left of lake build) -->
+        <rect x="8" y="240" width="82" height="36" rx="6" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)" stroke-dasharray="4 3"/>
+        <text x="49" y="255" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">Leanstral</text>
+        <text x="49" y="267" text-anchor="middle" fill="#52525b" font-size="7.5" font-family="'Geist Mono',monospace">fast (seconds)</text>
+        <line x1="118" y1="258" x2="92" y2="258" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
 
-        <!-- Leanstral arrow -->
-        <line x1="95" y1="297" x2="81" y2="297" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
+        <!-- Aristotle (left of lake build, below) -->
+        <rect x="8" y="282" width="82" height="36" rx="6" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.15)" stroke-dasharray="4 3"/>
+        <text x="49" y="297" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">Aristotle</text>
+        <text x="49" y="309" text-anchor="middle" fill="#52525b" font-size="7.5" font-family="'Geist Mono',monospace">deep (hours)</text>
+        <line x1="118" y1="278" x2="70" y2="282" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
 
-        <!-- Aristotle -->
-        <rect x="5" y="325" width="74" height="44" rx="6" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.15)" stroke-dasharray="4 3"/>
-        <text x="42" y="342" text-anchor="middle" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">Aristotle</text>
-        <text x="42" y="356" text-anchor="middle" fill="#6b7280" font-size="8" font-family="'Geist Mono',monospace">deep (hours)</text>
-
-        <!-- Aristotle arrow -->
-        <line x1="95" y1="315" x2="60" y2="325" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
-
-        <!-- Iterate loop -->
-        <path d="M 265 305 Q 300 305 300 217 Q 300 129 265 129" fill="none" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
-        <text x="305" y="220" text-anchor="start" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">iterate</text>
+        <!-- Iterate loop (right side, from lake build back to check) -->
+        <path d="M 290 270 Q 330 270 330 192 Q 330 114 290 114" fill="none" stroke="#6b7280" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#arr-m)"/>
+        <text x="336" y="195" text-anchor="start" fill="#6b7280" font-size="9" font-family="'Geist Mono',monospace">iterate</text>
       </svg>
     </div>
   </div>

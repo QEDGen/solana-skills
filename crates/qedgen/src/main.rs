@@ -4,6 +4,7 @@ mod asm2lean;
 mod check;
 mod codegen;
 mod consolidate;
+mod deps;
 mod drift;
 mod fingerprint;
 mod idl2spec;
@@ -461,6 +462,9 @@ async fn main() -> Result<()> {
                 "temperature must be between 0.0 and 2.0"
             );
             ensure!(max_tokens > 0, "max_tokens must be greater than 0");
+            if validate {
+                deps::require_lean()?;
+            }
             let prompt = std::fs::read_to_string(&prompt_file)?;
             api::generate_proofs(
                 &prompt,
@@ -490,6 +494,9 @@ async fn main() -> Result<()> {
                 "temperature must be between 0.0 and 2.0"
             );
             ensure!(max_tokens > 0, "max_tokens must be greater than 0");
+            if validate {
+                deps::require_lean()?;
+            }
             api::fill_sorry(
                 &file,
                 output.as_deref(),
@@ -579,6 +586,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Setup { workspace, mathlib } => {
+            deps::require_lean()?;
             validate::setup_workspace(workspace.as_deref(), mathlib).await?;
         }
 
@@ -793,6 +801,7 @@ async fn main() -> Result<()> {
             codegen::generate(&spec, &output_dir)?;
 
             if kani || all {
+                deps::require_kani()?;
                 kani::generate(&spec, &kani_output)?;
             }
             if test || all {
@@ -805,6 +814,7 @@ async fn main() -> Result<()> {
                 integration_test::generate(&spec, &integration_output)?;
             }
             if lean || all {
+                deps::require_lean()?;
                 let parsed = check::parse_spec_file(&spec)?;
                 lean_gen::generate(&parsed, &lean_output)?;
             }
@@ -832,6 +842,7 @@ async fn main() -> Result<()> {
                 wait,
                 poll_interval,
             } => {
+                deps::require_lean()?;
                 if let Some(interval) = poll_interval {
                     ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
                     ensure!(

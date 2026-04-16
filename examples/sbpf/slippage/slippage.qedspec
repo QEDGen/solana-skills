@@ -1,18 +1,36 @@
-# Slippage Guard — Balance Check
-#
-# Compares token account balance against a minimum threshold.
-# If balance is below minimum, rejects. Otherwise accepts.
+// Slippage Guard — Balance Check
+//
+// Pure guard program (no mutable state). Compares token account
+// balance against a minimum threshold read from instruction data.
+// If balance is below minimum, rejects with exit code 1.
+// Otherwise accepts with exit code 0.
 
 spec Slippage
 
-errors [
-  SlippageExceeded = 1 "Token balance below minimum threshold"
-]
+target assembly
 
+type Error
+  | SlippageExceeded = 1 "Token balance below minimum threshold"
+
+/// Check that token account balance meets minimum threshold
 handler check_slippage {
   accounts {
     token_account : readonly
   }
 
-  requires token_balance > minimum_balance else SlippageExceeded
+  takes minimum_balance : U64
+
+  requires token_account.balance > minimum_balance else SlippageExceeded
 }
+
+property rejects_insufficient_balance :
+  minimum_balance >= token_account.balance implies exit_code == 1
+  preserved_by all
+
+property accepts_sufficient_balance :
+  minimum_balance < token_account.balance implies exit_code == 0
+  preserved_by all
+
+cover slippage_rejected [check_slippage]
+
+cover slippage_accepted [check_slippage]

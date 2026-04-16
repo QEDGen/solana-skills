@@ -1,20 +1,25 @@
-# SOL Transfer — Validation + CPI
-#
-# Validates input accounts, checks sender balance,
-# then invokes System Program Transfer CPI.
+// SOL Transfer — Validation + CPI
+//
+// Validates input accounts (count, freshness, duplicates),
+// checks sender has sufficient lamports, then invokes
+// System Program Transfer CPI.
+//
+// On success: exit 0. On any guard failure: exit 1-7.
 
 spec Transfer
 
-errors [
-  InvalidAccountCount           = 1 "Invalid number of accounts",
-  DataLengthNonzeroSender       = 2 "Sender data length is nonzero",
-  DuplicateAccountRecipient     = 3 "Recipient account is a duplicate",
-  DataLengthNonzeroRecipient    = 4 "Recipient data length is nonzero",
-  DuplicateAccountSystemProgram = 5 "System program account is a duplicate",
-  InvalidInstructionDataLength  = 6 "Invalid instruction data length",
-  InsufficientLamports          = 7 "Sender has insufficient lamports"
-]
+target assembly
 
+type Error
+  | InvalidAccountCount           = 1 "Invalid number of accounts"
+  | DataLengthNonzeroSender       = 2 "Sender data length is nonzero"
+  | DuplicateAccountRecipient     = 3 "Recipient account is a duplicate"
+  | DataLengthNonzeroRecipient    = 4 "Recipient data length is nonzero"
+  | DuplicateAccountSystemProgram = 5 "System program account is a duplicate"
+  | InvalidInstructionDataLength  = 6 "Invalid instruction data length"
+  | InsufficientLamports          = 7 "Sender has insufficient lamports"
+
+/// Transfer SOL from sender to recipient via System Program CPI
 handler transfer_sol {
   accounts {
     sender         : signer, writable
@@ -24,5 +29,25 @@ handler transfer_sol {
 
   takes amount : U64
 
-  requires sender_lamports >= amount else InsufficientLamports
+  requires accounts.count == 3 else InvalidAccountCount
+  requires sender.data_len == 0 else DataLengthNonzeroSender
+  requires recipient.is_unique else DuplicateAccountRecipient
+  requires recipient.data_len == 0 else DataLengthNonzeroRecipient
+  requires system_program.is_unique else DuplicateAccountSystemProgram
+  requires instruction_data_len == 8 else InvalidInstructionDataLength
+  requires sender.lamports >= amount else InsufficientLamports
 }
+
+property rejects_wrong_account_count :
+  accounts.count != 3 implies exit_code == 1
+  preserved_by all
+
+property rejects_insufficient_lamports :
+  sender.lamports < amount implies exit_code == 7
+  preserved_by all
+
+property accepts_valid_transfer :
+  all_guards_pass implies exit_code == 0
+  preserved_by all
+
+cover successful_transfer [transfer_sol]

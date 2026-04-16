@@ -2856,7 +2856,7 @@ mod tests {
         let lean = render(&spec);
         assert!(lean.contains("def threshold_bounded (s : State) : Prop :="));
         assert!(lean.contains("theorem threshold_bounded_inductive"));
-        assert!(lean.contains("theorem approvals_bounded_inductive"));
+        assert!(lean.contains("theorem votes_bounded_inductive"));
         // Multisig is fully auto-proven: all preservation, abort, overflow, cover,
         // and liveness theorems have mechanical proofs — no sorry markers remain.
         assert!(
@@ -3270,7 +3270,7 @@ instruction RegisterMarket {
         let spec = parser::parse(MULTISIG_SPEC).unwrap();
         let lean = render(&spec);
         assert!(lean.contains("theorem cover_proposal_lifecycle"));
-        assert!(lean.contains("theorem cover_cancel_flow"));
+        assert!(lean.contains("theorem cover_rejection_flow"));
         // Should be existential proofs with auto-generated witnesses
         assert!(lean.contains("∃ (s0 : State) (signer : Pubkey)"));
         // Covers are auto-proven with concrete witnesses via `by decide`
