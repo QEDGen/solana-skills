@@ -3,18 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QEDGen — Mathematical proof for Solana programs</title>
-  <meta name="description" content="One skill turns your coding agent into a theorem prover. Lean 4 proofs for Rust, Anchor, and native sBPF assembly — from access control to on-chain order books.">
-  <meta property="og:title" content="QEDGen — Mathematical proof for Solana programs">
-  <meta property="og:description" content="One skill turns your coding agent into a theorem prover. Lean 4 proofs for Rust, Anchor, and native sBPF assembly — from access control to on-chain order books.">
+  <title>QEDGen — Proofs, not promises</title>
+  <meta name="description" content="Spec-driven verification for Solana programs. Describe what your program must guarantee — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, and CI.">
+  <meta property="og:title" content="QEDGen — Proofs, not promises">
+  <meta property="og:description" content="Spec-driven verification for Solana programs. Describe what your program must guarantee — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, and CI.">
   <meta property="og:url" content="https://qedgen.dev/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://qedgen.dev/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="QEDGen — Mathematical proof for Solana programs">
-  <meta name="twitter:description" content="One skill turns your coding agent into a theorem prover. Lean 4 proofs for Rust, Anchor, and native sBPF assembly — from access control to on-chain order books.">
+  <meta name="twitter:title" content="QEDGen — Proofs, not promises">
+  <meta name="twitter:description" content="Spec-driven verification for Solana programs. Describe what your program must guarantee — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, and CI.">
   <meta name="twitter:image" content="https://qedgen.dev/og.png">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 42 42' fill='none'><rect x='4' y='4' width='34' height='34' rx='4' stroke='%2338bdf8' stroke-width='2.5'/><path d='M12 21L18 27L30 15' stroke='%2338bdf8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/><rect x='28' y='28' width='6' height='6' fill='%2338bdf8'/></svg>">
   <link rel="stylesheet" href="style.css">
@@ -46,8 +46,8 @@
   <div class="container hero-grid">
     <div class="hero-copy">
       <div class="badge"><span class="badge-dot"></span> Proofs, not promises</div>
-      <h1>Prove your Solana code is correct.<br><span class="accent-text">Mathematically. &#x220E;</span></h1>
-      <p class="subtitle">One skill. Your agent reads your Rust or sBPF assembly, writes Lean 4 proofs, and iterates until they compile. Hard goals go to Leanstral (fast) or Aristotle (deep).</p>
+      <h1>Ship to mainnet<br><span class="accent-text">without fear. &#x220E;</span></h1>
+      <p class="subtitle">Spec-driven verification for Solana. Describe what your program must guarantee in a <code>.qedspec</code> — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, and CI. All from one spec.</p>
       <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code><button class="copy-btn" aria-label="Copy to clipboard" onclick="navigator.clipboard.writeText('npx skills add qedgen/solana-skills').then(()=>{this.classList.add('copied');setTimeout(()=>this.classList.remove('copied'),1500)})"><svg class="icon-copy" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1.5 1.5 0 0 0-1.5-1.5H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg><svg class="icon-check" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5L6.5 12L13 4"/></svg></button></pre>
       <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">Agent Skills</a>.</p>
       <div class="cta">
@@ -75,7 +75,7 @@
           <path fill="#71717a" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
         </svg>
         <text x="180" y="46" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Your Code</text>
-        <text x="180" y="60" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">Rust / Anchor / sBPF</text>
+        <text x="180" y="60" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">Anchor / Quasar / sBPF</text>
 
         <!-- Arrow 1 → 2 -->
         <line x1="180" y1="74" x2="180" y2="94" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
@@ -97,8 +97,8 @@
           <path fill="none" stroke="#71717a" stroke-width="1.3" stroke-linejoin="round" d="M4 1 h5 l4 4 v10 h-9 z"/>
           <path fill="none" stroke="#71717a" stroke-width="1.3" d="M9 1 v4 h4"/>
         </svg>
-        <text x="180" y="222" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">SPEC.md</text>
-        <text x="180" y="236" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">goals &amp; properties</text>
+        <text x="180" y="222" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">.qedspec</text>
+        <text x="180" y="236" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">guarantees &amp; properties</text>
 
         <!-- Arrow 3 → 4 -->
         <line x1="180" y1="250" x2="180" y2="270" stroke="#e2e8f0" stroke-width="1" marker-end="url(#arr)"/>
@@ -106,8 +106,8 @@
         <!-- Box 4: Lean 4 Proofs -->
         <rect x="95" y="272" width="170" height="66" rx="8" fill="rgba(255,255,255,0.03)" stroke="rgba(56,189,248,0.25)"/>
         <text x="180" y="292" text-anchor="middle" fill="#38bdf8" font-size="16" font-weight="600" font-family="Georgia,serif" font-style="italic">&#x03BB;</text>
-        <text x="180" y="310" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Lean 4 Proofs</text>
-        <text x="180" y="324" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">lake build</text>
+        <text x="180" y="310" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="600" font-family="'Geist Mono',monospace">Verify</text>
+        <text x="180" y="324" text-anchor="middle" fill="#6b7280" font-size="10" font-family="'Geist Mono',monospace">proptest &#x2192; kani &#x2192; lean</text>
 
         <!-- Arrow 4 → ∎ -->
         <line x1="180" y1="338" x2="180" y2="366" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#arr-a)"/>

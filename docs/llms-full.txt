@@ -1,6 +1,6 @@
 # QEDGen
 
-> An agent skill that formally verifies Solana programs by generating Lean 4 proofs. Supports Rust/Anchor and native sBPF assembly. Your agent writes the proofs; Leanstral handles routine sub-goals (seconds), Aristotle handles hard ones (minutes-hours).
+> Spec-driven verification for Solana programs. Write a `.qedspec` describing what your program must guarantee — QEDGen validates it and generates property tests, Kani harnesses, Lean 4 proofs, program code, and CI workflows. Supports Anchor, Quasar, and native sBPF assembly.
 
 ## Installation
 
