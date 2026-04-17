@@ -23,6 +23,7 @@ mod rust_codegen_util;
 mod spec;
 mod spec_hash;
 mod unit_test;
+mod sbpf_verify;
 mod validate;
 mod verify;
 
@@ -236,6 +237,49 @@ enum Commands {
         /// Path to sBPF assembly source (hash check + lake build)
         #[arg(long)]
         asm: Option<PathBuf>,
+
+        /// Output as JSON (for agent consumption)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the generated harnesses against the generated implementation.
+    ///
+    /// `check` validates the spec; `verify` validates the code the spec
+    /// produced. Default (no flags) runs every backend whose artifact is
+    /// present on disk. Use --proptest/--kani/--lean to target one backend.
+    Verify {
+        /// Path to the spec file (.qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Run proptest harnesses (cargo test --release)
+        #[arg(long)]
+        proptest: bool,
+
+        /// Path to the proptest harness file
+        #[arg(long, default_value = "./tests/proptest.rs")]
+        proptest_path: PathBuf,
+
+        /// Run Kani BMC harnesses (cargo kani) — lands in v2.4-M2
+        #[arg(long)]
+        kani: bool,
+
+        /// Path to the Kani harness file
+        #[arg(long, default_value = "./tests/kani.rs")]
+        kani_path: PathBuf,
+
+        /// Run Lean proofs (lake build)
+        #[arg(long)]
+        lean: bool,
+
+        /// Path to the Lean project directory
+        #[arg(long, default_value = "./formal_verification")]
+        lean_dir: PathBuf,
+
+        /// Stop on the first failing backend
+        #[arg(long)]
+        fail_fast: bool,
 
         /// Output as JSON (for agent consumption)
         #[arg(long)]
@@ -704,7 +748,7 @@ async fn main() -> Result<()> {
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
-                verify::verify(asm_path, &proofs)?;
+                sbpf_verify::verify(asm_path, &proofs)?;
             }
 
             // Drift detection (--drift)
@@ -860,6 +904,64 @@ async fn main() -> Result<()> {
             }
 
             if has_issues {
+                std::process::exit(1);
+            }
+        }
+
+        // ==================================================================
+        // verify — run generated harnesses against generated code
+        // ==================================================================
+        Commands::Verify {
+            spec,
+            proptest,
+            proptest_path,
+            kani,
+            kani_path,
+            lean,
+            lean_dir,
+            fail_fast,
+            json,
+        } => {
+            require_git_repo()?;
+
+            // No explicit backend flags -> run every backend whose artifact
+            // is present on disk. This matches the agent-friendly "just do
+            // the right thing" default from the PRD.
+            let any_flag = proptest || kani || lean;
+            let opts = if any_flag {
+                verify::VerifyOpts {
+                    spec: spec.clone(),
+                    proptest,
+                    proptest_path,
+                    kani,
+                    kani_path,
+                    lean,
+                    lean_dir,
+                    fail_fast,
+                }
+            } else {
+                verify::VerifyOpts {
+                    spec: spec.clone(),
+                    proptest: proptest_path.exists(),
+                    proptest_path,
+                    kani: kani_path.exists(),
+                    kani_path,
+                    lean: lean_dir.join("lakefile.lean").exists()
+                        || lean_dir.join("lakefile.toml").exists(),
+                    lean_dir,
+                    fail_fast,
+                }
+            };
+
+            let report = verify::run(&opts)?;
+
+            if json {
+                verify::print_json(&report)?;
+            } else {
+                verify::print_human(&report);
+            }
+
+            if !report.ok() {
                 std::process::exit(1);
             }
         }
