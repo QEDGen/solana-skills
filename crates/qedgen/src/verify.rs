@@ -17,7 +17,6 @@ pub enum BackendStatus {
     Passed,
     Failed,
     Skipped,
-    NotImplemented,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,9 +47,6 @@ pub struct VerifyOpts {
     pub proptest: bool,
     pub proptest_path: PathBuf,
     pub kani: bool,
-    // Reserved for the M2 kani runner; currently only used by the CLI default
-    // to decide whether to auto-enable the backend.
-    #[allow(dead_code)]
     pub kani_path: PathBuf,
     pub lean: bool,
     pub lean_dir: PathBuf,
@@ -73,13 +69,15 @@ pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
     }
 
     if opts.kani {
-        backends.push(BackendReport {
-            name: "kani",
-            status: BackendStatus::NotImplemented,
-            duration_ms: 0,
-            detail: Some("Kani runner lands in v2.4-M2".into()),
-            log_path: None,
-        });
+        let report = run_kani(&opts.kani_path);
+        let failed = matches!(report.status, BackendStatus::Failed);
+        backends.push(report);
+        if failed && opts.fail_fast {
+            return Ok(VerifyReport {
+                spec: opts.spec.clone(),
+                backends,
+            });
+        }
     }
 
     if opts.lean {
@@ -178,6 +176,90 @@ fn run_proptest(harness: &Path) -> BackendReport {
     }
 }
 
+fn run_kani(harness: &Path) -> BackendReport {
+    let start = Instant::now();
+
+    if !harness.exists() {
+        return BackendReport {
+            name: "kani",
+            status: BackendStatus::Skipped,
+            duration_ms: start.elapsed().as_millis(),
+            detail: Some(format!(
+                "harness not found at {} (run `qedgen codegen --kani`)",
+                harness.display()
+            )),
+            log_path: None,
+        };
+    }
+
+    // Point-of-use dep check. `require_kani` returns Err with install text
+    // when cargo-kani is missing; surface that as a Failed backend so the
+    // user sees the install hint instead of a spawn error.
+    if let Err(e) = crate::deps::require_kani() {
+        return BackendReport {
+            name: "kani",
+            status: BackendStatus::Failed,
+            duration_ms: start.elapsed().as_millis(),
+            detail: Some(format!("{}", e)),
+            log_path: None,
+        };
+    }
+
+    let crate_dir = match nearest_cargo_dir(harness) {
+        Some(dir) => dir,
+        None => {
+            return BackendReport {
+                name: "kani",
+                status: BackendStatus::Failed,
+                duration_ms: start.elapsed().as_millis(),
+                detail: Some(format!(
+                    "no Cargo.toml found above {}",
+                    harness.display()
+                )),
+                log_path: None,
+            };
+        }
+    };
+
+    // `--tests` scopes Kani to #[kani::proof] functions under tests/.
+    // The generated harness is `#![cfg(kani)]`, so `cargo test` ignores
+    // it and only `cargo kani` picks it up.
+    let output = Command::new("cargo")
+        .args(["kani", "--tests"])
+        .current_dir(&crate_dir)
+        .output();
+
+    let duration_ms = start.elapsed().as_millis();
+
+    match output {
+        Ok(out) if out.status.success() => BackendReport {
+            name: "kani",
+            status: BackendStatus::Passed,
+            duration_ms,
+            detail: Some(summarize_kani_pass(&String::from_utf8_lossy(&out.stdout))),
+            log_path: None,
+        },
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            BackendReport {
+                name: "kani",
+                status: BackendStatus::Failed,
+                duration_ms,
+                detail: Some(summarize_kani_failure(&stdout, &stderr)),
+                log_path: None,
+            }
+        }
+        Err(e) => BackendReport {
+            name: "kani",
+            status: BackendStatus::Failed,
+            duration_ms,
+            detail: Some(format!("failed to spawn cargo kani: {}", e)),
+            log_path: None,
+        },
+    }
+}
+
 fn run_lean(lean_dir: &Path) -> BackendReport {
     let start = Instant::now();
 
@@ -258,6 +340,56 @@ fn summarize_cargo_failure(stdout: &str, stderr: &str) -> String {
     tail_lines(stderr, 20)
 }
 
+fn summarize_kani_pass(stdout: &str) -> String {
+    // On success, Kani prints "VERIFICATION:- SUCCESSFUL" per harness and a
+    // summary line. Count them for a tight report.
+    let successful = stdout.matches("VERIFICATION:- SUCCESSFUL").count();
+    let summary_line = stdout
+        .lines()
+        .find(|l| l.contains("Complete - ") || l.contains("harnesses"))
+        .unwrap_or("");
+    if summary_line.is_empty() {
+        format!("{} harness(es) verified", successful)
+    } else {
+        format!("{} verified — {}", successful, summary_line.trim())
+    }
+}
+
+fn summarize_kani_failure(stdout: &str, stderr: &str) -> String {
+    // Pull failed verifications and their counterexample preamble.
+    let mut lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| {
+            l.contains("VERIFICATION:- FAILED")
+                || l.contains("Failed Checks:")
+                || l.contains("Failed properties:")
+                || l.contains("Check ")
+        })
+        .take(20)
+        .collect();
+    if lines.is_empty() {
+        // Failure before any harness ran (toolchain missing, cargo metadata
+        // refused, etc). `cargo kani` writes some of these to stdout and some
+        // to stderr; return whichever has content.
+        let tail_err = tail_lines(stderr, 20);
+        if !tail_err.trim().is_empty() {
+            return tail_err;
+        }
+        let tail_out = tail_lines(stdout, 20);
+        if !tail_out.trim().is_empty() {
+            return tail_out;
+        }
+        return "cargo kani failed with no diagnostic output".into();
+    }
+    if let Some(summary) = stdout
+        .lines()
+        .find(|l| l.contains("Complete - ") || l.contains("Summary:"))
+    {
+        lines.push(summary);
+    }
+    lines.join("\n")
+}
+
 fn summarize_lake_failure(stdout: &str, stderr: &str) -> String {
     let errors: Vec<&str> = stderr
         .lines()
@@ -284,7 +416,6 @@ pub fn print_human(report: &VerifyReport) {
             BackendStatus::Passed => "PASS",
             BackendStatus::Failed => "FAIL",
             BackendStatus::Skipped => "SKIP",
-            BackendStatus::NotImplemented => "TODO",
         };
         eprintln!("  [{}] {:<10} ({} ms)", marker, b.name, b.duration_ms);
         if let Some(d) = &b.detail {
