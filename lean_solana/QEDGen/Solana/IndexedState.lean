@@ -96,6 +96,24 @@ theorem sum_update_proj_bilinear
   -- Both sides are commutatively equal; `abel` (AddCommMonoid normalizer) closes.
   abel
 
+/-- Per-index map invariant preservation under `Function.update`.
+    To show `∀ j, P (update m i v j)`, discharge `P v` (the new value at `i`)
+    and reuse the existing invariant `∀ j, P (m j)` off-index. This is the
+    workhorse for any "∀ account, predicate(account)" invariant in DeFi
+    programs (solvency, bounded balances, active-slot invariants, etc.). -/
+theorem forall_update_pres
+    {n : Nat} {α : Type}
+    (m : Fin n → α) (i : Fin n) (v : α) (P : α → Prop)
+    (h_inv : ∀ j, P (m j)) (h_new : P v) :
+    ∀ j, P (Function.update m i v j) := by
+  intro j
+  by_cases hji : j = i
+  · subst hji
+    rw [Function.update_self]
+    exact h_new
+  · rw [Function.update_of_ne hji]
+    exact h_inv j
+
 /-- Summing a projection through a `Function.update` is unchanged when the
     update doesn't alter that projection at the updated index. This is the
     backbone of conservation proofs when a handler's effect touches fields

@@ -57,6 +57,11 @@ handler add_user (i : AccountIdx) : State.Active -> State.Active {
              vault     : writable }
 
   requires state.accounts[i].active == 0 else SlotAlreadyActive
+  // Must not reactivate an underwater slot — the equity check preserves
+  // the account_solvent invariant by construction on activation. A fresh
+  // slot (cap=0, pnl=0) trivially satisfies; a reclaimed slot with
+  // residual negative pnl must be settled before reactivation.
+  requires state.accounts[i].capital + state.accounts[i].pnl >= 0 else AccountUnderwater
 
   effect {
     accounts[i].active := 1
@@ -69,6 +74,7 @@ handler add_lp (i : AccountIdx) : State.Active -> State.Active {
              vault     : writable }
 
   requires state.accounts[i].active == 0 else SlotAlreadyActive
+  requires state.accounts[i].capital + state.accounts[i].pnl >= 0 else AccountUnderwater
 
   effect {
     accounts[i].active := 1
@@ -130,6 +136,9 @@ handler withdraw (i : AccountIdx) (amount : U128) : State.Active -> State.Active
 
   requires state.accounts[i].active == 1 else SlotInactive
   requires state.accounts[i].capital >= amount else InsufficientFunds
+  // Post-withdraw equity must stay non-negative, i.e. amount ≤ capital + pnl.
+  // Needed for account_solvent preservation when pnl is negative.
+  requires state.accounts[i].capital + state.accounts[i].pnl >= amount else InsufficientFunds
 
   effect {
     V                   -= amount
