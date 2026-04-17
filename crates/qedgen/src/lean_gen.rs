@@ -3672,7 +3672,6 @@ instruction RegisterMarket {
 "#;
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_routes_to_sbpf_renderer() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3683,7 +3682,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_namespace() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3692,7 +3690,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_constants() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3706,7 +3703,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_pubkey_chunks() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3718,7 +3714,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_error_constants() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3730,7 +3725,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_offset_constants_and_ea_lemmas() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3752,7 +3746,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_guard_theorems() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3769,7 +3762,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_hypothesis_accumulation() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3786,7 +3778,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_spec_structure() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3798,7 +3789,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_property_stubs() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3810,7 +3800,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_initstate2_for_two_pointer() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3819,7 +3808,6 @@ instruction RegisterMarket {
     }
 
     #[test]
-    #[ignore = "sBPF grammar (instruction blocks, layouts, guards) not yet ported to chumsky — see M6.2 follow-up"]
     fn lean_gen_sbpf_entry_point() {
         let spec = chumsky_adapter::parse_str(DROPSET_SPEC).unwrap();
         let lean = render(&spec);
@@ -3874,13 +3862,13 @@ instruction RegisterMarket {
     }
 
     #[test]
-    fn lean_gen_liveness_theorem() {
+    fn lean_gen_does_not_emit_liveness_in_spec() {
+        // Liveness obligations are user-owned in Proofs.lean (stop-gap for
+        // durability under codegen regeneration; tracked in M13 git-native).
+        // Spec.lean must stay codegen-owned.
         let spec = chumsky_adapter::parse_str(PERCOLATOR_SPEC).unwrap();
         let lean = render(&spec);
-        assert!(lean.contains("theorem liveness_drain_completes"));
-        assert!(lean.contains("s.status = .Draining"));
-        assert!(lean.contains("s'.status = .Active"));
-        assert!(lean.contains("ops.length ≤ 2"));
+        assert!(!lean.contains("theorem liveness_drain_completes"));
     }
 
     #[test]

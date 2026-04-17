@@ -12,9 +12,10 @@
 
 use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
-    ParsedAccountType, ParsedCover, ParsedEnsures, ParsedEnvironment, ParsedErrorCode,
-    ParsedEvent, ParsedHandler, ParsedHandlerAccount, ParsedLiveness, ParsedPda, ParsedProperty,
-    ParsedRecordType, ParsedRequires, ParsedSpec, ParsedSumType, ParsedVariant,
+    FlowKind, ParsedAccountType, ParsedCover, ParsedEnsures, ParsedEnvironment, ParsedErrorCode,
+    ParsedEvent, ParsedGuard, ParsedHandler, ParsedHandlerAccount, ParsedInstruction,
+    ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
+    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedVariant, SbpfPropertyKind,
 };
 
 // ============================================================================
@@ -903,6 +904,251 @@ fn string_to_typeref_best_effort(s: &str) -> a::TypeRef {
 }
 
 // ============================================================================
+// sBPF instruction adapter
+// ============================================================================
+
+/// Render a simple guard expression into the space-separated ASCII triple
+/// form consumed by `derive_guard_hypotheses` in `lean_gen`:
+///   `field == RHS`, `field >= RHS`, etc.
+/// When `resolve_consts` is true, bare identifiers that are declared constants
+/// are substituted with their values (for the `checks` form). Otherwise names
+/// are preserved verbatim (for the `checks_raw` form).
+fn render_sbpf_check(e: &Expr, consts: ConstTable, resolve_consts: bool) -> String {
+    fn render(e: &Expr, consts: ConstTable, resolve_consts: bool) -> String {
+        match e {
+            Expr::Int(v) => v.to_string(),
+            Expr::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Expr::Path(p) => {
+                // Render as root[.seg]* with no state prefix substitution.
+                if p.segments.is_empty() {
+                    if resolve_consts {
+                        if let Some(v) = consts.get(&p.root) {
+                            return v.clone();
+                        }
+                    }
+                    return p.root.clone();
+                }
+                let mut s = p.root.clone();
+                for seg in &p.segments {
+                    match seg {
+                        a::PathSeg::Field(f) => {
+                            s.push('.');
+                            s.push_str(f);
+                        }
+                        a::PathSeg::Index(i) => {
+                            s.push('[');
+                            s.push_str(i);
+                            s.push(']');
+                        }
+                    }
+                }
+                s
+            }
+            Expr::Paren(inner) => render(&inner.node, consts, resolve_consts),
+            Expr::Cmp { op, lhs, rhs } => {
+                let sym = match op {
+                    a::CmpOp::Eq => "==",
+                    a::CmpOp::Ne => "!=",
+                    a::CmpOp::Le => "<=",
+                    a::CmpOp::Ge => ">=",
+                    a::CmpOp::Lt => "<",
+                    a::CmpOp::Gt => ">",
+                };
+                format!(
+                    "{} {} {}",
+                    render(&lhs.node, consts, resolve_consts),
+                    sym,
+                    render(&rhs.node, consts, resolve_consts)
+                )
+            }
+            Expr::Arith { op, lhs, rhs } => {
+                let sym = match op {
+                    a::ArithOp::Add => "+",
+                    a::ArithOp::Sub => "-",
+                    a::ArithOp::Mul => "*",
+                    a::ArithOp::Div => "/",
+                    a::ArithOp::Mod => "%",
+                };
+                format!(
+                    "{} {} {}",
+                    render(&lhs.node, consts, resolve_consts),
+                    sym,
+                    render(&rhs.node, consts, resolve_consts)
+                )
+            }
+            // Fallback for unexpected shapes — pretty-print a minimal Lean-ish form.
+            other => {
+                let env = TypeEnv::default();
+                expr_to_lean(other, Ctx::Guard, consts, &env)
+            }
+        }
+    }
+    render(e, consts, resolve_consts)
+}
+
+/// Translate an `InstructionDecl` into the legacy `ParsedInstruction` shape.
+fn adapt_instruction(instr: &a::InstructionDecl, top_consts: ConstTable) -> ParsedInstruction {
+    let mut discriminant: Option<String> = None;
+    let mut entry: Option<u64> = None;
+    let mut constants: Vec<(String, String)> = Vec::new();
+    let mut errors: Vec<ParsedErrorCode> = Vec::new();
+    let mut input_layout: Vec<ParsedLayoutField> = Vec::new();
+    let mut insn_layout: Vec<ParsedLayoutField> = Vec::new();
+    let mut guard_decls: Vec<&a::GuardDecl> = Vec::new();
+    let mut prop_decls: Vec<&a::SbpfPropertyDecl> = Vec::new();
+
+    for item in &instr.items {
+        match item {
+            a::InstructionItem::Discriminant(d) => discriminant = Some(d.clone()),
+            a::InstructionItem::Entry(n) => entry = Some(*n),
+            a::InstructionItem::Const { name, value } => {
+                constants.push((name.clone(), value.to_string()));
+            }
+            a::InstructionItem::Errors(entries) => {
+                for e in entries {
+                    errors.push(ParsedErrorCode {
+                        name: e.name.clone(),
+                        value: e.code,
+                        description: e.description.clone(),
+                    });
+                }
+            }
+            a::InstructionItem::InputLayout(fs) => {
+                for f in fs {
+                    input_layout.push(ParsedLayoutField {
+                        name: f.name.clone(),
+                        field_type: f.field_type.clone(),
+                        offset: f.offset,
+                        description: f.description.clone(),
+                    });
+                }
+            }
+            a::InstructionItem::InsnLayout(fs) => {
+                for f in fs {
+                    insn_layout.push(ParsedLayoutField {
+                        name: f.name.clone(),
+                        field_type: f.field_type.clone(),
+                        offset: f.offset,
+                        description: f.description.clone(),
+                    });
+                }
+            }
+            a::InstructionItem::Guard(g) => guard_decls.push(g),
+            a::InstructionItem::SbpfProperty(p) => prop_decls.push(p),
+        }
+    }
+
+    // Build a merged const table: top-level constants + this instruction's
+    // local constants. Instruction-local wins on conflict (pest parity).
+    let mut merged = top_consts.clone();
+    for (name, value) in &constants {
+        merged.insert(name.clone(), value.clone());
+    }
+    let merged_consts: ConstTable = &merged;
+
+    let guards: Vec<ParsedGuard> = guard_decls
+        .iter()
+        .map(|g| {
+            let (checks, checks_raw) = match &g.checks {
+                Some(e) => (
+                    Some(render_sbpf_check(&e.node, merged_consts, true)),
+                    Some(render_sbpf_check(&e.node, merged_consts, false)),
+                ),
+                None => (None, None),
+            };
+            ParsedGuard {
+                name: g.name.clone(),
+                doc: g.doc.clone(),
+                checks,
+                checks_raw,
+                error: g.error.clone(),
+                fuel: g.fuel,
+            }
+        })
+        .collect();
+
+    let properties: Vec<ParsedSbpfProperty> = prop_decls
+        .iter()
+        .map(|p| adapt_sbpf_property(p))
+        .collect();
+
+    ParsedInstruction {
+        name: instr.name.clone(),
+        doc: instr.doc.clone(),
+        discriminant,
+        entry,
+        constants,
+        errors,
+        input_layout,
+        insn_layout,
+        guards,
+        properties,
+    }
+}
+
+fn adapt_sbpf_property(p: &a::SbpfPropertyDecl) -> ParsedSbpfProperty {
+    // Decide kind from the clauses. Later clauses override earlier ones when
+    // they set the same field. The presence of certain clauses determines the
+    // variant.
+    let mut scope_targets: Option<Vec<String>> = None;
+    let mut flow: Option<(String, FlowKind)> = None;
+    let mut cpi: Option<(String, String, Vec<(String, String)>)> = None;
+    let mut after_all_guards = false;
+    let mut exit: Option<u64> = None;
+    let mut has_expr = false;
+
+    for clause in &p.clauses {
+        match clause {
+            a::SbpfPropClause::Expr(_) => has_expr = true,
+            a::SbpfPropClause::PreservedBy(_) => {}
+            a::SbpfPropClause::Scope(names) => scope_targets = Some(names.clone()),
+            a::SbpfPropClause::Flow { target, kind } => {
+                let k = match kind {
+                    a::SbpfFlowKind::FromSeeds(xs) => FlowKind::FromSeeds(xs.clone()),
+                    a::SbpfFlowKind::Through(xs) => FlowKind::Through(xs.clone()),
+                };
+                flow = Some((target.clone(), k));
+            }
+            a::SbpfPropClause::Cpi {
+                program,
+                instruction,
+                fields,
+            } => {
+                cpi = Some((program.clone(), instruction.clone(), fields.clone()));
+            }
+            a::SbpfPropClause::AfterAllGuards => after_all_guards = true,
+            a::SbpfPropClause::Exit(n) => exit = Some(*n),
+        }
+    }
+
+    let _ = has_expr; // accepted but currently unused for routing
+    let kind = if let Some(targets) = scope_targets {
+        SbpfPropertyKind::Scope { targets }
+    } else if let Some((target, k)) = flow {
+        SbpfPropertyKind::Flow { target, kind: k }
+    } else if let Some((program, instruction, fields)) = cpi {
+        SbpfPropertyKind::Cpi {
+            program,
+            instruction,
+            fields,
+        }
+    } else if after_all_guards || exit.is_some() {
+        SbpfPropertyKind::HappyPath {
+            exit_code: exit.map(|n| n.to_string()).unwrap_or_default(),
+        }
+    } else {
+        // Either an explicit `expr` body or empty — the generic stub covers both.
+        SbpfPropertyKind::Generic
+    };
+
+    ParsedSbpfProperty {
+        name: p.name.clone(),
+        doc: p.doc.clone(),
+        kind,
+    }
+}
+
+// ============================================================================
 // Top-level adapter
 // ============================================================================
 
@@ -1105,6 +1351,28 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Assembly(path) => {
                 out.assembly_path = Some(path.clone());
+            }
+            TopItem::Pubkey(p) => {
+                out.pubkeys.push(ParsedPubkey {
+                    name: p.name.clone(),
+                    chunks: p.chunks.iter().map(|c| c.to_string()).collect(),
+                });
+            }
+            TopItem::Errors(entries) => {
+                // Mirror ADT-Error behavior: populate error_codes and valued_errors.
+                for e in entries {
+                    out.error_codes.push(e.name.clone());
+                    if e.code.is_some() || e.description.is_some() {
+                        out.valued_errors.push(ParsedErrorCode {
+                            name: e.name.clone(),
+                            value: e.code,
+                            description: e.description.clone(),
+                        });
+                    }
+                }
+            }
+            TopItem::Instruction(instr) => {
+                out.instructions.push(adapt_instruction(instr, consts));
             }
             TopItem::Environment(envd) => {
                 let mut mutates: Vec<(String, String)> = Vec::new();

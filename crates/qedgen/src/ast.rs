@@ -78,6 +78,120 @@ pub enum TopItem {
     Assembly(String),
     /// `type Name = <type_ref>` — type alias, expands to its target.
     TypeAlias(TypeAliasDecl),
+    /// `pubkey NAME [u64, u64, u64, u64]` — 4-chunk U64 pubkey literal (sBPF sugar).
+    Pubkey(PubkeyDecl),
+    /// `errors [Name = code "desc", ...]` — top-level error list (sBPF sugar,
+    /// equivalent to `type Error | Name = code "desc" | ...`).
+    Errors(Vec<ErrorEntry>),
+    /// `instruction Name { ... }` — sBPF instruction block with layouts,
+    /// guards, and properties.
+    Instruction(InstructionDecl),
+}
+
+// ============================================================================
+// sBPF-specific AST nodes (instruction blocks, layouts, guards, properties)
+// ============================================================================
+
+/// `pubkey NAME [c0, c1, c2, c3]` — 32-byte pubkey as 4 U64 chunks.
+#[derive(Debug, Clone)]
+pub struct PubkeyDecl {
+    pub name: String,
+    pub chunks: Vec<u128>,
+}
+
+/// One entry in a top-level `errors [...]` list.
+#[derive(Debug, Clone)]
+pub struct ErrorEntry {
+    pub name: String,
+    pub code: Option<u64>,
+    pub description: Option<String>,
+}
+
+/// `instruction Name { ... }` — an sBPF instruction handler.
+#[derive(Debug, Clone)]
+pub struct InstructionDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub items: Vec<InstructionItem>,
+}
+
+/// A clause inside an instruction block.
+#[derive(Debug, Clone)]
+pub enum InstructionItem {
+    /// `discriminant IDENT` or `discriminant INT`.
+    Discriminant(String),
+    /// `entry N` — byte offset of instruction entry point in the program.
+    Entry(u64),
+    /// `const NAME = VALUE` — instruction-local constant.
+    Const { name: String, value: u128 },
+    /// `errors [...]` inside an instruction — per-instruction error list.
+    Errors(Vec<ErrorEntry>),
+    /// `input_layout { ... }` — layout of input buffer.
+    InputLayout(Vec<LayoutField>),
+    /// `insn_layout { ... }` — layout of instruction data register.
+    InsnLayout(Vec<LayoutField>),
+    /// `guard NAME { ... }` — a validation guard.
+    Guard(GuardDecl),
+    /// `property NAME { ... }` — an sBPF property block.
+    SbpfProperty(SbpfPropertyDecl),
+}
+
+/// A field in `input_layout {}` / `insn_layout {}`:
+/// `name : Type @ offset "description"`.
+#[derive(Debug, Clone)]
+pub struct LayoutField {
+    pub name: String,
+    pub field_type: String,
+    pub offset: i64,
+    pub description: Option<String>,
+}
+
+/// `guard NAME { checks? error fuel? }`.
+#[derive(Debug, Clone)]
+pub struct GuardDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    /// Parsed checks expression, or None if the guard has no checks clause.
+    pub checks: Option<Node<Expr>>,
+    pub error: String,
+    pub fuel: Option<u64>,
+}
+
+/// `property NAME { ... }` — sBPF property body.
+#[derive(Debug, Clone)]
+pub struct SbpfPropertyDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub clauses: Vec<SbpfPropClause>,
+}
+
+/// Clause inside an sBPF property block.
+#[derive(Debug, Clone)]
+pub enum SbpfPropClause {
+    /// `expr <guard-expr>` — a propositional body.
+    Expr(Node<Expr>),
+    /// `preserved_by all | [...]` — preservation hint.
+    PreservedBy(PreservedBy),
+    /// `scope guards | [names]` — memory-safety scope selector.
+    Scope(Vec<String>),
+    /// `flow target from seeds [...]` or `flow target through [...]`.
+    Flow { target: String, kind: SbpfFlowKind },
+    /// `cpi program instruction { ... }` — expected CPI envelope.
+    Cpi {
+        program: String,
+        instruction: String,
+        fields: Vec<(String, String)>,
+    },
+    /// `after all guards` — mark the subsequent `exit` as the post-guard exit.
+    AfterAllGuards,
+    /// `exit N` — happy-path exit code.
+    Exit(u64),
+}
+
+#[derive(Debug, Clone)]
+pub enum SbpfFlowKind {
+    FromSeeds(Vec<String>),
+    Through(Vec<String>),
 }
 
 #[derive(Debug, Clone)]
