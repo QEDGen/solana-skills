@@ -1,2 +1,5 @@
-# Syntax highlighting for .qedspec files on GitHub
-*.qedspec linguist-language=Ruby
+# Syntax highlighting for .qedspec files on GitHub.
+# OCaml reads closer to the qedspec surface: `type | ... | ...` ADTs,
+# `match with`, camelCase fields, comment form. Ruby was a stopgap from
+# the earlier syntax; OCaml matches what we ship today.
+*.qedspec linguist-language=OCaml
