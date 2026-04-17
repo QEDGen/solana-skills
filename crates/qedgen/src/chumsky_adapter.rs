@@ -76,16 +76,14 @@ impl<'a> TypeEnv<'a> {
                         r.fields.iter().map(|f| (f.name.clone(), &f.ty)).collect();
                     env.records.insert(r.name.clone(), m);
                 }
-                TopItem::Adt(a) => {
-                    // State-like ADTs: flatten all variant fields into the
-                    // state_fields map (backward-compat with the existing
-                    // ParsedSpec shape). The first variant carrying fields
-                    // wins for name collisions.
-                    if a.name != "Error" {
-                        for variant in &a.variants {
-                            for f in &variant.fields {
-                                env.state_fields.entry(f.name.clone()).or_insert(&f.ty);
-                            }
+                // State-like ADTs: flatten all variant fields into the
+                // state_fields map (backward-compat with the existing
+                // ParsedSpec shape). The first variant carrying fields
+                // wins for name collisions. `Error`-shaped ADTs are skipped.
+                TopItem::Adt(a) if a.name != "Error" => {
+                    for variant in &a.variants {
+                        for f in &variant.fields {
+                            env.state_fields.entry(f.name.clone()).or_insert(&f.ty);
                         }
                     }
                 }
