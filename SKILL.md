@@ -305,31 +305,87 @@ See `references/cli.md` for all Aristotle subcommands.
 
 ### 4d. Stamp verified code
 
-After proofs compile and `qedgen check` passes, stamp the verified Rust handlers with `#[qed(verified)]` to detect future drift:
-
-```bash
-# Add #[qed(verified)] to handler functions, then stamp hashes
-$QEDGEN check --spec program.qedspec --drift programs/src/ --update-hashes
-```
-
-This adds content hashes to every `#[qed(verified)]` annotation. If anyone later modifies a verified function:
-- **At compile time** (with `qedgen-macros`): `compile_error!` — the program won't build
-- **In CI** (with `qedgen check --drift`): `exit 1` — the pipeline fails
-
-**Adding annotations:**
+After proofs compile and `qedgen check` passes, stamp the verified Rust handlers with `#[qed(verified)]` so any future drift — in either the handler body *or* the `.qedspec` — fails the build. Generated scaffolds (`$QEDGEN codegen --all`) already emit these attributes with hashes populated; only legacy/brownfield handlers need to be stamped by hand.
 
 ```rust
 use qedgen_macros::qed;
 
-#[qed(verified, hash = "5af369bb254368d3")]
+#[qed(verified,
+      spec = "percolator.qedspec",
+      handler = "deposit",
+      hash = "5af369bb254368d3",
+      spec_hash = "6771efd5f76b268a")]
 pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
-    // ...
+    guards::deposit(&ctx, amount)?;
+    // user business logic
 }
 ```
 
-The hash covers the function signature + body, excluding attributes and comments. It changes when the body, parameters, or return type change. It does NOT change for whitespace, formatting, or comment changes.
+The two hashes run independently at compile time:
 
-### 4e. Verify and report
+| Attribute arg | Covers | Fires when |
+|---|---|---|
+| `hash` | handler body + signature (modulo whitespace/comments/attrs) | user edits the handler body |
+| `spec_hash` | raw text of `handler <name> { … }` in the `.qedspec` | spec changes the handler contract |
+
+Both are **pure compile-time checks**: the macro expands to the original function unchanged (`cargo expand` to verify — zero runtime overhead, zero injected code).
+
+**Setup**: omit a hash to have the macro tell you its current value:
+
+```rust
+#[qed(verified, spec = "percolator.qedspec", handler = "deposit")]
+// ↑ cargo build prints: expected hash = "5af36...", spec_hash = "67719..."
+```
+
+Paste the printed hashes back into the attribute. Done.
+
+### 4e. Reconcile spec drift (agent loop)
+
+When a user edits the `.qedspec` after code/proofs are already written, QEDGen does **not** regenerate user-owned files (handler bodies, `Proofs.lean`). It surfaces drift via compile errors and orphan checks. You (Claude) are expected to reconcile.
+
+**Files never clobbered by `qedgen codegen`:**
+- `programs/<name>/src/lib.rs`, `programs/<name>/src/instructions/<handler>.rs` — user's business logic
+- `formal_verification/Proofs.lean` — user's preservation proofs
+- `tests/integration/*.rs` — user's integration test cases
+
+**Files always regenerated:**
+- `programs/<name>/src/guards.rs` — pure codegen from `requires` / `aborts_if`
+- `formal_verification/Spec.lean` — types, transitions, property defs
+- Kani and proptest harnesses
+
+**Drift detection signals:**
+
+| Signal | How to see it | What it tells you |
+|---|---|---|
+| Rust: `cargo build` error at `#[qed(...)]` | Compile error: "handler `X` spec contract changed. Expected: `abc`, Actual: `def`" | Spec's handler block changed — user's Rust handler needs review |
+| Rust: `cargo build` error at `#[qed(...)]` with `hash` mismatch | Compile error: "function `X` has changed since verification" | User edited the function body — re-verify or update hash |
+| Lean: `lake build` error referencing a missing symbol | "unknown identifier `deposit_guards`" or "unknown constant `Xyz`" | Spec renamed/removed something `Proofs.lean` references |
+| Lean: `qedgen check` orphan/missing report | "orphan theorem `X`" / "missing obligation `Y`" | `Proofs.lean` has theorems for handlers that no longer exist, or is missing theorems for new handlers |
+
+**Agent reconcile loop:**
+
+```
+1. Run `cargo build` in the generated program crate, `lake build` in formal_verification/
+2. Also run:  $QEDGEN check --spec program.qedspec --json
+3. For each drift signal:
+     a. Read the CURRENT spec's handler/property block
+     b. Read the CURRENT user file (handler body or theorem)
+     c. Diff them — identify what semantic change the spec introduced
+     d. Apply the minimal edit to the user file to restore consistency
+     e. For Rust: update the `hash` and `spec_hash` attribute values to the new computed values (the compile error shows them)
+     f. For Lean: add missing `theorem … := by sorry` stubs, delete orphan theorems, or rename per the spec
+4. Re-run build commands; repeat until green
+5. Fill any newly-introduced sorry stubs via the standard proof path (Step 4b → 4c)
+```
+
+**Rules for reconciliation:**
+
+- **Never auto-update a hash without inspecting the diff first.** The `spec_hash` changing is the only signal the user has that the spec contract moved under them; silently bumping it bypasses the check.
+- **Handler signature changes require a code review, not a mechanical patch.** If `deposit` gained a `deadline: u64` parameter in the spec, the Rust body may need real logic changes, not just a re-hash.
+- **Orphan theorems are almost always safe to delete** once you've confirmed the spec no longer declares that handler/property. Missing theorems get stubbed with `sorry` and then filled.
+- **If both hashes drift together**, the spec changed AND the user's body was edited in the same cycle — present this to the user before acting; don't silently prefer one side.
+
+### 4f. Verify and report
 
 ```bash
 # Build proofs
@@ -372,12 +428,27 @@ $QEDGEN check --spec program.qedspec --drift programs/src/   # exits 1 on drift
 
 Everything is derived from the `.qedspec`. Some outputs are transient (used during spec design, then discarded), others are generated into the project.
 
+**Every `qedgen codegen` or `qedgen check` invocation requires a git repo.** The CLI exits with a clear error if run outside a `.git` tree — this protects against accidental data loss from scaffolding into an unversioned directory. Run `git init` first if needed.
+
+**Ownership model** (which files codegen owns vs. scaffolds once):
+
+| File | Policy | Rationale |
+|---|---|---|
+| `formal_verification/Spec.lean` | always regenerated | Pure codegen: types, transitions, property defs |
+| `formal_verification/Proofs.lean` | scaffold once, never touched | User-owned proof bodies |
+| `programs/<name>/src/guards.rs` | always regenerated | Pure codegen from `requires` / `aborts_if` |
+| `programs/<name>/src/lib.rs`, `instructions/<handler>.rs` | scaffold once, never touched | User-owned business logic |
+| `tests/kani/*.rs`, `tests/proptest/*.rs` | always regenerated | Pure codegen; user customizations go in a sibling file |
+| `tests/integration/*.rs` | scaffold once, never touched | User-owned test cases |
+
+**Subsequent `qedgen codegen` runs** print skip advisories for user-owned files and always regenerate pure-codegen files. Drift between user-owned files and the spec is caught at `cargo build` / `lake build` time via the `#[qed(spec_hash=…)]` macro and `qedgen check` orphan reports — see **Step 4e** for the reconcile loop.
+
 ```bash
 # Validation (spec design feedback — transient, agent-driven)
-$QEDGEN check --spec program.qedspec                    # lint + coverage (default)
+$QEDGEN check --spec program.qedspec                    # lint + coverage + orphan/missing theorems
 $QEDGEN check --spec program.qedspec --json              # machine-readable for agent
 
-# Generated (derived from spec, written to project)
+# Generated (scaffolded or regenerated per ownership table above)
 $QEDGEN codegen --spec program.qedspec --all             # everything at once
 $QEDGEN codegen --spec program.qedspec --lean            # Lean proofs only
 $QEDGEN codegen --spec program.qedspec --kani            # Kani harnesses only

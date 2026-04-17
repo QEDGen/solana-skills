@@ -18,6 +18,7 @@ mod lean_gen;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
+mod reconcile;
 mod rust_codegen_util;
 mod spec;
 mod spec_hash;
@@ -314,6 +315,28 @@ enum Commands {
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
     #[command(subcommand)]
     Aristotle(AristotleCommands),
+
+    /// Emit a unified drift report (Rust handlers + Lean proofs vs .qedspec)
+    ///
+    /// Report-only; never modifies files. Exits 0 on no drift, 1 on drift.
+    /// Pair with `--json` for machine-readable output consumable by agents.
+    Reconcile {
+        /// Path to the spec file (.qedspec)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Root directory to scan for Rust handlers (recursive)
+        #[arg(long, default_value = "programs/")]
+        code: PathBuf,
+
+        /// Directory containing Proofs.lean
+        #[arg(long, default_value = "formal_verification/")]
+        proofs: PathBuf,
+
+        /// Emit JSON instead of the human-readable report
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1018,6 +1041,27 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        // ==================================================================
+        // reconcile — unified drift report (Rust handlers + Lean proofs)
+        // ==================================================================
+        Commands::Reconcile {
+            spec,
+            code,
+            proofs,
+            json,
+        } => {
+            require_git_repo()?;
+            let report = reconcile::reconcile(&spec, &code, &proofs)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                reconcile::print_report(&report);
+            }
+            if report.has_drift() {
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
