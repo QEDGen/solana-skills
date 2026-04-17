@@ -364,7 +364,10 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         };
         let when_state = infer_when(&ix.name, analysis).unwrap_or("Active");
         let then_state = infer_then(&ix.name, analysis).unwrap_or("Active");
-        let transition = format!(" : {}.{} -> {}.{}", on_type, when_state, on_type, then_state);
+        let transition = format!(
+            " : {}.{} -> {}.{}",
+            on_type, when_state, on_type, then_state
+        );
 
         writeln!(s, "handler {}{}{} {{", ix.name, params, transition).unwrap();
 

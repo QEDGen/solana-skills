@@ -31,9 +31,7 @@ pub fn expected_theorems(spec: &ParsedSpec) -> BTreeSet<String> {
 /// file. Regex-only — we don't need syntactic parsing for this check.
 pub fn extract_theorem_names(source: &str) -> BTreeSet<String> {
     let re = Regex::new(r"(?m)^\s*theorem\s+([A-Za-z_][A-Za-z0-9_]*)").unwrap();
-    re.captures_iter(source)
-        .map(|c| c[1].to_string())
-        .collect()
+    re.captures_iter(source).map(|c| c[1].to_string()).collect()
 }
 
 /// Render the bootstrap `Proofs.lean` body (once, when the file is absent).

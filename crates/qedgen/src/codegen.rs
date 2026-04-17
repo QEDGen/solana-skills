@@ -13,7 +13,9 @@ use crate::spec_hash;
 /// fall back to the absolute path (works as long as the repo doesn't move).
 fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
     // Canonicalize both; fall back to the raw paths on failure.
-    let spec = spec_path.canonicalize().unwrap_or_else(|_| spec_path.to_path_buf());
+    let spec = spec_path
+        .canonicalize()
+        .unwrap_or_else(|_| spec_path.to_path_buf());
     let manifest = manifest_dir
         .canonicalize()
         .unwrap_or_else(|_| manifest_dir.to_path_buf());
@@ -94,7 +96,10 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
     if lib_path.exists() {
         eprintln!(
             "programs/{}/src/lib.rs already exists — skipping (user-owned). guards.rs regenerated.",
-            output_dir.file_name().and_then(|n| n.to_str()).unwrap_or("<program>")
+            output_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<program>")
         );
         return Ok(());
     }
@@ -531,11 +536,17 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
     std::fs::create_dir_all(&src_dir)?;
 
     let mut out = String::new();
-    out.push_str(&marker("DO NOT EDIT — regenerated from .qedspec", fp, "src/guards.rs"));
+    out.push_str(&marker(
+        "DO NOT EDIT — regenerated from .qedspec",
+        fp,
+        "src/guards.rs",
+    ));
     out.push_str("//! Per-handler guard checks derived from the `.qedspec`.\n");
     out.push_str("//! Called from user-owned `instructions/<name>::handler` before\n");
     out.push_str("//! business logic; keep guard logic here, policy-free logic there.\n\n");
-    out.push_str("#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]\n\n");
+    out.push_str(
+        "#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]\n\n",
+    );
     out.push_str("use quasar_lang::prelude::*;\n");
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
@@ -569,10 +580,7 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
             // The Rust expression comes directly from the spec; callers are
             // expected to bring the identifiers in scope (typically via
             // `ctx.<account>.<field>` style access).
-            out.push_str(&format!(
-                "    // requires: {}\n",
-                req.lean_expr.trim()
-            ));
+            out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
@@ -582,10 +590,7 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
                     err
                 ));
             } else {
-                out.push_str(&format!(
-                    "    debug_assert!({});\n",
-                    req.rust_expr.trim()
-                ));
+                out.push_str(&format!("    debug_assert!({});\n", req.rust_expr.trim()));
             }
         }
 

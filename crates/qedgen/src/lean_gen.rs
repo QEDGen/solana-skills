@@ -69,9 +69,11 @@ fn is_indexed_spec(spec: &ParsedSpec) -> bool {
     if !spec.records.is_empty() {
         return true;
     }
-    spec.account_types
-        .iter()
-        .any(|a| a.fields.iter().any(|(_, t)| t.trim_start().starts_with("Map")))
+    spec.account_types.iter().any(|a| {
+        a.fields
+            .iter()
+            .any(|(_, t)| t.trim_start().starts_with("Map"))
+    })
 }
 
 /// Single-account rendering — original path, backward-compatible output.
@@ -2897,9 +2899,7 @@ fn pick_account_idx_bound(spec: &ParsedSpec) -> String {
 
 /// Collect all Map-typed field names from account types, keyed by field name.
 /// Returns (field_name → (bound_const, inner_record_name)).
-fn collect_map_fields(
-    spec: &ParsedSpec,
-) -> std::collections::BTreeMap<String, (String, String)> {
+fn collect_map_fields(spec: &ParsedSpec) -> std::collections::BTreeMap<String, (String, String)> {
     use std::collections::BTreeMap;
     let mut out = BTreeMap::new();
     for acct in &spec.account_types {
@@ -3035,7 +3035,10 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
 
     // -- AccountIdx alias --
     let idx_bound = pick_account_idx_bound(spec);
-    out.push_str(&format!("abbrev AccountIdx : Type := Fin {}\n\n", idx_bound));
+    out.push_str(&format!(
+        "abbrev AccountIdx : Type := Fin {}\n\n",
+        idx_bound
+    ));
 
     // -- Record structures (e.g. Account) --
     for rec in &spec.records {
@@ -3050,7 +3053,10 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
         out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 
         // Inhabited instance — zero-defaults. Needed for Map.set fallback.
-        out.push_str(&format!("instance : Inhabited {} := \u{27E8}{{\n", rec.name));
+        out.push_str(&format!(
+            "instance : Inhabited {} := \u{27E8}{{\n",
+            rec.name
+        ));
         for (fname, ftype) in &rec.fields {
             out.push_str(&format!(
                 "  {} := {},\n",
@@ -3102,10 +3108,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
             if v.fields.is_empty() {
                 out.push_str(&format!("  | {}\n", v.name));
             } else {
-                out.push_str(&format!(
-                    "  | {} (d : {}{}Data)\n",
-                    v.name, st.name, v.name
-                ));
+                out.push_str(&format!("  | {} (d : {}{}Data)\n", v.name, st.name, v.name));
             }
         }
         out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
@@ -3325,11 +3328,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
 
         out.push_str("def applyOp (s : State) (signer : Pubkey) : Operation → Option State\n");
         for op in &spec.handlers {
-            let binders: Vec<String> = op
-                .takes_params
-                .iter()
-                .map(|(n, _)| n.clone())
-                .collect();
+            let binders: Vec<String> = op.takes_params.iter().map(|(n, _)| n.clone()).collect();
             let call_args = if binders.is_empty() {
                 String::new()
             } else {
@@ -3374,7 +3373,6 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     //   `theorem <prop>_preserved_by_<handler> (s s' : State) ... : ... := by ...`
     // `qedgen init` seeds a `Proofs.lean` scaffold on first run; subsequent
     // `qedgen codegen` calls leave it alone.
-
 
     out.push_str(&format!("end {}\n", spec.program_name));
     out

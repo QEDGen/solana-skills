@@ -47,9 +47,7 @@ fn tok<'a, O: 'a>(
 
 /// Match a keyword with a word boundary on the trailing side — rejects
 /// `justify` matching `just`. Consumes trailing ws/comments.
-fn kw<'a>(
-    keyword: &'static str,
-) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
+fn kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
     just(keyword)
         .then(
             any::<&'a str, Err<'a>>()
@@ -176,7 +174,11 @@ fn doc_line<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
 /// Consumes trailing whitespace/newlines between lines.
 fn doc_comments<'a>() -> impl Parser<'a, &'a str, Option<String>, Err<'a>> + Clone {
     doc_line()
-        .then_ignore(any::<&'a str, Err<'a>>().filter(|c: &char| c.is_whitespace()).repeated())
+        .then_ignore(
+            any::<&'a str, Err<'a>>()
+                .filter(|c: &char| c.is_whitespace())
+                .repeated(),
+        )
         .repeated()
         .collect::<Vec<_>>()
         .map(|v: Vec<String>| {
@@ -260,14 +262,10 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
     recursive(|expr| {
         let int = integer().map_with(|v, e| Node::new(Expr::Int(v), e.span().into_range()));
 
-        let bool_lit = choice((
-            kw("true").to(true),
-            kw("false").to(false),
-        ))
-        .map_with(|b, e| Node::new(Expr::Bool(b), e.span().into_range()));
+        let bool_lit = choice((kw("true").to(true), kw("false").to(false)))
+            .map_with(|b, e| Node::new(Expr::Bool(b), e.span().into_range()));
 
-        let path_expr =
-            path().map_with(|p, e| Node::new(Expr::Path(p), e.span().into_range()));
+        let path_expr = path().map_with(|p, e| Node::new(Expr::Path(p), e.span().into_range()));
 
         // old(expr)
         let old = just("old")
@@ -421,9 +419,7 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             )
             .then_ignore(wsc())
             .then_ignore(just(')'))
-            .map_with(|(func, args), e| {
-                Node::new(Expr::App { func, args }, e.span().into_range())
-            })
+            .map_with(|(func, args), e| Node::new(Expr::App { func, args }, e.span().into_range()))
             .boxed();
 
         // Inline `match scrutinee with | Variant binder? => body | ...`.
@@ -441,9 +437,7 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                 binder,
                 body: Box::new(body),
             });
-        let match_arm = just('|')
-            .then_ignore(wsc())
-            .ignore_then(match_arm_pat);
+        let match_arm = just('|').then_ignore(wsc()).ignore_then(match_arm_pat);
         let match_expr = kw("match")
             .ignore_then(expr.clone())
             .then_ignore(wsc())
@@ -509,9 +503,7 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             .ignore_then(field_init_list.clone())
             .then_ignore(wsc())
             .then_ignore(just('}'))
-            .map_with(|fields, e| {
-                Node::new(Expr::RecordLit(fields), e.span().into_range())
-            })
+            .map_with(|fields, e| Node::new(Expr::RecordLit(fields), e.span().into_range()))
             .boxed();
 
         // `.Variant` or `.Variant payload`. Payload is a record literal or
@@ -544,7 +536,9 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
         // follows, so bare paths still route to path_expr). Try
         // record_update before record_lit; both before bare-path fallback.
         let group_c = choice((record_update, record_lit, ctor, paren, app_expr, path_expr)).boxed();
-        let atom_base = choice((group_a, group_b, group_c)).then_ignore(wsc()).boxed();
+        let atom_base = choice((group_a, group_b, group_c))
+            .then_ignore(wsc())
+            .boxed();
 
         // Postfix `.field` — layers on any atom result. Used for chains
         // like `left(n).key` where the base isn't a bare path.
@@ -560,36 +554,34 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             .ignore_then(non_keyword_ident())
             .then_ignore(wsc())
             .boxed();
-        let atom_with_fields = atom_base.foldl_with(
-            field_postfix.repeated(),
-            |base, field, e| {
-                Node::new(
-                    Expr::Field {
-                        base: Box::new(base),
-                        field,
-                    },
-                    e.span().into_range(),
-                )
-            },
-        );
+        let atom_with_fields = atom_base.foldl_with(field_postfix.repeated(), |base, field, e| {
+            Node::new(
+                Expr::Field {
+                    base: Box::new(base),
+                    field,
+                },
+                e.span().into_range(),
+            )
+        });
 
         // Postfix `is .Variant` check — layers on any atom result.
         let is_postfix = kw("is")
             .ignore_then(just('.'))
             .ignore_then(non_keyword_ident())
             .then_ignore(wsc());
-        let atom = atom_with_fields
-            .then(is_postfix.or_not())
-            .map_with(|(base, is_v), e| match is_v {
-                None => base,
-                Some(variant) => Node::new(
-                    Expr::IsVariant {
-                        scrutinee: Box::new(base),
-                        variant,
-                    },
-                    e.span().into_range(),
-                ),
-            });
+        let atom =
+            atom_with_fields
+                .then(is_postfix.or_not())
+                .map_with(|(base, is_v), e| match is_v {
+                    None => base,
+                    Some(variant) => Node::new(
+                        Expr::IsVariant {
+                            scrutinee: Box::new(base),
+                            variant,
+                        },
+                        e.span().into_range(),
+                    ),
+                });
 
         // product: atom (('*' | '/' | '%') atom)*
         let mul_op = choice((
@@ -598,25 +590,25 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             just('%').to(ArithOp::Mod),
         ))
         .then_ignore(wsc());
-        let product = atom
-            .clone()
-            .foldl_with(mul_op.then(atom.clone()).repeated(), |lhs, (op, rhs), e| {
-                Node::new(
-                    Expr::Arith {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    },
-                    e.span().into_range(),
-                )
-            });
+        let product =
+            atom.clone()
+                .foldl_with(mul_op.then(atom.clone()).repeated(), |lhs, (op, rhs), e| {
+                    Node::new(
+                        Expr::Arith {
+                            op,
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        },
+                        e.span().into_range(),
+                    )
+                });
 
         // sum-expr (arithmetic additive): product (('+' | '-') product)*
-        let add_op = choice((just('+').to(ArithOp::Add), just('-').to(ArithOp::Sub)))
-            .then_ignore(wsc());
-        let arith = product
-            .clone()
-            .foldl_with(add_op.then(product.clone()).repeated(), |lhs, (op, rhs), e| {
+        let add_op =
+            choice((just('+').to(ArithOp::Add), just('-').to(ArithOp::Sub))).then_ignore(wsc());
+        let arith = product.clone().foldl_with(
+            add_op.then(product.clone()).repeated(),
+            |lhs, (op, rhs), e| {
                 Node::new(
                     Expr::Arith {
                         op,
@@ -625,7 +617,8 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                     },
                     e.span().into_range(),
                 )
-            });
+            },
+        );
 
         // comparison: arith (cmp_op arith)?
         let cmp_op = choice((
@@ -637,8 +630,10 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             just('>').to(CmpOp::Gt),
         ))
         .then_ignore(wsc());
-        let cmp = arith.clone().then(cmp_op.then(arith.clone()).or_not()).map_with(
-            |(lhs, maybe_rhs), e| match maybe_rhs {
+        let cmp = arith
+            .clone()
+            .then(cmp_op.then(arith.clone()).or_not())
+            .map_with(|(lhs, maybe_rhs), e| match maybe_rhs {
                 None => lhs,
                 Some((op, rhs)) => Node::new(
                     Expr::Cmp {
@@ -648,8 +643,7 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                     },
                     e.span().into_range(),
                 ),
-            },
-        );
+            });
 
         // not: ("not" cmp) | cmp
         let not_expr = recursive(|not_expr| {
@@ -657,7 +651,9 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                 just("not")
                     .then_ignore(wsc())
                     .ignore_then(not_expr.clone())
-                    .map_with(|inner, e| Node::new(Expr::Not(Box::new(inner)), e.span().into_range())),
+                    .map_with(|inner, e| {
+                        Node::new(Expr::Not(Box::new(inner)), e.span().into_range())
+                    }),
                 cmp.clone(),
             ))
         });
@@ -810,7 +806,13 @@ fn adt_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     kw("type")
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
-        .then(variant().then_ignore(wsc()).repeated().at_least(1).collect::<Vec<Variant>>())
+        .then(
+            variant()
+                .then_ignore(wsc())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<Variant>>(),
+        )
         .map(|(name, variants)| TopItem::Adt(AdtDecl { name, variants }))
 }
 
@@ -1000,10 +1002,7 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
                 .not(),
         )
         .to(None::<Node<Expr>>);
-    let arm_guard = choice((
-        wildcard_guard,
-        expr().map(Some),
-    ));
+    let arm_guard = choice((wildcard_guard, expr().map(Some)));
     let match_arm = just('|')
         .then_ignore(wsc())
         .ignore_then(arm_guard)
@@ -1173,22 +1172,20 @@ fn handler_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
 
 // property name : expr preserved_by all | [a, b, ...]
 fn property_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    let preserved = just("preserved_by")
-        .then_ignore(wsc())
-        .ignore_then(choice((
-            just("all").to(PreservedBy::All),
-            just('[')
-                .then_ignore(wsc())
-                .ignore_then(
-                    non_keyword_ident()
-                        .then_ignore(wsc())
-                        .separated_by(just(',').then_ignore(wsc()))
-                        .collect::<Vec<String>>(),
-                )
-                .then_ignore(wsc())
-                .then_ignore(just(']'))
-                .map(PreservedBy::Some),
-        )));
+    let preserved = just("preserved_by").then_ignore(wsc()).ignore_then(choice((
+        just("all").to(PreservedBy::All),
+        just('[')
+            .then_ignore(wsc())
+            .ignore_then(
+                non_keyword_ident()
+                    .then_ignore(wsc())
+                    .separated_by(just(',').then_ignore(wsc()))
+                    .collect::<Vec<String>>(),
+            )
+            .then_ignore(wsc())
+            .then_ignore(just(']'))
+            .map(PreservedBy::Some),
+    )));
 
     doc_comments()
         .then_ignore(kw("property"))
@@ -1307,7 +1304,9 @@ fn program_id_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
 
 // assembly "path/to/file.s"
 fn assembly_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    kw("assembly").ignore_then(string_lit()).map(TopItem::Assembly)
+    kw("assembly")
+        .ignore_then(string_lit())
+        .map(TopItem::Assembly)
 }
 
 // pda name [seed1, seed2, ...]
@@ -1364,8 +1363,7 @@ fn environment_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone 
         .ignore_then(expr())
         .map(EnvClause::Constraint);
 
-    let clause = choice((mutates, constraint))
-        .map_with(|c, e| Node::new(c, e.span().into_range()));
+    let clause = choice((mutates, constraint)).map_with(|c, e| Node::new(c, e.span().into_range()));
 
     kw("environment")
         .ignore_then(non_keyword_ident())
@@ -1754,11 +1752,7 @@ fn sbpf_property_decl<'a>() -> impl Parser<'a, &'a str, SbpfPropertyDecl, Err<'a
         )
         .then_ignore(wsc())
         .then_ignore(just('}'))
-        .map(|((doc, name), clauses)| SbpfPropertyDecl {
-            name,
-            doc,
-            clauses,
-        })
+        .map(|((doc, name), clauses)| SbpfPropertyDecl { name, doc, clauses })
 }
 
 // instruction_item: discriminant / entry / const / errors / input_layout /
@@ -1837,9 +1831,7 @@ fn instruction_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone 
         )
         .then_ignore(wsc())
         .then_ignore(just('}'))
-        .map(|((doc, name), items)| {
-            TopItem::Instruction(InstructionDecl { name, doc, items })
-        })
+        .map(|((doc, name), items)| TopItem::Instruction(InstructionDecl { name, doc, items }))
 }
 
 // Top-level item: priority-ordered choice.
@@ -1867,13 +1859,8 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         program_id_decl(),
         assembly_decl(),
     ));
-    let group_c = choice((
-        pubkey_decl(),
-        errors_decl(),
-        instruction_decl(),
-    ));
-    choice((group_a, group_b, group_c))
-        .map_with(|item, e| Node::new(item, e.span().into_range()))
+    let group_c = choice((pubkey_decl(), errors_decl(), instruction_decl()));
+    choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
 pub fn spec_parser<'a>() -> impl Parser<'a, &'a str, Spec, Err<'a>> + Clone {
@@ -2072,7 +2059,9 @@ property conservation :
             Expr::Cmp { op, rhs, .. } => {
                 assert_eq!(*op, CmpOp::Ge);
                 match &rhs.node {
-                    Expr::Sum { binder, binder_ty, .. } => {
+                    Expr::Sum {
+                        binder, binder_ty, ..
+                    } => {
                         assert_eq!(binder, "i");
                         assert_eq!(binder_ty, "AccountIdx");
                     }
@@ -2113,10 +2102,13 @@ property conservation :
                 TopItem::Errors(_) => "errors",
                 TopItem::Instruction(_) => "instruction",
             })
-            .fold(std::collections::BTreeMap::<&str, usize>::new(), |mut m, k| {
-                *m.entry(k).or_default() += 1;
-                m
-            });
+            .fold(
+                std::collections::BTreeMap::<&str, usize>::new(),
+                |mut m, k| {
+                    *m.entry(k).or_default() += 1;
+                    m
+                },
+            );
 
         assert_eq!(counts.get("const"), Some(&4), "consts: {:?}", counts);
         assert_eq!(counts.get("record"), Some(&1));
@@ -2152,41 +2144,54 @@ handler h (i : U16) (amount : U128) : State.Active -> State.Active {
 }
 "#;
         let s = parse_ok(src);
-        let h = s.items.iter().find_map(|i| match &i.node {
-            TopItem::Handler(h) => Some(h),
-            _ => None,
-        }).unwrap();
+        let h = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) => Some(h),
+                _ => None,
+            })
+            .unwrap();
         // requires: IsVariant
-        let req = h.clauses.iter().find_map(|c| match &c.node {
-            HandlerClause::Requires { guard, .. } => Some(guard),
-            _ => None,
-        }).unwrap();
+        let req = h
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Requires { guard, .. } => Some(guard),
+                _ => None,
+            })
+            .unwrap();
         match &req.node {
             Expr::IsVariant { variant, .. } => assert_eq!(variant, "Active"),
             o => panic!("expected IsVariant, got {:?}", o),
         }
         // effect RHS: Match containing RecordUpdate on the Active arm
-        let eff = h.clauses.iter().find_map(|c| match &c.node {
-            HandlerClause::Effect(s) => Some(s),
-            _ => None,
-        }).unwrap();
+        let eff = h
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Effect(s) => Some(s),
+                _ => None,
+            })
+            .unwrap();
         match &eff[0].node.rhs.node {
-            Expr::Match { arms, .. } => {
-                match &arms[0].body.node {
-                    Expr::Ctor { variant: v, payload } => {
-                        assert_eq!(v, "Active");
-                        let p = payload.as_ref().expect("payload");
-                        match &p.node {
-                            Expr::RecordUpdate { updates, .. } => {
-                                assert_eq!(updates.len(), 1);
-                                assert_eq!(updates[0].0, "capital");
-                            }
-                            o => panic!("expected RecordUpdate payload, got {:?}", o),
+            Expr::Match { arms, .. } => match &arms[0].body.node {
+                Expr::Ctor {
+                    variant: v,
+                    payload,
+                } => {
+                    assert_eq!(v, "Active");
+                    let p = payload.as_ref().expect("payload");
+                    match &p.node {
+                        Expr::RecordUpdate { updates, .. } => {
+                            assert_eq!(updates.len(), 1);
+                            assert_eq!(updates[0].0, "capital");
                         }
+                        o => panic!("expected RecordUpdate payload, got {:?}", o),
                     }
-                    o => panic!("expected Ctor in Active arm, got {:?}", o),
                 }
-            }
+                o => panic!("expected Ctor in Active arm, got {:?}", o),
+            },
             o => panic!("expected Match on effect RHS, got {:?}", o),
         }
     }
@@ -2221,14 +2226,22 @@ handler init_slot (i : U16) : State.Active -> State.Active {
 }
 "#;
         let s = parse_ok(src);
-        let reset = s.items.iter().find_map(|i| match &i.node {
-            TopItem::Handler(h) if h.name == "reset_slot" => Some(h),
-            _ => None,
-        }).unwrap();
-        let reset_effect = reset.clauses.iter().find_map(|c| match &c.node {
-            HandlerClause::Effect(stmts) => Some(stmts),
-            _ => None,
-        }).unwrap();
+        let reset = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) if h.name == "reset_slot" => Some(h),
+                _ => None,
+            })
+            .unwrap();
+        let reset_effect = reset
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Effect(stmts) => Some(stmts),
+                _ => None,
+            })
+            .unwrap();
         match &reset_effect[0].node.rhs.node {
             Expr::Ctor { variant, payload } => {
                 assert_eq!(variant, "Inactive");
@@ -2237,14 +2250,22 @@ handler init_slot (i : U16) : State.Active -> State.Active {
             o => panic!("expected Ctor, got {:?}", o),
         }
 
-        let init = s.items.iter().find_map(|i| match &i.node {
-            TopItem::Handler(h) if h.name == "init_slot" => Some(h),
-            _ => None,
-        }).unwrap();
-        let init_effect = init.clauses.iter().find_map(|c| match &c.node {
-            HandlerClause::Effect(stmts) => Some(stmts),
-            _ => None,
-        }).unwrap();
+        let init = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) if h.name == "init_slot" => Some(h),
+                _ => None,
+            })
+            .unwrap();
+        let init_effect = init
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Effect(stmts) => Some(stmts),
+                _ => None,
+            })
+            .unwrap();
         match &init_effect[0].node.rhs.node {
             Expr::Ctor { variant, payload } => {
                 assert_eq!(variant, "Active");

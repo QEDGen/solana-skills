@@ -353,9 +353,9 @@ pub enum TransferAmount {
 
 #[derive(Debug, Clone)]
 pub enum AccountAttr {
-    Simple(String),     // signer, writable, readonly, program, token
-    Type(String),       // `type token`
-    Authority(String),  // `authority x`
+    Simple(String),    // signer, writable, readonly, program, token
+    Type(String),      // `type token`
+    Authority(String), // `authority x`
     Pda(Vec<String>),
 }
 
@@ -521,10 +521,7 @@ pub enum Expr {
     /// declares them as uninterpreted symbols (axioms or Lean defs) in the
     /// support module. Zero-arg calls are rejected; bare identifiers parse
     /// as paths.
-    App {
-        func: String,
-        args: Vec<Node<Expr>>,
-    },
+    App { func: String, args: Vec<Node<Expr>> },
     /// Postfix field access on an arbitrary expression — `e.field`.
     /// Enables chains like `left(n).key` where the base isn't a bare path.
     /// (Simple bare paths `a.b.c` still route to `Expr::Path`.)

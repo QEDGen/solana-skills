@@ -639,8 +639,8 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
         );
     }
 
-    let src = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let src =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
         let msg = errs
             .iter()
@@ -3081,7 +3081,8 @@ mod tests {
     #[test]
     fn test_complete_spec_clean() {
         let spec_content = include_str!("../../../examples/rust/escrow/escrow.qedspec");
-        let spec = crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
+        let spec =
+            crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
         let warnings = check_completeness(&spec);
         // A well-formed spec should have zero warnings
         let warning_rules: Vec<&str> = warnings
@@ -3103,7 +3104,8 @@ mod tests {
     #[test]
     fn test_coverage_matrix_full_coverage() {
         let spec_content = include_str!("../../../examples/rust/multisig/multisig.qedspec");
-        let spec = crate::chumsky_adapter::parse_str(spec_content).expect("multisig.qedspec should parse");
+        let spec =
+            crate::chumsky_adapter::parse_str(spec_content).expect("multisig.qedspec should parse");
         let matrix = coverage_matrix(&spec);
         assert_eq!(matrix.coverage_pct, 100.0);
         assert!(matrix.gaps.is_empty());

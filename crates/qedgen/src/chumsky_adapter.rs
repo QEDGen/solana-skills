@@ -72,11 +72,8 @@ impl<'a> TypeEnv<'a> {
         for Node { node, .. } in &spec.items {
             match node {
                 TopItem::Record(r) => {
-                    let m: std::collections::BTreeMap<_, _> = r
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), &f.ty))
-                        .collect();
+                    let m: std::collections::BTreeMap<_, _> =
+                        r.fields.iter().map(|f| (f.name.clone(), &f.ty)).collect();
                     env.records.insert(r.name.clone(), m);
                 }
                 TopItem::Adt(a) => {
@@ -132,17 +129,14 @@ impl<'a> TypeEnv<'a> {
                     a::PathSeg::Field(f) => {
                         let field_ty = match current {
                             None => self.state_fields.get(f).copied(),
-                            Some(a::TypeRef::Named(rec_name)) => self
-                                .records
-                                .get(rec_name)
-                                .and_then(|m| m.get(f).copied()),
+                            Some(a::TypeRef::Named(rec_name)) => {
+                                self.records.get(rec_name).and_then(|m| m.get(f).copied())
+                            }
                             Some(a::TypeRef::Map { inner, .. }) => {
                                 // direct .field after a Map without [idx] shouldn't happen
                                 // in valid specs, but bottom out safely
                                 if let a::TypeRef::Named(rec_name) = inner.as_ref() {
-                                    self.records
-                                        .get(rec_name)
-                                        .and_then(|m| m.get(f).copied())
+                                    self.records.get(rec_name).and_then(|m| m.get(f).copied())
                                 } else {
                                     None
                                 }
@@ -251,11 +245,10 @@ impl<'a> TypeEnv<'a> {
             }
             // Match result type: use the first arm's body. Arms must agree;
             // in phase 1 we don't cross-check.
-            Expr::Match { arms, .. } => {
-                arms.first()
-                    .map(|a| self.infer(&a.body.node))
-                    .unwrap_or(Kind::Other)
-            }
+            Expr::Match { arms, .. } => arms
+                .first()
+                .map(|a| self.infer(&a.body.node))
+                .unwrap_or(Kind::Other),
             // Constructor value — sum-type result. Kind is Other because
             // downstream consumers (Map updates, effect assignments) don't
             // need arithmetic promotion for the outer value.
@@ -283,13 +276,22 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
         Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         Expr::Path(p) => path_to_lean(p, ctx, /*inside_old=*/ false, consts),
         Expr::Old(inner) => path_or_expr_to_lean_old(&inner.node, ctx, consts, env),
-        Expr::Sum { binder, binder_ty, body } => format!(
+        Expr::Sum {
+            binder,
+            binder_ty,
+            body,
+        } => format!(
             "(\u{2211} {} : {}, {})",
             binder,
             binder_ty,
             expr_to_lean(&body.node, ctx, consts, env)
         ),
-        Expr::Quant { kind, binder, binder_ty, body } => {
+        Expr::Quant {
+            kind,
+            binder,
+            binder_ty,
+            body,
+        } => {
             let sym = match kind {
                 a::Quantifier::Forall => "\u{2200}",
                 a::Quantifier::Exists => "\u{2203}",
@@ -332,7 +334,8 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
                 a::CmpOp::Lt => "<",
                 a::CmpOp::Gt => ">",
             };
-            let (l_str, r_str) = render_binary_with_coercion(&lhs.node, &rhs.node, ctx, consts, env);
+            let (l_str, r_str) =
+                render_binary_with_coercion(&lhs.node, &rhs.node, ctx, consts, env);
             format!("{} {} {}", l_str, sym, r_str)
         }
         Expr::Arith { op, lhs, rhs } => {
@@ -343,7 +346,8 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
                 a::ArithOp::Div => " / ",
                 a::ArithOp::Mod => " % ",
             };
-            let (l_str, r_str) = render_binary_with_coercion(&lhs.node, &rhs.node, ctx, consts, env);
+            let (l_str, r_str) =
+                render_binary_with_coercion(&lhs.node, &rhs.node, ctx, consts, env);
             format!("{}{}{}", l_str, sym, r_str)
         }
         Expr::Paren(inner) => format!("({})", expr_to_lean(&inner.node, ctx, consts, env)),
@@ -426,10 +430,7 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
                     return format!("({}.is{} {} = true)", ty_name, variant, sc);
                 }
             }
-            format!(
-                "(match {} with | .{} _ => True | _ => False)",
-                sc, variant
-            )
+            format!("(match {} with | .{} _ => True | _ => False)", sc, variant)
         }
         Expr::MulDivCeil { a, b, d } => {
             // ceil(a*b/d) = (a*b + d - 1) / d   for positive d.
@@ -601,13 +602,22 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             Expr::Path(p) => path_to_rust(p, ctx, true, consts),
             other => format!("/*old({})*/", expr_to_rust(other, ctx, consts)),
         },
-        Expr::Sum { binder, binder_ty, body } => format!(
+        Expr::Sum {
+            binder,
+            binder_ty,
+            body,
+        } => format!(
             "sum_over::<{}>(|{}| {})",
             binder_ty,
             binder,
             expr_to_rust(&body.node, ctx, consts)
         ),
-        Expr::Quant { kind, binder, binder_ty, body } => {
+        Expr::Quant {
+            kind,
+            binder,
+            binder_ty,
+            body,
+        } => {
             let sym = match kind {
                 a::Quantifier::Forall => "forall",
                 a::Quantifier::Exists => "exists",
@@ -695,7 +705,12 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
         }
         Expr::Ctor { variant, payload } => match payload {
             None => format!("{}::{}", "/* ty */", variant),
-            Some(p) => format!("{}::{}({})", "/* ty */", variant, expr_to_rust(&p.node, ctx, consts)),
+            Some(p) => format!(
+                "{}::{}({})",
+                "/* ty */",
+                variant,
+                expr_to_rust(&p.node, ctx, consts)
+            ),
         },
         Expr::RecordLit(fields) => {
             let body = fields
@@ -871,8 +886,7 @@ fn render_effect(
     let value = match &stmt.rhs.node {
         Expr::Int(v) => v.to_string(),
         Expr::Path(p) => {
-            let is_param = p.segments.is_empty()
-                && params.iter().any(|(n, _)| n == &p.root);
+            let is_param = p.segments.is_empty() && params.iter().any(|(n, _)| n == &p.root);
             if is_param {
                 p.root.clone()
             } else if p.root == "state" {
@@ -1101,10 +1115,8 @@ fn adapt_instruction(instr: &a::InstructionDecl, top_consts: ConstTable) -> Pars
         })
         .collect();
 
-    let properties: Vec<ParsedSbpfProperty> = prop_decls
-        .iter()
-        .map(|p| adapt_sbpf_property(p))
-        .collect();
+    let properties: Vec<ParsedSbpfProperty> =
+        prop_decls.iter().map(|p| adapt_sbpf_property(p)).collect();
 
     ParsedInstruction {
         name: instr.name.clone(),
@@ -1424,7 +1436,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             mutates.push((field.clone(), ty.clone()));
                         }
                         a::EnvClause::Constraint(e) => {
-                            constraints_lean.push(expr_to_lean(&e.node, Ctx::Ensures, consts, &env));
+                            constraints_lean.push(expr_to_lean(
+                                &e.node,
+                                Ctx::Ensures,
+                                consts,
+                                &env,
+                            ));
                             constraints_rust.push(expr_to_rust(&e.node, Ctx::Ensures, consts));
                         }
                     }
@@ -1440,8 +1457,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     }
 
     // Expand `preserved_by all` to the full handler-name list (pest parity).
-    let all_handler_names: Vec<String> =
-        out.handlers.iter().map(|h| h.name.clone()).collect();
+    let all_handler_names: Vec<String> = out.handlers.iter().map(|h| h.name.clone()).collect();
     for prop in &mut out.properties {
         if prop.preserved_by.len() == 1 && prop.preserved_by[0] == "all" {
             prop.preserved_by = all_handler_names.clone();
@@ -1471,16 +1487,16 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
 /// Handlers without a `branch` clause produce exactly one. Handlers with
 /// branches produce one synthetic handler per arm, each carrying the
 /// parent's auth/accounts/requires plus the arm's guard and body.
-fn expand_handler(h: &a::HandlerDecl, consts: ConstTable, base_env: &TypeEnv) -> Vec<ParsedHandler> {
+fn expand_handler(
+    h: &a::HandlerDecl,
+    consts: ConstTable,
+    base_env: &TypeEnv,
+) -> Vec<ParsedHandler> {
     // Per-handler env carries the handler's params for bare-ident lookup.
     let env = TypeEnv {
         state_fields: base_env.state_fields.clone(),
         records: base_env.records.clone(),
-        params: h
-            .params
-            .iter()
-            .map(|f| (f.name.clone(), &f.ty))
-            .collect(),
+        params: h.params.iter().map(|f| (f.name.clone(), &f.ty)).collect(),
     };
     let env = &env;
     // Detect a single branch clause (phase 1: at most one branch per handler).
@@ -1542,7 +1558,9 @@ fn expand_handler(h: &a::HandlerDecl, consts: ConstTable, base_env: &TypeEnv) ->
             }
             a::MatchBody::Effect(stmts) => {
                 for Node { node: stmt, .. } in stmts {
-                    synth.effects.push(render_effect(stmt, &base.takes_params, consts));
+                    synth
+                        .effects
+                        .push(render_effect(stmt, &base.takes_params, consts));
                 }
             }
             a::MatchBody::Noop => {}
@@ -1577,14 +1595,8 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         doc: h.doc.clone(),
         who: None,
         on_account,
-        pre_status: h
-            .pre
-            .as_ref()
-            .and_then(|p| p.0.last().cloned()),
-        post_status: h
-            .post
-            .as_ref()
-            .and_then(|p| p.0.last().cloned()),
+        pre_status: h.pre.as_ref().and_then(|p| p.0.last().cloned()),
+        post_status: h.post.as_ref().and_then(|p| p.0.last().cloned()),
         takes_params: params.clone(),
         guard_str: None,
         guard_str_rust: None,
