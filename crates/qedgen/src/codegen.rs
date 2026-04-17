@@ -417,6 +417,82 @@ fn generate_instructions(
 }
 
 /// Render the initial scaffold for a single user-owned handler file.
+/// Identify the writable state-holding account in a handler. A handler's
+/// accounts include user signers, token/mint accounts, programs, and
+/// PDA-derived state holders; only the last category can receive a `self.X.field = ...`
+/// effect expansion. Returns None when the handler has zero or multiple
+/// plausible state accounts — in which case the caller must fall back to
+/// `todo!()` and let a human (or M4 agent) disambiguate.
+fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHandlerAccount> {
+    let mut candidates: Vec<&crate::check::ParsedHandlerAccount> = handler
+        .accounts
+        .iter()
+        .filter(|a| a.is_writable && !a.is_signer && !a.is_program)
+        .filter(|a| {
+            // Drop token/mint accounts — they hold balances, not program state.
+            !matches!(
+                a.account_type.as_deref(),
+                Some("token") | Some("mint")
+            )
+        })
+        .collect();
+
+    // Prefer PDA-derived candidates when available.
+    let pda_candidates: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|a| a.pda_seeds.is_some())
+        .collect();
+    if !pda_candidates.is_empty() {
+        candidates = pda_candidates;
+    }
+
+    if candidates.len() == 1 {
+        Some(candidates[0])
+    } else {
+        None
+    }
+}
+
+/// Try to translate a single effect tuple to a real Rust statement. Returns
+/// None when the RHS is too complex for mechanical expansion (match/arith/
+/// pre-rendered Lean form); the caller falls through to a `todo!()` so an
+/// LLM or human fills the body.
+fn mechanize_effect(
+    effect: &(String, String, String),
+    state_acct: &crate::check::ParsedHandlerAccount,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Option<String> {
+    let (field, op_kind, value) = effect;
+
+    // Refuse complex RHS. `render_effect` pre-renders match/record/arith into
+    // Lean string form; those start looking nothing like Rust identifiers.
+    // A simple param / literal / constant is what's always safe.
+    let simple_rhs = value
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    if !simple_rhs {
+        return None;
+    }
+
+    let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec);
+    let acct = &state_acct.name;
+    let line = match op_kind.as_str() {
+        "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
+        "add" => format!(
+            "        self.{}.{} = self.{}.{}.wrapping_add({});\n",
+            acct, field, acct, field, rhs
+        ),
+        "sub" => format!(
+            "        self.{}.{} = self.{}.{}.wrapping_sub({});\n",
+            acct, field, acct, field, rhs
+        ),
+        _ => return None,
+    };
+    Some(line)
+}
+
 fn render_handler_scaffold(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
@@ -512,17 +588,53 @@ fn render_handler_scaffold(
         handler.name, guard_args
     ));
 
-    for (field, op_kind, value) in &handler.effects {
-        out.push_str(&format!(
-            "        // Spec effect: {} {} {}\n",
-            field, op_kind, value
-        ));
+    // Mechanical-effect expansion (v2.4-M3). For each spec effect we try to
+    // emit a real Rust statement; anything non-mechanical stays as a comment
+    // and forces a trailing `todo!()` so the user / an LLM (M4) fills it in.
+    let state_acct = find_state_account(handler);
+    let mut any_unmechanized = false;
+    for effect in &handler.effects {
+        let mechanized = state_acct
+            .and_then(|sa| mechanize_effect(effect, sa, handler, spec));
+        match mechanized {
+            Some(line) => out.push_str(&line),
+            None => {
+                let (field, op_kind, value) = effect;
+                out.push_str(&format!(
+                    "        // Spec effect (needs fill): {} {} {}\n",
+                    field, op_kind, value
+                ));
+                any_unmechanized = true;
+            }
+        }
     }
+
+    // Events are always agent-fill for now (M4): the spec declares the event
+    // name but not the payload binding.
     for emit in &handler.emits {
         out.push_str(&format!("        // Spec: emit!({})\n", emit));
     }
+    let has_events = !handler.emits.is_empty();
 
-    out.push_str("        todo!(\"user business logic\")\n");
+    // Token transfers (CPI calls) are also agent-fill: building the CPI
+    // context from the handler accounts is mechanical-ish but involves
+    // framework-specific helpers that differ per Quasar/Anchor/raw.
+    let has_transfers = !handler.transfers.is_empty();
+    for t in &handler.transfers {
+        out.push_str(&format!(
+            "        // Spec transfer: {} -> {} amount={}\n",
+            t.from,
+            t.to,
+            t.amount.as_deref().unwrap_or("?")
+        ));
+    }
+
+    let needs_fill = any_unmechanized || has_events || has_transfers;
+    if needs_fill {
+        out.push_str("        todo!(\"fill non-mechanical effects, events, transfers\")\n");
+    } else {
+        out.push_str("        Ok(())\n");
+    }
     out.push_str("    }\n");
     out.push_str("}\n");
     out
