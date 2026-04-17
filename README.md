@@ -183,19 +183,28 @@ qedgen aristotle cancel <project-id>
 
 ### Verification drift detection
 
-After verifying a function, stamp it with `#[qed(verified)]` to detect future changes:
+After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract:
 
 ```rust
 use qedgen_macros::qed;
 
-#[qed(verified, hash = "5af369bb254368d3")]
+#[qed(verified,
+      spec = "my_program.qedspec",
+      handler = "deposit",
+      hash = "5af369bb254368d3",
+      spec_hash = "c3d4e5f67890abcd")]
 pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
-    // Any change → compile_error! (with proc macro)
-    // Any change → exit 1 (with CLI)
+    guards::deposit(&ctx, amount)?;
+    // user business logic
 }
 ```
 
+Both hashes are pure compile-time checks — the macro expands to the function unchanged, so there's zero runtime cost. `hash` fires when the body changes; `spec_hash` fires when the `.qedspec` handler block changes.
+
 ```bash
+# Unified drift report — Rust handlers + Lean theorems vs spec
+qedgen reconcile --spec my_program.qedspec --json
+
 # Scan and stamp hashes on all #[qed(verified)] functions
 qedgen check --spec my_program.qedspec --drift programs/src/ --update-hashes
 
@@ -205,6 +214,8 @@ qedgen check --spec my_program.qedspec --drift programs/src/
 # Transitive drift — also check if callees of verified functions changed
 qedgen check --spec my_program.qedspec --drift programs/src/ --deep
 ```
+
+`qedgen reconcile` is the agent-friendly entry point: it combines Rust-side `spec_hash` mismatches with Lean-side orphan/missing theorem findings into one machine-readable report, ready for an LLM to consume and act on.
 
 ### Consolidate proofs
 
