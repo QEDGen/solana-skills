@@ -25,8 +25,7 @@ quote = { workspace = true }
 proc-macro2 = { workspace = true }
 tar = "0.4"
 flate2 = "1"
-pest = "2.7"
-pest_derive = "2.7"
+chumsky = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

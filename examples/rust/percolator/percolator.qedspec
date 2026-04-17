@@ -1,74 +1,148 @@
-// Percolator Risk Engine — Spec-Driven Verification
+// Percolator Risk Engine — Spec-Driven Verification (v2, per-account state)
 //
-// A perpetual DEX risk engine managing protected principal, junior profit
-// claims, and lazy A/K side indices.
+// A perpetual DEX risk engine managing per-account capital, junior profit
+// claims, fee credits, insurance, and an accumulated fee pool.
 //
-// Core properties:
-//   - Conservation: V >= C_tot + I (vault covers all obligations)
-//   - Vault bounded: V <= MAX_VAULT_TVL
-//   - ADL lifecycle: Active -> Draining -> Resetting -> Active
+// Records Account as a flat struct with an `active` discriminator. A future
+// pass will refactor Account into a proper sum type once the Lean codegen
+// plumbing catches up (M12.4 — deferred on this branch).
 
 spec Percolator
 
-const MAX_VAULT_TVL = 10_000_000_000_000_000
+const MAX_ACCOUNTS         = 1024
+const MAX_VAULT_TVL        = 10_000_000_000_000_000
+const POS_SCALE            = 1_000_000
+const MAX_ACCOUNT_NOTIONAL = 100_000_000_000_000_000_000
 
+type AccountIdx = Fin[MAX_ACCOUNTS]
+
+// Per-account slot. `active` is a 0/1 discriminator (U8 for simpler codegen
+// than Bool); inactive slots have all other fields at zero by convention.
+type Account = {
+  active        : U8,
+  capital       : U128,
+  reserved_pnl  : U128,
+  pnl           : I128,
+  fee_credits   : U128,
+}
+
+// Global engine state. Draining and Resetting cover the ADL lifecycle.
 type State
   | Active of {
       authority : Pubkey,
       V         : U128,
-      C_tot     : U128,
       I         : U128,
+      F         : U128,
+      accounts  : Map[MAX_ACCOUNTS] Account,
     }
   | Draining
   | Resetting
 
 type Error
   | InsufficientFunds
+  | SlotInactive
+  | SlotAlreadyActive
+  | AccountUnderwater
+  | AccountHealthy
+  | BankruptPosition
+  | VaultOverflow
 
-/// User adds capital — V and C_tot increase by same amount
-handler deposit (amount : U128) : State.Active -> State.Active {
+// ---------------------------------------------------------------------------
+// Account lifecycle
+// ---------------------------------------------------------------------------
+
+handler add_user (i : AccountIdx) : State.Active -> State.Active {
   auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
 
-  accounts {
-    authority : signer, writable
-    vault     : writable
-  }
-
-  requires state.V + amount <= MAX_VAULT_TVL
+  requires state.accounts[i].active == 0 else SlotAlreadyActive
 
   effect {
-    V += amount
-    C_tot += amount
+    accounts[i].active := 1
   }
 }
 
-/// User removes capital — V and C_tot decrease by same amount
-handler withdraw (amount : U128) : State.Active -> State.Active {
+handler add_lp (i : AccountIdx) : State.Active -> State.Active {
   auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
 
-  accounts {
-    authority : signer, writable
-    vault     : writable
-  }
-
-  requires state.C_tot >= amount else InsufficientFunds
+  requires state.accounts[i].active == 0 else SlotAlreadyActive
 
   effect {
-    V -= amount
-    C_tot -= amount
+    accounts[i].active := 1
   }
 }
 
-/// External deposit into insurance fund
+handler reclaim_empty_account (i : AccountIdx) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.accounts[i].capital == 0
+  requires state.accounts[i].reserved_pnl == 0
+  requires state.accounts[i].fee_credits == 0
+
+  effect {
+    accounts[i].active := 0
+  }
+}
+
+handler close_account (i : AccountIdx) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.V >= state.accounts[i].capital else InsufficientFunds
+
+  effect {
+    V                -= accounts[i].capital
+    accounts[i].capital := 0
+    accounts[i].active  := 0
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Capital flow
+// ---------------------------------------------------------------------------
+
+handler deposit (i : AccountIdx) (amount : U128) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.V + amount <= MAX_VAULT_TVL else VaultOverflow
+
+  effect {
+    V                   += amount
+    accounts[i].capital += amount
+  }
+}
+
+handler withdraw (i : AccountIdx) (amount : U128) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.accounts[i].capital >= amount else InsufficientFunds
+
+  effect {
+    V                   -= amount
+    accounts[i].capital -= amount
+  }
+}
+
 handler top_up_insurance (amount : U128) : State.Active -> State.Active {
   auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
 
-  accounts {
-    authority : signer, writable
-    vault     : writable
-  }
-
-  requires state.V + amount <= MAX_VAULT_TVL
+  requires state.V + amount <= MAX_VAULT_TVL else VaultOverflow
 
   effect {
     V += amount
@@ -76,44 +150,142 @@ handler top_up_insurance (amount : U128) : State.Active -> State.Active {
   }
 }
 
-/// Begin auto-deleveraging cycle
+handler deposit_fee_credits (i : AccountIdx) (amount : U128) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.V + amount <= MAX_VAULT_TVL else VaultOverflow
+
+  effect {
+    V                       += amount
+    F                       += amount
+    accounts[i].fee_credits += amount
+  }
+}
+
+handler convert_released_pnl (i : AccountIdx) (x : U128) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+  requires state.accounts[i].reserved_pnl >= x else InsufficientFunds
+  requires state.V >= x else InsufficientFunds
+
+  effect {
+    V                        -= x
+    accounts[i].reserved_pnl -= x
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Trading and liquidation
+// ---------------------------------------------------------------------------
+
+handler execute_trade
+    (a : AccountIdx) (b : AccountIdx)
+    (size_q : I128) (exec_price : U64)
+    : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer
+             vault     : writable }
+
+  requires state.accounts[a].active == 1 else SlotInactive
+  requires state.accounts[b].active == 1 else SlotInactive
+  requires a != b
+  requires mul_div_floor(size_q, exec_price, POS_SCALE) <= MAX_ACCOUNT_NOTIONAL
+
+  ensures state.V == old(state.V)
+  ensures state.I == old(state.I)
+  ensures state.F == old(state.F)
+
+  ensures sum i : AccountIdx, state.accounts[i].pnl
+          == sum i : AccountIdx, old(state.accounts[i].pnl)
+}
+
+handler liquidate (i : AccountIdx) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+
+  match
+    | state.accounts[i].capital + state.accounts[i].pnl >= 0 =>
+        abort AccountHealthy
+    | state.accounts[i].capital + state.accounts[i].pnl + state.I >= 0 =>
+        effect { accounts[i].active := 0 }
+    | _ =>
+        abort BankruptPosition
+}
+
+handler settle_account (i : AccountIdx) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer
+             vault     : writable }
+
+  requires state.accounts[i].active == 1 else SlotInactive
+
+  ensures state.V == old(state.V)
+  ensures state.I == old(state.I)
+  ensures state.F == old(state.F)
+}
+
+// ---------------------------------------------------------------------------
+// ADL lifecycle
+// ---------------------------------------------------------------------------
+
 handler trigger_adl : State.Active -> State.Draining {
   auth authority
-
   accounts {
     authority : signer
     vault     : writable
   }
 }
 
-/// Complete the drain phase of ADL
 handler complete_drain : State.Draining -> State.Resetting {
   auth authority
-
   accounts {
     authority : signer
     vault     : writable
   }
 }
 
-/// Reset risk engine after ADL cycle
 handler reset : State.Resetting -> State.Active {
   auth authority
-
   accounts {
     authority : signer
     vault     : writable
   }
 }
 
+// ---------------------------------------------------------------------------
+// Properties
+// ---------------------------------------------------------------------------
+
 property conservation :
-  state.V >= state.C_tot + state.I
+  state.V >= (sum i : AccountIdx, state.accounts[i].capital)
+           + (sum i : AccountIdx, state.accounts[i].reserved_pnl)
+           + state.I + state.F
   preserved_by all
 
 property vault_bounded :
   state.V <= MAX_VAULT_TVL
-  preserved_by [deposit, top_up_insurance]
+  preserved_by [deposit, top_up_insurance, deposit_fee_credits]
 
-cover happy_path [deposit, withdraw]
+property account_solvent :
+  forall i : AccountIdx,
+    state.accounts[i].active == 1
+      implies state.accounts[i].capital + state.accounts[i].pnl >= 0
+  preserved_by all
+
+// ---------------------------------------------------------------------------
+// Coverage and liveness
+// ---------------------------------------------------------------------------
+
+cover happy_path [add_user, deposit, withdraw, close_account]
+cover trading    [add_user, deposit, execute_trade, settle_account]
 
 liveness drain_completes : State.Draining ~> State.Active via [complete_drain, reset] within 2

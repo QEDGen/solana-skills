@@ -8,6 +8,26 @@ QEDGen is a Claude Code skill for spec-driven verification of Solana programs. T
 
 **Core workflow**: User describes intent → agent writes `.qedspec` → `qedgen check` validates (lint + proptest + Lean) → iterate on spec → `qedgen codegen --all` generates committed artifacts → `#[qed(verified)]` stamps verified code
 
+## Primary user interface: agent + skill
+
+QEDGen's UX is **agent-first**, not CLI-first. The end user interacts with:
+
+1. **The SKILL** (`.claude/skills/qedgen/SKILL.md` + this file) — declarative guidance that shapes Claude's behavior when working with `.qedspec` files.
+2. **Agents** — Claude (orchestrator), Leanstral (fast sorry-filling), Aristotle (long-running proof search). The CLI (`qedgen …`) is the *interface between agents and artifacts*, not a user-facing tool in its own right.
+
+**Proof-filling escalation order** (default → last resort):
+
+1. **Mechanical → codegen template** (`lean_gen.rs`): trivial preservation, vacuous cases from aborting branches, scalar-arithmetic goals closable by `omega`, `forall`-over-unchanged-Map via `Function.update_of_ne`.
+2. **Non-mechanical but tractable → local LLM** (the LLM driving this session — Claude Code, Codex, or similar). Most real Lean proof bodies — case analysis, Mathlib lemma selection, sum-update rewrites, per-handler structural proofs — are well within a frontier LLM's reach and should be written directly in-context, not shelled out.
+3. **Hard → Leanstral** (`qedgen fill-sorry`): when the local LLM has tried a few passes and still can't close the goal. Fast, non-deterministic, pass@N sampling.
+4. **Last resort → Aristotle** (`qedgen aristotle submit`): agentic proof search measured in minutes to hours. Only when Leanstral has failed after multiple passes.
+
+**Design implications:**
+- A new DSL feature that *eliminates* a proof obligation structurally (e.g. sum types making vacuous cases literal) is always preferable to a new proof template or a sorry to shell out.
+- When a proof template can't handle a case, emit `sorry` with a comment documenting the obligation — don't bury it in complex tactics that might spuriously close.
+- Don't pre-shell to Leanstral/Aristotle from code that a local LLM can handle. Escalation is when you've tried; not when you expect to need to.
+- Routing between Leanstral and Aristotle is agent-decided per SKILL.md heuristics, not hardcoded in the CLI.
+
 ## Build and Development Commands
 
 ### Build the CLI

@@ -632,7 +632,7 @@ fn default_value(rust_type: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser;
+    use crate::chumsky_adapter;
 
     const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn integration_test_multisig_generates() {
-        let spec = parser::parse(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
         let out = render(&spec, "test");
         // Has setup
         assert!(out.contains("fn setup() -> QuasarSvm"));
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn integration_test_escrow_has_token_helpers() {
-        let spec = parser::parse(ESCROW_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
         let out = render(&spec, "test");
         // Escrow uses SPL tokens — should have token helpers
         assert!(out.contains("fn mint_account("));
@@ -683,9 +683,12 @@ mod tests {
         let spec_path = dir.join("test.qedspec");
         let out_path = dir.join("out.rs");
         std::fs::create_dir_all(&dir).unwrap();
+        // Minimal assembly-targeted spec — generate() must refuse before
+        // looking at the handler body because integration tests only apply
+        // to the Quasar (Rust) target.
         std::fs::write(
             &spec_path,
-            "spec Test\ntarget assembly\nassembly \"a.s\"\ninstruction I { entry 0\n  guard g { error E\n    fuel 1\n  }\n}\nerrors [ E = 1 \"e\" ]\n",
+            "spec Test\ntarget assembly\nassembly \"a.s\"\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
         )
         .unwrap();
         let result = generate(&spec_path, &out_path);

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -61,6 +61,31 @@ pub struct ParsedAccountType {
     pub lifecycle: Vec<String>,
     /// Reference to a PDA name (if this account is PDA-derived)
     pub pda_ref: Option<String>,
+}
+
+/// Plain record type (no variants). Declared as `type T = { field : Type, ... }`.
+/// Used as the value type of a `Map[N] T` field and for grouping account-level state.
+#[derive(Debug, Clone)]
+pub struct ParsedRecordType {
+    pub name: String,
+    pub fields: Vec<(String, String)>,
+}
+
+/// Sum type with named variants; used when the ADT carries real alternatives
+/// (e.g. `type Account | Inactive | Active of { ... }`). Lean codegen emits
+/// this as an `inductive` with a payload-carrying constructor referencing a
+/// separate `structure` per variant that has fields.
+#[derive(Debug, Clone)]
+pub struct ParsedSumType {
+    pub name: String,
+    pub variants: Vec<ParsedVariant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedVariant {
+    pub name: String,
+    /// Empty for no-payload variants like `| Inactive`.
+    pub fields: Vec<(String, String)>,
 }
 
 /// Parsed aborts_if clause: condition → error name.
@@ -525,6 +550,17 @@ pub struct ParsedSpec {
     /// Empty for single-account specs that use bare `state {}`.
     pub account_types: Vec<ParsedAccountType>,
 
+    /// Plain record types declared with `type T = { ... }`.
+    /// Used as value types of Map fields and for structured state entries.
+    pub records: Vec<ParsedRecordType>,
+
+    /// Sum types used as Map-value types (not as handler pre/post states).
+    /// These are emitted as proper Lean `inductive` — with one `structure`
+    /// per payload-carrying variant — rather than flattened into a single
+    /// record with a discriminator field. `type Account | Inactive | Active
+    /// of { ... }` referenced from `Map[N] Account` ends up here.
+    pub sum_types: Vec<ParsedSumType>,
+
     /// Target mode: "assembly" (sBPF) or "quasar" (Rust).
     #[allow(dead_code)]
     pub target: Option<String>,
@@ -546,6 +582,10 @@ pub struct ParsedSpec {
     /// Global named constants (`const NAME = VALUE`).
     #[allow(dead_code)]
     pub constants: Vec<(String, String)>,
+    /// Type aliases: `type AccountIdx = Fin[MAX_ACCOUNTS]` etc.
+    /// Stored as (alias_name, rendered_target). Target is `Fin[N]`, `Nat`,
+    /// a record name, etc. — whatever `TypeRef` the source points at.
+    pub type_aliases: Vec<(String, String)>,
     /// Cover blocks (reachability properties).
     #[allow(dead_code)]
     pub covers: Vec<ParsedCover>,
@@ -596,6 +636,7 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
 }
 
 /// Parse a spec file from disk. Only .qedspec format is supported.
+/// Uses chumsky for parsing + a typed AST → ParsedSpec adapter.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext != "qedspec" {
@@ -605,7 +646,18 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             ext
         );
     }
-    crate::parser::parse_file(path)
+
+    let src = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
+        let msg = errs
+            .iter()
+            .map(|e| format!("  {:?}", e))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::anyhow!("parse error:\n{}", msg)
+    })?;
+    Ok(crate::chumsky_adapter::adapt(&typed))
 }
 
 /// Generate the full list of expected properties with intent descriptions.
@@ -797,6 +849,7 @@ fn collect_lean_files(dir: &Path, out: &mut String) -> Result<()> {
 #[derive(Debug, PartialEq, Clone, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    Error,
     Warning,
     Info,
 }
@@ -1949,8 +2002,146 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
+    // Validate new-DSL constructs: Map[N] T fields, subscripted effect LHS.
+    warnings.extend(check_map_and_subscript(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
+
+    warnings
+}
+
+/// Parsed form of a field type string. Captures the distinction between a
+/// plain type (e.g. `U128`, `Account`) and a bounded map (`Map[N] T`).
+#[derive(Debug)]
+enum FieldTypeShape<'a> {
+    Simple(&'a str),
+    Map { bound: &'a str, inner: &'a str },
+}
+
+/// Parse a field-type source string into a structured view.
+/// Returns `Simple` for `U128`, `Account`, `Vec U64` and `Map { ... }` for
+/// `Map[CONST] T` (bound and inner trimmed).
+fn classify_field_type(s: &str) -> FieldTypeShape<'_> {
+    let trimmed = s.trim();
+    if let Some(rest) = trimmed.strip_prefix("Map") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let bound = rest[..close].trim();
+                let inner = rest[close + 1..].trim();
+                return FieldTypeShape::Map { bound, inner };
+            }
+        }
+    }
+    FieldTypeShape::Simple(trimmed)
+}
+
+/// Validate `Map[N] T` field declarations and subscript usage.
+///   - `N` must be a declared `const`
+///   - `T` must be either a declared record or a well-known primitive
+///   - Effect LHS of form `field[i].x` must reference a Map-typed state field
+fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut warnings = Vec::new();
+
+    let const_names: HashSet<&str> = spec.constants.iter().map(|(n, _)| n.as_str()).collect();
+    let record_names: HashSet<&str> = spec.records.iter().map(|r| r.name.as_str()).collect();
+
+    // Collect Map-typed fields across all account types, keyed by field name.
+    let mut map_fields: HashMap<&str, (&str, &str, &str)> = HashMap::new(); // field → (owner, bound, inner)
+
+    for acct in &spec.account_types {
+        for (fname, ftype) in &acct.fields {
+            if let FieldTypeShape::Map { bound, inner } = classify_field_type(ftype) {
+                // Rule: bound must be a declared const
+                if !const_names.contains(bound) {
+                    warnings.push(CompletenessWarning {
+                        rule: "map_bound_not_const".to_string(),
+                        severity: Severity::Error,
+                        priority: 0,
+                        message: format!(
+                            "field '{}.{}' uses Map[{}] but '{}' is not declared as `const`",
+                            acct.name, fname, bound, bound
+                        ),
+                        subject: Some(fname.clone()),
+                        fix: format!("Add `const {} = <size>` at the top of the spec", bound),
+                        example: Some(format!("  const {} = 1024", bound)),
+                        counterexample: None,
+                        fix_options: vec![],
+                    });
+                }
+
+                // Rule: inner must be a record or a known primitive
+                let is_known = record_names.contains(inner)
+                    || matches!(
+                        inner,
+                        "Bool"
+                            | "U8"
+                            | "U16"
+                            | "U32"
+                            | "U64"
+                            | "U128"
+                            | "I8"
+                            | "I16"
+                            | "I32"
+                            | "I64"
+                            | "I128"
+                            | "Pubkey"
+                    );
+                if !is_known {
+                    warnings.push(CompletenessWarning {
+                        rule: "map_value_unknown".to_string(),
+                        severity: Severity::Error,
+                        priority: 0,
+                        message: format!(
+                            "field '{}.{}' uses Map[{}] {} but '{}' is neither a declared record nor a primitive",
+                            acct.name, fname, bound, inner, inner
+                        ),
+                        subject: Some(fname.clone()),
+                        fix: format!("Declare `type {} = {{ ... }}`", inner),
+                        example: Some(format!(
+                            "  type {} = {{\n    active : Bool,\n    capital : U128,\n  }}",
+                            inner
+                        )),
+                        counterexample: None,
+                        fix_options: vec![],
+                    });
+                }
+
+                map_fields.insert(fname.as_str(), (acct.name.as_str(), bound, inner));
+            }
+        }
+    }
+
+    // Effect LHS validation: any `name[i]...` must refer to a Map-typed field.
+    for op in &spec.handlers {
+        for (field, _, _) in &op.effects {
+            if let Some(bracket) = field.find('[') {
+                let root = &field[..bracket];
+                if !map_fields.contains_key(root) {
+                    warnings.push(CompletenessWarning {
+                        rule: "subscript_not_map".to_string(),
+                        severity: Severity::Error,
+                        priority: 0,
+                        message: format!(
+                            "handler '{}' has effect `{}` but '{}' is not a Map-typed state field",
+                            op.name, field, root
+                        ),
+                        subject: Some(op.name.clone()),
+                        fix: format!(
+                            "Declare `{} : Map[MAX_...] SomeRecord` in the state type, or remove the subscript",
+                            root
+                        ),
+                        example: None,
+                        counterexample: None,
+                        fix_options: vec![],
+                    });
+                }
+            }
+        }
+    }
 
     warnings
 }
@@ -2352,6 +2543,7 @@ pub fn print_unified_report(spec_name: &str, report: &UnifiedReport) {
     } else {
         for w in &report.completeness {
             let icon = match w.severity {
+                Severity::Error => "E",
                 Severity::Warning => "!",
                 Severity::Info => "i",
             };
@@ -2893,7 +3085,7 @@ mod tests {
     #[test]
     fn test_complete_spec_clean() {
         let spec_content = include_str!("../../../examples/rust/escrow/escrow.qedspec");
-        let spec = crate::parser::parse(spec_content).expect("escrow.qedspec should parse");
+        let spec = crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
         let warnings = check_completeness(&spec);
         // A well-formed spec should have zero warnings
         let warning_rules: Vec<&str> = warnings
@@ -2915,7 +3107,7 @@ mod tests {
     #[test]
     fn test_coverage_matrix_full_coverage() {
         let spec_content = include_str!("../../../examples/rust/multisig/multisig.qedspec");
-        let spec = crate::parser::parse(spec_content).expect("multisig.qedspec should parse");
+        let spec = crate::chumsky_adapter::parse_str(spec_content).expect("multisig.qedspec should parse");
         let matrix = coverage_matrix(&spec);
         assert_eq!(matrix.coverage_pct, 100.0);
         assert!(matrix.gaps.is_empty());

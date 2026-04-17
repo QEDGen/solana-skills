@@ -1,7 +1,10 @@
 mod api;
 mod aristotle;
 mod asm2lean;
+mod ast;
 mod check;
+mod chumsky_adapter;
+mod chumsky_parser;
 mod codegen;
 mod consolidate;
 mod deps;
@@ -12,7 +15,6 @@ mod init;
 mod integration_test;
 mod kani;
 mod lean_gen;
-mod parser;
 mod project;
 mod proptest_gen;
 mod rust_codegen_util;
@@ -385,6 +387,7 @@ enum AristotleCommands {
 
 fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
     let icon = match warning.severity {
+        check::Severity::Error => "E",
         check::Severity::Warning => "!",
         check::Severity::Info => "i",
     };

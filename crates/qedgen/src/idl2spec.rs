@@ -290,21 +290,30 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
             writeln!(s).unwrap();
         }
     } else if let Some(ty) = struct_types.first() {
-        writeln!(s, "state {{").unwrap();
+        // Emit canonical `type State | Active of { ... } | <lifecycle> ...` form.
+        // First variant carries the struct fields; the rest are lifecycle-only.
+        writeln!(s, "type State").unwrap();
+        let mut variants = lifecycle.clone();
+        if variants.is_empty() {
+            variants.push("Active".to_string());
+        }
+        let first = variants.remove(0);
+        writeln!(s, "  | {} of {{", first).unwrap();
         let max_name = ty.ty.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
         for field in &ty.ty.fields {
             writeln!(
                 s,
-                "  {:<width$} : {}",
+                "      {:<width$} : {},",
                 field.name,
                 map_type(&field.ty),
                 width = max_name
             )
             .unwrap();
         }
-        writeln!(s, "}}").unwrap();
-        writeln!(s).unwrap();
-        writeln!(s, "lifecycle [{}]", lifecycle.join(", ")).unwrap();
+        writeln!(s, "    }}").unwrap();
+        for v in &variants {
+            writeln!(s, "  | {}", v).unwrap();
+        }
         writeln!(s).unwrap();
     }
 
@@ -325,56 +334,43 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     }
 
     // ── Errors ───────────────────────────────────────────────────────────
+    // Emit canonical `type Error | Name | ...` (no legacy `errors [...]` sugar).
     if !idl.errors.is_empty() {
-        let error_names: Vec<&str> = idl.errors.iter().map(|e| e.name.as_str()).collect();
-        writeln!(s, "errors [{}]", error_names.join(", ")).unwrap();
+        writeln!(s, "type Error").unwrap();
+        for e in &idl.errors {
+            writeln!(s, "  | {}", e.name).unwrap();
+        }
         writeln!(s).unwrap();
     }
 
     // ── Handlers ────────────────────────────────────────────────────────
+    // Emit canonical `handler name (arg : T) ... : Type.From -> Type.To { ... }` form.
     for (ix, analysis) in idl.instructions.iter().zip(analyses.iter()) {
-        // Doc comment
         if !analysis.docs.is_empty() {
             writeln!(s, "/// {}", analysis.docs).unwrap();
         }
 
-        writeln!(s, "handler {} {{", ix.name).unwrap();
+        // Build ML-curried param list.
+        let mut params = String::new();
+        for arg in &ix.args {
+            params.push_str(&format!(" ({} : {})", arg.name, map_type(&arg.ty)));
+        }
+
+        // Transition signature from inferred when/then lifecycle states.
+        let on_type = if multi_account {
+            infer_target_account(ix, &type_names).unwrap_or_else(|| "State".to_string())
+        } else {
+            "State".to_string()
+        };
+        let when_state = infer_when(&ix.name, analysis).unwrap_or("Active");
+        let then_state = infer_then(&ix.name, analysis).unwrap_or("Active");
+        let transition = format!(" : {}.{} -> {}.{}", on_type, when_state, on_type, then_state);
+
+        writeln!(s, "handler {}{}{} {{", ix.name, params, transition).unwrap();
 
         // auth
         if let Some(signer) = analysis.signers.first() {
             writeln!(s, "  auth {}", signer).unwrap();
-        }
-
-        // on (multi-account)
-        if multi_account {
-            if let Some(target) = infer_target_account(ix, &type_names) {
-                writeln!(s, "  on {}", target).unwrap();
-            }
-        }
-
-        // when / then
-        if let Some(when) = infer_when(&ix.name, analysis) {
-            writeln!(s, "  when {}", when).unwrap();
-        }
-        if let Some(then) = infer_then(&ix.name, analysis) {
-            writeln!(s, "  then {}", then).unwrap();
-        }
-
-        // takes
-        if !ix.args.is_empty() {
-            writeln!(s, "  takes {{").unwrap();
-            let max_arg = ix.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
-            for arg in &ix.args {
-                writeln!(
-                    s,
-                    "    {:<width$} : {}",
-                    arg.name,
-                    map_type(&arg.ty),
-                    width = max_arg
-                )
-                .unwrap();
-            }
-            writeln!(s, "  }}").unwrap();
         }
 
         // guard stub
@@ -471,7 +467,7 @@ pub fn generate_qedspec(idl_path: &Path, output_path: &Path) -> Result<()> {
     let content = render(&idl, &analyses);
 
     // Round-trip validation: ensure generated output parses cleanly
-    crate::parser::parse(&content).context(
+    crate::chumsky_adapter::parse_str(&content).context(
         "Generated .qedspec failed to parse — this is a bug in idl2spec. \
          Please report at https://github.com/qedgen/solana-skills/issues",
     )?;
@@ -670,7 +666,7 @@ mod tests {
         let (idl, analyses) = parse_test_idl(ESCROW_IDL);
         let content = render(&idl, &analyses);
 
-        let spec = crate::parser::parse(&content).unwrap_or_else(|e| {
+        let spec = crate::chumsky_adapter::parse_str(&content).unwrap_or_else(|e| {
             panic!(
                 "Generated .qedspec failed to parse:\n{}\n\nContent:\n{}",
                 e, content
@@ -697,7 +693,7 @@ mod tests {
         let (idl, analyses) = parse_test_idl(LENDING_IDL);
         let content = render(&idl, &analyses);
 
-        let spec = crate::parser::parse(&content).unwrap_or_else(|e| {
+        let spec = crate::chumsky_adapter::parse_str(&content).unwrap_or_else(|e| {
             panic!(
                 "Generated .qedspec failed to parse:\n{}\n\nContent:\n{}",
                 e, content

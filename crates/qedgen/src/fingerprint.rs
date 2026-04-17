@@ -274,14 +274,13 @@ mod tests {
         let spec_content = r#"
 spec Counter
 
-state {
-  authority : Pubkey
-  count : U64
-}
+type State
+  | Active of {
+      authority : Pubkey,
+      count     : U64,
+    }
 
-lifecycle [Active]
-
-handler increment (delta : U64) : Active -> Active {
+handler increment (delta : U64) : State.Active -> State.Active {
   auth authority
   requires state.count + delta <= 1000000
   effect {
@@ -289,13 +288,12 @@ handler increment (delta : U64) : Active -> Active {
   }
 }
 
-property bounded {
-  expr state.count <= 1000000
+property bounded :
+  state.count <= 1000000
   preserved_by [increment]
-}
 "#;
-        let spec1 = crate::parser::parse(spec_content).unwrap();
-        let spec2 = crate::parser::parse(spec_content).unwrap();
+        let spec1 = crate::chumsky_adapter::parse_str(spec_content).unwrap();
+        let spec2 = crate::chumsky_adapter::parse_str(spec_content).unwrap();
         let fp1 = compute_fingerprint(&spec1);
         let fp2 = compute_fingerprint(&spec2);
         assert_eq!(fp1.file_hashes, fp2.file_hashes);
@@ -306,11 +304,9 @@ property bounded {
         let spec_a = r#"
 spec Counter
 
-state {
-  count : U64
-}
+type State | Active of { count : U64, }
 
-handler increment {
+handler increment (delta : U64) : State.Active -> State.Active {
   effect {
     count += delta
   }
@@ -319,18 +315,16 @@ handler increment {
         let spec_b = r#"
 spec Counter
 
-state {
-  count : U64
-}
+type State | Active of { count : U64, }
 
-handler increment {
+handler increment (delta : U64) : State.Active -> State.Active {
   effect {
     count -= delta
   }
 }
 "#;
-        let fp_a = compute_fingerprint(&crate::parser::parse(spec_a).unwrap());
-        let fp_b = compute_fingerprint(&crate::parser::parse(spec_b).unwrap());
+        let fp_a = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_a).unwrap());
+        let fp_b = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_b).unwrap());
         // Instruction file hash should differ
         assert_ne!(
             fp_a.file_hashes.get("src/instructions/increment.rs"),
@@ -343,15 +337,13 @@ handler increment {
         let spec_a = r#"
 spec Counter
 
-state {
-  count : U64
-}
+type State | Active of { count : U64, }
 
 event Foo {
-  x : U64
+  x : U64,
 }
 
-handler increment {
+handler increment (delta : U64) : State.Active -> State.Active {
   effect {
     count += delta
   }
@@ -360,22 +352,20 @@ handler increment {
         let spec_b = r#"
 spec Counter
 
-state {
-  count : U64
-}
+type State | Active of { count : U64, }
 
 event Bar {
-  y : U64
+  y : U64,
 }
 
-handler increment {
+handler increment (delta : U64) : State.Active -> State.Active {
   effect {
     count += delta
   }
 }
 "#;
-        let fp_a = compute_fingerprint(&crate::parser::parse(spec_a).unwrap());
-        let fp_b = compute_fingerprint(&crate::parser::parse(spec_b).unwrap());
+        let fp_a = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_a).unwrap());
+        let fp_b = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_b).unwrap());
         // Instruction file hash should be THE SAME
         assert_eq!(
             fp_a.file_hashes.get("src/instructions/increment.rs"),
