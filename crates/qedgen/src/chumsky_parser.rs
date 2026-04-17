@@ -304,14 +304,21 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                 )
             });
 
-        // forall / exists i : T, body
+        // forall / exists i : T, body      (single binder)
+        // forall / exists i j k : T, body   (multi-binder — desugars to nested quantifiers,
+        //                                    all binders share the same type annotation)
         let quant = choice((
             just("forall").to(Quantifier::Forall),
             just("exists").to(Quantifier::Exists),
         ))
         .then_ignore(wsc())
-        .then(non_keyword_ident())
-        .then_ignore(wsc())
+        .then(
+            non_keyword_ident()
+                .then_ignore(wsc())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
         .then_ignore(just(':'))
         .then_ignore(wsc())
         .then(qualified_path())
@@ -319,17 +326,21 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
         .then_ignore(just(','))
         .then_ignore(wsc())
         .then(expr.clone())
-        .map_with(|(((kind, binder), binder_ty), body), e| {
+        .map_with(|(((kind, binders), binder_ty), body), e| {
             let ty_name = binder_ty.0.join(".");
-            Node::new(
-                Expr::Quant {
-                    kind,
-                    binder,
-                    binder_ty: ty_name,
-                    body: Box::new(body),
-                },
-                e.span().into_range(),
-            )
+            let span = e.span().into_range();
+            // Fold binders right-to-left so the outermost binder is the first listed.
+            binders.into_iter().rev().fold(body, |acc, binder| {
+                Node::new(
+                    Expr::Quant {
+                        kind,
+                        binder,
+                        binder_ty: ty_name.clone(),
+                        body: Box::new(acc),
+                    },
+                    span.clone(),
+                )
+            })
         });
 
         // Parenthesized sub-expression
@@ -387,6 +398,34 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
         };
         let mul_div_floor_atom = mdf_args("mul_div_floor", false);
         let mul_div_ceil_atom = mdf_args("mul_div_ceil", true);
+
+        // Generic function application: `f(arg1, arg2, ...)`.
+        // Must precede path_expr in the atom choice (both start with ident);
+        // `.and_is(just('(').rewind())` ensures we only commit to `app` when
+        // the ident is immediately followed by `(`, so bare paths like
+        // `state.foo` still route to path_expr.
+        let app_expr = non_keyword_ident()
+            .and_is(
+                any::<&'a str, Err<'a>>()
+                    .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
+                    .repeated()
+                    .ignore_then(just('('))
+                    .rewind(),
+            )
+            .then_ignore(just('('))
+            .then_ignore(wsc())
+            .then(
+                expr.clone()
+                    .separated_by(just(',').then_ignore(wsc()))
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
+            .then_ignore(wsc())
+            .then_ignore(just(')'))
+            .map_with(|(func, args), e| {
+                Node::new(Expr::App { func, args }, e.span().into_range())
+            })
+            .boxed();
 
         // Inline `match scrutinee with | Variant binder? => body | ...`.
         // Distinct from the handler-clause `match` — this one has an explicit
@@ -501,17 +540,46 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
         let group_a = choice((int, bool_lit, old, sum, quant)).boxed();
         let group_b = choice((mul_div_floor_atom, mul_div_ceil_atom, match_expr)).boxed();
         // `record_update` must precede `ctor` (leading `.` distinguishes
-        // them, but this ordering is clearer). Try record_update before
-        // record_lit; both before the bare-path fallback.
-        let group_c = choice((record_update, record_lit, ctor, paren, path_expr)).boxed();
+        // them, but this ordering is clearer). `app_expr` must precede
+        // `path_expr` (both start with ident; app commits only when `(`
+        // follows, so bare paths still route to path_expr). Try
+        // record_update before record_lit; both before bare-path fallback.
+        let group_c = choice((record_update, record_lit, ctor, paren, app_expr, path_expr)).boxed();
         let atom_base = choice((group_a, group_b, group_c)).then_ignore(wsc()).boxed();
+
+        // Postfix `.field` — layers on any atom result. Used for chains
+        // like `left(n).key` where the base isn't a bare path.
+        // `.` must NOT be followed by `0-9` (could be a float) or an
+        // uppercase ident (`.Variant` constructor syntax); but we already
+        // distinguish variants by being at atom position not postfix.
+        let field_postfix = just('.')
+            .then(
+                any::<&'a str, Err<'a>>()
+                    .filter(|c: &char| c.is_ascii_lowercase() || *c == '_')
+                    .rewind(),
+            )
+            .ignore_then(non_keyword_ident())
+            .then_ignore(wsc())
+            .boxed();
+        let atom_with_fields = atom_base.foldl_with(
+            field_postfix.repeated(),
+            |base, field, e| {
+                Node::new(
+                    Expr::Field {
+                        base: Box::new(base),
+                        field,
+                    },
+                    e.span().into_range(),
+                )
+            },
+        );
 
         // Postfix `is .Variant` check — layers on any atom result.
         let is_postfix = kw("is")
             .ignore_then(just('.'))
             .ignore_then(non_keyword_ident())
             .then_ignore(wsc());
-        let atom = atom_base
+        let atom = atom_with_fields
             .then(is_postfix.or_not())
             .map_with(|(base, is_v), e| match is_v {
                 None => base,

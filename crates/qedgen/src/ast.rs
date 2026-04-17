@@ -503,6 +503,24 @@ pub enum Expr {
         scrutinee: Box<Node<Expr>>,
         variant: String,
     },
+    /// `f(arg1, arg2, ...)` — function application. Renders to Lean as
+    /// space-separated `f arg1 arg2` and to Rust as `f(arg1, arg2)`. The
+    /// function name is left abstract: for spec-level helpers like
+    /// `parent(n)` or `left(n)` in a tree invariant, downstream codegen
+    /// declares them as uninterpreted symbols (axioms or Lean defs) in the
+    /// support module. Zero-arg calls are rejected; bare identifiers parse
+    /// as paths.
+    App {
+        func: String,
+        args: Vec<Node<Expr>>,
+    },
+    /// Postfix field access on an arbitrary expression — `e.field`.
+    /// Enables chains like `left(n).key` where the base isn't a bare path.
+    /// (Simple bare paths `a.b.c` still route to `Expr::Path`.)
+    Field {
+        base: Box<Node<Expr>>,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone)]

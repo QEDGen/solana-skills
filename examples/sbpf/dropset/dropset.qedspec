@@ -81,9 +81,8 @@ handler register_market : State.Uninitialized -> State.Registered {
   }
 }
 
-property all_guards_reject_invalid :
-  forall i : Error, register_market rejects with error i when guard i fails
-  preserved_by all
+invariant all_guards_reject_invalid
+  "register_market rejects with the matching Error variant whenever any of the 13 guards fails — enumerated explicitly by the `rejects_*` guard theorems emitted per guard"
 
 invariant pda_integrity "market PDA derived from [base_mint, quote_mint] — 4-chunk comparison"
 

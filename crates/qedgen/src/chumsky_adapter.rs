@@ -266,6 +266,10 @@ impl<'a> TypeEnv<'a> {
             Expr::RecordUpdate { base, .. } => self.infer(&base.node),
             // Constructor test → Bool (propositional).
             Expr::IsVariant { .. } => Kind::Bool,
+            // Function application — abstract, treat as Other (no promotion).
+            Expr::App { .. } => Kind::Other,
+            // Postfix field access — abstract, treat as Other.
+            Expr::Field { .. } => Kind::Other,
         }
     }
 }
@@ -439,6 +443,20 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
                 "((({}) * ({}) + ({}) - 1) / ({}))",
                 a_str, b_str, d_str, d_str
             )
+        }
+        Expr::App { func, args } => {
+            // Lean function application: `f a b c` (space-separated, parenthesized
+            // args). Leaves `func` as the raw name — downstream users declare
+            // these as uninterpreted helpers (axioms or defs) in a support module.
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|n| format!("({})", expr_to_lean(&n.node, ctx, consts, env)))
+                .collect();
+            format!("({} {})", func, args_str.join(" "))
+        }
+        Expr::Field { base, field } => {
+            let base_str = expr_to_lean(&base.node, ctx, consts, env);
+            format!("({}).{}", base_str, field)
         }
     }
 }
@@ -699,6 +717,17 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
         Expr::IsVariant { scrutinee, variant } => {
             let sc = expr_to_rust(&scrutinee.node, ctx, consts);
             format!("matches!({}, {}::{}(..))", sc, "/* ty */", variant)
+        }
+        Expr::App { func, args } => {
+            let args_str: Vec<String> = args
+                .iter()
+                .map(|n| expr_to_rust(&n.node, ctx, consts))
+                .collect();
+            format!("{}({})", func, args_str.join(", "))
+        }
+        Expr::Field { base, field } => {
+            let base_str = expr_to_rust(&base.node, ctx, consts);
+            format!("{}.{}", base_str, field)
         }
     }
 }
