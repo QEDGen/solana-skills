@@ -1,5 +1,11 @@
 [workspace]
 members = ["crates/qedgen", "crates/qedgen-macros"]
+exclude = [
+    "examples/rust/escrow",
+    "examples/rust/lending",
+    "examples/rust/multisig",
+    "examples/rust/percolator",
+]
 resolver = "2"
 
 [workspace.dependencies]
