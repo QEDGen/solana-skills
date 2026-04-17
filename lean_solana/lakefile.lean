@@ -1,12 +1,14 @@
 import Lake
 open Lake DSL
 
+-- Base lean_solana package. Pure Lean 4; no Mathlib dependency.
+-- Covers Account, Cpi, State, Valid, SBPF helpers — everything that
+-- doesn't need `Fin → α` / BigOperators reasoning.
+--
+-- The `IndexedState` module and anything else that needs Mathlib
+-- lives in the sibling `lean_solana_mathlib/` package; programs that
+-- need it depend on that one, which transitively pulls this.
 package qedgenSupport
-
--- Mathlib is required for IndexedState (Fin / BigOperators / Finset).
--- The manifest already pins a version; lake will not refetch.
-require mathlib from git
-  "https://github.com/leanprover-community/mathlib4.git"
 
 @[default_target]
 lean_lib QEDGen where

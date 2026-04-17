@@ -17,7 +17,6 @@
 
 #![allow(dead_code)] // scaffolding; consumers land in subsequent phases
 
-use chumsky::input::ValueInput;
 use chumsky::prelude::*;
 
 use crate::ast::*;

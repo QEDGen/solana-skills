@@ -3,8 +3,9 @@ open Lake DSL
 
 package qedgenPercolatorProofs
 
-require qedgenSupport from
-  "../../../../lean_solana"
+-- Requires the Mathlib-extended slice (transitively pulls the base).
+require qedgenSupportMathlib from
+  "../../../../lean_solana_mathlib"
 
 @[default_target]
 lean_lib PercolatorSpec where

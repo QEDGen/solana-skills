@@ -1,6 +1,6 @@
 import Mathlib.Algebra.BigOperators.Fin
 import QEDGen.Solana.Account
-import QEDGen.Solana.IndexedState
+import QEDGenMathlib.IndexedState
 
 namespace Percolator
 

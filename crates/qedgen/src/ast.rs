@@ -17,6 +17,17 @@
 //!     records, ADTs, handlers, properties, covers, liveness.
 //!   - Subset deliberately omitted in phase 1 (pest still handles these):
 //!     sBPF instruction blocks, schemas, environments, PDAs, events.
+//!
+//! NOTE on `#![allow(dead_code)]`: several AST fields (`span`, variant
+//! payloads like `TypeRef::Param`, `MatchBody::Noop`, doc strings) are parsed
+//! and carried through the typed form but not yet consumed by every downstream
+//! adapter/backend. They are intentional scaffolding for the pest→chumsky
+//! migration and for planned diagnostics (span-based error reporting, Param
+//! types like `Vec U64` in handler signatures, doc preservation in generated
+//! artifacts). Removing them would lose information the parser already
+//! recovers. Revisit per-field once the corresponding backend consumer lands.
+
+#![allow(dead_code)]
 
 use std::ops::Range;
 

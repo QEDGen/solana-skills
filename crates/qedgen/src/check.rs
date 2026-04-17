@@ -144,45 +144,37 @@ pub struct ParsedEnvironment {
 }
 
 /// Parsed operation from a qedspec block with its clauses.
+///
+/// Scaffolding: many fields are parsed out of the qedspec operation block
+/// but consumed only by specific backends (kani/proptest/lean/codegen). We
+/// keep them on the shared struct so downstream passes can reach them without
+/// re-parsing. The struct-level `allow(dead_code)` covers fields that the
+/// active binary feature set doesn't touch yet.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ParsedOperation {
     pub name: String,
     pub doc: Option<String>,
     pub who: Option<String>,
     /// Which account type this operation targets (from `on` clause).
     /// None means the default (first/only) account.
-    #[allow(dead_code)]
     pub on_account: Option<String>,
-    #[allow(dead_code)]
     pub has_when: bool,
     pub pre_status: Option<String>,
     pub post_status: Option<String>,
-    #[allow(dead_code)]
     pub has_calls: bool,
-    #[allow(dead_code)]
     pub program_id: Option<String>,
-    #[allow(dead_code)]
     pub has_u64_fields: bool,
-    #[allow(dead_code)]
     pub has_takes: bool,
-    #[allow(dead_code)]
     pub has_guard: bool,
-    #[allow(dead_code)]
     pub guard_str: Option<String>,
-    #[allow(dead_code)]
     pub has_effect: bool,
-    #[allow(dead_code)]
     pub takes_params: Vec<(String, String)>,
-    #[allow(dead_code)]
     pub effects: Vec<(String, String, String)>,
-    #[allow(dead_code)]
     pub calls_accounts: Vec<(String, String)>,
-    #[allow(dead_code)]
     pub calls_discriminator: Option<String>,
-    #[allow(dead_code)]
     pub emits: Vec<String>,
     /// Abort conditions: (lean_expr, rust_expr, error_name)
-    #[allow(dead_code)]
     pub aborts_if: Vec<ParsedAbort>,
 }
 
@@ -2013,9 +2005,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
 /// Parsed form of a field type string. Captures the distinction between a
 /// plain type (e.g. `U128`, `Account`) and a bounded map (`Map[N] T`).
+///
+/// Only `Map { .. }` is inspected by the current consumer; `Simple` carries
+/// the trimmed type string for future linting passes (e.g., primitive-type
+/// checks, alias resolution) and intentionally remains exhaustive.
 #[derive(Debug)]
 enum FieldTypeShape<'a> {
-    Simple(&'a str),
+    Simple(#[allow(dead_code)] &'a str),
     Map { bound: &'a str, inner: &'a str },
 }
 

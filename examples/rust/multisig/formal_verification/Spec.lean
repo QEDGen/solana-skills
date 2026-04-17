@@ -276,23 +276,6 @@ cancel_proposalTransition s3 signer ≠ none := by
   let s3 : State := ⟨pk, 1, 1, 0, 1, .HasProposal⟩
   exact ⟨s0, pk, 1, 1, s1, by decide, s2, by decide, 0, s3, by decide, by decide⟩
 
-/-- mixed_voting — trace [create_vault, propose, approve, reject, approve, execute] is reachable. -/
-theorem cover_mixed_voting : ∃ (s0 : State) (signer : Pubkey),
-    ∃ (v0_0 : Nat) (v0_1 : Nat), ∃ (s1 : State), create_vaultTransition s0 signer v0_0 v0_1 = some s1 ∧
-∃ (s2 : State), proposeTransition s1 signer = some s2 ∧
-        ∃ (v2_0 : Nat), ∃ (s3 : State), approveTransition s2 signer v2_0 = some s3 ∧
-          ∃ (v3_0 : Nat), ∃ (s4 : State), rejectTransition s3 signer v3_0 = some s4 ∧
-            ∃ (v4_0 : Nat), ∃ (s5 : State), approveTransition s4 signer v4_0 = some s5 ∧
-executeTransition s5 signer ≠ none := by
-  let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  let s0 : State := ⟨pk, 0, 0, 0, 0, .Uninitialized⟩
-  let s1 : State := ⟨pk, 1, 1, 0, 0, .Active⟩
-  let s2 : State := ⟨pk, 1, 1, 0, 0, .HasProposal⟩
-  let s3 : State := ⟨pk, 1, 1, 1, 0, .HasProposal⟩
-  let s4 : State := ⟨pk, 1, 1, 1, 1, .HasProposal⟩
-  let s5 : State := ⟨pk, 1, 1, 2, 1, .HasProposal⟩
-  exact ⟨s0, pk, 1, 1, s1, by decide, s2, by decide, 0, s3, by decide, 0, s4, by decide, 0, s5, by decide, by decide⟩
-
 -- ============================================================================
 -- Liveness properties — bounded reachability (leads-to)
 -- ============================================================================

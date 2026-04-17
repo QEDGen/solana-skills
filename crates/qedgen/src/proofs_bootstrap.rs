@@ -37,41 +37,47 @@ pub fn extract_theorem_names(source: &str) -> BTreeSet<String> {
 }
 
 /// Render the bootstrap `Proofs.lean` body (once, when the file is absent).
-/// Emits `import Spec`, minimal `open` clauses, and `theorem … := by sorry`
-/// stubs — one per expected obligation.
+/// Emits `import Spec`, minimal `open` clauses, and a commented checklist
+/// of the preservation obligations the spec expects. The user materializes
+/// each theorem against the real signature in `Spec.lean`.
+///
+/// Intentionally does NOT emit `theorem X : True := by trivial` stubs —
+/// those type-check but prove nothing meaningful, and a skimmed `Proofs.lean`
+/// full of them reads as "everything is proven" when it isn't. Better to
+/// force the user to write the real signature from the start.
 pub fn render_bootstrap(spec: &ParsedSpec) -> String {
     let mut out = String::new();
     out.push_str("/-\n");
     out.push_str("Proofs.lean — user-owned preservation proofs.\n");
     out.push('\n');
     out.push_str("`qedgen codegen` bootstraps this file once and never touches it again.\n");
-    out.push_str("Spec.lean is regenerated; this file is durable. Fill in each `sorry`\n");
-    out.push_str("with a real proof. `qedgen check` flags orphan theorems (handler\n");
-    out.push_str("renamed in spec) and missing theorems (new obligation declared).\n");
+    out.push_str("Spec.lean is regenerated; this file is durable. `qedgen check`\n");
+    out.push_str("(and `qedgen reconcile`) flag orphan theorems (handler removed from\n");
+    out.push_str("spec) and missing obligations (new `preserved_by` declared).\n");
     out.push_str("-/\n");
     out.push_str("import Spec\n\n");
     out.push_str(&format!("namespace {}\n\n", spec.program_name));
-    out.push_str("open QEDGen.Solana\n");
-    out.push_str("open QEDGen.Solana.IndexedState\n\n");
+    out.push_str("open QEDGen.Solana\n\n");
 
     let theorems = expected_theorems(spec);
     if theorems.is_empty() {
         out.push_str("-- No preservation obligations declared by the spec.\n");
-        out.push_str("-- Add `property <name> preserved_by …` blocks to generate stubs.\n");
+        out.push_str("-- Add `property <name> preserved_by [...]` blocks to the `.qedspec`\n");
+        out.push_str("-- and `qedgen check` will list the new obligations here.\n");
     } else {
+        out.push_str("-- Preservation obligations the spec expects.\n");
+        out.push_str("-- Write each theorem against the signature generated in Spec.lean\n");
+        out.push_str("-- (the handler's transition + the property predicate). Close with\n");
+        out.push_str("-- tactics like `unfold`, `omega`, or `simp_all` as appropriate, or\n");
+        out.push_str("-- `QEDGen.Solana.IndexedState.forall_update_pres` for per-account\n");
+        out.push_str("-- invariants in Map-backed specs.\n");
+        out.push_str("--\n");
         for name in &theorems {
-            // The exact signature of each theorem is driven by spec details
-            // that Spec.lean owns. Emit a signature-free stub — the user
-            // fills in the types from the Spec when they write the proof.
-            out.push_str(&format!("theorem {} : True := by\n", name));
-            out.push_str("  -- TODO: signature lives in Spec.lean; rewrite against the\n");
-            out.push_str("  --       generated preservation obligation and close with\n");
-            out.push_str("  --       `unfold`/`omega`/`simp_all` as appropriate.\n");
-            out.push_str("  trivial\n\n");
+            out.push_str(&format!("--   theorem {}\n", name));
         }
     }
 
-    out.push_str(&format!("end {}\n", spec.program_name));
+    out.push_str(&format!("\nend {}\n", spec.program_name));
     out
 }
 

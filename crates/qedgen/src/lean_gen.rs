@@ -2988,6 +2988,14 @@ fn effect_value_to_lean(value: &str, params: &[(String, String)]) -> String {
     rewrite_subscripts_lean(&prefixed)
 }
 
+/// One subscripted effect: `(inner_field, op_kind, value)` — parts of an
+/// `accounts[i].inner_field (op) value` assignment.
+type IndexedEffect = (String, String, String);
+
+/// Per-`(root_field, idx)` group of subscripted effects, used to collapse
+/// multiple `Function.update` calls targeting the same indexed path into one.
+type IndexedEffectsByRoot = std::collections::BTreeMap<(String, String), Vec<IndexedEffect>>;
+
 /// Split an indexed-path LHS `name[idx].field` into its parts.
 fn parse_indexed_lhs(lhs: &str) -> Option<(&str, &str, &str)> {
     let bracket = lhs.find('[')?;
@@ -3005,9 +3013,13 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     let mut out = String::new();
 
     // -- Imports --
+    // `QEDGenMathlib.IndexedState` lives in the sibling lean_solana_mathlib
+    // package (Mathlib-dependent slice). Its internal namespace is still
+    // `QEDGen.Solana.IndexedState` so `open` statements and fully-qualified
+    // references are unchanged from before the split.
     out.push_str("import Mathlib.Algebra.BigOperators.Fin\n");
     out.push_str("import QEDGen.Solana.Account\n");
-    out.push_str("import QEDGen.Solana.IndexedState\n\n");
+    out.push_str("import QEDGenMathlib.IndexedState\n\n");
 
     out.push_str(&format!("namespace {}\n\n", spec.program_name));
     out.push_str("open QEDGen.Solana\n");
@@ -3046,7 +3058,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
                 default_value_for(ftype)
             ));
         }
-        out.push_str(&format!("}}\u{27E9}\n\n"));
+        out.push_str("}\u{27E9}\n\n");
     }
 
     // -- Sum types (emitted as `inductive` with a `structure` per payload variant) --
@@ -3081,7 +3093,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
                     default_value_for(ftype)
                 ));
             }
-            out.push_str(&format!("}}\u{27E9}\n\n"));
+            out.push_str("}\u{27E9}\n\n");
         }
 
         // Emit the inductive itself.
@@ -3174,7 +3186,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     if !lifecycle.is_empty() {
         out.push_str("  status : Status\n");
     }
-    out.push_str("\n");
+    out.push('\n');
 
     // -- Transitions --
     for op in &spec.handlers {
@@ -3202,8 +3214,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
         // touched inner field.
         let mut scalar_parts: Vec<String> = Vec::new();
         // (root_field, idx) → Vec<(inner_field, op_kind, value)>
-        let mut indexed_by_root: std::collections::BTreeMap<(String, String), Vec<(String, String, String)>> =
-            std::collections::BTreeMap::new();
+        let mut indexed_by_root: IndexedEffectsByRoot = std::collections::BTreeMap::new();
         for (field, op_kind, value) in &op.effects {
             if let Some((root, idx, inner_field)) = parse_indexed_lhs(field) {
                 if map_fields.contains_key(root) {
@@ -3310,7 +3321,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
                 .collect();
             out.push_str(&format!("  | {}{}\n", safe_name(&op.name), args));
         }
-        out.push_str("\n");
+        out.push('\n');
 
         out.push_str("def applyOp (s : State) (signer : Pubkey) : Operation → Option State\n");
         for op in &spec.handlers {
@@ -3336,7 +3347,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
                 call = call_args
             ));
         }
-        out.push_str("\n");
+        out.push('\n');
     }
 
     // -- Property predicates --

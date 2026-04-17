@@ -177,10 +177,10 @@ impl<'a> TypeEnv<'a> {
     fn path_type_name(&self, p: &a::Path) -> Option<String> {
         if p.root != "state" {
             if p.segments.is_empty() {
-                if let Some((_, ty)) = self.params.iter().find(|(n, _)| n == &p.root) {
-                    if let a::TypeRef::Named(n) = ty {
-                        return Some(n.clone());
-                    }
+                if let Some((_, a::TypeRef::Named(n))) =
+                    self.params.iter().find(|(n, _)| n == &p.root)
+                {
+                    return Some(n.clone());
                 }
             }
             return None;
@@ -812,6 +812,11 @@ fn type_ref_to_string(t: &a::TypeRef) -> String {
 
 /// Resolve a type reference through a table of aliases until we hit a
 /// non-alias target. Cyclic aliases bottom out on a fixed number of hops.
+///
+/// Scaffolding: used once the adapter grows alias-aware coercion for guard
+/// expressions (e.g., `type Amount = U128` appearing in a requires/effect).
+/// Kept near the typed-AST surface so it's ready when that pass lands.
+#[allow(dead_code)]
 fn resolve_type_alias<'a>(
     name: &str,
     aliases: &'a std::collections::BTreeMap<String, a::TypeRef>,
@@ -1115,13 +1120,17 @@ fn adapt_instruction(instr: &a::InstructionDecl, top_consts: ConstTable) -> Pars
     }
 }
 
+/// Pending CPI envelope data accumulated while scanning an sBPF property's
+/// clauses: (program, instruction, fields).
+type PendingCpi = (String, String, Vec<(String, String)>);
+
 fn adapt_sbpf_property(p: &a::SbpfPropertyDecl) -> ParsedSbpfProperty {
     // Decide kind from the clauses. Later clauses override earlier ones when
     // they set the same field. The presence of certain clauses determines the
     // variant.
     let mut scope_targets: Option<Vec<String>> = None;
     let mut flow: Option<(String, FlowKind)> = None;
-    let mut cpi: Option<(String, String, Vec<(String, String)>)> = None;
+    let mut cpi: Option<PendingCpi> = None;
     let mut after_all_guards = false;
     let mut exit: Option<u64> = None;
     let mut has_expr = false;
@@ -1197,8 +1206,10 @@ pub fn parse_str(src: &str) -> anyhow::Result<ParsedSpec> {
 
 /// Translate the typed AST into a `ParsedSpec` compatible with current consumers.
 pub fn adapt(spec: &a::Spec) -> ParsedSpec {
-    let mut out = ParsedSpec::default();
-    out.program_name = spec.name.clone();
+    let mut out = ParsedSpec {
+        program_name: spec.name.clone(),
+        ..ParsedSpec::default()
+    };
 
     // First pass: collect constants so guard rendering can substitute them.
     let mut consts_map: std::collections::BTreeMap<String, String> =
@@ -1506,7 +1517,7 @@ fn expand_handler(h: &a::HandlerDecl, consts: ConstTable, base_env: &TypeEnv) ->
         // Current arm's guard (if any) becomes a requires; negation is
         // recorded for subsequent arms.
         if let Some(guard) = &arm.guard {
-            let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, &env);
+            let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, env);
             let rust = expr_to_rust(&guard.node, Ctx::Guard, consts);
             synth.requires.push(ParsedRequires {
                 lean_expr: lean.clone(),
@@ -1624,14 +1635,14 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             }
             a::HandlerClause::Requires { guard, on_fail } => {
                 handler.requires.push(ParsedRequires {
-                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, &env),
+                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
                     rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts),
                     error_name: on_fail.clone(),
                 });
             }
             a::HandlerClause::Ensures(e) => {
                 handler.ensures.push(ParsedEnsures {
-                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, &env),
+                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
                     rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts),
                 });
             }
@@ -1641,7 +1652,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             a::HandlerClause::Let { name, value } => {
                 handler.let_bindings.push((
                     name.clone(),
-                    expr_to_lean(&value.node, Ctx::Guard, consts, &env),
+                    expr_to_lean(&value.node, Ctx::Guard, consts, env),
                     expr_to_rust(&value.node, Ctx::Guard, consts),
                 ));
             }
