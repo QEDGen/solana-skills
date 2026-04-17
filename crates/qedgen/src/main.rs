@@ -16,9 +16,11 @@ mod integration_test;
 mod kani;
 mod lean_gen;
 mod project;
+mod proofs_bootstrap;
 mod proptest_gen;
 mod rust_codegen_util;
 mod spec;
+mod spec_hash;
 mod unit_test;
 mod validate;
 mod verify;
@@ -385,6 +387,35 @@ enum AristotleCommands {
     },
 }
 
+/// Walk up from `start` looking for a `.git` directory. Returns true if one
+/// is found before hitting the filesystem root. qedgen refuses to write
+/// scaffolding unless the user has a git repo — the safety net for
+/// regeneration is a clean working tree.
+fn has_git_repo(start: &std::path::Path) -> bool {
+    let mut cur = match start.canonicalize() {
+        Ok(p) => p,
+        Err(_) => start.to_path_buf(),
+    };
+    loop {
+        if cur.join(".git").exists() {
+            return true;
+        }
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => return false,
+        }
+    }
+}
+
+fn require_git_repo() -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    if !has_git_repo(&cwd) {
+        eprintln!("qedgen requires a git repo — run `git init` first");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
     let icon = match warning.severity {
         check::Severity::Error => "E",
@@ -640,6 +671,7 @@ async fn main() -> Result<()> {
             asm,
             json,
         } => {
+            require_git_repo()?;
             let spec_name = spec
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -748,6 +780,36 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Orphan / missing preservation theorems in Proofs.lean. This
+            // runs whenever the proofs dir exists and is a no-op on specs
+            // without preservation obligations.
+            if proofs.exists() {
+                let parsed = check::parse_spec_file(&spec)?;
+                let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
+                if !findings.is_empty() {
+                    if json {
+                        let as_json: Vec<serde_json::Value> = findings
+                            .iter()
+                            .map(|f| match f {
+                                proofs_bootstrap::OrphanFinding::Orphan(n) => {
+                                    serde_json::json!({"kind": "orphan", "theorem": n})
+                                }
+                                proofs_bootstrap::OrphanFinding::Missing(n) => {
+                                    serde_json::json!({"kind": "missing", "theorem": n})
+                                }
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&as_json)?);
+                    } else {
+                        eprintln!("Proofs.lean drift:");
+                        for f in &findings {
+                            eprintln!("  {}", f);
+                        }
+                    }
+                    has_issues = true;
+                }
+            }
+
             // Lint — always runs (core of spec validation)
             {
                 let warnings = check::lint(&spec)?;
@@ -800,6 +862,7 @@ async fn main() -> Result<()> {
             ci_asm,
             all,
         } => {
+            require_git_repo()?;
             // Rust skeleton (always)
             codegen::generate(&spec, &output_dir)?;
 
@@ -820,6 +883,11 @@ async fn main() -> Result<()> {
                 deps::require_lean()?;
                 let parsed = check::parse_spec_file(&spec)?;
                 lean_gen::generate(&parsed, &lean_output)?;
+                // Bootstrap Proofs.lean alongside Spec.lean. Never overwrites
+                // an existing file — the user-owned theorems survive regen.
+                if let Some(proofs_dir) = lean_output.parent() {
+                    proofs_bootstrap::bootstrap_if_missing(&parsed, proofs_dir)?;
+                }
             }
             if ci || all {
                 const CI_TEMPLATE: &str = include_str!("../../../templates/verify.yml");

@@ -14,8 +14,10 @@ Conventions:
     becomes stale, the rename shows up as a compile error — fix or move
     the theorem to match.
 
-Until M13 (git-native regen) lands, this split is the stop-gap
-durability story.
+Durability story: scaffold-once codegen + compile-time spec-hash drift
+detection via `#[qed(verified, spec = ...)]` keeps Proofs.lean safe
+across `qedgen codegen` invocations. `qedgen check` flags orphan and
+missing theorems against the spec's `preserved_by` obligations.
 -/
 import Spec
 

@@ -1,8 +1,45 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedSpec};
+use crate::check::{self, ParsedHandler, ParsedSpec};
 use crate::fingerprint::SpecFingerprint;
+use crate::spec_hash;
+
+/// Compute a path, as a string, from a program `Cargo.toml` directory to the
+/// spec file. This value is embedded verbatim in the `#[qed(spec = "...")]`
+/// attribute and resolved at compile time relative to `CARGO_MANIFEST_DIR`.
+///
+/// Best-effort: if the spec isn't under a path we can express relatively,
+/// fall back to the absolute path (works as long as the repo doesn't move).
+fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
+    // Canonicalize both; fall back to the raw paths on failure.
+    let spec = spec_path.canonicalize().unwrap_or_else(|_| spec_path.to_path_buf());
+    let manifest = manifest_dir
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let spec_components: Vec<_> = spec.components().collect();
+    let manifest_components: Vec<_> = manifest.components().collect();
+
+    // Find common prefix length.
+    let common = spec_components
+        .iter()
+        .zip(manifest_components.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let mut out = std::path::PathBuf::new();
+    for _ in 0..(manifest_components.len().saturating_sub(common)) {
+        out.push("..");
+    }
+    for comp in &spec_components[common..] {
+        out.push(comp.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        spec.display().to_string()
+    } else {
+        out.to_string_lossy().replace('\\', "/")
+    }
+}
 
 /// Map DSL type to Quasar Rust type.
 pub fn map_type(dsl_type: &str) -> &str {
@@ -45,10 +82,22 @@ fn marker(label: &str, fp: &SpecFingerprint, file_key: &str) -> String {
 // File generators
 // ============================================================================
 
-/// Generate src/lib.rs
+/// Generate src/lib.rs. Skip if the file already exists — once the user has
+/// stamped custom imports or extra modules onto the crate shell, regenerating
+/// it would silently clobber that edit. Paired with the per-handler
+/// `instructions/<name>.rs` skip, this keeps `qedgen codegen` idempotent.
 fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
+
+    let lib_path = src_dir.join("lib.rs");
+    if lib_path.exists() {
+        eprintln!(
+            "programs/{}/src/lib.rs already exists — skipping (user-owned). guards.rs regenerated.",
+            output_dir.file_name().and_then(|n| n.to_str()).unwrap_or("<program>")
+        );
+        return Ok(());
+    }
 
     let program_name = spec.program_name.to_lowercase();
     let program_id = spec
@@ -68,7 +117,8 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
     if !spec.error_codes.is_empty() {
         out.push_str("pub mod errors;\n");
     }
-    out.push_str("pub mod state;\n\n");
+    out.push_str("pub mod state;\n");
+    out.push_str("pub mod guards;\n\n");
 
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
@@ -297,14 +347,27 @@ fn generate_errors(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 }
 
 /// Generate src/instructions/mod.rs and per-handler files.
-fn generate_instructions(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+///
+/// `mod.rs` is always regenerated (pure scaffold: `pub mod` declarations).
+/// Per-handler `src/instructions/<name>.rs` files are USER-OWNED: emitted
+/// only when missing. Each scaffolded handler body calls
+/// `crate::guards::<name>(...)?` then falls through to `todo!()` for the
+/// agent to fill in business logic. The `#[qed(verified, spec, handler,
+/// hash, spec_hash)]` attribute ties the body and the spec contract
+/// together at compile time.
+fn generate_instructions(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    spec_path: &Path,
+    output_dir: &Path,
+) -> Result<()> {
     let instr_dir = output_dir.join("src").join("instructions");
     std::fs::create_dir_all(&instr_dir)?;
 
     let is_multi = spec.account_types.len() > 1;
     let default_state_name = format!("{}Account", to_pascal_case(&spec.program_name));
 
-    // mod.rs
+    // mod.rs — always regenerated, pure scaffold.
     let mut mod_out = String::new();
     mod_out.push_str(&marker("DO NOT EDIT", fp, "src/instructions/mod.rs"));
     for handler in &spec.handlers {
@@ -318,94 +381,230 @@ fn generate_instructions(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &P
     mod_out.push_str("// ---- END GENERATED ----\n");
     std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
 
-    // Per-handler instruction files
+    // Read spec source once — used for spec_hash attributes.
+    let spec_src = std::fs::read_to_string(spec_path).unwrap_or_default();
+    let spec_attr = relative_spec_path(spec_path, output_dir);
+
+    // Per-handler instruction files — skip if existing (user-owned).
     for handler in &spec.handlers {
-        let pascal = to_pascal_case(&handler.name);
-        let bumps_name = format!("{}Bumps", pascal);
-        let any_mut = handler.accounts.iter().any(|a| a.is_writable);
-
-        let mut out = String::new();
-        let file_key = format!("src/instructions/{}.rs", handler.name);
-        out.push_str(&marker("DO NOT EDIT ABOVE THIS LINE", fp, &file_key));
-        out.push_str("use quasar_lang::prelude::*;\n");
-        out.push_str("use crate::state::*;\n");
-        if !spec.events.is_empty() && !handler.emits.is_empty() {
-            out.push_str("use crate::events::*;\n");
-        }
-        if !spec.error_codes.is_empty() {
-            out.push_str("use crate::errors::*;\n");
-        }
-        out.push('\n');
-
-        // #[derive(Accounts)] struct
-        out.push_str("#[derive(Accounts)]\n");
-        out.push_str(&format!("pub struct {} {{\n", pascal));
-
-        if !handler.accounts.is_empty() {
-            for acct in &handler.accounts {
-                let state_name = if is_multi {
-                    // For multi-account, infer state name from account type or use default
-                    infer_state_name(acct, spec, &default_state_name)
-                } else {
-                    default_state_name.clone()
-                };
-                let attr = acct.quasar_account_attr(handler, &state_name);
-                let field_type = acct.quasar_field_type();
-                out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
-            }
-        } else if handler.who.is_some() {
-            out.push_str("    pub signer: Signer,\n");
+        let handler_path = instr_dir.join(format!("{}.rs", handler.name));
+        if handler_path.exists() {
+            eprintln!(
+                "programs/{}/src/instructions/{}.rs already exists — skipping (user-owned). guards.rs regenerated.",
+                output_dir.file_name().and_then(|n| n.to_str()).unwrap_or("<program>"),
+                handler.name
+            );
+            continue;
         }
 
-        out.push_str("}\n\n");
-
-        // impl block with handler
-        out.push_str(&format!("impl {} {{\n", pascal));
-
-        if let Some(ref doc) = handler.doc {
-            out.push_str(&format!("    /// {}\n", doc));
-        }
-
-        out.push_str("    #[inline(always)]\n");
-
-        let self_ref = if any_mut { "&mut self" } else { "&self" };
-        let mut handler_params = vec![self_ref.to_string()];
-        for (pname, ptype) in &handler.takes_params {
-            handler_params.push(format!("{}: {}", pname, map_type(ptype)));
-        }
-        if handler.has_bumps() {
-            handler_params.push(format!("bumps: &{}", bumps_name));
-        }
-
-        out.push_str(&format!(
-            "    pub fn handler({}) -> Result<(), ProgramError> {{\n",
-            handler_params.join(", ")
-        ));
-
-        // AGENT hook body
-        out.push_str("        // AGENT: implement business logic here\n");
-
-        if let Some(ref guard) = handler.guard_str {
-            out.push_str(&format!("        // Spec guard: \"{}\"\n", guard));
-        }
-        for (field, op_kind, value) in &handler.effects {
-            out.push_str(&format!(
-                "        // Spec effect: {} {} {}\n",
-                field, op_kind, value
-            ));
-        }
-        for emit in &handler.emits {
-            out.push_str(&format!("        // Spec: emit!({})\n", emit));
-        }
-
-        out.push_str("        todo!()\n");
-        out.push_str("    }\n");
-        out.push_str("}\n");
-        out.push_str("// ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----\n");
-
-        std::fs::write(instr_dir.join(format!("{}.rs", handler.name)), &out)?;
+        let out = render_handler_scaffold(
+            handler,
+            spec,
+            is_multi,
+            &default_state_name,
+            &spec_src,
+            &spec_attr,
+        );
+        std::fs::write(&handler_path, &out)?;
     }
 
+    Ok(())
+}
+
+/// Render the initial scaffold for a single user-owned handler file.
+fn render_handler_scaffold(
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    is_multi: bool,
+    default_state_name: &str,
+    spec_src: &str,
+    spec_attr: &str,
+) -> String {
+    let pascal = to_pascal_case(&handler.name);
+    let bumps_name = format!("{}Bumps", pascal);
+    let any_mut = handler.accounts.iter().any(|a| a.is_writable);
+
+    let mut out = String::new();
+    out.push_str("// User-owned. Regenerating the spec does NOT overwrite this file.\n");
+    out.push_str("// Guard checks live in the sibling `crate::guards` module and ARE\n");
+    out.push_str("// regenerated on every `qedgen codegen`. Drift between the spec\n");
+    out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
+    out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
+    out.push_str("use quasar_lang::prelude::*;\n");
+    out.push_str("use crate::state::*;\n");
+    out.push_str("use crate::guards;\n");
+    out.push_str("use qedgen_macros::qed;\n");
+    if !spec.events.is_empty() && !handler.emits.is_empty() {
+        out.push_str("use crate::events::*;\n");
+    }
+    if !spec.error_codes.is_empty() {
+        out.push_str("use crate::errors::*;\n");
+    }
+    out.push('\n');
+
+    // #[derive(Accounts)] struct
+    out.push_str("#[derive(Accounts)]\n");
+    out.push_str(&format!("pub struct {} {{\n", pascal));
+
+    if !handler.accounts.is_empty() {
+        for acct in &handler.accounts {
+            let state_name = if is_multi {
+                infer_state_name(acct, spec, default_state_name)
+            } else {
+                default_state_name.to_string()
+            };
+            let attr = acct.quasar_account_attr(handler, &state_name);
+            let field_type = acct.quasar_field_type();
+            out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
+        }
+    } else if handler.who.is_some() {
+        out.push_str("    pub signer: Signer,\n");
+    }
+
+    out.push_str("}\n\n");
+
+    // impl block with handler
+    out.push_str(&format!("impl {} {{\n", pascal));
+    if let Some(ref doc) = handler.doc {
+        out.push_str(&format!("    /// {}\n", doc));
+    }
+
+    // Emit the spec-bound #[qed(...)] attribute. Hashes are empty on first
+    // scaffold — the macro errors with the computed values for copy-paste.
+    let spec_h = spec_hash::spec_hash_for_handler(spec_src, &handler.name).unwrap_or_default();
+    out.push_str(&format!(
+        "    #[qed(verified, spec = \"{}\", handler = \"{}\", spec_hash = \"{}\")]\n",
+        spec_attr, handler.name, spec_h
+    ));
+
+    out.push_str("    #[inline(always)]\n");
+
+    let self_ref = if any_mut { "&mut self" } else { "&self" };
+    let mut handler_params = vec![self_ref.to_string()];
+    let mut param_names: Vec<String> = Vec::new();
+    for (pname, ptype) in &handler.takes_params {
+        handler_params.push(format!("{}: {}", pname, map_type(ptype)));
+        param_names.push(pname.clone());
+    }
+    if handler.has_bumps() {
+        handler_params.push(format!("bumps: &{}", bumps_name));
+    }
+
+    out.push_str(&format!(
+        "    pub fn handler({}) -> Result<(), ProgramError> {{\n",
+        handler_params.join(", ")
+    ));
+
+    // Call the always-regenerated guards module. Signature: takes `&Self`
+    // plus every handler-level parameter, returns `Result<(), ProgramError>`.
+    let guard_args = if param_names.is_empty() {
+        "self".to_string()
+    } else {
+        format!("self, {}", param_names.join(", "))
+    };
+    out.push_str(&format!(
+        "        guards::{}({})?;\n",
+        handler.name, guard_args
+    ));
+
+    for (field, op_kind, value) in &handler.effects {
+        out.push_str(&format!(
+            "        // Spec effect: {} {} {}\n",
+            field, op_kind, value
+        ));
+    }
+    for emit in &handler.emits {
+        out.push_str(&format!("        // Spec: emit!({})\n", emit));
+    }
+
+    out.push_str("        todo!(\"user business logic\")\n");
+    out.push_str("    }\n");
+    out.push_str("}\n");
+    out
+}
+
+/// Generate src/guards.rs — one function per handler containing all the
+/// spec-declared guard checks. This file is always regenerated; any edit
+/// is clobbered on the next `qedgen codegen` (by design).
+fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+    let src_dir = output_dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+
+    let mut out = String::new();
+    out.push_str(&marker("DO NOT EDIT — regenerated from .qedspec", fp, "src/guards.rs"));
+    out.push_str("//! Per-handler guard checks derived from the `.qedspec`.\n");
+    out.push_str("//! Called from user-owned `instructions/<name>::handler` before\n");
+    out.push_str("//! business logic; keep guard logic here, policy-free logic there.\n\n");
+    out.push_str("#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]\n\n");
+    out.push_str("use quasar_lang::prelude::*;\n");
+    if !spec.error_codes.is_empty() {
+        out.push_str("use crate::errors::*;\n");
+    }
+    out.push_str("use crate::instructions::*;\n\n");
+
+    for handler in &spec.handlers {
+        let pascal = to_pascal_case(&handler.name);
+        let any_mut = handler.accounts.iter().any(|a| a.is_writable);
+        let self_ref = if any_mut { "&mut " } else { "&" };
+        let mut params = vec![format!("ctx: {}{}", self_ref, pascal)];
+        for (pname, ptype) in &handler.takes_params {
+            params.push(format!("{}: {}", pname, map_type(ptype)));
+        }
+        out.push_str(&format!(
+            "/// Guards for `{}`.  \n/// Generated from the `requires` clauses of the spec handler block.\n",
+            handler.name
+        ));
+        out.push_str(&format!(
+            "pub fn {}({}) -> Result<(), ProgramError> {{\n",
+            handler.name,
+            params.join(", ")
+        ));
+
+        if handler.requires.is_empty() && handler.aborts_if.is_empty() {
+            out.push_str("    // No guards declared in spec — nothing to check.\n");
+        }
+
+        for req in &handler.requires {
+            // Emit as a comment for human readers + an executable check.
+            // The Rust expression comes directly from the spec; callers are
+            // expected to bring the identifiers in scope (typically via
+            // `ctx.<account>.<field>` style access).
+            out.push_str(&format!(
+                "    // requires: {}\n",
+                req.lean_expr.trim()
+            ));
+            let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+            if let Some(err) = &req.error_name {
+                out.push_str(&format!(
+                    "    if !({}) {{ return Err(ProgramError::from({}::{})); }}\n",
+                    req.rust_expr.trim(),
+                    err_enum,
+                    err
+                ));
+            } else {
+                out.push_str(&format!(
+                    "    debug_assert!({});\n",
+                    req.rust_expr.trim()
+                ));
+            }
+        }
+
+        let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+        for ab in &handler.aborts_if {
+            out.push_str(&format!(
+                "    if ({}) {{ return Err(ProgramError::from({}::{})); }}\n",
+                ab.rust_expr.trim(),
+                err_enum,
+                ab.error_name
+            ));
+        }
+
+        out.push_str("    Ok(())\n");
+        out.push_str("}\n\n");
+    }
+
+    out.push_str("// ---- END GENERATED ----\n");
+    std::fs::write(src_dir.join("guards.rs"), &out)?;
     Ok(())
 }
 
@@ -457,6 +656,7 @@ debug = []
 
 [dependencies]
 quasar-lang = {{ version = "0.1" }}
+qedgen-macros = {{ version = "0.1", path = "../../../crates/qedgen-macros" }}
 "#,
         program_name
     ));
@@ -500,7 +700,8 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
     generate_state(&spec, &fp, output_dir)?;
     generate_events(&spec, &fp, output_dir)?;
     generate_errors(&spec, &fp, output_dir)?;
-    generate_instructions(&spec, &fp, output_dir)?;
+    generate_instructions(&spec, &fp, spec_path, output_dir)?;
+    generate_guards(&spec, &fp, output_dir)?;
     generate_cargo_toml(&spec, &fp, output_dir)?;
 
     let file_count = 4

@@ -3356,8 +3356,8 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     //
     // Durable user-owned proofs live in a sibling `Proofs.lean`. Codegen
     // never writes theorem bodies so regeneration can't clobber proof work.
-    // See M13 for the planned git-native merge-based regen path that
-    // will retire this split in favor of 3-way merge.
+    // `qedgen check` diffs the spec's preservation obligations against the
+    // theorems declared in Proofs.lean and flags orphans/missing stubs.
     //
     // Users/agents write proofs in `Proofs.lean` with the shape:
     //   `theorem <prop>_preserved_by_<handler> (s s' : State) ... : ... := by ...`
@@ -3863,9 +3863,10 @@ instruction RegisterMarket {
 
     #[test]
     fn lean_gen_does_not_emit_liveness_in_spec() {
-        // Liveness obligations are user-owned in Proofs.lean (stop-gap for
-        // durability under codegen regeneration; tracked in M13 git-native).
-        // Spec.lean must stay codegen-owned.
+        // Liveness obligations are user-owned in Proofs.lean — durability
+        // comes from scaffold-once codegen + compile-time spec-hash drift
+        // detection via the `#[qed(verified, spec = ...)]` macro. Spec.lean
+        // must stay codegen-owned.
         let spec = chumsky_adapter::parse_str(PERCOLATOR_SPEC).unwrap();
         let lean = render(&spec);
         assert!(!lean.contains("theorem liveness_drain_completes"));
