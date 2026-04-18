@@ -21,9 +21,12 @@ handler initialize (deposit_amount : U64) (receive_amount : U64) : State.Uniniti
     taker_amount := receive_amount
   }
 
-  transfers {
-    from initializer_ta to escrow_ta amount deposit_amount authority initializer
-  }
+  call Token.transfer(
+    from      = initializer_ta,
+    to        = escrow_ta,
+    amount    = deposit_amount,
+    authority = initializer,
+  )
 
   emits EscrowInitialized
 }

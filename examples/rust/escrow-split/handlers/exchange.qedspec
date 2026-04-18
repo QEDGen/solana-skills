@@ -13,10 +13,19 @@ handler exchange : State.Open -> State.Closed {
     token_program  : program
   }
 
-  transfers {
-    from taker_ta to initializer_ta amount taker_amount authority taker
-    from escrow_ta to taker_ta amount initializer_amount authority escrow
-  }
+  call Token.transfer(
+    from      = taker_ta,
+    to        = initializer_ta,
+    amount    = taker_amount,
+    authority = taker,
+  )
+
+  call Token.transfer(
+    from      = escrow_ta,
+    to        = taker_ta,
+    amount    = initializer_amount,
+    authority = escrow,
+  )
 
   emits EscrowExchanged
 }

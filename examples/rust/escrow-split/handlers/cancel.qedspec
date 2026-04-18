@@ -12,9 +12,12 @@ handler cancel : State.Open -> State.Closed {
     token_program  : program
   }
 
-  transfers {
-    from escrow_ta to initializer_ta amount initializer_amount authority escrow
-  }
+  call Token.transfer(
+    from      = escrow_ta,
+    to        = initializer_ta,
+    amount    = initializer_amount,
+    authority = escrow,
+  )
 
   emits EscrowCancelled
 }

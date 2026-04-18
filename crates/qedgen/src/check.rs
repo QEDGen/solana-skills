@@ -410,8 +410,11 @@ impl ParsedHandler {
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()
     }
+    /// Whether this handler initiates a CPI. True if the handler has a
+    /// `transfers { }` block (legacy sugar for Token.transfer) OR any
+    /// `call Interface.handler(...)` site (v2.5 uniform CPI surface).
     pub fn has_calls(&self) -> bool {
-        !self.transfers.is_empty()
+        !self.transfers.is_empty() || !self.calls.is_empty()
     }
     pub fn has_when(&self) -> bool {
         self.pre_status.is_some()

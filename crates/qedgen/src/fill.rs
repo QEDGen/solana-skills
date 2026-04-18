@@ -413,6 +413,30 @@ fn build_prompt(
     }
     out.push('\n');
 
+    // -- CPI calls (v2.5 slice 2+5) -----------------------------------
+    // Each `call Interface.handler(name = expr, ...)` is a CPI obligation
+    // the agent must turn into the appropriate CPI envelope. The target
+    // interface's `program_id`, `discriminant`, and account shape carry
+    // everything else needed (when the interface is declared in-spec).
+    out.push_str("  calls (NEEDS FILL):\n");
+    if handler.calls.is_empty() {
+        out.push_str("           — none —\n");
+    } else {
+        for c in &handler.calls {
+            let args = c
+                .args
+                .iter()
+                .map(|a| format!("{}={}", a.name, a.rust_expr))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "           call {}.{}({})\n",
+                c.target_interface, c.target_handler, args
+            ));
+        }
+    }
+    out.push('\n');
+
     // -- Available accounts -------------------------------------------
     out.push_str("Available accounts in `&mut self`:\n");
     for acct in &handler.accounts {
@@ -439,7 +463,7 @@ fn build_prompt(
     out.push_str(&handler.name);
     out.push_str("(self, ...)?;` call as the first statement.\n");
     out.push_str("  - Keep mechanically-expanded effect lines exactly as written.\n");
-    out.push_str("  - Replace the `todo!(...)` line with the remaining effects + events + transfers, then `Ok(())`.\n");
+    out.push_str("  - Replace the `todo!(...)` line with the remaining effects + events + transfers + calls, then `Ok(())`.\n");
     out.push_str("  - Do not modify the `#[qed(verified, ...)]` attribute (drift detection).\n");
     out.push_str("  - Use the existing `crate::events::*` and `crate::guards::*` imports.\n");
 
