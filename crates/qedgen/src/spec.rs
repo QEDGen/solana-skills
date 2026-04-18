@@ -17,6 +17,10 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 pub(crate) struct Idl {
     pub metadata: IdlMetadata,
+    /// Anchor 0.30+ emits `address` at the IDL root for the deployed program
+    /// ID. Older IDLs put it under metadata; we fall back on both.
+    #[serde(default)]
+    pub address: Option<String>,
     #[serde(default)]
     pub instructions: Vec<IdlInstruction>,
     #[serde(default)]
@@ -39,6 +43,11 @@ pub(crate) struct IdlInstruction {
     pub accounts: Vec<IdlAccount>,
     #[serde(default)]
     pub args: Vec<IdlArg>,
+    /// Anchor 0.30+ emits an 8-byte discriminator. Older IDLs omit it; the
+    /// interface-from-IDL generator leaves the `discriminant` line as a
+    /// TODO in that case.
+    #[serde(default)]
+    pub discriminator: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize)]

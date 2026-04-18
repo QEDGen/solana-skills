@@ -2189,8 +2189,87 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Validate new-DSL constructs: Map[N] T fields, subscripted effect LHS.
     warnings.extend(check_map_and_subscript(spec));
 
+    // CPI tier lint: call sites whose target is Tier 0 (no ensures declared)
+    // get flagged so users see the gap between "my Rust compiles" and "my
+    // program is verified." See docs/design/spec-composition.md §2.
+    warnings.extend(check_shape_only_cpi(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
+
+    warnings
+}
+
+/// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
+/// sites whose target declares no `ensures`. The call still generates a real
+/// Rust CPI builder; the lint simply makes the proof-side gap explicit so
+/// nobody mistakes a compiling CPI for a verified one.
+fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+
+    for handler in &spec.handlers {
+        for call in &handler.calls {
+            let iface = spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface);
+            let target_handler =
+                iface.and_then(|i| i.handlers.iter().find(|h| h.name == call.target_handler));
+
+            let (reason, fix) = match (iface, target_handler) {
+                (None, _) => (
+                    format!(
+                        "interface `{}` is not declared in this spec — the call compiles but has no contract",
+                        call.target_interface
+                    ),
+                    format!(
+                        "Declare `interface {} {{ ... }}` at the top level, or `qedgen interface --idl <path>` to scaffold one.",
+                        call.target_interface
+                    ),
+                ),
+                (Some(_), None) => (
+                    format!(
+                        "interface `{}` has no handler named `{}` — check for a typo or add the handler",
+                        call.target_interface, call.target_handler
+                    ),
+                    format!(
+                        "Add `handler {}` inside `interface {} {{ ... }}`, or update the call site to match a real handler.",
+                        call.target_handler, call.target_interface
+                    ),
+                ),
+                (Some(_), Some(h)) if h.ensures.is_empty() => (
+                    format!(
+                        "`{}.{}` declares shape only (no `ensures`) — the call has no post-state assumptions for proofs",
+                        call.target_interface, call.target_handler
+                    ),
+                    format!(
+                        "Upgrade to Tier 1 by declaring `ensures` on `{}` inside `interface {}`, or import a qedspec for full verification.",
+                        call.target_handler, call.target_interface
+                    ),
+                ),
+                // Tier 1/2 target — nothing to lint.
+                _ => continue,
+            };
+
+            warnings.push(CompletenessWarning {
+                rule: "shape_only_cpi".to_string(),
+                severity: Severity::Info,
+                priority: 3,
+                message: format!(
+                    "handler '{}' calls `{}.{}` — {}",
+                    handler.name, call.target_interface, call.target_handler, reason
+                ),
+                subject: Some(handler.name.clone()),
+                fix,
+                example: Some(format!(
+                    "  interface {} {{\n    handler {} (...) {{\n      ensures /* what the callee guarantees */\n    }}\n  }}",
+                    call.target_interface, call.target_handler
+                )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
 
     warnings
 }
@@ -3564,6 +3643,93 @@ handler dec (x : U64) : State.Active -> State.Active {
     // ──────────────────────────────────────────────────────────────────────
     // Interface adapter round-trip (v2.5 slice 1)
     // ──────────────────────────────────────────────────────────────────────
+
+    // ──────────────────────────────────────────────────────────────────────
+    // [shape_only_cpi] lint (v2.5 slice 4)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn shape_only_cpi_fires_on_tier0_interface() {
+        // Interface declared with no ensures — classic Tier-0. Should lint.
+        let src = r#"spec Demo
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected one shape_only_cpi warning, got {:?}",
+            ws
+        );
+        assert!(hits[0].message.contains("shape only"));
+    }
+
+    #[test]
+    fn shape_only_cpi_fires_on_undeclared_interface() {
+        let src = r#"spec Demo
+
+handler pay : State.A -> State.A {
+  call Jupiter.swap(pool = amm, amount_in = 100, min_out = 90)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected one shape_only_cpi warning, got {:?}",
+            ws
+        );
+        assert!(hits[0].message.contains("not declared"));
+    }
+
+    #[test]
+    fn shape_only_cpi_silent_on_tier1_interface() {
+        // Interface declares at least one ensures — no lint should fire.
+        let src = r#"spec Demo
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert!(
+            hits.is_empty(),
+            "Tier 1 interfaces should not lint, got: {:?}",
+            hits
+        );
+    }
 
     #[test]
     fn call_clause_populates_handler_calls() {

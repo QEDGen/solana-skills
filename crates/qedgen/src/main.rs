@@ -15,6 +15,7 @@ mod fingerprint;
 mod idl2spec;
 mod init;
 mod integration_test;
+mod interface_gen;
 mod kani;
 mod lean_gen;
 mod project;
@@ -104,6 +105,23 @@ enum Commands {
         /// Auto-escalate to Aristotle if sorry markers remain after Leanstral
         #[arg(long)]
         escalate: bool,
+    },
+
+    /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
+    ///
+    /// Shape only — program ID, discriminators, accounts, argument types.
+    /// No requires/ensures (effects need semantic understanding the IDL does
+    /// not carry). Upgrade to Tier 1 by declaring what the callee does; see
+    /// docs/design/spec-composition.md §2.
+    Interface {
+        /// Path to the Anchor IDL JSON file.
+        #[arg(long)]
+        idl: PathBuf,
+
+        /// Path to write the generated .qedspec. If omitted, the rendered
+        /// source is printed to stdout so the caller can redirect.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 
     /// Generate SPEC.md or .qedspec from an Anchor IDL or a .qedspec file
@@ -663,6 +681,17 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        Commands::Interface { idl, out } => match out {
+            Some(path) => {
+                interface_gen::generate_to_file(&idl, &path)?;
+                eprintln!("Wrote Tier-0 interface to {}", path.display());
+            }
+            None => {
+                let rendered = interface_gen::generate(&idl)?;
+                print!("{}", rendered);
+            }
+        },
 
         Commands::Spec {
             idl,
