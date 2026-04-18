@@ -23,6 +23,164 @@ pub struct FillOpts<'a> {
     pub only_handler: Option<&'a str>,
 }
 
+pub struct FillTestsOpts<'a> {
+    pub spec: &'a ParsedSpec,
+    pub spec_path: &'a Path,
+    pub tests_path: &'a Path,
+}
+
+pub fn emit_test_prompts(opts: &FillTestsOpts<'_>) -> Result<usize> {
+    if !opts.tests_path.exists() {
+        eprintln!(
+            "qedgen fill-tests — no integration test file at {} (run `qedgen codegen --integration` first).",
+            opts.tests_path.display()
+        );
+        return Ok(0);
+    }
+    let body = std::fs::read_to_string(opts.tests_path)
+        .with_context(|| format!("reading {}", opts.tests_path.display()))?;
+
+    let mut prompts = Vec::new();
+    let lines: Vec<&str> = body.lines().collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if !line.contains("todo!(") {
+            continue;
+        }
+        // Skip comment lines that just *mention* todo!() in prose.
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let test_name = enclosing_fn(&lines, idx).unwrap_or("<unknown>".to_string());
+        prompts.push(build_test_prompt(
+            opts.spec,
+            opts.spec_path,
+            opts.tests_path,
+            idx + 1,
+            &test_name,
+            &lines,
+        ));
+    }
+
+    if prompts.is_empty() {
+        eprintln!(
+            "qedgen fill-tests — nothing to fill ({} contains no `todo!(`).",
+            opts.tests_path.display()
+        );
+        return Ok(0);
+    }
+
+    println!(
+        "qedgen-fill-tests: {} prompt(s) — copy these to your agent or act on them in this session.\n",
+        prompts.len()
+    );
+    for p in &prompts {
+        println!("{}", p);
+    }
+    Ok(prompts.len())
+}
+
+fn enclosing_fn(lines: &[&str], idx: usize) -> Option<String> {
+    for line in lines[..=idx].iter().rev() {
+        if let Some(rest) = line.trim_start().strip_prefix("fn ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn build_test_prompt(
+    spec: &ParsedSpec,
+    spec_path: &Path,
+    tests_path: &Path,
+    line_no: usize,
+    test_name: &str,
+    lines: &[&str],
+) -> String {
+    let mut out = String::new();
+    out.push_str(SEP);
+    out.push('\n');
+    out.push_str(&format!("QEDGEN-FILL-TESTS: {}:{}\n", tests_path.display(), line_no));
+    out.push_str(&format!("test: {}    spec: {}\n", test_name, spec_path.display()));
+    out.push_str(HALF);
+    out.push_str("\n\n");
+
+    out.push_str(&format!(
+        "Replace the `todo!(...)` at line {} with the test body.\n\n",
+        line_no
+    ));
+
+    // Surrounding context: print 8 lines before the todo to anchor the agent.
+    let start = line_no.saturating_sub(8);
+    out.push_str("Surrounding lines (read-only — do not modify the comments):\n");
+    for (i, l) in lines.iter().enumerate().skip(start).take(line_no - start) {
+        out.push_str(&format!("  {:>4} | {}\n", i + 1, l));
+    }
+    out.push('\n');
+
+    // Lifecycle context — most useful for test_lifecycle_sequence.
+    if test_name == "test_lifecycle_sequence" {
+        out.push_str("Spec lifecycle handlers (in declaration order):\n");
+        for h in &spec.handlers {
+            let pre = h.pre_status.as_deref().unwrap_or("?");
+            let post = h.post_status.as_deref().unwrap_or("?");
+            out.push_str(&format!(
+                "  {:<14} : {} -> {}\n",
+                h.name, pre, post
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Handler-specific context if the test name matches a handler.
+    let handler = spec.handlers.iter().find(|h| {
+        test_name == format!("test_{}", h.name)
+            || test_name == format!("test_{}_unauthorized", h.name)
+    });
+    if let Some(h) = handler {
+        out.push_str(&format!("Handler `{}` accepts:\n", h.name));
+        if h.takes_params.is_empty() {
+            out.push_str("  (no parameters)\n");
+        } else {
+            for (n, t) in &h.takes_params {
+                out.push_str(&format!("  {:<14} : {}\n", n, t));
+            }
+        }
+        out.push_str(&format!("\nHandler `{}` accounts:\n", h.name));
+        for acct in &h.accounts {
+            out.push_str(&format!("  {:<14} : {}\n", acct.name, describe_account(acct)));
+        }
+        out.push('\n');
+    }
+
+    // Available helpers (always present in the generated file).
+    out.push_str("Available helpers (defined at top of file):\n");
+    out.push_str("  signer(addr)                                 -> Account\n");
+    out.push_str("  empty(addr)                                  -> Account (system-owned, zero data)\n");
+    out.push_str("  state_account(addr, ...spec_fields, bump)    -> Account (program-owned, populated)\n");
+    out.push_str("  mint_account(addr, authority)                -> Account\n");
+    out.push_str("  token_account(addr, mint, owner, amount)     -> Account\n");
+    out.push_str("  Instruction builders: instructions::<handler>::Builder::default().<param>(v)…build()\n");
+    out.push('\n');
+
+    out.push_str("Constraints:\n");
+    out.push_str("  - Use `let result = svm.execute(&instruction, &[<accounts>]);` to invoke.\n");
+    out.push_str("  - For lifecycle sequences, chain handlers in the order shown above.\n");
+    out.push_str("  - After each step, assert `result.is_ok()` and read the post-state via `svm.account(&pubkey)`.\n");
+    out.push_str("  - Replace any inline `/* AGENT: ... */` placeholders nearby with concrete values too.\n");
+    out.push_str("  - Do NOT modify the `// ---- GENERATED BY QEDGEN ----` header.\n");
+
+    out.push('\n');
+    out.push_str(SEP);
+    out.push('\n');
+    out
+}
+
 pub fn emit_prompts(opts: &FillOpts<'_>) -> Result<usize> {
     let mut prompts = Vec::new();
 
@@ -82,7 +240,10 @@ fn handler_file_path(programs_dir: &Path, program_name: &str, handler: &ParsedHa
 fn needs_fill(body: &str) -> bool {
     // The M3 expander emits a focused `todo!("fill non-mechanical ...")`
     // when something remains; a fully-mechanized handler ends in `Ok(())`.
-    body.contains("todo!(")
+    // Skip comment lines that merely mention todo!() in prose.
+    body.lines().any(|l| {
+        l.contains("todo!(") && !l.trim_start().starts_with("//")
+    })
 }
 
 fn build_prompt(

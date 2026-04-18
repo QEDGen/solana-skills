@@ -365,6 +365,13 @@ enum Commands {
         /// Restrict --fill to one handler by name (default: all that need filling)
         #[arg(long)]
         handler: Option<String>,
+
+        /// After scaffolding, emit prompt blocks for every `todo!()` site in
+        /// the generated integration test file. Same stdout-for-agent flow
+        /// as --fill, but for `tests/integration_tests.rs` rather than
+        /// per-handler files.
+        #[arg(long)]
+        fill_tests: bool,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -999,6 +1006,7 @@ async fn main() -> Result<()> {
             all,
             fill,
             handler,
+            fill_tests,
         } => {
             require_git_repo()?;
             // Rust skeleton (always)
@@ -1051,6 +1059,16 @@ async fn main() -> Result<()> {
                     only_handler: handler.as_deref(),
                 };
                 fill::emit_prompts(&opts)?;
+            }
+
+            if fill_tests {
+                let parsed = check::parse_spec_file(&spec)?;
+                let opts = fill::FillTestsOpts {
+                    spec: &parsed,
+                    spec_path: &spec,
+                    tests_path: &integration_output,
+                };
+                fill::emit_test_prompts(&opts)?;
             }
         }
 
