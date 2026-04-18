@@ -1,183 +1,124 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QEDGen — Proofs, not promises</title>
-  <meta name="description" content="Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed.">
-  <meta property="og:title" content="QEDGen — Proofs, not promises">
-  <meta property="og:description" content="Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed.">
+  <title>QEDGen. Proofs, not promises.</title>
+  <meta name="description" content="Describe what your Solana program must guarantee in .qedspec. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed.">
+  <meta property="og:title" content="QEDGen. Proofs, not promises.">
+  <meta property="og:description" content="Describe what your Solana program must guarantee in .qedspec. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed.">
   <meta property="og:url" content="https://qedgen.dev/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://qedgen.dev/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="QEDGen — Proofs, not promises">
-  <meta name="twitter:description" content="Define what your Solana program must guarantee. QEDGen finds the bugs your tests miss — then generates the tests, proofs, and CI to make sure they stay fixed.">
+  <meta name="twitter:title" content="QEDGen. Proofs, not promises.">
+  <meta name="twitter:description" content="Describe what your Solana program must guarantee in .qedspec. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed.">
   <meta name="twitter:image" content="https://qedgen.dev/og.png">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 42 42' fill='none'><rect x='4' y='4' width='34' height='34' rx='4' stroke='%2338bdf8' stroke-width='2.5'/><path d='M12 21L18 27L30 15' stroke='%2338bdf8' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/><rect x='28' y='28' width='6' height='6' fill='%2338bdf8'/></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="page">
 
-<div class="hero-glow"></div>
-
-<!-- Nav -->
-<nav>
-  <div class="container">
-    <a class="logo-mark" href="#">
-      <svg class="logo-svg" width="28" height="28" viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="4" y="4" width="34" height="34" rx="4" stroke="#38bdf8" stroke-width="2.5"/>
-        <path d="M12 21L18 27L30 15" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-        <rect x="28" y="28" width="6" height="6" fill="#38bdf8"/>
-      </svg>
-      <span class="logo-text">QEDGen</span>
-    </a>
-    <div class="links">
-      <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" target="_blank" rel="noopener noreferrer">Docs</a>
-      <a href="https://github.com/qedgen/solana-skills" target="_blank" rel="noopener noreferrer">GitHub</a>
-    </div>
-  </div>
-</nav>
-
-<!-- Hero — single screen, split layout -->
-<header class="hero">
-  <div class="container hero-grid">
-    <div class="hero-copy">
-      <div class="badge"><span class="badge-dot"></span> Proofs, not promises</div>
-      <h1>Ship to mainnet<br><span class="accent-text">without fear. &#x220E;</span></h1>
-      <p class="subtitle">Write what your Solana program must guarantee in a <code>.qedspec</code> file. QEDGen validates it, finds the bugs your tests miss, then generates the tests, proofs, and CI to keep them fixed — all from a single source of truth.</p>
-      <pre class="install-cmd"><code>npx skills add qedgen/solana-skills</code><button class="copy-btn" aria-label="Copy to clipboard" onclick="navigator.clipboard.writeText('npx skills add qedgen/solana-skills').then(()=>{this.classList.add('copied');setTimeout(()=>this.classList.remove('copied'),1500)})"><svg class="icon-copy" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1.5 1.5 0 0 0-1.5-1.5H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5h2"/></svg><svg class="icon-check" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5L6.5 12L13 4"/></svg></button></pre>
-      <p class="compat">Works with Cursor, Windsurf, Claude Code, GitHub Copilot, and any agent supporting <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">Agent Skills</a>.</p>
-      <div class="cta">
-        <a href="https://github.com/qedgen/solana-skills" class="btn btn-primary" target="_blank" rel="noopener noreferrer"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> Star on GitHub</a>
-        <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" class="btn btn-secondary" target="_blank" rel="noopener noreferrer">View the Skill</a>
+    <header class="top">
+      <a href="#" class="lockup" aria-label="QEDGen home">
+        <svg width="26" height="26" viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="4" y="4" width="34" height="34" rx="4" stroke="#38bdf8" stroke-width="2.5"/>
+          <path d="M12 21L18 27L30 15" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect x="28" y="28" width="6" height="6" fill="#38bdf8"/>
+        </svg>
+        <span class="wm"><span>QED</span><span class="gen">gen</span></span>
+      </a>
+      <div class="top-meta">
+        <span class="live">mainnet · shipping proofs</span>
+        <a href="https://github.com/qedgen/solana-skills" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
       </div>
-    </div>
-    <div class="hero-diagram">
-      <svg viewBox="0 0 440 580" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <marker id="arr-primary" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#a1a1aa"/>
-          </marker>
-          <marker id="arr-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#38bdf8"/>
-          </marker>
-          <marker id="arr-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#52525b"/>
-          </marker>
-        </defs>
+    </header>
 
-        <!-- ═══ Source: .qedspec ═══ -->
-        <rect x="120" y="10" width="3" height="64" fill="#38bdf8" rx="1.5"/>
-        <rect x="123" y="10" width="197" height="64" rx="8" fill="rgba(56,189,248,0.04)" stroke="rgba(56,189,248,0.25)"/>
-        <path d="M 140 28 h 8 l 4 4 v 14 h -12 z M 148 28 v 4 h 4" fill="none" stroke="#38bdf8" stroke-width="1.3" stroke-linejoin="round"/>
-        <text x="162" y="40" fill="#fafafa" font-size="14" font-weight="600" font-family="'Geist Mono',monospace">.qedspec</text>
-        <text x="140" y="60" fill="#71717a" font-size="10" font-family="'Geist',sans-serif">single source of truth</text>
+    <main class="stage">
+      <div class="stage-grid-bg" aria-hidden="true"></div>
 
-        <!-- Arrow: source → check -->
-        <line x1="220" y1="76" x2="220" y2="100" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#arr-primary)"/>
+      <div class="claim">
+        <span class="eyebrow"><span class="dot"></span>proofs, not promises</span>
+        <h1>Ship to mainnet <span class="italic">without</span> fear.<span class="tomb"></span></h1>
+        <p class="sub">
+          Describe what your Solana program must guarantee in <code>.qedspec</code>.
+          QEDGen finds the bugs your tests miss, then generates the proofs, property tests,
+          and CI to keep them fixed.
+        </p>
+        <div class="cta-row">
+          <button class="install" id="install" type="button">
+            <span class="p">$</span>
+            <span>npx skills add qedgen/solana-skills</span>
+            <span class="copy" id="copylabel">COPY</span>
+          </button>
+          <a class="btn" href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" target="_blank" rel="noopener noreferrer">View the Skill →</a>
+        </div>
+        <p class="compat">
+          Works with Claude Code, Codex, Cursor, Windsurf, and any agent supporting
+          <a href="https://agentskills.io" target="_blank" rel="noopener noreferrer">Agent Skills</a>.
+        </p>
+      </div>
 
-        <!-- ═══ check ═══ -->
-        <rect x="120" y="102" width="200" height="84" rx="8" fill="#18181b" stroke="#27272a"/>
-        <text x="134" y="128" fill="#52525b" font-size="11" font-family="'Geist Mono',monospace">$</text>
-        <text x="146" y="128" fill="#fafafa" font-size="13" font-weight="600" font-family="'Geist Mono',monospace">qedgen check</text>
-        <text x="134" y="146" fill="#71717a" font-size="10" font-family="'Geist',sans-serif">validate spec</text>
-        <g transform="translate(134, 158)">
-          <rect x="0" y="0" width="32" height="18" rx="9" fill="#27272a"/>
-          <text x="16" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">lint</text>
-          <rect x="38" y="0" width="54" height="18" rx="9" fill="#27272a"/>
-          <text x="65" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">proptest</text>
-          <rect x="98" y="0" width="60" height="18" rx="9" fill="#27272a"/>
-          <text x="128" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">lean-gen</text>
-        </g>
+      <div class="demo" aria-label="Sample .qedspec file with generated artifacts">
+        <div class="demo-head">
+          <span class="dot"></span>
+          <span class="filename">escrow.qedspec</span>
+          <span class="tag">SPEC</span>
+        </div>
+<pre class="spec-body"><span class="ln"><span class="cmt">// Token escrow: two parties trade safely.</span></span><span class="ln"><span class="kw">spec</span> <span class="fn">Escrow</span></span><span class="ln"> </span><span class="ln"><span class="kw">type</span> State</span><span class="ln">  <span class="op">|</span> Uninitialized</span><span class="ln">  <span class="op">|</span> Open <span class="kw">of</span> <span class="op">{</span> initializer_amount : <span class="fn">U64</span>, taker_amount : <span class="fn">U64</span> <span class="op">}</span></span><span class="ln">  <span class="op">|</span> Closed</span><span class="ln"> </span><span class="ln"><span class="kw">handler</span> <span class="fn">initialize</span> (deposit : <span class="fn">U64</span>) : State.Uninitialized <span class="op">-&gt;</span> State.Open <span class="op">{</span></span><span class="ln">  <span class="kw">auth</span> initializer</span><span class="ln">  <span class="kw">requires</span> deposit <span class="op">&gt;</span> <span class="num">0</span> <span class="kw">else</span> InvalidAmount</span><span class="ln">  <span class="kw">transfers</span> <span class="op">{</span> <span class="kw">from</span> initializer_ta <span class="kw">to</span> escrow_ta <span class="kw">amount</span> deposit <span class="op">}</span></span><span class="ln">  <span class="kw">emits</span> EscrowInitialized</span><span class="ln"><span class="op">}</span></span></pre>
+        <div class="demo-out">
+          <div class="out-head">generates</div>
+          <div class="out-row">
+            <span class="out-name">tests/proptest.rs</span>
+            <span class="out-tag">proptest</span>
+          </div>
+          <div class="out-row">
+            <span class="out-name">formal_verification/Proofs.lean</span>
+            <span class="out-tag">Lean 4</span>
+          </div>
+          <div class="out-row">
+            <span class="out-name">tests/kani.rs</span>
+            <span class="out-tag">Kani · SMT</span>
+          </div>
+          <div class="out-row">
+            <span class="out-name">.github/workflows/verify.yml</span>
+            <span class="out-tag">CI</span>
+          </div>
+        </div>
+      </div>
+    </main>
 
-        <!-- Arrow: check → codegen -->
-        <line x1="220" y1="188" x2="220" y2="212" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#arr-primary)"/>
+    <footer class="strip">
+      <div class="agents">
+        <span class="strip-label">Runs with</span>
+        <span class="agent"><span class="agent-glyph">CC</span>Claude Code</span>
+        <span class="agent"><span class="agent-glyph">CX</span>Codex</span>
+        <span class="agent"><span class="agent-glyph">→</span>Cursor</span>
+        <span class="agent"><span class="agent-glyph">W</span>Windsurf</span>
+      </div>
+      <div class="links">
+        <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" target="_blank" rel="noopener noreferrer">SKILL.md</a>
+        <a href="https://github.com/qedgen/solana-skills/tree/main/examples" target="_blank" rel="noopener noreferrer">Examples</a>
+        <a href="https://github.com/qedgen/solana-skills/issues" target="_blank" rel="noopener noreferrer">Issues</a>
+        <a href="https://github.com/qedgen/solana-skills" target="_blank" rel="noopener noreferrer">GitHub</a>
+      </div>
+    </footer>
 
-        <!-- ═══ codegen ═══ -->
-        <rect x="120" y="214" width="200" height="84" rx="8" fill="#18181b" stroke="#27272a"/>
-        <text x="134" y="240" fill="#52525b" font-size="11" font-family="'Geist Mono',monospace">$</text>
-        <text x="146" y="240" fill="#fafafa" font-size="13" font-weight="600" font-family="'Geist Mono',monospace">qedgen codegen</text>
-        <text x="134" y="258" fill="#71717a" font-size="10" font-family="'Geist',sans-serif">generate artifacts</text>
-        <g transform="translate(134, 270)">
-          <rect x="0" y="0" width="36" height="18" rx="9" fill="#27272a"/>
-          <text x="18" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">Rust</text>
-          <rect x="42" y="0" width="36" height="18" rx="9" fill="#27272a"/>
-          <text x="60" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">Lean</text>
-          <rect x="84" y="0" width="36" height="18" rx="9" fill="#27272a"/>
-          <text x="102" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">Kani</text>
-          <rect x="126" y="0" width="42" height="18" rx="9" fill="#27272a"/>
-          <text x="147" y="12" text-anchor="middle" fill="#d4d4d8" font-size="9" font-family="'Geist Mono',monospace">tests</text>
-        </g>
-
-        <!-- Arrow: codegen → lake build -->
-        <line x1="220" y1="300" x2="220" y2="324" stroke="#a1a1aa" stroke-width="1.5" marker-end="url(#arr-primary)"/>
-
-        <!-- ═══ Solvers (side inputs) ═══ -->
-        <rect x="8" y="340" width="96" height="24" rx="12" fill="#18181b" stroke="#3f3f46" stroke-dasharray="3 3"/>
-        <circle cx="20" cy="352" r="2.5" fill="#a1a1aa"/>
-        <text x="28" y="356" fill="#a1a1aa" font-size="10" font-family="'Geist Mono',monospace">Leanstral</text>
-
-        <rect x="8" y="372" width="96" height="24" rx="12" fill="#18181b" stroke="#3f3f46" stroke-dasharray="3 3"/>
-        <circle cx="20" cy="384" r="2.5" fill="#38bdf8"/>
-        <text x="28" y="388" fill="#a1a1aa" font-size="10" font-family="'Geist Mono',monospace">Aristotle</text>
-
-        <text x="56" y="412" text-anchor="middle" fill="#52525b" font-size="9" font-family="'Geist',sans-serif">sorry fillers</text>
-
-        <line x1="104" y1="352" x2="118" y2="358" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arr-dim)"/>
-        <line x1="104" y1="384" x2="118" y2="378" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arr-dim)"/>
-
-        <!-- ═══ lake build ═══ -->
-        <rect x="120" y="326" width="200" height="84" rx="8" fill="#18181b" stroke="rgba(56,189,248,0.4)" stroke-width="1.5"/>
-        <text x="134" y="352" fill="#52525b" font-size="11" font-family="'Geist Mono',monospace">$</text>
-        <text x="146" y="352" fill="#fafafa" font-size="13" font-weight="600" font-family="'Geist Mono',monospace">lake build</text>
-        <text x="134" y="370" fill="#71717a" font-size="10" font-family="'Geist',sans-serif">verify proofs</text>
-        <g transform="translate(134, 382)">
-          <rect x="0" y="0" width="110" height="18" rx="9" fill="rgba(56,189,248,0.08)" stroke="rgba(56,189,248,0.3)"/>
-          <path d="M 8 9 L 11 12 L 16 6" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          <text x="22" y="12" fill="#38bdf8" font-size="9" font-family="'Geist Mono',monospace">zero sorry</text>
-        </g>
-
-        <!-- Iterate loop -->
-        <path d="M 320 368 Q 360 368 360 236 Q 360 144 320 144" fill="none" stroke="#52525b" stroke-width="1" stroke-dasharray="3 3" marker-end="url(#arr-dim)"/>
-        <text x="368" y="254" fill="#a1a1aa" font-size="10" font-family="'Geist',sans-serif">iterate</text>
-        <text x="368" y="268" fill="#52525b" font-size="8" font-family="'Geist',sans-serif">on error</text>
-
-        <!-- Arrow: lake build → ∎ (accent, prominent) -->
-        <line x1="220" y1="412" x2="220" y2="444" stroke="#38bdf8" stroke-width="2" marker-end="url(#arr-accent)"/>
-
-        <!-- ═══ Terminus: Q.E.D. ═══ -->
-        <rect x="180" y="446" width="80" height="58" rx="8" fill="#38bdf8"/>
-        <text x="220" y="486" text-anchor="middle" fill="#09090b" font-size="26" font-weight="800">&#x220E;</text>
-        <text x="220" y="528" text-anchor="middle" fill="#d4d4d8" font-size="11" font-weight="600" font-family="'Geist Mono',monospace">Q.E.D.</text>
-        <text x="220" y="544" text-anchor="middle" fill="#71717a" font-size="9" font-family="'Geist',sans-serif">proofs committed to CI</text>
-      </svg>
-    </div>
   </div>
-</header>
 
-<!-- Footer -->
-<footer>
-  <div class="watermark">Q.E.D.</div>
-  <div class="container">
-    <div class="footer-left">
-      <svg width="20" height="20" viewBox="0 0 42 42" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <rect x="4" y="4" width="34" height="34" rx="4" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="2.5"/>
-        <path d="M12 21L18 27L30 15" stroke="#38bdf8" stroke-opacity="0.5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-        <rect x="28" y="28" width="6" height="6" fill="#38bdf8" fill-opacity="0.5"/>
-      </svg>
-      <span class="footer-name">QEDGen</span>
-      <span class="footer-copy">MIT License</span>
-    </div>
-    <div class="footer-links">
-      <a href="https://github.com/qedgen/solana-skills" target="_blank" rel="noopener noreferrer">GitHub</a>
-      <a href="https://github.com/qedgen/solana-skills/blob/main/SKILL.md" target="_blank" rel="noopener noreferrer">SKILL.md</a>
-      <a href="https://github.com/qedgen/solana-skills/issues" target="_blank" rel="noopener noreferrer">Issues</a>
-    </div>
-  </div>
-</footer>
-
+  <script>
+    document.getElementById('install').addEventListener('click', () => {
+      navigator.clipboard?.writeText('npx skills add qedgen/solana-skills');
+      const l = document.getElementById('copylabel');
+      l.textContent = 'COPIED';
+      setTimeout(() => l.textContent = 'COPY', 1400);
+    });
+  </script>
 </body>
 </html>

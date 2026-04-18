@@ -1,29 +1,37 @@
 # QEDGen
 
-> Find the bugs your tests miss. Define what your Solana program must guarantee in a `.qedspec` — QEDGen validates it and generates the tests, proofs, and CI to keep it fixed. Supports Anchor, Quasar, and native sBPF assembly. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
+> Describe what your Solana program must guarantee in `.qedspec`. QEDGen finds the bugs your tests miss, then generates the proofs, property tests, and CI to keep them fixed. Supports Anchor, Quasar, and native sBPF assembly. Install with `npx skills add qedgen/solana-skills`. Works with any coding agent supporting the Agent Skills spec.
 
-One spec file drives everything: property tests, Kani harnesses, Lean 4 proofs, program code, and CI workflows.
+A `.qedspec` is the single source of truth. It can live in one file or span multiple files with upstream spec dependencies. From it, QEDGen generates program code, property tests, Kani harnesses, Lean 4 proofs, and CI workflows.
 
 ## Docs
 
 - [README](https://raw.githubusercontent.com/qedgen/solana-skills/main/README.md): Installation, usage, CLI commands, and requirements
-- [SKILL.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/SKILL.md): Full proof-writing workflow, support library API (including sBPF), proof patterns, tactic rules, and error fixes
+- [SKILL.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/SKILL.md): Spec-writing workflow, support library API (including sBPF), proof patterns, tactic rules, and error fixes
 - [CLAUDE.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/CLAUDE.md): Build commands, architecture, crate structure, and development guide
+- [references/cli.md](https://raw.githubusercontent.com/qedgen/solana-skills/main/references/cli.md): Full CLI reference for every `qedgen` subcommand
 
 ## Examples
 
 ### Rust / Anchor
-- [Escrow Proofs](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/formal_verification/EscrowProofs.lean): 9/9 verified proofs for an Anchor token escrow (access control, state machines, arithmetic safety)
-- [Escrow Spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/formal_verification/SPEC.md): Verification spec for the escrow program
-- [Percolator Proofs](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/formal_verification/PercolatorProofs.lean): 7/7 verified proofs for a pure Rust risk engine (conservation, arithmetic safety, state machine, fee isolation)
-- [Percolator Spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/formal_verification/SPEC.md): Verification spec for the percolator engine
+- [Escrow spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/escrow.qedspec): Two-party token escrow (access control, state machine, arithmetic safety, CPI correctness)
+- [Escrow Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/formal_verification/Spec.lean): Generated Lean proofs for the escrow spec
+- [Escrow-split spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow-split/escrow.qedspec): Multi-file version of the escrow showing spec composition across handlers and interfaces
+- [Percolator spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/percolator.qedspec): Pure Rust perpetual DEX risk engine (conservation, arithmetic safety, lifecycle, fee isolation)
+- [Percolator Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/formal_verification/Proofs.lean): Generated Lean proofs for the percolator engine
+- [Multisig spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/multisig/multisig.qedspec): M-of-N threshold signer gating with replay protection
+- [Lending spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/lending/lending.qedspec): Collateralized lending market
 
 ### sBPF Assembly
-- [Transfer Proofs](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/transfer/formal_verification/TransferProofs.lean): Verified proofs for a native sBPF lamport transfer (input validation, balance checks)
-- [Dropset Proofs](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/formal_verification/DropsetProofs.lean): Verified proofs for an on-chain order book RegisterMarket (discriminant dispatch, account uniqueness, freshness checks)
-- [Dropset Spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/formal_verification/SPEC.md): Verification spec for the dropset program
+- [Transfer spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/transfer/transfer.qedspec): Native sBPF lamport transfer (input validation, balance checks)
+- [Transfer Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/transfer/formal_verification/Spec.lean): Generated proofs over the sBPF program module
+- [Dropset spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/dropset.qedspec): On-chain order book RegisterMarket (discriminant dispatch, account uniqueness, freshness checks)
+- [Dropset Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/formal_verification/Spec.lean): Generated proofs for the dropset program
+- [Slippage spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/slippage/slippage.qedspec): Slippage guard program (SIMD-0321 style)
+- [Counter spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/counter/counter.qedspec): Minimal sBPF example for onboarding
 
 ## Optional
 
 - [Verification Scope](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/formal_verification/VERIFICATION_SCOPE.md): What is verified vs. trusted as axioms
 - [Lean Support Library](https://raw.githubusercontent.com/qedgen/solana-skills/main/lean_solana/QEDGen.lean): Root import for the Solana axiom library (includes SBPF module)
+- [Spec composition design note](https://raw.githubusercontent.com/qedgen/solana-skills/main/docs/design/spec-composition.md): How multi-file specs and CPI dependencies compose
