@@ -9,6 +9,7 @@ mod codegen;
 mod consolidate;
 mod deps;
 mod drift;
+mod fill;
 mod fingerprint;
 mod idl2spec;
 mod init;
@@ -354,6 +355,16 @@ enum Commands {
         /// Generate all artifacts
         #[arg(long)]
         all: bool,
+
+        /// After scaffolding, emit one stdout prompt block per handler
+        /// whose generated body still contains a `todo!()`. The in-session
+        /// agent (Claude / Codex) reads the prompts and edits the files.
+        #[arg(long)]
+        fill: bool,
+
+        /// Restrict --fill to one handler by name (default: all that need filling)
+        #[arg(long)]
+        handler: Option<String>,
     },
 
     /// Aristotle theorem prover (Harmonic) — sorry-filling via long-running agent
@@ -986,6 +997,8 @@ async fn main() -> Result<()> {
             ci_output,
             ci_asm,
             all,
+            fill,
+            handler,
         } => {
             require_git_repo()?;
             // Rust skeleton (always)
@@ -1027,6 +1040,17 @@ async fn main() -> Result<()> {
                 }
                 std::fs::write(&ci_output, workflow)?;
                 eprintln!("Generated CI workflow: {}", ci_output.display());
+            }
+
+            if fill {
+                let parsed = check::parse_spec_file(&spec)?;
+                let opts = fill::FillOpts {
+                    spec: &parsed,
+                    spec_path: &spec,
+                    programs_dir: &output_dir,
+                    only_handler: handler.as_deref(),
+                };
+                fill::emit_prompts(&opts)?;
             }
         }
 

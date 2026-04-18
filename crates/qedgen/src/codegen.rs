@@ -779,7 +779,7 @@ qedgen-macros = {{ version = "0.1", path = "../../../crates/qedgen-macros" }}
     ));
 
     if needs_spl {
-        out.push_str("quasar-spl = { version = \"0.1\" }\n");
+        out.push_str("quasar-spl = { version = \"0.0.0\" }\n");
     }
 
     std::fs::write(output_dir.join("Cargo.toml"), &out)?;
