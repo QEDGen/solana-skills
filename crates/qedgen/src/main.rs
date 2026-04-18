@@ -120,8 +120,14 @@ enum Commands {
 
         /// Path to write the generated .qedspec. If omitted, the rendered
         /// source is printed to stdout so the caller can redirect.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "vendor")]
         out: Option<PathBuf>,
+
+        /// Drop the interface into `.qed/interfaces/<program>.qedspec` (the
+        /// vendored-library convention). Resolved via the nearest `.qed/`.
+        /// Overrides `--out`; errors if no `.qed/` ancestor is found.
+        #[arg(long)]
+        vendor: bool,
     },
 
     /// Generate SPEC.md or .qedspec from an Anchor IDL or a .qedspec file
@@ -191,6 +197,12 @@ enum Commands {
         #[arg(long)]
         name: String,
 
+        /// Path to the authored `.qedspec` (file or directory). Written
+        /// into `.qed/config.json` so `qedgen check`/`codegen` can resolve
+        /// it without an explicit `--spec`. Relative to the program root.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+
         /// sBPF assembly source file (runs asm2lean automatically)
         #[arg(long)]
         asm: Option<PathBuf>,
@@ -214,9 +226,11 @@ enum Commands {
     /// With --explain: generates a Markdown verification report.
     /// With --drift: detects code drift in #[qed(verified)] functions.
     Check {
-        /// Path to the spec file (.qedspec)
+        /// Path to the spec file (.qedspec or a directory of fragments).
+        /// Optional — falls back to the `spec` field in the nearest
+        /// `.qed/config.json` discovered by walking up from cwd.
         #[arg(long)]
-        spec: PathBuf,
+        spec: Option<PathBuf>,
 
         /// Path to the proofs directory
         #[arg(long, default_value = "./formal_verification")]
@@ -311,9 +325,11 @@ enum Commands {
     /// Default (no flags): generates Quasar Rust skeleton only.
     /// Use flags to generate additional artifacts, or --all for everything.
     Codegen {
-        /// Path to the spec file (.qedspec)
+        /// Path to the spec file (.qedspec or a directory of fragments).
+        /// Optional — falls back to the `spec` field in the nearest
+        /// `.qed/config.json` discovered by walking up from cwd.
         #[arg(long)]
-        spec: PathBuf,
+        spec: Option<PathBuf>,
 
         /// Output directory for the generated Quasar project
         #[arg(long, default_value = "./programs")]
@@ -682,16 +698,40 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Interface { idl, out } => match out {
-            Some(path) => {
+        Commands::Interface { idl, out, vendor } => {
+            if vendor {
+                // Drop into `.qed/interfaces/<program>.qedspec`. The program
+                // name is derived from the IDL metadata; the directory is
+                // resolved via the nearest `.qed/` ancestor of cwd.
+                let cwd = std::env::current_dir()?;
+                let (qed_dir, config) = init::discover_qed_config(&cwd).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--vendor requires a `.qed/` ancestor of {} — run `qedgen init` first or pass `--out`",
+                        cwd.display()
+                    )
+                })?;
+                let project_root = qed_dir.parent().unwrap_or(std::path::Path::new("."));
+                let interfaces_dir = project_root.join(
+                    config
+                        .interfaces_dir
+                        .as_deref()
+                        .unwrap_or(".qed/interfaces"),
+                );
+                let stem = idl
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("interface");
+                let target = interfaces_dir.join(format!("{}.qedspec", stem));
+                interface_gen::generate_to_file(&idl, &target)?;
+                eprintln!("Vendored interface to {}", target.display());
+            } else if let Some(path) = out {
                 interface_gen::generate_to_file(&idl, &path)?;
                 eprintln!("Wrote Tier-0 interface to {}", path.display());
-            }
-            None => {
+            } else {
                 let rendered = interface_gen::generate(&idl)?;
                 print!("{}", rendered);
             }
-        },
+        }
 
         Commands::Spec {
             idl,
@@ -741,6 +781,7 @@ async fn main() -> Result<()> {
 
         Commands::Init {
             name,
+            spec,
             asm,
             mathlib,
             quasar,
@@ -748,7 +789,16 @@ async fn main() -> Result<()> {
         } => {
             // .qed/ lives at the program root (parent of formal_verification/)
             let program_root = output_dir.parent().unwrap_or(std::path::Path::new("."));
-            init::init_qed_dir(program_root, &name)?;
+            // The spec pointer is stored relative to program_root so
+            // `qedgen check` from anywhere under the project resolves it
+            // via .qed/config.json → project_root / <spec>.
+            let spec_rel = spec.as_ref().map(|p| {
+                p.strip_prefix(program_root)
+                    .unwrap_or(p.as_path())
+                    .to_string_lossy()
+                    .to_string()
+            });
+            init::init_qed_dir(program_root, &name, spec_rel.as_deref())?;
 
             init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
 
@@ -787,6 +837,8 @@ async fn main() -> Result<()> {
             json,
         } => {
             require_git_repo()?;
+            let cwd = std::env::current_dir()?;
+            let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             let spec_name = spec
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -1039,6 +1091,8 @@ async fn main() -> Result<()> {
             fill_tests,
         } => {
             require_git_repo()?;
+            let cwd = std::env::current_dir()?;
+            let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             // Rust skeleton (always)
             codegen::generate(&spec, &output_dir)?;
 
