@@ -376,6 +376,31 @@ pub struct ParsedHandler {
     pub invariants: Vec<String>,
     /// Per-handler properties (from inline property/invariant clauses).
     pub properties: Vec<String>,
+    /// `call Interface.handler(name = expr, ...)` sites — CPI invocations
+    /// resolved against a top-level `interface` block. Empty for handlers
+    /// that don't CPI. Consumed by Rust codegen (slice 5) and the
+    /// `[shape_only_cpi]` lint (slice 4).
+    #[allow(dead_code)]
+    pub calls: Vec<ParsedCall>,
+}
+
+/// A resolved `call Target.handler(...)` site inside a handler body. The
+/// target is split into interface + handler name for easier lookup; args
+/// carry both Lean and Rust renderings so backends can pick their form.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedCall {
+    pub target_interface: String,
+    pub target_handler: String,
+    pub args: Vec<ParsedCallArg>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedCallArg {
+    pub name: String,
+    pub lean_expr: String,
+    pub rust_expr: String,
 }
 
 impl ParsedHandler {
@@ -2840,6 +2865,7 @@ mod tests {
             emits: vec![],
             invariants: vec![],
             properties: vec![],
+            calls: vec![],
         }
     }
 
@@ -3538,6 +3564,28 @@ handler dec (x : U64) : State.Active -> State.Active {
     // ──────────────────────────────────────────────────────────────────────
     // Interface adapter round-trip (v2.5 slice 1)
     // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn call_clause_populates_handler_calls() {
+        let src = r#"spec Demo
+
+handler exchange : State.A -> State.B {
+  call Token.transfer(from = taker_ta, to = initializer_ta, amount = taker_amount)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.calls.len(), 1);
+        let c = &handler.calls[0];
+        assert_eq!(c.target_interface, "Token");
+        assert_eq!(c.target_handler, "transfer");
+        assert_eq!(c.args.len(), 3);
+        assert_eq!(c.args[0].name, "from");
+        assert_eq!(c.args[2].name, "amount");
+        // Args carry both renderings so backends can pick the form they want.
+        assert!(!c.args[0].rust_expr.is_empty());
+        assert!(!c.args[0].lean_expr.is_empty());
+    }
 
     #[test]
     fn interface_block_populates_parsed_spec() {

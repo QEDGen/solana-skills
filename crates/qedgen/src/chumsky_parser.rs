@@ -110,6 +110,7 @@ const KEYWORDS: &[&str] = &[
     "is",
     "mul_div_floor",
     "mul_div_ceil",
+    "interface",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -1114,10 +1115,35 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .ignore_then(non_keyword_ident())
         .map(HandlerClause::Include);
 
+    // call Target.handler(name = expr, name = expr, ...)
+    let call_kw_arg = non_keyword_ident()
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(expr())
+        .map(|(name, value)| CallArg { name, value });
+
+    let call_c = just("call")
+        .then_ignore(wsc())
+        .ignore_then(qualified_path())
+        .then_ignore(wsc())
+        .then_ignore(just('('))
+        .then_ignore(wsc())
+        .then(
+            call_kw_arg
+                .then_ignore(wsc())
+                .separated_by(just(',').then_ignore(wsc()))
+                .allow_trailing()
+                .collect::<Vec<CallArg>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just(')'))
+        .map(|(target, args)| HandlerClause::Call(CallExpr { target, args }));
+
     // `choice()` has an arity limit; split into groups.
     let grp_a = choice((auth, accounts, requires, ensures, modifies, let_c, effect));
     let grp_b = choice((transfers, takes, emits, aborts_total, invariant, include));
-    let grp_c = choice((match_c,));
+    let grp_c = choice((match_c, call_c));
     choice((grp_a, grp_b, grp_c))
 }
 
@@ -2791,5 +2817,78 @@ interface Token {
             }
             o => panic!("expected Interface, got {:?}", o),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // call clause (v2.5 slice 2)
+    // ------------------------------------------------------------------
+
+    fn first_handler_clauses(spec: &Spec) -> &Vec<Node<HandlerClause>> {
+        match spec.items.iter().find_map(|n| match &n.node {
+            TopItem::Handler(h) => Some(h),
+            _ => None,
+        }) {
+            Some(h) => &h.clauses,
+            None => panic!("no handler in spec"),
+        }
+    }
+
+    #[test]
+    fn parses_call_clause_with_kw_args() {
+        let src = r#"spec T
+handler exchange : State.A -> State.B {
+  call Token.transfer(from = taker_ta, to = initializer_ta, amount = taker_amount, authority = taker)
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let call = clauses.iter().find_map(|c| match &c.node {
+            HandlerClause::Call(e) => Some(e),
+            _ => None,
+        });
+        let call = call.expect("expected a Call clause");
+        assert_eq!(
+            call.target.0,
+            vec!["Token".to_string(), "transfer".to_string()]
+        );
+        assert_eq!(call.args.len(), 4);
+        assert_eq!(call.args[0].name, "from");
+        assert_eq!(call.args[3].name, "authority");
+    }
+
+    #[test]
+    fn parses_call_with_trailing_comma() {
+        let src = r#"spec T
+handler h : State.A -> State.A {
+  call Token.transfer(
+    from   = a,
+    to     = b,
+    amount = 100,
+  )
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let has_call = clauses
+            .iter()
+            .any(|c| matches!(c.node, HandlerClause::Call(_)));
+        assert!(has_call);
+    }
+
+    #[test]
+    fn parses_call_with_no_args() {
+        let src = r#"spec T
+handler h : State.A -> State.A {
+  call Clock.current()
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let call = clauses.iter().find_map(|c| match &c.node {
+            HandlerClause::Call(e) => Some(e),
+            _ => None,
+        });
+        let call = call.expect("expected a Call");
+        assert!(call.args.is_empty());
     }
 }

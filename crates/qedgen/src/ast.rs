@@ -305,6 +305,28 @@ pub enum HandlerClause {
     Invariant(String),
     /// `include schema_name` — forward-compat; phase 1 rejects.
     Include(String),
+    /// `call Interface.handler(name = expr, ...)` — terminal CPI invocation.
+    /// Resolves against a top-level `interface` block; backends emit
+    /// tier-appropriate artifacts (CPI builder in Rust, hypotheses/rewrites
+    /// in Lean when the interface declares ensures). See
+    /// docs/design/spec-composition.md §2.
+    Call(CallExpr),
+}
+
+/// `call Target.handler(arg1 = v1, arg2 = v2, ...)` parsed form.
+#[derive(Debug, Clone)]
+pub struct CallExpr {
+    /// Qualified name of the target. Usually `Interface.handler` (len 2),
+    /// but longer paths are accepted — the resolver decides.
+    pub target: QualifiedPath,
+    /// Keyword arguments, in source order. Positional args are not allowed.
+    pub args: Vec<CallArg>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallArg {
+    pub name: String,
+    pub value: Node<Expr>,
 }
 
 #[derive(Debug, Clone)]

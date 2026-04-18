@@ -12,11 +12,12 @@
 
 use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
-    FlowKind, ParsedAccountType, ParsedCover, ParsedEnsures, ParsedEnvironment, ParsedErrorCode,
-    ParsedEvent, ParsedGuard, ParsedHandler, ParsedHandlerAccount, ParsedInstruction,
-    ParsedInterface, ParsedInterfaceHandler, ParsedLayoutField, ParsedLiveness, ParsedPda,
-    ParsedProperty, ParsedPubkey, ParsedRecordType, ParsedRequires, ParsedSbpfProperty, ParsedSpec,
-    ParsedSumType, ParsedUpstream, ParsedVariant, SbpfPropertyKind,
+    FlowKind, ParsedAccountType, ParsedCall, ParsedCallArg, ParsedCover, ParsedEnsures,
+    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
+    ParsedHandlerAccount, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
+    ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
+    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedUpstream, ParsedVariant,
+    SbpfPropertyKind,
 };
 
 // ============================================================================
@@ -1614,6 +1615,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         emits: Vec::new(),
         invariants: Vec::new(),
         properties: Vec::new(),
+        calls: Vec::new(),
     };
 
     for Node { node: clause, .. } in &h.clauses {
@@ -1724,6 +1726,32 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 // Branches are expanded into synthetic handlers by
                 // `expand_handler`; this function only builds the shared
                 // base and must ignore the branch clause itself.
+            }
+            a::HandlerClause::Call(c) => {
+                // Split `Interface.handler` from the qualified path. Longer
+                // paths (unusual — e.g. nested namespacing) flatten with '.'
+                // into the handler name so the call still records, and the
+                // resolver (slice 4+) can decide what to do.
+                let segs = &c.target.0;
+                let (iface, handler_name) = match segs.as_slice() {
+                    [] => (String::new(), String::new()),
+                    [only] => (String::new(), only.clone()),
+                    [head, tail @ ..] => (head.clone(), tail.join(".")),
+                };
+                let args = c
+                    .args
+                    .iter()
+                    .map(|arg| ParsedCallArg {
+                        name: arg.name.clone(),
+                        lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
+                        rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts),
+                    })
+                    .collect();
+                handler.calls.push(ParsedCall {
+                    target_interface: iface,
+                    target_handler: handler_name,
+                    args,
+                });
             }
         }
     }
