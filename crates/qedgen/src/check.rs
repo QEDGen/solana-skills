@@ -3844,6 +3844,63 @@ pubkey TOKEN_PROGRAM [1, 2, 3, 4]
         );
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // ML syntax — let...in in expressions (v2.5)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn let_in_renders_to_lean_and_rust() {
+        let src = r#"spec T
+type State | A of { balance : U64 }
+
+handler h (amount : U64) : State.A -> State.A {
+  ensures let delta = old(state.balance) - state.balance in delta == amount
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.ensures.len(), 1);
+        let e = &handler.ensures[0];
+        // Lean form uses Lean's let-binding syntax.
+        assert!(
+            e.lean_expr.contains("let delta :="),
+            "expected Lean let-binding, got: {}",
+            e.lean_expr
+        );
+        // Rust form lowers to a block expression.
+        assert!(
+            e.rust_expr.contains("let delta ="),
+            "expected Rust let-in-block, got: {}",
+            e.rust_expr
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Smoke test — items 1 (match) and 2 (ctors) already in the grammar.
+    // Confirms the claim in the v2.5 report.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ml_match_and_ctor_already_parse() {
+        let src = r#"spec T
+type State | Active of { count : U64 } | Closed
+
+handler inspect : State.Active -> State.Active {
+  ensures
+    match state with
+    | Active a => a.count >= 0
+    | Closed => true
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.handlers.len(), 1);
+        assert_eq!(parsed.handlers[0].ensures.len(), 1);
+        // The rendered form should reference both variants.
+        let lean = &parsed.handlers[0].ensures[0].lean_expr;
+        assert!(lean.contains("Active"), "got: {}", lean);
+        assert!(lean.contains("Closed"), "got: {}", lean);
+    }
+
     #[test]
     fn interface_block_populates_parsed_spec() {
         let src = r#"spec Escrow

@@ -263,6 +263,9 @@ impl<'a> TypeEnv<'a> {
             Expr::App { .. } => Kind::Other,
             // Postfix field access — abstract, treat as Other.
             Expr::Field { .. } => Kind::Other,
+            // `let x = v in body` — kind follows the body (the let is
+            // transparent from the caller's perspective).
+            Expr::Let { body, .. } => self.infer(&body.node),
         }
     }
 }
@@ -458,6 +461,16 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
         Expr::Field { base, field } => {
             let base_str = expr_to_lean(&base.node, ctx, consts, env);
             format!("({}).{}", base_str, field)
+        }
+        Expr::Let { name, value, body } => {
+            // Lean's `let x := v; body` is semicolon-separated inside a
+            // tactic-free term position, which is what ensures/requires give us.
+            format!(
+                "(let {} := {}; {})",
+                name,
+                expr_to_lean(&value.node, ctx, consts, env),
+                expr_to_lean(&body.node, ctx, consts, env)
+            )
         }
     }
 }
@@ -743,6 +756,16 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
         Expr::Field { base, field } => {
             let base_str = expr_to_rust(&base.node, ctx, consts);
             format!("{}.{}", base_str, field)
+        }
+        Expr::Let { name, value, body } => {
+            // Rust lowers a let-in expression to a block. Parentheses are
+            // safe around the block for embedding in larger expressions.
+            format!(
+                "({{ let {} = {}; {} }})",
+                name,
+                expr_to_rust(&value.node, ctx, consts),
+                expr_to_rust(&body.node, ctx, consts)
+            )
         }
     }
 }

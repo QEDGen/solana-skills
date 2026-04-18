@@ -112,6 +112,8 @@ const KEYWORDS: &[&str] = &[
     "mul_div_ceil",
     "interface",
     "pragma",
+    "let",
+    "in",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -527,10 +529,34 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             })
             .boxed();
 
+        // `let NAME = value in body` — ML-style expression binding.
+        // Inside ensures/requires/effect-rhs, lets you derive a value once
+        // and reference it by name. Lowers to Lean's `let NAME := value; body`.
+        let let_in = kw("let")
+            .ignore_then(non_keyword_ident())
+            .then_ignore(wsc())
+            .then_ignore(just('='))
+            .then_ignore(wsc())
+            .then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("in"))
+            .then(expr.clone())
+            .map_with(|((name, value), body), e| {
+                Node::new(
+                    Expr::Let {
+                        name,
+                        value: Box::new(value),
+                        body: Box::new(body),
+                    },
+                    e.span().into_range(),
+                )
+            })
+            .boxed();
+
         // atom — must stay under chumsky's `choice` arity limit; split.
         // `.boxed()` tames the type complexity that otherwise trips Apple's
         // linker on overlong symbol names.
-        let group_a = choice((int, bool_lit, old, sum, quant)).boxed();
+        let group_a = choice((int, bool_lit, old, let_in, sum, quant)).boxed();
         let group_b = choice((mul_div_floor_atom, mul_div_ceil_atom, match_expr)).boxed();
         // `record_update` must precede `ctor` (leading `.` distinguishes
         // them, but this ordering is clearer). `app_expr` must precede
@@ -2962,5 +2988,71 @@ pragma sbpf {
             }
             o => panic!("expected Pragma, got {:?}", o),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // ML-style `let x = v in body` in expressions (v2.5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_let_in_inside_ensures() {
+        let src = r#"spec T
+type State | A of { balance : U64 }
+
+handler withdraw (amount : U64) : State.A -> State.A {
+  effect { balance = balance - amount }
+  ensures let delta = old(state.balance) - state.balance in delta == amount
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let ensures = clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Ensures(e) => Some(e),
+                _ => None,
+            })
+            .expect("expected an Ensures clause");
+        // Top of the ensures expression is the Let binding; its body is a Cmp.
+        match &ensures.node {
+            Expr::Let { name, body, .. } => {
+                assert_eq!(name, "delta");
+                assert!(
+                    matches!(body.node, Expr::Cmp { .. }),
+                    "expected Cmp in let body, got {:?}",
+                    body.node
+                );
+            }
+            other => panic!("expected Let at top of ensures, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_nested_let_in() {
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    let a = state.x in
+    let b = state.y in
+    a + b == a + b
+}
+"#;
+        parse_ok(src);
+    }
+
+    #[test]
+    fn let_keyword_still_works_as_handler_clause() {
+        // Keyword-ifying `let` must not break the statement-level clause.
+        let src = r#"spec T
+type State | A of { count : U64 }
+
+handler h (amount : U64) : State.A -> State.A {
+  let doubled = amount + amount
+  effect { count = count + doubled }
+}
+"#;
+        parse_ok(src);
     }
 }

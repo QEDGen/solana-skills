@@ -628,6 +628,15 @@ pub enum Expr {
         base: Box<Node<Expr>>,
         field: String,
     },
+    /// `let name = value in body` — ML-style expression-level binding.
+    /// Derives a value once and references it by `name` in `body`. Lowers
+    /// to Lean's `let name := value; body` and to a Rust block
+    /// `{ let name = value; body }`.
+    Let {
+        name: String,
+        value: Box<Node<Expr>>,
+        body: Box<Node<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone)]
