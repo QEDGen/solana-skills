@@ -75,11 +75,11 @@ For native Rust programs without an IDL (no Anchor/Quasar), use LSP and source r
 
 3. **Find account validation** — In each handler, identify which accounts are checked for `is_signer`, which are writable, and any PDA derivations (`Pubkey::find_program_address`). These map to `context {}` entries with `Signer`, `mut`, `seeds()`, `bump`.
 
-4. **Find guards** — Look for early-return error checks (`if !condition { return Err(...) }`). These become `guard` clauses. Map error codes to an `errors [...]` block.
+4. **Find guards** — Look for early-return error checks (`if !condition { return Err(...) }`). These become `guard` clauses. Map error codes to a top-level `type Error | Name | ...` ADT. (The `errors [...]` list-sugar is v2.5-restricted to inside `pragma sbpf { ... }`.)
 
 5. **Find state mutations** — Track which fields are modified in each handler. These become `effect {}` blocks (`field = value`, `field += value`, `field -= value`).
 
-6. **Find CPI calls** — Look for `invoke` or `invoke_signed`. These become `calls` clauses with the target program, discriminator, and account list.
+6. **Find CPI calls** — Look for `invoke` or `invoke_signed`. Declare the callee's contract as an `interface Name { ... }` block (program_id, handler discriminant, accounts, optional `ensures`), then write `call Name.handler(name = expr, ...)` at each invocation site. For Anchor/SPL Token programs, use `qedgen interface --idl target/idl/<program>.json --out interfaces/<program>.qedspec` to scaffold a Tier-0 interface. See `interfaces/spl_token.qedspec` for the canonical SPL Token Tier-1 interface.
 
 7. **Infer lifecycle** — If there's an init handler that creates the account and a close/cancel handler that closes it, use `lifecycle [Uninitialized, Active, Closed]`. Map each handler to `when`/`then` transitions.
 
@@ -134,7 +134,13 @@ The spec design phase is an **interactive loop**. You iterate on the `.qedspec` 
 
 ### 3a. Write the initial .qedspec
 
-Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. For sBPF assembly programs, use `qedguards` instead.
+Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. Key v2.5 constructs:
+
+- **`pragma sbpf { ... }`** wraps sBPF-specific declarations (`instruction`, `pubkey`, per-instruction `errors`). The pragma's presence also selects the assembly target — no explicit `target` keyword.
+- **`interface Name { ... }` + `call Name.handler(...)`** declare CPI contracts. Generate Tier-0 scaffolds from Anchor IDLs with `qedgen interface --idl target/idl/<program>.json`. Tier-1 (hand-authored `ensures`) strengthens the caller's Lean proof.
+- **Multi-file specs** — `qedgen check --spec <dir>` accepts a directory of `.qedspec` fragments all declaring the same `spec Name`. Merged in sorted-path order. See `examples/rust/escrow-split/` for the convention.
+
+For sBPF assembly programs, use `qedguards` instead of the core DSL for guard/property bodies.
 
 Present the spec to the user and get confirmation before proceeding to validation.
 
@@ -502,6 +508,33 @@ environment oracle_update {
 **Auto-overflow** — operations with `add` effects automatically generate overflow safety obligations in both Lean and Kani.
 
 **`qedgen check --coverage`** — prints a verification matrix (operations × properties) showing coverage gaps.
+
+### v2.5 spec features
+
+**`pragma <name> { ... }`** — platform-specific namespace. sBPF constructs
+(`instruction`, `pubkey`, list-form `errors`) are pragma-only; they won't
+parse at the top level. `pragma sbpf { ... }` also selects the assembly
+target (no explicit `target` keyword — that was removed in v2.5).
+
+**`interface Name { ... }` + `call Target.handler(name = expr, ...)`** —
+declarative CPI contracts. Three tiers: shape-only (Tier 0, from IDL),
+hand-authored `ensures` (Tier 1, e.g. SPL Token library at
+`interfaces/spl_token.qedspec`), and imported qedspec (Tier 2, v2.6+).
+`qedgen check` emits `[shape_only_cpi]` for calls to Tier-0 interfaces —
+the visible gap between "my Rust compiles" and "my program is verified."
+
+**`qedgen interface --idl <path>`** — scaffold a Tier-0 interface from an
+Anchor IDL. Honest output: no `ensures` (IDL doesn't carry semantics),
+TODO-stubbed `upstream` block (author fills in after running harnesses
+against the deployed program).
+
+**Multi-file specs** — `qedgen check --spec <dir>` accepts a directory of
+fragments. Every `.qedspec` under the path must declare the same `spec
+Name`; items merge in sorted-path order. Convention: `state.qedspec`,
+`handlers/<name>.qedspec`, `properties.qedspec`, `interfaces/*.qedspec`.
+
+**`let x = v in body`** — ML-style expression binding inside
+`ensures`/`requires`/effect RHS. Lowers to Lean's `let x := v; body`.
 
 See `references/qedspec-dsl.md` for full syntax reference.
 
