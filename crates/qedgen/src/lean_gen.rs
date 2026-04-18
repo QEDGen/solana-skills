@@ -231,7 +231,11 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
             &mut out,
             &state_name,
             &acct.fields,
-            if has_lifecycle { Some(&status_name) } else { None },
+            if has_lifecycle {
+                Some(&status_name)
+            } else {
+                None
+            },
         );
 
         // Operations targeting this account

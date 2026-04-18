@@ -73,7 +73,11 @@ pub fn to_pascal_case(s: &str) -> String {
 /// Thin wrapper around `crate::banner::banner` that resolves the hash from
 /// the fingerprint table by file_key.
 fn marker(label: &str, fp: &SpecFingerprint, file_key: &str) -> String {
-    let hash = fp.file_hashes.get(file_key).map(String::as_str).unwrap_or("");
+    let hash = fp
+        .file_hashes
+        .get(file_key)
+        .map(String::as_str)
+        .unwrap_or("");
     crate::banner::banner(Some(label), hash)
 }
 
@@ -427,10 +431,7 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
         .filter(|a| a.is_writable && !a.is_signer && !a.is_program)
         .filter(|a| {
             // Drop token/mint accounts — they hold balances, not program state.
-            !matches!(
-                a.account_type.as_deref(),
-                Some("token") | Some("mint")
-            )
+            !matches!(a.account_type.as_deref(), Some("token") | Some("mint"))
         })
         .collect();
 
@@ -591,8 +592,7 @@ fn render_handler_scaffold(
     let state_acct = find_state_account(handler);
     let mut any_unmechanized = false;
     for effect in &handler.effects {
-        let mechanized = state_acct
-            .and_then(|sa| mechanize_effect(effect, sa, handler, spec));
+        let mechanized = state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec));
         match mechanized {
             Some(line) => out.push_str(&line),
             None => {

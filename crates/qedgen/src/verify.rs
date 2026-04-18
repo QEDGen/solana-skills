@@ -124,10 +124,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 name: "proptest",
                 status: BackendStatus::Failed,
                 duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!(
-                    "no Cargo.toml found above {}",
-                    harness.display()
-                )),
+                detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
             };
         }
@@ -212,10 +209,7 @@ fn run_kani(harness: &Path) -> BackendReport {
                 name: "kani",
                 status: BackendStatus::Failed,
                 duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!(
-                    "no Cargo.toml found above {}",
-                    harness.display()
-                )),
+                detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
             };
         }
@@ -306,7 +300,10 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
             name: "lean",
             status: BackendStatus::Failed,
             duration_ms,
-            detail: Some(format!("failed to spawn lake: {} (is lean/lake on PATH?)", e)),
+            detail: Some(format!(
+                "failed to spawn lake: {} (is lean/lake on PATH?)",
+                e
+            )),
             log_path: None,
         },
     }

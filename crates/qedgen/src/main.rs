@@ -22,10 +22,10 @@ mod proofs_bootstrap;
 mod proptest_gen;
 mod reconcile;
 mod rust_codegen_util;
+mod sbpf_verify;
 mod spec;
 mod spec_hash;
 mod unit_test;
-mod sbpf_verify;
 mod validate;
 mod verify;
 
