@@ -2,6 +2,7 @@ mod api;
 mod aristotle;
 mod asm2lean;
 mod ast;
+mod banner;
 mod check;
 mod chumsky_adapter;
 mod chumsky_parser;
