@@ -587,6 +587,55 @@ pub struct ParsedSpec {
     /// Environment blocks (external state).
     #[allow(dead_code)]
     pub environments: Vec<ParsedEnvironment>,
+
+    /// Interface declarations — callee contracts for CPI. See
+    /// docs/design/spec-composition.md §2. Tier-0 interfaces have no
+    /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
+    pub interfaces: Vec<ParsedInterface>,
+}
+
+/// Callee contract: program ID + per-handler shape (and optional effects).
+/// Downstream consumers (lint, codegen) land in later v2.5 slices, hence
+/// `allow(dead_code)` on fields without readers yet.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedInterface {
+    pub name: String,
+    pub doc: Option<String>,
+    pub program_id: Option<String>,
+    pub upstream: Option<ParsedUpstream>,
+    pub handlers: Vec<ParsedInterfaceHandler>,
+}
+
+/// Upstream version pin for a library interface — `binary_hash` is
+/// authoritative; the rest is informational. `verified_with` lists only
+/// backends that were actually run; `"lean"` appears only when the callee is
+/// genuinely proven, not axiomatized.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedUpstream {
+    pub package: Option<String>,
+    pub version: Option<String>,
+    pub source: Option<String>,
+    pub binary_hash: Option<String>,
+    pub idl_hash: Option<String>,
+    pub verified_with: Vec<String>,
+    pub verified_at: Option<String>,
+}
+
+/// One handler inside an interface block. The `requires`/`ensures` vectors
+/// are empty for Tier-0 (shape-only) interfaces. Populated for Tier-1
+/// (hand-authored) and Tier-2 (imported) interfaces.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedInterfaceHandler {
+    pub name: String,
+    pub doc: Option<String>,
+    pub params: Vec<(String, String)>,
+    pub discriminant: Option<String>,
+    pub accounts: Vec<ParsedHandlerAccount>,
+    pub requires: Vec<ParsedRequires>,
+    pub ensures: Vec<ParsedEnsures>,
 }
 
 /// Check spec coverage: which properties have proofs, which have sorry, which are missing.
@@ -3484,6 +3533,59 @@ handler dec (x : U64) : State.Active -> State.Active {
             err.contains("spec name mismatch"),
             "expected name-mismatch error, got: {err}"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Interface adapter round-trip (v2.5 slice 1)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn interface_block_populates_parsed_spec() {
+        let src = r#"spec Escrow
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:abc"
+    verified_with ["proptest", "kani"]
+    verified_at  "2026-04-18"
+  }
+
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.interfaces.len(), 1);
+        let i = &parsed.interfaces[0];
+        assert_eq!(i.name, "Token");
+        assert_eq!(
+            i.program_id.as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
+
+        let u = i.upstream.as_ref().expect("upstream present");
+        assert_eq!(u.binary_hash.as_deref(), Some("sha256:abc"));
+        // Lean absent by design — no overclaiming.
+        assert!(!u.verified_with.contains(&"lean".to_string()));
+
+        assert_eq!(i.handlers.len(), 1);
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "transfer");
+        assert_eq!(h.params, vec![("amount".to_string(), "U64".to_string())]);
+        assert_eq!(h.accounts.len(), 3);
+        assert_eq!(h.requires.len(), 1);
+        assert_eq!(h.ensures.len(), 1);
     }
 
     #[test]

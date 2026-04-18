@@ -14,8 +14,9 @@ use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
     FlowKind, ParsedAccountType, ParsedCover, ParsedEnsures, ParsedEnvironment, ParsedErrorCode,
     ParsedEvent, ParsedGuard, ParsedHandler, ParsedHandlerAccount, ParsedInstruction,
-    ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
-    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedVariant, SbpfPropertyKind,
+    ParsedInterface, ParsedInterfaceHandler, ParsedLayoutField, ParsedLiveness, ParsedPda,
+    ParsedProperty, ParsedPubkey, ParsedRecordType, ParsedRequires, ParsedSbpfProperty, ParsedSpec,
+    ParsedSumType, ParsedUpstream, ParsedVariant, SbpfPropertyKind,
 };
 
 // ============================================================================
@@ -1451,6 +1452,9 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     constraints_rust,
                 });
             }
+            TopItem::Interface(iface) => {
+                out.interfaces.push(adapt_interface(iface, consts, &env));
+            }
         }
     }
 
@@ -1725,6 +1729,108 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
     }
 
     handler
+}
+
+// ----------------------------------------------------------------------------
+// Interface adaptation
+// ----------------------------------------------------------------------------
+
+fn adapt_interface<'a>(
+    iface: &'a a::InterfaceDecl,
+    consts: ConstTable<'a>,
+    env: &TypeEnv<'a>,
+) -> ParsedInterface {
+    let handlers = iface
+        .handlers
+        .iter()
+        .map(|h| adapt_interface_handler(h, consts, env))
+        .collect();
+    ParsedInterface {
+        name: iface.name.clone(),
+        doc: iface.doc.clone(),
+        program_id: iface.program_id.clone(),
+        upstream: iface.upstream.as_ref().map(|u| ParsedUpstream {
+            package: u.package.clone(),
+            version: u.version.clone(),
+            source: u.source.clone(),
+            binary_hash: u.binary_hash.clone(),
+            idl_hash: u.idl_hash.clone(),
+            verified_with: u.verified_with.clone(),
+            verified_at: u.verified_at.clone(),
+        }),
+        handlers,
+    }
+}
+
+fn adapt_interface_handler<'a>(
+    h: &'a a::InterfaceHandlerDecl,
+    consts: ConstTable<'a>,
+    env: &TypeEnv<'a>,
+) -> ParsedInterfaceHandler {
+    let mut out = ParsedInterfaceHandler {
+        name: h.name.clone(),
+        doc: h.doc.clone(),
+        params: h
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+            .collect(),
+        discriminant: None,
+        accounts: Vec::new(),
+        requires: Vec::new(),
+        ensures: Vec::new(),
+    };
+
+    for Node { node: clause, .. } in &h.clauses {
+        match clause {
+            a::InterfaceHandlerClause::Discriminant(s) => {
+                out.discriminant = Some(s.clone());
+            }
+            a::InterfaceHandlerClause::Accounts(descs) => {
+                for d in descs {
+                    let mut acc = ParsedHandlerAccount {
+                        name: d.name.clone(),
+                        is_signer: false,
+                        is_writable: false,
+                        is_program: false,
+                        pda_seeds: None,
+                        account_type: None,
+                        authority: None,
+                    };
+                    for attr in &d.attrs {
+                        match attr {
+                            a::AccountAttr::Simple(s) => match s.as_str() {
+                                "signer" => acc.is_signer = true,
+                                "writable" => acc.is_writable = true,
+                                "readonly" => acc.is_writable = false,
+                                "program" => acc.is_program = true,
+                                _ => acc.account_type = Some(s.clone()),
+                            },
+                            a::AccountAttr::Type(t) => acc.account_type = Some(t.clone()),
+                            a::AccountAttr::Authority(x) => acc.authority = Some(x.clone()),
+                            a::AccountAttr::Pda(seeds) => acc.pda_seeds = Some(seeds.clone()),
+                        }
+                    }
+                    out.accounts.push(acc);
+                }
+            }
+            a::InterfaceHandlerClause::Requires { guard, on_fail } => {
+                out.requires.push(ParsedRequires {
+                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
+                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts),
+                    error_name: on_fail.clone(),
+                });
+            }
+            a::InterfaceHandlerClause::Ensures(e) => {
+                out.ensures.push(ParsedEnsures {
+                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
+                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts),
+                });
+            }
+        }
+    }
+
+    out
 }
 
 // ============================================================================

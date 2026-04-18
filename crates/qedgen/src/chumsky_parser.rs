@@ -1834,6 +1834,216 @@ fn instruction_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone 
         .map(|((doc, name), items)| TopItem::Instruction(InstructionDecl { name, doc, items }))
 }
 
+// ----------------------------------------------------------------------------
+// interface Name { program_id "...", upstream { ... }, handler h(args) { ... } }
+// ----------------------------------------------------------------------------
+
+/// Internal: items that appear at the top of an `interface` block.
+/// Folded into `InterfaceDecl` by the decl combinator.
+enum InterfaceItem {
+    ProgramId(String),
+    Upstream(UpstreamDecl),
+    Handler(InterfaceHandlerDecl),
+}
+
+/// Internal: items that appear inside an `upstream { ... }` block.
+enum UpstreamItem {
+    Package(String),
+    Version(String),
+    Source(String),
+    BinaryHash(String),
+    IdlHash(String),
+    VerifiedWith(Vec<String>),
+    VerifiedAt(String),
+}
+
+// upstream { package "...", version "...", binary_hash "...", ... }
+fn upstream_block<'a>() -> impl Parser<'a, &'a str, UpstreamDecl, Err<'a>> + Clone {
+    let package = kw("package")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Package);
+    let version = kw("version")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Version);
+    let source = kw("source")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Source);
+    let binary_hash = kw("binary_hash")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::BinaryHash);
+    let idl_hash = kw("idl_hash")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::IdlHash);
+    let verified_with = kw("verified_with")
+        .ignore_then(just('['))
+        .then_ignore(wsc())
+        .ignore_then(
+            string_lit()
+                .then_ignore(wsc())
+                .separated_by(just(',').then_ignore(wsc()))
+                .allow_trailing()
+                .collect::<Vec<String>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just(']'))
+        .map(UpstreamItem::VerifiedWith);
+    let verified_at = kw("verified_at")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::VerifiedAt);
+
+    let item = choice((
+        package,
+        version,
+        source,
+        binary_hash,
+        idl_hash,
+        verified_with,
+        verified_at,
+    ));
+
+    kw("upstream")
+        .ignore_then(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            item.then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<UpstreamItem>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|items| {
+            let mut u = UpstreamDecl::default();
+            for it in items {
+                match it {
+                    UpstreamItem::Package(s) => u.package = Some(s),
+                    UpstreamItem::Version(s) => u.version = Some(s),
+                    UpstreamItem::Source(s) => u.source = Some(s),
+                    UpstreamItem::BinaryHash(s) => u.binary_hash = Some(s),
+                    UpstreamItem::IdlHash(s) => u.idl_hash = Some(s),
+                    UpstreamItem::VerifiedWith(v) => u.verified_with = v,
+                    UpstreamItem::VerifiedAt(s) => u.verified_at = Some(s),
+                }
+            }
+            u
+        })
+}
+
+// Clauses inside an interface-handler body: discriminant, accounts, requires, ensures.
+fn interface_handler_clause<'a>(
+) -> impl Parser<'a, &'a str, InterfaceHandlerClause, Err<'a>> + Clone {
+    let discriminant = kw("discriminant")
+        .ignore_then(choice((string_lit(), non_keyword_ident())))
+        .map(InterfaceHandlerClause::Discriminant);
+
+    let accounts = just("accounts")
+        .then_ignore(wsc())
+        .ignore_then(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            account_descriptor()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<AccountDescriptor>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(InterfaceHandlerClause::Accounts);
+
+    let requires = just("requires")
+        .then_ignore(wsc())
+        .ignore_then(expr())
+        .then_ignore(wsc())
+        .then(
+            just("else")
+                .then_ignore(wsc())
+                .ignore_then(non_keyword_ident())
+                .or_not(),
+        )
+        .map(|(guard, on_fail)| InterfaceHandlerClause::Requires { guard, on_fail });
+
+    let ensures = just("ensures")
+        .then_ignore(wsc())
+        .ignore_then(expr())
+        .map(InterfaceHandlerClause::Ensures);
+
+    choice((discriminant, accounts, requires, ensures))
+}
+
+// handler h(params)* { discriminant, accounts, requires, ensures }  — inside an interface block.
+fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl, Err<'a>> + Clone {
+    doc_comments()
+        .then_ignore(kw("handler"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then(
+            handler_param()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<TypedField>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            interface_handler_clause()
+                .map_with(|c, e| Node::new(c, e.span().into_range()))
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<Node<InterfaceHandlerClause>>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|(((doc, name), params), clauses)| InterfaceHandlerDecl {
+            name,
+            doc,
+            params,
+            clauses,
+        })
+}
+
+fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    let program_id = kw("program_id")
+        .ignore_then(string_lit())
+        .map(InterfaceItem::ProgramId);
+    let upstream = upstream_block().map(InterfaceItem::Upstream);
+    let handler = interface_handler_decl().map(InterfaceItem::Handler);
+
+    let item = choice((program_id, upstream, handler));
+
+    doc_comments()
+        .then_ignore(kw("interface"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            item.then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<InterfaceItem>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|((doc, name), items)| {
+            let mut program_id = None;
+            let mut upstream = None;
+            let mut handlers = Vec::new();
+            for it in items {
+                match it {
+                    InterfaceItem::ProgramId(s) => program_id = Some(s),
+                    InterfaceItem::Upstream(u) => upstream = Some(u),
+                    InterfaceItem::Handler(h) => handlers.push(h),
+                }
+            }
+            TopItem::Interface(InterfaceDecl {
+                name,
+                doc,
+                program_id,
+                upstream,
+                handlers,
+            })
+        })
+}
+
 // Top-level item: priority-ordered choice.
 // record_decl must precede adt_decl (PEG-style backtracking via .or).
 fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
@@ -1859,7 +2069,12 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         program_id_decl(),
         assembly_decl(),
     ));
-    let group_c = choice((pubkey_decl(), errors_decl(), instruction_decl()));
+    let group_c = choice((
+        pubkey_decl(),
+        errors_decl(),
+        instruction_decl(),
+        interface_decl(),
+    ));
     choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
@@ -2101,6 +2316,7 @@ property conservation :
                 TopItem::Pubkey(_) => "pubkey",
                 TopItem::Errors(_) => "errors",
                 TopItem::Instruction(_) => "instruction",
+                TopItem::Interface(_) => "interface",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
@@ -2457,6 +2673,123 @@ liveness drain : State.Draining ~> State.Active via [a, b] within 2"#;
                 assert_eq!(l.within, 2);
             }
             o => panic!("expected Liveness, got {:?}", o),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // interface block (v2.5 slice 1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_tier0_interface_shape_only() {
+        let src = r#"spec Demo
+interface Jupiter {
+  program_id "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+
+  handler swap (amount_in : U64) (min_amount_out : U64) {
+    discriminant "0xE445A52E51CB9A1D"
+    accounts {
+      user_input_ta  : writable, type token
+      user_output_ta : writable, type token
+      user           : signer
+    }
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        assert_eq!(i.name, "Jupiter");
+        assert_eq!(
+            i.program_id.as_deref(),
+            Some("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")
+        );
+        assert!(i.upstream.is_none());
+        assert_eq!(i.handlers.len(), 1);
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "swap");
+        assert_eq!(h.params.len(), 2);
+        // Tier-0: no requires/ensures.
+        let has_requires = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Requires { .. }));
+        let has_ensures = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Ensures(_)));
+        assert!(!has_requires, "Tier-0 interface should have no requires");
+        assert!(!has_ensures, "Tier-0 interface should have no ensures");
+    }
+
+    #[test]
+    fn parses_tier1_interface_with_upstream_and_ensures() {
+        let src = r#"spec Demo
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:abcdef1234567890"
+    verified_with ["proptest", "kani"]
+    verified_at  "2026-04-18"
+  }
+
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let u = i.upstream.as_ref().expect("upstream present");
+        assert_eq!(u.package.as_deref(), Some("spl-token"));
+        assert_eq!(u.version.as_deref(), Some("4.0.3"));
+        assert_eq!(u.binary_hash.as_deref(), Some("sha256:abcdef1234567890"));
+        assert_eq!(
+            u.verified_with,
+            vec!["proptest".to_string(), "kani".to_string()]
+        );
+        // Lean deliberately absent — no overclaiming.
+        assert!(!u.verified_with.contains(&"lean".to_string()));
+
+        let h = &i.handlers[0];
+        let has_requires = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Requires { .. }));
+        let has_ensures = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Ensures(_)));
+        assert!(has_requires);
+        assert!(has_ensures);
+    }
+
+    #[test]
+    fn parses_empty_interface() {
+        // An interface with no handlers is valid (e.g. a stub pre-codegen).
+        let src =
+            "spec T\ninterface Empty {\n  program_id \"11111111111111111111111111111111\"\n}\n";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Interface(i) => {
+                assert_eq!(i.name, "Empty");
+                assert!(i.handlers.is_empty());
+            }
+            o => panic!("expected Interface, got {:?}", o),
         }
     }
 }
