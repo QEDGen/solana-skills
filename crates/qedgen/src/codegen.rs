@@ -772,7 +772,7 @@ client = []
 debug = []
 
 [dependencies]
-quasar-lang = {{ version = "0.1" }}
+quasar-lang = {{ version = "0.0.0" }}
 qedgen-macros = {{ version = "0.1", path = "../../../crates/qedgen-macros" }}
 "#,
         program_name
