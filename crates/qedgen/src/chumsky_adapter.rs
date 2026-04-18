@@ -1398,9 +1398,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::ProgramId(pid) => {
                 out.program_id = Some(pid.clone());
             }
-            TopItem::Assembly(path) => {
-                out.assembly_path = Some(path.clone());
-            }
             TopItem::Pubkey(p) => {
                 out.pubkeys.push(ParsedPubkey {
                     name: p.name.clone(),
@@ -1472,9 +1469,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                                 name: pk.name.clone(),
                                 chunks: pk.chunks.iter().map(|c| c.to_string()).collect(),
                             });
-                        }
-                        TopItem::Assembly(path) => {
-                            out.assembly_path = Some(path.clone());
                         }
                         TopItem::Instruction(instr) => {
                             out.instructions.push(adapt_instruction(instr, consts));

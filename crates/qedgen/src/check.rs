@@ -586,9 +586,12 @@ pub struct ParsedSpec {
     // `ParsedSpec::is_assembly_target()`. One less source of truth.
 
     // sBPF-specific fields
-    /// Assembly source path (present means sBPF mode).
-    #[allow(dead_code)]
-    pub assembly_path: Option<String>,
+    //
+    // `assembly_path` used to live here, populated by a top-level
+    // `assembly "..."` line. v2.5 drops the keyword entirely —
+    // `qedgen asm2lean --input <path>` is explicit, and other tooling
+    // uses the `src/program.s` convention next to the spec. The spec
+    // does not carry a file path.
     /// Known pubkeys as 4-chunk U64 representations.
     #[allow(dead_code)]
     pub pubkeys: Vec<ParsedPubkey>,
@@ -633,11 +636,10 @@ impl ParsedSpec {
         self.pragmas.iter().any(|p| p == name)
     }
 
-    /// Target inference: `pragma sbpf` present → assembly target.
-    /// Falls back to the legacy signal (assembly path + instructions
-    /// present) so partially-migrated specs don't silently shift mode.
+    /// Target inference: `pragma sbpf` present → assembly target, else
+    /// Quasar/Anchor (the default). Single source of truth.
     pub fn is_assembly_target(&self) -> bool {
-        self.has_pragma("sbpf") || (self.assembly_path.is_some() && !self.instructions.is_empty())
+        self.has_pragma("sbpf")
     }
 }
 

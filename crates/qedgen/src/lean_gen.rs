@@ -3558,8 +3558,6 @@ mod tests {
 spec Dropset
 
 pragma sbpf {
-  assembly "src/dropset.s"
-
   const DISC_REGISTER_MARKET     = 0
   const ACCT_NON_DUP_MARKER      = 255
   const DATA_LEN_ZERO             = 0

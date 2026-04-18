@@ -1319,13 +1319,6 @@ fn program_id_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(TopItem::ProgramId)
 }
 
-// assembly "path/to/file.s"
-fn assembly_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    kw("assembly")
-        .ignore_then(string_lit())
-        .map(TopItem::Assembly)
-}
-
 // pda name [seed1, seed2, ...]
 fn pda_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     let seed = choice((
@@ -2072,7 +2065,6 @@ fn pragma_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone
     choice((
         const_decl(),
         pubkey_decl(),
-        assembly_decl(),
         instruction_decl(),
         errors_decl(),
     ))
@@ -2360,7 +2352,6 @@ property conservation :
                 TopItem::Event(_) => "event",
                 TopItem::Environment(_) => "environment",
                 TopItem::ProgramId(_) => "program_id",
-                TopItem::Assembly(_) => "assembly",
                 TopItem::TypeAlias(_) => "type_alias",
                 TopItem::Pubkey(_) => "pubkey",
                 TopItem::Errors(_) => "errors",

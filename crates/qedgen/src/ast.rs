@@ -83,8 +83,6 @@ pub enum TopItem {
     Environment(EnvironmentDecl),
     /// `program_id "..."` — explicit program ID.
     ProgramId(String),
-    /// `assembly "..."` — sBPF assembly file path.
-    Assembly(String),
     /// `type Name = <type_ref>` — type alias, expands to its target.
     TypeAlias(TypeAliasDecl),
     /// `pubkey NAME [u64, u64, u64, u64]` — 4-chunk U64 pubkey literal (sBPF sugar).
