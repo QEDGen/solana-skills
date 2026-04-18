@@ -1312,16 +1312,6 @@ fn invariant_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|(name, body)| TopItem::Invariant(InvariantDecl { name, body }))
 }
 
-// target assembly | target quasar
-fn target_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    kw("target")
-        .ignore_then(choice((
-            kw("assembly").to("assembly".to_string()),
-            kw("quasar").to("quasar".to_string()),
-        )))
-        .map(TopItem::Target)
-}
-
 // program_id "base58..."
 fn program_id_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     kw("program_id")
@@ -2128,7 +2118,6 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         pda_decl(),
         event_decl(),
         environment_decl(),
-        target_decl(),
         program_id_decl(),
     ));
     // Note: `pubkey`, `instruction`, `assembly`, and the `errors [...]`
@@ -2370,7 +2359,6 @@ property conservation :
                 TopItem::Pda(_) => "pda",
                 TopItem::Event(_) => "event",
                 TopItem::Environment(_) => "environment",
-                TopItem::Target(_) => "target",
                 TopItem::ProgramId(_) => "program_id",
                 TopItem::Assembly(_) => "assembly",
                 TopItem::TypeAlias(_) => "type_alias",

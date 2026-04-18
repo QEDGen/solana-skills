@@ -581,9 +581,9 @@ pub struct ParsedSpec {
     /// of { ... }` referenced from `Map[N] Account` ends up here.
     pub sum_types: Vec<ParsedSumType>,
 
-    /// Target mode: "assembly" (sBPF) or "quasar" (Rust).
-    #[allow(dead_code)]
-    pub target: Option<String>,
+    // Target mode was an explicit `target assembly|quasar` keyword; as of
+    // v2.5 it's derived from `has_pragma("sbpf")` at the call site via
+    // `ParsedSpec::is_assembly_target()`. One less source of truth.
 
     // sBPF-specific fields
     /// Assembly source path (present means sBPF mode).
@@ -628,11 +628,16 @@ pub struct ParsedSpec {
 }
 
 impl ParsedSpec {
-    /// True iff the spec declared `pragma <name> { ... }`. Consumer lands
-    /// in the next commit (target-inference from pragma presence).
-    #[allow(dead_code)]
+    /// True iff the spec declared `pragma <name> { ... }`.
     pub fn has_pragma(&self, name: &str) -> bool {
         self.pragmas.iter().any(|p| p == name)
+    }
+
+    /// Target inference: `pragma sbpf` present → assembly target.
+    /// Falls back to the legacy signal (assembly path + instructions
+    /// present) so partially-migrated specs don't silently shift mode.
+    pub fn is_assembly_target(&self) -> bool {
+        self.has_pragma("sbpf") || (self.assembly_path.is_some() && !self.instructions.is_empty())
     }
 }
 

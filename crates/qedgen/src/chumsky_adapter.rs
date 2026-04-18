@@ -1395,9 +1395,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.type_aliases
                     .push((ta.name.clone(), type_ref_to_string(&ta.target)));
             }
-            TopItem::Target(t) => {
-                out.target = Some(t.clone());
-            }
             TopItem::ProgramId(pid) => {
                 out.program_id = Some(pid.clone());
             }

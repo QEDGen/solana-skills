@@ -7,7 +7,7 @@
 
 spec Slippage
 
-target assembly
+pragma sbpf {}
 
 type Error
   | SlippageExceeded = 1 "Token balance below minimum threshold"

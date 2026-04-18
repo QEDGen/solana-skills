@@ -13,7 +13,7 @@
 
 spec Counter
 
-target assembly
+pragma sbpf {}
 
 const MAX_COUNTER = 18446744073709551615
 

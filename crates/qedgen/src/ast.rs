@@ -81,8 +81,6 @@ pub enum TopItem {
     Event(EventDecl),
     /// `environment name { mutates/constraint }` — external state.
     Environment(EnvironmentDecl),
-    /// `target assembly` or `target quasar` — codegen target hint.
-    Target(String),
     /// `program_id "..."` — explicit program ID.
     ProgramId(String),
     /// `assembly "..."` — sBPF assembly file path.

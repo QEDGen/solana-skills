@@ -70,10 +70,9 @@ pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
 
 /// Render a `ParsedSpec` into a complete Lean 4 source string.
 pub fn render(spec: &ParsedSpec) -> String {
-    // sBPF mode: target is "assembly", or assembly_path is set with instructions
-    if spec.target.as_deref() == Some("assembly")
-        || (spec.assembly_path.is_some() && !spec.instructions.is_empty())
-    {
+    // sBPF mode: inferred from `pragma sbpf { ... }` presence (or the
+    // legacy fallback signal — see ParsedSpec::is_assembly_target).
+    if spec.is_assembly_target() {
         return render_sbpf(spec);
     }
 
@@ -3557,8 +3556,6 @@ mod tests {
 
     const DROPSET_SPEC: &str = r#"
 spec Dropset
-
-target assembly
 
 pragma sbpf {
   assembly "src/dropset.s"
