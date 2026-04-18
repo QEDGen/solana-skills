@@ -647,7 +647,7 @@ mod tests {
         // to the Quasar (Rust) target.
         std::fs::write(
             &spec_path,
-            "spec Test\ntarget assembly\nassembly \"a.s\"\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
+            "spec Test\ntarget assembly\n\npragma sbpf {\n  assembly \"a.s\"\n}\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
         )
         .unwrap();
         let result = generate(&spec_path, &out_path);

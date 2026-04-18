@@ -101,6 +101,23 @@ pub enum TopItem {
     /// Declares a callee's public contract so a caller can `call Name.h(...)`
     /// with backend-appropriate artifacts. See docs/design/spec-composition.md §2.
     Interface(InterfaceDecl),
+    /// `pragma <name> { <top_item>* }` — platform-specific namespace.
+    ///
+    /// Keeps the core DSL platform-agnostic while letting target-specific
+    /// constructs (sBPF `instruction`/`pubkey`/layouts, eventually Anchor
+    /// or Quasar extensions) live in clearly scoped blocks. Target
+    /// inference reads `ParsedSpec.pragmas` — presence of `sbpf` selects
+    /// the assembly target with no explicit `target` keyword.
+    Pragma(PragmaDecl),
+}
+
+/// Platform-specific namespace. Parser accepts arbitrary `TopItem`s inside;
+/// the adapter restricts which items are valid per pragma name.
+#[derive(Debug, Clone)]
+pub struct PragmaDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub items: Vec<Node<TopItem>>,
 }
 
 // ============================================================================

@@ -1456,6 +1456,51 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Interface(iface) => {
                 out.interfaces.push(adapt_interface(iface, consts, &env));
             }
+            TopItem::Pragma(p) => {
+                // Record the pragma name for target inference. Any given
+                // pragma may appear at most once per spec; duplicates are
+                // flagged at lint time, not here.
+                out.pragmas.push(p.name.clone());
+
+                // Inline-adapt each nested item. The parser restricts pragma
+                // bodies to a whitelist (const/pubkey/assembly/instruction/
+                // errors), so only those cases matter.
+                for Node { node: inner, .. } in &p.items {
+                    match inner {
+                        TopItem::Const { name, value } => {
+                            constants.push((name.clone(), value.to_string()));
+                        }
+                        TopItem::Pubkey(pk) => {
+                            out.pubkeys.push(ParsedPubkey {
+                                name: pk.name.clone(),
+                                chunks: pk.chunks.iter().map(|c| c.to_string()).collect(),
+                            });
+                        }
+                        TopItem::Assembly(path) => {
+                            out.assembly_path = Some(path.clone());
+                        }
+                        TopItem::Instruction(instr) => {
+                            out.instructions.push(adapt_instruction(instr, consts));
+                        }
+                        TopItem::Errors(entries) => {
+                            for e in entries {
+                                out.error_codes.push(e.name.clone());
+                                if e.code.is_some() || e.description.is_some() {
+                                    out.valued_errors.push(ParsedErrorCode {
+                                        name: e.name.clone(),
+                                        value: e.code,
+                                        description: e.description.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        // Grammar already rejects non-whitelisted items; this
+                        // arm is defensive and silently ignores anything that
+                        // slipped through (would indicate a grammar bug).
+                        _ => {}
+                    }
+                }
+            }
         }
     }
 

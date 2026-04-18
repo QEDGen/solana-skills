@@ -111,6 +111,7 @@ const KEYWORDS: &[&str] = &[
     "mul_div_floor",
     "mul_div_ceil",
     "interface",
+    "pragma",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -2070,6 +2071,42 @@ fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
+// ----------------------------------------------------------------------------
+// pragma <name> { <platform_item>* } — platform-specific namespace.
+// ----------------------------------------------------------------------------
+
+/// Items allowed inside a pragma body. Restricted whitelist — keeps the
+/// grammar tight and emits clearer errors on misplaced constructs. Extend
+/// as new platforms or pragma content arrives.
+fn pragma_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
+    choice((
+        const_decl(),
+        pubkey_decl(),
+        assembly_decl(),
+        instruction_decl(),
+        errors_decl(),
+    ))
+    .map_with(|item, e| Node::new(item, e.span().into_range()))
+}
+
+fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    doc_comments()
+        .then_ignore(kw("pragma"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            pragma_item()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<Node<TopItem>>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|((doc, name), items)| TopItem::Pragma(PragmaDecl { name, doc, items }))
+}
+
 // Top-level item: priority-ordered choice.
 // record_decl must precede adt_decl (PEG-style backtracking via .or).
 fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
@@ -2093,14 +2130,12 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         environment_decl(),
         target_decl(),
         program_id_decl(),
-        assembly_decl(),
     ));
-    let group_c = choice((
-        pubkey_decl(),
-        errors_decl(),
-        instruction_decl(),
-        interface_decl(),
-    ));
+    // Note: `pubkey`, `instruction`, `assembly`, and the `errors [...]`
+    // sugar are platform-specific and only parse inside
+    // `pragma sbpf { ... }`. Use `type Error | A | B | ...` for errors at
+    // the core-DSL level. The platform-agnostic top level is the point.
+    let group_c = choice((interface_decl(), pragma_decl()));
     choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
@@ -2343,6 +2378,7 @@ property conservation :
                 TopItem::Errors(_) => "errors",
                 TopItem::Instruction(_) => "instruction",
                 TopItem::Interface(_) => "interface",
+                TopItem::Pragma(_) => "pragma",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
@@ -2890,5 +2926,62 @@ handler h : State.A -> State.A {
         });
         let call = call.expect("expected a Call");
         assert!(call.args.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // pragma sbpf { ... } (v2.5 slice — platform-specific namespace)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_pragma_sbpf_with_instruction() {
+        let src = r#"spec Transfer
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+
+  instruction transfer {
+    discriminant 3
+    entry 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let p = match &s.items[0].node {
+            TopItem::Pragma(p) => p,
+            o => panic!("expected Pragma, got {:?}", o),
+        };
+        assert_eq!(p.name, "sbpf");
+        assert_eq!(p.items.len(), 2);
+        // Order is preserved: pubkey first, instruction second.
+        assert!(matches!(p.items[0].node, TopItem::Pubkey(_)));
+        assert!(matches!(p.items[1].node, TopItem::Instruction(_)));
+    }
+
+    #[test]
+    fn pragma_body_rejects_non_whitelisted_items() {
+        // A `handler` at the top level of a pragma is not in the whitelist
+        // — it belongs to the core DSL. The parser fails on the closing
+        // brace because the handler doesn't consume.
+        let src = r#"spec T
+pragma sbpf {
+  handler nope : State.A -> State.A { effect {} }
+}
+"#;
+        assert!(
+            parse(src).is_err(),
+            "pragma body should reject `handler`; core DSL items belong at top level"
+        );
+    }
+
+    #[test]
+    fn empty_pragma_parses() {
+        let src = "spec T\npragma sbpf {}\n";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Pragma(p) => {
+                assert_eq!(p.name, "sbpf");
+                assert!(p.items.is_empty());
+            }
+            o => panic!("expected Pragma, got {:?}", o),
+        }
     }
 }

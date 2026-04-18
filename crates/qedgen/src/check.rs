@@ -620,6 +620,20 @@ pub struct ParsedSpec {
     /// docs/design/spec-composition.md §2. Tier-0 interfaces have no
     /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
     pub interfaces: Vec<ParsedInterface>,
+
+    /// Names of `pragma <name> { ... }` blocks that appeared in the spec.
+    /// Used for target inference (`sbpf` → assembly target) and for
+    /// platform-scoped feature flags in backends.
+    pub pragmas: Vec<String>,
+}
+
+impl ParsedSpec {
+    /// True iff the spec declared `pragma <name> { ... }`. Consumer lands
+    /// in the next commit (target-inference from pragma presence).
+    #[allow(dead_code)]
+    pub fn has_pragma(&self, name: &str) -> bool {
+        self.pragmas.iter().any(|p| p == name)
+    }
 }
 
 /// Callee contract: program ID + per-handler shape (and optional effects).
@@ -3754,6 +3768,73 @@ handler exchange : State.A -> State.B {
         // Args carry both renderings so backends can pick the form they want.
         assert!(!c.args[0].rust_expr.is_empty());
         assert!(!c.args[0].lean_expr.is_empty());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // pragma sbpf { ... } adaptation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pragma_sbpf_unpacks_inner_items() {
+        let src = r#"spec Transfer
+
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [6, 221, 246, 225]
+
+  instruction transfer {
+    discriminant 3
+    entry 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "transfer");
+    }
+
+    #[test]
+    fn pragma_body_adapts_into_standard_parsed_spec_fields() {
+        // Items wrapped in `pragma sbpf { ... }` must land in the same
+        // ParsedSpec fields downstream consumers already read — pubkeys,
+        // instructions, etc. The pragma is a grammatical namespace, not
+        // a new parallel tree.
+        let src = r#"spec T
+
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+
+  instruction foo {
+    discriminant 1
+    entry 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert!(parsed.has_pragma("sbpf"));
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "foo");
+    }
+
+    #[test]
+    fn top_level_sbpf_items_now_rejected() {
+        // Platform-specifics (pubkey, instruction, assembly) used to parse
+        // at the top level; v2.5 moves them behind `pragma sbpf { ... }`.
+        // The grammar enforces the discipline so a spec can't quietly mix
+        // them into the core surface.
+        let src = r#"spec T
+
+pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+"#;
+        assert!(
+            crate::chumsky_adapter::parse_str(src).is_err(),
+            "top-level `pubkey` should no longer parse"
+        );
     }
 
     #[test]
