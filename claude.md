@@ -22,11 +22,19 @@ QEDGen's UX is **agent-first**, not CLI-first. The end user interacts with:
 3. **Hard → Leanstral** (`qedgen fill-sorry`): when the local LLM has tried a few passes and still can't close the goal. Fast, non-deterministic, pass@N sampling.
 4. **Last resort → Aristotle** (`qedgen aristotle submit`): agentic proof search measured in minutes to hours. Only when Leanstral has failed after multiple passes.
 
+**Code- and test-filling escalation order** (v2.4+, same shape as proofs):
+
+1. **Mechanical → codegen template** (`codegen.rs::mechanize_effect`): scalar effects with simple RHS (`field := param`, `field += literal`, `field -= constant`) become real Rust; fully-mechanizable handlers ship as `Ok(())` with no `todo!()`.
+2. **Non-mechanical but tractable → local LLM**: events (payload binding from spec event schema), token transfers (CPI builder shape), complex effect RHS (match/arith), and integration-test assertions (post-state checks, lifecycle chains). Run `qedgen codegen --fill` / `--fill-tests` to get one structured prompt per remaining `todo!()` site, then edit in-session.
+3. **Last resort → spec refinement**: if the LLM can't fill the body from the prompt, the spec is under-specified. Add the missing detail (event field bindings, transfer authority chain, declared invariant) and re-run codegen. This is the Rust analog of "add a DSL feature that eliminates the proof obligation structurally".
+
+**`qedgen verify` runs the generated harnesses** (v2.4+): `--proptest` shells `cargo test --release`, `--kani` shells `cargo kani --tests`, `--lean` shells `lake build`. `--all` runs every backend whose artifact is on disk; failures surface verbatim with summarized diagnostics so the agent can act on them. Closes the loop that `qedgen check` opens (check validates the spec; verify validates the implementation).
+
 **Design implications:**
 - A new DSL feature that *eliminates* a proof obligation structurally (e.g. sum types making vacuous cases literal) is always preferable to a new proof template or a sorry to shell out.
 - When a proof template can't handle a case, emit `sorry` with a comment documenting the obligation — don't bury it in complex tactics that might spuriously close.
 - Don't pre-shell to Leanstral/Aristotle from code that a local LLM can handle. Escalation is when you've tried; not when you expect to need to.
-- Routing between Leanstral and Aristotle is agent-decided per SKILL.md heuristics, not hardcoded in the CLI.
+- Routing between Leanstral and Aristotle is agent-decided per SKILL.md heuristics, not hardcoded in the CLI. The same applies to code/test fills: `--fill` emits prompts to stdout; the in-session agent decides when to call out (it almost never needs to).
 
 ## Build and Development Commands
 
@@ -88,6 +96,18 @@ qedgen codegen --spec program.qedspec --all             # everything
 qedgen codegen --spec program.qedspec --lean            # Lean proofs only
 qedgen codegen --spec program.qedspec --kani            # Kani harnesses
 qedgen codegen --spec program.qedspec --proptest        # proptest harnesses
+
+# Agent-fill prompts for unfilled handlers (v2.4+)
+qedgen codegen --spec program.qedspec --fill                       # all handlers
+qedgen codegen --spec program.qedspec --fill --handler initialize  # one handler
+qedgen codegen --spec program.qedspec --fill-tests                 # integration test sites
+
+# Run the generated harnesses against the implementation (v2.4+)
+qedgen verify --spec program.qedspec                    # auto-detect: every backend on disk
+qedgen verify --spec program.qedspec --proptest         # cargo test --release proptest
+qedgen verify --spec program.qedspec --kani             # cargo kani --tests
+qedgen verify --spec program.qedspec --lean             # lake build
+qedgen verify --spec program.qedspec --json             # machine-readable for CI
 
 # Generate a draft SPEC.md from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
