@@ -26,20 +26,34 @@ QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 The `.qedspec` is the **single source of truth** — the only artifact committed to the user's repo. Everything else (proptests, Lean theorems, generated code) is derived and disposable.
 
 ```
-Two phases:
+Three phases:
 
 Phase 1 — Spec Design (interactive, all artifacts transient)
   You + User ──→ iterate on .qedspec
     ├── Lint         — structural validation           (instant)
     ├── Proptest     — random counterexamples           (~100ms)
     └── lean-gen     — type-level provability check     (~seconds)
+  Mindset: declarative intent. Write what must be true, not how to prove it.
   Deliverable: .qedspec (committed)
+  Covered in: Step 1–3 below.
 
 Phase 2 — Proof Engineering (on demand, formal certificates)
   .qedspec ──→ Spec.lean ──→ Lean proofs ──→ lake build
     ├── Leanstral    — fast sorry-filling               (seconds)
     └── Aristotle    — deep agentic proof search         (minutes-hours)
+  Mindset: tactical. Read Lean errors, select proof patterns, route hard
+  sub-goals to the right backend. Switch references/proof-patterns.md
+  and references/sbpf.md into active context.
   Deliverable: zero-sorry Lean project + #[qed(verified)] stamps
+  Covered in: Step 4 below.
+
+Phase 3 — Audit / drift maintenance (ongoing, post-ship)
+  Verified code ──→ `qedgen reconcile` ──→ drift report
+    ├── spec_hash mismatch       — handler body drifted from spec
+    ├── orphan / missing theorem — Lean proofs out of sync with spec
+    └── upstream_binary_hash     — library interface (SPL Token, …) moved
+  Mindset: skeptical review. Read-mostly, verify claims, flag gaps.
+  Deliverable: no unresolved drift; verified artifacts remain trustworthy.
 
 Spec-driven pipeline (all generated from the same .qedspec):
   qedspec ──→ Proptest harnesses    (transient, /tmp)
@@ -48,6 +62,10 @@ Spec-driven pipeline (all generated from the same .qedspec):
           ──→ Quasar Rust program   (generated)
           ──→ Unit + integration tests (generated)
 ```
+
+Phase boundaries are meaningful: each phase has a distinct mindset,
+distinct tooling focus, and a distinct reference pack. When transitioning,
+load only the references relevant to the new phase — keep context tight.
 
 ## Step 1: Understand the program
 
@@ -139,6 +157,7 @@ Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for fu
 - **`pragma sbpf { ... }`** wraps sBPF-specific declarations (`instruction`, `pubkey`, per-instruction `errors`). The pragma's presence also selects the assembly target — no explicit `target` keyword.
 - **`interface Name { ... }` + `call Name.handler(...)`** declare CPI contracts. Generate Tier-0 scaffolds from Anchor IDLs with `qedgen interface --idl target/idl/<program>.json`. Tier-1 (hand-authored `ensures`) strengthens the caller's Lean proof.
 - **Multi-file specs** — `qedgen check --spec <dir>` accepts a directory of `.qedspec` fragments all declaring the same `spec Name`. Merged in sorted-path order. See `examples/rust/escrow-split/` for the convention.
+- **`let x = v in body`** — ML-style expression binding inside `ensures`/`requires`/effect RHS. Use when naming a computed quantity makes the post-condition clearer: `ensures let delta = old(state.balance) - state.balance in delta == amount`.
 
 For sBPF assembly programs, use `qedguards` instead of the core DSL for guard/property bodies.
 
