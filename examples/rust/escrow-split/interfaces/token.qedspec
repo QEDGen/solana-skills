@@ -1,0 +1,33 @@
+// Inlined SPL Token interface (Tier 1).
+//
+// Until v2.6 ships `import Token from "qedgen/interfaces/spl_token"`, every
+// caller needs the Token contract in its own spec closure. This fragment is
+// a direct copy of interfaces/spl_token.qedspec scoped to what Escrow
+// actually calls (`transfer` only). When import lands, delete this fragment
+// and add the import to escrow.qedspec instead.
+
+spec Escrow
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package       "spl-token"
+    version       "4.0.3"
+    source        "https://github.com/solana-program/token/tree/v4.0.3"
+    verified_with ["proptest"]
+    verified_at   "2026-04-18"
+  }
+
+  /// Transfer `amount` tokens from `from` to `to`, authorized by `authority`.
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}

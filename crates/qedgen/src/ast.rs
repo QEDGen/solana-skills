@@ -81,12 +81,8 @@ pub enum TopItem {
     Event(EventDecl),
     /// `environment name { mutates/constraint }` — external state.
     Environment(EnvironmentDecl),
-    /// `target assembly` or `target quasar` — codegen target hint.
-    Target(String),
     /// `program_id "..."` — explicit program ID.
     ProgramId(String),
-    /// `assembly "..."` — sBPF assembly file path.
-    Assembly(String),
     /// `type Name = <type_ref>` — type alias, expands to its target.
     TypeAlias(TypeAliasDecl),
     /// `pubkey NAME [u64, u64, u64, u64]` — 4-chunk U64 pubkey literal (sBPF sugar).
@@ -97,6 +93,27 @@ pub enum TopItem {
     /// `instruction Name { ... }` — sBPF instruction block with layouts,
     /// guards, and properties.
     Instruction(InstructionDecl),
+    /// `interface Name { program_id "...", upstream { ... }, handler h(args) { ... } }`
+    /// Declares a callee's public contract so a caller can `call Name.h(...)`
+    /// with backend-appropriate artifacts. See docs/design/spec-composition.md §2.
+    Interface(InterfaceDecl),
+    /// `pragma <name> { <top_item>* }` — platform-specific namespace.
+    ///
+    /// Keeps the core DSL platform-agnostic while letting target-specific
+    /// constructs (sBPF `instruction`/`pubkey`/layouts, eventually Anchor
+    /// or Quasar extensions) live in clearly scoped blocks. Target
+    /// inference reads `ParsedSpec.pragmas` — presence of `sbpf` selects
+    /// the assembly target with no explicit `target` keyword.
+    Pragma(PragmaDecl),
+}
+
+/// Platform-specific namespace. Parser accepts arbitrary `TopItem`s inside;
+/// the adapter restricts which items are valid per pragma name.
+#[derive(Debug, Clone)]
+pub struct PragmaDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub items: Vec<Node<TopItem>>,
 }
 
 // ============================================================================
@@ -301,12 +318,94 @@ pub enum HandlerClause {
     Invariant(String),
     /// `include schema_name` — forward-compat; phase 1 rejects.
     Include(String),
+    /// `call Interface.handler(name = expr, ...)` — terminal CPI invocation.
+    /// Resolves against a top-level `interface` block; backends emit
+    /// tier-appropriate artifacts (CPI builder in Rust, hypotheses/rewrites
+    /// in Lean when the interface declares ensures). See
+    /// docs/design/spec-composition.md §2.
+    Call(CallExpr),
+}
+
+/// `call Target.handler(arg1 = v1, arg2 = v2, ...)` parsed form.
+#[derive(Debug, Clone)]
+pub struct CallExpr {
+    /// Qualified name of the target. Usually `Interface.handler` (len 2),
+    /// but longer paths are accepted — the resolver decides.
+    pub target: QualifiedPath,
+    /// Keyword arguments, in source order. Positional args are not allowed.
+    pub args: Vec<CallArg>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallArg {
+    pub name: String,
+    pub value: Node<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AccountDescriptor {
     pub name: String,
     pub attrs: Vec<AccountAttr>,
+}
+
+// ============================================================================
+// Interface declarations (callee contracts for CPI)
+// ============================================================================
+
+/// `interface Name { program_id "...", upstream { ... }, handler h(args) { ... } }`
+///
+/// Contract for a program we CPI into. Shape-only (Tier 0), hand-authored
+/// effects (Tier 1), or imported from another qedspec (Tier 2) — the AST is
+/// the same shape, backends decide how much they can emit based on whether
+/// `requires`/`ensures` are populated.
+#[derive(Debug, Clone)]
+pub struct InterfaceDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub program_id: Option<String>,
+    pub upstream: Option<UpstreamDecl>,
+    pub handlers: Vec<InterfaceHandlerDecl>,
+}
+
+/// `upstream { package "...", version "...", binary_hash "...", ... }` —
+/// pins a library interface to the exact upstream program it was verified
+/// against. `binary_hash` is authoritative; the rest is informational.
+#[derive(Debug, Clone, Default)]
+pub struct UpstreamDecl {
+    pub package: Option<String>,
+    pub version: Option<String>,
+    pub source: Option<String>,
+    pub binary_hash: Option<String>,
+    pub idl_hash: Option<String>,
+    /// Which backends were actually run (e.g. ["proptest", "kani"]).
+    /// `"lean"` appears only when the program is genuinely proven, not
+    /// merely axiomatized — no overclaiming.
+    pub verified_with: Vec<String>,
+    pub verified_at: Option<String>,
+}
+
+/// A handler inside an `interface` block. Structurally a subset of
+/// `HandlerDecl`: no pre/post transition, no `effect`, no `emits` (callee
+/// state is opaque to the caller; callee events are the callee's business).
+#[derive(Debug, Clone)]
+pub struct InterfaceHandlerDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub params: Vec<TypedField>,
+    pub clauses: Vec<Node<InterfaceHandlerClause>>,
+}
+
+/// Clauses allowed inside an interface-handler body.
+#[derive(Debug, Clone)]
+pub enum InterfaceHandlerClause {
+    /// `discriminant 0xABCD` or `discriminant name` — instruction selector.
+    Discriminant(String),
+    Accounts(Vec<AccountDescriptor>),
+    Requires {
+        guard: Node<Expr>,
+        on_fail: Option<String>,
+    },
+    Ensures(Node<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -528,6 +627,15 @@ pub enum Expr {
     Field {
         base: Box<Node<Expr>>,
         field: String,
+    },
+    /// `let name = value in body` — ML-style expression-level binding.
+    /// Derives a value once and references it by `name` in `body`. Lowers
+    /// to Lean's `let name := value; body` and to a Rust block
+    /// `{ let name = value; body }`.
+    Let {
+        name: String,
+        value: Box<Node<Expr>>,
+        body: Box<Node<Expr>>,
     },
 }
 

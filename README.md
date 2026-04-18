@@ -67,12 +67,18 @@ CPI calls are axiomatic — we verify the program passes correct parameters. SPL
 # 1. Install
 npx skills add qedgen/solana-skills
 
-# 2. Write a spec and validate it
-qedgen check --spec my_program.qedspec
+# 2. Initialize the project — records the spec path in .qed/config.json
+qedgen init --name my_program --spec my_program.qedspec --quasar
 
-# 3. Generate all artifacts
-qedgen codegen --spec my_program.qedspec --all
+# 3. Validate and generate artifacts (no --spec needed from inside the project)
+qedgen check
+qedgen codegen --all
 ```
+
+`.qed/config.json` pins the spec location so subsequent commands don't need
+`--spec <path>` — they walk up from the current directory, find the nearest
+`.qed/`, and resolve. Explicit `--spec` still works when you want to point
+at something specific.
 
 Lean proofs, Kani harnesses, and API keys are set up automatically when first needed. To configure them manually:
 
@@ -131,6 +137,18 @@ qedgen check --spec my_program.qedspec --code ./programs --kani ./tests/kani.rs 
 
 ### sBPF verification
 
+sBPF-specific declarations (`instruction`, `pubkey`, per-instruction `errors`)
+live inside `pragma sbpf { ... }` — the core DSL stays platform-agnostic, and
+`qedgen` infers the assembly target from the pragma's presence.
+
+```
+spec Transfer
+
+pragma sbpf {
+  instruction transfer_sol { ... }
+}
+```
+
 ```bash
 # Transpile sBPF assembly to Lean 4
 qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
@@ -138,6 +156,45 @@ qedgen asm2lean --input src/program.s --output formal_verification/Program.lean
 # Verify sBPF proofs (checks source hash, regenerates if stale)
 qedgen check --spec my_program.qedspec --asm src/program.s
 ```
+
+### CPI contracts — `interface` + `call`
+
+When your program invokes another (SPL Token, System Program, an AMM, …),
+declare the callee's contract as an `interface` and write `call` at the
+invocation site. The Rust side gets a real CPI builder; Lean proofs pick up
+the callee's declared `ensures` as hypotheses.
+
+```
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts { from : writable, type token
+               to   : writable, type token
+               authority : signer }
+    ensures amount > 0
+  }
+}
+
+handler exchange : State.Open -> State.Closed {
+  call Token.transfer(from = taker_ta, to = initializer_ta,
+                      amount = taker_amount, authority = taker)
+}
+```
+
+```bash
+# Scaffold a Tier-0 interface from an Anchor IDL (shape only — no ensures)
+qedgen interface --idl target/idl/jupiter.json --out interfaces/jupiter.qedspec
+
+# Or vendor it into .qed/interfaces/<program>.qedspec (the canonical location
+# for tool-managed library specs — pointed at by `.qed/config.json`)
+qedgen interface --idl target/idl/jupiter.json --vendor
+```
+
+`qedgen check` emits `[shape_only_cpi]` for any `call` whose target lacks
+`ensures`, making the gap between "my Rust compiles" and "my program is
+verified" visible. See [docs/design/spec-composition.md](docs/design/spec-composition.md)
+for the full tier model.
 
 ### Generate proofs from a prompt
 

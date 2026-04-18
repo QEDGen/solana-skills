@@ -376,6 +376,31 @@ pub struct ParsedHandler {
     pub invariants: Vec<String>,
     /// Per-handler properties (from inline property/invariant clauses).
     pub properties: Vec<String>,
+    /// `call Interface.handler(name = expr, ...)` sites — CPI invocations
+    /// resolved against a top-level `interface` block. Empty for handlers
+    /// that don't CPI. Consumed by Rust codegen (slice 5) and the
+    /// `[shape_only_cpi]` lint (slice 4).
+    #[allow(dead_code)]
+    pub calls: Vec<ParsedCall>,
+}
+
+/// A resolved `call Target.handler(...)` site inside a handler body. The
+/// target is split into interface + handler name for easier lookup; args
+/// carry both Lean and Rust renderings so backends can pick their form.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedCall {
+    pub target_interface: String,
+    pub target_handler: String,
+    pub args: Vec<ParsedCallArg>,
+}
+
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedCallArg {
+    pub name: String,
+    pub lean_expr: String,
+    pub rust_expr: String,
 }
 
 impl ParsedHandler {
@@ -385,8 +410,11 @@ impl ParsedHandler {
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()
     }
+    /// Whether this handler initiates a CPI. True if the handler has a
+    /// `transfers { }` block (legacy sugar for Token.transfer) OR any
+    /// `call Interface.handler(...)` site (v2.5 uniform CPI surface).
     pub fn has_calls(&self) -> bool {
-        !self.transfers.is_empty()
+        !self.transfers.is_empty() || !self.calls.is_empty()
     }
     pub fn has_when(&self) -> bool {
         self.pre_status.is_some()
@@ -553,14 +581,17 @@ pub struct ParsedSpec {
     /// of { ... }` referenced from `Map[N] Account` ends up here.
     pub sum_types: Vec<ParsedSumType>,
 
-    /// Target mode: "assembly" (sBPF) or "quasar" (Rust).
-    #[allow(dead_code)]
-    pub target: Option<String>,
+    // Target mode was an explicit `target assembly|quasar` keyword; as of
+    // v2.5 it's derived from `has_pragma("sbpf")` at the call site via
+    // `ParsedSpec::is_assembly_target()`. One less source of truth.
 
     // sBPF-specific fields
-    /// Assembly source path (present means sBPF mode).
-    #[allow(dead_code)]
-    pub assembly_path: Option<String>,
+    //
+    // `assembly_path` used to live here, populated by a top-level
+    // `assembly "..."` line. v2.5 drops the keyword entirely —
+    // `qedgen asm2lean --input <path>` is explicit, and other tooling
+    // uses the `src/program.s` convention next to the spec. The spec
+    // does not carry a file path.
     /// Known pubkeys as 4-chunk U64 representations.
     #[allow(dead_code)]
     pub pubkeys: Vec<ParsedPubkey>,
@@ -587,6 +618,73 @@ pub struct ParsedSpec {
     /// Environment blocks (external state).
     #[allow(dead_code)]
     pub environments: Vec<ParsedEnvironment>,
+
+    /// Interface declarations — callee contracts for CPI. See
+    /// docs/design/spec-composition.md §2. Tier-0 interfaces have no
+    /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
+    pub interfaces: Vec<ParsedInterface>,
+
+    /// Names of `pragma <name> { ... }` blocks that appeared in the spec.
+    /// Used for target inference (`sbpf` → assembly target) and for
+    /// platform-scoped feature flags in backends.
+    pub pragmas: Vec<String>,
+}
+
+impl ParsedSpec {
+    /// True iff the spec declared `pragma <name> { ... }`.
+    pub fn has_pragma(&self, name: &str) -> bool {
+        self.pragmas.iter().any(|p| p == name)
+    }
+
+    /// Target inference: `pragma sbpf` present → assembly target, else
+    /// Quasar/Anchor (the default). Single source of truth.
+    pub fn is_assembly_target(&self) -> bool {
+        self.has_pragma("sbpf")
+    }
+}
+
+/// Callee contract: program ID + per-handler shape (and optional effects).
+/// Downstream consumers (lint, codegen) land in later v2.5 slices, hence
+/// `allow(dead_code)` on fields without readers yet.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedInterface {
+    pub name: String,
+    pub doc: Option<String>,
+    pub program_id: Option<String>,
+    pub upstream: Option<ParsedUpstream>,
+    pub handlers: Vec<ParsedInterfaceHandler>,
+}
+
+/// Upstream version pin for a library interface — `binary_hash` is
+/// authoritative; the rest is informational. `verified_with` lists only
+/// backends that were actually run; `"lean"` appears only when the callee is
+/// genuinely proven, not axiomatized.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedUpstream {
+    pub package: Option<String>,
+    pub version: Option<String>,
+    pub source: Option<String>,
+    pub binary_hash: Option<String>,
+    pub idl_hash: Option<String>,
+    pub verified_with: Vec<String>,
+    pub verified_at: Option<String>,
+}
+
+/// One handler inside an interface block. The `requires`/`ensures` vectors
+/// are empty for Tier-0 (shape-only) interfaces. Populated for Tier-1
+/// (hand-authored) and Tier-2 (imported) interfaces.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedInterfaceHandler {
+    pub name: String,
+    pub doc: Option<String>,
+    pub params: Vec<(String, String)>,
+    pub discriminant: Option<String>,
+    pub accounts: Vec<ParsedHandlerAccount>,
+    pub requires: Vec<ParsedRequires>,
+    pub ensures: Vec<ParsedEnsures>,
 }
 
 /// Check spec coverage: which properties have proofs, which have sorry, which are missing.
@@ -627,9 +725,23 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
     Ok(results)
 }
 
-/// Parse a spec file from disk. Only .qedspec format is supported.
-/// Uses chumsky for parsing + a typed AST → ParsedSpec adapter.
+/// Parse a spec from disk. Only .qedspec format is supported.
+///
+/// `path` may be either:
+///   - a single `.qedspec` file (original behaviour), or
+///   - a directory containing one or more `.qedspec` files. Every file in the
+///     directory (recursively) must declare the same `spec Name`; their top
+///     items are merged in alphabetically-sorted source-path order.
+///
+/// The multi-file form is convention-based: no new grammar, no `import`/
+/// `module` keywords. A program's spec is simply spread across files that all
+/// start with `spec <Name>`. Fragments live naturally under `handlers/`,
+/// `properties/`, etc.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
+    if path.is_dir() {
+        return parse_spec_dir(path);
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext != "qedspec" {
         anyhow::bail!(
@@ -647,9 +759,113 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             .map(|e| format!("  {:?}", e))
             .collect::<Vec<_>>()
             .join("\n");
-        anyhow::anyhow!("parse error:\n{}", msg)
+        anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
     })?;
     Ok(crate::chumsky_adapter::adapt(&typed))
+}
+
+/// Load every `.qedspec` file under `dir` (recursively), parse each, validate
+/// they all declare the same `spec Name`, and merge their top items into a
+/// single typed AST. Files are visited in alphabetically-sorted path order so
+/// the resulting `ParsedSpec` — and every artifact downstream of it — is
+/// deterministic.
+fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
+    let mut files = Vec::new();
+    collect_qedspec_files(dir, &mut files)?;
+    files.sort();
+
+    anyhow::ensure!(
+        !files.is_empty(),
+        "no .qedspec files found under {}",
+        dir.display()
+    );
+
+    let mut merged_name: Option<String> = None;
+    let mut merged_items: Vec<crate::ast::Node<crate::ast::TopItem>> = Vec::new();
+
+    for file in &files {
+        let src =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(|e| format!("  {:?}", e))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!("parse error in {}:\n{}", file.display(), msg)
+        })?;
+
+        match &merged_name {
+            None => merged_name = Some(typed.name.clone()),
+            Some(existing) if existing != &typed.name => {
+                anyhow::bail!(
+                    "spec name mismatch in {}: declared `spec {}`, but a sibling \
+                     file declares `spec {}`. Every .qedspec fragment in a \
+                     multi-file spec directory must declare the same name.",
+                    file.display(),
+                    typed.name,
+                    existing,
+                );
+            }
+            _ => {}
+        }
+
+        merged_items.extend(typed.items);
+    }
+
+    let merged = crate::ast::Spec {
+        name: merged_name.expect("non-empty files implies non-empty name"),
+        items: merged_items,
+    };
+    Ok(crate::chumsky_adapter::adapt(&merged))
+}
+
+/// Read the source text of a spec path — single file or directory of
+/// fragments — as one contiguous string, joining fragments in the same
+/// sorted-path order the loader uses. Consumers that scan the raw text
+/// (e.g. `spec_hash_for_handler`) must go through this helper so the hash
+/// they compute is identical to what the proc-macro will compute at compile
+/// time.
+pub fn read_spec_source(path: &Path) -> Result<String> {
+    if path.is_dir() {
+        let mut files = Vec::new();
+        collect_qedspec_files(path, &mut files)?;
+        files.sort();
+        let mut out = String::new();
+        for f in &files {
+            let src =
+                std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            out.push_str(&src);
+            if !src.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        Ok(out)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    }
+}
+
+/// Recursive collector for `.qedspec` files under a directory, depth-first.
+/// Silently skips non-UTF8 paths (pathologically rare in a source tree).
+fn collect_qedspec_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading dir {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("stat {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_qedspec_files(&path, out)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("qedspec")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Generate the full list of expected properties with intent descriptions.
@@ -1997,8 +2213,87 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Validate new-DSL constructs: Map[N] T fields, subscripted effect LHS.
     warnings.extend(check_map_and_subscript(spec));
 
+    // CPI tier lint: call sites whose target is Tier 0 (no ensures declared)
+    // get flagged so users see the gap between "my Rust compiles" and "my
+    // program is verified." See docs/design/spec-composition.md §2.
+    warnings.extend(check_shape_only_cpi(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
+
+    warnings
+}
+
+/// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
+/// sites whose target declares no `ensures`. The call still generates a real
+/// Rust CPI builder; the lint simply makes the proof-side gap explicit so
+/// nobody mistakes a compiling CPI for a verified one.
+fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+
+    for handler in &spec.handlers {
+        for call in &handler.calls {
+            let iface = spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface);
+            let target_handler =
+                iface.and_then(|i| i.handlers.iter().find(|h| h.name == call.target_handler));
+
+            let (reason, fix) = match (iface, target_handler) {
+                (None, _) => (
+                    format!(
+                        "interface `{}` is not declared in this spec — the call compiles but has no contract",
+                        call.target_interface
+                    ),
+                    format!(
+                        "Declare `interface {} {{ ... }}` at the top level, or `qedgen interface --idl <path>` to scaffold one.",
+                        call.target_interface
+                    ),
+                ),
+                (Some(_), None) => (
+                    format!(
+                        "interface `{}` has no handler named `{}` — check for a typo or add the handler",
+                        call.target_interface, call.target_handler
+                    ),
+                    format!(
+                        "Add `handler {}` inside `interface {} {{ ... }}`, or update the call site to match a real handler.",
+                        call.target_handler, call.target_interface
+                    ),
+                ),
+                (Some(_), Some(h)) if h.ensures.is_empty() => (
+                    format!(
+                        "`{}.{}` declares shape only (no `ensures`) — the call has no post-state assumptions for proofs",
+                        call.target_interface, call.target_handler
+                    ),
+                    format!(
+                        "Upgrade to Tier 1 by declaring `ensures` on `{}` inside `interface {}`, or import a qedspec for full verification.",
+                        call.target_handler, call.target_interface
+                    ),
+                ),
+                // Tier 1/2 target — nothing to lint.
+                _ => continue,
+            };
+
+            warnings.push(CompletenessWarning {
+                rule: "shape_only_cpi".to_string(),
+                severity: Severity::Info,
+                priority: 3,
+                message: format!(
+                    "handler '{}' calls `{}.{}` — {}",
+                    handler.name, call.target_interface, call.target_handler, reason
+                ),
+                subject: Some(handler.name.clone()),
+                fix,
+                example: Some(format!(
+                    "  interface {} {{\n    handler {} (...) {{\n      ensures /* what the callee guarantees */\n    }}\n  }}",
+                    call.target_interface, call.target_handler
+                )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
 
     warnings
 }
@@ -2673,6 +2968,7 @@ mod tests {
             emits: vec![],
             invariants: vec![],
             properties: vec![],
+            calls: vec![],
         }
     }
 
@@ -3305,6 +3601,372 @@ mod tests {
                 .iter()
                 .filter(|w| w.rule == "write_without_read")
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Multi-file spec loader
+    // ──────────────────────────────────────────────────────────────────────
+
+    const SPEC_ROOT: &str = r#"
+spec Demo
+
+type State
+  | Active of { count : U64 }
+"#;
+
+    const SPEC_INC: &str = r#"
+spec Demo
+
+/// Increments count
+handler inc (x : U64) : State.Active -> State.Active {
+  effect { count += x }
+}
+"#;
+
+    const SPEC_DEC: &str = r#"
+spec Demo
+
+handler dec (x : U64) : State.Active -> State.Active {
+  effect { count -= x }
+}
+"#;
+
+    #[test]
+    fn multi_file_spec_merges_handlers_across_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("demo.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::create_dir_all(dir.path().join("handlers")).unwrap();
+        std::fs::write(dir.path().join("handlers/inc.qedspec"), SPEC_INC).unwrap();
+        std::fs::write(dir.path().join("handlers/dec.qedspec"), SPEC_DEC).unwrap();
+
+        let parsed = parse_spec_file(dir.path()).unwrap();
+        assert_eq!(parsed.program_name, "Demo");
+        let names: Vec<_> = parsed.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"inc"), "got handlers: {:?}", names);
+        assert!(names.contains(&"dec"), "got handlers: {:?}", names);
+    }
+
+    #[test]
+    fn multi_file_spec_rejects_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(
+            dir.path().join("b.qedspec"),
+            "spec Other\n\nhandler noop : State.Active -> State.Active { effect {} }\n",
+        )
+        .unwrap();
+
+        let err = parse_spec_file(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("spec name mismatch"),
+            "expected name-mismatch error, got: {err}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Interface adapter round-trip (v2.5 slice 1)
+    // ──────────────────────────────────────────────────────────────────────
+
+    // ──────────────────────────────────────────────────────────────────────
+    // [shape_only_cpi] lint (v2.5 slice 4)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn shape_only_cpi_fires_on_tier0_interface() {
+        // Interface declared with no ensures — classic Tier-0. Should lint.
+        let src = r#"spec Demo
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected one shape_only_cpi warning, got {:?}",
+            ws
+        );
+        assert!(hits[0].message.contains("shape only"));
+    }
+
+    #[test]
+    fn shape_only_cpi_fires_on_undeclared_interface() {
+        let src = r#"spec Demo
+
+handler pay : State.A -> State.A {
+  call Jupiter.swap(pool = amm, amount_in = 100, min_out = 90)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected one shape_only_cpi warning, got {:?}",
+            ws
+        );
+        assert!(hits[0].message.contains("not declared"));
+    }
+
+    #[test]
+    fn shape_only_cpi_silent_on_tier1_interface() {
+        // Interface declares at least one ensures — no lint should fire.
+        let src = r#"spec Demo
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let ws = check_completeness(&parsed);
+        let hits: Vec<_> = ws.iter().filter(|w| w.rule == "shape_only_cpi").collect();
+        assert!(
+            hits.is_empty(),
+            "Tier 1 interfaces should not lint, got: {:?}",
+            hits
+        );
+    }
+
+    #[test]
+    fn call_clause_populates_handler_calls() {
+        let src = r#"spec Demo
+
+handler exchange : State.A -> State.B {
+  call Token.transfer(from = taker_ta, to = initializer_ta, amount = taker_amount)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.calls.len(), 1);
+        let c = &handler.calls[0];
+        assert_eq!(c.target_interface, "Token");
+        assert_eq!(c.target_handler, "transfer");
+        assert_eq!(c.args.len(), 3);
+        assert_eq!(c.args[0].name, "from");
+        assert_eq!(c.args[2].name, "amount");
+        // Args carry both renderings so backends can pick the form they want.
+        assert!(!c.args[0].rust_expr.is_empty());
+        assert!(!c.args[0].lean_expr.is_empty());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // pragma sbpf { ... } adaptation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pragma_sbpf_unpacks_inner_items() {
+        let src = r#"spec Transfer
+
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [6, 221, 246, 225]
+
+  instruction transfer {
+    discriminant 3
+    entry 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "transfer");
+    }
+
+    #[test]
+    fn pragma_body_adapts_into_standard_parsed_spec_fields() {
+        // Items wrapped in `pragma sbpf { ... }` must land in the same
+        // ParsedSpec fields downstream consumers already read — pubkeys,
+        // instructions, etc. The pragma is a grammatical namespace, not
+        // a new parallel tree.
+        let src = r#"spec T
+
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+
+  instruction foo {
+    discriminant 1
+    entry 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert!(parsed.has_pragma("sbpf"));
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "foo");
+    }
+
+    #[test]
+    fn top_level_sbpf_items_now_rejected() {
+        // Platform-specifics (pubkey, instruction, assembly) used to parse
+        // at the top level; v2.5 moves them behind `pragma sbpf { ... }`.
+        // The grammar enforces the discipline so a spec can't quietly mix
+        // them into the core surface.
+        let src = r#"spec T
+
+pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+"#;
+        assert!(
+            crate::chumsky_adapter::parse_str(src).is_err(),
+            "top-level `pubkey` should no longer parse"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // ML syntax — let...in in expressions (v2.5)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn let_in_renders_to_lean_and_rust() {
+        let src = r#"spec T
+type State | A of { balance : U64 }
+
+handler h (amount : U64) : State.A -> State.A {
+  ensures let delta = old(state.balance) - state.balance in delta == amount
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.ensures.len(), 1);
+        let e = &handler.ensures[0];
+        // Lean form uses Lean's let-binding syntax.
+        assert!(
+            e.lean_expr.contains("let delta :="),
+            "expected Lean let-binding, got: {}",
+            e.lean_expr
+        );
+        // Rust form lowers to a block expression.
+        assert!(
+            e.rust_expr.contains("let delta ="),
+            "expected Rust let-in-block, got: {}",
+            e.rust_expr
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Smoke test — items 1 (match) and 2 (ctors) already in the grammar.
+    // Confirms the claim in the v2.5 report.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ml_match_and_ctor_already_parse() {
+        let src = r#"spec T
+type State | Active of { count : U64 } | Closed
+
+handler inspect : State.Active -> State.Active {
+  ensures
+    match state with
+    | Active a => a.count >= 0
+    | Closed => true
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.handlers.len(), 1);
+        assert_eq!(parsed.handlers[0].ensures.len(), 1);
+        // The rendered form should reference both variants.
+        let lean = &parsed.handlers[0].ensures[0].lean_expr;
+        assert!(lean.contains("Active"), "got: {}", lean);
+        assert!(lean.contains("Closed"), "got: {}", lean);
+    }
+
+    #[test]
+    fn interface_block_populates_parsed_spec() {
+        let src = r#"spec Escrow
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:abc"
+    verified_with ["proptest", "kani"]
+    verified_at  "2026-04-18"
+  }
+
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.interfaces.len(), 1);
+        let i = &parsed.interfaces[0];
+        assert_eq!(i.name, "Token");
+        assert_eq!(
+            i.program_id.as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
+
+        let u = i.upstream.as_ref().expect("upstream present");
+        assert_eq!(u.binary_hash.as_deref(), Some("sha256:abc"));
+        // Lean absent by design — no overclaiming.
+        assert!(!u.verified_with.contains(&"lean".to_string()));
+
+        assert_eq!(i.handlers.len(), 1);
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "transfer");
+        assert_eq!(h.params, vec![("amount".to_string(), "U64".to_string())]);
+        assert_eq!(h.accounts.len(), 3);
+        assert_eq!(h.requires.len(), 1);
+        assert_eq!(h.ensures.len(), 1);
+    }
+
+    #[test]
+    fn multi_file_spec_source_matches_single_file_concat() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(dir.path().join("2.qedspec"), SPEC_INC).unwrap();
+
+        // read_spec_source must emit fragments in sorted-path order so
+        // spec_hash_for_handler finds handler bodies regardless of which
+        // fragment they live in.
+        let src = read_spec_source(dir.path()).unwrap();
+        assert!(
+            src.contains("type State"),
+            "root fragment missing in merged source"
+        );
+        assert!(
+            src.contains("handler inc"),
+            "handler fragment missing in merged source"
         );
     }
 }

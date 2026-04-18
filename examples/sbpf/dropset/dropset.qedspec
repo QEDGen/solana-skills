@@ -17,7 +17,7 @@
 
 spec Dropset
 
-target assembly
+pragma sbpf {}
 
 type State
   | Uninitialized

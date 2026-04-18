@@ -26,20 +26,34 @@ QEDGEN="$HOME/.agents/skills/qedgen/tools/qedgen"
 The `.qedspec` is the **single source of truth** — the only artifact committed to the user's repo. Everything else (proptests, Lean theorems, generated code) is derived and disposable.
 
 ```
-Two phases:
+Three phases:
 
 Phase 1 — Spec Design (interactive, all artifacts transient)
   You + User ──→ iterate on .qedspec
     ├── Lint         — structural validation           (instant)
     ├── Proptest     — random counterexamples           (~100ms)
     └── lean-gen     — type-level provability check     (~seconds)
+  Mindset: declarative intent. Write what must be true, not how to prove it.
   Deliverable: .qedspec (committed)
+  Covered in: Step 1–3 below.
 
 Phase 2 — Proof Engineering (on demand, formal certificates)
   .qedspec ──→ Spec.lean ──→ Lean proofs ──→ lake build
     ├── Leanstral    — fast sorry-filling               (seconds)
     └── Aristotle    — deep agentic proof search         (minutes-hours)
+  Mindset: tactical. Read Lean errors, select proof patterns, route hard
+  sub-goals to the right backend. Switch references/proof-patterns.md
+  and references/sbpf.md into active context.
   Deliverable: zero-sorry Lean project + #[qed(verified)] stamps
+  Covered in: Step 4 below.
+
+Phase 3 — Audit / drift maintenance (ongoing, post-ship)
+  Verified code ──→ `qedgen reconcile` ──→ drift report
+    ├── spec_hash mismatch       — handler body drifted from spec
+    ├── orphan / missing theorem — Lean proofs out of sync with spec
+    └── upstream_binary_hash     — library interface (SPL Token, …) moved
+  Mindset: skeptical review. Read-mostly, verify claims, flag gaps.
+  Deliverable: no unresolved drift; verified artifacts remain trustworthy.
 
 Spec-driven pipeline (all generated from the same .qedspec):
   qedspec ──→ Proptest harnesses    (transient, /tmp)
@@ -48,6 +62,10 @@ Spec-driven pipeline (all generated from the same .qedspec):
           ──→ Quasar Rust program   (generated)
           ──→ Unit + integration tests (generated)
 ```
+
+Phase boundaries are meaningful: each phase has a distinct mindset,
+distinct tooling focus, and a distinct reference pack. When transitioning,
+load only the references relevant to the new phase — keep context tight.
 
 ## Step 1: Understand the program
 
@@ -75,11 +93,11 @@ For native Rust programs without an IDL (no Anchor/Quasar), use LSP and source r
 
 3. **Find account validation** — In each handler, identify which accounts are checked for `is_signer`, which are writable, and any PDA derivations (`Pubkey::find_program_address`). These map to `context {}` entries with `Signer`, `mut`, `seeds()`, `bump`.
 
-4. **Find guards** — Look for early-return error checks (`if !condition { return Err(...) }`). These become `guard` clauses. Map error codes to an `errors [...]` block.
+4. **Find guards** — Look for early-return error checks (`if !condition { return Err(...) }`). These become `guard` clauses. Map error codes to a top-level `type Error | Name | ...` ADT. (The `errors [...]` list-sugar is v2.5-restricted to inside `pragma sbpf { ... }`.)
 
 5. **Find state mutations** — Track which fields are modified in each handler. These become `effect {}` blocks (`field = value`, `field += value`, `field -= value`).
 
-6. **Find CPI calls** — Look for `invoke` or `invoke_signed`. These become `calls` clauses with the target program, discriminator, and account list.
+6. **Find CPI calls** — Look for `invoke` or `invoke_signed`. Declare the callee's contract as an `interface Name { ... }` block (program_id, handler discriminant, accounts, optional `ensures`), then write `call Name.handler(name = expr, ...)` at each invocation site. For Anchor/SPL Token programs, use `qedgen interface --idl target/idl/<program>.json --out interfaces/<program>.qedspec` to scaffold a Tier-0 interface. See `interfaces/spl_token.qedspec` for the canonical SPL Token Tier-1 interface.
 
 7. **Infer lifecycle** — If there's an init handler that creates the account and a close/cancel handler that closes it, use `lifecycle [Uninitialized, Active, Closed]`. Map each handler to `when`/`then` transitions.
 
@@ -134,7 +152,14 @@ The spec design phase is an **interactive loop**. You iterate on the `.qedspec` 
 
 ### 3a. Write the initial .qedspec
 
-Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. For sBPF assembly programs, use `qedguards` instead.
+Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. Key v2.5 constructs:
+
+- **`pragma sbpf { ... }`** wraps sBPF-specific declarations (`instruction`, `pubkey`, per-instruction `errors`). The pragma's presence also selects the assembly target — no explicit `target` keyword.
+- **`interface Name { ... }` + `call Name.handler(...)`** declare CPI contracts. Generate Tier-0 scaffolds from Anchor IDLs with `qedgen interface --idl target/idl/<program>.json`. Tier-1 (hand-authored `ensures`) strengthens the caller's Lean proof.
+- **Multi-file specs** — `qedgen check --spec <dir>` accepts a directory of `.qedspec` fragments all declaring the same `spec Name`. Merged in sorted-path order. See `examples/rust/escrow-split/` for the convention.
+- **`let x = v in body`** — ML-style expression binding inside `ensures`/`requires`/effect RHS. Use when naming a computed quantity makes the post-condition clearer: `ensures let delta = old(state.balance) - state.balance in delta == amount`.
+
+For sBPF assembly programs, use `qedguards` instead of the core DSL for guard/property bodies.
 
 Present the spec to the user and get confirmation before proceeding to validation.
 
@@ -223,18 +248,24 @@ Not every project needs this. The `.qedspec` alone (validated by lint + proptest
 ### 4a. Set up the Lean project
 
 ```bash
-# Anchor/Rust project
-$QEDGEN init --name escrow
+# Anchor/Rust project — --spec pins the authored qedspec location in .qed/config.json
+$QEDGEN init --name escrow --spec escrow.qedspec
 
 # sBPF project (runs asm2lean automatically)
-$QEDGEN init --name dropset --asm src/dropset.s
+$QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 
 # With Mathlib (for u128 arithmetic helpers)
-$QEDGEN init --name engine --mathlib
+$QEDGEN init --name engine --spec engine.qedspec --mathlib
 
 # With Quasar codegen pipeline
-$QEDGEN init --name counter --quasar
+$QEDGEN init --name counter --spec counter.qedspec --quasar
 ```
+
+After init, subsequent commands find the spec automatically by walking up
+from the current directory to the nearest `.qed/config.json` — no
+`--spec <path>` needed on `qedgen check` or `qedgen codegen` from inside
+the project. Explicit `--spec` still overrides when you want to point at
+something different.
 
 Generated structure:
 ```
@@ -502,6 +533,33 @@ environment oracle_update {
 **Auto-overflow** — operations with `add` effects automatically generate overflow safety obligations in both Lean and Kani.
 
 **`qedgen check --coverage`** — prints a verification matrix (operations × properties) showing coverage gaps.
+
+### v2.5 spec features
+
+**`pragma <name> { ... }`** — platform-specific namespace. sBPF constructs
+(`instruction`, `pubkey`, list-form `errors`) are pragma-only; they won't
+parse at the top level. `pragma sbpf { ... }` also selects the assembly
+target (no explicit `target` keyword — that was removed in v2.5).
+
+**`interface Name { ... }` + `call Target.handler(name = expr, ...)`** —
+declarative CPI contracts. Three tiers: shape-only (Tier 0, from IDL),
+hand-authored `ensures` (Tier 1, e.g. SPL Token library at
+`interfaces/spl_token.qedspec`), and imported qedspec (Tier 2, v2.6+).
+`qedgen check` emits `[shape_only_cpi]` for calls to Tier-0 interfaces —
+the visible gap between "my Rust compiles" and "my program is verified."
+
+**`qedgen interface --idl <path>`** — scaffold a Tier-0 interface from an
+Anchor IDL. Honest output: no `ensures` (IDL doesn't carry semantics),
+TODO-stubbed `upstream` block (author fills in after running harnesses
+against the deployed program).
+
+**Multi-file specs** — `qedgen check --spec <dir>` accepts a directory of
+fragments. Every `.qedspec` under the path must declare the same `spec
+Name`; items merge in sorted-path order. Convention: `state.qedspec`,
+`handlers/<name>.qedspec`, `properties.qedspec`, `interfaces/*.qedspec`.
+
+**`let x = v in body`** — ML-style expression binding inside
+`ensures`/`requires`/effect RHS. Lowers to Lean's `let x := v; body`.
 
 See `references/qedspec-dsl.md` for full syntax reference.
 

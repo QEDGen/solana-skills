@@ -1,0 +1,31 @@
+spec Escrow
+
+/// Taker completes the trade by sending their tokens
+handler exchange : State.Open -> State.Closed {
+  auth taker
+
+  accounts {
+    taker          : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    initializer_ta : writable, type token
+    taker_ta       : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+  }
+
+  call Token.transfer(
+    from      = taker_ta,
+    to        = initializer_ta,
+    amount    = taker_amount,
+    authority = taker,
+  )
+
+  call Token.transfer(
+    from      = escrow_ta,
+    to        = taker_ta,
+    amount    = initializer_amount,
+    authority = escrow,
+  )
+
+  emits EscrowExchanged
+}

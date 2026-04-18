@@ -1,16 +1,34 @@
 # qedspec DSL Reference
 
 The `.qedspec` file is the single source of truth for a program's formal
-specification. QEDGen parses it (chumsky parser, as of v2.3), validates it
-(`qedgen check`), and generates all downstream artifacts: Quasar Rust code,
-Lean proofs, Kani harnesses, proptest suites, CI workflows, and the
+specification. QEDGen parses it (chumsky parser), validates it (`qedgen
+check`), and generates all downstream artifacts: Quasar Rust code, Lean
+proofs, Kani harnesses, proptest suites, CI workflows, and the
 `#[qed(verified, spec, handler, spec_hash)]` drift attributes that tie
 generated code back to the spec.
 
-This reference covers the current (v2.3) grammar. Where the parser emits a
+This reference covers the current (v2.5) grammar. Where the parser emits a
 specific AST node shape that influences codegen (match, constructors, record
 updates, `mul_div_*`), the node name is called out so you can follow the
 transform into the Lean/Rust backends.
+
+## What changed in v2.5
+
+- **`pragma <name> { ... }`** — platform-specific namespace. sBPF-specific
+  constructs (`instruction`, `pubkey`, top-level `errors [...]`) now live
+  only inside `pragma sbpf { ... }`. See *Pragmas* below.
+- **`target` keyword removed.** Target is inferred from pragma presence —
+  `pragma sbpf` → assembly target, absent → Quasar/Anchor (the default).
+- **`assembly "..."` keyword removed.** Assembly source path is tooling
+  config, not spec intent — pass `qedgen asm2lean --input <path>` or use
+  the convention of `src/program.s` next to the spec.
+- **`interface Name { ... }` + `call Target.handler(...)`** — declarative
+  CPI contracts. See *Interface declarations*.
+- **Multi-file specs.** `parse_spec_file` accepts a directory of `.qedspec`
+  fragments (all declaring the same `spec Name`); fragments are merged
+  deterministically in sorted-path order.
+- **`let x = v in body` in expressions** — ML-style binding inside
+  `ensures` / `requires` / effect RHS.
 
 ## File structure
 
@@ -18,9 +36,7 @@ transform into the Lean/Rust backends.
 spec ProgramName
 
 // Top-level declarations (any order)
-target quasar              // or: target assembly
 program_id "1111...1111"
-assembly "src/program.s"   // sBPF only
 
 const MAX_MEMBERS = 32
 
@@ -28,6 +44,9 @@ type State
   | Uninitialized
   | Active of { authority : Pubkey, balance : U64 }
   | Closed
+
+interface Token { ... }     // callee contracts for CPI
+pragma sbpf { ... }         // platform-specific namespace (opt-in; selects sBPF target)
 
 handler initialize ...
 property conservation ...
@@ -39,6 +58,54 @@ environment oracle { ... }
 
 Comments: `//` line comments, `///` doc comments (attached to the next item).
 
+## Project pinning — `.qed/config.json`
+
+`qedgen init --name <name> --spec <path>` records the authored spec's
+location in `.qed/config.json`:
+
+```json
+{
+  "name": "escrow",
+  "spec": "escrow.qedspec",           // path, relative to the project root
+  "interfaces_dir": ".qed/interfaces" // vendored library interfaces
+}
+```
+
+`qedgen check` / `qedgen codegen` with no `--spec` argument walk upward from
+the current directory, find the nearest `.qed/config.json`, and resolve the
+spec via the `spec` field. Explicit `--spec <path>` still overrides the
+config — useful for scripts or one-off checks against a different spec.
+
+Authored `.qedspec` files stay at the program root (visible, committed,
+user-edited). Tool-managed library interfaces live under
+`.qed/interfaces/` and are dropped there by `qedgen interface --idl
+<path> --vendor`.
+
+## Multi-file specs
+
+`qedgen check --spec <path>` accepts either a single `.qedspec` file or a
+directory of fragments. In directory mode, every `*.qedspec` under the path
+(recursively) is parsed, and all fragments must declare the same `spec
+Name`. Top items are merged in alphabetically-sorted source-path order —
+both the merged `ParsedSpec` and every downstream artifact are
+deterministic.
+
+Convention-based layout (no new grammar required):
+
+```
+my-program/
+  escrow.qedspec            # spec header + types + events + errors
+  handlers/
+    initialize.qedspec      # spec Escrow + handler initialize { ... }
+    exchange.qedspec        # spec Escrow + handler exchange { ... }
+    cancel.qedspec          # spec Escrow + handler cancel { ... }
+  properties.qedspec        # spec Escrow + invariants + covers + liveness
+  interfaces/               # scoped copies of library interfaces
+    token.qedspec           # spec Escrow + interface Token { ... }
+```
+
+See `examples/rust/escrow-split/` for a concrete demo.
+
 ## Top-level declarations
 
 ### `spec`
@@ -49,30 +116,12 @@ Required header. Names the program.
 spec Escrow
 ```
 
-### `target`
-
-Declares the compilation target. Affects which codegen backends and
-sBPF-specific constructs are available.
-
-```
-target quasar       // Anchor/Quasar Rust programs (default)
-target assembly     // sBPF assembly programs
-```
-
 ### `program_id`
 
 On-chain program address.
 
 ```
 program_id "11111111111111111111111111111111"
-```
-
-### `assembly`
-
-Path to the sBPF assembly source (assembly target only).
-
-```
-assembly "src/program.s"
 ```
 
 ### `const`
@@ -82,16 +131,6 @@ Named integer constants. Underscores allowed for readability.
 ```
 const MAX_MEMBERS = 32
 const MAX_VAULT_TVL = 10_000_000_000_000_000
-```
-
-### `pubkey`
-
-Named pubkey as four `U64` chunks (sBPF target). Matches how an sBPF program
-materializes a 32-byte pubkey in registers.
-
-```
-pubkey SYSTEM_PROGRAM_ID [0, 0, 0, 0]
-pubkey RENT_SYSVAR_ID    [0x6a7d51..., 0xb8b9f5..., 0xc01b2f..., 0xb85e22...]
 ```
 
 ## Type system
@@ -207,21 +246,27 @@ event PoolInitialized { authority : Pubkey, rate : U64 }
 event Deposited       { depositor : Pubkey, amount : U64 }
 ```
 
-## Error declarations (sugar)
+## Error declarations
 
-`errors [...]` is a legacy sugar for a flat error list. Prefer
-`type Error | ...`; both desugar to the same internal representation.
+At the top level, declare errors with `type Error | Variant | ...`:
 
 ```
-// Simple list
-errors [Unauthorized, InvalidAmount, AlreadyClosed]
-
-// Valued list (sBPF compat)
-errors [
-  InvalidAccountCount  = 1 "Invalid number of accounts",
-  InsufficientLamports = 7 "Sender has insufficient lamports",
-]
+type Error
+  | Unauthorized
+  | InvalidAmount
+  | AlreadyClosed
 ```
+
+Valued form (with codes + descriptions) uses the same ADT syntax:
+
+```
+type Error
+  | InvalidAccountCount  = 1 "Invalid number of accounts"
+  | InsufficientLamports = 7 "Sender has insufficient lamports"
+```
+
+The `errors [ ... ]` list-sugar is v2.5-restricted to inside `pragma sbpf
+{ ... }` — see the sBPF section.
 
 ## Handlers
 
@@ -432,6 +477,11 @@ sum i : AccountIdx, state.accounts[i].capital
 
 // Parenthesized
 (amount + fee) * rate
+
+// Let-in binding — derive a value once, reference it by name.
+// Lowers to Lean's `let x := v; body`, Rust `{ let x = v; body }`.
+// Useful in ensures to name the quantity you're asserting about:
+ensures let delta = old(state.balance) - state.balance in delta == amount
 ```
 
 ### Constructors, record literals, record updates
@@ -600,17 +650,102 @@ environment interest_rate_change {
 }
 ```
 
-## sBPF-specific constructs
+## Pragmas
 
-For `target assembly` specs, additional top-level blocks model sBPF program
-structure. See `examples/sbpf/dropset/dropset.qedspec` for a comprehensive
-example that combines most of them.
-
-### `target assembly` and `assembly "path"`
+`pragma <name> { <items> }` wraps platform-specific declarations in a named
+namespace. Pragmas keep the core DSL platform-agnostic: constructs that only
+make sense for one target live inside their pragma block, not at the top
+level.
 
 ```
-target assembly
-assembly "src/dropset.s"
+pragma sbpf { ... }    // sBPF assembly programs
+```
+
+The presence of `pragma sbpf` also selects the assembly target — no explicit
+`target` keyword needed. Absent → Quasar/Anchor (the default).
+
+Body whitelist for `pragma sbpf`: `const`, `pubkey`, `instruction`, `errors`.
+Core DSL items (`handler`, `type`, `property`, `invariant`, `interface`, …)
+stay at the top level.
+
+## Interface declarations
+
+Contracts for programs you CPI into. Uniform surface across three tiers:
+
+- **Tier 0** — shape only: `program_id`, handler discriminant, accounts, args.
+  Generated by `qedgen interface --idl target/idl/program.json`.
+- **Tier 1** — hand-authored `requires` / `ensures` on handlers. The caller's
+  Lean proof gets real hypotheses at each `call` site.
+- **Tier 2** — the interface is a real imported `.qedspec` (v2.6+). No
+  `interface` keyword needed — every handler in the imported spec is public.
+
+```
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package       "spl-token"
+    version       "4.0.3"
+    binary_hash   "sha256:..."      // deployed .so, authoritative
+    verified_with ["proptest", "kani"]  // honest — "lean" only when proven
+    verified_at   "2026-04-18"
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+```
+
+See `docs/design/spec-composition.md` §2 for the tier model and
+`interfaces/spl_token.qedspec` for the canonical SPL Token interface.
+
+### `call Target.handler(name = expr, ...)` clause
+
+Inside a handler body, a `call` is a terminal statement — the uniform CPI
+surface. Not an expression, not nestable.
+
+```
+handler exchange : State.Open -> State.Closed {
+  call Token.transfer(
+    from      = taker_ta,
+    to        = initializer_ta,
+    amount    = taker_amount,
+    authority = taker,
+  )
+  emits EscrowExchanged
+}
+```
+
+`qedgen check` emits `[shape_only_cpi]` on calls whose target declares no
+`ensures` — the visible gap between "my Rust compiles" and "my program is
+verified."
+
+## sBPF-specific constructs (inside `pragma sbpf { ... }`)
+
+Everything in this section lives inside `pragma sbpf { ... }`. The pragma
+wrapping is mandatory in v2.5; the grammar rejects these items at the top
+level. See `examples/sbpf/dropset/dropset.qedspec` for a full example.
+
+```
+pragma sbpf {
+  pubkey SYSTEM_PROGRAM_ID [0, 0, 0, 0]
+  pubkey RENT_SYSVAR_ID    [0x6a7d51..., 0xb8b9f5..., 0xc01b2f..., 0xb85e22...]
+
+  errors [
+    InvalidDiscriminant        = 1  "Discriminant is not REGISTER_MARKET",
+    InvalidInstructionLength   = 2  "Instruction data is not 1 byte",
+  ]
+
+  instruction register_market { ... }
+}
 ```
 
 ### `pubkey NAME [u64, u64, u64, u64]`
@@ -618,23 +753,11 @@ assembly "src/dropset.s"
 32-byte pubkeys as four `U64` chunks — the form the sBPF program will compare
 against in registers.
 
-```
-pubkey SYSTEM_PROGRAM_ID [0, 0, 0, 0]
-pubkey RENT_SYSVAR_ID    [0x6a7d51..., 0xb8b9f5..., 0xc01b2f..., 0xb85e22...]
-```
-
 ### `errors [ NAME = CODE "msg", ... ]`
 
-Top-level error list used for exit-code reasoning in sBPF properties. Equivalent
-to the Rust-side `type Error | ...`.
-
-```
-errors [
-  InvalidDiscriminant        = 1  "Discriminant is not REGISTER_MARKET",
-  InvalidInstructionLength   = 2  "Instruction data is not 1 byte",
-  InvalidNumberOfAccounts    = 3  "Fewer than 10 accounts provided",
-]
-```
+Error list used for exit-code reasoning in sBPF properties. Anchor-style
+programs use `type Error | ...` at the top level instead — this sugar is
+sBPF-only.
 
 ### `instruction NAME { ... }` block
 

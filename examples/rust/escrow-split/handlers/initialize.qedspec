@@ -1,0 +1,32 @@
+spec Escrow
+
+/// Initializer deposits tokens and opens the escrow
+handler initialize (deposit_amount : U64) (receive_amount : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    mint           : readonly
+    initializer_ta : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+    system_program : program
+  }
+
+  requires deposit_amount > 0 and receive_amount > 0 else InvalidAmount
+
+  effect {
+    initializer_amount := deposit_amount
+    taker_amount := receive_amount
+  }
+
+  call Token.transfer(
+    from      = initializer_ta,
+    to        = escrow_ta,
+    amount    = deposit_amount,
+    authority = initializer,
+  )
+
+  emits EscrowInitialized
+}

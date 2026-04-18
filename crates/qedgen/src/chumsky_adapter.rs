@@ -12,10 +12,12 @@
 
 use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
-    FlowKind, ParsedAccountType, ParsedCover, ParsedEnsures, ParsedEnvironment, ParsedErrorCode,
-    ParsedEvent, ParsedGuard, ParsedHandler, ParsedHandlerAccount, ParsedInstruction,
+    FlowKind, ParsedAccountType, ParsedCall, ParsedCallArg, ParsedCover, ParsedEnsures,
+    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
+    ParsedHandlerAccount, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
     ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
-    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedVariant, SbpfPropertyKind,
+    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedUpstream, ParsedVariant,
+    SbpfPropertyKind,
 };
 
 // ============================================================================
@@ -261,6 +263,9 @@ impl<'a> TypeEnv<'a> {
             Expr::App { .. } => Kind::Other,
             // Postfix field access — abstract, treat as Other.
             Expr::Field { .. } => Kind::Other,
+            // `let x = v in body` — kind follows the body (the let is
+            // transparent from the caller's perspective).
+            Expr::Let { body, .. } => self.infer(&body.node),
         }
     }
 }
@@ -456,6 +461,16 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
         Expr::Field { base, field } => {
             let base_str = expr_to_lean(&base.node, ctx, consts, env);
             format!("({}).{}", base_str, field)
+        }
+        Expr::Let { name, value, body } => {
+            // Lean's `let x := v; body` is semicolon-separated inside a
+            // tactic-free term position, which is what ensures/requires give us.
+            format!(
+                "(let {} := {}; {})",
+                name,
+                expr_to_lean(&value.node, ctx, consts, env),
+                expr_to_lean(&body.node, ctx, consts, env)
+            )
         }
     }
 }
@@ -741,6 +756,16 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
         Expr::Field { base, field } => {
             let base_str = expr_to_rust(&base.node, ctx, consts);
             format!("{}.{}", base_str, field)
+        }
+        Expr::Let { name, value, body } => {
+            // Rust lowers a let-in expression to a block. Parentheses are
+            // safe around the block for embedding in larger expressions.
+            format!(
+                "({{ let {} = {}; {} }})",
+                name,
+                expr_to_rust(&value.node, ctx, consts),
+                expr_to_rust(&body.node, ctx, consts)
+            )
         }
     }
 }
@@ -1393,14 +1418,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.type_aliases
                     .push((ta.name.clone(), type_ref_to_string(&ta.target)));
             }
-            TopItem::Target(t) => {
-                out.target = Some(t.clone());
-            }
             TopItem::ProgramId(pid) => {
                 out.program_id = Some(pid.clone());
-            }
-            TopItem::Assembly(path) => {
-                out.assembly_path = Some(path.clone());
             }
             TopItem::Pubkey(p) => {
                 out.pubkeys.push(ParsedPubkey {
@@ -1450,6 +1469,51 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     constraints: constraints_lean,
                     constraints_rust,
                 });
+            }
+            TopItem::Interface(iface) => {
+                out.interfaces.push(adapt_interface(iface, consts, &env));
+            }
+            TopItem::Pragma(p) => {
+                // Record the pragma name for target inference. Any given
+                // pragma may appear at most once per spec; duplicates are
+                // flagged at lint time, not here.
+                out.pragmas.push(p.name.clone());
+
+                // Inline-adapt each nested item. The parser restricts pragma
+                // bodies to a whitelist (const/pubkey/assembly/instruction/
+                // errors), so only those cases matter.
+                for Node { node: inner, .. } in &p.items {
+                    match inner {
+                        TopItem::Const { name, value } => {
+                            constants.push((name.clone(), value.to_string()));
+                        }
+                        TopItem::Pubkey(pk) => {
+                            out.pubkeys.push(ParsedPubkey {
+                                name: pk.name.clone(),
+                                chunks: pk.chunks.iter().map(|c| c.to_string()).collect(),
+                            });
+                        }
+                        TopItem::Instruction(instr) => {
+                            out.instructions.push(adapt_instruction(instr, consts));
+                        }
+                        TopItem::Errors(entries) => {
+                            for e in entries {
+                                out.error_codes.push(e.name.clone());
+                                if e.code.is_some() || e.description.is_some() {
+                                    out.valued_errors.push(ParsedErrorCode {
+                                        name: e.name.clone(),
+                                        value: e.code,
+                                        description: e.description.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        // Grammar already rejects non-whitelisted items; this
+                        // arm is defensive and silently ignores anything that
+                        // slipped through (would indicate a grammar bug).
+                        _ => {}
+                    }
+                }
             }
         }
     }
@@ -1610,6 +1674,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         emits: Vec::new(),
         invariants: Vec::new(),
         properties: Vec::new(),
+        calls: Vec::new(),
     };
 
     for Node { node: clause, .. } in &h.clauses {
@@ -1721,10 +1786,138 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 // `expand_handler`; this function only builds the shared
                 // base and must ignore the branch clause itself.
             }
+            a::HandlerClause::Call(c) => {
+                // Split `Interface.handler` from the qualified path. Longer
+                // paths (unusual — e.g. nested namespacing) flatten with '.'
+                // into the handler name so the call still records, and the
+                // resolver (slice 4+) can decide what to do.
+                let segs = &c.target.0;
+                let (iface, handler_name) = match segs.as_slice() {
+                    [] => (String::new(), String::new()),
+                    [only] => (String::new(), only.clone()),
+                    [head, tail @ ..] => (head.clone(), tail.join(".")),
+                };
+                let args = c
+                    .args
+                    .iter()
+                    .map(|arg| ParsedCallArg {
+                        name: arg.name.clone(),
+                        lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
+                        rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts),
+                    })
+                    .collect();
+                handler.calls.push(ParsedCall {
+                    target_interface: iface,
+                    target_handler: handler_name,
+                    args,
+                });
+            }
         }
     }
 
     handler
+}
+
+// ----------------------------------------------------------------------------
+// Interface adaptation
+// ----------------------------------------------------------------------------
+
+fn adapt_interface<'a>(
+    iface: &'a a::InterfaceDecl,
+    consts: ConstTable<'a>,
+    env: &TypeEnv<'a>,
+) -> ParsedInterface {
+    let handlers = iface
+        .handlers
+        .iter()
+        .map(|h| adapt_interface_handler(h, consts, env))
+        .collect();
+    ParsedInterface {
+        name: iface.name.clone(),
+        doc: iface.doc.clone(),
+        program_id: iface.program_id.clone(),
+        upstream: iface.upstream.as_ref().map(|u| ParsedUpstream {
+            package: u.package.clone(),
+            version: u.version.clone(),
+            source: u.source.clone(),
+            binary_hash: u.binary_hash.clone(),
+            idl_hash: u.idl_hash.clone(),
+            verified_with: u.verified_with.clone(),
+            verified_at: u.verified_at.clone(),
+        }),
+        handlers,
+    }
+}
+
+fn adapt_interface_handler<'a>(
+    h: &'a a::InterfaceHandlerDecl,
+    consts: ConstTable<'a>,
+    env: &TypeEnv<'a>,
+) -> ParsedInterfaceHandler {
+    let mut out = ParsedInterfaceHandler {
+        name: h.name.clone(),
+        doc: h.doc.clone(),
+        params: h
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+            .collect(),
+        discriminant: None,
+        accounts: Vec::new(),
+        requires: Vec::new(),
+        ensures: Vec::new(),
+    };
+
+    for Node { node: clause, .. } in &h.clauses {
+        match clause {
+            a::InterfaceHandlerClause::Discriminant(s) => {
+                out.discriminant = Some(s.clone());
+            }
+            a::InterfaceHandlerClause::Accounts(descs) => {
+                for d in descs {
+                    let mut acc = ParsedHandlerAccount {
+                        name: d.name.clone(),
+                        is_signer: false,
+                        is_writable: false,
+                        is_program: false,
+                        pda_seeds: None,
+                        account_type: None,
+                        authority: None,
+                    };
+                    for attr in &d.attrs {
+                        match attr {
+                            a::AccountAttr::Simple(s) => match s.as_str() {
+                                "signer" => acc.is_signer = true,
+                                "writable" => acc.is_writable = true,
+                                "readonly" => acc.is_writable = false,
+                                "program" => acc.is_program = true,
+                                _ => acc.account_type = Some(s.clone()),
+                            },
+                            a::AccountAttr::Type(t) => acc.account_type = Some(t.clone()),
+                            a::AccountAttr::Authority(x) => acc.authority = Some(x.clone()),
+                            a::AccountAttr::Pda(seeds) => acc.pda_seeds = Some(seeds.clone()),
+                        }
+                    }
+                    out.accounts.push(acc);
+                }
+            }
+            a::InterfaceHandlerClause::Requires { guard, on_fail } => {
+                out.requires.push(ParsedRequires {
+                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
+                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts),
+                    error_name: on_fail.clone(),
+                });
+            }
+            a::InterfaceHandlerClause::Ensures(e) => {
+                out.ensures.push(ParsedEnsures {
+                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
+                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts),
+                });
+            }
+        }
+    }
+
+    out
 }
 
 // ============================================================================

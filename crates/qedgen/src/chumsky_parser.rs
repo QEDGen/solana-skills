@@ -110,6 +110,10 @@ const KEYWORDS: &[&str] = &[
     "is",
     "mul_div_floor",
     "mul_div_ceil",
+    "interface",
+    "pragma",
+    "let",
+    "in",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -525,10 +529,34 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             })
             .boxed();
 
+        // `let NAME = value in body` — ML-style expression binding.
+        // Inside ensures/requires/effect-rhs, lets you derive a value once
+        // and reference it by name. Lowers to Lean's `let NAME := value; body`.
+        let let_in = kw("let")
+            .ignore_then(non_keyword_ident())
+            .then_ignore(wsc())
+            .then_ignore(just('='))
+            .then_ignore(wsc())
+            .then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("in"))
+            .then(expr.clone())
+            .map_with(|((name, value), body), e| {
+                Node::new(
+                    Expr::Let {
+                        name,
+                        value: Box::new(value),
+                        body: Box::new(body),
+                    },
+                    e.span().into_range(),
+                )
+            })
+            .boxed();
+
         // atom — must stay under chumsky's `choice` arity limit; split.
         // `.boxed()` tames the type complexity that otherwise trips Apple's
         // linker on overlong symbol names.
-        let group_a = choice((int, bool_lit, old, sum, quant)).boxed();
+        let group_a = choice((int, bool_lit, old, let_in, sum, quant)).boxed();
         let group_b = choice((mul_div_floor_atom, mul_div_ceil_atom, match_expr)).boxed();
         // `record_update` must precede `ctor` (leading `.` distinguishes
         // them, but this ordering is clearer). `app_expr` must precede
@@ -1114,10 +1142,35 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .ignore_then(non_keyword_ident())
         .map(HandlerClause::Include);
 
+    // call Target.handler(name = expr, name = expr, ...)
+    let call_kw_arg = non_keyword_ident()
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(expr())
+        .map(|(name, value)| CallArg { name, value });
+
+    let call_c = just("call")
+        .then_ignore(wsc())
+        .ignore_then(qualified_path())
+        .then_ignore(wsc())
+        .then_ignore(just('('))
+        .then_ignore(wsc())
+        .then(
+            call_kw_arg
+                .then_ignore(wsc())
+                .separated_by(just(',').then_ignore(wsc()))
+                .allow_trailing()
+                .collect::<Vec<CallArg>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just(')'))
+        .map(|(target, args)| HandlerClause::Call(CallExpr { target, args }));
+
     // `choice()` has an arity limit; split into groups.
     let grp_a = choice((auth, accounts, requires, ensures, modifies, let_c, effect));
     let grp_b = choice((transfers, takes, emits, aborts_total, invariant, include));
-    let grp_c = choice((match_c,));
+    let grp_c = choice((match_c, call_c));
     choice((grp_a, grp_b, grp_c))
 }
 
@@ -1285,28 +1338,11 @@ fn invariant_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|(name, body)| TopItem::Invariant(InvariantDecl { name, body }))
 }
 
-// target assembly | target quasar
-fn target_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    kw("target")
-        .ignore_then(choice((
-            kw("assembly").to("assembly".to_string()),
-            kw("quasar").to("quasar".to_string()),
-        )))
-        .map(TopItem::Target)
-}
-
 // program_id "base58..."
 fn program_id_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     kw("program_id")
         .ignore_then(string_lit())
         .map(TopItem::ProgramId)
-}
-
-// assembly "path/to/file.s"
-fn assembly_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    kw("assembly")
-        .ignore_then(string_lit())
-        .map(TopItem::Assembly)
 }
 
 // pda name [seed1, seed2, ...]
@@ -1834,6 +1870,251 @@ fn instruction_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone 
         .map(|((doc, name), items)| TopItem::Instruction(InstructionDecl { name, doc, items }))
 }
 
+// ----------------------------------------------------------------------------
+// interface Name { program_id "...", upstream { ... }, handler h(args) { ... } }
+// ----------------------------------------------------------------------------
+
+/// Internal: items that appear at the top of an `interface` block.
+/// Folded into `InterfaceDecl` by the decl combinator.
+enum InterfaceItem {
+    ProgramId(String),
+    Upstream(UpstreamDecl),
+    Handler(InterfaceHandlerDecl),
+}
+
+/// Internal: items that appear inside an `upstream { ... }` block.
+enum UpstreamItem {
+    Package(String),
+    Version(String),
+    Source(String),
+    BinaryHash(String),
+    IdlHash(String),
+    VerifiedWith(Vec<String>),
+    VerifiedAt(String),
+}
+
+// upstream { package "...", version "...", binary_hash "...", ... }
+fn upstream_block<'a>() -> impl Parser<'a, &'a str, UpstreamDecl, Err<'a>> + Clone {
+    let package = kw("package")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Package);
+    let version = kw("version")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Version);
+    let source = kw("source")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::Source);
+    let binary_hash = kw("binary_hash")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::BinaryHash);
+    let idl_hash = kw("idl_hash")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::IdlHash);
+    let verified_with = kw("verified_with")
+        .ignore_then(just('['))
+        .then_ignore(wsc())
+        .ignore_then(
+            string_lit()
+                .then_ignore(wsc())
+                .separated_by(just(',').then_ignore(wsc()))
+                .allow_trailing()
+                .collect::<Vec<String>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just(']'))
+        .map(UpstreamItem::VerifiedWith);
+    let verified_at = kw("verified_at")
+        .ignore_then(string_lit())
+        .map(UpstreamItem::VerifiedAt);
+
+    let item = choice((
+        package,
+        version,
+        source,
+        binary_hash,
+        idl_hash,
+        verified_with,
+        verified_at,
+    ));
+
+    kw("upstream")
+        .ignore_then(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            item.then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<UpstreamItem>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|items| {
+            let mut u = UpstreamDecl::default();
+            for it in items {
+                match it {
+                    UpstreamItem::Package(s) => u.package = Some(s),
+                    UpstreamItem::Version(s) => u.version = Some(s),
+                    UpstreamItem::Source(s) => u.source = Some(s),
+                    UpstreamItem::BinaryHash(s) => u.binary_hash = Some(s),
+                    UpstreamItem::IdlHash(s) => u.idl_hash = Some(s),
+                    UpstreamItem::VerifiedWith(v) => u.verified_with = v,
+                    UpstreamItem::VerifiedAt(s) => u.verified_at = Some(s),
+                }
+            }
+            u
+        })
+}
+
+// Clauses inside an interface-handler body: discriminant, accounts, requires, ensures.
+fn interface_handler_clause<'a>(
+) -> impl Parser<'a, &'a str, InterfaceHandlerClause, Err<'a>> + Clone {
+    let discriminant = kw("discriminant")
+        .ignore_then(choice((string_lit(), non_keyword_ident())))
+        .map(InterfaceHandlerClause::Discriminant);
+
+    let accounts = just("accounts")
+        .then_ignore(wsc())
+        .ignore_then(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            account_descriptor()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<AccountDescriptor>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(InterfaceHandlerClause::Accounts);
+
+    let requires = just("requires")
+        .then_ignore(wsc())
+        .ignore_then(expr())
+        .then_ignore(wsc())
+        .then(
+            just("else")
+                .then_ignore(wsc())
+                .ignore_then(non_keyword_ident())
+                .or_not(),
+        )
+        .map(|(guard, on_fail)| InterfaceHandlerClause::Requires { guard, on_fail });
+
+    let ensures = just("ensures")
+        .then_ignore(wsc())
+        .ignore_then(expr())
+        .map(InterfaceHandlerClause::Ensures);
+
+    choice((discriminant, accounts, requires, ensures))
+}
+
+// handler h(params)* { discriminant, accounts, requires, ensures }  — inside an interface block.
+fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl, Err<'a>> + Clone {
+    doc_comments()
+        .then_ignore(kw("handler"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then(
+            handler_param()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<TypedField>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            interface_handler_clause()
+                .map_with(|c, e| Node::new(c, e.span().into_range()))
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<Node<InterfaceHandlerClause>>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|(((doc, name), params), clauses)| InterfaceHandlerDecl {
+            name,
+            doc,
+            params,
+            clauses,
+        })
+}
+
+fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    let program_id = kw("program_id")
+        .ignore_then(string_lit())
+        .map(InterfaceItem::ProgramId);
+    let upstream = upstream_block().map(InterfaceItem::Upstream);
+    let handler = interface_handler_decl().map(InterfaceItem::Handler);
+
+    let item = choice((program_id, upstream, handler));
+
+    doc_comments()
+        .then_ignore(kw("interface"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            item.then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<InterfaceItem>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|((doc, name), items)| {
+            let mut program_id = None;
+            let mut upstream = None;
+            let mut handlers = Vec::new();
+            for it in items {
+                match it {
+                    InterfaceItem::ProgramId(s) => program_id = Some(s),
+                    InterfaceItem::Upstream(u) => upstream = Some(u),
+                    InterfaceItem::Handler(h) => handlers.push(h),
+                }
+            }
+            TopItem::Interface(InterfaceDecl {
+                name,
+                doc,
+                program_id,
+                upstream,
+                handlers,
+            })
+        })
+}
+
+// ----------------------------------------------------------------------------
+// pragma <name> { <platform_item>* } — platform-specific namespace.
+// ----------------------------------------------------------------------------
+
+/// Items allowed inside a pragma body. Restricted whitelist — keeps the
+/// grammar tight and emits clearer errors on misplaced constructs. Extend
+/// as new platforms or pragma content arrives.
+fn pragma_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
+    choice((
+        const_decl(),
+        pubkey_decl(),
+        instruction_decl(),
+        errors_decl(),
+    ))
+    .map_with(|item, e| Node::new(item, e.span().into_range()))
+}
+
+fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    doc_comments()
+        .then_ignore(kw("pragma"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .then(
+            pragma_item()
+                .then_ignore(wsc())
+                .repeated()
+                .collect::<Vec<Node<TopItem>>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|((doc, name), items)| TopItem::Pragma(PragmaDecl { name, doc, items }))
+}
+
 // Top-level item: priority-ordered choice.
 // record_decl must precede adt_decl (PEG-style backtracking via .or).
 fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
@@ -1855,11 +2136,13 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         pda_decl(),
         event_decl(),
         environment_decl(),
-        target_decl(),
         program_id_decl(),
-        assembly_decl(),
     ));
-    let group_c = choice((pubkey_decl(), errors_decl(), instruction_decl()));
+    // Note: `pubkey`, `instruction`, `assembly`, and the `errors [...]`
+    // sugar are platform-specific and only parse inside
+    // `pragma sbpf { ... }`. Use `type Error | A | B | ...` for errors at
+    // the core-DSL level. The platform-agnostic top level is the point.
+    let group_c = choice((interface_decl(), pragma_decl()));
     choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
@@ -2094,13 +2377,13 @@ property conservation :
                 TopItem::Pda(_) => "pda",
                 TopItem::Event(_) => "event",
                 TopItem::Environment(_) => "environment",
-                TopItem::Target(_) => "target",
                 TopItem::ProgramId(_) => "program_id",
-                TopItem::Assembly(_) => "assembly",
                 TopItem::TypeAlias(_) => "type_alias",
                 TopItem::Pubkey(_) => "pubkey",
                 TopItem::Errors(_) => "errors",
                 TopItem::Instruction(_) => "instruction",
+                TopItem::Interface(_) => "interface",
+                TopItem::Pragma(_) => "pragma",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
@@ -2458,5 +2741,318 @@ liveness drain : State.Draining ~> State.Active via [a, b] within 2"#;
             }
             o => panic!("expected Liveness, got {:?}", o),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // interface block (v2.5 slice 1)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_tier0_interface_shape_only() {
+        let src = r#"spec Demo
+interface Jupiter {
+  program_id "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+
+  handler swap (amount_in : U64) (min_amount_out : U64) {
+    discriminant "0xE445A52E51CB9A1D"
+    accounts {
+      user_input_ta  : writable, type token
+      user_output_ta : writable, type token
+      user           : signer
+    }
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        assert_eq!(i.name, "Jupiter");
+        assert_eq!(
+            i.program_id.as_deref(),
+            Some("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4")
+        );
+        assert!(i.upstream.is_none());
+        assert_eq!(i.handlers.len(), 1);
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "swap");
+        assert_eq!(h.params.len(), 2);
+        // Tier-0: no requires/ensures.
+        let has_requires = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Requires { .. }));
+        let has_ensures = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Ensures(_)));
+        assert!(!has_requires, "Tier-0 interface should have no requires");
+        assert!(!has_ensures, "Tier-0 interface should have no ensures");
+    }
+
+    #[test]
+    fn parses_tier1_interface_with_upstream_and_ensures() {
+        let src = r#"spec Demo
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:abcdef1234567890"
+    verified_with ["proptest", "kani"]
+    verified_at  "2026-04-18"
+  }
+
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let u = i.upstream.as_ref().expect("upstream present");
+        assert_eq!(u.package.as_deref(), Some("spl-token"));
+        assert_eq!(u.version.as_deref(), Some("4.0.3"));
+        assert_eq!(u.binary_hash.as_deref(), Some("sha256:abcdef1234567890"));
+        assert_eq!(
+            u.verified_with,
+            vec!["proptest".to_string(), "kani".to_string()]
+        );
+        // Lean deliberately absent — no overclaiming.
+        assert!(!u.verified_with.contains(&"lean".to_string()));
+
+        let h = &i.handlers[0];
+        let has_requires = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Requires { .. }));
+        let has_ensures = h
+            .clauses
+            .iter()
+            .any(|c| matches!(c.node, InterfaceHandlerClause::Ensures(_)));
+        assert!(has_requires);
+        assert!(has_ensures);
+    }
+
+    #[test]
+    fn parses_empty_interface() {
+        // An interface with no handlers is valid (e.g. a stub pre-codegen).
+        let src =
+            "spec T\ninterface Empty {\n  program_id \"11111111111111111111111111111111\"\n}\n";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Interface(i) => {
+                assert_eq!(i.name, "Empty");
+                assert!(i.handlers.is_empty());
+            }
+            o => panic!("expected Interface, got {:?}", o),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // call clause (v2.5 slice 2)
+    // ------------------------------------------------------------------
+
+    fn first_handler_clauses(spec: &Spec) -> &Vec<Node<HandlerClause>> {
+        match spec.items.iter().find_map(|n| match &n.node {
+            TopItem::Handler(h) => Some(h),
+            _ => None,
+        }) {
+            Some(h) => &h.clauses,
+            None => panic!("no handler in spec"),
+        }
+    }
+
+    #[test]
+    fn parses_call_clause_with_kw_args() {
+        let src = r#"spec T
+handler exchange : State.A -> State.B {
+  call Token.transfer(from = taker_ta, to = initializer_ta, amount = taker_amount, authority = taker)
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let call = clauses.iter().find_map(|c| match &c.node {
+            HandlerClause::Call(e) => Some(e),
+            _ => None,
+        });
+        let call = call.expect("expected a Call clause");
+        assert_eq!(
+            call.target.0,
+            vec!["Token".to_string(), "transfer".to_string()]
+        );
+        assert_eq!(call.args.len(), 4);
+        assert_eq!(call.args[0].name, "from");
+        assert_eq!(call.args[3].name, "authority");
+    }
+
+    #[test]
+    fn parses_call_with_trailing_comma() {
+        let src = r#"spec T
+handler h : State.A -> State.A {
+  call Token.transfer(
+    from   = a,
+    to     = b,
+    amount = 100,
+  )
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let has_call = clauses
+            .iter()
+            .any(|c| matches!(c.node, HandlerClause::Call(_)));
+        assert!(has_call);
+    }
+
+    #[test]
+    fn parses_call_with_no_args() {
+        let src = r#"spec T
+handler h : State.A -> State.A {
+  call Clock.current()
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let call = clauses.iter().find_map(|c| match &c.node {
+            HandlerClause::Call(e) => Some(e),
+            _ => None,
+        });
+        let call = call.expect("expected a Call");
+        assert!(call.args.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // pragma sbpf { ... } (v2.5 slice — platform-specific namespace)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_pragma_sbpf_with_instruction() {
+        let src = r#"spec Transfer
+pragma sbpf {
+  pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+
+  instruction transfer {
+    discriminant 3
+    entry 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let p = match &s.items[0].node {
+            TopItem::Pragma(p) => p,
+            o => panic!("expected Pragma, got {:?}", o),
+        };
+        assert_eq!(p.name, "sbpf");
+        assert_eq!(p.items.len(), 2);
+        // Order is preserved: pubkey first, instruction second.
+        assert!(matches!(p.items[0].node, TopItem::Pubkey(_)));
+        assert!(matches!(p.items[1].node, TopItem::Instruction(_)));
+    }
+
+    #[test]
+    fn pragma_body_rejects_non_whitelisted_items() {
+        // A `handler` at the top level of a pragma is not in the whitelist
+        // — it belongs to the core DSL. The parser fails on the closing
+        // brace because the handler doesn't consume.
+        let src = r#"spec T
+pragma sbpf {
+  handler nope : State.A -> State.A { effect {} }
+}
+"#;
+        assert!(
+            parse(src).is_err(),
+            "pragma body should reject `handler`; core DSL items belong at top level"
+        );
+    }
+
+    #[test]
+    fn empty_pragma_parses() {
+        let src = "spec T\npragma sbpf {}\n";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Pragma(p) => {
+                assert_eq!(p.name, "sbpf");
+                assert!(p.items.is_empty());
+            }
+            o => panic!("expected Pragma, got {:?}", o),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ML-style `let x = v in body` in expressions (v2.5)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_let_in_inside_ensures() {
+        let src = r#"spec T
+type State | A of { balance : U64 }
+
+handler withdraw (amount : U64) : State.A -> State.A {
+  effect { balance = balance - amount }
+  ensures let delta = old(state.balance) - state.balance in delta == amount
+}
+"#;
+        let s = parse_ok(src);
+        let clauses = first_handler_clauses(&s);
+        let ensures = clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Ensures(e) => Some(e),
+                _ => None,
+            })
+            .expect("expected an Ensures clause");
+        // Top of the ensures expression is the Let binding; its body is a Cmp.
+        match &ensures.node {
+            Expr::Let { name, body, .. } => {
+                assert_eq!(name, "delta");
+                assert!(
+                    matches!(body.node, Expr::Cmp { .. }),
+                    "expected Cmp in let body, got {:?}",
+                    body.node
+                );
+            }
+            other => panic!("expected Let at top of ensures, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_nested_let_in() {
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    let a = state.x in
+    let b = state.y in
+    a + b == a + b
+}
+"#;
+        parse_ok(src);
+    }
+
+    #[test]
+    fn let_keyword_still_works_as_handler_clause() {
+        // Keyword-ifying `let` must not break the statement-level clause.
+        let src = r#"spec T
+type State | A of { count : U64 }
+
+handler h (amount : U64) : State.A -> State.A {
+  let doubled = amount + amount
+  effect { count = count + doubled }
+}
+"#;
+        parse_ok(src);
     }
 }

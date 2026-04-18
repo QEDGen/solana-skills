@@ -8,7 +8,7 @@
 
 spec Transfer
 
-target assembly
+pragma sbpf {}
 
 type Error
   | InvalidAccountCount           = 1 "Invalid number of accounts"

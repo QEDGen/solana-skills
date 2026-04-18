@@ -10,7 +10,7 @@
 
 spec Tree
 
-target assembly
+pragma sbpf {}
 
 const HEADER_SIZE = 24
 const NODE_SIZE   = 29

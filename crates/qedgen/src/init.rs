@@ -7,11 +7,75 @@ const GITIGNORE: &str = ".lake/\nbuild/\nlake-packages/\nlean_solana/.lake/\nlea
 const QED_DIR: &str = ".qed";
 
 /// Persistent project metadata stored in `.qed/config.json`.
+///
+/// `.qed/` pins the project layout: CLI commands resolve the spec path by
+/// walking up from the current directory, finding the nearest `.qed/`, and
+/// reading this file. Users can still pass `--spec <path>` explicitly;
+/// the config is the fallback.
 #[derive(Serialize, Deserialize)]
 pub struct QedConfig {
     pub name: String,
+    /// Path to the authored `.qedspec` (file or directory). Relative to
+    /// the directory containing `.qed/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<String>,
+    /// Directory for vendored library interfaces (e.g. SPL Token).
+    /// Relative to the directory containing `.qed/`. Defaults to
+    /// `.qed/interfaces` when written by `qedgen init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interfaces_dir: Option<String>,
     pub created_at: String,
+}
+
+/// Walk upward from `start` looking for a `.qed/config.json`. Returns the
+/// discovered `.qed/` directory and the loaded config, or `None` if no
+/// ancestor has one.
+pub fn discover_qed_config(start: &Path) -> Option<(std::path::PathBuf, QedConfig)> {
+    let mut current: Option<&Path> = Some(start);
+    while let Some(dir) = current {
+        let candidate = dir.join(QED_DIR);
+        let config_path = candidate.join("config.json");
+        if config_path.is_file() {
+            if let Ok(raw) = std::fs::read_to_string(&config_path) {
+                if let Ok(config) = serde_json::from_str::<QedConfig>(&raw) {
+                    return Some((candidate, config));
+                }
+            }
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Resolve the spec path a CLI command should operate on.
+///
+/// Precedence:
+/// 1. `--spec <path>` passed explicitly — returned as-is.
+/// 2. `.qed/config.json spec` field discovered by walking up from `cwd`
+///    (the config's spec is resolved relative to the directory containing
+///    `.qed/`).
+/// 3. Neither — a helpful error pointing at the two options.
+pub fn resolve_spec_path(explicit: Option<&Path>, cwd: &Path) -> Result<std::path::PathBuf> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    let (qed_dir, config) = discover_qed_config(cwd).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no --spec given and no .qed/config.json found in {} or any parent — \
+             run `qedgen init` or pass `--spec <path>`",
+            cwd.display()
+        )
+    })?;
+    let spec_rel = config.spec.ok_or_else(|| {
+        anyhow::anyhow!(
+            "found {} but it has no `spec` field — \
+             edit the config or pass `--spec <path>`",
+            qed_dir.join("config.json").display()
+        )
+    })?;
+    // `.qed/` lives inside the project root; spec is relative to that root.
+    let project_root = qed_dir.parent().unwrap_or(Path::new("."));
+    Ok(project_root.join(spec_rel))
 }
 
 /// Check whether `.qed/` exists in the same directory as `spec_path`.
@@ -32,7 +96,12 @@ pub fn find_qed_dir(spec_path: &Path) -> Option<std::path::PathBuf> {
 
 /// Initialize `.qed/` in the given directory. Returns error if already initialized.
 /// `dir` should be the program root — the directory where the `.qedspec` lives.
-pub fn init_qed_dir(dir: &Path, name: &str) -> Result<()> {
+///
+/// `spec_rel` is the spec path *relative to `dir`* — the pointer written into
+/// `config.json` so `qedgen check`/`codegen` can resolve it without `--spec`.
+/// Pass `None` to leave the field empty (users will need to pass `--spec`
+/// explicitly until they edit the config).
+pub fn init_qed_dir(dir: &Path, name: &str, spec_rel: Option<&str>) -> Result<()> {
     let qed_path = dir.join(QED_DIR);
     if qed_path.exists() {
         anyhow::bail!(
@@ -46,7 +115,10 @@ pub fn init_qed_dir(dir: &Path, name: &str) -> Result<()> {
 
     let config = QedConfig {
         name: name.to_string(),
-        spec: None,
+        spec: spec_rel.map(|s| s.to_string()),
+        // Vendored library interfaces (e.g. SPL Token) land here when the
+        // user runs `qedgen interface --idl <path> --vendor`.
+        interfaces_dir: Some(".qed/interfaces".to_string()),
         created_at: chrono_now(),
     };
     let json = serde_json::to_string_pretty(&config)?;
@@ -263,5 +335,66 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_walks_up_from_nested_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_qed_dir(root, "demo", Some("demo.qedspec")).unwrap();
+        let nested = root.join("src/deep/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let (qed_dir, config) = discover_qed_config(&nested).expect("discovery succeeds");
+        assert_eq!(qed_dir, root.join(QED_DIR));
+        assert_eq!(config.spec.as_deref(), Some("demo.qedspec"));
+    }
+
+    #[test]
+    fn discover_returns_none_with_no_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Don't init — no .qed/ anywhere.
+        assert!(discover_qed_config(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_spec_prefers_explicit_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_qed_dir(root, "demo", Some("from_config.qedspec")).unwrap();
+        // Explicit --spec should win over discovery.
+        let explicit = root.join("from_flag.qedspec");
+        let resolved = resolve_spec_path(Some(&explicit), root).unwrap();
+        assert_eq!(resolved, explicit);
+    }
+
+    #[test]
+    fn resolve_spec_falls_back_to_config_pointer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_qed_dir(root, "demo", Some("demo.qedspec")).unwrap();
+        // No explicit --spec → discovery resolves via config, relative to
+        // the directory containing .qed/.
+        let nested = root.join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let resolved = resolve_spec_path(None, &nested).unwrap();
+        assert_eq!(resolved, root.join("demo.qedspec"));
+    }
+
+    #[test]
+    fn resolve_spec_errors_when_config_lacks_spec_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // spec_rel = None → config has no spec pointer.
+        init_qed_dir(root, "demo", None).unwrap();
+        let err = resolve_spec_path(None, root).unwrap_err().to_string();
+        assert!(
+            err.contains("no `spec` field"),
+            "expected 'no spec field' error, got: {err}"
+        );
     }
 }

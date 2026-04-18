@@ -70,10 +70,9 @@ pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
 
 /// Render a `ParsedSpec` into a complete Lean 4 source string.
 pub fn render(spec: &ParsedSpec) -> String {
-    // sBPF mode: target is "assembly", or assembly_path is set with instructions
-    if spec.target.as_deref() == Some("assembly")
-        || (spec.assembly_path.is_some() && !spec.instructions.is_empty())
-    {
+    // sBPF mode: inferred from `pragma sbpf { ... }` presence (or the
+    // legacy fallback signal — see ParsedSpec::is_assembly_target).
+    if spec.is_assembly_target() {
         return render_sbpf(spec);
     }
 
@@ -3558,42 +3557,40 @@ mod tests {
     const DROPSET_SPEC: &str = r#"
 spec Dropset
 
-target assembly
-assembly "src/dropset.s"
+pragma sbpf {
+  const DISC_REGISTER_MARKET     = 0
+  const ACCT_NON_DUP_MARKER      = 255
+  const DATA_LEN_ZERO             = 0
+  const SIZE_OF_EMPTY_ACCOUNT     = 10_336
+  const SIZE_OF_MARKET_HEADER     = 40
+  const SIZE_OF_ADDRESS           = 32
+  const SIZE_OF_CREATE_ACCOUNT    = 56
 
-const DISC_REGISTER_MARKET     = 0
-const ACCT_NON_DUP_MARKER      = 255
-const DATA_LEN_ZERO             = 0
-const SIZE_OF_EMPTY_ACCOUNT     = 10_336
-const SIZE_OF_MARKET_HEADER     = 40
-const SIZE_OF_ADDRESS           = 32
-const SIZE_OF_CREATE_ACCOUNT    = 56
+  pubkey RENT [
+    5_862_609_301_215_225_606,
+    9_219_231_539_345_853_473,
+    4_971_307_250_928_769_624,
+    2_329_533_411
+  ]
 
-pubkey RENT [
-  5_862_609_301_215_225_606,
-  9_219_231_539_345_853_473,
-  4_971_307_250_928_769_624,
-  2_329_533_411
-]
+  errors [
+    InvalidDiscriminant         = 1   "Discriminant is not REGISTER_MARKET",
+    InvalidInstructionLength    = 2   "Instruction data is not 1 byte",
+    InvalidNumberOfAccounts     = 3   "Fewer than 10 accounts provided",
+    UserHasData                 = 4   "User account already has data",
+    MarketAccountIsDuplicate    = 5   "Market account is a duplicate",
+    MarketHasData               = 6   "Market account already has data",
+    BaseMintIsDuplicate         = 7   "Base mint account is a duplicate",
+    QuoteMintIsDuplicate        = 8   "Quote mint account is a duplicate",
+    InvalidMarketPubkey         = 9   "Market pubkey does not match derived PDA",
+    SystemProgramIsDuplicate    = 10  "System Program account is a duplicate",
+    InvalidSystemProgramPubkey  = 11  "System Program pubkey is wrong",
+    RentSysvarIsDuplicate       = 12  "Rent sysvar account is a duplicate",
+    InvalidRentSysvarPubkey     = 13  "Rent sysvar pubkey is wrong"
+  ]
 
-errors [
-  InvalidDiscriminant         = 1   "Discriminant is not REGISTER_MARKET",
-  InvalidInstructionLength    = 2   "Instruction data is not 1 byte",
-  InvalidNumberOfAccounts     = 3   "Fewer than 10 accounts provided",
-  UserHasData                 = 4   "User account already has data",
-  MarketAccountIsDuplicate    = 5   "Market account is a duplicate",
-  MarketHasData               = 6   "Market account already has data",
-  BaseMintIsDuplicate         = 7   "Base mint account is a duplicate",
-  QuoteMintIsDuplicate        = 8   "Quote mint account is a duplicate",
-  InvalidMarketPubkey         = 9   "Market pubkey does not match derived PDA",
-  SystemProgramIsDuplicate    = 10  "System Program account is a duplicate",
-  InvalidSystemProgramPubkey  = 11  "System Program pubkey is wrong",
-  RentSysvarIsDuplicate       = 12  "Rent sysvar account is a duplicate",
-  InvalidRentSysvarPubkey     = 13  "Rent sysvar pubkey is wrong"
-]
-
-/// Validates accounts, derives market PDA, creates market account via CPI
-instruction RegisterMarket {
+  /// Validates accounts, derives market PDA, creates market account via CPI
+  instruction RegisterMarket {
   discriminant DISC_REGISTER_MARKET
   entry 24
 
@@ -3699,6 +3696,7 @@ instruction RegisterMarket {
     after all guards
     exit 0
   }
+}
 }
 "#;
 

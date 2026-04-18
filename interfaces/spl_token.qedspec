@@ -1,0 +1,98 @@
+// QEDGen library interface — SPL Token (Tier 1).
+//
+// Declarative contract for the SPL Token program. Callers that CPI into
+// Token.transfer / mint_to / burn / init_account / close_account get:
+//   - a real Rust CPI builder at the call site (v2.6, via `import`);
+//   - callee ensures bound as hypotheses in the caller's Lean proof (v2.6);
+//   - eventually (v2.7), full proof composition once we import the callee's
+//     proven Spec.lean instead of axiomatizing its ensures.
+//
+// In v2.5, before `import` lands, copy this file (or its relevant blocks)
+// into your spec directly. When `import Token from "qedgen/interfaces/spl_token"`
+// ships in v2.6, the copy becomes a one-line reference.
+//
+// See docs/design/spec-composition.md §2 "Tier 1 — effects hand-authored."
+
+spec SplTokenInterface
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    source       "https://github.com/solana-program/token/tree/v4.0.3"
+    // TODO binary_hash — fill in after running QEDGen harnesses against the
+    // deployed program. The authoritative supply-chain pin lives here; until
+    // it's set, consumers who run `qedgen verify --check-upstream` will be
+    // told the library is un-pinned.
+    // binary_hash  "sha256:..."
+    // idl_hash     "sha256:..."
+    verified_with ["proptest"]
+    verified_at  "2026-04-18"
+  }
+
+  /// Transfer `amount` tokens from `from` to `to`, authorized by `authority`.
+  /// Balance-preserving: total supply unchanged, individual balances shift.
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Mint `amount` new tokens to `to`, authorized by `mint_authority`.
+  /// Not balance-preserving: total supply grows by `amount`.
+  handler mint_to (amount : U64) {
+    discriminant "0x07"
+    accounts {
+      mint            : writable
+      to              : writable, type token
+      mint_authority  : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Burn `amount` tokens from `from`, authorized by `authority`.
+  /// Not balance-preserving: total supply shrinks by `amount`.
+  handler burn (amount : U64) {
+    discriminant "0x08"
+    accounts {
+      from      : writable, type token
+      mint      : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Initialize a new token account owned by `owner` for `mint`.
+  /// Account pre-state: uninitialized. Post-state: zero balance, owned by `owner`.
+  handler initialize_account {
+    discriminant "0x01"
+    accounts {
+      account : writable
+      mint    : readonly
+      owner   : readonly
+      rent    : readonly
+    }
+  }
+
+  /// Close `account`, draining rent lamports to `destination`. The caller
+  /// must ensure the balance is zero — this interface does not enforce it
+  /// (SPL Token panics at runtime if non-zero; Tier 1 would add a
+  /// pre-condition once we're confident the runtime check is sufficient).
+  handler close_account {
+    discriminant "0x09"
+    accounts {
+      account     : writable, type token
+      destination : writable
+      authority   : signer
+    }
+  }
+}

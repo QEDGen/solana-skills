@@ -388,7 +388,9 @@ fn generate_instructions(
     std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
 
     // Read spec source once — used for spec_hash attributes.
-    let spec_src = std::fs::read_to_string(spec_path).unwrap_or_default();
+    // `read_spec_source` handles both single-file and multi-file (directory)
+    // specs, concatenating fragments in the same order the loader merges them.
+    let spec_src = crate::check::read_spec_source(spec_path).unwrap_or_default();
     let spec_attr = relative_spec_path(spec_path, output_dir);
 
     // Per-handler instruction files — skip if existing (user-owned).
@@ -626,9 +628,29 @@ fn render_handler_scaffold(
         ));
     }
 
-    let needs_fill = any_unmechanized || has_events || has_transfers;
+    // `call Interface.handler(name = expr, ...)` sites — the uniform CPI
+    // surface introduced in v2.5 (slice 2). For MVP this follows the same
+    // agent-fill shape as `transfers { }`: emit a structured comment so the
+    // prompt in fill.rs has everything it needs to generate a correct CPI
+    // envelope. Real codegen from a resolved interface lands in v2.6 once
+    // `import` is in play (see docs/design/spec-composition.md §2).
+    let has_calls = !handler.calls.is_empty();
+    for c in &handler.calls {
+        let args = c
+            .args
+            .iter()
+            .map(|a| format!("{}={}", a.name, a.rust_expr))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "        // Spec call: {}.{}({})\n",
+            c.target_interface, c.target_handler, args
+        ));
+    }
+
+    let needs_fill = any_unmechanized || has_events || has_transfers || has_calls;
     if needs_fill {
-        out.push_str("        todo!(\"fill non-mechanical effects, events, transfers\")\n");
+        out.push_str("        todo!(\"fill non-mechanical effects, events, transfers, calls\")\n");
     } else {
         out.push_str("        Ok(())\n");
     }

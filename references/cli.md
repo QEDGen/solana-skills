@@ -20,22 +20,35 @@ and `Proofs.lean`.
 ## Project setup
 
 ### `init`
-Scaffold a new formal verification project. Creates `.qed/` project state directory.
+Scaffold a new formal verification project. Creates `.qed/` project state
+directory and pins the spec path in `.qed/config.json` so subsequent
+commands don't need `--spec`.
 
 ```bash
-$QEDGEN init --name escrow
-$QEDGEN init --name dropset --asm src/dropset.s
-$QEDGEN init --name engine --mathlib
-$QEDGEN init --name counter --quasar
+$QEDGEN init --name escrow   --spec escrow.qedspec
+$QEDGEN init --name dropset  --spec dropset.qedspec --asm src/dropset.s
+$QEDGEN init --name engine   --spec engine.qedspec --mathlib
+$QEDGEN init --name counter  --spec counter.qedspec --quasar
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--name` | String | required | Project name (alphanumeric + underscores) |
+| `--spec` | Path | - | Spec path (file or directory) — written into `.qed/config.json` so `check`/`codegen` can resolve it automatically |
 | `--asm` | Path | - | sBPF assembly source (runs asm2lean automatically) |
 | `--mathlib` | bool | false | Include Mathlib dependency |
 | `--quasar` | bool | false | Generate Quasar program + Kani harnesses + tests |
 | `--output-dir` | Path | `./formal_verification` | Output directory |
+
+The written `.qed/config.json`:
+
+```json
+{
+  "name": "escrow",
+  "spec": "escrow.qedspec",
+  "interfaces_dir": ".qed/interfaces"
+}
+```
 
 ### `setup`
 Set up the global validation workspace at `~/.qedgen/workspace/`.
@@ -65,8 +78,36 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/Prog.lean
 
 ## Spec and validation
 
+### `interface`
+Generate a Tier-0 interface `.qedspec` from an Anchor IDL. Shape only —
+program ID, discriminator, accounts, argument types. No `requires`/
+`ensures`/`effect` (those require semantic understanding the IDL does not
+carry). The `upstream` block is left as a TODO stub for the author to fill
+in after running QEDGen harnesses against the deployed program.
+
+See `docs/design/spec-composition.md` §2 for the CPI tier model.
+
+```bash
+# Print to stdout
+$QEDGEN interface --idl target/idl/jupiter.json
+
+# Write to an explicit path
+$QEDGEN interface --idl target/idl/jupiter.json --out interfaces/jupiter.qedspec
+
+# Vendor into .qed/interfaces/<program>.qedspec (canonical library location,
+# resolved via the nearest .qed/config.json)
+$QEDGEN interface --idl target/idl/jupiter.json --vendor
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--idl` | Path | required | Anchor IDL JSON file |
+| `--out` | Path | - | Output path (default: stdout). Conflicts with `--vendor`. |
+| `--vendor` | bool | false | Drop into `.qed/interfaces/<program>.qedspec`. Requires a discoverable `.qed/` ancestor. |
+
 ### `spec`
-Generate SPEC.md or .qedspec from IDL or .qedspec.
+Generate SPEC.md or .qedspec from IDL or .qedspec. (For Tier-0 interface
+scaffolding from an IDL, prefer `interface` — it's more focused.)
 
 ```bash
 $QEDGEN spec --idl target/idl/program.json
@@ -87,16 +128,23 @@ Validate a spec — lint, coverage, drift, and verification report. Default (no 
 
 Requires a git repo (see [Require-git guard](#require-git-guard)).
 
+`--spec` is optional — when omitted, walks up from the current directory to
+the nearest `.qed/config.json` and uses its `spec` field. Explicit `--spec`
+overrides.
+
 ```bash
-# Lint (always runs)
+# From inside a project initialized with `qedgen init --spec ...`
+$QEDGEN check
+$QEDGEN check --json
+
+# Explicit spec path
 $QEDGEN check --spec my_program.qedspec
-$QEDGEN check --spec my_program.qedspec --json
 
 # Coverage matrix
-$QEDGEN check --spec my_program.qedspec --coverage
+$QEDGEN check --coverage
 
 # Verification report
-$QEDGEN check --spec my_program.qedspec --explain
+$QEDGEN check --explain
 $QEDGEN check --spec my_program.qedspec --explain --output report.md
 
 # Drift detection
@@ -113,7 +161,7 @@ $QEDGEN check --spec my_program.qedspec --asm src/program.s
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--spec` | Path | required | Spec file (.qedspec) |
+| `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
 | `--proofs` | Path | `./formal_verification` | Proofs directory |
 | `--coverage` | bool | false | Show operation × property matrix |
 | `--explain` | bool | false | Generate Markdown verification report |
@@ -125,6 +173,11 @@ $QEDGEN check --spec my_program.qedspec --asm src/program.s
 | `--kani` | Path | - | Kani harness file (Kani drift detection) |
 | `--asm` | Path | - | sBPF assembly source (hash check + lake build) |
 | `--json` | bool | false | Machine-readable output |
+
+Lints fired by `check` include `[shape_only_cpi]` for `call
+Interface.handler(...)` sites whose target declares no `ensures` —
+making the visible gap between "my Rust compiles" and "my program is
+verified" explicit.
 
 ### `reconcile`
 Emit a unified drift report comparing a `.qedspec` against both its Rust
@@ -187,25 +240,29 @@ the Quasar Rust skeleton only.
 
 Requires a git repo (see [Require-git guard](#require-git-guard)).
 
-```bash
-# Rust skeleton only
-$QEDGEN codegen --spec my_program.qedspec
+`--spec` is optional — when omitted, resolved via the nearest
+`.qed/config.json`'s `spec` field. Explicit `--spec` overrides.
 
-# Everything
+```bash
+# From inside a project initialized with `qedgen init --spec ...`
+$QEDGEN codegen
+$QEDGEN codegen --all
+
+# Explicit spec path
 $QEDGEN codegen --spec my_program.qedspec --all
 
 # Selective
-$QEDGEN codegen --spec my_program.qedspec --lean
-$QEDGEN codegen --spec my_program.qedspec --kani
-$QEDGEN codegen --spec my_program.qedspec --test
-$QEDGEN codegen --spec my_program.qedspec --proptest
-$QEDGEN codegen --spec my_program.qedspec --integration
-$QEDGEN codegen --spec my_program.qedspec --ci
+$QEDGEN codegen --lean
+$QEDGEN codegen --kani
+$QEDGEN codegen --test
+$QEDGEN codegen --proptest
+$QEDGEN codegen --integration
+$QEDGEN codegen --ci
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--spec` | Path | required | Spec file (.qedspec) |
+| `--spec` | Path | optional | Spec file or directory. Defaults to `.qed/config.json spec` |
 | `--output-dir` | Path | `./programs` | Output directory for Rust skeleton |
 | `--all` | bool | false | Generate all artifacts |
 | `--lean` | bool | false | Generate Lean 4 proofs |

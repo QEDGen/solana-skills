@@ -249,9 +249,11 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s).unwrap();
 
     // ── spec header ──────────────────────────────────────────────────────
+    //
+    // No `target quasar` — Anchor/Quasar is the default; the sBPF target is
+    // opted into with `pragma sbpf { ... }`. See v2.5 spec-composition.
     writeln!(s, "spec {}", program_name).unwrap();
     writeln!(s).unwrap();
-    writeln!(s, "target quasar").unwrap();
     writeln!(s, "// TODO: Replace with deployed program ID").unwrap();
     writeln!(s, "program_id \"11111111111111111111111111111111\"").unwrap();
     writeln!(s).unwrap();
@@ -677,7 +679,10 @@ mod tests {
         });
 
         assert_eq!(spec.program_name, "Escrow");
-        assert_eq!(spec.target.as_deref(), Some("quasar"));
+        assert!(
+            !spec.is_assembly_target(),
+            "IDL-generated specs default to Quasar (no `pragma sbpf`)"
+        );
         assert_eq!(spec.handlers.len(), 3);
         assert_eq!(spec.handlers[0].name, "initialize");
         assert_eq!(spec.handlers[1].name, "exchange");

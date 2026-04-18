@@ -14,7 +14,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
     // Only Quasar targets make sense for integration tests
-    if spec.target.as_deref() == Some("assembly") || spec.assembly_path.is_some() {
+    if spec.is_assembly_target() {
         anyhow::bail!("Integration tests are only supported for Quasar targets, not assembly/sBPF");
     }
 
@@ -647,7 +647,7 @@ mod tests {
         // to the Quasar (Rust) target.
         std::fs::write(
             &spec_path,
-            "spec Test\ntarget assembly\nassembly \"a.s\"\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
+            "spec Test\n\npragma sbpf {}\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",
         )
         .unwrap();
         let result = generate(&spec_path, &out_path);
