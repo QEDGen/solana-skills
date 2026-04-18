@@ -9,6 +9,35 @@ use std::path::Path;
 
 use crate::check::ParsedSpec;
 
+/// Emit a Lean `inductive Foo where | A | B …` block for a lifecycle.
+/// Same shape used by single-account (Status) and multi-account
+/// (PoolStatus, EscrowStatus, …) renderers.
+fn emit_status_inductive(out: &mut String, name: &str, lifecycle: &[String]) {
+    out.push_str(&format!("inductive {} where\n", name));
+    for s in lifecycle {
+        out.push_str(&format!("  | {}\n", s));
+    }
+    out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+}
+
+/// Emit a Lean `structure Foo where field : Type …` block for a state.
+/// Pass `status_name` when the state carries a lifecycle field.
+fn emit_state_struct(
+    out: &mut String,
+    name: &str,
+    fields: &[(String, String)],
+    status_name: Option<&str>,
+) {
+    out.push_str(&format!("structure {} where\n", name));
+    for (fname, ftype) in fields {
+        out.push_str(&format!("  {} : {}\n", safe_name(fname), map_type(ftype)));
+    }
+    if let Some(sn) = status_name {
+        out.push_str(&format!("  status : {}\n", sn));
+    }
+    out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+}
+
 /// Build a Lean type name from an account name, avoiding double-suffix.
 /// "Pool" → "PoolState", "Pool" → "PoolStatus"
 /// "State" → "State" (not "StateState"), "State" → "Status" (not "StateStatus")
@@ -94,22 +123,16 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     // Status inductive (if lifecycle states exist)
     let has_lifecycle = !spec.lifecycle_states.is_empty();
     if has_lifecycle {
-        out.push_str("inductive Status where\n");
-        for s in &spec.lifecycle_states {
-            out.push_str(&format!("  | {}\n", s));
-        }
-        out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+        emit_status_inductive(&mut out, "Status", &spec.lifecycle_states);
     }
 
     // State structure
-    out.push_str("structure State where\n");
-    for (fname, ftype) in &spec.state_fields {
-        out.push_str(&format!("  {} : {}\n", safe_name(fname), map_type(ftype)));
-    }
-    if has_lifecycle {
-        out.push_str("  status : Status\n");
-    }
-    out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+    emit_state_struct(
+        &mut out,
+        "State",
+        &spec.state_fields,
+        if has_lifecycle { Some("Status") } else { None },
+    );
 
     // Transition functions
     let ops_refs: Vec<&crate::check::ParsedHandler> = spec.handlers.iter().collect();
@@ -198,23 +221,18 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         let state_name = lean_state_name(acct_name);
 
         // Status inductive
-        if !acct.lifecycle.is_empty() {
-            out.push_str(&format!("inductive {} where\n", status_name));
-            for s in &acct.lifecycle {
-                out.push_str(&format!("  | {}\n", s));
-            }
-            out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+        let has_lifecycle = !acct.lifecycle.is_empty();
+        if has_lifecycle {
+            emit_status_inductive(&mut out, &status_name, &acct.lifecycle);
         }
 
         // State structure
-        out.push_str(&format!("structure {} where\n", state_name));
-        for (fname, ftype) in &acct.fields {
-            out.push_str(&format!("  {} : {}\n", safe_name(fname), map_type(ftype)));
-        }
-        if !acct.lifecycle.is_empty() {
-            out.push_str(&format!("  status : {}\n", status_name));
-        }
-        out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+        emit_state_struct(
+            &mut out,
+            &state_name,
+            &acct.fields,
+            if has_lifecycle { Some(&status_name) } else { None },
+        );
 
         // Operations targeting this account
         let ops: Vec<&crate::check::ParsedHandler> = spec
