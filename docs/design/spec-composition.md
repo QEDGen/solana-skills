@@ -226,6 +226,86 @@ against mistaking "my Rust compiles" for "my program is verified."
 If any of those come up, the answer is "declare it as a separate handler in
 your own spec" — not "extend interface."
 
+### Library interface pinning (upstream version binding)
+
+Tier-1 interfaces QEDGen ships for SPL Token, System Program, etc. are
+trusted transitively by every consumer. A silent runtime or program upgrade
+that changes upstream behavior would invalidate every consumer's proof with
+no diagnostic. Every library interface therefore carries an **`upstream`
+block** declaring the exact version it was verified against:
+
+```qedspec
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    source       "https://github.com/solana-program/token/tree/v4.0.3"
+    binary_hash  "sha256:a1b2c3…"      # of the deployed .so on mainnet
+    idl_hash     "sha256:d4e5f6…"      # of the Anchor IDL we codegen'd from
+    verified_with ["proptest", "kani"]  # what QEDGen ran; "lean" only when proven, not axiomatized
+    verified_at  "2026-04-18"
+  }
+
+  handler transfer (amount : U64) { ... }
+  ...
+}
+```
+
+Semantics:
+
+- **`binary_hash` is authoritative.** It's the SHA-256 of the deployed
+  program's `.so` bytes (what `solana program dump <program_id>` returns).
+  Version strings and commit hashes are informational; the binary hash is
+  what a caller's attestation chains to.
+- **`verified_with`** is honest. `"proptest"` means we ran property tests
+  against the real program. `"kani"` means we BMC-checked the CPI envelope.
+  `"lean"` only appears when we actually have a proof of the program's Rust
+  source — which we generally do **not** have for external programs. For
+  SPL Token today, the Lean side remains axiomatized and `verified_with`
+  omits `"lean"`. No overclaiming.
+- **Not a proof of correctness.** `upstream` records what QEDGen checked, not
+  that the upstream program is provably correct. The interface's `ensures`
+  are still declarative contracts; `verified_with` tells consumers *which
+  backend checked that the real program behaves that way* on the harness
+  inputs we ran.
+
+### Propagation into `qed.lock`
+
+When a consumer imports a library interface, the `upstream.binary_hash` flows
+into their lockfile (see §3). That's the transitive pin: the consumer's
+`#[qed(verified, qedlock_hash="...")]` covers not just *what* QEDGen
+declared about SPL Token, but *which bytes on chain* we declared it about.
+
+### Drift detection against mainnet
+
+`qedgen verify --check-upstream` (v2.6+) fetches the on-chain program for
+every imported library interface and compares its SHA-256 to the pinned
+`binary_hash`. A mismatch surfaces as:
+
+> `[upstream_drift]` `Token` — pinned binary `sha256:a1b2c3…` (verified
+> 2026-04-18) does not match mainnet deploy `sha256:9d8c7b…`. The program
+> may have been upgraded. Re-verify with the newer version before trusting
+> this interface.
+
+This is optional per run (network dependency), not a build-time check. CI
+pipelines for production programs should turn it on; local development runs
+can skip it.
+
+### Upgrade flow
+
+When a Solana upstream program bumps (rare but not never):
+
+1. QEDGen re-runs its harnesses against the new version.
+2. Re-hashes the deployed `.so` and any changed `ensures`.
+3. Publishes a new release of `qedgen/interfaces/<program>.qedspec`.
+4. Consumers run `qedgen lock --upgrade Token` to accept the new pin.
+5. `qedgen check` flags any caller whose `ensures` relied on behavior that
+   changed between versions.
+
+Same shape as a `Cargo.lock` upgrade — explicit, reviewable, diffable.
+
 ---
 
 ## §3 — Cross-program spec composition (import + qedlock)
@@ -260,16 +340,24 @@ import Jupiter from "./specs/jupiter_v6"           // local path (Tier 2)
 
 ```toml
 # qed.lock — pinned spec dependencies (commit to git)
-[[import]]
-name = "Token"
-path = "qedgen/interfaces/spl_token"
-version = "spl-token@6.0.0"
-spec_hash = "a1b2c3d4e5f67890"   # sha256 of the resolved spec text
 
+# Library interface: pins both our spec text AND the upstream binary we
+# verified against. See §2 "Library interface pinning."
 [[import]]
-name = "Jupiter"
-path = "./specs/jupiter_v6"
-version = "jupiter-v6@c8d9e0f1"
+name           = "Token"
+path           = "qedgen/interfaces/spl_token"
+spec_hash      = "a1b2c3d4e5f67890"   # our interface declaration
+upstream_package = "spl-token"
+upstream_version = "4.0.3"
+upstream_binary_hash = "sha256:9f8e7d6c5b4a3210…"   # deployed .so
+verified_with  = ["proptest", "kani"]
+verified_at    = "2026-04-18"
+
+# Peer qedspec: pins the callee's spec hash only — no upstream block, because
+# the callee's own qed.lock covers its upstream pins transitively.
+[[import]]
+name      = "Jupiter"
+path      = "./specs/jupiter_v6"
 spec_hash = "9fedcba098765432"
 ```
 
@@ -277,7 +365,10 @@ spec_hash = "9fedcba098765432"
 - Fingerprint of a multi-file spec directory becomes
   `hash(ParsedSpec) ⊕ hash(qedlock)`, so a callee spec edit invalidates the
   caller's attestation.
-- `qedgen lock` updates the file; `qedgen check` diagnoses drift.
+- Library imports carry an `upstream_binary_hash`; peer qedspec imports
+  don't (their own `qed.lock` does, and we chain through `spec_hash`).
+- `qedgen lock` updates the file; `qedgen check` diagnoses drift;
+  `qedgen verify --check-upstream` diagnoses mainnet-vs-pin drift on demand.
 
 ### `#[qed(verified)]` transitive hash
 
@@ -313,18 +404,24 @@ stronger without any user action. This is the compounding-adoption lever.
    - §1 multi-file loader (shipped).
    - §2 `interface` block + `call` instruction (Tier 0 and Tier 1).
    - `qedgen interface --idl <path>` writes Tier-0 interfaces from Anchor IDL.
-   - SPL Token / System Program shipped as Tier-1 library interfaces.
+   - SPL Token / System Program shipped as Tier-1 library interfaces,
+     each carrying an `upstream { package, version, binary_hash, … }` block.
    - `transfers { ... }` becomes sugar for `call Token.transfer(...)`.
    - `[shape_only_cpi]` lint for Tier-0 call sites.
    - §3 remains this design doc + declared qedlock format.
 
-2. **v2.6** — Tier 2 composition (§3 stance 1).
+2. **v2.6** — Tier 2 composition (§3 stance 1) + upstream drift detection.
    - `import Foo from "./path/to/spec"` resolution (project + library paths).
    - Importing a qedspec exposes its handlers as the interface — no
      re-declaration.
-   - `qed.lock` file + `qedgen lock` subcommand.
+   - `qed.lock` file + `qedgen lock` + `qedgen lock --upgrade <name>`
+     subcommands. Library imports flow `upstream_binary_hash` into the lock;
+     peer qedspec imports chain through `spec_hash`.
    - Transitive `#[qed(verified, qedlock_hash="...")]` attribute so callee
      spec edits surface as a clear drift diagnostic instead of a silent gap.
+   - `qedgen verify --check-upstream` fetches on-chain programs and
+     diffs against pinned `upstream_binary_hash` (CI-friendly, network-
+     optional).
 
 3. **v2.7** — proof composition (§3 stance 2).
    - Caller's generated Lean imports callee's `formal_verification/Spec.lean`
