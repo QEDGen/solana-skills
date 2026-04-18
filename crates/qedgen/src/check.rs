@@ -627,9 +627,23 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
     Ok(results)
 }
 
-/// Parse a spec file from disk. Only .qedspec format is supported.
-/// Uses chumsky for parsing + a typed AST → ParsedSpec adapter.
+/// Parse a spec from disk. Only .qedspec format is supported.
+///
+/// `path` may be either:
+///   - a single `.qedspec` file (original behaviour), or
+///   - a directory containing one or more `.qedspec` files. Every file in the
+///     directory (recursively) must declare the same `spec Name`; their top
+///     items are merged in alphabetically-sorted source-path order.
+///
+/// The multi-file form is convention-based: no new grammar, no `import`/
+/// `module` keywords. A program's spec is simply spread across files that all
+/// start with `spec <Name>`. Fragments live naturally under `handlers/`,
+/// `properties/`, etc.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
+    if path.is_dir() {
+        return parse_spec_dir(path);
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext != "qedspec" {
         anyhow::bail!(
@@ -647,9 +661,113 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             .map(|e| format!("  {:?}", e))
             .collect::<Vec<_>>()
             .join("\n");
-        anyhow::anyhow!("parse error:\n{}", msg)
+        anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
     })?;
     Ok(crate::chumsky_adapter::adapt(&typed))
+}
+
+/// Load every `.qedspec` file under `dir` (recursively), parse each, validate
+/// they all declare the same `spec Name`, and merge their top items into a
+/// single typed AST. Files are visited in alphabetically-sorted path order so
+/// the resulting `ParsedSpec` — and every artifact downstream of it — is
+/// deterministic.
+fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
+    let mut files = Vec::new();
+    collect_qedspec_files(dir, &mut files)?;
+    files.sort();
+
+    anyhow::ensure!(
+        !files.is_empty(),
+        "no .qedspec files found under {}",
+        dir.display()
+    );
+
+    let mut merged_name: Option<String> = None;
+    let mut merged_items: Vec<crate::ast::Node<crate::ast::TopItem>> = Vec::new();
+
+    for file in &files {
+        let src =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(|e| format!("  {:?}", e))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!("parse error in {}:\n{}", file.display(), msg)
+        })?;
+
+        match &merged_name {
+            None => merged_name = Some(typed.name.clone()),
+            Some(existing) if existing != &typed.name => {
+                anyhow::bail!(
+                    "spec name mismatch in {}: declared `spec {}`, but a sibling \
+                     file declares `spec {}`. Every .qedspec fragment in a \
+                     multi-file spec directory must declare the same name.",
+                    file.display(),
+                    typed.name,
+                    existing,
+                );
+            }
+            _ => {}
+        }
+
+        merged_items.extend(typed.items);
+    }
+
+    let merged = crate::ast::Spec {
+        name: merged_name.expect("non-empty files implies non-empty name"),
+        items: merged_items,
+    };
+    Ok(crate::chumsky_adapter::adapt(&merged))
+}
+
+/// Read the source text of a spec path — single file or directory of
+/// fragments — as one contiguous string, joining fragments in the same
+/// sorted-path order the loader uses. Consumers that scan the raw text
+/// (e.g. `spec_hash_for_handler`) must go through this helper so the hash
+/// they compute is identical to what the proc-macro will compute at compile
+/// time.
+pub fn read_spec_source(path: &Path) -> Result<String> {
+    if path.is_dir() {
+        let mut files = Vec::new();
+        collect_qedspec_files(path, &mut files)?;
+        files.sort();
+        let mut out = String::new();
+        for f in &files {
+            let src =
+                std::fs::read_to_string(f).with_context(|| format!("reading {}", f.display()))?;
+            out.push_str(&src);
+            if !src.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        Ok(out)
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    }
+}
+
+/// Recursive collector for `.qedspec` files under a directory, depth-first.
+/// Silently skips non-UTF8 paths (pathologically rare in a source tree).
+fn collect_qedspec_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading dir {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("stat {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_qedspec_files(&path, out)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("qedspec")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Generate the full list of expected properties with intent descriptions.
@@ -3305,6 +3423,86 @@ mod tests {
                 .iter()
                 .filter(|w| w.rule == "write_without_read")
                 .collect::<Vec<_>>()
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Multi-file spec loader
+    // ──────────────────────────────────────────────────────────────────────
+
+    const SPEC_ROOT: &str = r#"
+spec Demo
+
+type State
+  | Active of { count : U64 }
+"#;
+
+    const SPEC_INC: &str = r#"
+spec Demo
+
+/// Increments count
+handler inc (x : U64) : State.Active -> State.Active {
+  effect { count += x }
+}
+"#;
+
+    const SPEC_DEC: &str = r#"
+spec Demo
+
+handler dec (x : U64) : State.Active -> State.Active {
+  effect { count -= x }
+}
+"#;
+
+    #[test]
+    fn multi_file_spec_merges_handlers_across_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("demo.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::create_dir_all(dir.path().join("handlers")).unwrap();
+        std::fs::write(dir.path().join("handlers/inc.qedspec"), SPEC_INC).unwrap();
+        std::fs::write(dir.path().join("handlers/dec.qedspec"), SPEC_DEC).unwrap();
+
+        let parsed = parse_spec_file(dir.path()).unwrap();
+        assert_eq!(parsed.program_name, "Demo");
+        let names: Vec<_> = parsed.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"inc"), "got handlers: {:?}", names);
+        assert!(names.contains(&"dec"), "got handlers: {:?}", names);
+    }
+
+    #[test]
+    fn multi_file_spec_rejects_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(
+            dir.path().join("b.qedspec"),
+            "spec Other\n\nhandler noop : State.Active -> State.Active { effect {} }\n",
+        )
+        .unwrap();
+
+        let err = parse_spec_file(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("spec name mismatch"),
+            "expected name-mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn multi_file_spec_source_matches_single_file_concat() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(dir.path().join("2.qedspec"), SPEC_INC).unwrap();
+
+        // read_spec_source must emit fragments in sorted-path order so
+        // spec_hash_for_handler finds handler bodies regardless of which
+        // fragment they live in.
+        let src = read_spec_source(dir.path()).unwrap();
+        assert!(
+            src.contains("type State"),
+            "root fragment missing in merged source"
+        );
+        assert!(
+            src.contains("handler inc"),
+            "handler fragment missing in merged source"
         );
     }
 }

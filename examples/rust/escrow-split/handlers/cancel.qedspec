@@ -1,0 +1,20 @@
+spec Escrow
+
+/// Initializer reclaims their deposit and closes the escrow
+handler cancel : State.Open -> State.Closed {
+  auth initializer
+
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    escrow_ta      : writable, type token, authority escrow
+    initializer_ta : writable, type token
+    token_program  : program
+  }
+
+  transfers {
+    from escrow_ta to initializer_ta amount initializer_amount authority escrow
+  }
+
+  emits EscrowCancelled
+}

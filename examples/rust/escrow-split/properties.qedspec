@@ -1,0 +1,9 @@
+spec Escrow
+
+invariant conservation "total tokens preserved across initialize, exchange, cancel"
+
+cover happy_path [initialize, exchange]
+
+cover cancel_path [initialize, cancel]
+
+liveness escrow_settles : State.Open ~> State.Closed via [exchange, cancel] within 1

@@ -1,0 +1,40 @@
+// Escrow Verification Spec — multi-file edition
+//
+// Byte-for-byte equivalent to examples/rust/escrow/escrow.qedspec, split
+// across files to exercise the convention-based multi-file loader. Every
+// fragment declares `spec Escrow` and contributes top items that are merged
+// in sorted-path order.
+
+spec Escrow
+
+type State
+  | Uninitialized
+  | Open of {
+      initializer          : Pubkey,
+      taker                : Pubkey,
+      initializer_amount   : U64,
+      taker_amount         : U64,
+      escrow_token_account : Pubkey,
+    }
+  | Closed
+
+pda escrow ["escrow", initializer]
+
+event EscrowInitialized {
+  initializer : Pubkey,
+  amount      : U64,
+}
+
+event EscrowExchanged {
+  taker  : Pubkey,
+  amount : U64,
+}
+
+event EscrowCancelled {
+  initializer : Pubkey,
+}
+
+type Error
+  | InvalidAmount
+  | Unauthorized
+  | AlreadyClosed

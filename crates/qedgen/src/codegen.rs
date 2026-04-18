@@ -388,7 +388,9 @@ fn generate_instructions(
     std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
 
     // Read spec source once — used for spec_hash attributes.
-    let spec_src = std::fs::read_to_string(spec_path).unwrap_or_default();
+    // `read_spec_source` handles both single-file and multi-file (directory)
+    // specs, concatenating fragments in the same order the loader merges them.
+    let spec_src = crate::check::read_spec_source(spec_path).unwrap_or_default();
     let spec_attr = relative_spec_path(spec_path, output_dir);
 
     // Per-handler instruction files — skip if existing (user-owned).
