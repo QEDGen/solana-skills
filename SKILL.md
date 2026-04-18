@@ -229,18 +229,24 @@ Not every project needs this. The `.qedspec` alone (validated by lint + proptest
 ### 4a. Set up the Lean project
 
 ```bash
-# Anchor/Rust project
-$QEDGEN init --name escrow
+# Anchor/Rust project — --spec pins the authored qedspec location in .qed/config.json
+$QEDGEN init --name escrow --spec escrow.qedspec
 
 # sBPF project (runs asm2lean automatically)
-$QEDGEN init --name dropset --asm src/dropset.s
+$QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 
 # With Mathlib (for u128 arithmetic helpers)
-$QEDGEN init --name engine --mathlib
+$QEDGEN init --name engine --spec engine.qedspec --mathlib
 
 # With Quasar codegen pipeline
-$QEDGEN init --name counter --quasar
+$QEDGEN init --name counter --spec counter.qedspec --quasar
 ```
+
+After init, subsequent commands find the spec automatically by walking up
+from the current directory to the nearest `.qed/config.json` — no
+`--spec <path>` needed on `qedgen check` or `qedgen codegen` from inside
+the project. Explicit `--spec` still overrides when you want to point at
+something different.
 
 Generated structure:
 ```

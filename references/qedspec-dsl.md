@@ -58,6 +58,29 @@ environment oracle { ... }
 
 Comments: `//` line comments, `///` doc comments (attached to the next item).
 
+## Project pinning — `.qed/config.json`
+
+`qedgen init --name <name> --spec <path>` records the authored spec's
+location in `.qed/config.json`:
+
+```json
+{
+  "name": "escrow",
+  "spec": "escrow.qedspec",           // path, relative to the project root
+  "interfaces_dir": ".qed/interfaces" // vendored library interfaces
+}
+```
+
+`qedgen check` / `qedgen codegen` with no `--spec` argument walk upward from
+the current directory, find the nearest `.qed/config.json`, and resolve the
+spec via the `spec` field. Explicit `--spec <path>` still overrides the
+config — useful for scripts or one-off checks against a different spec.
+
+Authored `.qedspec` files stay at the program root (visible, committed,
+user-edited). Tool-managed library interfaces live under
+`.qed/interfaces/` and are dropped there by `qedgen interface --idl
+<path> --vendor`.
+
 ## Multi-file specs
 
 `qedgen check --spec <path>` accepts either a single `.qedspec` file or a
