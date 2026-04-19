@@ -7,7 +7,7 @@
 </p>
 
 <h3 align="center">Proofs, not promises.</h3>
-<p align="center"><em>Ship to mainnet without fear.</em></p>
+<p align="center"><em>Ship without fear.</em></p>
 
 <p align="center">
   <a href="https://qedgen.dev">Website</a> &middot;
