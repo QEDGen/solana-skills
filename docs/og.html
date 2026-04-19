@@ -179,6 +179,10 @@ h1 .italic {
   letter-spacing: -0.01em;
 }
 
+.nobr {
+  white-space: nowrap;
+}
+
 .tomb {
   display: inline-block;
   width: 0.48em;
@@ -288,7 +292,7 @@ h1 .italic {
 
   <div class="main">
     <span class="eyebrow"><span class="dot"></span>proofs, not promises</span>
-    <h1>Ship <span class="italic">without</span> fear<span class="tomb"></span></h1>
+    <h1>Ship <span class="italic">without</span> <span class="nobr">fear<span class="tomb"></span></span></h1>
     <p class="sub">
       Describe what your Solana program must guarantee in <code>.qedspec</code>.
       QEDGen generates the proofs, property tests, and CI.
