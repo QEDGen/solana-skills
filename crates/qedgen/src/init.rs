@@ -441,7 +441,10 @@ mod tests {
         let readme = plan.join("README.md");
         assert!(readme.is_file(), "plan/README.md should be seeded");
         let body = std::fs::read_to_string(&readme).unwrap();
-        assert!(body.contains("findings/"), "README should describe findings/");
+        assert!(
+            body.contains("findings/"),
+            "README should describe findings/"
+        );
         assert!(body.contains("gaps.md"), "README should describe gaps.md");
     }
 
