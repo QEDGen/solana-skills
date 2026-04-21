@@ -1,5 +1,14 @@
 # Support Library API Reference
 
+> **Phase 2 material — load only when writing Lean proofs.** This file
+> documents the `QEDGen.Solana.*` Lean support library. The surface is
+> intentionally narrow: program IDs, SPL Token discriminators,
+> `CpiInstruction` / `AccountMeta` / `Lifecycle` types, and Mathlib-backed
+> arithmetic helpers. It does **not** ship Solana-runtime axioms (rent
+> formula, ABI layout, borrow-state protocol, PDA ownership rules) —
+> those track a moving target and would rot faster than they pay off.
+> See SKILL.md **Step 4** drift caution.
+
 After `import QEDGen.Solana` or individual modules.
 
 ## Types

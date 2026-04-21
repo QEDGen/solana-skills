@@ -127,11 +127,57 @@ pub fn init_qed_dir(dir: &Path, name: &str, spec_rel: Option<&str>) -> Result<()
     // Add .qed/ gitignore for internal state (config.json is committed)
     std::fs::write(
         qed_path.join(".gitignore"),
-        "# .qed/ is project metadata — commit config.json\n",
+        "# .qed/ is project metadata — commit config.json and plan/\n",
     )?;
+
+    // Scaffold .qed/plan/ — agent-maintained ledger of session findings,
+    // gap reports, and reviewer feedback. Committed by default. Subdirs
+    // (findings/, sessions/) are created lazily when first written.
+    let plan_path = qed_path.join("plan");
+    std::fs::create_dir_all(&plan_path)?;
+    std::fs::write(plan_path.join("README.md"), PLAN_README)?;
 
     Ok(())
 }
+
+const PLAN_README: &str = r#"# .qed/plan/
+
+Agent-maintained ledger of what qedgen caught, what it missed, and what
+reviewers surfaced after the fact. Committed by default.
+
+## Layout
+
+- `findings/NNN-<slug>.md` — pattern-tagged entries: a probe that fired,
+  a reviewer's callout, a gap that surfaced in testing. One pattern per
+  file. Reference the pattern, not the incident.
+- `sessions/YYYY-MM-DD-<topic>.md` — session summaries written at
+  meaningful boundaries (spec finalized, proofs shipped, bug resolved).
+  Three fields: what we tried, what worked, what we'd do differently.
+- `gaps.md` — running list of "qedgen didn't catch X; Y did" with a
+  one-line hypothesis for what lint or harness would've caught it.
+- `reviewers.md` — external-review feedback, pattern-tagged.
+
+Subdirectories are created lazily as entries are written.
+
+## What to capture
+
+Capture **patterns**, not business specifics. A good entry names a class
+of bug and the shape of the guard that would catch it. A bad entry names
+an account, a pubkey, a user, or a dollar value.
+
+Good: *"Generic const parameter flowed into an `as u16` cast without a
+force-evaluated compile-time bound — silent wrap at the 65,536th push."*
+
+Bad: *"Alice's vault overflowed when she deposited 2^16 times."*
+
+## Telemetry (future)
+
+This ledger is the seed corpus for future qedgen lints and probes. A
+future opt-in `qedgen telemetry push` will upload entries anonymised;
+until that command ships, `.qed/plan/` is local-to-your-repo. You
+control what leaves: inspect, edit, or delete any entry before
+uploading. Scrubbing rules above are the contract.
+"#;
 
 /// Simple ISO-8601 timestamp without pulling in chrono.
 fn chrono_now() -> String {
@@ -383,6 +429,20 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         let resolved = resolve_spec_path(None, &nested).unwrap();
         assert_eq!(resolved, root.join("demo.qedspec"));
+    }
+
+    #[test]
+    fn init_scaffolds_plan_directory_with_readme() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_qed_dir(root, "demo", Some("demo.qedspec")).unwrap();
+        let plan = root.join(QED_DIR).join("plan");
+        assert!(plan.is_dir(), "plan/ directory should be created");
+        let readme = plan.join("README.md");
+        assert!(readme.is_file(), "plan/README.md should be seeded");
+        let body = std::fs::read_to_string(&readme).unwrap();
+        assert!(body.contains("findings/"), "README should describe findings/");
+        assert!(body.contains("gaps.md"), "README should describe gaps.md");
     }
 
     #[test]

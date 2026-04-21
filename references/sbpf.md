@@ -1,5 +1,12 @@
 # sBPF Assembly Verification Reference
 
+> **Lean-mandatory by construction.** sBPF is the one place in qedgen
+> where Lean is required, not optional — the SVM interpreter lives in
+> the Lean support library (`QEDGen.Solana.SBPF`), so bytecode
+> verification has no Kani substitute. If you're verifying an sBPF
+> program, you're in Phase 2. For Rust programs, Phase 1 (spec +
+> proptest + Kani) is usually the finish line.
+
 ## Transpile with asm2lean
 
 **Never transcribe assembly by hand.** Use `qedgen asm2lean`:

@@ -60,6 +60,12 @@ bin/
 # PRDs (internal planning docs)
 docs/prds/
 
+# Internal learnings / reconnaissance — source material for probes and
+# lints, never committed to the public repo (see feedback memory: no
+# naming sources of finding in public artifacts).
+learnings/
+LEARNINGS_*.md
+
 # Local agent/editor state
 .agents/
 .claude/

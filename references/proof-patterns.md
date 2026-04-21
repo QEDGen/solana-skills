@@ -1,5 +1,11 @@
 # Proof Patterns Reference
 
+> **Phase 2 material — load only when writing Lean proofs.** Most
+> programs finish at Phase 1 (spec + lint + adversarial probes +
+> proptest + Kani). Enter Phase 2 for DeFi numerical invariants, new
+> cryptographic primitives, or inductive sBPF proofs. See SKILL.md
+> **Step 4** for the entry criteria and drift caveats.
+
 ## Access control
 
 Signer must match authority:

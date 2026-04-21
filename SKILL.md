@@ -9,10 +9,11 @@ You (Claude) help the user **specify** what their program must guarantee. The `.
 
 **Reference files** (read on demand — do NOT load all at once):
 - `references/qedspec-dsl.md` — qedspec, qedguards, qedbridge DSL syntax
-- `references/support-library.md` — Types, constants, functions, lemmas, arithmetic helpers
-- `references/proof-patterns.md` — Access control, CPI, state machine, conservation patterns + tactic rules
-- `references/sbpf.md` — sBPF assembly verification: asm2lean, wp_exec, memory, simp performance
+- `references/adversarial-probes.md` — Probe taxonomy for the automatic attack-surface scan (§3a.5)
 - `references/cli.md` — Full CLI reference with all commands and flags
+- `references/support-library.md` — Lean types, constants, lemmas, arithmetic helpers (Phase 2 only)
+- `references/proof-patterns.md` — Lean proof patterns + tactic rules (Phase 2 only)
+- `references/sbpf.md` — sBPF assembly verification: asm2lean, wp_exec, memory, simp performance (sBPF is Lean-mandatory)
 
 ## Important: how to run qedgen
 
@@ -30,17 +31,25 @@ Three phases:
 
 Phase 1 — Spec Design (interactive, all artifacts transient)
   You + User ──→ iterate on .qedspec
-    ├── Lint         — structural validation           (instant)
-    ├── Proptest     — random counterexamples           (~100ms)
-    └── lean-gen     — type-level provability check     (~seconds)
-  Mindset: declarative intent. Write what must be true, not how to prove it.
+    ├── Lint               — structural validation              (instant)
+    ├── Adversarial probe  — automatic attack-surface scan      (instant)
+    ├── Proptest           — random counterexamples              (~100ms)
+    ├── Kani BMC           — bounded-model counterexamples       (~seconds–minutes)
+    └── lean-gen (opt.)    — type-level provability sanity      (~seconds)
+  Mindset: architectural AND adversarial. Declare what must be true; the
+  probes + counterexample tiers hunt for what breaks it. Kani+proptest are
+  the spec's defenses, not a post-ship check.
   Deliverable: .qedspec (committed)
   Covered in: Step 1–3 below.
 
-Phase 2 — Proof Engineering (on demand, formal certificates)
+Phase 2 — Formal Proofs (on demand, for exotic math only)
   .qedspec ──→ Spec.lean ──→ Lean proofs ──→ lake build
     ├── Leanstral    — fast sorry-filling               (seconds)
     └── Aristotle    — deep agentic proof search         (minutes-hours)
+  When to enter: the program has obligations Kani/proptest can't discharge
+  — DeFi curve math, wide-arithmetic solvency, novel cryptographic
+  primitives, or inductive sBPF bytecode proofs. Most programs finish at
+  Phase 1.
   Mindset: tactical. Read Lean errors, select proof patterns, route hard
   sub-goals to the right backend. Switch references/proof-patterns.md
   and references/sbpf.md into active context.
@@ -58,7 +67,7 @@ Phase 3 — Audit / drift maintenance (ongoing, post-ship)
 Spec-driven pipeline (all generated from the same .qedspec):
   qedspec ──→ Proptest harnesses    (transient, /tmp)
           ──→ Kani harnesses        (generated)
-          ──→ Spec.lean             (generated)
+          ──→ Spec.lean             (generated — Phase 2 only)
           ──→ Quasar Rust program   (generated)
           ──→ Unit + integration tests (generated)
 ```
@@ -122,32 +131,38 @@ Ask questions **one at a time**. Wait for the answer before the next.
 
 ## Step 3: Write and refine the .qedspec
 
-The spec design phase is an **interactive loop**. You iterate on the `.qedspec` with the user, using lint, proptest, and lean-gen as internal feedback tools. All verification artifacts (proptests, Lean theorems, Spec.lean) are **transient intermediary files** — generated to `/tmp`, used for validation, then discarded. Only the `.qedspec` gets committed to the user's repo.
+The spec design phase is an **architectural and adversarial interactive loop**. Draft the `.qedspec`, scan it for attack surfaces the user didn't enumerate, then exercise it with counterexample tiers (proptest first, Kani BMC second) to find anything the probes missed. Lint, probes, proptest, and Kani are spec-design tools — not post-ship validation. All harnesses and transient Lean builds live in `/tmp`. Only the `.qedspec` gets committed.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                   Spec Design Loop                          │
-│                                                             │
-│   Write/edit .qedspec                                       │
-│        │                                                    │
-│        ▼                                                    │
-│   Lint ──→ priority 1-2 findings? ──→ fix spec, re-lint    │
-│        │                                                    │
-│        ▼                                                    │
-│   Proptest (transient) ──→ counterexample? ──→ fix spec     │
-│        │                                                    │
-│        ▼                                                    │
-│   lean-gen + lake build (transient) ──→ unprovable? ──→ fix │
-│        │                                                    │
-│        ▼                                                    │
-│   Present findings to user as spec-level issues             │
-│        │                                                    │
-│        ▼                                                    │
-│   User confirms ──→ finalize .qedspec                       │
-│                                                             │
-│   Deliverable: the .qedspec file (committed to repo)        │
-│   Everything else: disposable agent workspace               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                   Spec Design Loop                              │
+│                                                                 │
+│   Write/edit .qedspec                                           │
+│        │                                                        │
+│        ▼                                                        │
+│   Adversarial probe (auto) ──→ attack surface? ──→ add obligations
+│        │                                                        │
+│        ▼                                                        │
+│   Lint ──→ priority 1-2 findings? ──→ fix spec, re-lint         │
+│        │                                                        │
+│        ▼                                                        │
+│   Proptest (~100ms) ──→ counterexample? ──→ fix spec            │
+│        │                                                        │
+│        ▼                                                        │
+│   Kani BMC (~seconds–minutes) ──→ counterexample? ──→ fix spec  │
+│        │                                                        │
+│        ▼                                                        │
+│   lean-gen + lake build (optional) ──→ unprovable? ──→ fix      │
+│        │                                                        │
+│        ▼                                                        │
+│   Present findings to user as spec-level issues                 │
+│        │                                                        │
+│        ▼                                                        │
+│   User confirms ──→ finalize .qedspec                           │
+│                                                                 │
+│   Deliverable: the .qedspec file (committed to repo)            │
+│   Everything else: disposable agent workspace                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### 3a. Write the initial .qedspec
@@ -162,6 +177,42 @@ Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for fu
 For sBPF assembly programs, use `qedguards` instead of the core DSL for guard/property bodies.
 
 Present the spec to the user and get confirmation before proceeding to validation.
+
+### 3a.5. Adversarial probe (automatic attack-surface scan)
+
+Before running lint or counterexample tiers, automatically scan the spec
+and source for attack surfaces the user may not have thought about. This
+is agent-driven — not a quiz. Users typically don't enumerate
+authorization-bypass scenarios, close-reinit vectors, or narrowing-cast
+corruption on their own; the probe list does it for them.
+
+See `references/adversarial-probes.md` for the full taxonomy. Classes:
+
+- **Arithmetic & casting** — narrowing casts from generic/const params,
+  unchecked mul/add/sub on attacker-influenced operands, usize subtraction
+  with external-mutation reachability.
+- **State machine & close-safety** — replay, re-init, close without
+  discriminator scrub, reads after an external resize.
+- **Borrow / aliasing protocol** — release-then-reacquire losing writes,
+  borrow-state assumptions that don't hold at the loader boundary.
+- **Authorization** — missing signer/owner checks, PDA seed uniqueness.
+- **Conservation** — sum-across-accounts invariants with partial updates.
+- **CPI execution** — account ordering, realloc lamport disjointness,
+  data-increase bounds.
+
+For each probe that hits:
+
+1. Add the corresponding negative-path obligation to the spec —
+   `aborts_if`, `cover`, or a property — so proptest/Kani have a
+   concrete target.
+2. Record the hit in `.qed/plan/findings/NNN-<probe-slug>.md` (see
+   **Learning capture** below) with the pattern shape, not the incident.
+3. Surface *only* the findings to the user: "I noticed X could Y; I've
+   added an `aborts_if` to defend. Confirm or adjust." Keep the probe
+   list itself out of the conversation.
+
+Probes that don't hit leave no trace. Silent when the spec is sound,
+loud when it isn't.
 
 ### 3b. Lint (structural validation)
 
@@ -179,9 +230,15 @@ Lint output is priority-ordered (1=security, 2=correctness, 3=completeness, 4=qu
 
 Re-run lint after each round of fixes until clean or only priority 5 items remain.
 
-### 3c. Proptest (fast counterexamples)
+### 3c. Counterexample hunting (proptest → Kani BMC)
 
-Run proptest to catch spec-level bugs in ~100ms. All proptest artifacts are **transient** — generated, run, and discarded within `/tmp`.
+Two adversarial tiers, both transient (generated, run, discarded in `/tmp`).
+Proptest runs on every spec edit — it's ~100ms and catches most
+counterexamples by random sampling. Kani runs when proptest is green
+— it's bounded-model and exhaustive within its unwind limits, slower
+(seconds to minutes) but deterministic.
+
+#### 3c.1 Proptest (~100ms, every spec edit)
 
 ```bash
 # Generate harness
@@ -209,21 +266,79 @@ cd /tmp/proptest_runner && cargo test --test proptest
 - **Overflow test fails**: An `add`/`sub` effect wraps around without a guard.
 - **Guard test fails**: Guard logic has a bug (shouldn't happen if lint is clean).
 
-### 3d. lean-gen + lake build (type-level validation)
+#### 3c.2 Kani BMC (~seconds–minutes, after proptest passes)
 
-Generate Lean theorems and attempt to build. This catches spec issues that proptest misses — theorems that are logically unprovable indicate a spec bug, not a proof engineering problem.
+Run Kani once proptest is green. Kani is deterministic — it finds
+everything within its unwind bound — but costs more wall-time per run.
+Worth the cost: bounded-model verification of arithmetic and state
+transitions is the single strongest defense short of full Lean proofs,
+and it holds for the overwhelming majority of program-level obligations.
+
+```bash
+# Generate harness
+$QEDGEN codegen --spec <path-to-qedspec> --kani --kani-output /tmp/kani_harness.rs
+
+# Run in a scratch project with Kani installed
+mkdir -p /tmp/kani_runner/src
+cat > /tmp/kani_runner/Cargo.toml << 'EOF'
+[package]
+name = "kani-runner"
+version = "0.1.0"
+edition = "2021"
+EOF
+cp /tmp/kani_harness.rs /tmp/kani_runner/src/lib.rs
+cd /tmp/kani_runner && cargo kani
+```
+
+**Solver selection.** Kani's CBMC default (CaDiCaL) handles layout and
+small arithmetic well but chokes on wide types (u128) and symbolic
+div/rem. When a harness times out or takes minutes, swap solvers per
+property class:
+
+| Property class                          | Solver     | Attribute                       |
+|-----------------------------------------|------------|---------------------------------|
+| Layout, bit-fiddling, u8/u16/u32 math   | CaDiCaL    | (default — no attribute needed) |
+| u128 mul/add/sub, signed div/rem        | Z3         | `#[kani::solver(z3)]`           |
+| Long-tail / mixed                       | kissat     | `#[kani::solver(kissat)]`       |
+| Floating-point adjacent                 | bitwuzla   | `#[kani::solver(bitwuzla)]`     |
+| Fallback                                | cvc5       | `#[kani::solver(cvc5)]`         |
+
+Start with CaDiCaL. If a harness is slow (>30s for a bounded property),
+add `#[kani::solver(z3)]` — the 128-bit arithmetic surface that would
+otherwise require Lean verifies cleanly under Z3 in seconds. This is
+the single most common reach-for-a-flag moment in Kani usage; don't
+spend wall-time on CaDiCaL timeouts.
+
+**Interpreting failures.** Kani prints a concrete counterexample — the
+input that violated the assertion. Treat it as a spec bug report:
+either add the missing guard, or narrow the property's precondition.
+Record the class of bug (not the specific input) in
+`.qed/plan/findings/` so the shape informs future probes.
+
+### 3d. lean-gen (optional — type-level sanity)
+
+**Skip unless the project is Phase 2 bound** (DeFi/crypto math, sBPF).
+Proptest + Kani are sufficient for Phase 1 programs.
+
+For Phase-2-bound projects, generate the Lean type stubs and run
+`lake build` on the statements only. This catches spec bugs where the
+theorem statement itself is nonsense (e.g. a conservation property that
+doesn't type-check against the declared state). It does **not** attempt
+proofs — `sorry` is fine here.
 
 ```bash
 # Generate Spec.lean to /tmp
 $QEDGEN codegen --spec <path-to-qedspec> --lean --lean-output /tmp/lean_check/Spec.lean
 
-# Quick validation build
+# Quick validation build (types only, proofs are sorry)
 $QEDGEN init --name check --output-dir /tmp/lean_check
 cp /tmp/lean_check/Spec.lean /tmp/lean_check/formal_verification/Spec.lean
 cd /tmp/lean_check/formal_verification && lake build
 ```
 
-If `lake build` reveals structurally unprovable theorems (not just missing tactics — the theorem statement itself is wrong), that's feedback about the spec. Fix the `.qedspec` and re-run.
+A structurally unprovable theorem is feedback about the spec — fix the
+`.qedspec` and re-run. Tactic failures are Phase 2 territory; a file
+full of `sorry` that type-checks is the expected output of this step.
 
 ### 3e. Present findings as spec-level issues
 
@@ -241,9 +356,39 @@ When all tiers pass clean, present the final `.qedspec` to the user. This is the
 
 ## Step 4: Proof engineering (on demand)
 
-Steps 4-8 apply when the user wants **formal proof certificates** — mathematical guarantees backed by Lean 4 proofs. This is a separate phase from spec design. The `.qedspec` is the input; Lean proofs are the output.
+Step 4 applies when the user wants **formal proof certificates** —
+mathematical guarantees backed by Lean 4 proofs. The `.qedspec` is the
+input; Lean proofs are the output.
 
-Not every project needs this. The `.qedspec` alone (validated by lint + proptest) provides significant assurance. Full formal proofs are for high-stakes programs (DeFi vaults, bridges, token contracts) where the cost of a bug justifies the investment.
+**Most programs don't need Phase 2.** A `.qedspec` validated by lint +
+adversarial probes + proptest + Kani BMC in Phase 1 is the finish line
+for the majority of Solana programs — authorization, conservation at
+u64/u128 bounds, lifecycle, CPI shape, close-safety, and narrowing-cast
+defenses all verify cleanly without leaving the SAT/SMT world.
+
+Enter Phase 2 when the program has obligations those tiers can't
+discharge:
+
+- **DeFi numerical invariants** — AMM curve math, bonding curves,
+  fee-conservation across wide arithmetic, solvency under compound
+  operations. Mathlib (`Finset`, `BigOperators`, `ring`, `linarith`,
+  `norm_num`) earns its 8GB here.
+- **New cryptographic primitives** — hash-based constructions,
+  signature schemes, commitment schemes whose correctness depends on
+  mathematical properties rather than byte-level equivalence.
+- **Inductive bytecode proofs** — sBPF assembly programs. sBPF is
+  Lean-mandatory by construction: the SVM interpreter lives in the
+  Lean support library, there's no Kani substitute. See
+  `references/sbpf.md`.
+
+**Drift caution.** The `QEDGen.Solana.*` support library intentionally
+models a narrow, stable surface: program IDs, SPL Token discriminators,
+account/CPI structure, `Lifecycle`, Mathlib-backed arithmetic helpers.
+It does **not** ship Solana-runtime axioms (rent formula, ABI layout,
+borrow-state protocol, PDA ownership rules, CPI execution semantics).
+Those track a moving target and would rot faster than they pay off. If
+a proof seems to need such axioms, it's asking for a boundary Phase 2
+won't give you — stay in Phase 1 with Kani on the specific scenario.
 
 ### 4a. Set up the Lean project
 
@@ -284,7 +429,7 @@ $QEDGEN codegen --spec program.qedspec --lean --lean-output formal_verification/
 
 **When to add Mathlib:**
 - **sBPF proofs do NOT need Mathlib.** Built-in tactics handle everything.
-- **Anchor/Rust proofs MAY need Mathlib** for u128 arithmetic, `linarith`, `ring`, or `norm_num`.
+- **DeFi / crypto proofs almost always need Mathlib** — `Finset`, `BigOperators`, `ring`, `linarith`, `norm_num`, u128 reasoning. This is the Phase 2 sweet spot and where Mathlib earns its cost.
 - **Rule of thumb:** Start without. Add `--mathlib` if `lake build` fails on a missing tactic or lemma. Mathlib adds ~8GB and 15-45 min first build.
 
 ### 4b. Write Lean proofs
@@ -543,10 +688,20 @@ target (no explicit `target` keyword — that was removed in v2.5).
 
 **`interface Name { ... }` + `call Target.handler(name = expr, ...)`** —
 declarative CPI contracts. Three tiers: shape-only (Tier 0, from IDL),
-hand-authored `ensures` (Tier 1, e.g. SPL Token library at
+hand-authored `requires` / `ensures` (Tier 1, e.g. SPL Token library at
 `interfaces/spl_token.qedspec`), and imported qedspec (Tier 2, v2.6+).
+Tier-1 clauses bind proptest, Kani, and — when the caller has a Lean
+side — Lean obligations from the same source.
 `qedgen check` emits `[shape_only_cpi]` for calls to Tier-0 interfaces —
 the visible gap between "my Rust compiles" and "my program is verified."
+
+**Caution when growing Tier-1.** Keep `requires`/`ensures` **semantic**
+(`amount > 0`, `from != to`, `authority signs`) rather than
+**implementation-tracking** (specific fee math, byte layouts, particular
+error codes). Implementation details drift with upstream releases;
+semantic constraints don't. When in doubt, prefer fewer clauses plus a
+Kani harness against the deployed binary over more clauses that need
+rewriting when the upstream ships a patch.
 
 **`qedgen interface --idl <path>`** — scaffold a Tier-0 interface from an
 Anchor IDL. Honest output: no `ensures` (IDL doesn't carry semantics),
@@ -599,12 +754,65 @@ fn deposit_preserves_conservation() {
 
 **Greenfield Kani harnesses** (self-contained models from `$QEDGEN codegen --kani`) are for new projects where no Rust implementation exists yet. They model the spec's state machine independently of any framework types.
 
+## Learning capture (`.qed/plan/`)
+
+`qedgen init` scaffolds `.qed/plan/` — a committed, agent-maintained
+ledger of what qedgen caught, what it missed, and what reviewers
+surfaced after the fact. This is **qedgen-team telemetry**: the data
+shapes future probes, lints, and DSL features. The signal is what matters;
+business specifics stay out.
+
+**Layout** (subdirectories created lazily on first write):
+
+```
+.qed/
+  config.json                       # existing project metadata
+  plan/
+    README.md                       # conventions (seeded by init)
+    findings/NNN-<slug>.md          # patterns caught / missed
+    sessions/YYYY-MM-DD-<topic>.md  # session summaries at boundaries
+    gaps.md                         # "qedgen didn't catch X; Y did"
+    reviewers.md                    # external-review feedback
+```
+
+**When to write.** As you work:
+
+- Every adversarial probe hit (§3a.5) → `findings/NNN-<probe-slug>.md`
+  with the pattern shape and the obligation that was added.
+- Every Kani counterexample → `findings/NNN-<class>.md` with the bug
+  class (not the specific input).
+- Every time the user overrides a suggestion, corrects a miss, or
+  points out a probe should have fired → `gaps.md` entry with a
+  one-line hypothesis for what would catch it next time.
+- Every external reviewer finding (audit, security firm, ad-hoc
+  teammate) → `reviewers.md` entry, pattern-tagged.
+- Meaningful session boundaries (spec finalized, proofs shipped, bug
+  resolved) → `sessions/YYYY-MM-DD-<topic>.md` with three fields: what
+  we tried, what worked, what we'd do differently.
+
+**What to write.** Capture **patterns**, not specifics.
+
+- **Good:** *"Generic const parameter flowed into an `as u16` cast
+  without a force-evaluated compile-time bound — silent wrap at the
+  65,536th push. Probe P-arith/narrowing-cast fired; added
+  `aborts_if MAX > U16_MAX with NarrowingWrap`."*
+- **Bad:** *"Alice's vault overflowed when she deposited 2^16 times."*
+
+Scrub account keys, pubkeys, user identities, dollar values, and
+project-specific identifiers before writing.
+
+**Telemetry (future release).** A future `qedgen telemetry push` will
+upload entries anonymised, opt-in. Until that command ships, `.qed/plan/`
+is local to the repo — inspect, edit, or delete any entry before it
+ever leaves the machine.
+
 ## Git hygiene
 
 The `.qedspec` is the primary committed artifact. Everything else is derived.
 
 **Always commit:**
 - `.qedspec` file (the spec source of truth)
+- `.qed/config.json` and `.qed/plan/` (project metadata + learning ledger)
 
 **Commit when doing full proof engineering (Step 4):**
 - `formal_verification/*.lean` source files, `lakefile.lean`, `lean-toolchain`, `.gitignore`
