@@ -430,8 +430,10 @@ After `qedgen generate`:
 Before cutting a new release or tag:
 
 1. **Bump version** in `crates/qedgen/Cargo.toml` — `install.sh` derives its version from there
-2. **`cargo test`** — all tests must pass
-3. **`cargo clippy`** — no warnings
-4. **`lake build` all examples** — run in each `examples/*/formal_verification/` directory; all must build successfully
-5. **Zero `sorry`** — `grep -r '\bsorry\b' examples/**/*.lean` must return nothing
-6. **README, SKILL.md, references/ are up to date** — check commands, flags, examples match current CLI
+2. **`cargo fmt --check`** — matches the CI gate; `cargo test` does NOT run fmt, so this is an easy miss if skipped
+3. **`cargo clippy -- -D warnings`** — matches the CI gate (plain `cargo clippy` is too lenient)
+4. **`cargo test`** — all tests must pass
+5. **`bash scripts/check-readme-drift.sh`** — CI runs this; catches undocumented CLI commands
+6. **`lake build` all examples** — run in each `examples/*/formal_verification/` directory; all must build successfully
+7. **Zero `sorry`** — `grep -r '\bsorry\b' examples/**/*.lean` must return nothing
+8. **README, SKILL.md, references/ are up to date** — check commands, flags, examples match current CLI
