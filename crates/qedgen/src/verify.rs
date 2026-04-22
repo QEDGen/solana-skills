@@ -202,6 +202,19 @@ fn run_kani(harness: &Path) -> BackendReport {
         };
     }
 
+    // If the harness routes any effect to `bin = "z3"` (wide-type mul/div),
+    // preflight that z3 is installed. Without this the Kani run fails with
+    // an opaque cbmc spawn error; surface the install hint up front.
+    if let Err(e) = crate::deps::require_z3_if_kani_harness_needs_it(harness) {
+        return BackendReport {
+            name: "kani",
+            status: BackendStatus::Failed,
+            duration_ms: start.elapsed().as_millis(),
+            detail: Some(format!("{}", e)),
+            log_path: None,
+        };
+    }
+
     let crate_dir = match nearest_cargo_dir(harness) {
         Some(dir) => dir,
         None => {

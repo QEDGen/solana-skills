@@ -778,7 +778,17 @@ fn path_to_rust(p: &a::Path, _ctx: Ctx, _inside_old: bool, consts: ConstTable) -
             return v.clone();
         }
     }
-    out.push_str(&p.root);
+    // B12 (v2.6.1): `state.X` lowers to `s.X` — every Rust consumer (property
+    // fn bodies, transition-fn assume predicates, abort.rust_expr, etc.) binds
+    // state to a parameter named `s`. Previously we emitted `state` as-is and
+    // relied on a post-hoc `translate_guard_to_rust` string replace to fix it,
+    // which covered `requires` but missed property bodies consumed raw via
+    // `prop.rust_expression`.
+    if p.root == "state" {
+        out.push('s');
+    } else {
+        out.push_str(&p.root);
+    }
     for seg in &p.segments {
         match seg {
             a::PathSeg::Field(f) => {
@@ -1998,6 +2008,37 @@ type Battle
         // Lifecycle retains every variant name (Active/Frozen/Settled) for
         // Status enum generation.
         assert_eq!(at.lifecycle, vec!["Active", "Frozen", "Settled"]);
+    }
+
+    // B12 regression: property bodies referencing `state.x` must render as
+    // `s.x` in the Rust form — `s` is the function parameter that
+    // `emit_property_predicates` binds. Pre-v2.6.1 the Rust form was
+    // `state.x >= 0`, which failed to compile (`cannot find value 'state'`).
+    #[test]
+    fn property_state_root_renders_as_s_in_rust() {
+        let src = r#"spec T
+state { x : U64 }
+property x_bounded :
+  state.x >= 0
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "x_bounded")
+            .expect("property");
+        let rust = prop.rust_expression.as_deref().expect("rust rendering");
+        assert!(
+            rust.contains("s.x"),
+            "state.x should render as s.x, got: {}",
+            rust
+        );
+        assert!(
+            !rust.contains("state."),
+            "no residual `state.` prefix in rust form: {}",
+            rust
+        );
     }
 
     // B2 regression: `implies` and `forall` must not leak Unicode symbols into

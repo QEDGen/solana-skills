@@ -353,26 +353,29 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         );
 
         // B11 v2.6: split effect conformance into PER-FIELD harnesses — one
-        // proof per (handler, field) pair — so a single cadical-stuck mul/div
-        // field doesn't block verification of its siblings. Heavy-arith
-        // handlers (value RHS contains `*` or `/`) also get `minisat` instead
-        // of `cadical`: minisat solves multiplication-heavy bit-blasted
-        // problems that cadical wedges on.
+        // proof per (handler, field) pair — so a single stuck mul/div field
+        // doesn't block verification of its siblings. Solver choice per
+        // harness is delegated to `pick_kani_solver`, which tiers:
+        //   * cadical     — scalar / linear (default)
+        //   * minisat     — narrow-type (u8/u16/u32) mul/div
+        //   * bin="z3"    — wide-type (u64/u128/i128) mul/div, e.g. the
+        //                   `amount * 125 / 10000 * N / 10000` pattern
         //
         // Pre-v2.6 a single `verify_X_effects` harness combined every field's
         // assertion — `verify_buy_side_a_effects` took 20+ min on a 5×mul/div
-        // effect body. Per-field + solver hint drops that to seconds per
-        // harness, and failures on one field don't hide the rest.
+        // effect body. Per-field + tiered solver drops wide-arith harnesses
+        // from >17 min (minisat-stuck) to seconds, and failures on one field
+        // don't hide the rest.
+        let field_type_lookup: std::collections::HashMap<&str, &str> = mutable_fields
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
         for op in &effect_ops {
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
             for (field, op_kind, value) in &op.effects {
-                let rhs_is_arithmetic = value.contains('*') || value.contains('/');
-                let solver = if rhs_is_arithmetic {
-                    "minisat"
-                } else {
-                    "cadical"
-                };
+                let field_type = field_type_lookup.get(field.as_str()).copied().unwrap_or("");
+                let solver = rust_codegen_util::pick_kani_solver_for_effect(field_type, value, op);
 
                 out.push_str("#[kani::proof]\n");
                 out.push_str("#[kani::unwind(2)]\n");
@@ -959,20 +962,88 @@ handler buy (amount : U64) { effect { pool += amount } }"#;
     }
 
     // B11 regression: effect conformance must be split per-field so one
-    // CBMC-stuck field doesn't block the rest. Heavy-arith RHS (`*`/`/` in
-    // the value) switches solver to `minisat`, which handles bit-blasted
-    // multiplication without cadical's wedge. This doesn't test the full
-    // kani.rs emission path (that requires a spec file on disk) — it encodes
-    // the invariants we rely on as comments/plumbing.
+    // CBMC-stuck field doesn't block the rest, and the solver is chosen per
+    // (field-width × RHS-shape) by `pick_kani_solver`:
+    //   * scalar/linear  → cadical
+    //   * narrow mul/div → minisat
+    //   * wide mul/div   → z3 (via `bin = "z3"`)
     #[test]
-    fn b11_effect_heuristics() {
-        // Arithmetic detection: a value containing `*` or `/` triggers the
-        // minisat solver hint. `amount * 125 / 10000` is the canonical case
-        // from the B11 repro (fee arithmetic).
-        let v1 = "amount";
-        let v2 = "amount * 125 / 10000";
-        assert!(!v1.contains('*') && !v1.contains('/'));
-        assert!(v2.contains('*') && v2.contains('/'));
+    fn b11_effect_solver_tiers() {
+        use crate::rust_codegen_util::pick_kani_solver_for_effect;
+        // Empty handler — no let bindings to chase through, so the RHS is
+        // inspected directly. Exercises the width tiering in isolation.
+        let src = r#"spec T
+state { x : U64 }
+handler noop { }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+
+        // Scalar: no arithmetic → cadical regardless of width.
+        assert_eq!(pick_kani_solver_for_effect("U64", "amount", op), "cadical");
+        assert_eq!(pick_kani_solver_for_effect("U8", "1", op), "cadical");
+        // Narrow-type mul/div → minisat.
+        assert_eq!(pick_kani_solver_for_effect("U8", "x * 3", op), "minisat");
+        assert_eq!(
+            pick_kani_solver_for_effect("U32", "amount / 100", op),
+            "minisat"
+        );
+        // Wide-type mul/div → z3 (the `amount * 125 / 10000` canonical case).
+        assert_eq!(
+            pick_kani_solver_for_effect("U64", "amount * 125 / 10000", op),
+            "bin = \"z3\""
+        );
+        assert_eq!(
+            pick_kani_solver_for_effect("U128", "a * b", op),
+            "bin = \"z3\""
+        );
+        assert_eq!(
+            pick_kani_solver_for_effect("I128", "a / b", op),
+            "bin = \"z3\""
+        );
+        // Unknown type → falls back to minisat for arithmetic (safe default,
+        // avoids cadical wedge until we learn the width).
+        assert_eq!(pick_kani_solver_for_effect("", "a * b", op), "minisat");
+    }
+
+    // B11 let-binding chase: the canonical roaster_v2 pattern hides arithmetic
+    // behind a let binding. The effect RHS is a bare ident; the solver
+    // selector must chase through the binding to find the mul/div.
+    #[test]
+    fn b11_effect_solver_resolves_through_let_bindings() {
+        use crate::rust_codegen_util::pick_kani_solver_for_effect;
+        let src = r#"spec T
+state { pool : U64, fees : U64 }
+handler compute (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  let total_fee = amount * 125 / 10000
+  let net = amount - total_fee
+  effect {
+    pool += net
+    fees += total_fee
+  }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        // `fees += total_fee` — RHS is bare ident, let-binding has mul/div,
+        // U64 field → z3.
+        assert_eq!(
+            pick_kani_solver_for_effect("U64", "total_fee", op),
+            "bin = \"z3\"",
+            "wide mul/div hidden in `let total_fee` must route to z3"
+        );
+        // `pool += net` — let-binding is `amount - total_fee`, no mul/div at
+        // this level, but chases to `total_fee` which has mul/div → z3.
+        assert_eq!(
+            pick_kani_solver_for_effect("U64", "net", op),
+            "bin = \"z3\"",
+            "transitive let-chase must reach mul/div through `net → total_fee`"
+        );
+        // Narrow-field variant of the same pattern → minisat.
+        assert_eq!(
+            pick_kani_solver_for_effect("U8", "total_fee", op),
+            "minisat"
+        );
     }
 
     // B4 corollary: a handler with NO guards AND NO requires must not get a

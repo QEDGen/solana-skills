@@ -196,6 +196,120 @@ pub fn infer_const_type(value: &str) -> &'static str {
     }
 }
 
+/// Pick a CBMC backend solver for a Kani effect-conformance harness based on
+/// the LHS field type and the RHS expression.
+///
+/// Returns the content of the `#[kani::solver(...)]` attribute (without the
+/// attribute wrapper). The three tiers:
+///
+/// * **cadical** — scalar / linear effects (no `*` or `/` reachable from the
+///   RHS). Default Kani solver; fast on bit-blasted boolean and linear-arith
+///   problems.
+/// * **minisat** — narrow-type multiplication/division (u8, u16, u32, bool).
+///   SAT-level solver that outperforms cadical on multiplication-heavy
+///   bit-blasts at narrow widths.
+/// * **bin = "z3"** — wide-type multiplication/division (u64, u128, i128).
+///   CBMC hands the problem to z3 as an SMT2 solver; z3's bit-vector theory
+///   handles nested `*`/`/` chains on 64+ bit types that SAT backends blow up
+///   on (the `amount * 125 / 10000 * N / 10000` pattern is the canonical
+///   wedge case). Requires `z3` on `PATH` when running `cargo kani --tests`.
+///
+/// `dsl_field_type` is the DSL-level type string from the spec
+/// (`U64`, `U128`, `I128`, `U8`, etc.), pre-`map_type`.
+fn pick_arith_solver(dsl_field_type: &str, rhs_is_arithmetic: bool) -> &'static str {
+    if !rhs_is_arithmetic {
+        return "cadical";
+    }
+    let is_wide = matches!(dsl_field_type, "U64" | "U128" | "I128");
+    if is_wide {
+        // CBMC / Kani accepts an external SMT solver via `bin = "<path>"`.
+        // Z3 solves bit-vector arithmetic (especially nested mul/div on 64/128
+        // bit types) far faster than any SAT backend here.
+        "bin = \"z3\""
+    } else {
+        "minisat"
+    }
+}
+
+/// Pick a solver for an effect RHS, chasing through the handler's `let`
+/// bindings. The canonical heavy-arith pattern hides behind a binding:
+///
+///     let total_fee = amount * 125 / 10000
+///     let net = amount - total_fee
+///     effect { pool += net, fees += total_fee }
+///
+/// Both effect RHSs are bare identifiers. A purely syntactic
+/// `pick_kani_solver("U64", "net")` returns cadical and wedges CBMC on
+/// a u64 mul/div symbolic exploration. Transitively resolving through the
+/// bindings exposes `total_fee`'s mul/div and routes the wide-LHS fields
+/// to z3.
+pub fn pick_kani_solver_for_effect(
+    dsl_field_type: &str,
+    rhs: &str,
+    op: &ParsedHandler,
+) -> &'static str {
+    // Compute the set of "arith-tainted" let bindings — bindings whose
+    // (transitive) RHS contains a `*` or `/`. Fixed-point iteration: start
+    // from direct syntactic hits, then propagate by whole-word containment
+    // of an already-tainted name in another binding's RHS. Bounded by the
+    // binding count (each pass adds at least one or converges).
+    let mut tainted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (name, _, bound_rhs) in &op.let_bindings {
+        if bound_rhs.contains('*') || bound_rhs.contains('/') {
+            tainted.insert(name.as_str());
+        }
+    }
+    for _ in 0..op.let_bindings.len() {
+        let mut changed = false;
+        for (name, _, bound_rhs) in &op.let_bindings {
+            if tainted.contains(name.as_str()) {
+                continue;
+            }
+            if tainted.iter().any(|t| contains_whole_word(bound_rhs, t)) {
+                tainted.insert(name.as_str());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // An effect RHS is arithmetic if it directly contains `*`/`/` OR it
+    // mentions any tainted binding.
+    let rhs_is_arith = rhs.contains('*')
+        || rhs.contains('/')
+        || tainted.iter().any(|t| contains_whole_word(rhs, t));
+    pick_arith_solver(dsl_field_type, rhs_is_arith)
+}
+
+/// True if `hay` contains `needle` as a whole word (not a substring of a
+/// longer identifier). `net` in `amount - net` matches; `net` in `network`
+/// does not.
+fn contains_whole_word(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = hay.as_bytes();
+    let n = needle.as_bytes();
+    let mut i = 0;
+    while i + n.len() <= bytes.len() {
+        if &bytes[i..i + n.len()] == n {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_ok = i + n.len() == bytes.len() || !is_ident_byte(bytes[i + n.len()]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Resolve an effect value to a Rust expression (param name, constant, or literal).
 pub fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> String {
     if op.takes_params.iter().any(|(n, _)| n == value) {
