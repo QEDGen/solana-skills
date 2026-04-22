@@ -27,5 +27,14 @@ tar = "0.4"
 flate2 = "1"
 chumsky = "0.12"
 
+# ratchet — upgrade-safety + mainnet-readiness lint.
+# `ratchet-anchor` default-features is off to drop `ureq` (ratchet's RPC
+# fetcher), which we don't need: qedgen hands ratchet an IDL JSON file it
+# already has on disk, never an on-chain pubkey. The `package = …`
+# aliases keep the import path (`ratchet_core::`, `ratchet_anchor::`)
+# short without renaming the upstream crates.
+ratchet-core = { package = "solana-ratchet-core", version = "0.3" }
+ratchet-anchor = { package = "solana-ratchet-anchor", version = "0.3", default-features = false }
+
 [dev-dependencies]
 tempfile = "3"

@@ -21,6 +21,7 @@ mod lean_gen;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
+mod ratchet;
 mod reconcile;
 mod rust_codegen_util;
 mod sbpf_verify;
@@ -320,6 +321,64 @@ enum Commands {
         json: bool,
     },
 
+    /// Lint one Anchor IDL for mainnet-readiness before first deploy.
+    ///
+    /// Runs the ratchet P-rule preflight on the IDL and reports every
+    /// future-upgrade landmine it finds — missing `version: u8` prefix,
+    /// no `_reserved` trailing padding, unpinned discriminators, name
+    /// collisions, writable accounts with no signer. Complements
+    /// `qedgen check` / `qedgen verify` (which prove semantics) by
+    /// proving the on-chain shape is safe to evolve.
+    ///
+    /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
+    Readiness {
+        /// Path to the Anchor IDL JSON (typically target/idl/<program>.json)
+        #[arg(long)]
+        idl: PathBuf,
+
+        /// Output as JSON (for agent / CI consumption)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Diff an old vs new Anchor IDL and flag every upgrade-unsafe change.
+    ///
+    /// Runs the ratchet R-rule engine over the pair. Catches the
+    /// failure modes `solana program upgrade` won't — field reorders,
+    /// discriminator changes, orphaned accounts, PDA seed drift,
+    /// signer/writable tightening.
+    ///
+    /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
+    CheckUpgrade {
+        /// Path to the baseline IDL (the one on-chain today).
+        #[arg(long)]
+        old: PathBuf,
+
+        /// Path to the candidate IDL (the one the upgrade would ship).
+        #[arg(long)]
+        new: PathBuf,
+
+        /// Acknowledge a specific unsafe finding so it reports as
+        /// additive instead (repeatable). See `ratchet list-rules` for
+        /// the full flag catalog.
+        #[arg(long = "unsafe")]
+        unsafes: Vec<String>,
+
+        /// Declare an account as having a migration in source; demotes
+        /// R003/R004 findings for that account to Additive (repeatable).
+        #[arg(long = "migrated-account")]
+        migrated_accounts: Vec<String>,
+
+        /// Declare an account as having `realloc = ...` in source;
+        /// demotes R005 for that account to Additive (repeatable).
+        #[arg(long = "realloc-account")]
+        realloc_accounts: Vec<String>,
+
+        /// Output as JSON (for agent / CI consumption)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate committed artifacts from a qedspec
     ///
     /// Default (no flags): generates Quasar Rust skeleton only.
@@ -386,6 +445,14 @@ enum Commands {
         /// sBPF assembly source file (for CI workflow)
         #[arg(long)]
         ci_asm: Option<String>,
+
+        /// Path to the Anchor IDL the generated CI should lint with
+        /// `qedgen readiness`. When set, the emitted verify.yml runs
+        /// ratchet after the verification jobs — any breaking /
+        /// unsafe finding fails the build. Value is the path relative
+        /// to the repo root, e.g. `target/idl/escrow.json`.
+        #[arg(long)]
+        ci_ratchet: Option<String>,
 
         /// Generate all artifacts
         #[arg(long)]
@@ -1067,6 +1134,51 @@ async fn main() -> Result<()> {
         }
 
         // ==================================================================
+        // readiness — preflight lint for first-deploy mainnet-readiness
+        // ==================================================================
+        Commands::Readiness { idl, json } => {
+            let report = ratchet::run_readiness(&ratchet::ReadinessOpts { idl })?;
+            if json {
+                ratchet::print_json(&report)?;
+            } else {
+                ratchet::print_human(&report);
+            }
+            let code = ratchet::exit_code(&report);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+
+        // ==================================================================
+        // check-upgrade — diff two IDLs under ratchet's R-rules
+        // ==================================================================
+        Commands::CheckUpgrade {
+            old,
+            new,
+            unsafes,
+            migrated_accounts,
+            realloc_accounts,
+            json,
+        } => {
+            let report = ratchet::run_check_upgrade(&ratchet::CheckUpgradeOpts {
+                old,
+                new,
+                unsafes,
+                migrated_accounts,
+                realloc_accounts,
+            })?;
+            if json {
+                ratchet::print_json(&report)?;
+            } else {
+                ratchet::print_human(&report);
+            }
+            let code = ratchet::exit_code(&report);
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+
+        // ==================================================================
         // codegen — generate committed artifacts
         // ==================================================================
         Commands::Codegen {
@@ -1085,6 +1197,7 @@ async fn main() -> Result<()> {
             ci,
             ci_output,
             ci_asm,
+            ci_ratchet,
             all,
             fill,
             handler,
@@ -1126,7 +1239,17 @@ async fn main() -> Result<()> {
                 } else {
                     String::new()
                 };
-                let workflow = CI_TEMPLATE.replace("{{VERIFY_STEP}}", &verify_step);
+                let ratchet_step = if let Some(ref idl) = ci_ratchet {
+                    format!(
+                        "\n      - name: Ratchet readiness lint\n        run: qedgen readiness --idl {}\n",
+                        idl
+                    )
+                } else {
+                    String::new()
+                };
+                let workflow = CI_TEMPLATE
+                    .replace("{{VERIFY_STEP}}", &verify_step)
+                    .replace("{{RATCHET_STEP}}", &ratchet_step);
                 if let Some(parent) = ci_output.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
