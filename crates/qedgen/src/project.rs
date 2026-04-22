@@ -34,8 +34,18 @@ import QEDGen.Solana.State\n\
 import QEDGen.Solana.Valid\n\
 import QEDGen.Solana.Spec\n";
 
-const MATHLIB_REQUIRE: &str = "\nrequire mathlib from git\n  \
-\"https://github.com/leanprover-community/mathlib4.git\"\n";
+/// Render the Mathlib `require` stanza appended to the `lean_solana/`
+/// sub-lakefile. When the shared workspace install exists, emit a
+/// local-path require so Lake reuses the pre-built cache; otherwise
+/// fall back to a git require for users without `qedgen setup --mathlib`.
+fn mathlib_require() -> String {
+    match crate::validate::shared_mathlib_path() {
+        Some(path) => format!("\nrequire mathlib from \"{}\"\n", path.display()),
+        None => "\nrequire mathlib from git\n  \
+                 \"https://github.com/leanprover-community/mathlib4.git\"\n"
+            .to_string(),
+    }
+}
 
 pub fn setup_lean_project(output_dir: &Path, mathlib: bool) -> Result<()> {
     // Write template files
@@ -64,7 +74,7 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
 
     // Inject mathlib require into lean_solana lakefile when opted in
     if mathlib {
-        let lakefile = format!("{}{}", SUPPORT_LAKEFILE, MATHLIB_REQUIRE);
+        let lakefile = format!("{}{}", SUPPORT_LAKEFILE, mathlib_require());
         std::fs::write(support_dir.join("lakefile.lean"), lakefile)?;
     } else {
         std::fs::write(support_dir.join("lakefile.lean"), SUPPORT_LAKEFILE)?;

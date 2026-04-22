@@ -156,6 +156,12 @@ reviewers surfaced after the fact. Committed by default.
 - `gaps.md` — running list of "qedgen didn't catch X; Y did" with a
   one-line hypothesis for what lint or harness would've caught it.
 - `reviewers.md` — external-review feedback, pattern-tagged.
+- `scoping.md` — moments the agent recommended NOT engaging qedgen's
+  default flow (target shape doesn't fit, Phase 2 direct, skip-spec,
+  forced-shim). Each entry: target shape, why `.qedspec` didn't fit
+  structurally, what was recommended instead, and one-line DSL-evolution
+  hypothesis. This is the richest signal for extending the DSL —
+  capture it **before** walking away, not after.
 
 Subdirectories are created lazily as entries are written.
 
@@ -247,6 +253,10 @@ pub fn init(
     }
     eprintln!("  ├── Spec.lean          ← definitions + proofs");
     eprintln!("  └── .gitignore");
+
+    if mathlib {
+        advise_mathlib_mode(crate::validate::shared_mathlib_path().as_deref());
+    }
     eprintln!();
     eprintln!(
         "Next: edit Spec.lean, then run `lake build` in {}/",
@@ -265,7 +275,10 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
     s.push_str("require qedgenSupport from\n  \"./lean_solana\"\n\n");
 
     if mathlib {
-        s.push_str("require \"leanprover-community\" / \"mathlib\" @ git \"v4.24.0\"\n\n");
+        s.push_str(&mathlib_require_line(
+            crate::validate::shared_mathlib_path().as_deref(),
+        ));
+        s.push('\n');
     }
 
     // asm2lean-generated program module
@@ -384,6 +397,42 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Render the Mathlib `require` line for a generated lakefile.
+///
+/// When `shared` is `Some`, emit a local-path require pointing at the
+/// shared workspace install — subsequent `lake build` reuses the
+/// pre-built Mathlib instead of re-fetching (8 GB / 15-45 min saved).
+/// When `None`, emit a git-based require as a fallback for users who
+/// haven't run `qedgen setup --mathlib` yet.
+pub(crate) fn mathlib_require_line(shared: Option<&Path>) -> String {
+    match shared {
+        Some(path) => format!("require mathlib from \"{}\"\n", path.display()),
+        None => "require \"leanprover-community\" / \"mathlib\" @ git \"v4.24.0\"\n".to_string(),
+    }
+}
+
+/// Advise the user about Mathlib shared-workspace state at init time.
+/// Called only when `--mathlib` is in play.
+pub(crate) fn advise_mathlib_mode(shared: Option<&Path>) {
+    match shared {
+        Some(path) => {
+            eprintln!(
+                "  Mathlib: reusing shared install at {} (subsequent builds are seconds)",
+                path.display()
+            );
+        }
+        None => {
+            eprintln!(
+                "  Mathlib: no shared install found — will fetch fresh (15-45 min first build)"
+            );
+            eprintln!(
+                "  Tip: `qedgen setup --mathlib` once per machine so every future project reuses"
+            );
+            eprintln!("       the same Mathlib in seconds.");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +495,41 @@ mod tests {
             "README should describe findings/"
         );
         assert!(body.contains("gaps.md"), "README should describe gaps.md");
+        assert!(
+            body.contains("scoping.md"),
+            "README should describe scoping.md"
+        );
+    }
+
+    #[test]
+    fn mathlib_require_line_uses_local_path_when_shared_available() {
+        let shared = std::path::PathBuf::from("/tmp/fake/workspace/.lake/packages/mathlib");
+        let line = mathlib_require_line(Some(&shared));
+        assert!(
+            line.contains("require mathlib from"),
+            "should emit local-path require"
+        );
+        assert!(
+            line.contains("/tmp/fake/workspace/.lake/packages/mathlib"),
+            "should reference the shared path"
+        );
+        assert!(
+            !line.contains("git"),
+            "should not fall back to git when shared path is available"
+        );
+    }
+
+    #[test]
+    fn mathlib_require_line_falls_back_to_git_when_shared_absent() {
+        let line = mathlib_require_line(None);
+        assert!(
+            line.contains("mathlib"),
+            "should still require mathlib in fallback"
+        );
+        assert!(
+            line.contains("git") || line.contains("leanprover-community"),
+            "should emit a git-based require when shared path is absent"
+        );
     }
 
     #[test]

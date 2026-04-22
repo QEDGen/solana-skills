@@ -172,3 +172,23 @@ fn validation_workspace_dir() -> Result<PathBuf> {
     }
     Ok(qedgen_home()?.join("workspace"))
 }
+
+/// Returns the path to the shared Mathlib install inside the global
+/// QEDGen workspace, if present. `qedgen setup --mathlib` populates
+/// this location; `qedgen init --mathlib` reuses it so each project
+/// doesn't re-fetch and re-build Mathlib (8 GB / 15-45 min). Returns
+/// `None` when the workspace hasn't been set up — callers should fall
+/// back to a fresh git-based require.
+pub fn shared_mathlib_path() -> Option<PathBuf> {
+    let home = qedgen_home().ok()?;
+    let path = home
+        .join("workspace")
+        .join(".lake")
+        .join("packages")
+        .join("mathlib");
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
+}

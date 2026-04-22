@@ -390,6 +390,19 @@ Those track a moving target and would rot faster than they pay off. If
 a proof seems to need such axioms, it's asking for a boundary Phase 2
 won't give you — stay in Phase 1 with Kani on the specific scenario.
 
+**Don't hedge Phase 2 with Mathlib cost caveats.** If the target's
+properties need Phase 2 (DeFi math, cryptographic primitives, sBPF
+bytecode), then the toolchain is Mathlib — not an option. Phrasing
+like *"we could burn 30 minutes for nothing"* or *"try a forced
+`.qedspec` first to avoid the Mathlib install"* is actively harmful:
+it pushes users into ceremonial specs that force qedgen into shapes
+it's not designed for. The 8 GB / 15-45 min first build is one-time
+**shared** infrastructure — every future Phase 2 project on the
+machine reuses it in seconds. Recommend `qedgen setup --mathlib` once
+and move on. Surface Error handling links if the user hits a
+first-build issue, but don't pre-weigh the install against doing
+nothing.
+
 ### 4a. Set up the Lean project
 
 ```bash
@@ -428,9 +441,20 @@ $QEDGEN codegen --spec program.qedspec --lean --lean-output formal_verification/
 ```
 
 **When to add Mathlib:**
-- **sBPF proofs do NOT need Mathlib.** Built-in tactics handle everything.
-- **DeFi / crypto proofs almost always need Mathlib** — `Finset`, `BigOperators`, `ring`, `linarith`, `norm_num`, u128 reasoning. This is the Phase 2 sweet spot and where Mathlib earns its cost.
-- **Rule of thumb:** Start without. Add `--mathlib` if `lake build` fails on a missing tactic or lemma. Mathlib adds ~8GB and 15-45 min first build.
+- **sBPF proofs do NOT need Mathlib.** Built-in tactics handle bytecode semantics.
+- **DeFi / crypto proofs DO need Mathlib** — `Finset`, `BigOperators`, `ring`, `linarith`, `norm_num`, u128 reasoning. If you're in Phase 2 for DeFi math or a cryptographic primitive, pass `--mathlib` on the first `qedgen init`. Don't hedge.
+- **The 8 GB / 15–45 min is one-time shared infrastructure, not a per-project cost.** `qedgen setup --mathlib` populates `~/.qedgen/workspace/` once; every subsequent `qedgen init --mathlib` references that shared install in seconds instead of re-fetching. Disk is cheap; the Lake cache persists across every future Phase 2 session in the workspace.
+- **First-build failure is rare and recoverable** — see Error handling below if `lake update` needs to re-resolve.
+
+**Ergonomic setup** (recommended once per machine, before any Phase 2 work):
+
+```bash
+$QEDGEN setup --mathlib    # one-time, 15-45 min
+```
+
+After this, every `qedgen init --mathlib` emits a lakefile pointing at the
+shared install. If the shared workspace isn't populated, init falls back
+to a fresh git fetch and prints a hint pointing at `setup --mathlib`.
 
 ### 4b. Write Lean proofs
 
@@ -773,6 +797,7 @@ business specifics stay out.
     sessions/YYYY-MM-DD-<topic>.md  # session summaries at boundaries
     gaps.md                         # "qedgen didn't catch X; Y did"
     reviewers.md                    # external-review feedback
+    scoping.md                      # moments we recommended NOT using qedgen
 ```
 
 **When to write.** As you work:
@@ -789,6 +814,14 @@ business specifics stay out.
 - Meaningful session boundaries (spec finalized, proofs shipped, bug
   resolved) → `sessions/YYYY-MM-DD-<topic>.md` with three fields: what
   we tried, what worked, what we'd do differently.
+- **Every scoping decision where you recommended NOT engaging qedgen's
+  default flow** → `scoping.md` entry with four fields: target shape
+  in one sentence, why `.qedspec` didn't fit structurally, what you
+  recommended instead (Phase 2 direct, skip, forced-shim), and a
+  one-line hypothesis for what DSL extension would unlock the class.
+  This is the richest signal for DSL evolution — it fires even when
+  qedgen was never run. Write it **before** starting the recommended
+  path, not after, so the reasoning doesn't evaporate.
 
 **What to write.** Capture **patterns**, not specifics.
 
