@@ -784,6 +784,32 @@ fn record_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|(name, fields)| TopItem::Record(RecordDecl { name, fields }))
 }
 
+// state { field : Type, ... } — sugar for `type State = { ... }`. Accepts
+// comma-separated (canonical) or newline-separated (as documented in
+// references/qedspec-dsl.md §"state (sugar)") field forms.
+fn state_sugar_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    // Separator: optional comma, always tolerant of surrounding whitespace.
+    // This accepts `a : U64, b : U8`, `a : U64\n  b : U8`, or trailing commas.
+    let sep = wsc().then_ignore(just(',').or_not()).then_ignore(wsc());
+    let fields = typed_field()
+        .then_ignore(sep)
+        .repeated()
+        .collect::<Vec<TypedField>>();
+    just("state")
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(fields)
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(|fields| {
+            TopItem::Record(RecordDecl {
+                name: "State".to_string(),
+                fields,
+            })
+        })
+}
+
 // Type alias: type Name = <type_ref>   (when `{` doesn't follow `=`)
 // Order matters in the `choice()` at top_item: record_decl is tried first
 // so `type T = { ... }` is consumed by record, not by this alias rule.
@@ -885,6 +911,17 @@ fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a>> + Clone 
 }
 
 fn account_descriptor<'a>() -> impl Parser<'a, &'a str, AccountDescriptor, Err<'a>> + Clone {
+    // Attr separator is a comma, BUT only when the following tokens don't look
+    // like a new descriptor start (`<ident> :`). This lets single-line blocks
+    // like `accounts { admin : signer, battle : writable }` parse without the
+    // comma being swallowed as "another attribute for `admin`".
+    let attr_sep = just(',').then_ignore(wsc()).then_ignore(
+        ident()
+            .then_ignore(wsc())
+            .then_ignore(just(':'))
+            .rewind()
+            .not(),
+    );
     non_keyword_ident()
         .then_ignore(wsc())
         .then_ignore(just(':'))
@@ -892,7 +929,7 @@ fn account_descriptor<'a>() -> impl Parser<'a, &'a str, AccountDescriptor, Err<'
         .then(
             account_attr()
                 .then_ignore(wsc())
-                .separated_by(just(',').then_ignore(wsc()))
+                .separated_by(attr_sep)
                 .at_least(1)
                 .collect::<Vec<AccountAttr>>(),
         )
@@ -927,6 +964,8 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then_ignore(wsc())
         .ignore_then(
             account_descriptor()
+                .then_ignore(wsc())
+                .then_ignore(just(',').or_not())
                 .then_ignore(wsc())
                 .repeated()
                 .collect::<Vec<AccountDescriptor>>(),
@@ -2126,6 +2165,7 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         record_decl(),
         type_alias_decl(),
         adt_decl(),
+        state_sugar_decl(),
         handler_decl(),
         property_decl(),
         cover_decl(),
@@ -2221,6 +2261,68 @@ mod tests {
                 }
             }
             o => panic!("expected Record, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parses_single_line_accounts_block() {
+        // B8 repro: comma-separated descriptors on one line must parse.
+        let src = r#"spec T
+handler foo {
+  accounts { admin : signer, battle : writable, pool : writable, pda ["pool"] }
+}"#;
+        let s = parse_ok(src);
+        let h = match &s.items[0].node {
+            TopItem::Handler(h) => h,
+            o => panic!("expected Handler, got {:?}", o),
+        };
+        let accounts = h
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Accounts(a) => Some(a),
+                _ => None,
+            })
+            .expect("accounts clause");
+        assert_eq!(
+            accounts.len(),
+            3,
+            "expected 3 descriptors, got {:?}",
+            accounts
+        );
+        assert_eq!(accounts[0].name, "admin");
+        assert_eq!(accounts[1].name, "battle");
+        assert_eq!(accounts[2].name, "pool");
+        // pool has two attrs (writable + pda).
+        assert_eq!(accounts[2].attrs.len(), 2);
+    }
+
+    #[test]
+    fn parses_state_sugar_newline_separated() {
+        // Documented form in references/qedspec-dsl.md §"state (sugar)".
+        let src = "spec T\nstate {\n  balance : U64\n  owner : Pubkey\n}";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Record(r) => {
+                assert_eq!(r.name, "State");
+                assert_eq!(r.fields.len(), 2);
+                assert_eq!(r.fields[0].name, "balance");
+                assert_eq!(r.fields[1].name, "owner");
+            }
+            o => panic!("expected Record from state sugar, got {:?}", o),
+        }
+    }
+
+    #[test]
+    fn parses_state_sugar_comma_separated() {
+        let src = "spec T\nstate { balance : U64, owner : Pubkey }";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::Record(r) => {
+                assert_eq!(r.name, "State");
+                assert_eq!(r.fields.len(), 2);
+            }
+            o => panic!("expected Record from state sugar, got {:?}", o),
         }
     }
 

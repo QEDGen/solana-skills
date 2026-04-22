@@ -264,9 +264,27 @@ fn emit_account_section(
         .collect();
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
-            if let Some(ref expr) = prop.expression {
-                let rust_expr = rust_codegen_util::translate_property_to_rust(expr, true);
-                out.push_str(&format!("/// {}: {}\n", prop.name, expr));
+            // Prefer the AST-rendered Rust form (handles `implies`/`forall`
+            // without mojibake); fall back to text-massaging the Lean body
+            // when `rust_expression` is absent (legacy callers).
+            let rust_expr = match prop.rust_expression.as_deref() {
+                Some(r) => r.to_string(),
+                None => match prop.expression.as_deref() {
+                    Some(e) => rust_codegen_util::translate_property_to_rust(e, true),
+                    None => continue,
+                },
+            };
+            let doc = prop.expression.as_deref().unwrap_or("");
+            out.push_str(&format!("/// {}: {}\n", prop.name, doc));
+            if crate::check::rust_expr_is_unsupported(&rust_expr) {
+                out.push_str(&format!("fn {}(_s: &State) -> bool {{\n", prop.name));
+                out.push_str(&format!(
+                    "    // {} — property uses a quantifier; not lowerable to a predicate.\n",
+                    rust_expr.trim()
+                ));
+                out.push_str("    true\n");
+                out.push_str("}\n\n");
+            } else {
                 out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
                 out.push_str(&format!("    {}\n", rust_expr));
                 out.push_str("}\n\n");

@@ -629,32 +629,32 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             kind,
             binder,
             binder_ty,
-            body,
+            body: _,
         } => {
-            let sym = match kind {
+            // Quantifiers don't lower to a property-function body directly: the
+            // universal case needs harness-level `kani::any()` scaffolding that's
+            // emitted by the backend, not inlined here. Surface the sentinel so
+            // the caller can replace the generated function body with a skip
+            // marker. See `rust_expr_is_unsupported` in check.rs.
+            let kind_name = match kind {
                 a::Quantifier::Forall => "forall",
                 a::Quantifier::Exists => "exists",
             };
             format!(
-                "{} {} : {}, {}",
-                sym,
-                binder,
-                binder_ty,
-                expr_to_rust(&body.node, ctx, consts)
+                "/* QEDGEN_UNSUPPORTED_QUANTIFIER: {} {} : {} — lower at harness level */",
+                kind_name, binder, binder_ty
             )
         }
         Expr::BoolOp { op, lhs, rhs } => {
-            let sym = match op {
-                a::BoolOp::And => " && ",
-                a::BoolOp::Or => " || ",
-                a::BoolOp::Implies => " -> ",
-            };
-            format!(
-                "{}{}{}",
-                expr_to_rust(&lhs.node, ctx, consts),
-                sym,
-                expr_to_rust(&rhs.node, ctx, consts)
-            )
+            let lhs_r = expr_to_rust(&lhs.node, ctx, consts);
+            let rhs_r = expr_to_rust(&rhs.node, ctx, consts);
+            match op {
+                a::BoolOp::And => format!("({}) && ({})", lhs_r, rhs_r),
+                a::BoolOp::Or => format!("({}) || ({})", lhs_r, rhs_r),
+                // `a implies b` ≡ `!a || b`; parenthesize both sides to survive
+                // surrounding precedence (matters once callers compose via `&&`/`||`).
+                a::BoolOp::Implies => format!("(!({})) || ({})", lhs_r, rhs_r),
+            }
         }
         Expr::Not(inner) => format!("!({})", expr_to_rust(&inner.node, ctx, consts)),
         Expr::Cmp { op, lhs, rhs } => {
@@ -1314,15 +1314,30 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     // representation matches existing transition codegen.
                     let lifecycle: Vec<String> =
                         adt.variants.iter().map(|v| v.name.clone()).collect();
-                    let fields: Vec<(String, String)> = adt
-                        .variants
-                        .iter()
-                        .flat_map(|v| {
-                            v.fields
-                                .iter()
-                                .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-                        })
-                        .collect();
+                    // B1 (v2.6): flatten variant fields into the state-field
+                    // list BUT deduplicate by name. Before this, each variant
+                    // contributed the full record to `fields`, producing e.g.
+                    //     struct State {
+                    //         pool: u64, status: u8,
+                    //         pool: u64, status: u8,   // duplicate from Frozen
+                    //         pool: u64, status: u8,   // duplicate from Settled
+                    //     }
+                    // in the Kani harness — invalid Rust. First occurrence
+                    // wins on name collision (variants usually share the same
+                    // field shape). If two variants declare the same field
+                    // name with different types, the downstream `check.rs`
+                    // lint surfaces the mismatch. Proper enum+match codegen
+                    // is tracked separately (release notes).
+                    let mut fields: Vec<(String, String)> = Vec::new();
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for variant in &adt.variants {
+                        for f in &variant.fields {
+                            if seen.insert(f.name.clone()) {
+                                fields.push((f.name.clone(), type_ref_to_string(&f.ty)));
+                            }
+                        }
+                    }
                     out.account_types.push(ParsedAccountType {
                         name: adt.name.clone(),
                         fields,
@@ -1339,6 +1354,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Property(p) => {
                 let lean = expr_to_lean(&p.body.node, Ctx::Guard, consts, &env);
+                let rust = expr_to_rust(&p.body.node, Ctx::Guard, consts);
                 let preserved = match &p.preserved_by {
                     // `preserved_by all` — kept as the sentinel "all".
                     // Expanded to the full handler-name list below after all
@@ -1349,6 +1365,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.properties.push(ParsedProperty {
                     name: p.name.clone(),
                     expression: Some(lean),
+                    rust_expression: Some(rust),
                     preserved_by: preserved,
                 });
             }
@@ -1952,5 +1969,102 @@ mod tests {
 
         // Const substitution in guards: MAX_VAULT_TVL should be inlined.
         assert!(deposit.requires[1].lean_expr.contains("10000000000000000"));
+    }
+
+    // B1 regression: ADTs with multiple variants sharing the same field
+    // names must produce a SINGLE entry per field (first-variant wins), not
+    // a struct with N copies of each field.
+    #[test]
+    fn adt_variants_with_shared_fields_deduplicate() {
+        let src = r#"spec T
+type Battle
+  | Active  of { pool : U64, status : U8 }
+  | Frozen  of { pool : U64, status : U8 }
+  | Settled of { pool : U64, status : U8 }
+"#;
+        let spec = parse_str(src).expect("parse");
+        assert_eq!(spec.account_types.len(), 1);
+        let at = &spec.account_types[0];
+        assert_eq!(at.name, "Battle");
+        // Pre-fix: fields.len() == 6 (3 variants × 2 fields, flattened).
+        assert_eq!(
+            at.fields.len(),
+            2,
+            "shared-field variants must dedupe to 2 fields, got {:?}",
+            at.fields
+        );
+        let names: Vec<&str> = at.fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["pool", "status"]);
+        // Lifecycle retains every variant name (Active/Frozen/Settled) for
+        // Status enum generation.
+        assert_eq!(at.lifecycle, vec!["Active", "Frozen", "Settled"]);
+    }
+
+    // B2 regression: `implies` and `forall` must not leak Unicode symbols into
+    // the Rust rendering of a property body.
+    #[test]
+    fn property_implies_renders_to_valid_rust() {
+        let src = r#"spec T
+state { x : U8 }
+property implies_case :
+  state.x == 2 implies state.x >= 2
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "implies_case")
+            .expect("property");
+        let rust = prop.rust_expression.as_deref().expect("rust rendering");
+        // No lingering Lean arrows that would mojibake as `â` in downstream Rust.
+        assert!(!rust.contains('\u{2192}'), "rust form has → : {}", rust);
+        // Explicit desugaring check: `implies` must lower to `!(…) || (…)`.
+        assert!(rust.contains("!("), "expected negation in: {}", rust);
+        assert!(rust.contains("||"), "expected disjunction in: {}", rust);
+        assert!(
+            !crate::check::rust_expr_is_unsupported(rust),
+            "implies should lower, not be marked unsupported: {}",
+            rust
+        );
+    }
+
+    #[test]
+    fn property_forall_marked_unsupported_in_rust() {
+        let src = r#"spec T
+state { x : U8 }
+property forall_case :
+  forall v : U8, v >= 0
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "forall_case")
+            .expect("property");
+        let rust = prop.rust_expression.as_deref().expect("rust rendering");
+        assert!(
+            crate::check::rust_expr_is_unsupported(rust),
+            "forall body should carry the unsupported marker: {}",
+            rust
+        );
+        // The marker is wrapped in `/* ... */` so downstream emission puts it
+        // inside a comment — no mojibake can leak into compiled Rust.
+        assert!(
+            rust.trim_start().starts_with("/*"),
+            "marker must be a Rust block comment: {}",
+            rust
+        );
+        assert!(
+            rust.trim_end().ends_with("*/"),
+            "marker must close the comment: {}",
+            rust
+        );
+        assert!(
+            !rust.contains('\u{2200}'),
+            "rust must not contain ∀: {}",
+            rust
+        );
     }
 }

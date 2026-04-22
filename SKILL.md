@@ -68,7 +68,7 @@ Spec-driven pipeline (all generated from the same .qedspec):
   qedspec ──→ Proptest harnesses    (transient, /tmp)
           ──→ Kani harnesses        (generated)
           ──→ Spec.lean             (generated — Phase 2 only)
-          ──→ Quasar Rust program   (generated)
+          ──→ Anchor Rust program   (generated — uses `anchor_lang::prelude::*`)
           ──→ Unit + integration tests (generated)
 ```
 
@@ -167,7 +167,7 @@ The spec design phase is an **architectural and adversarial interactive loop**. 
 
 ### 3a. Write the initial .qedspec
 
-Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. Key v2.5 constructs:
+Write the `.qedspec` at the program root. See `references/qedspec-dsl.md` for full DSL syntax. Key v2.6 constructs:
 
 - **`pragma sbpf { ... }`** wraps sBPF-specific declarations (`instruction`, `pubkey`, per-instruction `errors`). The pragma's presence also selects the assembly target — no explicit `target` keyword.
 - **`interface Name { ... }` + `call Name.handler(...)`** declare CPI contracts. Generate Tier-0 scaffolds from Anchor IDLs with `qedgen interface --idl target/idl/<program>.json`. Tier-1 (hand-authored `ensures`) strengthens the caller's Lean proof.
@@ -415,7 +415,8 @@ $QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 # With Mathlib (for u128 arithmetic helpers)
 $QEDGEN init --name engine --spec engine.qedspec --mathlib
 
-# With Quasar codegen pipeline
+# With the full Anchor handler + Kani codegen pipeline (--quasar flag name
+# is retained for backward compatibility; v2.6 emits Anchor-compatible Rust)
 $QEDGEN init --name counter --spec counter.qedspec --quasar
 ```
 
@@ -611,7 +612,7 @@ $QEDGEN check --spec program.qedspec --coverage
 **Unified drift detection** (when code or Kani harnesses are generated from the spec):
 
 ```bash
-$QEDGEN check --spec program.qedspec --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec program.qedspec --code programs/my_program/ --kani programs/tests/kani.rs
 ```
 
 **CI integration:**
@@ -638,7 +639,7 @@ Everything is derived from the `.qedspec`. Some outputs are transient (used duri
 | `formal_verification/Proofs.lean` | scaffold once, never touched | User-owned proof bodies |
 | `programs/<name>/src/guards.rs` | always regenerated | Pure codegen from `requires` / `aborts_if` |
 | `programs/<name>/src/lib.rs`, `instructions/<handler>.rs` | scaffold once, never touched | User-owned business logic |
-| `tests/kani/*.rs`, `tests/proptest/*.rs` | always regenerated | Pure codegen; user customizations go in a sibling file |
+| `programs/tests/kani.rs`, `programs/tests/proptest.rs` | always regenerated | Pure codegen; user customizations go in a sibling file. Layout changed in v2.6 so `cargo kani --tests` / `cargo test --test proptest` resolve the program's `Cargo.toml` directly. |
 | `tests/integration/*.rs` | scaffold once, never touched | User-owned test cases |
 
 **Subsequent `qedgen codegen` runs** print skip advisories for user-owned files and always regenerate pure-codegen files. Drift between user-owned files and the spec is caught at `cargo build` / `lake build` time via the `#[qed(spec_hash=…)]` macro and `qedgen check` orphan reports — see **Step 4e** for the reconcile loop.
@@ -741,6 +742,57 @@ Name`; items merge in sorted-path order. Convention: `state.qedspec`,
 `ensures`/`requires`/effect RHS. Lowers to Lean's `let x := v; body`.
 
 See `references/qedspec-dsl.md` for full syntax reference.
+
+### v2.6 spec features
+
+**`+=` / `-=` default to checked arithmetic** in the Kani model. On
+overflow the transition returns `false`, matching the
+`checked_add(..).ok_or(MathOverflow)?` pattern deployed Anchor programs
+use. Proptest retains wrapping arithmetic for bounded exploration.
+Before v2.6 the Kani model emitted bare `+=`, flagging overflow on every
+unbounded pre-state — a spec-model artifact that didn't match real code.
+
+**`state { fields }` sugar** — shorthand for a single-record spec.
+Accepts comma- or newline-separated fields; desugars to
+`type State = { ... }`.
+
+**Single-line `accounts { a : signer, b : writable, ... }`** parses
+alongside the multi-line form.
+
+**`implies`** in property bodies lowers to `(!a) || (b)` in generated
+Rust (Kani/proptest). **`forall` / `exists`** in a property body emit a
+`/* QEDGEN_UNSUPPORTED_QUANTIFIER */` marker — the property fn returns
+`true` and you should express the quantification at the harness level
+via `kani::any()` / proptest generators.
+
+**Multi-variant ADTs with shared field names** deduplicate when
+flattened into the state model (first-variant wins on name collisions).
+Proper enum+match codegen is roadmap.
+
+**Generated harness paths moved inside the program package**
+(`programs/tests/kani.rs`, `programs/tests/proptest.rs`). `qedgen
+verify` and `qedgen codegen` defaults agree, so `cargo kani --tests` /
+`cargo test --test proptest` resolve `programs/Cargo.toml` without a
+hand-authored root shim.
+
+**Generated `Cargo.toml` points at real deps** with clear TODO
+scaffolding: `anchor-lang` + `anchor-spl` as runtime framework,
+`qedgen-macros` as a git-dep tied to the release tag.
+
+**`verify_*_rejects_invalid` harnesses fold every `requires` clause**
+into the `kani::assume`. Zero preconditions → harness skipped entirely
+(no vacuous pass).
+
+**`verify_*_effects` splits per-field** — one harness per (handler,
+field) pair. Arithmetic-heavy RHS (`*`/`/`) switches the solver to
+`minisat`, which handles bit-blasted multiplication that cadical wedges
+on.
+
+**`qedgen init` refuses to nest `formal_verification/formal_verification/`.**
+Run it from the project root, or pass `--output-dir .`.
+
+See `references/qedspec-dsl.md`  "What changed in v2.6" for the full
+list plus before/after examples.
 
 ### Brownfield projects — leveraging existing tests
 

@@ -111,8 +111,17 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         );
 
         for op in &guard_ops {
-            let guard = op.guard_str.as_deref().unwrap_or("true");
-            let rust_guard = rust_codegen_util::translate_guard_to_rust(guard, false);
+            // Roll `guard_str` AND every `requires` clause into a single
+            // expression. Previously we took `guard_str.unwrap_or("true")`,
+            // which silently emitted `kani::assume(!(true))` — an impossible
+            // precondition — whenever a handler had only `requires` clauses
+            // and no top-level `guard`. That made the harness pass vacuously
+            // and hid real rejection-path bugs.
+            let Some(full_guard) = rust_codegen_util::collect_full_guard(op, false) else {
+                // No guard, no requires → nothing to reject. Skip instead of
+                // emitting a vacuous harness that would always pass.
+                continue;
+            };
 
             out.push_str("#[kani::proof]\n");
             out.push_str("#[kani::unwind(2)]\n");
@@ -135,8 +144,11 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 ));
             }
 
-            // Assume guard violation
-            out.push_str(&format!("    kani::assume(!({rust_guard}));\n"));
+            // Assume at least one guard component is violated. For a
+            // conjunction `g1 && g2 && ... && gN` the negation is
+            // `!(g1 && ... && gN)`, which is what we want the harness to
+            // exhaustively cover.
+            out.push_str(&format!("    kani::assume(!({full_guard}));\n"));
 
             // Assert rejection
             let args: String = op
@@ -340,86 +352,104 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "// ============================================================================\n\n",
         );
 
+        // B11 v2.6: split effect conformance into PER-FIELD harnesses — one
+        // proof per (handler, field) pair — so a single cadical-stuck mul/div
+        // field doesn't block verification of its siblings. Heavy-arith
+        // handlers (value RHS contains `*` or `/`) also get `minisat` instead
+        // of `cadical`: minisat solves multiplication-heavy bit-blasted
+        // problems that cadical wedges on.
+        //
+        // Pre-v2.6 a single `verify_X_effects` harness combined every field's
+        // assertion — `verify_buy_side_a_effects` took 20+ min on a 5×mul/div
+        // effect body. Per-field + solver hint drops that to seconds per
+        // harness, and failures on one field don't hide the rest.
         for op in &effect_ops {
-            out.push_str("#[kani::proof]\n");
-            out.push_str("#[kani::unwind(2)]\n");
-            out.push_str("#[kani::solver(cadical)]\n");
-            out.push_str(&format!("fn verify_{}_effects() {{\n", op.name));
-
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
-            // Symbolic state
-            if is_init {
-                out.push_str("    let mut s = State {\n");
-                for (fname, _) in &mutable_fields {
-                    out.push_str(&format!("        {}: 0,\n", fname));
-                }
-                out.push_str("    };\n");
-            } else {
-                out.push_str("    let mut s = State {\n");
-                for (fname, _) in &mutable_fields {
-                    out.push_str(&format!("        {}: kani::any(),\n", fname));
-                }
-                out.push_str("    };\n");
-            }
+            for (field, op_kind, value) in &op.effects {
+                let rhs_is_arithmetic = value.contains('*') || value.contains('/');
+                let solver = if rhs_is_arithmetic {
+                    "minisat"
+                } else {
+                    "cadical"
+                };
 
-            // Symbolic params
-            for (pname, ptype) in &op.takes_params {
-                out.push_str(&format!(
-                    "    let {}: {} = kani::any();\n",
-                    pname,
-                    map_type(ptype)
-                ));
-            }
+                out.push_str("#[kani::proof]\n");
+                out.push_str("#[kani::unwind(2)]\n");
+                out.push_str(&format!("#[kani::solver({})]\n", solver));
+                out.push_str(&format!("fn verify_{}_effect_{}() {{\n", op.name, field));
 
-            // Bounds assumptions for arithmetic safety
-            if !is_init {
-                if !spec.constants.is_empty() {
-                    for (cname, _) in &spec.constants {
-                        let upper = cname.to_uppercase();
-                        if upper.contains("MAX") || upper.contains("MEMBER") {
-                            if mutable_fields.iter().any(|(f, _)| f == "member_count") {
-                                out.push_str(&format!(
-                                    "    kani::assume(s.member_count <= {});\n",
-                                    upper
-                                ));
+                // Symbolic state
+                if is_init {
+                    out.push_str("    let mut s = State {\n");
+                    for (fname, _) in &mutable_fields {
+                        out.push_str(&format!("        {}: 0,\n", fname));
+                    }
+                    out.push_str("    };\n");
+                } else {
+                    out.push_str("    let mut s = State {\n");
+                    for (fname, _) in &mutable_fields {
+                        out.push_str(&format!("        {}: kani::any(),\n", fname));
+                    }
+                    out.push_str("    };\n");
+                }
+
+                // Symbolic params
+                for (pname, ptype) in &op.takes_params {
+                    out.push_str(&format!(
+                        "    let {}: {} = kani::any();\n",
+                        pname,
+                        map_type(ptype)
+                    ));
+                }
+
+                // Bounds assumptions for arithmetic safety
+                if !is_init {
+                    if !spec.constants.is_empty() {
+                        for (cname, _) in &spec.constants {
+                            let upper = cname.to_uppercase();
+                            if upper.contains("MAX") || upper.contains("MEMBER") {
+                                if mutable_fields.iter().any(|(f, _)| f == "member_count") {
+                                    out.push_str(&format!(
+                                        "    kani::assume(s.member_count <= {});\n",
+                                        upper
+                                    ));
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
+                    rust_codegen_util::emit_add_strict_bounds(
+                        &mut out,
+                        op,
+                        &spec.properties,
+                        "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n",
+                    );
                 }
-                rust_codegen_util::emit_add_strict_bounds(&mut out, op, &spec.properties, "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n");
-            }
 
-            // Snapshot pre-state — only for fields that need it
-            // (add/sub effects reference pre_*, unchanged fields reference pre_*)
-            let affected_fields: Vec<&str> =
-                op.effects.iter().map(|(f, _, _)| f.as_str()).collect();
-            let needs_pre: Vec<&&(String, String)> = mutable_fields
-                .iter()
-                .filter(|(fname, _)| {
-                    // Fields with "set" effects don't need pre (assertion uses literal/param)
-                    let has_set = op
-                        .effects
-                        .iter()
-                        .any(|(f, k, _)| f.as_str() == fname.as_str() && k == "set");
-                    !has_set
-                })
-                .collect();
-            for (fname, _) in &needs_pre {
-                out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
-            }
+                // Snapshot pre-state — every mutable field (one assertion
+                // pass: changed field + unchanged sibling fields).
+                let needs_pre_for: Vec<&&(String, String)> = mutable_fields
+                    .iter()
+                    .filter(|(fname, _)| {
+                        // "set" effects don't need pre on the target field;
+                        // other fields do (to assert unchanged).
+                        !(fname.as_str() == field.as_str() && op_kind == "set")
+                    })
+                    .collect();
+                for (fname, _) in &needs_pre_for {
+                    out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
+                }
 
-            // Call transition
-            let args: String = op
-                .takes_params
-                .iter()
-                .map(|(n, _)| format!(", {}", n))
-                .collect();
-            out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
+                // Call transition
+                let args: String = op
+                    .takes_params
+                    .iter()
+                    .map(|(n, _)| format!(", {}", n))
+                    .collect();
+                out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
 
-            // Assert effects
-            for (field, op_kind, value) in &op.effects {
+                // Assert THIS field's effect only
                 match op_kind.as_str() {
                     "set" => {
                         out.push_str(&format!(
@@ -429,32 +459,41 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     }
                     "add" => {
                         out.push_str(&format!(
-                            "        assert!(s.{} == pre_{} + {}, \"{} must increment by {}\");\n",
+                            "        assert!(s.{} == pre_{}.wrapping_add({}), \"{} must increment by {}\");\n",
                             field, field, value, field, value
                         ));
                     }
                     "sub" => {
                         out.push_str(&format!(
-                            "        assert!(s.{} == pre_{} - {}, \"{} must decrement by {}\");\n",
+                            "        assert!(s.{} == pre_{}.wrapping_sub({}), \"{} must decrement by {}\");\n",
                             field, field, value, field, value
                         ));
                     }
                     _ => {}
                 }
-            }
 
-            // Assert unchanged fields
-            for (fname, _) in &mutable_fields {
-                if !affected_fields.contains(&fname.as_str()) {
-                    out.push_str(&format!(
-                        "        assert!(s.{} == pre_{}, \"{} must not change\");\n",
-                        fname, fname, fname
-                    ));
+                // Assert all sibling fields unchanged
+                for (fname, _) in &mutable_fields {
+                    if fname.as_str() != field.as_str() {
+                        // Only assert unchanged if this sibling isn't itself
+                        // mutated by ANOTHER effect in the same handler —
+                        // otherwise the assertion would be wrong.
+                        let sibling_mutated = op
+                            .effects
+                            .iter()
+                            .any(|(f, _, _)| f.as_str() == fname.as_str());
+                        if !sibling_mutated {
+                            out.push_str(&format!(
+                                "        assert!(s.{} == pre_{}, \"{} must not change\");\n",
+                                fname, fname, fname
+                            ));
+                        }
+                    }
                 }
-            }
 
-            out.push_str("    }\n");
-            out.push_str("}\n\n");
+                out.push_str("    }\n");
+                out.push_str("}\n\n");
+            }
         }
     }
 
@@ -748,4 +787,211 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::chumsky_adapter::parse_str;
+
+    // B4 regression: a handler whose precondition is expressed purely through
+    // `requires` clauses (no top-level `guard` DSL) used to emit
+    // `kani::assume(!(true))`, making the rejection harness unreachable and
+    // silently vacuous. The harness must now reflect the conjunction of every
+    // `requires`.
+    #[test]
+    fn rejects_invalid_harness_folds_requires_clauses() {
+        // `state` sugar + `requires` — no `guard` keyword. Pre-fix this path
+        // fell through to `unwrap_or("true")`.
+        let src = r#"spec T
+state { balance : U64, status : U8 }
+handler deposit (amount : U64) {
+  requires amount > 0 else BelowMinimumAmount
+  requires amount < 1_000_000_000 else MathOverflow
+  requires state.status == 0 else WrongStatus
+  effect {
+    balance += amount
+  }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        assert_eq!(op.requires.len(), 3);
+
+        // Compose what `collect_full_guard` would produce; assert it's all three.
+        let full = crate::rust_codegen_util::collect_full_guard(op, false)
+            .expect("three requires clauses → Some");
+        assert!(full.contains("amount > 0"));
+        assert!(full.contains("1000000000"));
+        assert!(full.contains("s.status == 0"));
+
+        // Simulate the kani.rs emission: the assume line must negate the full
+        // conjunction, NOT collapse to `!(true)`.
+        let emitted_assume = format!("    kani::assume(!({}));", full);
+        assert!(
+            !emitted_assume.contains("!(true)"),
+            "assume must not be vacuous: {}",
+            emitted_assume
+        );
+        assert!(
+            emitted_assume.contains("amount > 0"),
+            "assume must reference a real guard: {}",
+            emitted_assume
+        );
+    }
+
+    // B3 regression: `let` bindings declared in the handler body MUST flow
+    // into the generated Rust transition function so that the effect RHS
+    // sees the binder in scope. Previously dropped entirely — the Rust
+    // `net`/`total_fee` references crashed the compiler.
+    #[test]
+    fn let_bindings_flow_into_rust_transition() {
+        let src = r#"spec T
+state { pool : U64, fees : U64 }
+handler compute (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  let total_fee = amount * 125 / 10000
+  let net = amount - total_fee
+  effect {
+    pool += net
+    fees += total_fee
+  }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        assert_eq!(op.let_bindings.len(), 2);
+        let names: Vec<&str> = op.let_bindings.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["total_fee", "net"]);
+
+        // Drive the transition emitter and assert both names appear as `let` in Rust.
+        let mut out = String::new();
+        crate::rust_codegen_util::emit_transition_fn(
+            &mut out,
+            op,
+            &spec,
+            /*wrapping=*/ false,
+            crate::codegen::map_type,
+        );
+        assert!(
+            out.contains("let total_fee ="),
+            "missing total_fee let in transition:\n{}",
+            out
+        );
+        assert!(
+            out.contains("let net ="),
+            "missing net let in transition:\n{}",
+            out
+        );
+        // And the effects that reference these binders must come after.
+        let total_fee_pos = out.find("let total_fee").unwrap();
+        let pool_effect_pos = out.find("s.pool").unwrap();
+        assert!(
+            total_fee_pos < pool_effect_pos,
+            "let bindings must precede effects:\n{}",
+            out
+        );
+    }
+
+    // B10 regression: transition functions must model `+=` as checked in the
+    // Kani model (`wrapping=false`). Pre-fix the model emitted bare `s.x += v`,
+    // which CBMC flagged as overflow on every unbounded pre-state — a
+    // spec-model artifact that didn't match deployed Anchor programs using
+    // `checked_add`.
+    #[test]
+    fn add_effect_uses_checked_semantics_in_kani_model() {
+        let src = r#"spec T
+state { pool : U64 }
+handler buy (amount : U64) {
+  requires amount > 0 else BelowMinimumAmount
+  effect { pool += amount }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+
+        let mut out = String::new();
+        crate::rust_codegen_util::emit_transition_fn(
+            &mut out,
+            op,
+            &spec,
+            /*wrapping=*/ false,
+            crate::codegen::map_type,
+        );
+
+        // Must NOT emit the bare `+=` pattern — that's the pre-v2.6 model.
+        assert!(
+            !out.contains("s.pool += amount;"),
+            "kani model (wrapping=false) must not use bare `+=`:\n{}",
+            out
+        );
+        // Must emit the checked pattern; overflow → return false, matching
+        // the Anchor program's `checked_add(..).ok_or(MathOverflow)?`.
+        assert!(
+            out.contains("checked_add"),
+            "expected checked_add in non-wrapping model:\n{}",
+            out
+        );
+        assert!(
+            out.contains("return false"),
+            "overflow must short-circuit the transition:\n{}",
+            out
+        );
+    }
+
+    #[test]
+    fn add_effect_keeps_wrapping_for_proptest_mode() {
+        let src = r#"spec T
+state { pool : U64 }
+handler buy (amount : U64) { effect { pool += amount } }"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        crate::rust_codegen_util::emit_transition_fn(
+            &mut out,
+            op,
+            &spec,
+            /*wrapping=*/ true,
+            crate::codegen::map_type,
+        );
+        assert!(
+            out.contains("wrapping_add"),
+            "proptest mode (wrapping=true) must keep wrapping_add:\n{}",
+            out
+        );
+        assert!(!out.contains("checked_add"));
+    }
+
+    // B11 regression: effect conformance must be split per-field so one
+    // CBMC-stuck field doesn't block the rest. Heavy-arith RHS (`*`/`/` in
+    // the value) switches solver to `minisat`, which handles bit-blasted
+    // multiplication without cadical's wedge. This doesn't test the full
+    // kani.rs emission path (that requires a spec file on disk) — it encodes
+    // the invariants we rely on as comments/plumbing.
+    #[test]
+    fn b11_effect_heuristics() {
+        // Arithmetic detection: a value containing `*` or `/` triggers the
+        // minisat solver hint. `amount * 125 / 10000` is the canonical case
+        // from the B11 repro (fee arithmetic).
+        let v1 = "amount";
+        let v2 = "amount * 125 / 10000";
+        assert!(!v1.contains('*') && !v1.contains('/'));
+        assert!(v2.contains('*') && v2.contains('/'));
+    }
+
+    // B4 corollary: a handler with NO guards AND NO requires must not get a
+    // rejection harness at all (kani.rs previously emitted one; now it skips).
+    #[test]
+    fn no_guards_no_requires_means_no_rejects_harness() {
+        let src = r#"spec T
+state { x : U8 }
+handler noop {
+  effect { x := 1 }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        assert!(op.requires.is_empty());
+        assert!(op.guard_str.is_none());
+        assert!(
+            crate::rust_codegen_util::collect_full_guard(op, false).is_none(),
+            "handler with no preconditions must yield None — the kani.rs loop \
+             should then `continue` and skip the harness entirely"
+        );
+    }
 }

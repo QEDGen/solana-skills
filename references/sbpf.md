@@ -6,6 +6,20 @@
 > verification has no Kani substitute. If you're verifying an sBPF
 > program, you're in Phase 2. For Rust programs, Phase 1 (spec +
 > proptest + Kani) is usually the finish line.
+>
+> **Experimental-intrinsic escape hatch.** The sBPF support library
+> models a fixed set of syscalls. Programs compiled with experimental
+> compiler-emitted intrinsics — e.g. proposed `sol_multi3`-style
+> libcalls for u128 mul — emit `CALL_IMM` to handlers the Lean
+> interpreter doesn't know, which `asm2lean` will transpile opaquely
+> and `wp_exec` will get stuck on. If you need to verify such a
+> program today, verify at the **Rust source level** via Kani rather
+> than at the bytecode level — Rust semantics (`a * b : u128`) are
+> unchanged by the intrinsic, and Kani is immune to the drift.
+> Bytecode-level verification of these programs waits until the
+> intrinsic stabilizes upstream and we pin an axiomatized handler
+> against a specific SVM version. Log the scoping decision in
+> `.qed/plan/scoping.md` so the signal accumulates.
 
 ## Transpile with asm2lean
 

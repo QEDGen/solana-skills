@@ -291,16 +291,16 @@ enum Commands {
         #[arg(long)]
         proptest: bool,
 
-        /// Path to the proptest harness file
-        #[arg(long, default_value = "./tests/proptest.rs")]
+        /// Path to the proptest harness file (matches codegen default)
+        #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_path: PathBuf,
 
         /// Run Kani BMC harnesses (cargo kani) — lands in v2.4-M2
         #[arg(long)]
         kani: bool,
 
-        /// Path to the Kani harness file
-        #[arg(long, default_value = "./tests/kani.rs")]
+        /// Path to the Kani harness file (matches codegen default)
+        #[arg(long, default_value = "./programs/tests/kani.rs")]
         kani_path: PathBuf,
 
         /// Run Lean proofs (lake build)
@@ -339,24 +339,29 @@ enum Commands {
         #[arg(long)]
         kani: bool,
 
-        /// Output path for Kani harnesses (default: ./tests/kani.rs)
-        #[arg(long, default_value = "./tests/kani.rs")]
+        /// Output path for Kani harnesses (default: ./programs/tests/kani.rs —
+        /// sits INSIDE the program package so `cargo kani --tests` finds it
+        /// via `programs/Cargo.toml`. Before v2.6 the default was
+        /// `./tests/kani.rs`, which landed without a governing Cargo.toml;
+        /// that layout silently broke `qedgen verify`.)
+        #[arg(long, default_value = "./programs/tests/kani.rs")]
         kani_output: PathBuf,
 
         /// Generate unit tests (plain Rust, cargo test)
         #[arg(long)]
         test: bool,
 
-        /// Output path for unit tests (default: ./src/tests.rs)
-        #[arg(long, default_value = "./src/tests.rs")]
+        /// Output path for unit tests (default: ./programs/src/tests.rs)
+        #[arg(long, default_value = "./programs/src/tests.rs")]
         test_output: PathBuf,
 
         /// Generate proptest harnesses (property-based testing)
         #[arg(long)]
         proptest: bool,
 
-        /// Output path for proptest harnesses (default: ./tests/proptest.rs)
-        #[arg(long, default_value = "./tests/proptest.rs")]
+        /// Output path for proptest harnesses
+        /// (default: ./programs/tests/proptest.rs — see --kani-output for why).
+        #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_output: PathBuf,
 
         /// Generate QuasarSVM integration test scaffolds
@@ -805,7 +810,11 @@ async fn main() -> Result<()> {
             if quasar {
                 let spec_path = output_dir.join("Spec.lean");
                 let program_dir = program_root.join(format!("programs/{}", name));
-                let kani_path = program_root.join("tests/kani.rs");
+                // v2.6: tests live INSIDE the program package so cargo-kani
+                // and cargo-test can resolve the governing Cargo.toml via the
+                // usual `tests/` convention. Previously at `tests/kani.rs` at
+                // program_root, which had no Cargo.toml above it.
+                let kani_path = program_dir.join("tests/kani.rs");
 
                 // Generate Quasar program skeleton
                 codegen::generate(&spec_path, &program_dir)?;

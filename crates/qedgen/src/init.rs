@@ -208,6 +208,32 @@ pub fn init(
         "project name must be alphanumeric (underscores allowed)"
     );
 
+    // Detect the nested-layout footgun: if `output_dir` leaf is
+    // `formal_verification` and cwd (the output_dir's canonicalized parent)
+    // already ends in `formal_verification/`, the path resolves to
+    // `.../formal_verification/formal_verification/` — a double layer that
+    // confuses every tool downstream. Ask the user to scope the call.
+    let leaf_is_fv = output_dir.file_name().and_then(|n| n.to_str()) == Some("formal_verification");
+    let parent_is_fv = output_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .and_then(|p| p.canonicalize().ok())
+        .and_then(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "formal_verification")
+        })
+        .unwrap_or(false);
+    if leaf_is_fv && parent_is_fv {
+        anyhow::bail!(
+            "refusing to scaffold into {} — the parent directory is already \
+             `formal_verification/`. Either run `qedgen init` from the project \
+             root, or pass `--output-dir .` to scaffold into the current \
+             directory.",
+            output_dir.display()
+        );
+    }
+
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
 
@@ -516,6 +542,36 @@ mod tests {
         assert!(
             !line.contains("git"),
             "should not fall back to git when shared path is available"
+        );
+    }
+
+    #[test]
+    fn init_refuses_nested_formal_verification() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize to dereference /var/folders → /private/var/folders on macOS,
+        // so our in-function `.parent().canonicalize()` check matches.
+        let root = tmp.path().canonicalize().unwrap();
+        let existing_fv = root.join("formal_verification");
+        std::fs::create_dir_all(&existing_fv).unwrap();
+        // Simulate the footgun: running `qedgen init --output-dir ./formal_verification`
+        // from inside `formal_verification/` → `output_dir` resolves to
+        // `formal_verification/formal_verification/`.
+        let nested = existing_fv.join("formal_verification");
+        let err = init("demo", &nested, None, false, false).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("refusing to scaffold"),
+            "expected refusal message, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("formal_verification"),
+            "message should name the offending layout: {}",
+            msg
+        );
+        assert!(
+            !nested.exists(),
+            "init must not create the nested directory when refusing"
         );
     }
 

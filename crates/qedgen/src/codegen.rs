@@ -114,7 +114,7 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/lib.rs"));
     out.push_str("#![no_std]\n\n");
-    out.push_str("use quasar_lang::prelude::*;\n\n");
+    out.push_str("use anchor_lang::prelude::*;\n\n");
     out.push_str("mod instructions;\nuse instructions::*;\n");
 
     if !spec.events.is_empty() {
@@ -192,7 +192,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/state.rs"));
-    out.push_str("use quasar_lang::prelude::*;\n\n");
+    out.push_str("use anchor_lang::prelude::*;\n\n");
 
     if is_multi {
         for (idx, acct) in spec.account_types.iter().enumerate() {
@@ -308,7 +308,7 @@ fn generate_events(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/events.rs"));
-    out.push_str("use quasar_lang::prelude::*;\n\n");
+    out.push_str("use anchor_lang::prelude::*;\n\n");
 
     for (i, event) in spec.events.iter().enumerate() {
         out.push_str(&format!("#[event(discriminator = {})]\n", i + 1));
@@ -338,7 +338,7 @@ fn generate_errors(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/errors.rs"));
-    out.push_str("use quasar_lang::prelude::*;\n\n");
+    out.push_str("use anchor_lang::prelude::*;\n\n");
 
     out.push_str("#[error_code]\n");
     out.push_str(&format!("pub enum {} {{\n", error_name));
@@ -511,7 +511,7 @@ fn render_handler_scaffold(
     out.push_str("// regenerated on every `qedgen codegen`. Drift between the spec\n");
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
-    out.push_str("use quasar_lang::prelude::*;\n");
+    out.push_str("use anchor_lang::prelude::*;\n");
     out.push_str("use crate::state::*;\n");
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
@@ -587,6 +587,14 @@ fn render_handler_scaffold(
         "        guards::{}({})?;\n",
         handler.name, guard_args
     ));
+
+    // Spec-level `let` bindings (e.g. `let total_fee = amount * 125 / 10000`)
+    // must be emitted BEFORE the effect block — effect RHSs reference them.
+    // Pre-fix: they were dropped on the Rust side, leaving undefined-variable
+    // errors on `cargo build`.
+    for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
+        out.push_str(&format!("        let {} = {};\n", binding_name, rust_expr));
+    }
 
     // Mechanical-effect expansion (v2.4-M3). For each spec effect we try to
     // emit a real Rust statement; anything non-mechanical stays as a comment
@@ -678,7 +686,7 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
     out.push_str(
         "#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]\n\n",
     );
-    out.push_str("use quasar_lang::prelude::*;\n");
+    out.push_str("use anchor_lang::prelude::*;\n");
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
     }
@@ -772,9 +780,11 @@ fn generate_cargo_toml(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Pat
 
     let mut out = TEMPLATE
         .replace("{SPEC_HASH}", &hash)
-        .replace("{PROGRAM_NAME}", &program_name);
+        .replace("{PROGRAM_NAME}", &program_name)
+        .replace("{QEDGEN_VERSION}", env!("CARGO_PKG_VERSION"));
     if needs_spl {
-        out.push_str("quasar-spl = { version = \"0.0.0\" }\n");
+        out.push_str("\n# TODO: SPL helper crate (spec declares token transfers) — e.g.:\n");
+        out.push_str("# anchor-spl = \"0.32.1\"\n");
     }
     std::fs::write(output_dir.join("Cargo.toml"), &out)?;
     Ok(())

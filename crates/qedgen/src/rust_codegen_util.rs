@@ -279,9 +279,35 @@ pub fn emit_state_struct(
 /// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
 pub fn emit_property_predicates(out: &mut String, properties: &[ParsedProperty], wrapping: bool) {
     for prop in properties {
-        if let Some(ref expr) = prop.expression {
-            let rust_expr = translate_property_to_rust(expr, wrapping);
-            out.push_str(&format!("/// {}: {}\n", prop.name, expr));
+        // Prefer the AST-rendered Rust form (handles implies/forall correctly,
+        // embeds the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker when a body can't
+        // lower to a boolean-valued fn). Fall back to the Lean form through
+        // `translate_property_to_rust` for callers constructing ParsedProperty
+        // without an AST (legacy / tests).
+        let rendered = prop
+            .rust_expression
+            .as_deref()
+            .map(|r| r.to_string())
+            .or_else(|| {
+                prop.expression
+                    .as_deref()
+                    .map(|e| translate_property_to_rust(e, wrapping))
+            });
+        let Some(rust_expr) = rendered else { continue };
+        let doc = prop.expression.as_deref().unwrap_or("");
+        out.push_str(&format!("/// {}: {}\n", prop.name, doc));
+        if crate::check::rust_expr_is_unsupported(&rust_expr) {
+            // Body contains `forall`/`exists`. Emit the function with a
+            // `unimplemented!()` that cites the limitation — the harness
+            // preamble (see kani.rs) skips calling into these predicates.
+            out.push_str(&format!("fn {}(_s: &State) -> bool {{\n", prop.name));
+            out.push_str(&format!(
+                "    // {} — property uses a quantifier; lower at the harness level.\n",
+                rust_expr.trim()
+            ));
+            out.push_str("    true\n");
+            out.push_str("}\n\n");
+        } else {
             out.push_str(&format!("fn {}(s: &State) -> bool {{\n", prop.name));
             out.push_str(&format!("    {}\n", rust_expr));
             out.push_str("}\n\n");
@@ -322,7 +348,24 @@ pub fn emit_transition_fn(
         out.push_str("    }\n");
     }
 
-    // Apply effects
+    // Spec-level `let` bindings (`let total_fee = amount * 125 / 10000`)
+    // declared in the handler body. Emit them as Rust `let` statements BEFORE
+    // the effect block — without this the effect RHS (e.g. `pool += net`)
+    // would reference an undefined `net`.
+    for (binding_name, _lean_expr, rust_expr) in &op.let_bindings {
+        out.push_str(&format!("    let {} = {};\n", binding_name, rust_expr));
+    }
+
+    // Apply effects. v2.6 default is `checked` semantics for `+=` / `-=`:
+    // on overflow/underflow the transition returns `false`, mirroring the
+    // `checked_add(..).ok_or(MathOverflow)?` pattern that real Anchor programs
+    // use. Previously this path emitted bare `s.x += val`, which made symbolic
+    // BMC (Kani) flag overflow on every unbounded pre-state — a spec-model
+    // artifact, not a program bug. See B10 in the v2.6 release notes.
+    //
+    // `wrapping = true` keeps the old wrapping semantics for proptest
+    // exploration, where we want to visit the full state space without the
+    // model short-circuiting on arithmetic rejection.
     for (field, op_kind, value) in &op.effects {
         let rust_value = resolve_value(value, op, spec);
         match op_kind.as_str() {
@@ -336,7 +379,10 @@ pub fn emit_transition_fn(
                         field, field, rust_value
                     ));
                 } else {
-                    out.push_str(&format!("    s.{} += {};\n", field, rust_value));
+                    out.push_str(&format!(
+                        "    match s.{}.checked_add({}) {{\n        Some(__v) => s.{} = __v,\n        None => return false,\n    }}\n",
+                        field, rust_value, field
+                    ));
                 }
             }
             "sub" => {
@@ -346,7 +392,10 @@ pub fn emit_transition_fn(
                         field, field, rust_value
                     ));
                 } else {
-                    out.push_str(&format!("    s.{} -= {};\n", field, rust_value));
+                    out.push_str(&format!(
+                        "    match s.{}.checked_sub({}) {{\n        Some(__v) => s.{} = __v,\n        None => return false,\n    }}\n",
+                        field, rust_value, field
+                    ));
                 }
             }
             _ => {

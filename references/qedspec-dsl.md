@@ -2,15 +2,58 @@
 
 The `.qedspec` file is the single source of truth for a program's formal
 specification. QEDGen parses it (chumsky parser), validates it (`qedgen
-check`), and generates all downstream artifacts: Quasar Rust code, Lean
-proofs, Kani harnesses, proptest suites, CI workflows, and the
+check`), and generates all downstream artifacts: Anchor-compatible Rust
+handlers, Lean proofs, Kani harnesses, proptest suites, CI workflows, and the
 `#[qed(verified, spec, handler, spec_hash)]` drift attributes that tie
 generated code back to the spec.
 
-This reference covers the current (v2.5) grammar. Where the parser emits a
+This reference covers the current (v2.6) grammar. Where the parser emits a
 specific AST node shape that influences codegen (match, constructors, record
 updates, `mul_div_*`), the node name is called out so you can follow the
 transform into the Lean/Rust backends.
+
+## What changed in v2.6
+
+- **`+=` / `-=` default to checked arithmetic** in the generated Kani model.
+  On overflow the transition returns `false` — mirroring the
+  `checked_add(..).ok_or(MathOverflow)?` pattern deployed Anchor programs
+  use. Proptest mode keeps wrapping arithmetic for bounded exploration.
+  Before v2.6 the Kani model emitted bare `+=`, which flagged overflow on
+  every unbounded pre-state (a spec-model artifact that didn't match real
+  programs).
+- **`state { fields }` sugar parses** as documented. Accepts
+  comma- or newline-separated fields; desugars to `type State = { ... }`.
+- **Single-line `accounts { a : signer, b : writable, ... }` parses.**
+  Attribute commas and descriptor commas disambiguate via lookahead for
+  `<ident> :`, so multi-line and compact forms both work.
+- **`implies` lowers to valid Rust** (`(!a) || (b)`) in generated Kani and
+  proptest property bodies. `forall` / `exists` in property bodies emit a
+  `/* QEDGEN_UNSUPPORTED_QUANTIFIER */` marker — the property fn returns
+  `true` (non-blocking) and the body should be lifted to harness-level
+  `kani::any()` scaffolding instead.
+- **Multi-variant ADTs with shared field names deduplicate** when flattened
+  into the state model. First-variant wins on collisions. Proper
+  enum+match codegen remains on the roadmap.
+- **Default output layout changed.** `qedgen codegen --kani` / `--proptest`
+  write to `./programs/tests/kani.rs` / `./programs/tests/proptest.rs` so
+  `cargo kani --tests` and `cargo test --test proptest` resolve the
+  program's `Cargo.toml` directly. `qedgen verify` matches. Pass
+  `--kani-output` / `--proptest-output` to override.
+- **`qedgen init` refuses to nest `formal_verification/formal_verification/`.**
+  If run from inside an existing `formal_verification/` it bails with a
+  fix hint (`--output-dir .`).
+- **Generated `Cargo.toml` points at real deps.** `anchor-lang` +
+  `anchor-spl` are the target framework; `qedgen-macros` is a git-dep
+  at the release tag. Dependency lines start commented with a clear TODO
+  so `cargo build` surfaces the contract instead of pretending the
+  scaffold is complete.
+- **Vacuous `verify_*_rejects_invalid` Kani harnesses are gone.** The
+  `kani::assume(!(true))` footgun is fixed — harnesses now negate the
+  full `guard + requires` conjunction, or skip entirely when the handler
+  has no preconditions.
+- **`verify_*_effects` is split per-field.** One `verify_X_effect_{field}`
+  harness per effect, with `kani::solver(minisat)` when the RHS contains
+  `*` or `/`. No more 20-minute cadical wedges on chained fee arithmetic.
 
 ## What changed in v2.5
 
@@ -367,6 +410,15 @@ Values on the RHS may be integer literals, qualified paths, arithmetic
 expressions, constructor applications (`.Variant payload`), record literals,
 record updates, `match … with`, or built-in helpers like `mul_div_floor`.
 
+**Arithmetic semantics (v2.6):** `+=` / `-=` default to **checked**
+semantics in the generated Kani model — on overflow the transition
+returns `false`, mirroring the `checked_add(..).ok_or(MathOverflow)?`
+pattern deployed Anchor programs use. If you want explicit saturating or
+wrapping semantics, express the intent in a user-owned `let` binding
+(`let x = a.saturating_add(b)`) for now; first-class `+=!` / `+=?`
+operators are on the roadmap. Proptest-mode codegen keeps `wrapping_add`
+for bounded exploration.
+
 ### `transfers` block
 
 Token transfer declarations with source, destination, amount, and authority.
@@ -471,6 +523,13 @@ exists l : Loan.Active, l.collateral > 0
 
 // Quantifiers — multi-binder (desugars to nested single-binder forms)
 forall p1 p2 : Path, black_count(p1) == black_count(p2)
+
+// Lowering notes (v2.6):
+//   - `implies`  Lean: → ; Rust: `(!a) || (b)` — valid in property fn bodies.
+//   - `forall` / `exists` in a `property` body emit a
+//     `/* QEDGEN_UNSUPPORTED_QUANTIFIER */` marker in Rust and the
+//     property fn returns `true`. Lift quantified universals to
+//     harness-level `kani::any()` / proptest generators instead.
 
 // Aggregate sum over a bounded index type
 sum i : AccountIdx, state.accounts[i].capital
@@ -938,9 +997,12 @@ Use `--json` for machine-readable output.
 
 From a `.qedspec`, codegen produces:
 
-- **Quasar Rust skeleton** (default): program crate, `guards.rs` (always
-  regenerated), `src/instructions/*.rs` (user-owned, scaffolded once),
-  `src/lib.rs` (user-owned, scaffolded once), `errors.rs`, entrypoint
+- **Rust handler skeleton** (default, Anchor-compatible): program crate,
+  `guards.rs` (always regenerated), `src/instructions/*.rs` (user-owned,
+  scaffolded once), `src/lib.rs` (user-owned, scaffolded once),
+  `errors.rs`, entrypoint. Generated `Cargo.toml` includes
+  TODO-commented `anchor-lang` / `anchor-spl` / `qedgen-macros` deps —
+  uncomment after reviewing.
 - **Lean proofs** (`--lean`): `Spec.lean` (always regenerated) +
   `Proofs.lean` (bootstrapped once — user-owned tactic bodies)
 - **Kani harnesses** (`--kani`): BMC harnesses for each property + overflow

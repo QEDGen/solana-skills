@@ -37,7 +37,7 @@ $QEDGEN init --name counter  --spec counter.qedspec --quasar
 | `--spec` | Path | - | Spec path (file or directory) — written into `.qed/config.json` so `check`/`codegen` can resolve it automatically |
 | `--asm` | Path | - | sBPF assembly source (runs asm2lean automatically) |
 | `--mathlib` | bool | false | Include Mathlib dependency |
-| `--quasar` | bool | false | Generate Quasar program + Kani harnesses + tests |
+| `--quasar` | bool | false | Generate Anchor-compatible program Rust + Kani harnesses + tests (flag name retained for backward compat) |
 | `--output-dir` | Path | `./formal_verification` | Output directory |
 
 The written `.qed/config.json`:
@@ -153,7 +153,7 @@ $QEDGEN check --spec my_program.qedspec --drift programs/src/ --deep
 $QEDGEN check --spec my_program.qedspec --drift programs/src/ --update-hashes
 
 # Unified code + kani drift
-$QEDGEN check --spec my_program.qedspec --code programs/my_program/ --kani tests/kani.rs
+$QEDGEN check --spec my_program.qedspec --code programs/my_program/ --kani programs/tests/kani.rs
 
 # sBPF verification (hash check + lake build)
 $QEDGEN check --spec my_program.qedspec --asm src/program.s
@@ -169,7 +169,7 @@ $QEDGEN check --spec my_program.qedspec --asm src/program.s
 | `--drift` | Path | - | Rust source path for #[qed(verified)] drift detection |
 | `--update-hashes` | bool | false | Auto-stamp hashes in source files |
 | `--deep` | bool | false | Transitive drift detection (check callees) |
-| `--code` | Path | - | Quasar program dir (code drift detection) |
+| `--code` | Path | - | Generated program source dir (code drift detection) |
 | `--kani` | Path | - | Kani harness file (Kani drift detection) |
 | `--asm` | Path | - | sBPF assembly source (hash check + lake build) |
 | `--json` | bool | false | Machine-readable output |
@@ -236,7 +236,8 @@ Typical use:
 
 ### `codegen`
 Generate committed artifacts from a qedspec. Default (no flags) generates
-the Quasar Rust skeleton only.
+the program Rust skeleton only (Anchor-compatible; see the generated
+`Cargo.toml` for dependency configuration).
 
 Requires a git repo (see [Require-git guard](#require-git-guard)).
 
@@ -268,11 +269,11 @@ $QEDGEN codegen --ci
 | `--lean` | bool | false | Generate Lean 4 proofs |
 | `--lean-output` | Path | `./formal_verification/Spec.lean` | Lean output path |
 | `--kani` | bool | false | Generate Kani proof harnesses |
-| `--kani-output` | Path | `./tests/kani.rs` | Kani output path |
+| `--kani-output` | Path | `./programs/tests/kani.rs` | Kani output path. Lives **inside the program package** so `cargo kani --tests` resolves `programs/Cargo.toml` without a hand-authored root shim. Changed from `./tests/kani.rs` in v2.6. |
 | `--test` | bool | false | Generate unit tests |
-| `--test-output` | Path | `./src/tests.rs` | Unit test output path |
+| `--test-output` | Path | `./programs/src/tests.rs` | Unit test output path |
 | `--proptest` | bool | false | Generate proptest harnesses |
-| `--proptest-output` | Path | `./tests/proptest.rs` | Proptest output path |
+| `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). Changed from `./tests/proptest.rs` in v2.6. |
 | `--integration` | bool | false | Generate QuasarSVM integration tests |
 | `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
 | `--ci` | bool | false | Generate GitHub Actions CI workflow |
@@ -296,8 +297,8 @@ refreshed.
 | `programs/<name>/src/guards.rs` | Always regenerated |
 | `programs/<name>/src/errors.rs` | Always regenerated |
 | `tests/integration/*.rs` | Scaffolded once (user-owned integration tests) |
-| `tests/kani.rs` | Always regenerated |
-| `tests/proptest.rs` | Always regenerated |
+| `programs/tests/kani.rs` | Always regenerated |
+| `programs/tests/proptest.rs` | Always regenerated |
 | `formal_verification/Spec.lean` | Always regenerated |
 | `formal_verification/Proofs.lean` | Scaffolded once (user-owned preservation proofs) |
 | `.github/workflows/verify.yml` | Always regenerated |

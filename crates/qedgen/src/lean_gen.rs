@@ -700,6 +700,7 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
             .map(|p| crate::check::ParsedProperty {
                 name: p.name.clone(),
                 expression: p.expression.clone(),
+                rust_expression: p.rust_expression.clone(),
                 preserved_by: p.preserved_by.clone(),
             })
             .collect();

@@ -182,8 +182,27 @@ pub struct ParsedOperation {
 #[derive(Debug, Clone)]
 pub struct ParsedProperty {
     pub name: String,
+    /// Lean-rendered body (for proofs / diagnostics / drift).
     pub expression: Option<String>,
+    /// Rust-rendered body (for proptest/Kani codegen). When `Some` the
+    /// backends use this verbatim — no string-substitution massaging. Contains
+    /// `QEDGEN_UNSUPPORTED_QUANTIFIER` when the body has a forall/exists that
+    /// can't lower to a bool-valued function body; callers skip emission in
+    /// that case.
+    pub rust_expression: Option<String>,
     pub preserved_by: Vec<String>,
+}
+
+/// Sentinel marker embedded by `chumsky_adapter::expr_to_rust` when a
+/// quantifier appears in a property body — no valid `fn p(&State) -> bool`
+/// lowering exists without harness-level cooperation (see B2 in v2.6.0
+/// release notes).
+pub const QEDGEN_UNSUPPORTED_MARKER: &str = "QEDGEN_UNSUPPORTED_QUANTIFIER";
+
+/// Does this Rust-rendered expression require harness-level scaffolding
+/// that the property function body can't provide on its own?
+pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
+    rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER)
 }
 
 /// PDA seed declaration from a qedspec block.
@@ -3141,6 +3160,7 @@ mod tests {
             properties: vec![ParsedProperty {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -3422,6 +3442,7 @@ mod tests {
             properties: vec![ParsedProperty {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()], // only covers deposit
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -3450,6 +3471,7 @@ mod tests {
             properties: vec![ParsedProperty {
                 name: "conservation".to_string(),
                 expression: Some("s.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],

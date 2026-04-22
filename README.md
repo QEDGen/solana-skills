@@ -122,7 +122,7 @@ qedgen check --spec my_program.qedspec --json           # machine-readable outpu
 qedgen codegen --spec my_program.qedspec --all          # everything: Rust, Lean, Kani, tests
 
 # Or generate selectively
-qedgen codegen --spec my_program.qedspec                # Quasar Rust skeleton only
+qedgen codegen --spec my_program.qedspec                # Rust handler skeleton only (Anchor-compatible)
 qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
 qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
@@ -132,7 +132,7 @@ qedgen codegen --spec my_program.qedspec --integration  # + QuasarSVM integratio
 # Check with drift detection and verification report
 qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
 qedgen check --spec my_program.qedspec --explain        # Markdown verification report
-qedgen check --spec my_program.qedspec --code ./programs --kani ./tests/kani.rs  # drift detection
+qedgen check --spec my_program.qedspec --code ./programs --kani ./programs/tests/kani.rs  # drift detection
 ```
 
 ### sBPF verification
