@@ -97,6 +97,41 @@ pub fn find_qed_dir(spec_path: &Path) -> Option<std::path::PathBuf> {
 /// Initialize `.qed/` in the given directory. Returns error if already initialized.
 /// `dir` should be the program root — the directory where the `.qedspec` lives.
 ///
+/// Pick the directory that should own `.qed/` given CLI flags.
+///
+/// v2.6.1 eval (qedgen-bug-report §3, PRD-v2.6.2 G5): when a user runs
+/// `qedgen init --spec x/y.qedspec --output-dir /tmp/z`, they expect `.qed/`
+/// next to the spec file, not next to `/tmp/z`. The pre-v2.6.2 caller
+/// derived `program_root = output_dir.parent()`, which placed `.qed/` at
+/// `/tmp/` — surprising and undocumented.
+///
+/// New rule: if `--spec` is provided, anchor `.qed/` to the spec's parent
+/// directory (resolving against `cwd` when the path is relative). Fall
+/// back to `output_dir.parent()` only when no spec was given.
+pub fn resolve_program_root(
+    spec: Option<&Path>,
+    output_dir: &Path,
+    cwd: &Path,
+) -> std::path::PathBuf {
+    if let Some(spec_path) = spec {
+        let abs = if spec_path.is_absolute() {
+            spec_path.to_path_buf()
+        } else {
+            cwd.join(spec_path)
+        };
+        match abs.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => cwd.to_path_buf(),
+        }
+    } else {
+        output_dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| cwd.to_path_buf())
+    }
+}
+
 /// `spec_rel` is the spec path *relative to `dir`* — the pointer written into
 /// `config.json` so `qedgen check`/`codegen` can resolve it without `--spec`.
 /// Pass `None` to leave the field empty (users will need to pass `--spec`
@@ -599,5 +634,39 @@ mod tests {
             err.contains("no `spec` field"),
             "expected 'no spec field' error, got: {err}"
         );
+    }
+
+    #[test]
+    fn resolve_program_root_anchors_on_spec_when_given() {
+        // Mirrors the eval's repro:
+        //   cd /home/user/percolator-prog
+        //   qedgen init --spec percolator.qedspec --output-dir /tmp/qedgen_eval
+        // Pre-v2.6.2: .qed/ landed in /tmp (= /tmp/qedgen_eval.parent()).
+        // Post-v2.6.2: .qed/ lands next to the spec (= cwd).
+        let cwd = std::path::Path::new("/home/user/percolator-prog");
+        let spec = std::path::Path::new("percolator.qedspec");
+        let output_dir = std::path::Path::new("/tmp/qedgen_eval");
+
+        let root = resolve_program_root(Some(spec), output_dir, cwd);
+        assert_eq!(root, cwd);
+    }
+
+    #[test]
+    fn resolve_program_root_handles_absolute_spec_path() {
+        let cwd = std::path::Path::new("/anywhere");
+        let spec = std::path::Path::new("/home/user/proj/prog.qedspec");
+        let output_dir = std::path::Path::new("/tmp/out");
+
+        let root = resolve_program_root(Some(spec), output_dir, cwd);
+        assert_eq!(root, std::path::Path::new("/home/user/proj"));
+    }
+
+    #[test]
+    fn resolve_program_root_falls_back_to_output_dir_parent_when_no_spec() {
+        let cwd = std::path::Path::new("/home/user");
+        let output_dir = std::path::Path::new("/home/user/proj/formal_verification");
+
+        let root = resolve_program_root(None, output_dir, cwd);
+        assert_eq!(root, std::path::Path::new("/home/user/proj"));
     }
 }

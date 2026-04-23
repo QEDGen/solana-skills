@@ -792,18 +792,21 @@ async fn main() -> Result<()> {
             quasar,
             output_dir,
         } => {
-            // .qed/ lives at the program root (parent of formal_verification/)
-            let program_root = output_dir.parent().unwrap_or(std::path::Path::new("."));
+            // .qed/ lives at the program root. If the user passed --spec, anchor
+            // to the spec's parent directory (what they expect); otherwise fall
+            // back to the output_dir's parent. See init::resolve_program_root.
+            let cwd = std::env::current_dir()?;
+            let program_root = init::resolve_program_root(spec.as_deref(), &output_dir, &cwd);
             // The spec pointer is stored relative to program_root so
             // `qedgen check` from anywhere under the project resolves it
             // via .qed/config.json → project_root / <spec>.
             let spec_rel = spec.as_ref().map(|p| {
-                p.strip_prefix(program_root)
+                p.strip_prefix(&program_root)
                     .unwrap_or(p.as_path())
                     .to_string_lossy()
                     .to_string()
             });
-            init::init_qed_dir(program_root, &name, spec_rel.as_deref())?;
+            init::init_qed_dir(&program_root, &name, spec_rel.as_deref())?;
 
             init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
 
