@@ -260,14 +260,6 @@ state {
 }
 ```
 
-### `lifecycle` (sugar)
-
-Shorthand for declaring lifecycle variant names with no payloads.
-
-```
-lifecycle [Open, Closed, Cancelled]
-```
-
 ## PDA and events
 
 ### `pda`
@@ -533,6 +525,12 @@ forall p1 p2 : Path, black_count(p1) == black_count(p2)
 
 // Aggregate sum over a bounded index type
 sum i : AccountIdx, state.accounts[i].capital
+
+// The body of a `sum` is a plain expression (no conditionals). To count
+// active entries when `active` is a 0/1 discriminator, sum the field
+// directly — `if state.accounts[i].active == 1 then 1 else 0` is not
+// grammatical. Example:
+//   num_active == sum i : AccountIdx, state.accounts[i].active
 
 // Parenthesized
 (amount + fee) * rate
