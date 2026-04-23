@@ -5,7 +5,9 @@ use crate::check::{self, ParsedHandler, ParsedProperty, ParsedSpec};
 use crate::codegen::map_type;
 use crate::rust_codegen_util;
 
-/// Return the proptest strategy string for a DSL type.
+/// Return the proptest strategy string for a DSL primitive type. For compound
+/// types (`Map[N] T`, records, sum types) use `strategy_for_field` instead —
+/// it dispatches here once it's unwrapped the compound.
 fn strategy_for_type(dsl_type: &str) -> &str {
     match dsl_type {
         "U8" => "0u8..=255u8",
@@ -13,7 +15,17 @@ fn strategy_for_type(dsl_type: &str) -> &str {
         "U32" => "0u32..=u32::MAX",
         "U64" => "0u64..=u64::MAX",
         "U128" => "0u128..=u128::MAX",
+        "I8" => "i8::MIN..=i8::MAX",
+        "I16" => "i16::MIN..=i16::MAX",
+        "I32" => "i32::MIN..=i32::MAX",
+        "I64" => "i64::MIN..=i64::MAX",
+        "I128" => "any::<i128>()",
+        "Bool" => "any::<bool>()",
         "Pubkey" => "prop::array::uniform32(0u8..)",
+        // Fin[N] falls through here after the compound-type detector in
+        // strategy_for_field strips the `Fin[N]` wrapper — it's modelled as
+        // usize with a small range since real usage is as an index.
+        "Fin" => "0usize..=1024usize",
         _ => "0u64..=u64::MAX",
     }
 }
@@ -28,9 +40,173 @@ fn boundary_strategy_for_type(dsl_type: &str) -> &str {
         "U32" => "prop_oneof![0u32..=3u32, (u32::MAX - 3)..=u32::MAX]",
         "U64" => "prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]",
         "U128" => "prop_oneof![0u128..=3u128, (u128::MAX - 3)..=u128::MAX]",
+        "I8" => "prop_oneof![i8::MIN..=(i8::MIN + 3), (i8::MAX - 3)..=i8::MAX]",
+        "I16" => "prop_oneof![i16::MIN..=(i16::MIN + 3), (i16::MAX - 3)..=i16::MAX]",
+        "I32" => "prop_oneof![i32::MIN..=(i32::MIN + 3), (i32::MAX - 3)..=i32::MAX]",
+        "I64" => "prop_oneof![i64::MIN..=(i64::MIN + 3), (i64::MAX - 3)..=i64::MAX]",
+        "I128" => "any::<i128>()",
+        "Bool" => "any::<bool>()",
         "Pubkey" => "prop::array::uniform32(0u8..1u8)",
+        "Fin" => "prop_oneof![0usize..=3usize, 1020usize..=1024usize]",
         _ => "prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]",
     }
+}
+
+/// Dispatch table for per-field strategy rendering. Handles compound types
+/// (`Map[N] T` → fixed-size array via strict-length vec + try_into; records
+/// → `arb_<Name>()`; unit-variant sum types → `arb_<Name>()`) and falls back
+/// to the primitive `strategy_for_type` / `boundary_strategy_for_type`
+/// helpers once the compound layer is peeled off.
+///
+/// v2.6.2 S3 taught `map_type` to resolve record/sum/alias/Fin names. v2.7
+/// G1 teaches the strategy emitter the matching shape so `arb_state()`
+/// doesn't bail into `0u64..=u64::MAX` when a field is `[Account; N]`.
+fn strategy_for_field(
+    dsl_type: &str,
+    spec: &ParsedSpec,
+    mode: StrategyMode,
+    field_bound: Option<&str>,
+) -> Result<String> {
+    let dsl_type = dsl_type.trim();
+
+    // Map[BOUND] T → strict-length Vec<T> → [T; N] via TryInto.
+    // proptest's `prop::array::uniform*` combinators only go up to 32; the
+    // vec-with-prop_map form works for any N.
+    if let Some(rest) = dsl_type.strip_prefix("Map") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let bound_src = rest[..close].trim();
+                let inner_src = rest[close + 1..].trim();
+                let n = resolve_map_bound_local(bound_src, &spec.constants)?;
+                let inner_strategy = strategy_for_field(inner_src, spec, mode, None)?;
+                return Ok(format!(
+                    "prop::collection::vec({inner_strategy}, {n}..={n}).prop_map(|v| v.try_into().ok().unwrap())"
+                ));
+            }
+        }
+        anyhow::bail!(
+            "malformed Map type in strategy: `{}` — expected `Map[BOUND] T`",
+            dsl_type
+        );
+    }
+
+    // Fin[N] → usize. Bound is informational; use a bounded-ish strategy so
+    // array indices stay within typical ranges.
+    if dsl_type.starts_with("Fin[") {
+        return Ok(match mode {
+            StrategyMode::Full => strategy_for_type("Fin").to_string(),
+            StrategyMode::Boundary => boundary_strategy_for_type("Fin").to_string(),
+        });
+    }
+
+    // Record type → arb_<Name>() — emitted by emit_record_prop_composes.
+    if spec.records.iter().any(|r| r.name == dsl_type) {
+        return Ok(format!("arb_{}()", dsl_type));
+    }
+
+    // Unit-variant sum type → arb_<Name>() — emitted by emit_unit_sum_prop_oneofs.
+    // Sum types with payload variants are S3 narrow's flattened-struct case and
+    // don't appear as field types (the flattened struct's own field becomes
+    // the one referenced).
+    if spec.sum_types.iter().any(|s| {
+        s.name == dsl_type
+            && !s.variants.is_empty()
+            && s.variants.iter().all(|v| v.fields.is_empty())
+    }) {
+        return Ok(format!("arb_{}()", dsl_type));
+    }
+
+    // Type alias: resolve transitively and recurse.
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return strategy_for_field(rhs, spec, mode, field_bound);
+    }
+
+    // Primitive path — apply field bound if one was extracted from
+    // property expressions.
+    if let Some(bound) = field_bound {
+        let rust_type = map_type(dsl_type, spec)?;
+        return Ok(match mode {
+            StrategyMode::Boundary => format!(
+                "prop_oneof![0{rt}..=3{rt}, ({b} - 3)..={b}{rt}]",
+                rt = rust_type,
+                b = bound
+            ),
+            StrategyMode::Full => format!("0{rt}..={b}{rt}", rt = rust_type, b = bound),
+        });
+    }
+    Ok(match mode {
+        StrategyMode::Boundary => boundary_strategy_for_type(dsl_type).to_string(),
+        StrategyMode::Full => strategy_for_type(dsl_type).to_string(),
+    })
+}
+
+/// Local copy of codegen::resolve_map_bound (private there) — same rule: bound
+/// is either a numeric literal or a declared spec constant.
+fn resolve_map_bound_local(bound: &str, constants: &[(String, String)]) -> Result<String> {
+    let bound = bound.trim();
+    if bound.chars().all(|c| c.is_ascii_digit()) && !bound.is_empty() {
+        return Ok(bound.to_string());
+    }
+    match constants.iter().find(|(n, _)| n == bound) {
+        Some((_, value)) => Ok(value.clone()),
+        None => anyhow::bail!(
+            "Map bound `{}` is not a numeric literal and not declared as a `const` in the spec",
+            bound
+        ),
+    }
+}
+
+/// Emit a `prop_compose!` strategy block per spec record — the generator
+/// that lets fields of type `Account` synthesize arbitrary values. Must be
+/// called after `emit_record_structs` (the struct must exist first) and
+/// before `emit_state_strategy` (the strategy references `arb_<Name>()`).
+fn emit_record_prop_composes(out: &mut String, spec: &ParsedSpec) -> Result<()> {
+    for rec in &spec.records {
+        if rec.fields.is_empty() {
+            continue;
+        }
+        out.push_str("prop_compose! {\n");
+        out.push_str(&format!("    fn arb_{}()(", rec.name));
+        for (i, (fname, ftype)) in rec.fields.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let strategy = strategy_for_field(ftype, spec, StrategyMode::Full, None)?;
+            out.push_str(&format!("{fname} in {strategy}"));
+        }
+        out.push_str(&format!(") -> {} {{\n", rec.name));
+        out.push_str(&format!("        {} {{\n", rec.name));
+        for (fname, _) in &rec.fields {
+            out.push_str(&format!("            {fname},\n"));
+        }
+        out.push_str("        }\n    }\n");
+        out.push_str("}\n\n");
+    }
+    Ok(())
+}
+
+/// Emit a `prop_oneof!` strategy per unit-variant sum type. Sum types with
+/// payload variants are skipped here — they're either flattened into the
+/// State struct (S3 narrow) or become a Rust `enum` with their own strategy
+/// (v2.7 G2).
+fn emit_unit_sum_prop_oneofs(out: &mut String, spec: &ParsedSpec) -> Result<()> {
+    for sum in &spec.sum_types {
+        let all_unit = sum.variants.iter().all(|v| v.fields.is_empty());
+        if !all_unit || sum.variants.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "fn arb_{}() -> impl Strategy<Value = {}> {{\n",
+            sum.name, sum.name
+        ));
+        out.push_str("    prop_oneof![\n");
+        for variant in &sum.variants {
+            out.push_str(&format!("        Just({}::{}),\n", sum.name, variant.name));
+        }
+        out.push_str("    ]\n}\n\n");
+    }
+    Ok(())
 }
 
 /// Return the Rust type max value for overflow testing.
@@ -232,12 +408,15 @@ fn emit_account_section(
     lifecycle_states: &[String],
     spec: &ParsedSpec,
 ) -> Result<()> {
-    // User-defined records/enums referenced by State must be declared first.
-    // proptest harnesses don't derive Arbitrary here — record-valued Map fields
-    // still need hand-written strategies; that's v2.7 scope. Minimum viable:
-    // the struct types exist so `cargo check` passes.
+    // User-defined records/enums referenced by State must be declared first,
+    // then their `arb_<Name>()` strategies so `arb_state` can call into them.
+    // v2.7 G1 finishes what v2.6.2 S3 started: the struct decls were emitted
+    // but the strategy lookup bailed into `0u64..=u64::MAX` for record-typed
+    // fields. emit_record_prop_composes + strategy_for_field below fix that.
     rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy", |t| map_type(t, spec))?;
     rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
+    emit_record_prop_composes(out, spec)?;
+    emit_unit_sum_prop_oneofs(out, spec)?;
 
     // State struct
     out.push_str("#[derive(Debug, Clone, Copy)]\n");
@@ -416,30 +595,12 @@ fn emit_state_strategy_inner(
             .find(|(n, _)| n.as_str() == fname.as_str())
             .map(|(_, t)| t.as_str())
             .unwrap_or("U64");
-        let rust_type = map_type(dsl_type, spec)?;
-
-        // Check if this field has a constant upper bound from properties
-        let strategy = if let Some(bound) = field_bounds.get(fname.as_str()) {
-            // Cap to the property-derived bound
-            match mode {
-                StrategyMode::Boundary => {
-                    format!(
-                        "prop_oneof![0{}..=3{rt}, ({b} - 3)..={b}{rt}]",
-                        rust_type,
-                        rt = rust_type,
-                        b = bound
-                    )
-                }
-                StrategyMode::Full => {
-                    format!("0{}..={}{}", rust_type, bound, rust_type)
-                }
-            }
-        } else {
-            match mode {
-                StrategyMode::Boundary => boundary_strategy_for_type(dsl_type).to_string(),
-                StrategyMode::Full => strategy_for_type(dsl_type).to_string(),
-            }
-        };
+        // strategy_for_field dispatches on compound types (Map, record, sum,
+        // alias) and falls through to the primitive strategy tables. Field
+        // bounds only apply to primitive fields (it doesn't make sense to
+        // cap a `[Account; N]` to a numeric bound).
+        let bound = field_bounds.get(fname.as_str()).map(|s| s.as_str());
+        let strategy = strategy_for_field(dsl_type, spec, mode, bound)?;
         if i > 0 {
             out.push_str(",\n");
         }
@@ -947,4 +1108,190 @@ fn emit_sequence_test_for(
 
     let _ = all_fields; // suppress unused
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::{ParsedRecordType, ParsedSumType, ParsedVariant};
+    use crate::chumsky_adapter::parse_str;
+
+    fn spec_with_record(name: &str, fields: &[(&str, &str)]) -> ParsedSpec {
+        ParsedSpec {
+            records: vec![ParsedRecordType {
+                name: name.to_string(),
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (n.to_string(), t.to_string()))
+                    .collect(),
+            }],
+            ..ParsedSpec::default()
+        }
+    }
+
+    fn spec_with_unit_sum(name: &str, variants: &[&str]) -> ParsedSpec {
+        ParsedSpec {
+            sum_types: vec![ParsedSumType {
+                name: name.to_string(),
+                variants: variants
+                    .iter()
+                    .map(|v| ParsedVariant {
+                        name: v.to_string(),
+                        fields: vec![],
+                    })
+                    .collect(),
+            }],
+            ..ParsedSpec::default()
+        }
+    }
+
+    #[test]
+    fn strategy_for_field_primitive_routes_through_strategy_for_type() {
+        let spec = ParsedSpec::default();
+        let s = strategy_for_field("U64", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "0u64..=u64::MAX");
+        let s = strategy_for_field("U128", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "0u128..=u128::MAX");
+        let s = strategy_for_field("I128", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "any::<i128>()");
+    }
+
+    #[test]
+    fn strategy_for_field_map_of_primitive_emits_vec_with_try_into() {
+        // v2.6.2 bug: `Map[4] U64` fell through `strategy_for_type` and emitted
+        // `0[u64; 4]..=u64::MAX[u64; 4]` (pattern-splicing the Rust type into
+        // a range literal). v2.7 G1 routes through vec-with-prop_map.
+        let spec = ParsedSpec {
+            constants: vec![("N".to_string(), "4".to_string())],
+            ..ParsedSpec::default()
+        };
+        let s = strategy_for_field("Map[N] U64", &spec, StrategyMode::Full, None).unwrap();
+        assert!(
+            s.starts_with("prop::collection::vec(0u64..=u64::MAX, 4..=4)"),
+            "unexpected Map-primitive strategy: {s}"
+        );
+        assert!(
+            s.contains(".prop_map(|v| v.try_into().ok().unwrap())"),
+            "missing try_into prop_map: {s}"
+        );
+    }
+
+    #[test]
+    fn strategy_for_field_record_routes_to_arb_name() {
+        // Percolator case: `Map[MAX_ACCOUNTS] Account` should route through
+        // arb_Account() not `0u64..=u64::MAX`.
+        let src = r#"spec T
+const N = 4
+type Account = { active : U8, capital : U128 }
+state { accounts : Map[N] Account }
+handler noop { }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let s = strategy_for_field("Account", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "arb_Account()");
+
+        let s = strategy_for_field("Map[N] Account", &spec, StrategyMode::Full, None).unwrap();
+        assert!(
+            s.starts_with("prop::collection::vec(arb_Account(), 4..=4)"),
+            "Map-record strategy didn't call into arb_Account: {s}"
+        );
+    }
+
+    #[test]
+    fn strategy_for_field_unit_sum_routes_to_arb_name() {
+        // ParsedSpec fixture because the adapter only populates `sum_types`
+        // for sum types referenced as `Map[N] <SumName>`, not for top-level
+        // unit-variant sums. The strategy logic works off the field, so we
+        // test it in isolation.
+        let spec = spec_with_unit_sum("Status", &["Open", "Closed", "Cancelled"]);
+        let s = strategy_for_field("Status", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "arb_Status()");
+    }
+
+    #[test]
+    fn strategy_for_field_type_alias_resolves_transitively() {
+        // `type AccountIdx = Fin[N]` — strategy should route through the
+        // Fin[N] handler.
+        let src = r#"spec T
+const N = 4
+type AccountIdx = Fin[N]
+state { i : AccountIdx }
+handler noop { }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let s = strategy_for_field("AccountIdx", &spec, StrategyMode::Full, None).unwrap();
+        assert_eq!(s, "0usize..=1024usize");
+    }
+
+    #[test]
+    fn emit_record_prop_composes_emits_block_per_record() {
+        let spec = spec_with_record("Account", &[("active", "U8"), ("balance", "U128")]);
+        let mut out = String::new();
+        emit_record_prop_composes(&mut out, &spec).expect("emit");
+        assert!(
+            out.contains("prop_compose!"),
+            "should emit prop_compose! block: {out}"
+        );
+        assert!(
+            out.contains("fn arb_Account()"),
+            "should define arb_Account: {out}"
+        );
+        assert!(
+            out.contains("active in 0u8..=255u8"),
+            "should strategy active field: {out}"
+        );
+        assert!(
+            out.contains("balance in 0u128..=u128::MAX"),
+            "should strategy balance field: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_unit_sum_prop_oneofs_emits_fn_per_sum() {
+        let spec = spec_with_unit_sum("Error", &["NotAdmin", "InsufficientFunds", "VaultOverflow"]);
+        let mut out = String::new();
+        emit_unit_sum_prop_oneofs(&mut out, &spec).expect("emit");
+        assert!(
+            out.contains("fn arb_Error() -> impl Strategy<Value = Error>"),
+            "should define arb_Error: {out}"
+        );
+        assert!(out.contains("prop_oneof!"), "should use prop_oneof: {out}");
+        assert!(
+            out.contains("Just(Error::NotAdmin)"),
+            "should include variant: {out}"
+        );
+        assert!(
+            out.contains("Just(Error::InsufficientFunds)"),
+            "should include variant: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_unit_sum_skips_payload_variants() {
+        // A sum type with at least one payload-carrying variant isn't eligible
+        // for the unit-enum path — it'd need a real variant-aware strategy
+        // (v2.7 G2). Confirm the skip.
+        let spec = ParsedSpec {
+            sum_types: vec![ParsedSumType {
+                name: "State".to_string(),
+                variants: vec![
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("v".to_string(), "U64".to_string())],
+                    },
+                    ParsedVariant {
+                        name: "Closed".to_string(),
+                        fields: vec![],
+                    },
+                ],
+            }],
+            ..ParsedSpec::default()
+        };
+        let mut out = String::new();
+        emit_unit_sum_prop_oneofs(&mut out, &spec).expect("emit");
+        assert!(
+            !out.contains("arb_State"),
+            "payload-variant sum should not get unit-strategy: {out}"
+        );
+    }
 }
