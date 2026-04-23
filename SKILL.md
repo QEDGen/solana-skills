@@ -184,7 +184,7 @@ Before running lint or counterexample tiers, walk the probe taxonomy
 in `references/adversarial-probes.md` against the spec and source —
 looking for attack surfaces the user may not have enumerated. This
 is a checklist the agent executes in-session, not a `qedgen probe`
-CLI command; a real command is v2.7 scope. Users typically don't
+CLI command; a real command is a future release scope. Users typically don't
 think through authorization-bypass scenarios, close-reinit vectors,
 or narrowing-cast corruption on their own; the probe list is what
 you apply for them.

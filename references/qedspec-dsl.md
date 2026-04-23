@@ -7,10 +7,39 @@ handlers, Lean proofs, Kani harnesses, proptest suites, CI workflows, and the
 `#[qed(verified, spec, handler, spec_hash)]` drift attributes that tie
 generated code back to the spec.
 
-This reference covers the current (v2.6) grammar. Where the parser emits a
+This reference covers the current (v2.7) grammar. Where the parser emits a
 specific AST node shape that influences codegen (match, constructors, record
 updates, `mul_div_*`), the node name is called out so you can follow the
 transform into the Lean/Rust backends.
+
+## What changed in v2.7
+
+- **`+=` / `-=` default to checked semantics in Anchor handler bodies too**
+  (v2.6 already did this for the Kani model). `pool += net` lowers to
+  `self.pool = self.pool.checked_add(net).ok_or(ErrorCode::MathOverflow)?`
+  — the pattern deployed programs use. Pre-v2.7 this lowered to
+  `wrapping_add` which didn't match production.
+- **Explicit per-effect arithmetic modifiers.** `+=! ` (saturating) and `+=?`
+  (wrapping) opt out of the checked default when the handler *deliberately*
+  wants those semantics. Same three tiers for `-=!` / `-=?`. See
+  [Effect arithmetic](#effect-arithmetic) below.
+- **`permissionless` handler marker.** New body clause that opts the handler
+  out of the `no_access_control` P1 lint — for deliberately-unauthenticated
+  handlers like `deposit_collateral`, `init_user`, donations. Declaring both
+  `auth X` and `permissionless` on one handler fires a `contradictory_auth`
+  P1. See [Handler clauses](#handler-clauses).
+- **proptest `Arbitrary` strategies for records + unit-variant sums.** Each
+  record type emits a `prop_compose! { fn arb_<Name>(…) -> <Name> { … } }`
+  block; each unit-variant sum emits a `prop_oneof!` strategy. `arb_state`
+  now correctly composes these instead of bailing to `0u64..=u64::MAX` for
+  user-typed fields.
+- **`Map[N] T` strategies use strict-length Vec + `TryInto`.** Works for any
+  N; proptest's `prop::array::uniform*` combinators cap at 32 which wasn't
+  enough for `Map[1024] Account`.
+- **`--spec <dir>` accepts directories** across every CLI subcommand
+  (`check`, `codegen`, `verify`, `spec`, `reconcile`). Multi-file specs
+  already worked at the parser level; v2.7 locks it in as CLI-level
+  contract with clearer errors on missing paths.
 
 ## What changed in v2.6
 
@@ -351,6 +380,7 @@ handler transfer_sol { ... }
 | `aborts_total` | Handler must reject on all guard failures | `aborts_total` |
 | `invariant name` | Reference a global invariant | `invariant conservation` |
 | `include schema` | Include a schema's clauses | `include base_validation` |
+| `permissionless` | Opt out of the `no_access_control` lint (v2.7) | see below |
 | `takes { ... }` | Parameters (sugar, prefer signature) | `takes amount : U64` |
 | `on ident` | Instruction selector (sugar) | `on cancel` |
 | `when ident` | Pre-state (sugar, prefer signature) | `when Open` |
@@ -402,14 +432,64 @@ Values on the RHS may be integer literals, qualified paths, arithmetic
 expressions, constructor applications (`.Variant payload`), record literals,
 record updates, `match … with`, or built-in helpers like `mul_div_floor`.
 
-**Arithmetic semantics (v2.6):** `+=` / `-=` default to **checked**
-semantics in the generated Kani model — on overflow the transition
-returns `false`, mirroring the `checked_add(..).ok_or(MathOverflow)?`
-pattern deployed Anchor programs use. If you want explicit saturating or
-wrapping semantics, express the intent in a user-owned `let` binding
-(`let x = a.saturating_add(b)`) for now; first-class `+=!` / `+=?`
-operators are on the roadmap. Proptest-mode codegen keeps `wrapping_add`
-for bounded exploration.
+#### Effect arithmetic
+
+As of v2.7, `+=` / `-=` default to **checked** semantics *in both the
+generated Anchor handler bodies AND the Kani model*. On overflow the
+transition returns `false` (Kani model) or `.ok_or(ErrorCode::MathOverflow)?`
+(Anchor body) — mirroring what deployed Anchor programs do. Pre-v2.7 the
+Anchor handler body lowered to `wrapping_add` which didn't match production.
+
+Two explicit modifiers opt into alternative semantics when the handler
+deliberately wants them:
+
+| Operator | Semantics | Kani transition | Anchor handler body |
+|---|---|---|---|
+| `+=`  | checked (default)   | `checked_add(..)` — `return false` on overflow | `.checked_add(..).ok_or(MathOverflow)?` |
+| `+=!` | saturating          | `saturating_add(..)` | `.saturating_add(..)` |
+| `+=?` | wrapping            | `wrapping_add(..)`   | `.wrapping_add(..)` |
+
+(`-=` / `-=!` / `-=?` follow the same pattern.) Proptest harness keeps
+`wrapping_*` for default `+=` in the "explore the full state space" mode;
+`+=!` / `+=?` are honored verbatim regardless of harness.
+
+Example:
+
+```
+effect {
+  // default checked — reverts on overflow, matches deployed checked_add
+  pool += amount
+
+  // explicit saturating — clamps to u64::MAX instead of erroring
+  fees_collected +=! delta
+
+  // explicit wrapping — cursor/index field where modular arithmetic is intended
+  nonce +=? 1
+}
+```
+
+### `permissionless` clause
+
+Marks a handler as deliberately unauthenticated. Opts out of the P1
+`no_access_control` lint that otherwise fires for any handler missing
+`auth X`. Common on DeFi primitives where *anyone* is supposed to call
+the handler — user slot inits, deposits, donations.
+
+```
+handler init_user (user : Pubkey) {
+  permissionless
+  effect { balance := 0 }
+}
+
+handler deposit_collateral (i : AccountIdx) (amount : U128)
+    : State.Active -> State.Active {
+  permissionless
+  effect { accounts[i].capital += amount }
+}
+```
+
+Declaring both `auth X` AND `permissionless` on the same handler fires
+a `contradictory_auth` P1 — pick one.
 
 ### `transfers` block
 
