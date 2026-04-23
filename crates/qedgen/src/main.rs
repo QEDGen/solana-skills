@@ -333,8 +333,16 @@ enum Commands {
     /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
     Readiness {
         /// Path to the Anchor IDL JSON (typically target/idl/<program>.json)
+        #[arg(long, required_unless_present = "list_rules")]
+        idl: Option<PathBuf>,
+
+        /// Print the catalog of P-rules applied by `readiness` and exit.
+        /// Replaces the pre-embed `ratchet list-rules` step: users who
+        /// installed qedgen via `install.sh` / `npx skills add` don't
+        /// have the standalone `ratchet` CLI on PATH, but the rule set
+        /// is linked in as a library, so surface it here.
         #[arg(long)]
-        idl: PathBuf,
+        list_rules: bool,
 
         /// Output as JSON (for agent / CI consumption)
         #[arg(long)]
@@ -351,16 +359,16 @@ enum Commands {
     /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
     CheckUpgrade {
         /// Path to the baseline IDL (the one on-chain today).
-        #[arg(long)]
-        old: PathBuf,
+        #[arg(long, required_unless_present = "list_rules")]
+        old: Option<PathBuf>,
 
         /// Path to the candidate IDL (the one the upgrade would ship).
-        #[arg(long)]
-        new: PathBuf,
+        #[arg(long, required_unless_present = "list_rules")]
+        new: Option<PathBuf>,
 
         /// Acknowledge a specific unsafe finding so it reports as
-        /// additive instead (repeatable). See `ratchet list-rules` for
-        /// the full flag catalog.
+        /// additive instead (repeatable). Pass `--list-rules` to see the
+        /// full flag catalog.
         #[arg(long = "unsafe")]
         unsafes: Vec<String>,
 
@@ -373,6 +381,13 @@ enum Commands {
         /// demotes R005 for that account to Additive (repeatable).
         #[arg(long = "realloc-account")]
         realloc_accounts: Vec<String>,
+
+        /// Print the catalog of R-rules applied by `check-upgrade` and
+        /// exit. Same motivation as on `readiness`: the rule set is
+        /// linked in as a library so there's no `ratchet list-rules`
+        /// binary on PATH — this flag fills the gap.
+        #[arg(long)]
+        list_rules: bool,
 
         /// Output as JSON (for agent / CI consumption)
         #[arg(long)]
@@ -1174,7 +1189,18 @@ async fn main() -> Result<()> {
         // (missing IDL, unparseable JSON) exit 3 so CI scripts can
         // distinguish "your program has a breaking change" from "your
         // pipeline is misconfigured."
-        Commands::Readiness { idl, json } => {
+        Commands::Readiness {
+            idl,
+            list_rules,
+            json,
+        } => {
+            if list_rules {
+                ratchet::print_rules_preflight(json)?;
+                return Ok(());
+            }
+            // clap's `required_unless_present = "list_rules"` guarantees
+            // `idl` is Some here — unwrap is safe in shape.
+            let idl = idl.expect("--idl is required unless --list-rules");
             let report = match ratchet::run_readiness(&ratchet::ReadinessOpts { idl }) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1202,8 +1228,15 @@ async fn main() -> Result<()> {
             unsafes,
             migrated_accounts,
             realloc_accounts,
+            list_rules,
             json,
         } => {
+            if list_rules {
+                ratchet::print_rules_diff(json)?;
+                return Ok(());
+            }
+            let old = old.expect("--old is required unless --list-rules");
+            let new = new.expect("--new is required unless --list-rules");
             let report = match ratchet::run_check_upgrade(&ratchet::CheckUpgradeOpts {
                 old,
                 new,
