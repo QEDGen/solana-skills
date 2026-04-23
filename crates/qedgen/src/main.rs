@@ -603,6 +603,26 @@ fn require_git_repo() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Expand the committed CI template by substituting `{{VERIFY_STEP}}`
+/// and `{{RATCHET_STEP}}` with the caller-provided snippets, then
+/// normalise trailing whitespace so the workflow file ends with
+/// exactly one newline regardless of whether either step was set.
+///
+/// Factored out of the `Codegen` match arm so the substitution is
+/// unit-testable without spawning a process — the template bytes are
+/// `include_str!`'d at compile time, so the test wires them in the
+/// same way.
+fn expand_ci_template(template: &str, verify_step: &str, ratchet_step: &str) -> String {
+    let mut out = template
+        .replace("{{VERIFY_STEP}}", verify_step)
+        .replace("{{RATCHET_STEP}}", ratchet_step);
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push('\n');
+    out
+}
+
 fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
     let icon = match warning.severity {
         check::Severity::Error => "E",
@@ -1136,8 +1156,20 @@ async fn main() -> Result<()> {
         // ==================================================================
         // readiness — preflight lint for first-deploy mainnet-readiness
         // ==================================================================
+        //
+        // Exit-code discipline matches ratchet's CLI: rule-engine findings
+        // map to 1/2 via `ratchet::exit_code`, but caller-side failures
+        // (missing IDL, unparseable JSON) exit 3 so CI scripts can
+        // distinguish "your program has a breaking change" from "your
+        // pipeline is misconfigured."
         Commands::Readiness { idl, json } => {
-            let report = ratchet::run_readiness(&ratchet::ReadinessOpts { idl })?;
+            let report = match ratchet::run_readiness(&ratchet::ReadinessOpts { idl }) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {:#}", e);
+                    std::process::exit(3);
+                }
+            };
             if json {
                 ratchet::print_json(&report)?;
             } else {
@@ -1160,13 +1192,19 @@ async fn main() -> Result<()> {
             realloc_accounts,
             json,
         } => {
-            let report = ratchet::run_check_upgrade(&ratchet::CheckUpgradeOpts {
+            let report = match ratchet::run_check_upgrade(&ratchet::CheckUpgradeOpts {
                 old,
                 new,
                 unsafes,
                 migrated_accounts,
                 realloc_accounts,
-            })?;
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {:#}", e);
+                    std::process::exit(3);
+                }
+            };
             if json {
                 ratchet::print_json(&report)?;
             } else {
@@ -1247,9 +1285,7 @@ async fn main() -> Result<()> {
                 } else {
                     String::new()
                 };
-                let workflow = CI_TEMPLATE
-                    .replace("{{VERIFY_STEP}}", &verify_step)
-                    .replace("{{RATCHET_STEP}}", &ratchet_step);
+                let workflow = expand_ci_template(CI_TEMPLATE, &verify_step, &ratchet_step);
                 if let Some(parent) = ci_output.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -1420,7 +1456,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_lint_warning;
+    use super::{expand_ci_template, format_lint_warning};
     use crate::check::{CompletenessWarning, Severity};
 
     #[test]
@@ -1444,5 +1480,57 @@ mod tests {
         assert!(rendered.contains("[P2] [missing_effect]"));
         assert!(rendered.contains("Fix: Add an effect block to describe state changes"));
         assert!(rendered.contains("Example:"));
+    }
+
+    // The committed verify.yml template carries two extension placeholders
+    // — {{VERIFY_STEP}} for the optional sBPF source-hash check and
+    // {{RATCHET_STEP}} for the optional deploy-safety lint. A refactor
+    // that silently drops or mangles either one would be invisible in the
+    // rest of the test suite; these three snapshots catch that class of
+    // regression cheaply.
+    const CI_TEMPLATE: &str = include_str!("../../../templates/verify.yml");
+
+    #[test]
+    fn ci_template_unset_placeholders_produce_clean_workflow() {
+        let out = expand_ci_template(CI_TEMPLATE, "", "");
+        // Both placeholders fully consumed.
+        assert!(!out.contains("{{VERIFY_STEP}}"));
+        assert!(!out.contains("{{RATCHET_STEP}}"));
+        // Neither optional step present when unset.
+        assert!(!out.contains("Verify sBPF binary"));
+        assert!(!out.contains("Ratchet readiness lint"));
+        // Core workflow still intact.
+        assert!(out.contains("Check spec coverage"));
+        assert!(out.contains("Build proofs"));
+        // Exactly one trailing newline — no blank line at EOF.
+        assert!(out.ends_with('\n'));
+        assert!(!out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn ci_template_ratchet_step_injects_readiness_job() {
+        let ratchet = "\n      - name: Ratchet readiness lint\n        run: qedgen readiness --idl target/idl/escrow.json\n";
+        let out = expand_ci_template(CI_TEMPLATE, "", ratchet);
+        assert!(out.contains("Ratchet readiness lint"));
+        assert!(out.contains("qedgen readiness --idl target/idl/escrow.json"));
+        assert!(!out.contains("{{RATCHET_STEP}}"));
+        assert!(out.ends_with('\n'));
+        assert!(!out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn ci_template_both_steps_coexist_without_collision() {
+        let verify = "\n      - name: Verify sBPF binary\n        run: qedgen check --spec program.qedspec --asm src/program.s\n";
+        let ratchet = "\n      - name: Ratchet readiness lint\n        run: qedgen readiness --idl target/idl/x.json\n";
+        let out = expand_ci_template(CI_TEMPLATE, verify, ratchet);
+        assert!(out.contains("Verify sBPF binary"));
+        assert!(out.contains("Ratchet readiness lint"));
+        // sBPF step precedes proof build; ratchet step follows spec coverage.
+        let verify_pos = out.find("Verify sBPF binary").unwrap();
+        let proofs_pos = out.find("Build proofs").unwrap();
+        let coverage_pos = out.find("Check spec coverage").unwrap();
+        let ratchet_pos = out.find("Ratchet readiness lint").unwrap();
+        assert!(verify_pos < proofs_pos);
+        assert!(coverage_pos < ratchet_pos);
     }
 }

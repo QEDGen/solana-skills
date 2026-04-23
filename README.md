@@ -58,7 +58,7 @@ npx skills add qedgen/solana-skills
 | **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |
 | **PDA integrity** | Program-derived address derivation and 4-chunk comparison (sBPF) |
-| **Deploy safety** | On-chain shape — version fields, reserved padding, pinned discriminators, signer coverage, PDA seed continuity — via `qedgen readiness` and `qedgen check-upgrade` (ratchet). |
+| **Deploy safety** | On-chain shape for Anchor programs — version fields, reserved padding, pinned discriminators, signer coverage, PDA seed continuity — via `qedgen readiness` and `qedgen check-upgrade` (ratchet). |
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
 

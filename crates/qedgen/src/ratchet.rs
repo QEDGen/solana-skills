@@ -94,6 +94,11 @@ pub fn exit_code(report: &Report) -> i32 {
     }
 }
 
+// Human report → stderr, JSON report → stdout. Mirrors upstream
+// ratchet's CLI so agents / shell consumers can redirect `>report.json`
+// for machine parsing without swallowing the human-readable banner, and
+// CI logs show the verdict inline while an optional `--json` capture
+// stays separable.
 pub fn print_human(report: &Report) {
     if report.findings.is_empty() {
         eprintln!("READY — no findings.");
