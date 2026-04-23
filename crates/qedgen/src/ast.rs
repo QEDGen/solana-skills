@@ -469,12 +469,33 @@ pub struct EffectStmt {
     pub rhs: Node<Expr>,
 }
 
+/// Per-effect arithmetic semantics. v2.7 G3 introduced the distinction —
+/// prior versions always lowered `+=` to wrapping in the transition model,
+/// but that produced false-positive overflow hits in Kani for specs whose
+/// deployed implementation uses `checked_add`.
+///
+/// - `Add` / `Sub` = **checked** (default; matches deployed Anchor
+///   `checked_add(..).ok_or(err)?` — overflow short-circuits the transition).
+/// - `AddSat` / `SubSat` = **saturating** (`pool +=! net`) — clamps to
+///   `{u8,u64,…}::MAX` or `::MIN` on over/underflow.
+/// - `AddWrap` / `SubWrap` = **wrapping** (`pool +=? net`) — the pre-v2.7
+///   default; still valid opt-in for specs that deliberately use modular
+///   arithmetic.
+/// - `Set` = assignment (`:=` or `=`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectOp {
-    /// `+=`
+    /// `+=` — checked add (default, matches `checked_add` in deployed programs)
     Add,
-    /// `-=`
+    /// `+=!` — saturating add
+    AddSat,
+    /// `+=?` — wrapping add
+    AddWrap,
+    /// `-=` — checked sub (default)
     Sub,
+    /// `-=!` — saturating sub
+    SubSat,
+    /// `-=?` — wrapping sub
+    SubWrap,
     /// `:=` (or `=`)
     Set,
 }

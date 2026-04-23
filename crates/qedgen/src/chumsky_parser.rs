@@ -937,8 +937,14 @@ fn account_descriptor<'a>() -> impl Parser<'a, &'a str, AccountDescriptor, Err<'
 }
 
 fn effect_stmt<'a>() -> impl Parser<'a, &'a str, EffectStmt, Err<'a>> + Clone {
+    // Order matters: `+=!` and `+=?` must be tried before `+=`, else the
+    // `just("+=")` would greedy-match and leave the `!` / `?` hanging.
     let op = choice((
+        just("+=!").to(EffectOp::AddSat),
+        just("+=?").to(EffectOp::AddWrap),
         just("+=").to(EffectOp::Add),
+        just("-=!").to(EffectOp::SubSat),
+        just("-=?").to(EffectOp::SubWrap),
         just("-=").to(EffectOp::Sub),
         just(":=").to(EffectOp::Set),
         just('=').to(EffectOp::Set),

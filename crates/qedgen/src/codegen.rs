@@ -613,15 +613,31 @@ fn mechanize_effect(
 
     let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec);
     let acct = &state_acct.name;
+    // v2.7 G3: `+=` default lowers to `checked_add(...).ok_or(err)?` — the
+    // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
+    // `wrapping_add` which produced Kani false-positives and didn't match
+    // production behavior. Explicit `+=!` / `+=?` opt into saturating /
+    // wrapping. `MathOverflow` is the default error code; specs with an
+    // `Error` sum can surface it via the existing error_codes pipeline.
     let line = match op_kind.as_str() {
         "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
         "add" => format!(
-            "        self.{}.{} = self.{}.{}.wrapping_add({});\n",
-            acct, field, acct, field, rhs
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+        ),
+        "add_sat" => format!(
+            "        self.{acct}.{field} = self.{acct}.{field}.saturating_add({rhs});\n"
+        ),
+        "add_wrap" => format!(
+            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
         ),
         "sub" => format!(
-            "        self.{}.{} = self.{}.{}.wrapping_sub({});\n",
-            acct, field, acct, field, rhs
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+        ),
+        "sub_sat" => format!(
+            "        self.{acct}.{field} = self.{acct}.{field}.saturating_sub({rhs});\n"
+        ),
+        "sub_wrap" => format!(
+            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_sub({rhs});\n"
         ),
         _ => return None,
     };

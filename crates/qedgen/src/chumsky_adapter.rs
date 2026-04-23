@@ -909,9 +909,20 @@ fn render_effect(
         }
         s
     };
+    // Per-effect semantic tag (v2.7 G3):
+    //   - "add" / "sub"               = checked (default)
+    //   - "add_sat" / "sub_sat"       = saturating (`+=!` / `-=!`)
+    //   - "add_wrap" / "sub_wrap"     = wrapping   (`+=?` / `-=?`)
+    // Existing code paths that test `kind == "add"` continue to work for the
+    // default case (the one they were written against). Codegen branches on
+    // the full tag when the distinction matters.
     let op = match stmt.op {
         a::EffectOp::Add => "add",
+        a::EffectOp::AddSat => "add_sat",
+        a::EffectOp::AddWrap => "add_wrap",
         a::EffectOp::Sub => "sub",
+        a::EffectOp::SubSat => "sub_sat",
+        a::EffectOp::SubWrap => "sub_wrap",
         a::EffectOp::Set => "set",
     };
     // Value string — match pest's effect_value_to_string which strips

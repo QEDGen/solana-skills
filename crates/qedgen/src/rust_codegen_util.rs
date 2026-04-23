@@ -596,16 +596,20 @@ pub fn emit_transition_fn(
         out.push_str(&format!("    let {} = {};\n", binding_name, rust_expr));
     }
 
-    // Apply effects. v2.6 default is `checked` semantics for `+=` / `-=`:
-    // on overflow/underflow the transition returns `false`, mirroring the
-    // `checked_add(..).ok_or(MathOverflow)?` pattern that real Anchor programs
-    // use. Previously this path emitted bare `s.x += val`, which made symbolic
-    // BMC (Kani) flag overflow on every unbounded pre-state — a spec-model
-    // artifact, not a program bug. See B10 in the v2.6 release notes.
+    // Apply effects.
     //
-    // `wrapping = true` keeps the old wrapping semantics for proptest
-    // exploration, where we want to visit the full state space without the
-    // model short-circuiting on arithmetic rejection.
+    // v2.7 G3 introduces per-effect arithmetic semantics:
+    //   `+=`  ("add")       → checked_add, short-circuit via `return false`
+    //                         (matches deployed `checked_add(..).ok_or(err)?`)
+    //   `+=!` ("add_sat")   → saturating_add
+    //   `+=?` ("add_wrap")  → wrapping_add
+    //
+    // (same three tiers for `-=` / `-=!` / `-=?`).
+    //
+    // The `wrapping` flag is kept for backward compatibility with proptest's
+    // "explore the full state space" mode — when set, default `+=` / `-=`
+    // still use wrapping instead of checked. Explicit `+=!` / `+=?` always
+    // honor their declared semantics regardless of the caller's mode.
     for (field, op_kind, value) in &op.effects {
         let rust_value = resolve_value(value, op, spec);
         match op_kind.as_str() {
@@ -625,6 +629,18 @@ pub fn emit_transition_fn(
                     ));
                 }
             }
+            "add_sat" => {
+                out.push_str(&format!(
+                    "    s.{} = s.{}.saturating_add({});\n",
+                    field, field, rust_value
+                ));
+            }
+            "add_wrap" => {
+                out.push_str(&format!(
+                    "    s.{} = s.{}.wrapping_add({});\n",
+                    field, field, rust_value
+                ));
+            }
             "sub" => {
                 if wrapping {
                     out.push_str(&format!(
@@ -637,6 +653,18 @@ pub fn emit_transition_fn(
                         field, rust_value, field
                     ));
                 }
+            }
+            "sub_sat" => {
+                out.push_str(&format!(
+                    "    s.{} = s.{}.saturating_sub({});\n",
+                    field, field, rust_value
+                ));
+            }
+            "sub_wrap" => {
+                out.push_str(&format!(
+                    "    s.{} = s.{}.wrapping_sub({});\n",
+                    field, field, rust_value
+                ));
             }
             _ => {
                 out.push_str(&format!(
@@ -664,6 +692,107 @@ mod tests {
         assert_eq!(effect_target_base("s.foo"), "s");
         assert_eq!(effect_target_base("map[0]"), "map");
         assert_eq!(effect_target_base("  padded  "), "padded");
+    }
+
+    #[test]
+    fn emit_transition_fn_default_add_emits_checked() {
+        // v2.7 G3: `pool += amount` defaults to checked semantics — overflow
+        // short-circuits the transition via `return false`. Matches deployed
+        // `checked_add(..).ok_or(err)?` in Anchor programs.
+        let src = r#"spec T
+state { pool : U64 }
+handler buy (amount : U64) { effect { pool += amount } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        emit_transition_fn(&mut out, op, &spec, false, |t| {
+            crate::codegen::map_type(t, &spec)
+        })
+        .expect("emit");
+        assert!(
+            out.contains("checked_add(amount)"),
+            "default `+=` should emit checked_add: {out}"
+        );
+        assert!(
+            out.contains("None => return false"),
+            "checked should short-circuit on None: {out}"
+        );
+        assert!(
+            !out.contains("wrapping_add") && !out.contains("saturating_add"),
+            "default `+=` should NOT emit wrapping/saturating: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_transition_fn_saturating_add_emits_saturating() {
+        let src = r#"spec T
+state { pool : U64 }
+handler buy (amount : U64) { effect { pool +=! amount } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        emit_transition_fn(&mut out, op, &spec, false, |t| {
+            crate::codegen::map_type(t, &spec)
+        })
+        .expect("emit");
+        assert!(
+            out.contains("saturating_add(amount)"),
+            "`+=!` should emit saturating_add: {out}"
+        );
+        assert!(
+            !out.contains("checked_add") && !out.contains("wrapping_add"),
+            "`+=!` should NOT emit checked/wrapping: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_transition_fn_wrapping_add_emits_wrapping() {
+        let src = r#"spec T
+state { pool : U64 }
+handler buy (amount : U64) { effect { pool +=? amount } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        emit_transition_fn(&mut out, op, &spec, false, |t| {
+            crate::codegen::map_type(t, &spec)
+        })
+        .expect("emit");
+        assert!(
+            out.contains("wrapping_add(amount)"),
+            "`+=?` should emit wrapping_add: {out}"
+        );
+        assert!(
+            !out.contains("checked_add") && !out.contains("saturating_add"),
+            "`+=?` should NOT emit checked/saturating: {out}"
+        );
+    }
+
+    #[test]
+    fn emit_transition_fn_sub_three_tiers() {
+        // Mirror: `-=` / `-=!` / `-=?` emit checked / saturating / wrapping.
+        for (op_str, expected) in &[
+            ("-=", "checked_sub(amount)"),
+            ("-=!", "saturating_sub(amount)"),
+            ("-=?", "wrapping_sub(amount)"),
+        ] {
+            let src = format!(
+                "spec T\nstate {{ pool : U64 }}\nhandler buy (amount : U64) {{ effect {{ pool {op_str} amount }} }}\n"
+            );
+            let spec = parse_str(&src).expect("parse");
+            let op = &spec.handlers[0];
+            let mut out = String::new();
+            emit_transition_fn(&mut out, op, &spec, false, |t| {
+                crate::codegen::map_type(t, &spec)
+            })
+            .expect("emit");
+            assert!(
+                out.contains(expected),
+                "`{op_str}` should emit {expected}:\n{out}"
+            );
+        }
     }
 
     #[test]
