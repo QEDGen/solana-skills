@@ -2206,6 +2206,30 @@ pub fn parse(src: &str) -> Result<Spec, Vec<Rich<'_, char>>> {
     spec_parser().parse(src).into_result()
 }
 
+/// Convert a byte offset into a 1-indexed `line:col` pair for error messages.
+/// v2.6.1 eval (qedgen-bug-report §1.2): the reporter had to write an awk
+/// one-liner to map byte offsets back to source lines because we rendered
+/// errors as `found ':' at 3204..3205`. Everyone else does `line:col`.
+fn byte_offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(src.len());
+    let before = &src[..clamped];
+    let line = 1 + before.bytes().filter(|b| *b == b'\n').count();
+    let col = match before.rfind('\n') {
+        Some(nl) => src[nl + 1..clamped].chars().count() + 1,
+        None => before.chars().count() + 1,
+    };
+    (line, col)
+}
+
+/// Render a chumsky parse error with a `line:col` prefix instead of raw
+/// byte offsets. Keeps the full `Rich` detail (expected set, reason) so
+/// users can still see which tokens were expected.
+pub fn format_parse_error(err: &Rich<'_, char>, src: &str) -> String {
+    let span = err.span();
+    let (line, col) = byte_offset_to_line_col(src, span.start);
+    format!("line {line}, col {col}: {err:?}")
+}
+
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
@@ -2222,6 +2246,47 @@ mod tests {
                     eprintln!("parse error: {:?}", e);
                 }
                 panic!("parse failed");
+            }
+        }
+    }
+
+    #[test]
+    fn byte_offset_to_line_col_basic() {
+        let src = "line1\nline2\nline3";
+        assert_eq!(byte_offset_to_line_col(src, 0), (1, 1));
+        assert_eq!(byte_offset_to_line_col(src, 5), (1, 6)); // end of "line1"
+        assert_eq!(byte_offset_to_line_col(src, 6), (2, 1)); // start of "line2"
+        assert_eq!(byte_offset_to_line_col(src, 12), (3, 1)); // start of "line3"
+    }
+
+    #[test]
+    fn byte_offset_clamps_past_end() {
+        // If chumsky reports a span past EOF (unterminated construct), don't
+        // panic; clamp to the last valid offset.
+        let src = "abc";
+        let (line, col) = byte_offset_to_line_col(src, 99);
+        assert_eq!((line, col), (1, 4));
+    }
+
+    #[test]
+    fn format_parse_error_prefixes_line_col() {
+        // Trigger a parse error and verify the formatter attaches `line X, col Y:`.
+        // Use a one-line invalid spec; the error span points into it.
+        let src = "spec";
+        match parse(src) {
+            Ok(_) => panic!("expected parse to fail"),
+            Err(errs) => {
+                let msg = format_parse_error(&errs[0], src);
+                assert!(
+                    msg.contains("line 1, col"),
+                    "error should start with `line X, col Y:` — got: {msg}"
+                );
+                // The raw byte-offset `at N..M` form should NOT appear since
+                // it's the v2.6.1 UX that the eval complained about.
+                assert!(
+                    !msg.contains(" at ") || msg.contains("line "),
+                    "should not render raw byte offsets without a line:col prefix: {msg}"
+                );
             }
         }
     }

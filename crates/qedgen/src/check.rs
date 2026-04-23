@@ -775,7 +775,7 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
         let msg = errs
             .iter()
-            .map(|e| format!("  {:?}", e))
+            .map(|e| format!("  {}", crate::chumsky_parser::format_parse_error(e, &src)))
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
@@ -808,7 +808,7 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
         let typed = crate::chumsky_parser::parse(&src).map_err(|errs| {
             let msg = errs
                 .iter()
-                .map(|e| format!("  {:?}", e))
+                .map(|e| format!("  {}", crate::chumsky_parser::format_parse_error(e, &src)))
                 .collect::<Vec<_>>()
                 .join("\n");
             anyhow::anyhow!("parse error in {}:\n{}", file.display(), msg)

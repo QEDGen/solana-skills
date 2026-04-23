@@ -1241,7 +1241,7 @@ pub fn parse_str(src: &str) -> anyhow::Result<ParsedSpec> {
     let typed = crate::chumsky_parser::parse(src).map_err(|errs| {
         let msg = errs
             .iter()
-            .map(|e| format!("  {:?}", e))
+            .map(|e| format!("  {}", crate::chumsky_parser::format_parse_error(e, src)))
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::anyhow!("parse error:\n{}", msg)
