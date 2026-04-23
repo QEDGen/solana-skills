@@ -384,7 +384,11 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str("#[kani::proof]\n");
                 out.push_str("#[kani::unwind(2)]\n");
                 out.push_str(&format!("#[kani::solver({})]\n", solver));
-                out.push_str(&format!("fn verify_{}_effect_{}() {{\n", op.name, field));
+                out.push_str(&format!(
+                    "fn verify_{}_effect_{}() {{\n",
+                    op.name,
+                    crate::codegen::sanitize_ident(field)
+                ));
 
                 // Symbolic state
                 if is_init {

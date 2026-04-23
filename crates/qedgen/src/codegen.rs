@@ -116,6 +116,33 @@ fn resolve_map_bound(bound: &str, constants: &[(String, String)]) -> Result<Stri
     }
 }
 
+/// Sanitize a field-path string (e.g. `accounts[i].active`) into a legal
+/// Rust identifier stem suitable for interpolation into `fn verify_*` names
+/// and similar. Non-identifier characters become `_`; consecutive and
+/// trailing `_` are collapsed.
+///
+/// Motivated by the v2.6.1 eval (percolator-prog, qedgen-bug-report §2):
+/// subscripted effect targets like `accounts[i].active` landed verbatim
+/// inside `format!("fn verify_{}_effect_{}", op.name, field)`, producing
+/// Rust-illegal identifiers such as `verify_init_user_effect_accounts[i].active`.
+pub fn sanitize_ident(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut prev_underscore = false;
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+            prev_underscore = c == '_';
+        } else if !prev_underscore {
+            out.push('_');
+            prev_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
 /// Convert a snake_case operation name to PascalCase for struct names.
 pub fn to_pascal_case(s: &str) -> String {
     s.split('_')
@@ -997,6 +1024,27 @@ mod tests {
             err.contains("not a numeric literal") || err.contains("not declared"),
             "error should explain why the bound didn't resolve: {err}"
         );
+    }
+
+    #[test]
+    fn sanitize_ident_replaces_subscripts_and_dots() {
+        // The eval's actual output:
+        //   fn verify_init_user_effect_accounts[i].active()
+        // must become a legal Rust identifier.
+        assert_eq!(sanitize_ident("accounts[i].active"), "accounts_i_active");
+        assert_eq!(sanitize_ident("s.foo.bar"), "s_foo_bar");
+        assert_eq!(sanitize_ident("plain_field"), "plain_field");
+    }
+
+    #[test]
+    fn sanitize_ident_collapses_consecutive_and_trailing_underscores() {
+        // Repeated non-ident chars should not pile up as `___`.
+        assert_eq!(sanitize_ident("foo[ ].bar"), "foo_bar");
+        // Leading non-ident chars produce a leading `_` that stays (doesn't
+        // collapse to empty) — this keeps the resulting string non-empty.
+        assert_eq!(sanitize_ident("[i]"), "_i");
+        // Trailing non-ident chars drop cleanly.
+        assert_eq!(sanitize_ident("foo."), "foo");
     }
 
     #[test]
