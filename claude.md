@@ -134,7 +134,7 @@ qedgen asm2lean \
 
 **`crates/qedgen/`** - Main crate: CLI, parsers, code generators
 - `main.rs` - CLI entry points (init, check, codegen, generate, fill-sorry, aristotle, spec, asm2lean, setup, consolidate)
-- `parser.rs` - pest PEG parser for `.qedspec` files
+- `chumsky_parser.rs` - chumsky parser for `.qedspec` files (produces typed AST via `chumsky_adapter.rs`)
 - `check.rs` - Spec validation: lint, coverage matrix, drift detection
 - `lean_gen.rs` - Lean 4 code generation from parsed spec (Rust + sBPF renderers)
 - `codegen.rs` - Quasar Rust skeleton generation from spec
