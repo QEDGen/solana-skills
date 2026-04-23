@@ -768,6 +768,18 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
         return parse_spec_dir(path);
     }
 
+    // v2.7 G5: surface a precise error when the --spec target doesn't exist
+    // at all (file or directory). Pre-v2.7 the next branch would read the
+    // extension of a non-existent path and emit "Unsupported spec format:
+    // ." which is confusing.
+    if !path.exists() {
+        anyhow::bail!(
+            "spec path does not exist: {}\n\
+             Pass either a `.qedspec` file or a directory containing `.qedspec` files.",
+            path.display()
+        );
+    }
+
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if ext != "qedspec" {
         anyhow::bail!(
@@ -3764,6 +3776,24 @@ handler dec (x : U64) : State.Active -> State.Active {
         let names: Vec<_> = parsed.handlers.iter().map(|h| h.name.as_str()).collect();
         assert!(names.contains(&"inc"), "got handlers: {:?}", names);
         assert!(names.contains(&"dec"), "got handlers: {:?}", names);
+    }
+
+    #[test]
+    fn parse_spec_file_surfaces_clear_error_for_missing_path() {
+        // v2.7 G5: a non-existent --spec path used to fall through to the
+        // extension check and emit "Unsupported spec format: ." — confusing
+        // because the file doesn't exist in the first place. Should say so
+        // explicitly.
+        let missing = std::path::PathBuf::from("/tmp/does_not_exist_g5.qedspec");
+        let err = parse_spec_file(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "expected 'does not exist' in error, got: {err}"
+        );
+        assert!(
+            !err.contains("Unsupported spec format"),
+            "should not surface the extension-check error for missing path: {err}"
+        );
     }
 
     #[test]
