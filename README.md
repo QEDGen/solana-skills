@@ -58,8 +58,11 @@ npx skills add qedgen/solana-skills
 | **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |
 | **PDA integrity** | Program-derived address derivation and 4-chunk comparison (sBPF) |
+| **Deploy safety** | On-chain shape for Anchor programs — version fields, reserved padding, pinned discriminators, signer coverage, PDA seed continuity — via `qedgen readiness` and `qedgen check-upgrade` (ratchet). |
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
+
+**Proofs prove correctness. Ratchet proves deployability.** The P-rule preflight (`qedgen readiness`) catches future-upgrade landmines in a single IDL before the first deploy; the R-rule diff (`qedgen check-upgrade`) catches every breaking change between an old and new IDL once the program is live.
 
 ## Quick start
 
@@ -287,7 +290,29 @@ qedgen consolidate \
 ```bash
 qedgen codegen --spec my_program.qedspec --ci                    # Lean-only verification workflow
 qedgen codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF source hash check
+qedgen codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program.json  # + ratchet readiness lint on every build
 ```
+
+### Deploy-safety lint (ratchet)
+
+`qedgen readiness` runs before the first deploy: one Anchor IDL in, a verdict out (`READY`, `UNSAFE`, or `BREAKING`) plus every specific future-upgrade landmine it finds. `qedgen check-upgrade` runs on every subsequent release: diff the deployed IDL against the candidate and fail the build on any change that would silently corrupt on-chain state, break existing clients, or orphan PDAs.
+
+```bash
+# Pre-deploy — lint one IDL for mainnet-readiness
+qedgen readiness --idl target/idl/my_program.json
+qedgen readiness --idl target/idl/my_program.json --json          # machine-readable
+
+# Post-deploy — diff old vs new and block breaking upgrades
+qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json
+
+# Acknowledge an intentional unsafe change
+qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
+  --unsafe allow-field-append --migrated-account EscrowState
+```
+
+Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `ratchet list-rules` to see the full P-rule and R-rule set (22 rules at the time of writing).
+
+**Why both.** qedgen's `#[qed(verified)]` hash-stamps the *function body*, so a rename of an `#[account]` struct compiles with a stale-but-valid proof even though the on-chain discriminator is now different and every existing account of that type is orphaned. `qedgen check-upgrade`'s `R006 account-discriminator-change` catches that class of failure; the proof layer alone doesn't look at it.
 
 ## Examples
 
