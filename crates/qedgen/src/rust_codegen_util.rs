@@ -436,6 +436,65 @@ pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
     }
 }
 
+/// Emit Rust struct declarations for every user-defined record type in the
+/// spec. Called before `emit_state_struct` so the record types are in scope
+/// when the State struct references them (e.g. `accounts: [Account; N]`).
+///
+/// `derives` is the `#[derive(...)]` list to apply to each record. Kani
+/// harnesses want `Clone, Copy, kani::Arbitrary`; proptest harnesses want
+/// `Debug, Clone, Copy`; unit_test harnesses want `Debug, Clone, PartialEq`.
+///
+/// Empty-record edge case (records with no fields) are skipped — they're
+/// degenerate and not something our specs produce.
+pub fn emit_record_structs(
+    out: &mut String,
+    spec: &crate::check::ParsedSpec,
+    derives: &str,
+    map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    for rec in &spec.records {
+        if rec.fields.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("#[derive({})]\n", derives));
+        out.push_str(&format!("struct {} {{\n", rec.name));
+        for (fname, ftype) in &rec.fields {
+            out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)?));
+        }
+        out.push_str("}\n\n");
+    }
+    Ok(())
+}
+
+/// Emit Rust enum declarations for every sum-type in the spec whose variants
+/// are ALL unit (no payload). Classic example: `type Error | NotAdmin | …`
+/// becomes `enum Error { NotAdmin, … }`.
+///
+/// Sum-types with at least one payload-carrying variant (like `type State |
+/// Active of { … }`) are intentionally skipped here — the existing codegen
+/// path flattens those into a single `struct State { … }` using the first
+/// variant's fields, and emitting a conflicting `enum State` would collide.
+/// Full enum-State modeling is v2.7 scope.
+pub fn emit_unit_enum_sums(
+    out: &mut String,
+    spec: &crate::check::ParsedSpec,
+    derives: &str,
+) -> anyhow::Result<()> {
+    for sum in &spec.sum_types {
+        let all_unit = sum.variants.iter().all(|v| v.fields.is_empty());
+        if !all_unit || sum.variants.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("#[derive({})]\n", derives));
+        out.push_str(&format!("enum {} {{\n", sum.name));
+        for variant in &sum.variants {
+            out.push_str(&format!("    {},\n", variant.name));
+        }
+        out.push_str("}\n\n");
+    }
+    Ok(())
+}
+
 /// Emit a State struct with configurable `#[derive(...)]` attributes.
 /// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types; it
 /// returns an error on unrecognized types so codegen fails loudly rather

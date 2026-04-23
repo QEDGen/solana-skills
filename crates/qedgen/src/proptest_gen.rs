@@ -232,15 +232,18 @@ fn emit_account_section(
     lifecycle_states: &[String],
     spec: &ParsedSpec,
 ) -> Result<()> {
+    // User-defined records/enums referenced by State must be declared first.
+    // proptest harnesses don't derive Arbitrary here — record-valued Map fields
+    // still need hand-written strategies; that's v2.7 scope. Minimum viable:
+    // the struct types exist so `cargo check` passes.
+    rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy", |t| map_type(t, spec))?;
+    rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
+
     // State struct
     out.push_str("#[derive(Debug, Clone, Copy)]\n");
     out.push_str("struct State {\n");
     for (fname, ftype) in mutable_fields {
-        out.push_str(&format!(
-            "    {}: {},\n",
-            fname,
-            map_type(ftype, &spec.constants)?
-        ));
+        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype, spec)?));
     }
     out.push_str("}\n\n");
 
@@ -261,13 +264,7 @@ fn emit_account_section(
             }
         }
     }
-    emit_state_strategy(
-        out,
-        mutable_fields,
-        all_fields,
-        &field_bounds,
-        &spec.constants,
-    )?;
+    emit_state_strategy(out, mutable_fields, all_fields, &field_bounds, spec)?;
 
     // Property predicates
     let props_with_expr: Vec<&&ParsedProperty> = properties
@@ -348,7 +345,7 @@ fn emit_account_section(
             mutable_fields,
             all_fields,
             lifecycle_states,
-            &spec.constants,
+            spec,
         )?;
     }
     Ok(())
@@ -360,7 +357,7 @@ fn emit_state_strategy(
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
     field_bounds: &std::collections::HashMap<String, String>,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     // Full-range strategy (capped by property bounds when available)
     emit_state_strategy_inner(
@@ -370,7 +367,7 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Full,
         field_bounds,
-        constants,
+        spec,
     )?;
     // Boundary-biased strategy for guard rejection tests
     emit_state_strategy_inner(
@@ -380,7 +377,7 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Boundary,
         field_bounds,
-        constants,
+        spec,
     )?;
     Ok(())
 }
@@ -398,7 +395,7 @@ fn emit_state_strategy_inner(
     all_fields: &[(String, String)],
     mode: StrategyMode,
     field_bounds: &std::collections::HashMap<String, String>,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     match mode {
         StrategyMode::Boundary => {
@@ -419,7 +416,7 @@ fn emit_state_strategy_inner(
             .find(|(n, _)| n.as_str() == fname.as_str())
             .map(|(_, t)| t.as_str())
             .unwrap_or("U64");
-        let rust_type = map_type(dsl_type, constants)?;
+        let rust_type = map_type(dsl_type, spec)?;
 
         // Check if this field has a constant upper bound from properties
         let strategy = if let Some(bound) = field_bounds.get(fname.as_str()) {
@@ -471,9 +468,7 @@ fn emit_transition_functions_for(
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, op, spec, true, |t| {
-            map_type(t, &spec.constants)
-        })?;
+        rust_codegen_util::emit_transition_fn(out, op, spec, true, |t| map_type(t, spec))?;
     }
     Ok(())
 }
@@ -519,7 +514,7 @@ fn emit_preservation_tests_for(
             }
             if let Some(op) = op {
                 for (pname, ptype) in &op.takes_params {
-                    let rust_type = map_type(ptype, &spec.constants)?;
+                    let rust_type = map_type(ptype, spec)?;
                     param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
                 }
             }
@@ -661,7 +656,7 @@ fn emit_overflow_tests_for(
                 Some(m) => m,
                 None => continue,
             };
-            let rust_type = map_type(dsl_type, &spec.constants)?;
+            let rust_type = map_type(dsl_type, spec)?;
 
             out.push_str("proptest! {\n");
             out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
@@ -669,7 +664,7 @@ fn emit_overflow_tests_for(
 
             let mut param_parts = vec!["s in arb_state()".to_string()];
             for (pname, ptype) in &op.takes_params {
-                let rt = map_type(ptype, &spec.constants)?;
+                let rt = map_type(ptype, spec)?;
                 param_parts.push(format!("{} in 0{}..={}::MAX", pname, rt, rt));
             }
 
@@ -721,7 +716,7 @@ fn emit_sequence_test_for(
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
     lifecycle_states: &[String],
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     // Emit an Operation enum
     out.push_str("#[derive(Debug, Clone)]\n");
@@ -730,7 +725,7 @@ fn emit_sequence_test_for(
         let params: String = op
             .takes_params
             .iter()
-            .map(|(_, t)| map_type(t, constants))
+            .map(|(_, t)| map_type(t, spec))
             .collect::<Result<Vec<_>>>()?
             .join(", ");
         if params.is_empty() {
@@ -760,8 +755,7 @@ fn emit_sequence_test_for(
                 .takes_params
                 .iter()
                 .map(|(_, t)| {
-                    map_type(t, constants)
-                        .map(|rust_type| format!("0{rt}..={rt}::MAX", rt = rust_type))
+                    map_type(t, spec).map(|rust_type| format!("0{rt}..={rt}::MAX", rt = rust_type))
                 })
                 .collect::<Result<Vec<_>>>()?;
             out.push_str(&format!("        ({}).prop_map(|", strategies.join(", ")));

@@ -47,26 +47,33 @@ fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
 ///
 /// Handles:
 ///   - primitives (U8..U128, I8..I128, Bool, Pubkey),
-///   - `Map[N] T` fixed-size containers, where N resolves to either a numeric
-///     literal or a declared constant; emitted as `[T; N]`.
+///   - `Map[N] T` fixed-size containers (N = numeric literal or declared
+///     constant; inner T recurses through this function) → `[T; N]`,
+///   - `Fin[N]` → `usize` (index type with a bound; bound is informational),
+///   - type aliases declared via `type Name = RHS` — resolved transitively,
+///   - record type names (`type Foo = { ... }`) — returned as-is; the
+///     generated Rust emits a corresponding `struct Foo { ... }` declaration
+///     (see `emit_record_decls` in rust_codegen_util.rs),
+///   - sum type names (`type Error | A | B | C`) — returned as-is; the
+///     generated Rust emits a corresponding Rust enum (unit variants only;
+///     payload variants are S3 narrow: name resolves but enum is flattened).
 ///
-/// Returns an error for anything else rather than silently passing it through
-/// — the fall-through in v2.6.1 was the root cause of the codegen-bug class
-/// where types like `U16` or `Map[N] T` leaked verbatim into generated Rust
-/// (see docs/prds/PRD-v2.6.2.md G1).
-///
-/// Sum-typed user enums and struct-typed account records in Map still surface
-/// as errors here — their renderer lands in S3.
-pub fn map_type(dsl_type: &str, constants: &[(String, String)]) -> Result<String> {
+/// Returns an error for anything else, rather than silently passing it
+/// through — the fall-through in v2.6.1 was the root cause of the codegen-
+/// bug class where types like `U16` or `Map[N] UserAccount` leaked verbatim
+/// into generated Rust (see docs/prds/PRD-v2.6.2.md G1).
+pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    let dsl_type = dsl_type.trim();
+
     // Compound type: Map[BOUND] T → [T; N]
-    if let Some(rest) = dsl_type.trim().strip_prefix("Map") {
+    if let Some(rest) = dsl_type.strip_prefix("Map") {
         let rest = rest.trim_start();
         if let Some(rest) = rest.strip_prefix('[') {
             if let Some(close) = rest.find(']') {
                 let bound_src = rest[..close].trim();
                 let inner_src = rest[close + 1..].trim();
-                let n = resolve_map_bound(bound_src, constants)?;
-                let inner_rust = map_type(inner_src, constants)?;
+                let n = resolve_map_bound(bound_src, &spec.constants)?;
+                let inner_rust = map_type(inner_src, spec)?;
                 return Ok(format!("[{inner_rust}; {n}]"));
             }
         }
@@ -76,7 +83,51 @@ pub fn map_type(dsl_type: &str, constants: &[(String, String)]) -> Result<String
         );
     }
 
-    let rust = match dsl_type {
+    // Fin[N] → usize. N is informational (bound for index-type safety in
+    // the DSL); in Rust we just use usize.
+    if let Some(rest) = dsl_type.strip_prefix("Fin") {
+        let rest = rest.trim_start();
+        if rest.starts_with('[') {
+            return Ok("usize".to_string());
+        }
+    }
+
+    // Primitive match — check first so `U8` etc. never hit the alias path.
+    if let Some(rust) = primitive_map(dsl_type) {
+        return Ok(rust.to_string());
+    }
+
+    // Type alias: `type Foo = Bar` — recurse on the RHS. Transitive.
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return map_type(rhs, spec);
+    }
+
+    // Record type declared in the spec — return the name as-is. The generator
+    // is responsible for emitting a `struct <Name> { ... }` alongside the
+    // State struct.
+    if spec.records.iter().any(|r| r.name == dsl_type) {
+        return Ok(dsl_type.to_string());
+    }
+
+    // Sum type declared in the spec — return the name as-is. For S3 narrow,
+    // only no-payload sums (Error-like enums) are fully supported; sums with
+    // payload variants resolve by name but the generator flattens to a
+    // primary variant's fields (see `resolve_state_fields`).
+    if spec.sum_types.iter().any(|s| s.name == dsl_type) {
+        return Ok(dsl_type.to_string());
+    }
+
+    anyhow::bail!(
+        "unsupported DSL type `{}` — expected a primitive (U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey), a compound (Map[N] T, Fin[N]), or a user-defined type declared with `type` in the spec",
+        dsl_type
+    );
+}
+
+/// Map a DSL primitive name to its Rust equivalent, if one exists. Factored
+/// out of `map_type` so both the primitive fast-path and the alias-recursion
+/// base case can share it.
+fn primitive_map(dsl_type: &str) -> Option<&'static str> {
+    Some(match dsl_type {
         "Pubkey" => "Address",
         "U8" => "u8",
         "U16" => "u16",
@@ -89,14 +140,8 @@ pub fn map_type(dsl_type: &str, constants: &[(String, String)]) -> Result<String
         "I64" => "i64",
         "I128" => "i128",
         "Bool" => "bool",
-        other => {
-            anyhow::bail!(
-                "unsupported DSL type `{}` — expected a primitive (U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey) or a compound type handled by its own renderer (Map[N] T, sum variant)",
-                other
-            );
-        }
-    };
-    Ok(rust.to_string())
+        _ => return None,
+    })
 }
 
 /// Resolve the bound expression inside `Map[BOUND] T`. Accepts either a
@@ -232,11 +277,7 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
         params.push('>');
 
         for (pname, ptype) in &handler.takes_params {
-            params.push_str(&format!(
-                ", {}: {}",
-                pname,
-                map_type(ptype, &spec.constants)?
-            ));
+            params.push_str(&format!(", {}: {}", pname, map_type(ptype, spec)?));
         }
 
         out.push_str(&format!(
@@ -291,7 +332,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 
             let pda_seeds = if let Some(ref pda_name) = acct.pda_ref {
                 if let Some(pda) = spec.pdas.iter().find(|p| &p.name == pda_name) {
-                    gen_pda_seeds_attr(pda, &acct.fields, &spec.constants)?
+                    gen_pda_seeds_attr(pda, &acct.fields, spec)?
                 } else {
                     String::new()
                 }
@@ -307,11 +348,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
             ));
 
             for (fname, ftype) in &acct.fields {
-                out.push_str(&format!(
-                    "    pub {}: {},\n",
-                    fname,
-                    map_type(ftype, &spec.constants)?
-                ));
+                out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
             }
 
             if acct.pda_ref.is_some() && !acct.fields.iter().any(|(n, _)| n == "bump") {
@@ -335,7 +372,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
         let state_name = format!("{}Account", to_pascal_case(&spec.program_name));
 
         let pda_seeds = if !spec.pdas.is_empty() {
-            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields, &spec.constants)?
+            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields, spec)?
         } else {
             String::new()
         };
@@ -346,11 +383,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
         ));
 
         for (fname, ftype) in &spec.state_fields {
-            out.push_str(&format!(
-                "    pub {}: {},\n",
-                fname,
-                map_type(ftype, &spec.constants)?
-            ));
+            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
         }
 
         if !spec.pdas.is_empty() && !spec.state_fields.iter().any(|(n, _)| n == "bump") {
@@ -381,7 +414,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 fn gen_pda_seeds_attr(
     pda: &crate::check::ParsedPda,
     fields: &[(String, String)],
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<String> {
     let mut seed_parts = Vec::new();
     for seed in &pda.seeds {
@@ -390,7 +423,7 @@ fn gen_pda_seeds_attr(
             seed_parts.push(format!("b\"{}\"", trimmed));
         } else {
             let field_type = match fields.iter().find(|(n, _)| n == trimmed) {
-                Some((_, t)) => map_type(t, constants)?,
+                Some((_, t)) => map_type(t, spec)?,
                 None => "Address".to_string(),
             };
             seed_parts.push(format!("{}: {}", trimmed, field_type));
@@ -416,11 +449,7 @@ fn generate_events(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
         out.push_str(&format!("#[event(discriminator = {})]\n", i + 1));
         out.push_str(&format!("pub struct {} {{\n", event.name));
         for (fname, ftype) in &event.fields {
-            out.push_str(&format!(
-                "    pub {}: {},\n",
-                fname,
-                map_type(ftype, &spec.constants)?
-            ));
+            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
         }
         out.push_str("}\n\n");
     }
@@ -670,7 +699,7 @@ fn render_handler_scaffold(
     let mut handler_params = vec![self_ref.to_string()];
     let mut param_names: Vec<String> = Vec::new();
     for (pname, ptype) in &handler.takes_params {
-        handler_params.push(format!("{}: {}", pname, map_type(ptype, &spec.constants)?));
+        handler_params.push(format!("{}: {}", pname, map_type(ptype, spec)?));
         param_names.push(pname.clone());
     }
     if handler.has_bumps() {
@@ -804,7 +833,7 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
         let self_ref = if any_mut { "&mut " } else { "&" };
         let mut params = vec![format!("ctx: {}{}", self_ref, pascal)];
         for (pname, ptype) in &handler.takes_params {
-            params.push(format!("{}: {}", pname, map_type(ptype, &spec.constants)?));
+            params.push(format!("{}: {}", pname, map_type(ptype, spec)?));
         }
         out.push_str(&format!(
             "/// Guards for `{}`.  \n/// Generated from the `requires` clauses of the spec handler block.\n",
@@ -947,25 +976,39 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn empty_spec() -> ParsedSpec {
+        ParsedSpec::default()
+    }
+
+    fn spec_with_constants(pairs: &[(&str, &str)]) -> ParsedSpec {
+        ParsedSpec {
+            constants: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..ParsedSpec::default()
+        }
+    }
+
     #[test]
     fn map_type_covers_all_primitives() {
-        let no_consts: &[(String, String)] = &[];
+        let spec = empty_spec();
 
         // Integer primitives
-        assert_eq!(map_type("U8", no_consts).unwrap(), "u8");
-        assert_eq!(map_type("U16", no_consts).unwrap(), "u16");
-        assert_eq!(map_type("U32", no_consts).unwrap(), "u32");
-        assert_eq!(map_type("U64", no_consts).unwrap(), "u64");
-        assert_eq!(map_type("U128", no_consts).unwrap(), "u128");
-        assert_eq!(map_type("I8", no_consts).unwrap(), "i8");
-        assert_eq!(map_type("I16", no_consts).unwrap(), "i16");
-        assert_eq!(map_type("I32", no_consts).unwrap(), "i32");
-        assert_eq!(map_type("I64", no_consts).unwrap(), "i64");
-        assert_eq!(map_type("I128", no_consts).unwrap(), "i128");
+        assert_eq!(map_type("U8", &spec).unwrap(), "u8");
+        assert_eq!(map_type("U16", &spec).unwrap(), "u16");
+        assert_eq!(map_type("U32", &spec).unwrap(), "u32");
+        assert_eq!(map_type("U64", &spec).unwrap(), "u64");
+        assert_eq!(map_type("U128", &spec).unwrap(), "u128");
+        assert_eq!(map_type("I8", &spec).unwrap(), "i8");
+        assert_eq!(map_type("I16", &spec).unwrap(), "i16");
+        assert_eq!(map_type("I32", &spec).unwrap(), "i32");
+        assert_eq!(map_type("I64", &spec).unwrap(), "i64");
+        assert_eq!(map_type("I128", &spec).unwrap(), "i128");
 
         // Non-integer primitives
-        assert_eq!(map_type("Bool", no_consts).unwrap(), "bool");
-        assert_eq!(map_type("Pubkey", no_consts).unwrap(), "Address");
+        assert_eq!(map_type("Bool", &spec).unwrap(), "bool");
+        assert_eq!(map_type("Pubkey", &spec).unwrap(), "Address");
     }
 
     #[test]
@@ -973,8 +1016,8 @@ mod tests {
         // v2.6.1 bug: DSL types not in the four-item allowlist (U8/U64/U128/I128)
         // fell through as-is, leaking `U16` verbatim into Rust. v2.6.2: unknown
         // types must surface as errors at codegen time.
-        let no_consts: &[(String, String)] = &[];
-        let err = map_type("Blorb", no_consts).unwrap_err().to_string();
+        let spec = empty_spec();
+        let err = map_type("Blorb", &spec).unwrap_err().to_string();
         assert!(
             err.contains("Blorb"),
             "error should name the bad type: {err}"
@@ -987,25 +1030,19 @@ mod tests {
 
     #[test]
     fn map_type_renders_map_with_literal_bound() {
-        let no_consts: &[(String, String)] = &[];
-        assert_eq!(map_type("Map[4] U64", no_consts).unwrap(), "[u64; 4]");
-        assert_eq!(map_type("Map[16] U8", no_consts).unwrap(), "[u8; 16]");
-        assert_eq!(
-            map_type("Map[32] Pubkey", no_consts).unwrap(),
-            "[Address; 32]"
-        );
+        let spec = empty_spec();
+        assert_eq!(map_type("Map[4] U64", &spec).unwrap(), "[u64; 4]");
+        assert_eq!(map_type("Map[16] U8", &spec).unwrap(), "[u8; 16]");
+        assert_eq!(map_type("Map[32] Pubkey", &spec).unwrap(), "[Address; 32]");
     }
 
     #[test]
     fn map_type_resolves_map_bound_via_constants() {
         // Mirrors the percolator eval case: `Map[MAX_ACCOUNTS] U64` where
         // MAX_ACCOUNTS is declared as a spec constant.
-        let constants = vec![
-            ("MAX_ACCOUNTS".to_string(), "256".to_string()),
-            ("UNRELATED".to_string(), "99".to_string()),
-        ];
+        let spec = spec_with_constants(&[("MAX_ACCOUNTS", "256"), ("UNRELATED", "99")]);
         assert_eq!(
-            map_type("Map[MAX_ACCOUNTS] U64", &constants).unwrap(),
+            map_type("Map[MAX_ACCOUNTS] U64", &spec).unwrap(),
             "[u64; 256]"
         );
     }
@@ -1014,10 +1051,8 @@ mod tests {
     fn map_type_errors_when_map_bound_is_unknown_symbol() {
         // Bound is neither a literal nor a declared constant → clear error
         // naming the unresolved symbol.
-        let no_consts: &[(String, String)] = &[];
-        let err = map_type("Map[MISSING] U64", no_consts)
-            .unwrap_err()
-            .to_string();
+        let spec = empty_spec();
+        let err = map_type("Map[MISSING] U64", &spec).unwrap_err().to_string();
         assert!(
             err.contains("MISSING"),
             "error should name the bound: {err}"
@@ -1025,6 +1060,46 @@ mod tests {
         assert!(
             err.contains("not a numeric literal") || err.contains("not declared"),
             "error should explain why the bound didn't resolve: {err}"
+        );
+    }
+
+    #[test]
+    fn map_type_resolves_fin_to_usize() {
+        // `Fin[N]` → `usize`. Used for index types like `Fin[MAX_ACCOUNTS]`.
+        let spec = spec_with_constants(&[("MAX_ACCOUNTS", "256")]);
+        assert_eq!(map_type("Fin[MAX_ACCOUNTS]", &spec).unwrap(), "usize");
+        assert_eq!(map_type("Fin[4]", &spec).unwrap(), "usize");
+    }
+
+    #[test]
+    fn map_type_resolves_type_aliases_transitively() {
+        // The percolator pattern: `type AccountIdx = Fin[MAX_ACCOUNTS]`.
+        // `map_type("AccountIdx")` must resolve through the alias to `usize`.
+        use crate::check::ParsedRecordType;
+        let mut spec = ParsedSpec {
+            type_aliases: vec![
+                ("AccountIdx".to_string(), "Fin[MAX_ACCOUNTS]".to_string()),
+                ("MyAlias".to_string(), "U64".to_string()),
+            ],
+            ..ParsedSpec::default()
+        };
+        assert_eq!(map_type("AccountIdx", &spec).unwrap(), "usize");
+        assert_eq!(map_type("MyAlias", &spec).unwrap(), "u64");
+
+        // Record name stays as-is for struct emission downstream.
+        spec.records.push(ParsedRecordType {
+            name: "UserAccount".to_string(),
+            fields: vec![
+                ("active".to_string(), "U8".to_string()),
+                ("capital".to_string(), "U128".to_string()),
+            ],
+        });
+        assert_eq!(map_type("UserAccount", &spec).unwrap(), "UserAccount");
+        // `Map[N] UserAccount` → `[UserAccount; N]`.
+        spec.constants = vec![("MAX_ACCOUNTS".to_string(), "4".to_string())];
+        assert_eq!(
+            map_type("Map[MAX_ACCOUNTS] UserAccount", &spec).unwrap(),
+            "[UserAccount; 4]"
         );
     }
 
@@ -1050,13 +1125,13 @@ mod tests {
     }
 
     #[test]
-    fn map_type_rejects_struct_valued_maps_until_s3() {
-        // `Map[N] UserAccount` where UserAccount is a user-defined record is
-        // S3 scope (sum-typed state + account-record rendering). Until then
-        // this must still surface as an "unsupported DSL type" error so we
-        // never silently emit broken Rust.
-        let constants = vec![("MAX_ACCOUNTS".to_string(), "8".to_string())];
-        let err = map_type("Map[MAX_ACCOUNTS] UserAccount", &constants)
+    fn map_type_errors_on_undeclared_user_type() {
+        // `Map[N] UserAccount` where UserAccount is neither a primitive nor
+        // declared via `type UserAccount = …` / `type UserAccount { … }` /
+        // `type UserAccount | …`. Must surface as an error naming the bad
+        // inner type rather than silently emitting broken Rust.
+        let spec = spec_with_constants(&[("MAX_ACCOUNTS", "8")]);
+        let err = map_type("Map[MAX_ACCOUNTS] UserAccount", &spec)
             .unwrap_err()
             .to_string();
         assert!(

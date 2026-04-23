@@ -70,8 +70,21 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let state_fields = rust_codegen_util::resolve_state_fields(&spec);
     let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
 
+    // User-defined records/enums referenced by the State struct must be
+    // declared first. `#![cfg(kani)]` at the top of this file lets us derive
+    // Kani's Arbitrary trait unconditionally — generated Rust only compiles
+    // under Kani anyway.
+    rust_codegen_util::emit_record_structs(&mut out, &spec, "Clone, Copy, kani::Arbitrary", |t| {
+        map_type(t, &spec)
+    })?;
+    rust_codegen_util::emit_unit_enum_sums(
+        &mut out,
+        &spec,
+        "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
+    )?;
+
     rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", |t| {
-        map_type(t, &spec.constants)
+        map_type(t, &spec)
     })?;
 
     // ── Property predicates ──────────────────────────────────────────────
@@ -100,9 +113,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     );
 
     for op in &spec.handlers {
-        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, |t| {
-            map_type(t, &spec.constants)
-        })?;
+        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, |t| map_type(t, &spec))?;
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────
@@ -146,7 +157,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype, &spec.constants)?
+                    map_type(ptype, &spec)?
                 ));
             }
 
@@ -208,7 +219,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype, &spec.constants)?
+                        map_type(ptype, &spec)?
                     ));
                 }
 
@@ -309,7 +320,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         out.push_str(&format!(
                             "    let {}: {} = kani::any();\n",
                             pname,
-                            map_type(ptype, &spec.constants)?
+                            map_type(ptype, &spec)?
                         ));
                     }
                 }
@@ -412,7 +423,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype, &spec.constants)?
+                        map_type(ptype, &spec)?
                     ));
                 }
 
@@ -552,7 +563,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                                 indent,
                                 pname,
                                 j,
-                                map_type(ptype, &spec.constants)?
+                                map_type(ptype, &spec)?
                             ));
                         }
                     }
@@ -621,7 +632,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         .takes_params
                         .iter()
                         .map(|(n, t)| {
-                            map_type(t, &spec.constants)
+                            map_type(t, &spec)
                                 .map(|rt| format!("            let {}: {} = kani::any();\n", n, rt))
                         })
                         .collect::<anyhow::Result<String>>()?,
@@ -744,7 +755,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype, &spec.constants)?
+                    map_type(ptype, &spec)?
                 ));
             }
 
@@ -882,7 +893,7 @@ handler compute (amount : U64) {
             op,
             &spec,
             /*wrapping=*/ false,
-            |t| crate::codegen::map_type(t, &spec.constants),
+            |t| crate::codegen::map_type(t, &spec),
         )
         .expect("emit_transition_fn");
         assert!(
@@ -927,7 +938,7 @@ handler buy (amount : U64) {
             op,
             &spec,
             /*wrapping=*/ false,
-            |t| crate::codegen::map_type(t, &spec.constants),
+            |t| crate::codegen::map_type(t, &spec),
         )
         .expect("emit_transition_fn");
 
@@ -964,7 +975,7 @@ handler buy (amount : U64) { effect { pool += amount } }"#;
             op,
             &spec,
             /*wrapping=*/ true,
-            |t| crate::codegen::map_type(t, &spec.constants),
+            |t| crate::codegen::map_type(t, &spec),
         )
         .expect("emit_transition_fn");
         assert!(

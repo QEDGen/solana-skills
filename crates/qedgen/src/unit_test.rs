@@ -54,11 +54,25 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         out.push_str("type Address = [u8; 32];\n\n");
     }
 
+    // User-defined records/enums referenced by State fields must be
+    // declared first so the State struct compiles.
+    crate::rust_codegen_util::emit_record_structs(
+        &mut out,
+        &spec,
+        "Debug, Clone, Copy, PartialEq",
+        |t| map_type(t, &spec),
+    )?;
+    crate::rust_codegen_util::emit_unit_enum_sums(
+        &mut out,
+        &spec,
+        "Debug, Clone, Copy, PartialEq, Eq",
+    )?;
+
     if is_multi {
         // Multi-account: one struct + status enum per account type
         for acct in &spec.account_types {
             let state_name = format!("{}State", acct.name);
-            emit_state_struct(&mut out, &state_name, &acct.fields, &spec.constants)?;
+            emit_state_struct(&mut out, &state_name, &acct.fields, &spec)?;
 
             if !acct.lifecycle.is_empty() {
                 let status_name = format!("{}Status", acct.name);
@@ -77,7 +91,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "{}State",
             crate::codegen::to_pascal_case(&spec.program_name)
         );
-        emit_state_struct(&mut out, &state_name, &spec.state_fields, &spec.constants)?;
+        emit_state_struct(&mut out, &state_name, &spec.state_fields, &spec)?;
 
         // Status enum for state machine tests
         if !spec.lifecycle_states.is_empty() {
@@ -102,7 +116,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             .iter()
             .map(|(n, t)| {
                 let used = effect_values.iter().any(|v| v.contains(n.as_str()));
-                let rt = map_type(t, &spec.constants)?;
+                let rt = map_type(t, &spec)?;
                 Ok(if used {
                     format!("{}: {}", n, rt)
                 } else {
@@ -153,7 +167,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         let params: Vec<String> = op
             .takes_params
             .iter()
-            .map(|(n, t)| map_type(t, &spec.constants).map(|rt| format!("{}: {}", n, rt)))
+            .map(|(n, t)| map_type(t, &spec).map(|rt| format!("{}: {}", n, rt)))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let param_sig = if params.is_empty() {
             String::new()
@@ -190,7 +204,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_effect_test(&mut out, op, fields, &sn, &spec.constants)?;
+        generate_effect_test(&mut out, op, fields, &sn, &spec)?;
     }
 
     // --- Guard tests: boundary values that pass/fail ---
@@ -203,7 +217,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_guard_tests(&mut out, op, fields, &sn, &spec.constants)?;
+        generate_guard_tests(&mut out, op, fields, &sn, &spec)?;
     }
 
     // --- Property preservation tests ---
@@ -237,14 +251,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                             continue;
                         }
                     }
-                    generate_property_test(
-                        &mut out,
-                        op,
-                        prop,
-                        prop_fields,
-                        &prop_sn,
-                        &spec.constants,
-                    )?;
+                    generate_property_test(&mut out, op, prop, prop_fields, &prop_sn, &spec)?;
                 }
             }
         }
@@ -260,7 +267,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_unchanged_test(&mut out, op, fields, &sn, &spec.constants)?;
+        generate_unchanged_test(&mut out, op, fields, &sn, &spec)?;
     }
 
     // --- State machine tests ---
@@ -338,16 +345,12 @@ fn emit_state_struct(
     out: &mut String,
     state_name: &str,
     fields: &[(String, String)],
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
     out.push_str(&format!("struct {} {{\n", state_name));
     for (fname, ftype) in fields {
-        out.push_str(&format!(
-            "    {}: {},\n",
-            fname,
-            map_type(ftype, constants)?
-        ));
+        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype, spec)?));
     }
     out.push_str("}\n\n");
 
@@ -462,7 +465,7 @@ fn generate_effect_test(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn test_{}_effects() {{\n", op.name));
@@ -481,7 +484,7 @@ fn generate_effect_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype, constants)?,
+            map_type(ptype, spec)?,
             val
         ));
     }
@@ -534,7 +537,7 @@ fn generate_guard_tests(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     let guard_str = op.guard_str.as_deref().unwrap_or("true");
 
@@ -555,7 +558,7 @@ fn generate_guard_tests(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype, constants)?,
+            map_type(ptype, spec)?,
             val
         ));
     }
@@ -591,7 +594,7 @@ fn generate_guard_tests(
             out.push_str(&format!(
                 "        let {}: {} = {};\n",
                 pname,
-                map_type(ptype, constants)?,
+                map_type(ptype, spec)?,
                 val.1
             ));
         } else {
@@ -599,7 +602,7 @@ fn generate_guard_tests(
             out.push_str(&format!(
                 "        let {}: {} = {};\n",
                 pname,
-                map_type(ptype, constants)?,
+                map_type(ptype, spec)?,
                 val
             ));
         }
@@ -620,7 +623,7 @@ fn generate_property_test(
     prop: &crate::check::ParsedProperty,
     fields: &[(String, String)],
     state_name: &str,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("    #[test]\n");
     out.push_str(&format!(
@@ -641,7 +644,7 @@ fn generate_property_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype, constants)?,
+            map_type(ptype, spec)?,
             val
         ));
     }
@@ -683,7 +686,7 @@ fn generate_unchanged_test(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-    constants: &[(String, String)],
+    spec: &ParsedSpec,
 ) -> Result<()> {
     let affected: Vec<&str> = op.effects.iter().map(|(f, _, _)| f.as_str()).collect();
     let unchanged: Vec<&(String, String)> = fields
@@ -710,7 +713,7 @@ fn generate_unchanged_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype, constants)?,
+            map_type(ptype, spec)?,
             val
         ));
     }
