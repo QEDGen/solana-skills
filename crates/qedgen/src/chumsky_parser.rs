@@ -114,6 +114,8 @@ const KEYWORDS: &[&str] = &[
     "pragma",
     "let",
     "in",
+    // v2.7 G4: handler-level opt-out of the no_access_control lint.
+    "permissionless",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -1178,6 +1180,8 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .map(HandlerClause::Transfers);
 
     let aborts_total = just("aborts_total").to(HandlerClause::AbortsTotal);
+    // `permissionless` — deliberate opt-out of no_access_control P1 (v2.7 G4).
+    let permissionless = just("permissionless").to(HandlerClause::Permissionless);
     let invariant = just("invariant")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1215,7 +1219,7 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
     // `choice()` has an arity limit; split into groups.
     let grp_a = choice((auth, accounts, requires, ensures, modifies, let_c, effect));
     let grp_b = choice((transfers, takes, emits, aborts_total, invariant, include));
-    let grp_c = choice((match_c, call_c));
+    let grp_c = choice((match_c, call_c, permissionless));
     choice((grp_a, grp_b, grp_c))
 }
 

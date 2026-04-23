@@ -383,7 +383,14 @@ pub struct ParsedHandler {
     pub let_bindings: Vec<(String, String, String)>,
     /// All abort conditions are exhaustive — generates ↔ theorem instead of per-abort.
     pub aborts_total: bool,
-    /// State effects: (field, op, value) where op is "set"|"add"|"sub".
+    /// v2.7 G4: handler is deliberately permissionless — no `auth` required.
+    /// Mutually exclusive with `who`; check.rs rejects specs that declare both.
+    /// Opts out of the `no_access_control` P1 lint.
+    pub permissionless: bool,
+    /// State effects: (field, op, value) where op is
+    /// "set" | "add" | "add_sat" | "add_wrap" | "sub" | "sub_sat" | "sub_wrap".
+    /// "add"/"sub" are the checked defaults (v2.7 G3); `_sat` / `_wrap` tags
+    /// carry the explicit saturating / wrapping opt-in from `+=!` / `+=?`.
     pub effects: Vec<(String, String, String)>,
     /// IDL-level account descriptors.
     pub accounts: Vec<ParsedHandlerAccount>,
@@ -1532,8 +1539,34 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         .unwrap_or("authority");
 
     for op in &spec.handlers {
+        // v2.7 G4: `auth X` and `permissionless` are mutually exclusive — one
+        // declares who can call, the other declares "anyone can call." Both
+        // at once is contradictory; surface as a P1 warning, not silent
+        // precedence of one over the other.
+        if op.permissionless && op.who.is_some() {
+            warnings.push(CompletenessWarning {
+                rule: "contradictory_auth".to_string(),
+                severity: Severity::Warning,
+                priority: 1,
+                message: format!(
+                    "handler '{}' declares both `auth {}` and `permissionless` — pick one",
+                    op.name,
+                    op.who.as_deref().unwrap_or("?"),
+                ),
+                subject: Some(op.name.clone()),
+                fix: "Remove one: `permissionless` for deliberately-open handlers, `auth X` for access-controlled ones.".to_string(),
+                example: None,
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+
         // Rule 1: handler without who:
-        if op.who.is_none() {
+        //   - pre-v2.7: always warned
+        //   - v2.7 G4: skip when the handler declares `permissionless` —
+        //     the user has made an explicit opt-in, this is no longer
+        //     a missing declaration.
+        if op.who.is_none() && !op.permissionless {
             warnings.push(CompletenessWarning {
                 rule: "no_access_control".to_string(),
                 severity: Severity::Warning,
@@ -1541,7 +1574,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 message: format!("handler '{}' has no `auth` — anyone can call it", op.name),
                 subject: Some(op.name.clone()),
                 fix: format!(
-                    "Add `auth {}` to restrict who can execute this handler",
+                    "Add `auth {}` to restrict who can execute this handler, or `permissionless` if this handler is deliberately open",
                     signer_hint
                 ),
                 example: Some(format!("  handler {}\n    auth {}", op.name, signer_hint)),
@@ -2981,6 +3014,7 @@ mod tests {
             modifies: None,
             let_bindings: vec![],
             aborts_total: false,
+            permissionless: false,
             effects: vec![],
             accounts: vec![],
             transfers: vec![],
@@ -3119,6 +3153,69 @@ mod tests {
             !example.contains("total_deposits"),
             "should not use fields from a different account type: {}",
             example
+        );
+    }
+
+    #[test]
+    fn permissionless_skips_no_access_control() {
+        // v2.7 G4: a handler declaring `permissionless` opts out of the P1
+        // `no_access_control` lint. Without the marker, who-less handlers
+        // still fire.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_access_control"),
+            "permissionless handler must not fire no_access_control: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_access_control_still_fires_without_marker() {
+        // Control: handler with no auth and no permissionless marker still
+        // triggers the lint.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        // h.permissionless stays false
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_access_control"),
+            "who-less handler without permissionless should fire: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_with_auth_surfaces_contradictory_auth() {
+        // Both `auth X` and `permissionless` is contradictory — not a silent
+        // precedence situation. Lint surfaces a clear P1.
+        let mut h = make_handler("weird");
+        h.who = Some("authority".to_string());
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "contradictory_auth")
+            .expect("contradictory_auth should fire");
+        assert!(
+            w.message.contains("authority") && w.message.contains("permissionless"),
+            "message should name both: {}",
+            w.message
         );
     }
 

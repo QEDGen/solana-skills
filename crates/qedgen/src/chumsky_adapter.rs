@@ -1706,6 +1706,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         modifies: None,
         let_bindings: Vec::new(),
         aborts_total: false,
+        permissionless: false,
         effects: Vec::new(),
         accounts: Vec::new(),
         transfers: Vec::new(),
@@ -1815,6 +1816,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             }
             a::HandlerClause::Emits(ev) => handler.emits.push(ev.clone()),
             a::HandlerClause::AbortsTotal => handler.aborts_total = true,
+            a::HandlerClause::Permissionless => handler.permissionless = true,
             a::HandlerClause::Invariant(name) => handler.invariants.push(name.clone()),
             a::HandlerClause::Include(_) => {
                 // Schema includes: forward-compat; ignored in phase 1.

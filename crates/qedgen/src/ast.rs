@@ -316,6 +316,10 @@ pub enum HandlerClause {
     Emits(String),
     AbortsTotal,
     Invariant(String),
+    /// `permissionless` — marks the handler as deliberately-unauthenticated.
+    /// Opts out of the `no_access_control` P1 lint (v2.7 G4). Mutually
+    /// exclusive with `auth X`; check.rs rejects both appearing together.
+    Permissionless,
     /// `include schema_name` — forward-compat; phase 1 rejects.
     Include(String),
     /// `call Interface.handler(name = expr, ...)` — terminal CPI invocation.
