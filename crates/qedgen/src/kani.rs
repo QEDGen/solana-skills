@@ -68,7 +68,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let state_fields = rust_codegen_util::resolve_state_fields(&spec);
     let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
 
-    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", map_type)?;
+    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", |t| {
+        map_type(t, &spec.constants)
+    })?;
 
     // ── Property predicates ──────────────────────────────────────────────
     if !spec.properties.is_empty() {
@@ -96,7 +98,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     );
 
     for op in &spec.handlers {
-        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, map_type)?;
+        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, |t| {
+            map_type(t, &spec.constants)
+        })?;
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────
@@ -140,7 +144,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype)?
+                    map_type(ptype, &spec.constants)?
                 ));
             }
 
@@ -202,7 +206,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype)?
+                        map_type(ptype, &spec.constants)?
                     ));
                 }
 
@@ -303,7 +307,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         out.push_str(&format!(
                             "    let {}: {} = kani::any();\n",
                             pname,
-                            map_type(ptype)?
+                            map_type(ptype, &spec.constants)?
                         ));
                     }
                 }
@@ -402,7 +406,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype)?
+                        map_type(ptype, &spec.constants)?
                     ));
                 }
 
@@ -542,7 +546,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                                 indent,
                                 pname,
                                 j,
-                                map_type(ptype)?
+                                map_type(ptype, &spec.constants)?
                             ));
                         }
                     }
@@ -611,7 +615,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         .takes_params
                         .iter()
                         .map(|(n, t)| {
-                            map_type(t)
+                            map_type(t, &spec.constants)
                                 .map(|rt| format!("            let {}: {} = kani::any();\n", n, rt))
                         })
                         .collect::<anyhow::Result<String>>()?,
@@ -734,7 +738,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype)?
+                    map_type(ptype, &spec.constants)?
                 ));
             }
 
@@ -872,7 +876,7 @@ handler compute (amount : U64) {
             op,
             &spec,
             /*wrapping=*/ false,
-            crate::codegen::map_type,
+            |t| crate::codegen::map_type(t, &spec.constants),
         )
         .expect("emit_transition_fn");
         assert!(
@@ -917,7 +921,7 @@ handler buy (amount : U64) {
             op,
             &spec,
             /*wrapping=*/ false,
-            crate::codegen::map_type,
+            |t| crate::codegen::map_type(t, &spec.constants),
         )
         .expect("emit_transition_fn");
 
@@ -954,7 +958,7 @@ handler buy (amount : U64) { effect { pool += amount } }"#;
             op,
             &spec,
             /*wrapping=*/ true,
-            crate::codegen::map_type,
+            |t| crate::codegen::map_type(t, &spec.constants),
         )
         .expect("emit_transition_fn");
         assert!(

@@ -159,7 +159,7 @@ fn emit_account_helpers(
         out.push_str("fn state_account(\n");
         out.push_str("    address: Pubkey,\n");
         for (name, ty) in fields {
-            let rust_ty = map_type(ty)?;
+            let rust_ty = map_type(ty, &spec.constants)?;
             if rust_ty == "Address" {
                 out.push_str(&format!("    {}: Pubkey,\n", name));
             } else {
@@ -277,7 +277,7 @@ fn emit_happy_path_test(
     if !handler.takes_params.is_empty() {
         out.push_str("    // Instruction parameters\n");
         for (name, ty) in &handler.takes_params {
-            let rust_ty = map_type(ty)?;
+            let rust_ty = map_type(ty, &spec.constants)?;
             let default = default_value(&rust_ty);
             out.push_str(&format!(
                 "    let {}: {} = {}; // AGENT: set appropriate value\n",
@@ -439,7 +439,7 @@ fn emit_unauthorized_test(
         }
     }
     for (name, ty) in &handler.takes_params {
-        let rt = map_type(ty)?;
+        let rt = map_type(ty, &spec.constants)?;
         let default = default_value(&rt);
         out.push_str(&format!("        {}: {},\n", name, default));
     }

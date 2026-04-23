@@ -381,7 +381,7 @@ pub fn emit_state_struct(
     out: &mut String,
     fields: &[&(String, String)],
     derives: &str,
-    map_type_fn: fn(&str) -> anyhow::Result<String>,
+    map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     out.push_str(&format!("#[derive({})]\n", derives));
     out.push_str("struct State {\n");
@@ -439,7 +439,7 @@ pub fn emit_transition_fn(
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
-    map_type_fn: fn(&str) -> anyhow::Result<String>,
+    map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
     if let Some(ref doc) = op.doc {
         out.push_str(&format!("/// {}\n", doc.trim()));
