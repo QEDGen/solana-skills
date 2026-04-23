@@ -56,7 +56,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         // Multi-account: one struct + status enum per account type
         for acct in &spec.account_types {
             let state_name = format!("{}State", acct.name);
-            emit_state_struct(&mut out, &state_name, &acct.fields);
+            emit_state_struct(&mut out, &state_name, &acct.fields)?;
 
             if !acct.lifecycle.is_empty() {
                 let status_name = format!("{}Status", acct.name);
@@ -75,7 +75,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "{}State",
             crate::codegen::to_pascal_case(&spec.program_name)
         );
-        emit_state_struct(&mut out, &state_name, &spec.state_fields);
+        emit_state_struct(&mut out, &state_name, &spec.state_fields)?;
 
         // Status enum for state machine tests
         if !spec.lifecycle_states.is_empty() {
@@ -100,13 +100,14 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             .iter()
             .map(|(n, t)| {
                 let used = effect_values.iter().any(|v| v.contains(n.as_str()));
-                if used {
-                    format!("{}: {}", n, map_type(t))
+                let rt = map_type(t)?;
+                Ok(if used {
+                    format!("{}: {}", n, rt)
                 } else {
-                    format!("_{}: {}", n, map_type(t))
-                }
+                    format!("_{}: {}", n, rt)
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let param_sig = if params.is_empty() {
             String::new()
         } else {
@@ -150,8 +151,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         let params: Vec<String> = op
             .takes_params
             .iter()
-            .map(|(n, t)| format!("{}: {}", n, map_type(t)))
-            .collect();
+            .map(|(n, t)| map_type(t).map(|rt| format!("{}: {}", n, rt)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         let param_sig = if params.is_empty() {
             String::new()
         } else {
@@ -187,7 +188,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_effect_test(&mut out, op, fields, &sn);
+        generate_effect_test(&mut out, op, fields, &sn)?;
     }
 
     // --- Guard tests: boundary values that pass/fail ---
@@ -200,7 +201,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_guard_tests(&mut out, op, fields, &sn);
+        generate_guard_tests(&mut out, op, fields, &sn)?;
     }
 
     // --- Property preservation tests ---
@@ -234,7 +235,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                             continue;
                         }
                     }
-                    generate_property_test(&mut out, op, prop, prop_fields, &prop_sn);
+                    generate_property_test(&mut out, op, prop, prop_fields, &prop_sn)?;
                 }
             }
         }
@@ -250,7 +251,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_unchanged_test(&mut out, op, fields, &sn);
+        generate_unchanged_test(&mut out, op, fields, &sn)?;
     }
 
     // --- State machine tests ---
@@ -324,11 +325,15 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 }
 
 /// Emit a state struct definition with Default impl.
-fn emit_state_struct(out: &mut String, state_name: &str, fields: &[(String, String)]) {
+fn emit_state_struct(
+    out: &mut String,
+    state_name: &str,
+    fields: &[(String, String)],
+) -> Result<()> {
     out.push_str("#[derive(Debug, Clone, PartialEq)]\n");
     out.push_str(&format!("struct {} {{\n", state_name));
     for (fname, ftype) in fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype)));
+        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype)?));
     }
     out.push_str("}\n\n");
 
@@ -350,6 +355,7 @@ fn emit_state_struct(out: &mut String, state_name: &str, fields: &[(String, Stri
     out.push_str("        }\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
+    Ok(())
 }
 
 /// Resolve the state name and fields for an operation.
@@ -442,7 +448,7 @@ fn generate_effect_test(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-) {
+) -> Result<()> {
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn test_{}_effects() {{\n", op.name));
 
@@ -460,7 +466,7 @@ fn generate_effect_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype),
+            map_type(ptype)?,
             val
         ));
     }
@@ -504,6 +510,7 @@ fn generate_effect_test(
     }
 
     out.push_str("    }\n\n");
+    Ok(())
 }
 
 /// Generate pass/fail guard tests with boundary values.
@@ -512,7 +519,7 @@ fn generate_guard_tests(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-) {
+) -> Result<()> {
     let guard_str = op.guard_str.as_deref().unwrap_or("true");
 
     // --- Test: guard PASSES with valid inputs ---
@@ -532,7 +539,7 @@ fn generate_guard_tests(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype),
+            map_type(ptype)?,
             val
         ));
     }
@@ -568,7 +575,7 @@ fn generate_guard_tests(
             out.push_str(&format!(
                 "        let {}: {} = {};\n",
                 pname,
-                map_type(ptype),
+                map_type(ptype)?,
                 val.1
             ));
         } else {
@@ -576,7 +583,7 @@ fn generate_guard_tests(
             out.push_str(&format!(
                 "        let {}: {} = {};\n",
                 pname,
-                map_type(ptype),
+                map_type(ptype)?,
                 val
             ));
         }
@@ -587,6 +594,7 @@ fn generate_guard_tests(
         call_args(op)
     ));
     out.push_str("    }\n\n");
+    Ok(())
 }
 
 /// Generate a property preservation test for a specific operation.
@@ -596,7 +604,7 @@ fn generate_property_test(
     prop: &crate::check::ParsedProperty,
     fields: &[(String, String)],
     state_name: &str,
-) {
+) -> Result<()> {
     out.push_str("    #[test]\n");
     out.push_str(&format!(
         "    fn test_{}_preserves_{}() {{\n",
@@ -616,7 +624,7 @@ fn generate_property_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype),
+            map_type(ptype)?,
             val
         ));
     }
@@ -649,6 +657,7 @@ fn generate_property_test(
     }
 
     out.push_str("    }\n\n");
+    Ok(())
 }
 
 /// Generate unchanged field tests — fields not in effects must not change.
@@ -657,7 +666,7 @@ fn generate_unchanged_test(
     op: &ParsedHandler,
     fields: &[(String, String)],
     state_name: &str,
-) {
+) -> Result<()> {
     let affected: Vec<&str> = op.effects.iter().map(|(f, _, _)| f.as_str()).collect();
     let unchanged: Vec<&(String, String)> = fields
         .iter()
@@ -665,7 +674,7 @@ fn generate_unchanged_test(
         .collect();
 
     if unchanged.is_empty() {
-        return;
+        return Ok(());
     }
 
     out.push_str("    #[test]\n");
@@ -683,7 +692,7 @@ fn generate_unchanged_test(
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
-            map_type(ptype),
+            map_type(ptype)?,
             val
         ));
     }
@@ -710,6 +719,7 @@ fn generate_unchanged_test(
     }
 
     out.push_str("    }\n\n");
+    Ok(())
 }
 
 /// Generate a state machine test — verify the transition is valid.

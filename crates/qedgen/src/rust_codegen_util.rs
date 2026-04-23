@@ -374,19 +374,22 @@ pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
 }
 
 /// Emit a State struct with configurable `#[derive(...)]` attributes.
-/// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types.
+/// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types; it
+/// returns an error on unrecognized types so codegen fails loudly rather
+/// than emitting broken Rust.
 pub fn emit_state_struct(
     out: &mut String,
     fields: &[&(String, String)],
     derives: &str,
-    map_type_fn: fn(&str) -> &str,
-) {
+    map_type_fn: fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
     out.push_str(&format!("#[derive({})]\n", derives));
     out.push_str("struct State {\n");
     for (fname, ftype) in fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)));
+        out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)?));
     }
     out.push_str("}\n\n");
+    Ok(())
 }
 
 /// Emit property predicate functions from spec properties.
@@ -436,8 +439,8 @@ pub fn emit_transition_fn(
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
-    map_type_fn: fn(&str) -> &str,
-) {
+    map_type_fn: fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
     if let Some(ref doc) = op.doc {
         out.push_str(&format!("/// {}\n", doc.trim()));
     }
@@ -445,8 +448,9 @@ pub fn emit_transition_fn(
     let params: String = op
         .takes_params
         .iter()
-        .map(|(n, t)| format!(", {}: {}", n, map_type_fn(t)))
-        .collect();
+        .map(|(n, t)| map_type_fn(t).map(|rt| format!(", {}: {}", n, rt)))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .concat();
     out.push_str(&format!(
         "fn {}(s: &mut State{}) -> bool {{\n",
         op.name, params
@@ -523,4 +527,5 @@ pub fn emit_transition_fn(
 
     out.push_str("    true\n");
     out.push_str("}\n\n");
+    Ok(())
 }

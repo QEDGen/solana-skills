@@ -191,7 +191,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 &acct_props,
                 &acct.lifecycle,
                 &spec,
-            );
+            )?;
 
             out.push_str(&format!("}} // mod {}\n\n", mod_name));
         }
@@ -210,7 +210,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             &all_props,
             &spec.lifecycle_states,
             &spec,
-        );
+        )?;
     }
 
     std::fs::write(output_path, &out)?;
@@ -229,12 +229,12 @@ fn emit_account_section(
     properties: &[&ParsedProperty],
     lifecycle_states: &[String],
     spec: &ParsedSpec,
-) {
+) -> Result<()> {
     // State struct
     out.push_str("#[derive(Debug, Clone, Copy)]\n");
     out.push_str("struct State {\n");
     for (fname, ftype) in mutable_fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype)));
+        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype)?));
     }
     out.push_str("}\n\n");
 
@@ -255,7 +255,7 @@ fn emit_account_section(
             }
         }
     }
-    emit_state_strategy(out, mutable_fields, all_fields, &field_bounds);
+    emit_state_strategy(out, mutable_fields, all_fields, &field_bounds)?;
 
     // Property predicates
     let props_with_expr: Vec<&&ParsedProperty> = properties
@@ -293,14 +293,14 @@ fn emit_account_section(
     }
 
     // Transition functions
-    emit_transition_functions_for(out, handlers, spec);
+    emit_transition_functions_for(out, handlers, spec)?;
 
     // Clone properties once for sections that need owned copies
     let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
 
     // Property preservation tests
     if !props_with_expr.is_empty() {
-        emit_preservation_tests_for(out, handlers, &owned_props, mutable_fields, spec);
+        emit_preservation_tests_for(out, handlers, &owned_props, mutable_fields, spec)?;
     }
 
     // Guard enforcement tests
@@ -324,7 +324,7 @@ fn emit_account_section(
             all_fields,
             spec,
             &owned_props,
-        );
+        )?;
     }
 
     // Sequence test
@@ -336,8 +336,9 @@ fn emit_account_section(
             mutable_fields,
             all_fields,
             lifecycle_states,
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Emit proptest `Arbitrary`-like strategy for State.
@@ -346,7 +347,7 @@ fn emit_state_strategy(
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
     field_bounds: &std::collections::HashMap<String, String>,
-) {
+) -> Result<()> {
     // Full-range strategy (capped by property bounds when available)
     emit_state_strategy_inner(
         out,
@@ -355,7 +356,7 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Full,
         field_bounds,
-    );
+    )?;
     // Boundary-biased strategy for guard rejection tests
     emit_state_strategy_inner(
         out,
@@ -364,7 +365,8 @@ fn emit_state_strategy(
         all_fields,
         StrategyMode::Boundary,
         field_bounds,
-    );
+    )?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -380,7 +382,7 @@ fn emit_state_strategy_inner(
     all_fields: &[(String, String)],
     mode: StrategyMode,
     field_bounds: &std::collections::HashMap<String, String>,
-) {
+) -> Result<()> {
     match mode {
         StrategyMode::Boundary => {
             out.push_str("/// Boundary-biased strategy for guard rejection tests.\n");
@@ -400,7 +402,7 @@ fn emit_state_strategy_inner(
             .find(|(n, _)| n.as_str() == fname.as_str())
             .map(|(_, t)| t.as_str())
             .unwrap_or("U64");
-        let rust_type = map_type(dsl_type);
+        let rust_type = map_type(dsl_type)?;
 
         // Check if this field has a constant upper bound from properties
         let strategy = if let Some(bound) = field_bounds.get(fname.as_str()) {
@@ -442,13 +444,19 @@ fn emit_state_strategy_inner(
     }
     out.push_str("    })\n");
     out.push_str("}\n\n");
+    Ok(())
 }
 
 /// Emit transition functions for a slice of handlers.
-fn emit_transition_functions_for(out: &mut String, handlers: &[&ParsedHandler], spec: &ParsedSpec) {
+fn emit_transition_functions_for(
+    out: &mut String,
+    handlers: &[&ParsedHandler],
+    spec: &ParsedSpec,
+) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, op, spec, true, map_type);
+        rust_codegen_util::emit_transition_fn(out, op, spec, true, map_type)?;
     }
+    Ok(())
 }
 
 /// Emit per-(handler, property) preservation tests.
@@ -458,7 +466,7 @@ fn emit_preservation_tests_for(
     properties: &[ParsedProperty],
     mutable_fields: &[&(String, String)],
     _spec: &ParsedSpec,
-) {
+) -> Result<()> {
     for prop in properties {
         if prop.expression.is_none() {
             continue;
@@ -492,7 +500,7 @@ fn emit_preservation_tests_for(
             }
             if let Some(op) = op {
                 for (pname, ptype) in &op.takes_params {
-                    let rust_type = map_type(ptype);
+                    let rust_type = map_type(ptype)?;
                     param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
                 }
             }
@@ -555,6 +563,7 @@ fn emit_preservation_tests_for(
             out.push_str("}\n\n");
         }
     }
+    Ok(())
 }
 
 /// Emit guard enforcement tests.
@@ -617,7 +626,7 @@ fn emit_overflow_tests_for(
     all_fields: &[(String, String)],
     _spec: &ParsedSpec,
     properties: &[ParsedProperty],
-) {
+) -> Result<()> {
     for op in overflow_ops {
         for (field, kind, _value) in &op.effects {
             if kind != "add" {
@@ -633,7 +642,7 @@ fn emit_overflow_tests_for(
                 Some(m) => m,
                 None => continue,
             };
-            let rust_type = map_type(dsl_type);
+            let rust_type = map_type(dsl_type)?;
 
             out.push_str("proptest! {\n");
             out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
@@ -641,7 +650,7 @@ fn emit_overflow_tests_for(
 
             let mut param_parts = vec!["s in arb_state()".to_string()];
             for (pname, ptype) in &op.takes_params {
-                let rt = map_type(ptype);
+                let rt = map_type(ptype)?;
                 param_parts.push(format!("{} in 0{}..={}::MAX", pname, rt, rt));
             }
 
@@ -682,6 +691,7 @@ fn emit_overflow_tests_for(
             let _ = (max_val, rust_type, mutable_fields); // suppress unused
         }
     }
+    Ok(())
 }
 
 /// Emit state machine sequence test — random op sequences checking invariants.
@@ -692,7 +702,7 @@ fn emit_sequence_test_for(
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
     lifecycle_states: &[String],
-) {
+) -> Result<()> {
     // Emit an Operation enum
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("enum Op {\n");
@@ -700,8 +710,8 @@ fn emit_sequence_test_for(
         let params: String = op
             .takes_params
             .iter()
-            .map(|(_, t)| map_type(t).to_string())
-            .collect::<Vec<_>>()
+            .map(|(_, t)| map_type(t))
+            .collect::<Result<Vec<_>>>()?
             .join(", ");
         if params.is_empty() {
             out.push_str(&format!(
@@ -730,10 +740,9 @@ fn emit_sequence_test_for(
                 .takes_params
                 .iter()
                 .map(|(_, t)| {
-                    let rust_type = map_type(t);
-                    format!("0{}..={}::MAX", rust_type, rust_type)
+                    map_type(t).map(|rust_type| format!("0{rt}..={rt}::MAX", rt = rust_type))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
             out.push_str(&format!("        ({}).prop_map(|", strategies.join(", ")));
             if op.takes_params.len() == 1 {
                 out.push_str("v| ");
@@ -922,4 +931,5 @@ fn emit_sequence_test_for(
     out.push_str("}\n");
 
     let _ = all_fields; // suppress unused
+    Ok(())
 }

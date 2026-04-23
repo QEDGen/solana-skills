@@ -36,7 +36,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         .cloned()
         .unwrap_or_default();
 
-    let out = render(&spec, &hash);
+    let out = render(&spec, &hash)?;
     std::fs::write(output_path, &out)?;
     eprintln!("  wrote {}", output_path.display());
 
@@ -44,7 +44,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 }
 
 /// Render the complete integration test file.
-pub fn render(spec: &ParsedSpec, hash: &str) -> String {
+pub fn render(spec: &ParsedSpec, hash: &str) -> Result<String> {
     let mut out = String::new();
     let program_name = spec.program_name.to_lowercase();
     let state_name = format!("{}Account", to_pascal_case(&program_name));
@@ -94,17 +94,17 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> String {
     emit_setup(&mut out, &program_name, needs_token);
 
     // ── Account helpers ──────────────────────────────────────────────────────
-    emit_account_helpers(&mut out, &state_name, spec, needs_token);
+    emit_account_helpers(&mut out, &state_name, spec, needs_token)?;
 
     // ── Per-handler happy-path tests ────────────────────────────────────────
     for (i, handler) in spec.handlers.iter().enumerate() {
-        emit_happy_path_test(&mut out, handler, spec, i);
+        emit_happy_path_test(&mut out, handler, spec, i)?;
     }
 
     // ── Unauthorized access tests ────────────────────────────────────────────
     for handler in &spec.handlers {
         if handler.who.is_some() {
-            emit_unauthorized_test(&mut out, handler, spec);
+            emit_unauthorized_test(&mut out, handler, spec)?;
         }
     }
 
@@ -113,7 +113,7 @@ pub fn render(spec: &ParsedSpec, hash: &str) -> String {
         emit_lifecycle_sequence_test(&mut out, spec);
     }
 
-    out
+    Ok(out)
 }
 
 // ============================================================================
@@ -137,7 +137,12 @@ fn emit_setup(out: &mut String, program_name: &str, needs_token: bool) {
     out.push_str("}\n\n");
 }
 
-fn emit_account_helpers(out: &mut String, state_name: &str, spec: &ParsedSpec, needs_token: bool) {
+fn emit_account_helpers(
+    out: &mut String,
+    state_name: &str,
+    spec: &ParsedSpec,
+    needs_token: bool,
+) -> Result<()> {
     const BASE_HELPERS: &str = include_str!("../templates/integration-helpers-base.rs");
     const TOKEN_HELPERS: &str = include_str!("../templates/integration-helpers-token.rs");
 
@@ -154,7 +159,7 @@ fn emit_account_helpers(out: &mut String, state_name: &str, spec: &ParsedSpec, n
         out.push_str("fn state_account(\n");
         out.push_str("    address: Pubkey,\n");
         for (name, ty) in fields {
-            let rust_ty = map_type(ty);
+            let rust_ty = map_type(ty)?;
             if rust_ty == "Address" {
                 out.push_str(&format!("    {}: Pubkey,\n", name));
             } else {
@@ -183,6 +188,7 @@ fn emit_account_helpers(out: &mut String, state_name: &str, spec: &ParsedSpec, n
     if needs_token {
         out.push_str(TOKEN_HELPERS);
     }
+    Ok(())
 }
 
 fn emit_happy_path_test(
@@ -190,7 +196,7 @@ fn emit_happy_path_test(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     _discriminator: usize,
-) {
+) -> Result<()> {
     let test_name = format!("test_{}", handler.name);
     let pascal = to_pascal_case(&handler.name);
     let instr_struct = format!("{}Instruction", pascal);
@@ -271,8 +277,8 @@ fn emit_happy_path_test(
     if !handler.takes_params.is_empty() {
         out.push_str("    // Instruction parameters\n");
         for (name, ty) in &handler.takes_params {
-            let rust_ty = map_type(ty);
-            let default = default_value(rust_ty);
+            let rust_ty = map_type(ty)?;
+            let default = default_value(&rust_ty);
             out.push_str(&format!(
                 "    let {}: {} = {}; // AGENT: set appropriate value\n",
                 name, rust_ty, default
@@ -353,12 +359,17 @@ fn emit_happy_path_test(
         handler.name.to_uppercase()
     ));
     out.push_str("}\n\n");
+    Ok(())
 }
 
-fn emit_unauthorized_test(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
+fn emit_unauthorized_test(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Result<()> {
     let who = match &handler.who {
         Some(w) => w,
-        None => return,
+        None => return Ok(()),
     };
     let test_name = format!("test_{}_unauthorized", handler.name);
     let pascal = to_pascal_case(&handler.name);
@@ -428,7 +439,8 @@ fn emit_unauthorized_test(out: &mut String, handler: &ParsedHandler, spec: &Pars
         }
     }
     for (name, ty) in &handler.takes_params {
-        let default = default_value(map_type(ty));
+        let rt = map_type(ty)?;
+        let default = default_value(&rt);
         out.push_str(&format!("        {}: {},\n", name, default));
     }
     out.push_str("    }\n    .into();\n\n");
@@ -456,6 +468,7 @@ fn emit_unauthorized_test(out: &mut String, handler: &ParsedHandler, spec: &Pars
         handler.name, who
     ));
     out.push_str("}\n\n");
+    Ok(())
 }
 
 fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
@@ -600,7 +613,7 @@ mod tests {
     #[test]
     fn integration_test_multisig_generates() {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
-        let out = render(&spec, "test");
+        let out = render(&spec, "test").expect("render");
         // Has setup
         assert!(out.contains("fn setup() -> QuasarSvm"));
         // Has signer/empty helpers
@@ -624,7 +637,7 @@ mod tests {
     #[test]
     fn integration_test_escrow_has_token_helpers() {
         let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
-        let out = render(&spec, "test");
+        let out = render(&spec, "test").expect("render");
         // Escrow uses SPL tokens — should have token helpers
         assert!(out.contains("fn mint_account("));
         assert!(out.contains("fn token_account("));

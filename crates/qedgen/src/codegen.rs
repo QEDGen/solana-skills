@@ -43,17 +43,37 @@ fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
     }
 }
 
-/// Map DSL type to Quasar Rust type.
-pub fn map_type(dsl_type: &str) -> &str {
-    match dsl_type {
+/// Map a DSL primitive type name to its Rust type.
+///
+/// Returns an error for unrecognized types rather than silently passing them
+/// through — a fall-through was the root cause of the v2.6.1 codegen-bug
+/// class where types like `U16` or compound types like `Map[N] T` leaked
+/// verbatim into generated Rust (see docs/prds/PRD-v2.6.2.md G1).
+///
+/// Compound types (`Map[N] T`, sum types) are handled by their own renderers
+/// — this function is the primitive-level translator only.
+pub fn map_type(dsl_type: &str) -> Result<String> {
+    let rust = match dsl_type {
         "Pubkey" => "Address",
+        "U8" => "u8",
+        "U16" => "u16",
+        "U32" => "u32",
         "U64" => "u64",
         "U128" => "u128",
-        "U8" => "u8",
+        "I8" => "i8",
+        "I16" => "i16",
+        "I32" => "i32",
+        "I64" => "i64",
         "I128" => "i128",
         "Bool" => "bool",
-        other => other,
-    }
+        other => {
+            anyhow::bail!(
+                "unsupported DSL type `{}` — expected a primitive (U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey) or a compound type handled by its own renderer (Map[N] T, sum variant)",
+                other
+            );
+        }
+    };
+    Ok(rust.to_string())
 }
 
 /// Convert a snake_case operation name to PascalCase for struct names.
@@ -145,7 +165,7 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
         params.push('>');
 
         for (pname, ptype) in &handler.takes_params {
-            params.push_str(&format!(", {}: {}", pname, map_type(ptype)));
+            params.push_str(&format!(", {}: {}", pname, map_type(ptype)?));
         }
 
         out.push_str(&format!(
@@ -200,7 +220,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 
             let pda_seeds = if let Some(ref pda_name) = acct.pda_ref {
                 if let Some(pda) = spec.pdas.iter().find(|p| &p.name == pda_name) {
-                    gen_pda_seeds_attr(pda, &acct.fields)
+                    gen_pda_seeds_attr(pda, &acct.fields)?
                 } else {
                     String::new()
                 }
@@ -216,7 +236,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
             ));
 
             for (fname, ftype) in &acct.fields {
-                out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)));
+                out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)?));
             }
 
             if acct.pda_ref.is_some() && !acct.fields.iter().any(|(n, _)| n == "bump") {
@@ -240,7 +260,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
         let state_name = format!("{}Account", to_pascal_case(&spec.program_name));
 
         let pda_seeds = if !spec.pdas.is_empty() {
-            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields)
+            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields)?
         } else {
             String::new()
         };
@@ -251,7 +271,7 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
         ));
 
         for (fname, ftype) in &spec.state_fields {
-            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)));
+            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)?));
         }
 
         if !spec.pdas.is_empty() && !spec.state_fields.iter().any(|(n, _)| n == "bump") {
@@ -279,22 +299,24 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 }
 
 /// Generate PDA seeds attribute for a PDA declaration.
-fn gen_pda_seeds_attr(pda: &crate::check::ParsedPda, fields: &[(String, String)]) -> String {
+fn gen_pda_seeds_attr(
+    pda: &crate::check::ParsedPda,
+    fields: &[(String, String)],
+) -> Result<String> {
     let mut seed_parts = Vec::new();
     for seed in &pda.seeds {
         let trimmed = seed.trim_matches('"');
         if seed.starts_with('"') || seed.starts_with('\"') {
             seed_parts.push(format!("b\"{}\"", trimmed));
         } else {
-            let field_type = fields
-                .iter()
-                .find(|(n, _)| n == trimmed)
-                .map(|(_, t)| map_type(t))
-                .unwrap_or("Address");
+            let field_type = match fields.iter().find(|(n, _)| n == trimmed) {
+                Some((_, t)) => map_type(t)?,
+                None => "Address".to_string(),
+            };
             seed_parts.push(format!("{}: {}", trimmed, field_type));
         }
     }
-    format!("#[seeds({})]\n", seed_parts.join(", "))
+    Ok(format!("#[seeds({})]\n", seed_parts.join(", ")))
 }
 
 /// Generate src/events.rs (only if events are declared)
@@ -314,7 +336,7 @@ fn generate_events(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
         out.push_str(&format!("#[event(discriminator = {})]\n", i + 1));
         out.push_str(&format!("pub struct {} {{\n", event.name));
         for (fname, ftype) in &event.fields {
-            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)));
+            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype)?));
         }
         out.push_str("}\n\n");
     }
@@ -412,7 +434,7 @@ fn generate_instructions(
             &default_state_name,
             &spec_src,
             &spec_attr,
-        );
+        )?;
         std::fs::write(&handler_path, &out)?;
     }
 
@@ -500,7 +522,7 @@ fn render_handler_scaffold(
     default_state_name: &str,
     spec_src: &str,
     spec_attr: &str,
-) -> String {
+) -> Result<String> {
     let pascal = to_pascal_case(&handler.name);
     let bumps_name = format!("{}Bumps", pascal);
     let any_mut = handler.accounts.iter().any(|a| a.is_writable);
@@ -564,7 +586,7 @@ fn render_handler_scaffold(
     let mut handler_params = vec![self_ref.to_string()];
     let mut param_names: Vec<String> = Vec::new();
     for (pname, ptype) in &handler.takes_params {
-        handler_params.push(format!("{}: {}", pname, map_type(ptype)));
+        handler_params.push(format!("{}: {}", pname, map_type(ptype)?));
         param_names.push(pname.clone());
     }
     if handler.has_bumps() {
@@ -664,7 +686,7 @@ fn render_handler_scaffold(
     }
     out.push_str("    }\n");
     out.push_str("}\n");
-    out
+    Ok(out)
 }
 
 /// Generate src/guards.rs — one function per handler containing all the
@@ -698,7 +720,7 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
         let self_ref = if any_mut { "&mut " } else { "&" };
         let mut params = vec![format!("ctx: {}{}", self_ref, pascal)];
         for (pname, ptype) in &handler.takes_params {
-            params.push(format!("{}: {}", pname, map_type(ptype)));
+            params.push(format!("{}: {}", pname, map_type(ptype)?));
         }
         out.push_str(&format!(
             "/// Guards for `{}`.  \n/// Generated from the `requires` clauses of the spec handler block.\n",
@@ -833,4 +855,50 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
     eprintln!("Generated {} files in {}", file_count, output_dir.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_type_covers_all_primitives() {
+        // Integer primitives
+        assert_eq!(map_type("U8").unwrap(), "u8");
+        assert_eq!(map_type("U16").unwrap(), "u16");
+        assert_eq!(map_type("U32").unwrap(), "u32");
+        assert_eq!(map_type("U64").unwrap(), "u64");
+        assert_eq!(map_type("U128").unwrap(), "u128");
+        assert_eq!(map_type("I8").unwrap(), "i8");
+        assert_eq!(map_type("I16").unwrap(), "i16");
+        assert_eq!(map_type("I32").unwrap(), "i32");
+        assert_eq!(map_type("I64").unwrap(), "i64");
+        assert_eq!(map_type("I128").unwrap(), "i128");
+
+        // Non-integer primitives
+        assert_eq!(map_type("Bool").unwrap(), "bool");
+        assert_eq!(map_type("Pubkey").unwrap(), "Address");
+    }
+
+    #[test]
+    fn map_type_errors_on_unknown_type() {
+        // v2.6.1 bug: DSL types not in the four-item allowlist (U8/U64/U128/I128)
+        // fell through as-is, leaking `U16` and `Map[N] T` verbatim into Rust.
+        // v2.6.2: unknown types must surface as errors at codegen time.
+        let err = map_type("Blorb").unwrap_err().to_string();
+        assert!(
+            err.contains("Blorb"),
+            "error should name the bad type: {err}"
+        );
+        assert!(
+            err.contains("unsupported DSL type"),
+            "error should call it out as unsupported: {err}"
+        );
+
+        // Compound types aren't primitives — they're routed through their own
+        // renderers. Until those land (v2.6.2 G1 Map[N] T / G3 sum types),
+        // bare `map_type` must still reject them rather than silently pass
+        // them through.
+        assert!(map_type("Map[MAX_ACCOUNTS] UserAccount").is_err());
+    }
 }

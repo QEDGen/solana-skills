@@ -68,7 +68,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let state_fields = rust_codegen_util::resolve_state_fields(&spec);
     let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
 
-    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", map_type);
+    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", map_type)?;
 
     // ── Property predicates ──────────────────────────────────────────────
     if !spec.properties.is_empty() {
@@ -96,7 +96,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     );
 
     for op in &spec.handlers {
-        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, map_type);
+        rust_codegen_util::emit_transition_fn(&mut out, op, &spec, false, map_type)?;
     }
 
     // ── Guard enforcement proofs ─────────────────────────────────────────
@@ -140,7 +140,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype)
+                    map_type(ptype)?
                 ));
             }
 
@@ -202,7 +202,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype)
+                        map_type(ptype)?
                     ));
                 }
 
@@ -303,7 +303,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                         out.push_str(&format!(
                             "    let {}: {} = kani::any();\n",
                             pname,
-                            map_type(ptype)
+                            map_type(ptype)?
                         ));
                     }
                 }
@@ -402,7 +402,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     out.push_str(&format!(
                         "    let {}: {} = kani::any();\n",
                         pname,
-                        map_type(ptype)
+                        map_type(ptype)?
                     ));
                 }
 
@@ -542,7 +542,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                                 indent,
                                 pname,
                                 j,
-                                map_type(ptype)
+                                map_type(ptype)?
                             ));
                         }
                     }
@@ -606,16 +606,17 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             out.push_str("        match op {\n");
             for (i, op_name) in via_ops.iter().enumerate() {
                 let op = spec.handlers.iter().find(|o| o.name == *op_name);
-                let param_decls: String = op
-                    .map(|o| {
-                        o.takes_params
-                            .iter()
-                            .map(|(n, t)| {
-                                format!("            let {}: {} = kani::any();\n", n, map_type(t))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let param_decls: String = match op {
+                    Some(o) => o
+                        .takes_params
+                        .iter()
+                        .map(|(n, t)| {
+                            map_type(t)
+                                .map(|rt| format!("            let {}: {} = kani::any();\n", n, rt))
+                        })
+                        .collect::<anyhow::Result<String>>()?,
+                    None => String::new(),
+                };
                 let args: String = op
                     .map(|o| {
                         o.takes_params
@@ -733,7 +734,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
                     pname,
-                    map_type(ptype)
+                    map_type(ptype)?
                 ));
             }
 
@@ -872,7 +873,8 @@ handler compute (amount : U64) {
             &spec,
             /*wrapping=*/ false,
             crate::codegen::map_type,
-        );
+        )
+        .expect("emit_transition_fn");
         assert!(
             out.contains("let total_fee ="),
             "missing total_fee let in transition:\n{}",
@@ -916,7 +918,8 @@ handler buy (amount : U64) {
             &spec,
             /*wrapping=*/ false,
             crate::codegen::map_type,
-        );
+        )
+        .expect("emit_transition_fn");
 
         // Must NOT emit the bare `+=` pattern — that's the pre-v2.6 model.
         assert!(
@@ -952,7 +955,8 @@ handler buy (amount : U64) { effect { pool += amount } }"#;
             &spec,
             /*wrapping=*/ true,
             crate::codegen::map_type,
-        );
+        )
+        .expect("emit_transition_fn");
         assert!(
             out.contains("wrapping_add"),
             "proptest mode (wrapping=true) must keep wrapping_add:\n{}",
