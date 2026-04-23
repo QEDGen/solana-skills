@@ -1,9 +1,11 @@
 # Adversarial Probes Reference
 
-This is the taxonomy Claude runs silently during §3a.5 — the attack-surface
+This is a checklist Claude walks manually during §3a.5 — the attack-surface
 scan that happens after the initial `.qedspec` is drafted but before lint
-or counterexample tiers. Users rarely enumerate these classes on their
-own; the probes do it for them.
+or counterexample tiers. There is no `qedgen probe` CLI command (that's
+v2.7 scope); the taxonomy below is applied by the in-session agent against
+the spec + source. Users rarely enumerate these classes on their own; the
+probes do it for them.
 
 ## How Claude uses this file
 

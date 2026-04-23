@@ -9,7 +9,7 @@ You (Claude) help the user **specify** what their program must guarantee. The `.
 
 **Reference files** (read on demand — do NOT load all at once):
 - `references/qedspec-dsl.md` — qedspec, qedguards, qedbridge DSL syntax
-- `references/adversarial-probes.md` — Probe taxonomy for the automatic attack-surface scan (§3a.5)
+- `references/adversarial-probes.md` — Probe taxonomy the agent walks against the spec (§3a.5) — a checklist, not a CLI command
 - `references/cli.md` — Full CLI reference with all commands and flags
 - `references/support-library.md` — Lean types, constants, lemmas, arithmetic helpers (Phase 2 only)
 - `references/proof-patterns.md` — Lean proof patterns + tactic rules (Phase 2 only)
@@ -32,7 +32,7 @@ Three phases:
 Phase 1 — Spec Design (interactive, all artifacts transient)
   You + User ──→ iterate on .qedspec
     ├── Lint               — structural validation              (instant)
-    ├── Adversarial probe  — automatic attack-surface scan      (instant)
+    ├── Adversarial probe  — agent walks the probe taxonomy     (instant)
     ├── Proptest           — random counterexamples              (~100ms)
     ├── Kani BMC           — bounded-model counterexamples       (~seconds–minutes)
     └── lean-gen (opt.)    — type-level provability sanity      (~seconds)
@@ -131,7 +131,7 @@ Ask questions **one at a time**. Wait for the answer before the next.
 
 ## Step 3: Write and refine the .qedspec
 
-The spec design phase is an **architectural and adversarial interactive loop**. Draft the `.qedspec`, scan it for attack surfaces the user didn't enumerate, then exercise it with counterexample tiers (proptest first, Kani BMC second) to find anything the probes missed. Lint, probes, proptest, and Kani are spec-design tools — not post-ship validation. All harnesses and transient Lean builds live in `/tmp`. Only the `.qedspec` gets committed.
+The spec design phase is an **architectural and adversarial interactive loop**. Draft the `.qedspec`, walk the probe taxonomy against it for attack surfaces the user didn't enumerate, then exercise it with counterexample tiers (proptest first, Kani BMC second) to find anything the probes missed. Lint, probes, proptest, and Kani are spec-design tools — not post-ship validation. All harnesses and transient Lean builds live in `/tmp`. Only the `.qedspec` gets committed.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -178,13 +178,16 @@ For sBPF assembly programs, use `qedguards` instead of the core DSL for guard/pr
 
 Present the spec to the user and get confirmation before proceeding to validation.
 
-### 3a.5. Adversarial probe (automatic attack-surface scan)
+### 3a.5. Adversarial probe (agent-walked attack-surface checklist)
 
-Before running lint or counterexample tiers, automatically scan the spec
-and source for attack surfaces the user may not have thought about. This
-is agent-driven — not a quiz. Users typically don't enumerate
-authorization-bypass scenarios, close-reinit vectors, or narrowing-cast
-corruption on their own; the probe list does it for them.
+Before running lint or counterexample tiers, walk the probe taxonomy
+in `references/adversarial-probes.md` against the spec and source —
+looking for attack surfaces the user may not have enumerated. This
+is a checklist the agent executes in-session, not a `qedgen probe`
+CLI command; a real command is v2.7 scope. Users typically don't
+think through authorization-bypass scenarios, close-reinit vectors,
+or narrowing-cast corruption on their own; the probe list is what
+you apply for them.
 
 See `references/adversarial-probes.md` for the full taxonomy. Classes:
 
