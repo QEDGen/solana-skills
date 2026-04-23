@@ -18,6 +18,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         anyhow::bail!("Integration tests are only supported for Quasar targets, not assembly/sBPF");
     }
 
+    crate::rust_codegen_util::check_effect_targets(&spec)?;
+
     if spec.handlers.is_empty() {
         anyhow::bail!(
             "No handlers found in {}. Is this a valid qedspec file?",

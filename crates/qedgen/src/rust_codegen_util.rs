@@ -340,6 +340,69 @@ pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
     fields.iter().filter(|(_, t)| t != "Pubkey").collect()
 }
 
+/// The base field name an effect targets. `accounts[i].active` → `accounts`;
+/// `foo.bar` → `foo`; `plain` → `plain`. Used by `check_effect_targets` to
+/// look up the target in the declared state schema.
+pub fn effect_target_base(path: &str) -> &str {
+    let path = path.trim();
+    let end = path.find(['[', '.']).unwrap_or(path.len());
+    &path[..end]
+}
+
+/// Verify that every field referenced as an effect target in any handler is
+/// declared somewhere in the state schema — either `state_fields` (flat) or
+/// one of the per-account `account_types[*].fields` (multi-account) or any
+/// sum-type variant payload. Returns a clear error naming the handler and
+/// field when a mismatch is found.
+///
+/// Motivated by v2.6.1 eval (qedgen-bug-report §2, PRD-v2.6.2 G3): the
+/// `init_market` handler wrote `admin := p_admin` but `admin` only appeared
+/// in a sum-type variant payload that the flat-state renderer didn't see,
+/// so codegen emitted `s.admin = …` referencing an undeclared struct field.
+/// Catching this at codegen time beats a `cargo check` error 1000 lines
+/// into the generated harness.
+pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+
+    // Collect every declared field name from every place fields can live.
+    let mut declared: HashSet<&str> = HashSet::new();
+    for (n, _) in &spec.state_fields {
+        declared.insert(n.as_str());
+    }
+    for acct in &spec.account_types {
+        for (n, _) in &acct.fields {
+            declared.insert(n.as_str());
+        }
+    }
+    for rec in &spec.records {
+        for (n, _) in &rec.fields {
+            declared.insert(n.as_str());
+        }
+    }
+    for sum in &spec.sum_types {
+        for variant in &sum.variants {
+            for (n, _) in &variant.fields {
+                declared.insert(n.as_str());
+            }
+        }
+    }
+
+    for handler in &spec.handlers {
+        for (field, _kind, _value) in &handler.effects {
+            let base = effect_target_base(field);
+            if !declared.contains(base) {
+                anyhow::bail!(
+                    "handler `{}` writes effect target `{}` but `{}` is not declared in any state, account, record, or sum-variant payload — add it to the state declaration or remove the effect",
+                    handler.name,
+                    field,
+                    base,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collect all guard conditions from a handler (guard_str + requires clauses)
 /// as a single Rust expression. Returns None if no guards exist.
 pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
@@ -528,4 +591,46 @@ pub fn emit_transition_fn(
     out.push_str("    true\n");
     out.push_str("}\n\n");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chumsky_adapter::parse_str;
+
+    #[test]
+    fn effect_target_base_strips_subscripts_and_dots() {
+        assert_eq!(effect_target_base("plain"), "plain");
+        assert_eq!(effect_target_base("accounts[i].active"), "accounts");
+        assert_eq!(effect_target_base("s.foo"), "s");
+        assert_eq!(effect_target_base("map[0]"), "map");
+        assert_eq!(effect_target_base("  padded  "), "padded");
+    }
+
+    #[test]
+    fn check_effect_targets_accepts_declared_fields() {
+        let src = r#"spec T
+state { balance : U64 }
+handler deposit (amount : U64) {
+  effect { balance += amount }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(check_effect_targets(&spec).is_ok());
+    }
+
+    #[test]
+    fn check_effect_targets_errors_on_undeclared_target() {
+        // Effect writes `phantom` but the state declares only `balance` —
+        // mirrors the v2.6.1 eval's "writes s.admin but admin not declared"
+        // class of bugs. The error must name the handler and the bad field.
+        let src = r#"spec T
+state { balance : U64 }
+handler bogus (amount : U64) {
+  effect { phantom := amount }
+}"#;
+        let spec = parse_str(src).expect("parse");
+        let err = check_effect_targets(&spec).unwrap_err().to_string();
+        assert!(err.contains("bogus"), "should name handler: {err}");
+        assert!(err.contains("phantom"), "should name field: {err}");
+    }
 }

@@ -110,6 +110,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         );
     }
 
+    rust_codegen_util::check_effect_targets(&spec)?;
+
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

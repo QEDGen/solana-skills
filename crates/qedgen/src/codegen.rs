@@ -911,6 +911,8 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
         );
     }
 
+    crate::rust_codegen_util::check_effect_targets(&spec)?;
+
     // Check that the project is initialized (.qed/ next to the spec file)
     if crate::init::find_qed_dir(spec_path).is_none() {
         anyhow::bail!(
