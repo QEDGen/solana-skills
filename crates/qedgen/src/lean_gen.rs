@@ -2786,10 +2786,16 @@ fn offset_to_lean_name(name: &str) -> String {
 }
 
 /// Map DSL types to Lean types.
+///
+/// Keep in sync with the Rust-side `codegen::primitive_map`. Any DSL
+/// primitive with a Rust mapping must have a Lean mapping here too, or
+/// it leaks through as its DSL name (`U16 → "U16"`) and Lake fails
+/// with "Constructor field `U16` contains universe level metavariables".
+/// Parity regression tracked as issue #8 finding #1.
 fn map_type(t: &str) -> &str {
     match t {
-        "U64" | "U128" | "U8" => "Nat",
-        "I128" => "Int",
+        "U8" | "U16" | "U32" | "U64" | "U128" => "Nat",
+        "I8" | "I16" | "I32" | "I64" | "I128" => "Int",
         _ => t,
     }
 }
@@ -4124,6 +4130,49 @@ type State
             paren_if_low_prec("(a = 0 \u{2228} a = 1) \u{2227} b = 2"),
             "(a = 0 \u{2228} a = 1) \u{2227} b = 2"
         );
+    }
+
+    // Issue #8 finding #1 regression. Before the fix, `U16` leaked
+    // through as the DSL type name, producing Lake's
+    // "universe level metavariables" error. Now map_type covers every
+    // primitive the Rust side does.
+    #[test]
+    fn finding_1_u16_lowers_to_nat() {
+        let spec_src =
+            include_str!("../../../examples/regressions/issue-8/repro-01-u16-type.qedspec");
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("mm_count : Nat"),
+            "expected U16 param to lower to Nat, got:\n{}",
+            lean
+        );
+        assert!(
+            !lean.contains("mm_count : U16"),
+            "U16 leaked through — fix regressed:\n{}",
+            lean
+        );
+    }
+
+    // Map parity: every primitive the Rust side maps must have a Lean
+    // mapping too. The string-level check here catches the class of
+    // drift (finding #1) without running through full render.
+    #[test]
+    fn map_type_covers_all_signed_and_unsigned_primitives() {
+        for unsigned in ["U8", "U16", "U32", "U64", "U128"] {
+            assert_eq!(
+                super::map_type(unsigned),
+                "Nat",
+                "unsigned {unsigned} should map to Nat"
+            );
+        }
+        for signed in ["I8", "I16", "I32", "I64", "I128"] {
+            assert_eq!(
+                super::map_type(signed),
+                "Int",
+                "signed {signed} should map to Int"
+            );
+        }
     }
 
     // Issue #8 finding #2 regression. Runs against the exact fixture
