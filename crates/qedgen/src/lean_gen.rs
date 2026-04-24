@@ -1908,10 +1908,48 @@ fn render_aborts_if(
             let disjunction = all_abort_conditions.join(" \u{2228} "); // ∨
             out.push_str(&format!("    ({}) := sorry\n\n", disjunction));
         } else {
+            // Count per-error occurrences across both aborts_if and
+            // requires-with-else so duplicates (issue #8 finding #3)
+            // can be disambiguated. When the same error name appears
+            // multiple times across a single handler — common in
+            // real Anchor programs where one error code covers several
+            // preconditions — bare `{op}_aborts_if_{error}` collides
+            // and Lake reports "already been declared". Suffix each
+            // occurrence with its positional index (_0, _1, …) when
+            // count > 1; keep the unsuffixed form for unique cases so
+            // bundled examples don't churn.
+            let mut error_total: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for abort in &op.aborts_if {
+                *error_total.entry(abort.error_name.clone()).or_insert(0) += 1;
+            }
+            for req in &op.requires {
+                if let Some(ref e) = req.error_name {
+                    *error_total.entry(e.clone()).or_insert(0) += 1;
+                }
+            }
+            let mut error_seen: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let theorem_name_for = |error_name: &str,
+                                    seen: &mut std::collections::HashMap<String, usize>|
+             -> String {
+                let total = error_total.get(error_name).copied().unwrap_or(0);
+                let idx = {
+                    let entry = seen.entry(error_name.to_string()).or_insert(0);
+                    let cur = *entry;
+                    *entry += 1;
+                    cur
+                };
+                if total > 1 {
+                    safe_name(&format!("{}_aborts_if_{}_{}", op.name, error_name, idx))
+                } else {
+                    safe_name(&format!("{}_aborts_if_{}", op.name, error_name))
+                }
+            };
+
             // Per-condition abort theorems
             for abort in &op.aborts_if {
-                let theorem_name =
-                    safe_name(&format!("{}_aborts_if_{}", op.name, abort.error_name));
+                let theorem_name = theorem_name_for(&abort.error_name, &mut error_seen);
                 out.push_str(&format!(
                     "theorem {} (s : {}) (signer : Pubkey){}\n",
                     theorem_name, state_type, param_sig
@@ -1925,7 +1963,7 @@ fn render_aborts_if(
             // Requires-based abort theorems — auto-proven via if_neg projection
             for req in &op.requires {
                 if let Some(ref error_name) = req.error_name {
-                    let theorem_name = safe_name(&format!("{}_aborts_if_{}", op.name, error_name));
+                    let theorem_name = theorem_name_for(error_name, &mut error_seen);
                     out.push_str(&format!(
                         "theorem {} (s : {}) (signer : Pubkey){}\n",
                         theorem_name, state_type, param_sig
@@ -4173,6 +4211,59 @@ type State
                 "signed {signed} should map to Int"
             );
         }
+    }
+
+    // Issue #8 finding #3 regression. Two `requires X else SameErr`
+    // previously collided at `h_aborts_if_SameErr`; now they get
+    // positional suffixes `_0` / `_1`.
+    #[test]
+    fn finding_3_duplicate_error_theorems_uniquify() {
+        let spec_src = include_str!(
+            "../../../examples/regressions/issue-8/repro-03-duplicate-theorem.qedspec"
+        );
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("theorem h_aborts_if_SameErr_0"),
+            "expected _0 suffix, got:\n{}",
+            lean
+        );
+        assert!(
+            lean.contains("theorem h_aborts_if_SameErr_1"),
+            "expected _1 suffix, got:\n{}",
+            lean
+        );
+        // Count plain (no-suffix) occurrences — should be zero.
+        let plain_count = lean
+            .matches("theorem h_aborts_if_SameErr (")
+            .count();
+        assert_eq!(
+            plain_count, 0,
+            "unsuffixed theorem name leaked through:\n{}",
+            lean
+        );
+    }
+
+    // Parity: when an error appears only once, no suffix should
+    // be added (avoids churning every existing example).
+    #[test]
+    fn finding_3_unique_error_keeps_bare_name() {
+        // Uses the repro-02 fixture: two requires, DIFFERENT errors.
+        let spec_src = include_str!(
+            "../../../examples/regressions/issue-8/repro-02-composite-or-parens.qedspec"
+        );
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("theorem h_aborts_if_E1 "),
+            "expected bare E1, got:\n{}",
+            lean
+        );
+        assert!(
+            lean.contains("theorem h_aborts_if_E2 "),
+            "expected bare E2, got:\n{}",
+            lean
+        );
     }
 
     // Issue #8 finding #2 regression. Runs against the exact fixture
