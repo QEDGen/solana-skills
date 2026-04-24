@@ -34,16 +34,25 @@ import QEDGen.Solana.State\n\
 import QEDGen.Solana.Valid\n\
 import QEDGen.Solana.Spec\n";
 
+/// Mathlib tag pinned for every `qedgen init --mathlib` project and
+/// for `lean_solana_mathlib/lakefile.lean`. Kept in sync with the
+/// `lean-toolchain` so a `lake update` can't float the dep to a HEAD
+/// commit that drags in a newer Lean.
+const MATHLIB_TAG: &str = "v4.30.0-rc2";
+
 /// Render the Mathlib `require` stanza appended to the `lean_solana/`
 /// sub-lakefile. When the shared workspace install exists, emit a
 /// local-path require so Lake reuses the pre-built cache; otherwise
-/// fall back to a git require for users without `qedgen setup --mathlib`.
+/// fall back to a pinned git require for users without
+/// `qedgen setup --mathlib`.
 fn mathlib_require() -> String {
     match crate::validate::shared_mathlib_path() {
         Some(path) => format!("\nrequire mathlib from \"{}\"\n", path.display()),
-        None => "\nrequire mathlib from git\n  \
-                 \"https://github.com/leanprover-community/mathlib4.git\"\n"
-            .to_string(),
+        None => format!(
+            "\nrequire mathlib from git\n  \
+             \"https://github.com/leanprover-community/mathlib4.git\" @ \"{}\"\n",
+            MATHLIB_TAG
+        ),
     }
 }
 

@@ -1,0 +1,13 @@
+{"version": "1.2.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"type": "path",
+   "scope": "",
+   "name": "qedgenSupport",
+   "manifestFile": "lake-manifest.json",
+   "inherited": false,
+   "dir": "./lean_solana",
+   "configFile": "lakefile.lean"}],
+ "name": "escrow_splitProofs",
+ "lakeDir": ".lake",
+ "fixedToolchain": false}
