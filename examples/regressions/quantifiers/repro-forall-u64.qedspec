@@ -1,0 +1,29 @@
+// Quantifier regression — forall over U64 must emit P1 lint, not silently pass
+//
+// Expected: `qedgen check` emits a P1 `unchecked_quantifier` warning:
+//   property 'all_slots_valid' uses a quantifier over a type that
+//   proptest/Kani cannot exhaust — the harness emits `true` and skips the check
+//
+// Actual (pre-fix): passed check with 0 warnings; proptest/Kani harness
+//   silently returned true, giving false confidence the property was checked.
+//
+// Fix site: crates/qedgen/src/check.rs — check_completeness now detects the
+// QEDGEN_UNSUPPORTED_QUANTIFIER sentinel in rust_expression and emits an
+// unchecked_quantifier P1 warning.
+
+spec ReproForallU64
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { slot : U64 }
+
+type Error | E
+
+property all_slots_valid :
+  forall v : U64, v >= 0
+  preserved_by all
+
+handler update : State.Active -> State.Active {
+  permissionless
+  effect { slot := slot }
+}

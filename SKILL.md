@@ -763,10 +763,17 @@ Accepts comma- or newline-separated fields; desugars to
 alongside the multi-line form.
 
 **`implies`** in property bodies lowers to `(!a) || (b)` in generated
-Rust (Kani/proptest). **`forall` / `exists`** in a property body emit a
-`/* QEDGEN_UNSUPPORTED_QUANTIFIER */` marker — the property fn returns
-`true` and you should express the quantification at the harness level
-via `kani::any()` / proptest generators.
+Rust (Kani/proptest). **`forall` / `exists`** over **U8 or I8** lower to
+`(T::MIN..=T::MAX).all(|v| body)` / `.any(|v| body)` — exhaustive check,
+≤256 iterations, works in both proptest and Kani. Larger types (U16+)
+still emit a `/* QEDGEN_UNSUPPORTED_QUANTIFIER */` sentinel and the
+property fn returns `true`; `qedgen check` fires a P1
+`unchecked_quantifier` warning so the gap is visible rather than silent.
+
+**Quantified-property preservation theorems** (property body contains
+`∀`/`∃`) default to `sorry` in generated Lean — `omega` cannot prove
+universal goals. Fill these via the standard escalation ladder:
+Leanstral first (`qedgen fill-sorry`), then Aristotle for harder goals.
 
 **Multi-variant ADTs with shared field names** deduplicate when
 flattened into the state model (first-variant wins on name collisions).

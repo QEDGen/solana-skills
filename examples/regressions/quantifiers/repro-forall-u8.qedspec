@@ -1,0 +1,30 @@
+// Quantifier regression — forall over U8 must lower to a real iterator
+//
+// Expected: `qedgen codegen --proptest` emits
+//   fn bytes_nonneg(s: &State) -> bool {
+//     (u8::MIN..=u8::MAX).all(|v| v >= 0)
+//   }
+// `qedgen check` emits 0 unchecked_quantifier warnings.
+//
+// Actual (pre-fix): emitted fn body was `true` (stub), silently skipping
+//   the property check in all harnesses (proptest and Kani).
+//
+// Fix site: crates/qedgen/src/chumsky_adapter.rs — expr_to_rust Quant arm
+// now lowers U8/I8 quantifiers to (T::MIN..=T::MAX).all/any(|v| body).
+
+spec ReproForallU8
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { balance : U64 }
+
+type Error | E
+
+property bytes_nonneg :
+  forall v : U8, v >= 0
+  preserved_by all
+
+handler noop : State.Active -> State.Active {
+  permissionless
+  effect { balance := balance }
+}
