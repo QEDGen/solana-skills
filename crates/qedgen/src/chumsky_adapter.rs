@@ -276,7 +276,12 @@ impl<'a> TypeEnv<'a> {
 fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String {
     match e {
         Expr::Int(v) => v.to_string(),
-        Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        // Bool literal in Lean 4 is lowercase `true`/`false` (the `Bool`
+        // inductive). `True`/`False` are *Props*, so an effect RHS like
+        // `flag := True` would type-error when `flag : Bool`. This was
+        // the latent half of issue #8 finding #6 (the cover-witness
+        // side used `"0"` for Bool; this side used Prop).
+        Expr::Bool(b) => b.to_string(),
         Expr::Path(p) => path_to_lean(p, ctx, /*inside_old=*/ false, consts),
         Expr::Old(inner) => path_or_expr_to_lean_old(&inner.node, ctx, consts, env),
         Expr::Sum {

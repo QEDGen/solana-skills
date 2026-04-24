@@ -1027,8 +1027,14 @@ impl WitnessState {
         let field_vals: Vec<(String, String)> = fields
             .iter()
             .map(|(name, typ)| {
+                // Cover-witness initial value per field type. Pubkey
+                // fields refer to the `pk` binding in the generated
+                // proof scope; Bool fields need the lowercase Bool
+                // literal (`False` is a Prop); everything else defaults
+                // to the numeric 0. Issue #8 finding #6.
                 let val = match map_type(typ) {
                     "Pubkey" => "pk".to_string(),
+                    "Bool" => "false".to_string(),
                     _ => "0".to_string(),
                 };
                 (name.clone(), val)
@@ -1130,6 +1136,7 @@ fn choose_param_values(handler: &crate::check::ParsedHandler) -> Vec<(String, St
         .map(|(name, typ)| {
             let val = match map_type(typ) {
                 "Pubkey" => "pk".to_string(),
+                "Bool" => "false".to_string(),
                 _ => {
                     // Check if this is an index-like param: only appears in `param < state.X`
                     // and never in `> 0` or as a bound
@@ -4211,6 +4218,46 @@ type State
                 "signed {signed} should map to Int"
             );
         }
+    }
+
+    // Issue #8 finding #6 regression — two halves:
+    //   (a) cover-witness hardcoded `"0"` for any non-Pubkey field;
+    //       Bool should be `false`.
+    //   (b) effect RHS rendered `Expr::Bool(true)` as `True` (Prop)
+    //       instead of `true` (Bool literal).
+    // Both halves must be fixed together or `lake build` still fails
+    // — the first is a witness-construction issue, the second is a
+    // field-assignment type error.
+    #[test]
+    fn finding_6_bool_witness_and_effect_rhs() {
+        let spec_src = include_str!(
+            "../../../examples/regressions/issue-8/repro-06-cover-witness-bool.qedspec"
+        );
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        // (a) witness uses lowercase Bool literal
+        assert!(
+            lean.contains("⟨false, .Uninitialized⟩"),
+            "expected ⟨false, .Uninitialized⟩ witness, got:\n{}",
+            lean
+        );
+        // (b) effect RHS uses lowercase Bool literal
+        assert!(
+            lean.contains("flag := true"),
+            "expected `flag := true` effect RHS, got:\n{}",
+            lean
+        );
+        // Capital-T Prop forms must not appear
+        assert!(
+            !lean.contains("flag := True"),
+            "`True` (Prop) leaked into Bool field RHS:\n{}",
+            lean
+        );
+        assert!(
+            !lean.contains("⟨0, .Uninitialized⟩"),
+            "numeric `0` witness leaked onto Bool field:\n{}",
+            lean
+        );
     }
 
     // Issue #8 finding #3 regression. Two `requires X else SameErr`
