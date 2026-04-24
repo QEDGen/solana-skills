@@ -1599,15 +1599,48 @@ fn liveness_proof_script(
 ) -> String {
     let n = ops_path.len();
 
-    // Build the ops list literal: [.op1, .op2, ...]
+    // Build the ops list literal: `[.op1 arg1 arg2, .op2, ...]`. Each
+    // constructor needs a witness arg per `takes_params`, else the
+    // bare `.op` has the wrong type (e.g. `Operation.init` is
+    // `Pubkey → Operation` for a handler `init (p : Pubkey)`).
+    // Issue #8 finding #4.
+    let mut needs_pk_binding = false;
     let ops_list: Vec<String> = ops_path
         .iter()
-        .map(|name| format!(".{}", safe_name(name)))
+        .map(|name| {
+            let handler = handlers.iter().find(|h| &h.name == name);
+            let args: Vec<String> = match handler {
+                Some(h) => h
+                    .takes_params
+                    .iter()
+                    .map(|(_, typ)| match map_type(typ) {
+                        "Pubkey" => {
+                            needs_pk_binding = true;
+                            "pk".to_string()
+                        }
+                        "Bool" => "false".to_string(),
+                        _ => "0".to_string(),
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            if args.is_empty() {
+                format!(".{}", safe_name(name))
+            } else {
+                format!(".{} {}", safe_name(name), args.join(" "))
+            }
+        })
         .collect();
     let ops_literal = format!("[{}]", ops_list.join(", "));
 
     let mut proof = String::new();
     proof.push_str(" := by\n");
+    // Matching cover_trace_proof's convention: introduce a concrete
+    // Pubkey witness so constructors that take pubkey payloads can
+    // appear in the ops literal.
+    if needs_pk_binding {
+        proof.push_str("  let pk : Pubkey := \u{27E8}0, 0, 0, 0\u{27E9}\n");
+    }
     proof.push_str(&format!(
         "  refine \u{27E8}{}, by decide, fun s' h_apply => ?\u{5F}\u{27E9}\n",
         ops_literal
@@ -4218,6 +4251,39 @@ type State
                 "signed {signed} should map to Int"
             );
         }
+    }
+
+    // Issue #8 finding #4 regression. `liveness foo : S ~> T via [init] within 1`
+    // on an `init (p : Pubkey)` handler was emitting `.init` (bare)
+    // in the ops literal; `Operation.init` has type `Pubkey → Operation`,
+    // so Lake rejected with "List.cons <function> _" type mismatch.
+    // Post-fix: `.init pk` with a `let pk := ⟨0, 0, 0, 0⟩` binding.
+    #[test]
+    fn finding_4_liveness_threads_pubkey_param_witness() {
+        let spec_src =
+            include_str!("../../../examples/regressions/issue-8/repro-04-liveness-params.qedspec");
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("[.init pk]"),
+            "expected `[.init pk]` ops literal, got:\n{}",
+            lean
+        );
+        assert!(
+            lean.contains("let pk : Pubkey := \u{27E8}0, 0, 0, 0\u{27E9}"),
+            "expected `let pk` binding in proof scope, got:\n{}",
+            lean
+        );
+        // Bare `.init` (without a param) must no longer appear in the
+        // liveness_foo theorem body.
+        let foo_start = lean.find("theorem liveness_foo").unwrap();
+        let foo_end = lean[foo_start..].find("end ").unwrap() + foo_start;
+        let foo_body = &lean[foo_start..foo_end];
+        assert!(
+            !foo_body.contains("[.init]"),
+            "bare `.init` leaked into liveness proof:\n{}",
+            foo_body
+        );
     }
 
     // Issue #8 finding #6 regression — two halves:
