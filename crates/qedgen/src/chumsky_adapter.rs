@@ -1417,6 +1417,7 @@ fn is_signed_int(t: &str) -> bool {
 /// Pubkey = 0 pass silently."
 pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()> {
     let field_types = collect_field_types(parsed);
+    let const_literals = collect_numeric_consts(spec);
 
     for Node { node, .. } in &spec.items {
         if let TopItem::Handler(h) = node {
@@ -1425,10 +1426,20 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
                 .iter()
                 .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
                 .collect();
-            typecheck_handler(h, &field_types, &param_types)?;
+            typecheck_handler(h, &field_types, &param_types, &const_literals)?;
         }
     }
     Ok(())
+}
+
+fn collect_numeric_consts(spec: &a::Spec) -> std::collections::HashMap<String, u128> {
+    let mut out = std::collections::HashMap::new();
+    for Node { node, .. } in &spec.items {
+        if let TopItem::Const { name, value } = node {
+            out.insert(name.clone(), *value);
+        }
+    }
+    out
 }
 
 /// Flatten every field declaration in the spec into `name → DSL-type`.
@@ -1464,19 +1475,34 @@ fn typecheck_handler(
     h: &a::HandlerDecl,
     field_types: &std::collections::HashMap<String, String>,
     param_types: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, u128>,
 ) -> anyhow::Result<()> {
     for Node { node, .. } in &h.clauses {
         match node {
             a::HandlerClause::Effect(stmts) => {
                 for Node { node: stmt, .. } in stmts {
-                    check_effect_typed(&h.name, stmt, field_types, param_types)?;
+                    check_effect_typed(&h.name, stmt, field_types, param_types, const_literals)?;
                 }
             }
             a::HandlerClause::Requires { guard, .. } => {
-                check_cmp_types(&h.name, "requires", &guard.node, field_types, param_types)?;
+                check_cmp_types(
+                    &h.name,
+                    "requires",
+                    &guard.node,
+                    field_types,
+                    param_types,
+                    const_literals,
+                )?;
             }
             a::HandlerClause::Ensures(e) => {
-                check_cmp_types(&h.name, "ensures", &e.node, field_types, param_types)?;
+                check_cmp_types(
+                    &h.name,
+                    "ensures",
+                    &e.node,
+                    field_types,
+                    param_types,
+                    const_literals,
+                )?;
             }
             _ => {}
         }
@@ -1517,13 +1543,14 @@ fn check_effect_typed(
     stmt: &a::EffectStmt,
     field_types: &std::collections::HashMap<String, String>,
     param_types: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, u128>,
 ) -> anyhow::Result<()> {
     let lhs_type = match resolve_path_type(&stmt.lhs, field_types, param_types) {
         Some(t) => t,
         None => return Ok(()),
     };
     if lhs_type == "Pubkey" {
-        if let Expr::Int(v) = &stmt.rhs.node {
+        if let Some(v) = numeric_literal_value(&stmt.rhs.node, const_literals) {
             anyhow::bail!(
                 "handler `{}` effect `{} := {}`: Pubkey field cannot be assigned a numeric literal. \
                  The DSL has no Pubkey-literal syntax — use a handler parameter, a constant, \
@@ -1543,6 +1570,7 @@ fn check_cmp_types(
     expr: &Expr,
     field_types: &std::collections::HashMap<String, String>,
     param_types: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, u128>,
 ) -> anyhow::Result<()> {
     match expr {
         Expr::Cmp { lhs, rhs, .. } => {
@@ -1553,6 +1581,7 @@ fn check_cmp_types(
                 &rhs.node,
                 field_types,
                 param_types,
+                const_literals,
             )?;
             // Cmp operands are terminal atoms in the DSL (no nested Cmp),
             // so no need to recurse into them.
@@ -1564,6 +1593,7 @@ fn check_cmp_types(
                 &lhs.node,
                 field_types,
                 param_types,
+                const_literals,
             )?;
             check_cmp_types(
                 handler_name,
@@ -1571,6 +1601,7 @@ fn check_cmp_types(
                 &rhs.node,
                 field_types,
                 param_types,
+                const_literals,
             )?;
         }
         Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
@@ -1580,6 +1611,7 @@ fn check_cmp_types(
                 &inner.node,
                 field_types,
                 param_types,
+                const_literals,
             )?;
         }
         Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
@@ -1589,6 +1621,7 @@ fn check_cmp_types(
                 &body.node,
                 field_types,
                 param_types,
+                const_literals,
             )?;
         }
         _ => {}
@@ -1603,6 +1636,7 @@ fn check_cmp_pair(
     rhs: &Expr,
     field_types: &std::collections::HashMap<String, String>,
     param_types: &std::collections::HashMap<String, String>,
+    const_literals: &std::collections::HashMap<String, u128>,
 ) -> anyhow::Result<()> {
     // Try both orientations (LHS Pubkey / RHS Int and vice versa).
     let pubkey_vs_int = |p: &Expr, i: &Expr| -> Option<(String, u128)> {
@@ -1614,8 +1648,8 @@ fn check_cmp_pair(
         if t != "Pubkey" {
             return None;
         }
-        if let Expr::Int(v) = i {
-            return Some((render_path_human(path), *v));
+        if let Some(v) = numeric_literal_value(i, const_literals) {
+            return Some((render_path_human(path), v));
         }
         None
     };
@@ -1631,6 +1665,18 @@ fn check_cmp_pair(
         );
     }
     Ok(())
+}
+
+fn numeric_literal_value(
+    expr: &Expr,
+    const_literals: &std::collections::HashMap<String, u128>,
+) -> Option<u128> {
+    match expr {
+        Expr::Int(v) => Some(*v),
+        Expr::Path(p) if p.segments.is_empty() => const_literals.get(&p.root).copied(),
+        Expr::Paren(inner) | Expr::Old(inner) => numeric_literal_value(&inner.node, const_literals),
+        _ => None,
+    }
 }
 
 fn render_path_human(p: &a::Path) -> String {
@@ -2395,6 +2441,69 @@ mod tests {
             msg.contains("compares Pubkey"),
             "unexpected error message: {msg}"
         );
+    }
+
+    #[test]
+    fn finding_7_pubkey_assign_from_numeric_const_rejected() {
+        let src = r#"spec Repro7Const
+program_id "11111111111111111111111111111111"
+const ZERO = 0
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+type Error | E
+handler h : State.Uninitialized -> State.Active {
+  permissionless
+  effect { key := ZERO }
+}
+"#;
+        let err = parse_str(src).expect_err("expected key := ZERO to fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Pubkey field cannot be assigned a numeric literal"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn finding_8_pubkey_compare_with_numeric_const_rejected() {
+        let src = r#"spec Repro8Const
+program_id "11111111111111111111111111111111"
+const ZERO = 0
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+type Error | E
+handler h : State.Active -> State.Active {
+  permissionless
+  requires state.key != ZERO else E
+  effect { }
+}
+"#;
+        let err = parse_str(src).expect_err("expected state.key != ZERO to fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("compares Pubkey"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn pubkey_param_paths_remain_allowed_with_numeric_consts_present() {
+        let src = r#"spec ReproConstGuard
+program_id "11111111111111111111111111111111"
+const ZERO = 0
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+type Error | E
+handler h (k : Pubkey) : State.Active -> State.Active {
+  permissionless
+  requires state.key != k else E
+  effect { key := k }
+}
+"#;
+        parse_str(src).expect("Pubkey param assignment/comparison should remain valid");
     }
 
     // Guard: bundled specs that legitimately compare/assign Pubkey
