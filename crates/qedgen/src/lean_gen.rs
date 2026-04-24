@@ -119,6 +119,8 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     out.push_str(&format!("namespace {}\n\n", name));
     out.push_str("open QEDGen.Solana\n\n");
 
+    emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+
     // Status inductive (if lifecycle states exist)
     let has_lifecycle = !spec.lifecycle_states.is_empty();
     if has_lifecycle {
@@ -212,6 +214,8 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
 
     out.push_str(&format!("namespace {}\n\n", name));
     out.push_str("open QEDGen.Solana\n\n");
+
+    emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
 
     // Per-account sections
     for acct in &spec.account_types {
@@ -389,6 +393,36 @@ fn build_guard_cond_parts(
         }
     }
     cond_parts
+}
+
+/// Emit `axiom` declarations for every uninterpreted helper collected
+/// from the spec. These are functions referenced by name in guard /
+/// ensures / effect / property bodies but never defined structurally —
+/// user-facing "named but-not-fully-modeled" security check helpers.
+/// Issue #8 finding #5. Without this emission, generated Lean references
+/// an identifier Lake never sees declared.
+fn emit_uninterpreted_helpers(out: &mut String, helpers: &[(String, Vec<String>, String)]) {
+    if helpers.is_empty() {
+        return;
+    }
+    out.push_str(
+        "-- Uninterpreted helpers: declared axiomatically so generated\n\
+         -- proofs typecheck even though the DSL doesn't model their\n\
+         -- semantics. Treat each as an abstract property; strengthen\n\
+         -- into a concrete definition in your support module if you\n\
+         -- want to discharge it (rather than trust it).\n",
+    );
+    for (name, arg_types, return_type) in helpers {
+        let sig = if arg_types.is_empty() {
+            return_type.clone()
+        } else {
+            let mut parts: Vec<String> = arg_types.clone();
+            parts.push(return_type.clone());
+            parts.join(" \u{2192} ")
+        };
+        out.push_str(&format!("axiom {} : {}\n", safe_name(name), sig));
+    }
+    out.push('\n');
 }
 
 /// Wrap `expr` in parens iff it contains a top-level binary operator of
@@ -3172,6 +3206,8 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n");
     out.push_str("open QEDGen.Solana.IndexedState\n\n");
 
+    emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+
     // -- Constants --
     for (name, val) in &spec.constants {
         out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(name), val));
@@ -4251,6 +4287,35 @@ type State
                 "signed {signed} should map to Int"
             );
         }
+    }
+
+    // Issue #8 finding #5 regression. `requires foo(y) else E` used to
+    // emit `(foo (y))` in the guard without ever declaring `foo`, so
+    // Lake rejected with "Unknown identifier `foo`". Now `adapt` walks
+    // guard / ensures / effect-RHS / property bodies for Expr::App
+    // sites and populates `uninterpreted_helpers`; lean_gen emits an
+    // `axiom` block at the top of Spec.lean.
+    #[test]
+    fn finding_5_uninterpreted_helpers_are_axiomatized() {
+        let spec_src = include_str!(
+            "../../../examples/regressions/issue-8/repro-05-uninterpreted-helper.qedspec"
+        );
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("axiom foo : Nat \u{2192} Prop"),
+            "expected `axiom foo : Nat → Prop`, got:\n{}",
+            lean
+        );
+        // Helper must be declared before first use (namespace position
+        // matters for Lean's single-pass elaborator).
+        let axiom_pos = lean.find("axiom foo").expect("axiom present");
+        let use_pos = lean.find("foo (y)").expect("foo call present");
+        assert!(
+            axiom_pos < use_pos,
+            "axiom declared after first use:\n{}",
+            lean
+        );
     }
 
     // Issue #8 finding #4 regression. `liveness foo : S ~> T via [init] within 1`

@@ -654,6 +654,20 @@ pub struct ParsedSpec {
     /// Used for target inference (`sbpf` → assembly target) and for
     /// platform-scoped feature flags in backends.
     pub pragmas: Vec<String>,
+
+    /// Uninterpreted helper functions referenced by name in
+    /// `requires` / `ensures` / effect-RHS / property bodies but not
+    /// declared structurally in the spec. For each, we capture an
+    /// inferred Lean signature so codegen can emit an `axiom`
+    /// declaration at the top of `Spec.lean`, letting Lake typecheck
+    /// the surrounding expressions without forcing the user to give a
+    /// full semantics for the helper. Issue #8 finding #5.
+    ///
+    /// Representation: `(func_name, arg_types_in_lean, return_type)`.
+    /// First-encounter wins for the signature — inconsistent uses
+    /// across the spec would need a richer type inference pass than
+    /// v2.7.1 carries.
+    pub uninterpreted_helpers: Vec<(String, Vec<String>, String)>,
 }
 
 impl ParsedSpec {

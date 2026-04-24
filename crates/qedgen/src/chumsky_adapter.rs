@@ -1267,6 +1267,149 @@ pub fn parse_str(src: &str) -> anyhow::Result<ParsedSpec> {
     Ok(parsed)
 }
 
+/// Walk every guard / ensures / effect-RHS / property body in the spec
+/// and collect every `Expr::App` call site as an uninterpreted helper.
+/// First-encounter wins for the signature; duplicates (same name, same
+/// arity) are skipped. Issue #8 finding #5.
+///
+/// Return type is always `Prop` — in practice every App call in the
+/// DSL lives in a boolean-valued position (guard, invariant, ensures,
+/// or a boolean-valued let binding). If a user puts a call in an
+/// arithmetic position (e.g. `effect { x := foo(y) + 1 }`), the emitted
+/// `axiom foo : T → Prop` won't typecheck; richer context-sensitive
+/// inference is a v2.8 candidate.
+fn collect_uninterpreted_helpers(
+    spec: &a::Spec,
+    parsed: &ParsedSpec,
+) -> Vec<(String, Vec<String>, String)> {
+    let field_types = collect_field_types(parsed);
+    let mut out: Vec<(String, Vec<String>, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, usize)> =
+        std::collections::HashSet::new();
+
+    for Node { node, .. } in &spec.items {
+        match node {
+            TopItem::Handler(h) => {
+                let param_types: std::collections::HashMap<String, String> = h
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+                    .collect();
+                for Node { node: clause, .. } in &h.clauses {
+                    match clause {
+                        a::HandlerClause::Requires { guard, .. } => {
+                            walk_apps(
+                                &guard.node,
+                                &field_types,
+                                &param_types,
+                                &mut out,
+                                &mut seen,
+                            );
+                        }
+                        a::HandlerClause::Ensures(e) => {
+                            walk_apps(&e.node, &field_types, &param_types, &mut out, &mut seen);
+                        }
+                        a::HandlerClause::Effect(stmts) => {
+                            for Node { node: s, .. } in stmts {
+                                walk_apps(
+                                    &s.rhs.node,
+                                    &field_types,
+                                    &param_types,
+                                    &mut out,
+                                    &mut seen,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TopItem::Property(p) => {
+                walk_apps(
+                    &p.body.node,
+                    &field_types,
+                    &std::collections::HashMap::new(),
+                    &mut out,
+                    &mut seen,
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn walk_apps(
+    expr: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+    out: &mut Vec<(String, Vec<String>, String)>,
+    seen: &mut std::collections::HashSet<(String, usize)>,
+) {
+    match expr {
+        Expr::App { func, args } => {
+            let key = (func.clone(), args.len());
+            if seen.insert(key) {
+                let arg_types: Vec<String> = args
+                    .iter()
+                    .map(|n| infer_lean_type(&n.node, field_types, param_types))
+                    .collect();
+                out.push((func.clone(), arg_types, "Prop".to_string()));
+            }
+            for n in args {
+                walk_apps(&n.node, field_types, param_types, out, seen);
+            }
+        }
+        Expr::BoolOp { lhs, rhs, .. } | Expr::Cmp { lhs, rhs, .. } | Expr::Arith { lhs, rhs, .. } => {
+            walk_apps(&lhs.node, field_types, param_types, out, seen);
+            walk_apps(&rhs.node, field_types, param_types, out, seen);
+        }
+        Expr::Not(inner)
+        | Expr::Paren(inner)
+        | Expr::Old(inner) => {
+            walk_apps(&inner.node, field_types, param_types, out, seen);
+        }
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
+            walk_apps(&body.node, field_types, param_types, out, seen);
+        }
+        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+            walk_apps(&a.node, field_types, param_types, out, seen);
+            walk_apps(&b.node, field_types, param_types, out, seen);
+            walk_apps(&d.node, field_types, param_types, out, seen);
+        }
+        _ => {}
+    }
+}
+
+/// Best-effort Lean type for an argument expression. Used only for
+/// axiom signature synthesis; a wrong guess degrades to a type error
+/// at `lake build` time, but isn't silently corrupting anything.
+fn infer_lean_type(
+    expr: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+) -> String {
+    match expr {
+        Expr::Int(_) => "Nat".to_string(),
+        Expr::Bool(_) => "Bool".to_string(),
+        Expr::Path(p) => {
+            let dsl_type = resolve_path_type(p, field_types, param_types);
+            match dsl_type {
+                Some("Pubkey") => "Pubkey".to_string(),
+                Some("Bool") => "Bool".to_string(),
+                Some(t) if is_signed_int(t) => "Int".to_string(),
+                Some(_) => "Nat".to_string(),
+                None => "Nat".to_string(),
+            }
+        }
+        _ => "Nat".to_string(),
+    }
+}
+
+fn is_signed_int(t: &str) -> bool {
+    matches!(t, "I8" | "I16" | "I32" | "I64" | "I128")
+}
+
 /// Narrow check-time type guard for Pubkey-vs-numeric-literal mismatches
 /// in effect RHS and `requires` / `ensures` comparisons. Issue #8
 /// findings #7 and #8: the DSL has no Pubkey literal syntax, so
@@ -1804,6 +1947,10 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     }
 
     out.constants = constants;
+    // F5: collect uninterpreted helpers after all other fields are
+    // populated — the collector needs the full state_fields + records
+    // + sum_types picture to infer argument types.
+    out.uninterpreted_helpers = collect_uninterpreted_helpers(spec, &out);
     out
 }
 
