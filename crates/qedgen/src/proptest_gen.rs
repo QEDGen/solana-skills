@@ -127,11 +127,18 @@ fn strategy_for_field(
     if let Some(bound) = field_bound {
         let rust_type = map_type(dsl_type, spec)?;
         return Ok(match mode {
-            StrategyMode::Boundary => format!(
-                "prop_oneof![0{rt}..=3{rt}, ({b} - 3)..={b}{rt}]",
-                rt = rust_type,
-                b = bound
-            ),
+            StrategyMode::Boundary => {
+                let n: u128 = bound.parse().unwrap_or(u128::MAX);
+                if n < 3 {
+                    format!("0{rt}..={b}{rt}", rt = rust_type, b = bound)
+                } else {
+                    format!(
+                        "prop_oneof![0{rt}..=3{rt}, ({b} - 3)..={b}{rt}]",
+                        rt = rust_type,
+                        b = bound
+                    )
+                }
+            }
             StrategyMode::Full => format!("0{rt}..={b}{rt}", rt = rust_type, b = bound),
         });
     }

@@ -1375,6 +1375,7 @@ fn build_counterexample(
     prop_fields: &[&str],
     op: &ParsedHandler,
     modified_fields: &[&str],
+    constants: &[(String, String)],
 ) -> Option<Counterexample> {
     let relation = parse_property_relation(expr, prop_fields);
 
@@ -1416,7 +1417,13 @@ fn build_counterexample(
     let mut post_rhs = rhs_val;
     let mut effects = Vec::new();
     for (field, kind, value) in &effect_triples {
-        let v: i64 = value.parse().unwrap_or(1);
+        let v: i64 = value.parse().unwrap_or_else(|_| {
+            constants
+                .iter()
+                .find(|(n, _)| n == value)
+                .and_then(|(_, val)| val.parse().ok())
+                .unwrap_or(1)
+        });
         let desc = match *kind {
             "add" => format!("{} += {}", field, value),
             "sub" => format!("{} -= {}", field, value),
@@ -2293,6 +2300,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         &prop_fields,
                         op,
                         &modified_prop_fields,
+                        &spec.constants,
                     );
 
                     let fix_options = build_fix_suggestions(

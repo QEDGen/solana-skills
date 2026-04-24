@@ -1122,10 +1122,15 @@ impl WitnessState {
 
     /// Apply a handler's effects, updating field values.
     /// `param_values` maps parameter names to chosen concrete values.
-    fn apply(&mut self, handler: &crate::check::ParsedHandler, param_values: &[(String, String)]) {
+    fn apply(
+        &mut self,
+        handler: &crate::check::ParsedHandler,
+        param_values: &[(String, String)],
+        constants: &[(String, String)],
+    ) {
         // Apply effects
         for (field, op_kind, value) in &handler.effects {
-            let resolved = self.resolve_value(value, param_values);
+            let resolved = self.resolve_value(value, param_values, constants);
             match op_kind.as_str() {
                 "set" => {
                     if let Some(f) = self.fields.iter_mut().find(|(n, _)| n == field) {
@@ -1158,7 +1163,12 @@ impl WitnessState {
     /// Resolve an effect value to a concrete string.
     /// Checks param_values first, then tries parsing as integer.
     /// Falls back to "1" for unknown references.
-    fn resolve_value(&self, value: &str, param_values: &[(String, String)]) -> String {
+    fn resolve_value(
+        &self,
+        value: &str,
+        param_values: &[(String, String)],
+        constants: &[(String, String)],
+    ) -> String {
         // Check if it's a parameter
         if let Some((_, v)) = param_values.iter().find(|(n, _)| n == value) {
             return v.clone();
@@ -1171,6 +1181,10 @@ impl WitnessState {
         // in effect values, but handle self-references)
         if let Some(f) = self.fields.iter().find(|(n, _)| n == value) {
             return f.1.clone();
+        }
+        // Check if it's a declared spec constant
+        if let Some((_, v)) = constants.iter().find(|(n, _)| n == value) {
+            return v.clone();
         }
         // Fallback
         "1".to_string()
@@ -1253,7 +1267,7 @@ fn cover_trace_proof(
             status: state.status.clone(),
         };
 
-        state.apply(handler, &param_values);
+        state.apply(handler, &param_values, &spec.constants);
 
         steps.push((op_name.clone(), param_values, state_before));
     }
@@ -1278,7 +1292,7 @@ fn cover_trace_proof(
             let mut s = WitnessState::new(fields, lifecycle);
             for step in steps.iter().take(i + 1) {
                 let handler = spec.handlers.iter().find(|o| o.name == step.0)?;
-                s.apply(handler, &step.1);
+                s.apply(handler, &step.1, &spec.constants);
             }
             proof.push_str(&format!("  let s{} : State := {}\n", i + 1, s.to_lean()));
         }
