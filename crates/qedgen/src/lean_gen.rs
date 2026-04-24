@@ -391,6 +391,33 @@ fn build_guard_cond_parts(
     cond_parts
 }
 
+/// Wrap `expr` in parens iff it contains a top-level binary operator of
+/// lower precedence than `∧` — namely `∨`, `→`, or `↔`. Used before
+/// `∧`-joining a list of conjunct atoms so one atom's disjunction can't
+/// extend past its boundary at Lean parse time. Without this, a cond_part
+/// like `side = 0 ∨ side = 1` joined into `A ∧ B ∧ side = 0 ∨ side = 1`
+/// parses as `((A ∧ B) ∧ side = 0) ∨ side = 1`.
+///
+/// Depth-aware: an already-parenthesized `∨` (`(A ∨ B)`) doesn't trigger
+/// a second wrap. Atoms containing only `∧` / `=` / `≤` etc. (higher or
+/// equal precedence than `∧`) pass through unchanged, so existing
+/// projection paths via `count_top_level_conjuncts` stay valid.
+fn paren_if_low_prec(expr: &str) -> String {
+    let mut depth: i32 = 0;
+    for ch in expr.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            // ∨ (U+2228), → (U+2192), ↔ (U+2194)
+            '\u{2228}' | '\u{2192}' | '\u{2194}' if depth == 0 => {
+                return format!("({})", expr);
+            }
+            _ => {}
+        }
+    }
+    expr.to_string()
+}
+
 /// Count the number of top-level `∧` conjuncts in a Lean expression.
 ///
 /// Respects parenthesis nesting: `(a ∧ b) ∧ c` has 2 top-level conjuncts,
@@ -483,7 +510,11 @@ fn render_transitions(
         let cond_parts = build_guard_cond_parts(op, fields, &spec.state_fields);
 
         let has_cond = !cond_parts.is_empty();
-        let if_cond = cond_parts.join(" \u{2227} "); // ∧
+        let if_cond = cond_parts
+            .iter()
+            .map(|p| paren_if_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} "); // ∧
 
         // Build state update
         let mut with_parts: Vec<String> = Vec::new();
@@ -2139,7 +2170,12 @@ fn render_overflow_obligations(
             state_type,
             param_sig
         ));
-        out.push_str(&format!("    (h_valid : {})\n", pre_parts.join(" ∧ ")));
+        let pre_joined = pre_parts
+            .iter()
+            .map(|p| paren_if_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" ∧ ");
+        out.push_str(&format!("    (h_valid : {})\n", pre_joined));
         for inv in &inv_hyps {
             out.push_str(&format!("    (h_inv_{} : {} s)\n", safe_name(inv), inv));
         }
@@ -2151,7 +2187,12 @@ fn render_overflow_obligations(
         // Generate proof script
         let has_cond = handler_has_condition(op, fields);
         let proof = overflow_proof_script(op, fields, has_cond);
-        out.push_str(&format!("    {}{}\n", post_parts.join(" ∧ "), proof));
+        let post_joined = post_parts
+            .iter()
+            .map(|p| paren_if_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" ∧ ");
+        out.push_str(&format!("    {}{}\n", post_joined, proof));
     }
 }
 
@@ -3407,6 +3448,61 @@ mod tests {
 
     const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
+    // Issue #8 fixture bundle (contributed by @lmvdz, gist at
+    // https://gist.github.com/lmvdz/639804a0585317cb56cb14d2620e0ade).
+    // Each `ISSUE_8_FIXTURES` entry is a `(name, source)` pair so a
+    // failing iteration can report which fixture tripped.
+    const ISSUE_8_FIXTURES: &[(&str, &str)] = &[
+        (
+            "pool",
+            include_str!("../../../examples/regressions/issue-8/pool.qedspec"),
+        ),
+        (
+            "repro-01-u16-type",
+            include_str!("../../../examples/regressions/issue-8/repro-01-u16-type.qedspec"),
+        ),
+        (
+            "repro-02-composite-or-parens",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-02-composite-or-parens.qedspec"
+            ),
+        ),
+        (
+            "repro-03-duplicate-theorem",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-03-duplicate-theorem.qedspec"
+            ),
+        ),
+        (
+            "repro-04-liveness-params",
+            include_str!("../../../examples/regressions/issue-8/repro-04-liveness-params.qedspec"),
+        ),
+        (
+            "repro-05-uninterpreted-helper",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-05-uninterpreted-helper.qedspec"
+            ),
+        ),
+        (
+            "repro-06-cover-witness-bool",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-06-cover-witness-bool.qedspec"
+            ),
+        ),
+        (
+            "repro-07-pubkey-literal-assign",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-07-pubkey-literal-assign.qedspec"
+            ),
+        ),
+        (
+            "repro-08-pubkey-literal-compare",
+            include_str!(
+                "../../../examples/regressions/issue-8/repro-08-pubkey-literal-compare.qedspec"
+            ),
+        ),
+    ];
+
     #[test]
     fn lean_gen_has_namespace() {
         let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
@@ -3977,5 +4073,109 @@ type State
             lean.contains("instance : Inhabited Slot := \u{27E8}.Empty\u{27E9}"),
             "missing Inhabited Slot"
         );
+    }
+
+    // Regression: issue #8 finding #2 — a cond_part containing a top-level
+    // `∨` / `→` / `↔` must be parenthesized before being `∧`-joined, else
+    // Lean parses `A ∧ B ∨ C` as `(A ∧ B) ∨ C` and the generated theorem
+    // projections (`hg.2.1` etc.) don't typecheck.
+    #[test]
+    fn paren_if_low_prec_wraps_top_level_or() {
+        assert_eq!(
+            paren_if_low_prec("side = 0 \u{2228} side = 1"),
+            "(side = 0 \u{2228} side = 1)"
+        );
+    }
+
+    #[test]
+    fn paren_if_low_prec_wraps_top_level_implies() {
+        assert_eq!(
+            paren_if_low_prec("a = 1 \u{2192} b = 2"),
+            "(a = 1 \u{2192} b = 2)"
+        );
+    }
+
+    #[test]
+    fn paren_if_low_prec_wraps_top_level_iff() {
+        assert_eq!(
+            paren_if_low_prec("a = 1 \u{2194} b = 2"),
+            "(a = 1 \u{2194} b = 2)"
+        );
+    }
+
+    #[test]
+    fn paren_if_low_prec_leaves_pure_conjunction_alone() {
+        // ∧ binds tighter than the ∧-join, no wrap needed.
+        assert_eq!(
+            paren_if_low_prec("a = 1 \u{2227} b = 2"),
+            "a = 1 \u{2227} b = 2"
+        );
+    }
+
+    #[test]
+    fn paren_if_low_prec_leaves_simple_equality_alone() {
+        assert_eq!(paren_if_low_prec("s.a = 0"), "s.a = 0");
+    }
+
+    #[test]
+    fn paren_if_low_prec_respects_paren_nesting() {
+        // ∨ is already inside parens → no double-wrap.
+        assert_eq!(
+            paren_if_low_prec("(a = 0 \u{2228} a = 1) \u{2227} b = 2"),
+            "(a = 0 \u{2228} a = 1) \u{2227} b = 2"
+        );
+    }
+
+    // Issue #8 finding #2 regression. Runs against the exact fixture
+    // shipped in the gist, so fix drift would surface as test failure.
+    #[test]
+    fn finding_2_requires_with_or_is_parenthesized() {
+        let spec_src = include_str!(
+            "../../../examples/regressions/issue-8/repro-02-composite-or-parens.qedspec"
+        );
+        let spec = chumsky_adapter::parse_str(spec_src).unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("(side = 0 \u{2228} side = 1)"),
+            "expected paren-wrapped disjunction, got:\n{}",
+            lean
+        );
+        assert!(
+            !lean.contains("\u{2227} side = 0 \u{2228} side = 1"),
+            "raw ∧ adjacent to unwrapped ∨ — fix regressed:\n{}",
+            lean
+        );
+    }
+
+    // Smoke test: every issue-8 fixture must parse cleanly. This is a
+    // floor, not a ceiling — individual-finding regression tests add
+    // stronger assertions. But a parse break on any of these files
+    // (e.g. someone rejects a DSL shape real specs use) surfaces loudly
+    // here without needing a per-fixture test.
+    #[test]
+    fn issue_8_fixtures_all_parse() {
+        for (name, src) in ISSUE_8_FIXTURES {
+            let parsed = chumsky_adapter::parse_str(src);
+            assert!(
+                parsed.is_ok(),
+                "fixture {} failed to parse: {:?}",
+                name,
+                parsed.err()
+            );
+        }
+    }
+
+    // Render-smoke: every fixture must also make it through `render`
+    // without panic. Guarantees codegen changes don't silently regress
+    // a fixture from "produces wrong Lean" to "produces no Lean at
+    // all" — a subtler failure mode that per-finding tests wouldn't
+    // catch if they only inspect the output string for a known pattern.
+    #[test]
+    fn issue_8_fixtures_all_render() {
+        for (name, src) in ISSUE_8_FIXTURES {
+            let spec = chumsky_adapter::parse_str(src)
+                .unwrap_or_else(|e| panic!("fixture {} failed to parse: {:?}", name, e));
+            let _ = render(&spec);
+        }
     }
 }
