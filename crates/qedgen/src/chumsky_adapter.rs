@@ -1435,8 +1435,18 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
 fn collect_numeric_consts(spec: &a::Spec) -> std::collections::HashMap<String, u128> {
     let mut out = std::collections::HashMap::new();
     for Node { node, .. } in &spec.items {
-        if let TopItem::Const { name, value } = node {
-            out.insert(name.clone(), *value);
+        match node {
+            TopItem::Const { name, value } => {
+                out.insert(name.clone(), *value);
+            }
+            TopItem::Pragma(p) => {
+                for Node { node, .. } in &p.items {
+                    if let TopItem::Const { name, value } = node {
+                        out.insert(name.clone(), *value);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
