@@ -1,0 +1,32 @@
+// Finding #8 (follow-up) — qedgen check accepts state.<Pubkey-field> != <named-numeric-const>
+//
+// Same root cause as repro-08-pubkey-literal-compare.qedspec but triggered
+// via a named constant rather than a bare integer literal.
+//
+// Expected: `qedgen check` rejects `requires state.key != ZERO` with a
+//   type error: cannot compare Pubkey field against numeric constant.
+//
+// Actual (pre-fix): passed qedgen check, generated `s.key ≠ 0` in Lean,
+//   lake build failed:
+//   error: failed to synthesize instance of type class `OfNat Pubkey 0`
+//
+// Fix site: crates/qedgen/src/chumsky_adapter.rs — numeric_literal_value
+// resolves Expr::Path through const_literals so `state.key != ZERO` is
+// rejected the same as bare `state.key != 0`.
+
+spec Repro8ConstCompare
+program_id "11111111111111111111111111111111"
+
+const ZERO = 0
+
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+
+type Error | E
+
+handler h : State.Active -> State.Active {
+  permissionless
+  requires state.key != ZERO else E
+  effect { }
+}
