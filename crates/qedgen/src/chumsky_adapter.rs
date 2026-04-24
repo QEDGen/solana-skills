@@ -1284,8 +1284,7 @@ fn collect_uninterpreted_helpers(
 ) -> Vec<(String, Vec<String>, String)> {
     let field_types = collect_field_types(parsed);
     let mut out: Vec<(String, Vec<String>, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<(String, usize)> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, usize)> = std::collections::HashSet::new();
 
     for Node { node, .. } in &spec.items {
         match node {
@@ -1298,13 +1297,7 @@ fn collect_uninterpreted_helpers(
                 for Node { node: clause, .. } in &h.clauses {
                     match clause {
                         a::HandlerClause::Requires { guard, .. } => {
-                            walk_apps(
-                                &guard.node,
-                                &field_types,
-                                &param_types,
-                                &mut out,
-                                &mut seen,
-                            );
+                            walk_apps(&guard.node, &field_types, &param_types, &mut out, &mut seen);
                         }
                         a::HandlerClause::Ensures(e) => {
                             walk_apps(&e.node, &field_types, &param_types, &mut out, &mut seen);
@@ -1360,13 +1353,13 @@ fn walk_apps(
                 walk_apps(&n.node, field_types, param_types, out, seen);
             }
         }
-        Expr::BoolOp { lhs, rhs, .. } | Expr::Cmp { lhs, rhs, .. } | Expr::Arith { lhs, rhs, .. } => {
+        Expr::BoolOp { lhs, rhs, .. }
+        | Expr::Cmp { lhs, rhs, .. }
+        | Expr::Arith { lhs, rhs, .. } => {
             walk_apps(&lhs.node, field_types, param_types, out, seen);
             walk_apps(&rhs.node, field_types, param_types, out, seen);
         }
-        Expr::Not(inner)
-        | Expr::Paren(inner)
-        | Expr::Old(inner) => {
+        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
             walk_apps(&inner.node, field_types, param_types, out, seen);
         }
         Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
@@ -1553,19 +1546,50 @@ fn check_cmp_types(
 ) -> anyhow::Result<()> {
     match expr {
         Expr::Cmp { lhs, rhs, .. } => {
-            check_cmp_pair(handler_name, clause_kind, &lhs.node, &rhs.node, field_types, param_types)?;
+            check_cmp_pair(
+                handler_name,
+                clause_kind,
+                &lhs.node,
+                &rhs.node,
+                field_types,
+                param_types,
+            )?;
             // Cmp operands are terminal atoms in the DSL (no nested Cmp),
             // so no need to recurse into them.
         }
         Expr::BoolOp { lhs, rhs, .. } => {
-            check_cmp_types(handler_name, clause_kind, &lhs.node, field_types, param_types)?;
-            check_cmp_types(handler_name, clause_kind, &rhs.node, field_types, param_types)?;
+            check_cmp_types(
+                handler_name,
+                clause_kind,
+                &lhs.node,
+                field_types,
+                param_types,
+            )?;
+            check_cmp_types(
+                handler_name,
+                clause_kind,
+                &rhs.node,
+                field_types,
+                param_types,
+            )?;
         }
         Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
-            check_cmp_types(handler_name, clause_kind, &inner.node, field_types, param_types)?;
+            check_cmp_types(
+                handler_name,
+                clause_kind,
+                &inner.node,
+                field_types,
+                param_types,
+            )?;
         }
         Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
-            check_cmp_types(handler_name, clause_kind, &body.node, field_types, param_types)?;
+            check_cmp_types(
+                handler_name,
+                clause_kind,
+                &body.node,
+                field_types,
+                param_types,
+            )?;
         }
         _ => {}
     }

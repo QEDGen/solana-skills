@@ -2004,22 +2004,21 @@ fn render_aborts_if(
             }
             let mut error_seen: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
-            let theorem_name_for = |error_name: &str,
-                                    seen: &mut std::collections::HashMap<String, usize>|
-             -> String {
-                let total = error_total.get(error_name).copied().unwrap_or(0);
-                let idx = {
-                    let entry = seen.entry(error_name.to_string()).or_insert(0);
-                    let cur = *entry;
-                    *entry += 1;
-                    cur
+            let theorem_name_for =
+                |error_name: &str, seen: &mut std::collections::HashMap<String, usize>| -> String {
+                    let total = error_total.get(error_name).copied().unwrap_or(0);
+                    let idx = {
+                        let entry = seen.entry(error_name.to_string()).or_insert(0);
+                        let cur = *entry;
+                        *entry += 1;
+                        cur
+                    };
+                    if total > 1 {
+                        safe_name(&format!("{}_aborts_if_{}_{}", op.name, error_name, idx))
+                    } else {
+                        safe_name(&format!("{}_aborts_if_{}", op.name, error_name))
+                    }
                 };
-                if total > 1 {
-                    safe_name(&format!("{}_aborts_if_{}_{}", op.name, error_name, idx))
-                } else {
-                    safe_name(&format!("{}_aborts_if_{}", op.name, error_name))
-                }
-            };
 
             // Per-condition abort theorems
             for abort in &op.aborts_if {
@@ -4412,9 +4411,7 @@ type State
             lean
         );
         // Count plain (no-suffix) occurrences — should be zero.
-        let plain_count = lean
-            .matches("theorem h_aborts_if_SameErr (")
-            .count();
+        let plain_count = lean.matches("theorem h_aborts_if_SameErr (").count();
         assert_eq!(
             plain_count, 0,
             "unsuffixed theorem name leaked through:\n{}",
