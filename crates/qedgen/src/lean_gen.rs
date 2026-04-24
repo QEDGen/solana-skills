@@ -4334,32 +4334,59 @@ type State
         );
     }
 
-    // Smoke test: every issue-8 fixture must parse cleanly. This is a
-    // floor, not a ceiling — individual-finding regression tests add
-    // stronger assertions. But a parse break on any of these files
-    // (e.g. someone rejects a DSL shape real specs use) surfaces loudly
-    // here without needing a per-fixture test.
+    // Fixtures whose *intent* is to fail at parse/check time post-fix
+    // (not a codegen regression target). F7/F8 moved the failure point
+    // from `lake build` up to `qedgen check`, so their fixtures now
+    // surface errors at `parse_str` — that's the success criterion.
+    const FIXTURES_EXPECTED_TO_FAIL_PARSE: &[&str] = &[
+        "repro-07-pubkey-literal-assign",
+        "repro-08-pubkey-literal-compare",
+    ];
+
+    // Smoke test: every issue-8 fixture reaches a stable outcome at
+    // parse time. Most fixtures must parse cleanly (the bugs are
+    // downstream — codegen or render); a small list (F7/F8) is
+    // *expected* to fail parse post-fix, so those are asserted to fail
+    // with a Pubkey-related error message. A drift that makes a
+    // supposed-to-fail fixture start parsing (or vice versa) surfaces
+    // loudly here.
     #[test]
-    fn issue_8_fixtures_all_parse() {
+    fn issue_8_fixtures_reach_expected_parse_outcome() {
         for (name, src) in ISSUE_8_FIXTURES {
             let parsed = chumsky_adapter::parse_str(src);
-            assert!(
-                parsed.is_ok(),
-                "fixture {} failed to parse: {:?}",
-                name,
-                parsed.err()
-            );
+            let expect_fail = FIXTURES_EXPECTED_TO_FAIL_PARSE.contains(name);
+            match (parsed, expect_fail) {
+                (Ok(_), false) => { /* normal parse-pass case */ }
+                (Ok(_), true) => panic!(
+                    "fixture {} expected to fail parse (check-time reject), but parsed OK",
+                    name
+                ),
+                (Err(e), true) => {
+                    let msg = format!("{e:#}");
+                    assert!(
+                        msg.contains("Pubkey"),
+                        "fixture {} failed parse but with unexpected message: {msg}",
+                        name
+                    );
+                }
+                (Err(e), false) => panic!("fixture {} failed to parse: {e:#}", name),
+            }
         }
     }
 
-    // Render-smoke: every fixture must also make it through `render`
-    // without panic. Guarantees codegen changes don't silently regress
-    // a fixture from "produces wrong Lean" to "produces no Lean at
-    // all" — a subtler failure mode that per-finding tests wouldn't
-    // catch if they only inspect the output string for a known pattern.
+    // Render-smoke: every parse-passing fixture must also make it
+    // through `render` without panic. Guarantees codegen changes don't
+    // silently regress a fixture from "produces wrong Lean" to
+    // "produces no Lean at all" — a subtler failure mode that
+    // per-finding tests wouldn't catch if they only inspect the output
+    // string for a known pattern. Skips fixtures that intentionally
+    // fail parse (F7/F8).
     #[test]
-    fn issue_8_fixtures_all_render() {
+    fn issue_8_parsing_fixtures_all_render() {
         for (name, src) in ISSUE_8_FIXTURES {
+            if FIXTURES_EXPECTED_TO_FAIL_PARSE.contains(name) {
+                continue;
+            }
             let spec = chumsky_adapter::parse_str(src)
                 .unwrap_or_else(|e| panic!("fixture {} failed to parse: {:?}", name, e));
             let _ = render(&spec);

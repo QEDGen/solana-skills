@@ -1262,7 +1262,226 @@ pub fn parse_str(src: &str) -> anyhow::Result<ParsedSpec> {
             .join("\n");
         anyhow::anyhow!("parse error:\n{}", msg)
     })?;
-    Ok(adapt(&typed))
+    let parsed = adapt(&typed);
+    typecheck_spec(&typed, &parsed)?;
+    Ok(parsed)
+}
+
+/// Narrow check-time type guard for Pubkey-vs-numeric-literal mismatches
+/// in effect RHS and `requires` / `ensures` comparisons. Issue #8
+/// findings #7 and #8: the DSL has no Pubkey literal syntax, so
+/// `state.key := 0` (or `state.key != 0`) is always a category error,
+/// but qedgen v2.7.0 accepted both and the mismatch only surfaced at
+/// `lake build` — the exact failure mode v2.6.2 was refactored to
+/// avoid.
+///
+/// Scope is deliberately narrow: we only fail when one side is a
+/// resolved Pubkey field and the other side is a bare integer literal.
+/// Richer type inference can land later; the goal here is "don't let
+/// Pubkey = 0 pass silently."
+pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()> {
+    let field_types = collect_field_types(parsed);
+
+    for Node { node, .. } in &spec.items {
+        if let TopItem::Handler(h) = node {
+            let param_types: std::collections::HashMap<String, String> = h
+                .params
+                .iter()
+                .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+                .collect();
+            typecheck_handler(h, &field_types, &param_types)?;
+        }
+    }
+    Ok(())
+}
+
+/// Flatten every field declaration in the spec into `name → DSL-type`.
+/// State fields, record fields, sum-variant payload fields, and
+/// account-type fields all live in the same namespace from the DSL's
+/// point of view — the same `state.key` can resolve against any of them.
+fn collect_field_types(parsed: &ParsedSpec) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for (n, t) in &parsed.state_fields {
+        out.insert(n.clone(), t.clone());
+    }
+    for rec in &parsed.records {
+        for (n, t) in &rec.fields {
+            out.insert(n.clone(), t.clone());
+        }
+    }
+    for sum in &parsed.sum_types {
+        for v in &sum.variants {
+            for (n, t) in &v.fields {
+                out.insert(n.clone(), t.clone());
+            }
+        }
+    }
+    for acct in &parsed.account_types {
+        for (n, t) in &acct.fields {
+            out.insert(n.clone(), t.clone());
+        }
+    }
+    out
+}
+
+fn typecheck_handler(
+    h: &a::HandlerDecl,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    for Node { node, .. } in &h.clauses {
+        match node {
+            a::HandlerClause::Effect(stmts) => {
+                for Node { node: stmt, .. } in stmts {
+                    check_effect_typed(&h.name, stmt, field_types, param_types)?;
+                }
+            }
+            a::HandlerClause::Requires { guard, .. } => {
+                check_cmp_types(&h.name, "requires", &guard.node, field_types, param_types)?;
+            }
+            a::HandlerClause::Ensures(e) => {
+                check_cmp_types(&h.name, "ensures", &e.node, field_types, param_types)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the leaf field of a path like `state.key` or
+/// `accounts[i].capital` to its DSL type, if declared.
+fn resolve_path_type<'a>(
+    p: &a::Path,
+    field_types: &'a std::collections::HashMap<String, String>,
+    param_types: &'a std::collections::HashMap<String, String>,
+) -> Option<&'a str> {
+    // Walk the path to find the last `.field` segment — that's the leaf
+    // whose declared type matters for assignment/comparison.
+    let mut last_field: Option<&str> = None;
+    for seg in &p.segments {
+        if let a::PathSeg::Field(f) = seg {
+            last_field = Some(f.as_str());
+        }
+    }
+    match last_field {
+        Some(name) => field_types.get(name).map(String::as_str),
+        None => {
+            // Bare root identifier — either a handler param or a state
+            // field with no segments.
+            param_types
+                .get(&p.root)
+                .map(String::as_str)
+                .or_else(|| field_types.get(&p.root).map(String::as_str))
+        }
+    }
+}
+
+fn check_effect_typed(
+    handler_name: &str,
+    stmt: &a::EffectStmt,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    let lhs_type = match resolve_path_type(&stmt.lhs, field_types, param_types) {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+    if lhs_type == "Pubkey" {
+        if let Expr::Int(v) = &stmt.rhs.node {
+            anyhow::bail!(
+                "handler `{}` effect `{} := {}`: Pubkey field cannot be assigned a numeric literal. \
+                 The DSL has no Pubkey-literal syntax — use a handler parameter, a constant, \
+                 or the spec's `program_id` as the source pubkey.",
+                handler_name,
+                render_path_human(&stmt.lhs),
+                v
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check_cmp_types(
+    handler_name: &str,
+    clause_kind: &str,
+    expr: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    match expr {
+        Expr::Cmp { lhs, rhs, .. } => {
+            check_cmp_pair(handler_name, clause_kind, &lhs.node, &rhs.node, field_types, param_types)?;
+            // Cmp operands are terminal atoms in the DSL (no nested Cmp),
+            // so no need to recurse into them.
+        }
+        Expr::BoolOp { lhs, rhs, .. } => {
+            check_cmp_types(handler_name, clause_kind, &lhs.node, field_types, param_types)?;
+            check_cmp_types(handler_name, clause_kind, &rhs.node, field_types, param_types)?;
+        }
+        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
+            check_cmp_types(handler_name, clause_kind, &inner.node, field_types, param_types)?;
+        }
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
+            check_cmp_types(handler_name, clause_kind, &body.node, field_types, param_types)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn check_cmp_pair(
+    handler_name: &str,
+    clause_kind: &str,
+    lhs: &Expr,
+    rhs: &Expr,
+    field_types: &std::collections::HashMap<String, String>,
+    param_types: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    // Try both orientations (LHS Pubkey / RHS Int and vice versa).
+    let pubkey_vs_int = |p: &Expr, i: &Expr| -> Option<(String, u128)> {
+        let path = match p {
+            Expr::Path(path) => path,
+            _ => return None,
+        };
+        let t = resolve_path_type(path, field_types, param_types)?;
+        if t != "Pubkey" {
+            return None;
+        }
+        if let Expr::Int(v) = i {
+            return Some((render_path_human(path), *v));
+        }
+        None
+    };
+    if let Some((path_str, v)) = pubkey_vs_int(lhs, rhs).or_else(|| pubkey_vs_int(rhs, lhs)) {
+        anyhow::bail!(
+            "handler `{}` {} compares Pubkey `{}` with numeric literal `{}`. \
+             The DSL has no Pubkey-literal syntax — compare against a handler parameter, \
+             a constant, or the spec's `program_id` instead.",
+            handler_name,
+            clause_kind,
+            path_str,
+            v
+        );
+    }
+    Ok(())
+}
+
+fn render_path_human(p: &a::Path) -> String {
+    let mut out = p.root.clone();
+    for seg in &p.segments {
+        match seg {
+            a::PathSeg::Field(f) => {
+                out.push('.');
+                out.push_str(f);
+            }
+            a::PathSeg::Index(i) => {
+                out.push('[');
+                out.push_str(i);
+                out.push(']');
+            }
+        }
+    }
+    out
 }
 
 /// Translate the typed AST into a `ParsedSpec` compatible with current consumers.
@@ -1975,6 +2194,52 @@ mod tests {
 
     const PERCOLATOR_SPEC: &str =
         include_str!("../../../examples/rust/percolator/percolator.qedspec");
+
+    // Issue #8 finding #7 regression. Pubkey := <int> must be
+    // rejected at check time, not deferred to lake build's
+    // "OfNat Pubkey 0" error.
+    #[test]
+    fn finding_7_pubkey_assign_from_int_rejected() {
+        let src = include_str!(
+            "../../../examples/regressions/issue-8/repro-07-pubkey-literal-assign.qedspec"
+        );
+        let err = parse_str(src).expect_err("expected Pubkey := 0 to fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Pubkey field cannot be assigned a numeric literal"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    // Issue #8 finding #8 regression. state.<Pubkey> != <int> in a
+    // `requires` clause must also be rejected.
+    #[test]
+    fn finding_8_pubkey_compare_with_int_rejected() {
+        let src = include_str!(
+            "../../../examples/regressions/issue-8/repro-08-pubkey-literal-compare.qedspec"
+        );
+        let err = parse_str(src).expect_err("expected state.key != 0 to fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("compares Pubkey"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    // Guard: bundled specs that legitimately compare/assign Pubkey
+    // must not regress (e.g. `signer == state.admin`, `state.pk := p`).
+    #[test]
+    fn pubkey_typecheck_does_not_break_bundled_examples() {
+        for src in [
+            include_str!("../../../examples/rust/escrow/escrow.qedspec"),
+            include_str!("../../../examples/rust/lending/lending.qedspec"),
+            include_str!("../../../examples/rust/multisig/multisig.qedspec"),
+            include_str!("../../../examples/rust/percolator/percolator.qedspec"),
+            include_str!("../../../examples/regressions/issue-8/pool.qedspec"),
+        ] {
+            parse_str(src).unwrap();
+        }
+    }
 
     // Structural smoke test — percolator produces the shape we expect.
     // When pest existed this compared parser-for-parser; now it's a

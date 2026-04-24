@@ -799,7 +799,9 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             .join("\n");
         anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
     })?;
-    Ok(crate::chumsky_adapter::adapt(&typed))
+    let parsed = crate::chumsky_adapter::adapt(&typed);
+    crate::chumsky_adapter::typecheck_spec(&typed, &parsed)?;
+    Ok(parsed)
 }
 
 /// Load every `.qedspec` file under `dir` (recursively), parse each, validate
@@ -855,7 +857,9 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
         name: merged_name.expect("non-empty files implies non-empty name"),
         items: merged_items,
     };
-    Ok(crate::chumsky_adapter::adapt(&merged))
+    let parsed = crate::chumsky_adapter::adapt(&merged);
+    crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
+    Ok(parsed)
 }
 
 /// Read the source text of a spec path — single file or directory of
