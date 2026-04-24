@@ -1,0 +1,33 @@
+// Finding #5 — Uninterpreted helpers in requires/ensures never declared
+//
+// Generated Spec.lean never declares `foo`. lake build:
+//   error: Unknown identifier `foo`
+//
+// This directly contradicts the docstring at ast.rs:645 which promises
+// "downstream codegen declares them as uninterpreted symbols (axioms or
+// Lean defs) in the support module." Exhaustive grep across
+// crates/qedgen/src/ finds zero axiom/opaque emission for Expr::App.
+//
+// Expected: top of generated Spec.lean contains `axiom foo : Nat → Prop`.
+// Actual: no declaration → Lean rejects.
+//
+// Fix site: Expr::App renderer needs to walk the spec, collect every
+// distinct (func_name, arity, arg_types), and emit axiom declarations.
+// Simplest v1: assume Prop in boolean contexts, emit
+// `axiom foo : T1 → T2 → ... → Prop` at the top.
+
+spec Repro5
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { c : U8 }
+
+type Error | E
+
+handler h (y : U8) : State.Active -> State.Active {
+  permissionless
+  requires foo(y) else E
+  effect { c := 1 }
+}
+

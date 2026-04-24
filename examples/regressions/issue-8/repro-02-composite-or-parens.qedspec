@@ -1,0 +1,34 @@
+// Finding #2 — Composite guards mis-parenthesize ∨ / →
+//
+// Two requires clauses where one uses `or`. Generated Lean:
+//   theorem h_aborts_if_E2 ... (h : ¬(side = 0 ∨ side = 1)) ... := by
+//     unfold hTransition
+//     rw [if_neg (fun hg => h hg.2)]
+// where `hg` has type `s.a = 0 ∧ side = 0 ∨ side = 1` — parsed as
+// `(s.a = 0 ∧ side = 0) ∨ (side = 1)` because ∧ binds tighter than ∨.
+//
+// Expected: generated Lean guard is `(s.a = 0) ∧ (side = 0 ∨ side = 1)`.
+// Actual: no parens → wrong parse → `hg.2` projection fails.
+//
+// Same bug applies to `implies` (→) since → also binds looser than ∧.
+//
+// Fix site: crates/qedgen/src/lean_gen.rs:367 — paren-wrap each
+// req.lean_expr before joining with ∧, or wrap selectively when the
+// expression contains lower-precedence operators.
+
+spec Repro2
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { a : U8 }
+
+type Error | E1 | E2
+
+handler h (side : U8) : State.Active -> State.Active {
+  permissionless
+  requires state.a == 0 else E1
+  requires side == 0 or side == 1 else E2
+  effect { a := 1 }
+}
+

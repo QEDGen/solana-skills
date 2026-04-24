@@ -1,0 +1,44 @@
+// Finding #6 — Cover-witness state constructor uses "0" for Bool and
+// non-Nat types
+//
+// Generated Lean cover-trace witness:
+//   let pk : Pubkey := ⟨0, 0, 0, 0⟩
+//   let s0 : State := ⟨0, .Uninitialized⟩
+//   let s1 : State := ⟨1, .Active⟩
+// but `flag : Bool`, so `0` and `1` fail OfNat synthesis.
+//
+// lake build:
+//   error: failed to synthesize instance of type class `OfNat Bool 0`
+//
+// Expected: `⟨false, .Uninitialized⟩`, `⟨true, .Active⟩`
+// Actual: `⟨0, ...⟩`, `⟨1, ...⟩`
+//
+// Fix site: crates/qedgen/src/lean_gen.rs:998 WitnessState::new
+// hard-codes exactly two cases:
+//   let val = match map_type(typ) {
+//       "Pubkey" => "pk".to_string(),
+//       _ => "0".to_string(),
+//   };
+// Add `"Bool" => "false"` (plus the U16/U32 cases from finding #1).
+//
+// Related: percolator's header comment at examples/rust/percolator/
+// percolator.qedspec:19-20 already recommends U8+discriminator over
+// Bool "for simpler codegen" — worth promoting to a DSL-level
+// recommendation until this fix lands.
+
+spec Repro6
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { flag : Bool }
+
+type Error | E
+
+handler init : State.Uninitialized -> State.Active {
+  permissionless
+  effect { flag := true }
+}
+
+cover foo [init]
+

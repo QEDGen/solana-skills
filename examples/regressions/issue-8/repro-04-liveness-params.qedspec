@@ -1,0 +1,36 @@
+// Finding #4 — Liveness witness drops handler parameters
+//
+// Liveness declaration references a handler that takes parameters.
+// Generated Lean emits:
+//   refine ⟨[.init], by decide, fun s' h_apply => ?_⟩
+// but `.init` has type `Pubkey → Operation` (takes 1 Pubkey arg),
+// not `Operation`.
+//
+// Expected: `[.init pk]` where pk is a Pubkey witness value.
+// Actual: `lake build` fails with
+//   error: Application type mismatch: Operation.init has type
+//   `Pubkey → Operation` but expected to have type `Operation`
+//
+// multisig's liveness works because `execute` / `cancel_proposal` are
+// zero-param — this codepath wasn't exercised.
+//
+// Fix site: crates/qedgen/src/lean_gen.rs:1556 (liveness_proof_script)
+// needs to thread handler-param witness values (similar to
+// cover_trace_proof at :1192) into the .init pk call-site.
+
+spec Repro4
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { c : U8 }
+
+type Error | E
+
+handler init (p : Pubkey) : State.Uninitialized -> State.Active {
+  permissionless
+  effect { c := 1 }
+}
+
+liveness foo : State.Uninitialized ~> State.Active via [init] within 1
+

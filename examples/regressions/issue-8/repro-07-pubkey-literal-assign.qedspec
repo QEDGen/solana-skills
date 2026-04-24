@@ -1,0 +1,43 @@
+// Finding #7 — qedgen check accepts Pubkey := <integer>
+//
+// Passes `qedgen check` with 0 warnings, 0 info. Generated Lean:
+//   { key := 0, ... }
+//
+// lake build:
+//   error: failed to synthesize instance of type class `OfNat Pubkey 0`
+//
+// The DSL has no documented Pubkey-literal syntax. Either:
+//   (a) `Pubkey := <int>` is valid — needs to lower to
+//       `(OfNat.ofNat n : Pubkey)` with an instance, or
+//   (b) `Pubkey := <int>` is invalid — should fail at qedgen check
+//       with a clear error (matching v2.6.2 S5's philosophy).
+//
+// Currently it passes check and fails at Lean typecheck — the exact
+// "silent codegen corruption" failure mode v2.6.2 was refactored to
+// avoid.
+//
+// Fix site: crates/qedgen/src/rust_codegen_util.rs:364
+// (check_effect_targets) validates only that the effect's target name
+// is declared, never the RHS type.
+//
+// Workaround motivation: this is how I ended up with
+// `match_schedule_graph_pda := 0` in my initial spec — there's no
+// canonical way to express "uninitialized Pubkey / Pubkey::default"
+// in qedspec, so I reached for `0`. qedgen check said OK, Lean said
+// no. Consider documenting a canonical `.default` or `Pubkey.zero`
+// literal alongside the fix.
+
+spec Repro7
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+
+type Error | E
+
+handler h : State.Uninitialized -> State.Active {
+  permissionless
+  effect { key := 0 }
+}
+

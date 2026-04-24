@@ -1,0 +1,27 @@
+// Finding #8 — qedgen check accepts state.<Pubkey-field> != <integer>
+//
+// Passes `qedgen check`. Generated Lean guard:
+//   s.key ≠ 0
+// lake build:
+//   error: failed to synthesize instance of type class `OfNat Pubkey 0`
+//
+// Same root cause as Finding #7 — no operand-type validation on
+// comparison operators in `requires`. Covered by the same fix:
+// extending check_effect_targets (or adding a new check_requires_types)
+// to validate RHS/operand types against field types.
+
+spec Repro8
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+
+type Error | E
+
+handler h : State.Active -> State.Active {
+  permissionless
+  requires state.key != 0 else E
+  effect { }
+}
+

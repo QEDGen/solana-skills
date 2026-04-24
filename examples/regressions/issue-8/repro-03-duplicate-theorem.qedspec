@@ -1,0 +1,34 @@
+// Finding #3 — Duplicate aborts_if_E theorem for multiple requires
+// sharing an error variant
+//
+// Two requires clauses in one handler both use `else SameErr`.
+// Generated Lean declares `Repro3.h_aborts_if_SameErr` twice:
+//   theorem h_aborts_if_SameErr ... := by ...
+//   theorem h_aborts_if_SameErr ... := by ...  -- duplicate!
+//
+// Expected: single combined theorem, or two with indexed suffixes
+// (`h_aborts_if_SameErr_0`, `_1`).
+//
+// Actual: `lake build` fails with
+//   error: `Repro3.h_aborts_if_SameErr` has already been declared
+//
+// Fix site: crates/qedgen/src/lean_gen.rs:1897 — format_name includes
+// no index / dedup. Real Anchor programs regularly have multiple
+// `require!(..., <shared-error>)` under one handler.
+
+spec Repro3
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { a : U8, b : U8 }
+
+type Error | SameErr
+
+handler h : State.Active -> State.Active {
+  permissionless
+  requires state.a == 1 else SameErr
+  requires state.b == 1 else SameErr
+  effect { a := 1 }
+}
+

@@ -1,0 +1,25 @@
+// Finding #1 — Lean map_type missing U16/U32/I8..I64
+//
+// Expected: qedgen check passes. qedgen codegen --lean emits
+//   | h (mm_count : Nat)
+//
+// Actual: codegen emits `| h (mm_count : U16)`. lake build fails:
+//   error: Constructor field `U16` contains universe level metavariables
+//
+// Fix site: crates/qedgen/src/lean_gen.rs:2748 — add U16|U32 → "Nat",
+// I8|I16|I32|I64 → "Int" to mirror codegen::map_type's v2.6.2 S1 fix.
+
+spec Repro1
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of { c : U8 }
+
+type Error | E
+
+handler h (mm_count : U16) : State.Active -> State.Active {
+  permissionless
+  effect { c := 1 }
+}
+
