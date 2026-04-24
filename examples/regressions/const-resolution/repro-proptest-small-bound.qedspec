@@ -1,0 +1,32 @@
+// Regression: proptest boundary strategy underflow for sub-3 bounds
+//
+// Expected: `qedgen codegen --proptest` emits `0u8..=2u8` for a field
+//   whose property bound is 2 (i.e. state.count <= MAX_COUNT where MAX_COUNT = 2).
+//
+// Actual (pre-fix): emitted `(2 - 3)..=2u8` — unsigned subtraction wraps
+//   to a huge value (u64::MAX - 1), causing proptest to panic at runtime:
+//   thread panicked at 'Range start is greater than range end'
+//
+// Fix site: crates/qedgen/src/proptest_gen.rs — StrategyMode::Boundary
+// now checks n < 3 before emitting the `(b - 3)..=b` form; for b < 3
+// it emits `0..=b` directly.
+
+spec ReproProptestSmallBound
+program_id "11111111111111111111111111111111"
+
+const MAX_COUNT = 2
+
+type State
+  | Active of { count : U8 }
+
+type Error | E
+
+property count_bounded :
+  state.count <= MAX_COUNT
+  preserved_by all
+
+handler increment : State.Active -> State.Active {
+  permissionless
+  requires state.count < MAX_COUNT else E
+  effect { count += 1 }
+}

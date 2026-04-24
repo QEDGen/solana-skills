@@ -1,0 +1,30 @@
+// Regression: cover-proof witness uses constant name instead of resolved value
+//
+// Expected: `qedgen codegen --lean` emits a cover witness with
+//   counter := 0   (the resolved value of ZERO)
+//
+// Actual (pre-fix): WitnessState::resolve_value did not look up named
+//   constants, so it emitted `counter := ZERO` (the unresolved identifier).
+//   lake build failed:
+//   error: unknown identifier 'ZERO'
+//
+// Fix site: crates/qedgen/src/lean_gen.rs — WitnessState::resolve_value
+// now looks up the name in spec.constants before falling back to "1".
+
+spec ReproLeanConstWitness
+program_id "11111111111111111111111111111111"
+
+const ZERO = 0
+
+type State
+  | Uninitialized
+  | Active of { counter : U64 }
+
+type Error | E
+
+handler init : State.Uninitialized -> State.Active {
+  permissionless
+  effect { counter := ZERO }
+}
+
+cover init_reachable [init]

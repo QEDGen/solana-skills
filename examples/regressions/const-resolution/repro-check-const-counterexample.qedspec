@@ -1,0 +1,32 @@
+// Regression: qedgen check counterexample shows wrong value for named constants
+//
+// Expected: `qedgen check` counterexample for property `counter_small`
+//   (counter <= 3) after effect `counter := STEP` (STEP = 5) shows
+//   post-state counter = 5.
+//
+// Actual (pre-fix): build_counterexample fell back to 1 when the effect
+//   value was a named constant (not a parseable integer), so the diagnostic
+//   showed post-state counter = 1 — a misleading value that doesn't match
+//   any actual execution.
+//
+// Fix site: crates/qedgen/src/check.rs — build_counterexample now resolves
+// named constant values from spec.constants before falling back to 1.
+
+spec ReproCheckConstCounterexample
+program_id "11111111111111111111111111111111"
+
+const STEP = 5
+
+type State
+  | Active of { counter : U64 }
+
+type Error | E
+
+property counter_small :
+  state.counter <= 3
+  preserved_by all
+
+handler tick : State.Active -> State.Active {
+  permissionless
+  effect { counter := STEP }
+}
