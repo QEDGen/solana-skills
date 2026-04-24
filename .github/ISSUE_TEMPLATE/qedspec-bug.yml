@@ -1,0 +1,135 @@
+name: qedspec bug report
+description: Report a bug in qedgen's handling of a .qedspec (parser, check, codegen, verify, or generated Lean/Rust)
+title: "[qedspec] <short description>"
+labels: ["bug", "qedspec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a qedspec bug report.
+
+        qedgen lives or dies by how well `.qedspec` round-trips through `check → codegen → verify`. A good report lets us land a fix *and* a committed regression fixture, so the bug can't come back.
+
+        Before filing: please try to produce a **minimal `.qedspec`** that reproduces the issue — ideally under 30 lines, one handler, one property. The fastest way is to start from your real spec and delete until the bug disappears, then add back the last thing you removed.
+
+        See [`examples/regressions/issue-8/`](https://github.com/QEDGen/solana-skills/tree/main/examples/regressions/issue-8) for the fixture-committing convention (inline header comment: finding number → expected vs actual → suspected fix site).
+
+  - type: input
+    id: qedgen-version
+    attributes:
+      label: qedgen version
+      description: Output of `qedgen --version` (or commit sha if building from source).
+      placeholder: "qedgen 2.7.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where the bug surfaces
+      description: Which command/phase hits the bug? Pick the earliest stage that fails.
+      options:
+        - "qedgen check (lint / typecheck / coverage)"
+        - "qedgen codegen --lean (Lean proof generation)"
+        - "qedgen codegen --proptest (proptest harness)"
+        - "qedgen codegen --kani (Kani harness)"
+        - "qedgen codegen --all (Quasar Rust skeleton)"
+        - "qedgen verify --lean (lake build)"
+        - "qedgen verify --proptest (cargo test)"
+        - "qedgen verify --kani (cargo kani)"
+        - "qedgen spec (IDL → .qedspec scaffold)"
+        - "qedgen init (project scaffolding)"
+        - "parser / .qedspec is silently accepted but semantics are wrong"
+        - "other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-spec
+    attributes:
+      label: Minimal .qedspec
+      description: Paste the smallest .qedspec that reproduces the bug. Please include an inline header comment describing the expected vs actual behavior (same convention as `examples/regressions/issue-8/repro-*.qedspec`).
+      render: rust
+      placeholder: |
+        // Expected: qedgen check passes, lake build succeeds.
+        // Actual:   qedgen check passes, lake build fails with:
+        //           error: <paste the error>
+
+        spec ReproBug
+        program_id "11111111111111111111111111111111"
+
+        type State
+          | Uninitialized
+          | Active of { x : U64 }
+
+        type Error | E
+
+        handler h : State.Uninitialized -> State.Active {
+          permissionless
+          effect { x := 0 }
+        }
+    validations:
+      required: true
+
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands run
+      description: The exact qedgen / lake / cargo commands you ran, in order. Copy-pasteable so we can reproduce.
+      render: shell
+      placeholder: |
+        qedgen check --spec repro.qedspec
+        qedgen init --name repro --spec repro.qedspec --output-dir /tmp/repro
+        qedgen codegen --spec repro.qedspec --lean --lean-output /tmp/repro/Spec.lean
+        cd /tmp/repro && lake build
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should qedgen do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What qedgen does, including verbatim error output (stdout + stderr). Trim to the relevant frames — we don't need the whole lake log.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround tried (optional)
+      description: If you found a way to side-step the bug in your real spec, tell us — the *workaround* is often the clearest signal of which DSL surface is missing. ("I reached for `field := 0` because there's no canonical Pubkey-default literal" is gold.)
+
+  - type: input
+    id: fix-site
+    attributes:
+      label: Suspected fix site (optional)
+      description: If you've already traced it, point at a file:line in `crates/qedgen/src/`.
+      placeholder: "crates/qedgen/src/lean_gen.rs:2748"
+
+  - type: input
+    id: toolchain
+    attributes:
+      label: Toolchain (only if the bug is in Lean or generated Rust)
+      description: Lean + Lake versions (for `verify --lean` / codegen --lean bugs), or cargo + rustc (for proptest / Kani bugs).
+      placeholder: "Lean 4.15.0 / Lake 5.0.0-1165156, or rustc 1.85.0"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: "I've reduced the .qedspec to a minimal repro (one handler + one property where possible)."
+          required: true
+        - label: "I've run `qedgen check --spec <file>` and pasted the output above if it's relevant."
+          required: true
+        - label: "I'd be willing to contribute a `repro-*.qedspec` fixture under `examples/regressions/` once the fix lands (optional but appreciated)."
+          required: false
