@@ -310,7 +310,7 @@ qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
   --unsafe allow-field-append --migrated-account EscrowState
 ```
 
-Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `ratchet list-rules` to see the full P-rule and R-rule set (22 rules at the time of writing).
+Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set (22 rules at the time of writing). Pair with `--json` for a machine-readable dump.
 
 **Why both.** qedgen's `#[qed(verified)]` hash-stamps the *function body*, so a rename of an `#[account]` struct compiles with a stale-but-valid proof even though the on-chain discriminator is now different and every existing account of that type is orphaned. `qedgen check-upgrade`'s `R006 account-discriminator-change` catches that class of failure; the proof layer alone doesn't look at it.
 

@@ -22,6 +22,7 @@ use ratchet_anchor::{normalize, AnchorIdl};
 use ratchet_core::{
     check, default_preflight_rules, default_rules, preflight, CheckContext, Report, Severity,
 };
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Options accepted by the `qedgen readiness` subcommand.
@@ -136,6 +137,60 @@ pub fn print_human(report: &Report) {
 pub fn print_json(report: &Report) -> Result<()> {
     let s = serde_json::to_string_pretty(report).context("serializing ratchet report")?;
     println!("{}", s);
+    Ok(())
+}
+
+/// One row in a `--list-rules` dump. Kept minimal — id / name /
+/// description are the only fields the upstream ratchet CLI prints
+/// and the only fields stable across rule catalog revisions.
+#[derive(Serialize)]
+struct RuleEntry {
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+}
+
+/// Print every preflight (`P001`–`P006`) rule shipped with the
+/// embedded ratchet. `--json` switches to a machine-parseable payload
+/// (stdout) so agents can consume the catalog without regex-matching
+/// the human table.
+pub fn print_rules_preflight(json: bool) -> Result<()> {
+    let entries: Vec<RuleEntry> = default_preflight_rules()
+        .iter()
+        .map(|r| RuleEntry {
+            id: r.id(),
+            name: r.name(),
+            description: r.description(),
+        })
+        .collect();
+    render_rule_catalog("readiness (preflight, P-rules)", &entries, json)
+}
+
+/// Print every diff (`R001`–`R016`) rule shipped with the embedded
+/// ratchet. Same JSON / human split as
+/// [`print_rules_preflight`].
+pub fn print_rules_diff(json: bool) -> Result<()> {
+    let entries: Vec<RuleEntry> = default_rules()
+        .iter()
+        .map(|r| RuleEntry {
+            id: r.id(),
+            name: r.name(),
+            description: r.description(),
+        })
+        .collect();
+    render_rule_catalog("check-upgrade (diff, R-rules)", &entries, json)
+}
+
+fn render_rule_catalog(header: &str, entries: &[RuleEntry], json: bool) -> Result<()> {
+    if json {
+        let s = serde_json::to_string_pretty(entries).context("serializing rule catalog")?;
+        println!("{}", s);
+        return Ok(());
+    }
+    eprintln!("qedgen {} — {} rule(s):", header, entries.len());
+    for entry in entries {
+        eprintln!("  {}  {:<40}  {}", entry.id, entry.name, entry.description);
+    }
     Ok(())
 }
 
@@ -258,5 +313,38 @@ mod tests {
         let idl = write(tmp.path(), "t.json", "not json");
         let err = run_readiness(&ReadinessOpts { idl }).unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
+    }
+
+    // Catalog-shape guards for `--list-rules`. These tests snapshot the
+    // `id` / `name` / `description` tuples the embedded ratchet exposes;
+    // if an upstream rule is renamed without updating the P / R ID
+    // prefixes, the contains-check catches it. The counts are pinned at
+    // the v0.3.1 catalog (6 P-rules + 16 R-rules = 22); bump here when
+    // the upstream catalog grows.
+    #[test]
+    fn list_rules_preflight_covers_full_p_catalog() {
+        let entries: Vec<_> = default_preflight_rules()
+            .iter()
+            .map(|r| (r.id(), r.name()))
+            .collect();
+        assert_eq!(entries.len(), 6);
+        assert!(entries.iter().all(|(id, _)| id.starts_with('P')));
+        let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
+        for expected in &["P001", "P002", "P003", "P004", "P005", "P006"] {
+            assert!(ids.contains(expected), "missing {expected} in catalog");
+        }
+    }
+
+    #[test]
+    fn list_rules_diff_covers_full_r_catalog() {
+        let entries: Vec<_> = default_rules().iter().map(|r| (r.id(), r.name())).collect();
+        assert_eq!(entries.len(), 16);
+        assert!(entries.iter().all(|(id, _)| id.starts_with('R')));
+        // Spot-check a few key rule ids — these are the ones the PR body
+        // and README reference by number, so they must stay discoverable.
+        let ids: Vec<&str> = entries.iter().map(|(id, _)| *id).collect();
+        for expected in &["R001", "R006", "R007", "R013", "R016"] {
+            assert!(ids.contains(expected), "missing {expected} in catalog");
+        }
     }
 }
