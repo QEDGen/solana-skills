@@ -4584,6 +4584,7 @@ type State
     }
 
     #[test]
+<<<<<<< HEAD
     fn lean_gen_quantified_property_preservation_emits_sorry() {
         //  quantified property preservation theorem must emit sorry --
         // omega cannot prove universal goals and would generate non-compiling Lean.
@@ -4657,6 +4658,47 @@ handler noop : State -> State {
         assert!(
             !lean.contains(":= v ≥ 0"),
             "def must not strip the quantifier leaving v unbound"
+        );
+    }
+
+    #[test]
+    fn witness_state_apply_resolves_spec_const_in_effect() {
+        let mut ws = WitnessState {
+            fields: vec![("counter".to_string(), "0".to_string())],
+            status: None,
+        };
+        let handler = crate::check::ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            doc: None,
+            who: None,
+            on_account: None,
+            pre_status: None,
+            post_status: None,
+            takes_params: vec![],
+            guard_str: None,
+            guard_str_rust: None,
+            aborts_if: vec![],
+            requires: vec![],
+            ensures: vec![],
+            modifies: None,
+            let_bindings: vec![],
+            aborts_total: false,
+            permissionless: true,
+            accounts: vec![],
+            transfers: vec![],
+            emits: vec![],
+            invariants: vec![],
+            properties: vec![],
+            calls: vec![],
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        ws.apply(&handler, &[], &constants);
+        let val = &ws.fields.iter().find(|(n, _)| n == "counter").unwrap().1;
+        assert_eq!(
+            val.as_str(),
+            "0",
+            "ZERO const should resolve to 0, not fall back to 1"
         );
     }
 }

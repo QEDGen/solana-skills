@@ -4238,4 +4238,30 @@ interface Token {
             "handler fragment missing in merged source"
         );
     }
+
+    #[test]
+    fn build_counterexample_resolves_named_const_in_effect() {
+        let handler = ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            ..make_handler("reset")
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        let ce = build_counterexample(
+            "s.counter \u{2264} 5",
+            "bounded",
+            &["counter"],
+            &handler,
+            &["counter"],
+            &constants,
+        )
+        .expect("should produce a counterexample");
+        let post = ce
+            .post_state
+            .iter()
+            .find(|(f, _)| f == "counter")
+            .unwrap()
+            .1;
+        assert_eq!(post, 0, "ZERO should resolve to 0, not fall back to 1");
+    }
 }

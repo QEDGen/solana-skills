@@ -1301,4 +1301,12 @@ handler noop { }
             "payload-variant sum should not get unit-strategy: {out}"
         );
     }
+
+    #[test]
+    fn strategy_for_field_boundary_small_bound_avoids_underflow() {
+        let spec = ParsedSpec::default();
+        let s = strategy_for_field("U64", &spec, StrategyMode::Boundary, Some("2")).unwrap();
+        assert_eq!(s, "0u64..=2u64");
+        assert!(!s.contains("- 3"), "must not emit `(b - 3)` for b < 3");
+    }
 }
