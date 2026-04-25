@@ -10,9 +10,8 @@
 
 use proc_macro2::TokenStream;
 use sha2::{Digest, Sha256};
-use syn::{parse2, ItemFn};
 
-use crate::verified::content_hash;
+use crate::verified::FnLike;
 
 /// Parsed attribute arguments from `#[qed(verified, spec=..., handler=..., ...)]`.
 pub(crate) struct Args {
@@ -20,6 +19,18 @@ pub(crate) struct Args {
     pub handler: Option<String>,
     pub hash: Option<String>,
     pub spec_hash: Option<String>,
+    /// Optional `#[derive(Accounts)]` struct name (e.g. `Buy`,
+    /// `Initialize`). Present when the user wants the macro to also
+    /// hash-check the accounts struct alongside the body + spec.
+    pub accounts: Option<String>,
+    /// Path to the file declaring the accounts struct, relative to
+    /// `CARGO_MANIFEST_DIR`. Anchor scaffold typically puts it in
+    /// `src/lib.rs`; some programs split into `src/accounts.rs` or
+    /// `src/instructions/<name>.rs`.
+    pub accounts_file: Option<String>,
+    /// Sealed hash of the canonicalized accounts struct (sha256-hex16
+    /// of the syn ItemStruct's tokens after attribute stripping).
+    pub accounts_hash: Option<String>,
 }
 
 /// SHA-256 hash of a string, truncated to 16 hex characters.
@@ -39,12 +50,24 @@ pub(crate) fn parse_args(attr: &TokenStream) -> Result<Args, syn::Error> {
     let mut handler = None;
     let mut hash = None;
     let mut spec_hash = None;
+    let mut accounts = None;
+    let mut accounts_file = None;
+    let mut accounts_hash = None;
 
     let mut i = 0;
     while i < tokens.len() {
         if let proc_macro2::TokenTree::Ident(ref ident) = tokens[i] {
             let name = ident.to_string();
-            if matches!(name.as_str(), "spec" | "handler" | "hash" | "spec_hash") {
+            if matches!(
+                name.as_str(),
+                "spec"
+                    | "handler"
+                    | "hash"
+                    | "spec_hash"
+                    | "accounts"
+                    | "accounts_file"
+                    | "accounts_hash"
+            ) {
                 // Expect `=` then literal
                 if i + 2 >= tokens.len() {
                     return Err(syn::Error::new(
@@ -79,6 +102,9 @@ pub(crate) fn parse_args(attr: &TokenStream) -> Result<Args, syn::Error> {
                     "handler" => handler = Some(value),
                     "hash" => hash = Some(value),
                     "spec_hash" => spec_hash = Some(value),
+                    "accounts" => accounts = Some(value),
+                    "accounts_file" => accounts_file = Some(value),
+                    "accounts_hash" => accounts_hash = Some(value),
                     _ => unreachable!(),
                 }
                 i += 3;
@@ -93,7 +119,35 @@ pub(crate) fn parse_args(attr: &TokenStream) -> Result<Args, syn::Error> {
         handler,
         hash,
         spec_hash,
+        accounts,
+        accounts_file,
+        accounts_hash,
     })
+}
+
+/// Parse `source` as Rust, find a top-level `pub struct <name>`, and
+/// return the canonical hash of its tokens (after outer-attribute
+/// stripping). Mirrors `qedgen::spec_hash::accounts_struct_hash` so
+/// the proc-macro and the qedgen-side computation produce identical
+/// values; any divergence yields a spurious accounts-hash drift.
+///
+/// Returns `None` when:
+///   - the file isn't valid Rust source
+///   - no `struct <name>` is declared at the top level (we don't
+///     descend into mods to keep the search predictable)
+pub(crate) fn accounts_struct_hash_in(source: &str, struct_name: &str) -> Option<String> {
+    use quote::ToTokens;
+    let file: syn::File = syn::parse_str(source).ok()?;
+    for item in file.items {
+        if let syn::Item::Struct(mut s) = item {
+            if s.ident == struct_name {
+                s.attrs.clear();
+                let canonical = s.to_token_stream().to_string();
+                return Some(sha256_hex16(&canonical));
+            }
+        }
+    }
+    None
 }
 
 /// Extract the raw text of a `handler <name> { ... }` block from the spec source
@@ -238,13 +292,13 @@ pub(crate) fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<
 /// The macro NEVER injects runtime code — expansion is the original function
 /// alone (or compile_error + original function on drift).
 pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Parse the function.
-    let func: ItemFn = match parse2(item.clone()) {
+    // Parse the item — accepts free fns and impl methods alike.
+    let func = match FnLike::from_tokens(item.clone()) {
         Ok(f) => f,
         Err(_) => {
             return syn::Error::new_spanned(
                 &item,
-                "qed(verified): can only be applied to functions",
+                "qed(verified): can only be applied to free functions or impl methods",
             )
             .to_compile_error();
         }
@@ -261,8 +315,10 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => return crate::verified::expand(attr, item),
     };
 
-    let fn_name = func.sig.ident.to_string();
-    let actual_body_hash = content_hash(&func);
+    let fn_name = func.ident().to_string();
+    let actual_body_hash = func.content_hash();
+    let func_span = func.name_span();
+    let func_tokens = func.to_token_stream();
 
     // Locate the spec file relative to CARGO_MANIFEST_DIR.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
@@ -276,8 +332,8 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
                 full_path.display(),
                 e
             );
-            let err = syn::Error::new(func.sig.ident.span(), msg).to_compile_error();
-            return quote::quote! { #err #func };
+            let err = syn::Error::new(func_span, msg).to_compile_error();
+            return quote::quote! { #err #func_tokens };
         }
     };
 
@@ -288,12 +344,51 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
                 "qed(verified): handler `{}` not found in spec `{}`",
                 handler_name, spec_path,
             );
-            let err = syn::Error::new(func.sig.ident.span(), msg).to_compile_error();
-            return quote::quote! { #err #func };
+            let err = syn::Error::new(func_span, msg).to_compile_error();
+            return quote::quote! { #err #func_tokens };
         }
     };
 
-    // Both hashes must be provided for a sealed attribute.
+    // Optional accounts-struct check. When all three of `accounts`,
+    // `accounts_file`, and `accounts_hash` are present, hash the
+    // referenced struct and validate. Absent → backward-compat
+    // body+spec-only check.
+    let actual_accounts_hash = match (
+        args.accounts.as_deref(),
+        args.accounts_file.as_deref(),
+        args.accounts_hash.as_deref(),
+    ) {
+        (Some(name), Some(file), _) => {
+            let acct_path = std::path::Path::new(&manifest_dir).join(file);
+            match std::fs::read_to_string(&acct_path) {
+                Ok(src) => match accounts_struct_hash_in(&src, name) {
+                    Some(h) => Some(h),
+                    None => {
+                        let msg = format!(
+                            "qed(verified): accounts struct `{}` not found in `{}` (resolved to `{}`)",
+                            name, file, acct_path.display(),
+                        );
+                        let err = syn::Error::new(func_span, msg).to_compile_error();
+                        return quote::quote! { #err #func_tokens };
+                    }
+                },
+                Err(e) => {
+                    let msg = format!(
+                        "qed(verified): could not read accounts file `{}` (resolved to `{}`): {}",
+                        file,
+                        acct_path.display(),
+                        e
+                    );
+                    let err = syn::Error::new(func_span, msg).to_compile_error();
+                    return quote::quote! { #err #func_tokens };
+                }
+            }
+        }
+        _ => None,
+    };
+
+    // Both core hashes must be provided for a sealed attribute. The
+    // accounts-hash leg is optional (legacy attributes still work).
     match (args.hash.as_deref(), args.spec_hash.as_deref()) {
         (Some(body_expected), Some(spec_expected)) => {
             if body_expected != actual_body_hash {
@@ -304,8 +399,8 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
                      Actual:   {}",
                     fn_name, body_expected, actual_body_hash
                 );
-                let err = syn::Error::new(func.sig.ident.span(), msg).to_compile_error();
-                return quote::quote! { #err #func };
+                let err = syn::Error::new(func_span, msg).to_compile_error();
+                return quote::quote! { #err #func_tokens };
             }
             if spec_expected != actual_spec_hash {
                 let msg = format!(
@@ -315,19 +410,49 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
                      Re-run `qedgen check` for a diff.",
                     handler_name, spec_expected, actual_spec_hash
                 );
-                let err = syn::Error::new(func.sig.ident.span(), msg).to_compile_error();
-                return quote::quote! { #err #func };
+                let err = syn::Error::new(func_span, msg).to_compile_error();
+                return quote::quote! { #err #func_tokens };
             }
-            // Both match — pass through.
+            // If accounts metadata supplied, validate that leg too.
+            if let (Some(acct_name), Some(acct_actual), Some(acct_expected)) = (
+                args.accounts.as_deref(),
+                actual_accounts_hash.as_deref(),
+                args.accounts_hash.as_deref(),
+            ) {
+                if acct_expected != acct_actual {
+                    let msg = format!(
+                        "qed: accounts struct `{}` changed since verification \
+                         (handler `{}`).\n\
+                         Expected: {}\n\
+                         Actual:   {}\n\
+                         Re-run `qedgen adapt --spec ...` to refresh.",
+                        acct_name, handler_name, acct_expected, acct_actual
+                    );
+                    let err = syn::Error::new(func_span, msg).to_compile_error();
+                    return quote::quote! { #err #func_tokens };
+                }
+            }
+            // All match — pass through.
             item
         }
         _ => {
             // Setup mode: emit the computed hashes for copy-paste.
+            let accounts_line = match (
+                args.accounts.as_deref(),
+                args.accounts_file.as_deref(),
+                actual_accounts_hash.as_deref(),
+            ) {
+                (Some(name), Some(file), Some(h)) => format!(
+                    ", accounts = \"{}\", accounts_file = \"{}\", accounts_hash = \"{}\"",
+                    name, file, h
+                ),
+                _ => String::new(),
+            };
             let msg = format!(
                 "qed(verified): no hash(es) provided for `{}`.\n\
                  Computed body hash: {}\n\
                  Computed spec hash: {}\n\
-                 Usage: #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]",
+                 Usage: #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\"{})]",
                 fn_name,
                 actual_body_hash,
                 actual_spec_hash,
@@ -335,9 +460,10 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
                 handler_name,
                 actual_body_hash,
                 actual_spec_hash,
+                accounts_line,
             );
-            let err = syn::Error::new(func.sig.ident.span(), msg).to_compile_error();
-            quote::quote! { #err #func }
+            let err = syn::Error::new(func_span, msg).to_compile_error();
+            quote::quote! { #err #func_tokens }
         }
     }
 }

@@ -27,5 +27,20 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
   }
 }
 
+handler deposit_with_accounts (amount : U64) : State.Active -> State.Active {
+  effect {
+    balance += amount
+  }
+}
+
+handler process (delta : U64) : State.Active -> State.Active {
+  requires balance + delta <= U64.MAX else Overflow
+
+  effect {
+    balance +=! delta
+  }
+}
+
 type Error
   | InsufficientFunds
+  | Overflow

@@ -35,6 +35,44 @@ pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
     sha256_hex16(&canonical)
 }
 
+/// Body hash for an impl method (`syn::ImplItemFn`). Same algorithm
+/// as `body_hash_for_fn`. Mirrors `qedgen-macros::verified::FnLike`'s
+/// Impl-arm hash so v2.9's method-shape `#[qed]` annotations can be
+/// emitted by the adapter and recomputed by the macro.
+pub fn body_hash_for_impl_fn(func: &syn::ImplItemFn) -> String {
+    let mut stripped = func.clone();
+    stripped.attrs.clear();
+    let canonical = stripped.to_token_stream().to_string();
+    sha256_hex16(&canonical)
+}
+
+/// Hash a top-level `pub struct <name>` from a Rust source file. MUST
+/// match `qedgen-macros::spec_bind::accounts_struct_hash_in`. Used by
+/// `qedgen adapt --spec` to seal each handler's accompanying
+/// `#[derive(Accounts)]` struct so edits to the constraints there
+/// (e.g. `#[account(mut)]`, `has_one = ...`, `seeds = [...]`) trip
+/// `compile_error!` the same way handler body edits do.
+///
+/// `None` when:
+///   - the source isn't valid Rust
+///   - no `struct <name>` exists at the top level (we don't descend
+///     into mods to keep the search predictable; users with nested
+///     accounts structs can either move the struct top-level or wait
+///     for v2.10's mod-walking pass).
+pub fn accounts_struct_hash(source: &str, struct_name: &str) -> Option<String> {
+    let file: syn::File = syn::parse_str(source).ok()?;
+    for item in file.items {
+        if let syn::Item::Struct(mut s) = item {
+            if s.ident == struct_name {
+                s.attrs.clear();
+                let canonical = s.to_token_stream().to_string();
+                return Some(sha256_hex16(&canonical));
+            }
+        }
+    }
+    None
+}
+
 /// Extract the raw text of a `handler <name> { ... }` block (braces included)
 /// via keyword search + balanced-brace scanning, treating `//`, `/* */`, and
 /// `"…"` as opaque regions.
@@ -236,6 +274,83 @@ handler bar : State.A -> State.B {
             pub fn deposit(amount: u64) -> u64 { amount + 2 }
         };
         assert_ne!(body_hash_for_fn(&v1), body_hash_for_fn(&v2));
+    }
+
+    /// Mirrors `qedgen-macros::verified::tests::fn_like_handles_method_shape_input`.
+    /// Same impl-method body run through both sides should produce
+    /// identical 16-hex hashes.
+    #[test]
+    fn body_hash_for_impl_fn_handles_self_receiver() {
+        let func: syn::ImplItemFn = syn::parse_quote! {
+            pub fn process(&mut self, lamports: u64) -> Result<()> {
+                self.state.total_lamports += lamports;
+                Ok(())
+            }
+        };
+        let h = body_hash_for_impl_fn(&func);
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn accounts_struct_hash_finds_struct_and_is_stable() {
+        let src = r#"
+            use anchor_lang::prelude::*;
+
+            #[derive(Accounts)]
+            pub struct Buy<'info> {
+                #[account(mut)]
+                pub buyer: Signer<'info>,
+                #[account(mut, has_one = mint)]
+                pub vault: Account<'info, Vault>,
+            }
+
+            #[derive(Accounts)]
+            pub struct Sell<'info> {
+                pub seller: Signer<'info>,
+            }
+        "#;
+        let h_buy = accounts_struct_hash(src, "Buy").unwrap();
+        assert_eq!(h_buy.len(), 16);
+        // Stable: same input → same hash.
+        assert_eq!(accounts_struct_hash(src, "Buy").unwrap(), h_buy);
+        // Different struct → different hash.
+        let h_sell = accounts_struct_hash(src, "Sell").unwrap();
+        assert_ne!(h_buy, h_sell);
+        // Editing a constraint changes the hash.
+        let edited = src.replace("#[account(mut)]", "#[account(mut, signer)]");
+        assert_ne!(accounts_struct_hash(&edited, "Buy").unwrap(), h_buy);
+    }
+
+    #[test]
+    fn accounts_struct_hash_returns_none_for_missing_struct() {
+        let src = "pub struct Other { pub x: u64 }";
+        assert!(accounts_struct_hash(src, "DoesNotExist").is_none());
+    }
+
+    #[test]
+    fn accounts_struct_hash_ignores_outer_attrs() {
+        // The `#[derive(Accounts)]` and any other outer attributes
+        // are stripped before hashing — the macro recomputes after
+        // stripping too, so adding/removing derives without changing
+        // fields shouldn't fire drift. Constraint edits inside fields
+        // (the inner `#[account(...)]` attrs) WILL fire because
+        // those are part of the Field, not the outer struct.
+        let with_attrs = r#"
+            #[derive(Accounts, Debug, Clone)]
+            pub struct Buy {
+                pub x: u64,
+            }
+        "#;
+        let without_attrs = r#"
+            pub struct Buy {
+                pub x: u64,
+            }
+        "#;
+        assert_eq!(
+            accounts_struct_hash(with_attrs, "Buy").unwrap(),
+            accounts_struct_hash(without_attrs, "Buy").unwrap()
+        );
     }
 
     #[test]

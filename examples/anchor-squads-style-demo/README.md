@@ -16,8 +16,10 @@ The adapter:
 4. Emits `before.qedspec` with `// method on MultisigCreate` per
    handler and the file breadcrumb.
 
-Same v2.9 caveat as the Marinade-style fixture: `#[qed]` annotation
-on impl methods lands in v2.10. Scaffold mode works fully.
+Same shape as the Marinade-style fixture: method-shape handlers seal
+end-to-end via the proc-macro's `ItemFn`/`ImplItemFn` fallback.
+`qedgen adapt --spec` emits sealed attributes ready to paste above
+the impl methods.
 
 ## Reproduce
 

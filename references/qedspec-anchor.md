@@ -41,24 +41,25 @@ See the worked examples:
 - `examples/anchor-marinade-style-demo/` — accounts-method forwarders
 - `examples/anchor-squads-style-demo/` — type-associated forwarders
 
-## `#[qed]` drift loop (free-fn / inline only in v2.9)
+## `#[qed]` drift loop
 
-The proc-macro `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ...)]` is the seal. At compile time, `qedgen-macros`:
+The proc-macro `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ..., [accounts = ..., accounts_file = ..., accounts_hash = ...])]` is the seal. Three legs, two required, one optional:
 
-1. Reads the `.qedspec` at `<spec>` (resolved against `CARGO_MANIFEST_DIR`).
-2. Extracts the named `handler { ... }` block via balanced-brace scan, hashes it.
-3. Hashes the function body via `func.to_token_stream()` after stripping outer attributes.
-4. Compares both to the pinned `hash = "..."` and `spec_hash = "..."`.
-5. Mismatch → `compile_error!` with a "Expected: ... Actual: ..." diff. Match → pass-through.
+- **Required** — `hash`: SHA-256-hex16 of the function body's canonical token stream after outer-attribute stripping. Works on free fns (`syn::ItemFn`) and impl methods (`syn::ImplItemFn`) alike via the `FnLike` shim, so Marinade-style `ctx.accounts.process(...)` and Squads-style `Type::method(ctx, args)` handlers seal end-to-end.
+- **Required** — `spec_hash`: SHA-256-hex16 of the `handler <name> { ... }` block's raw text (braces included), whitespace-sensitive.
+- **Optional** — `accounts` / `accounts_file` / `accounts_hash`: when present, the macro reads the file at `accounts_file` (resolved against `CARGO_MANIFEST_DIR`), finds `pub struct <accounts>`, hashes its tokens after outer-attr stripping, and compares to `accounts_hash`. Edits to fields, types, or `#[account(...)]` constraints fire drift.
 
-`qedgen adapt --spec` precomputes both hashes via the same algorithms (`spec_hash::body_hash_for_fn` + `spec_hash::spec_hash_for_handler`) so the user just pastes the output.
+Mismatch in any leg → `compile_error!` with an "Expected: … Actual: …" diff. All match → pass-through.
+
+`qedgen adapt --spec` precomputes every leg via the same algorithms (`spec_hash::body_hash_for_fn`, `spec_hash::body_hash_for_impl_fn`, `spec_hash::spec_hash_for_handler`, `spec_hash::accounts_struct_hash`) so the user just pastes the output. The accounts triplet is auto-included whenever the adapter can find the `Context<X>` struct in source.
 
 ### What edits trip drift
 
 - Edit the function body (a statement, an arithmetic op, a `let` binding, even a parameter type) → body hash changes → `compile_error!`.
 - Edit the spec's `handler { ... }` block (any byte inside the braces, including whitespace) → spec hash changes → `compile_error!`.
-- Edit anything *outside* the braces (other handlers, type declarations, comments above the handler) → no effect.
-- Add or remove an attribute on the handler (e.g. `#[inline]`) → no effect (attributes are stripped before hashing).
+- Edit a field, type, or inner `#[account(...)]` attribute on the `#[derive(Accounts)]` struct (when sealed via the optional triplet) → accounts hash changes → `compile_error!`.
+- Edit anything *outside* those scopes (other handlers, unrelated type declarations, comments above the handler) → no effect.
+- Add or remove an outer attribute on the handler or the accounts struct (e.g. `#[inline]`, `#[derive(Debug)]`) → no effect (outer attributes are stripped before hashing).
 
 ### Refresh after intentional edits
 
@@ -68,23 +69,24 @@ qedgen adapt --program <crate> --spec <path>
 
 Re-emits all attribute lines with current hashes. Paste in the changed handlers. Build clears.
 
-For the success path + drift demo end-to-end, see `examples/qed-drift-fixture/`. That fixture is a workspace member, so workspace `cargo test` exercises the full chain on every CI run.
+For the success path + drift demo end-to-end, see `examples/qed-drift-fixture/`. That fixture is a workspace member exercising all three legs (free-fn body, impl-method body, accounts struct), so workspace `cargo test` proves every leg of the drift loop on every CI run.
 
-### Method-shape forwarders in v2.9
+### Method-shape forwarders
 
-`Marinade::process(...)` / `Type::method(ctx, args)` handlers come through `qedgen adapt --spec` with:
+Marinade-style (`ctx.accounts.process(...)`) and Squads-style (`Type::method(ctx, args)`) handlers seal end-to-end, the same as free-fn shapes. Place `#[qed]` directly on the impl method:
 
+```rust
+impl<'info> Deposit<'info> {
+    #[qed(verified, spec = "stake.qedspec", handler = "deposit",
+          hash = "...", spec_hash = "...",
+          accounts = "Deposit", accounts_file = "src/lib.rs", accounts_hash = "...")]
+    pub fn process(&mut self, lamports: u64) -> Result<()> {
+        // ...
+    }
+}
 ```
-// === handler: deposit ===
-// source: src/instructions/deposit.rs
-// note: method-shape forwarder (`impl Deposit` block) — `#[qed]` annotation requires a free-fn handler in v2.9. Either refactor to a free fn or wait for v2.10's impl-method support
-```
 
-Two paths:
-1. **Refactor to free-fn.** Move the body out of the impl into a `pub fn deposit(...)` at module level; the `Context<X>::deposit(...)` forwarder calls into it. Now `#[qed]` works.
-2. **Wait for v2.10.** Method-shape support is on the roadmap; the proc-macro will handle `syn::ImplItemFn` alongside `syn::ItemFn`.
-
-The scaffold path works for method shapes today; only the seal step is gated.
+The proc-macro tries `syn::ItemFn` first and falls back to `syn::ImplItemFn`, so the same attribute syntax works in either position. `qedgen adapt --spec` emits the right line whether the resolver classifies the handler as `Inline`, `FreeFn`, or `Method`.
 
 ## CI integration
 
@@ -105,7 +107,6 @@ Output is plain stderr by default, JSON via `--json` for tools.
 
 ## Limitations + roadmap
 
-- **Method-shape `#[qed]`:** v2.10. Requires the macro to parse `syn::ImplItemFn` in addition to `syn::ItemFn`.
-- **Accounts-struct in body hash:** v2.10 polish. Today the macro hashes only the handler body; constraints declared on `#[derive(Accounts)]` are validated by `qedgen check --anchor-project` rather than the proc-macro. The PRD's combined hash will fold in once we have the macro reading the accompanying struct.
-- **Drift custom dispatchers:** the v2.9 adapter classifies these as `Unrecognized`. Future `--handler <name>=<rust_path>` override flag is on the roadmap.
-- **Cosmetic-edit tolerance:** the spec hash is whitespace-sensitive on purpose (small reformats today, larger drift later — pinning whitespace surfaces the small ones early). v2.10+ may add a normalize-on-hash mode behind a flag.
+- **Drift custom dispatchers:** the adapter classifies these as `Unrecognized`. The planned `--handler <name>=<rust_path>` override flag is on the roadmap.
+- **Nested accounts struct:** `accounts_struct_hash` walks top-level items only. If `#[derive(Accounts)] pub struct Buy` lives inside `pub mod accounts { ... }`, the macro won't find it. Move it to the file's top level or use a sibling file (see `accounts_file` in the attribute).
+- **Cosmetic-edit tolerance:** the spec hash is whitespace-sensitive on purpose (small reformats today, larger drift later — pinning whitespace surfaces the small ones early). v3.0+ may add a normalize-on-hash mode behind a flag.

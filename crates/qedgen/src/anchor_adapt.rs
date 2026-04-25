@@ -148,6 +148,22 @@ pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<A
         };
 
         let location = resolve_handler(instruction, &project.lib_rs_path, program_root)?;
+        let spec_hash = crate::spec_hash::spec_hash_for_handler(&spec_source, &handler.name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "internal error: parsed handler `{}` but couldn't extract its block from {}",
+                    handler.name,
+                    spec_path.display()
+                )
+            })?;
+
+        // The accounts struct sits in the user's source somewhere —
+        // the program_fn's `Context<X>` names it; we walk source to
+        // find `pub struct X` and hash it. Optional: when the struct
+        // can't be found we omit the accounts-* fields so the
+        // attribute still works in body-only mode.
+        let accounts_meta = accounts_struct_for_handler(&instruction.program_fn, program_root);
+
         let entry = match location {
             HandlerLocation::Inline {
                 item_fn,
@@ -158,43 +174,42 @@ pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<A
                 source_path,
             } => {
                 let body_hash = crate::spec_hash::body_hash_for_fn(&item_fn);
-                let spec_hash = crate::spec_hash::spec_hash_for_handler(
-                    &spec_source,
-                    &handler.name,
-                )
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "internal error: parsed handler `{}` but couldn't extract its block from {}",
-                        handler.name,
-                        spec_path.display()
-                    )
-                })?;
                 AttributeEntry {
                     handler: handler.name.clone(),
                     source_path: rel_to(program_root, &source_path),
-                    attribute: format!(
-                        "#[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]",
-                        spec_rel.display(),
-                        handler.name,
-                        body_hash,
-                        spec_hash,
+                    attribute: render_attribute(
+                        &spec_rel,
+                        &handler.name,
+                        &body_hash,
+                        &spec_hash,
+                        accounts_meta.as_ref(),
                     ),
                     note: None,
                 }
             }
             HandlerLocation::Method {
+                item_fn,
                 source_path,
-                impl_type,
                 ..
-            } => AttributeEntry {
-                handler: handler.name.clone(),
-                source_path: rel_to(program_root, &source_path),
-                attribute: String::new(),
-                note: Some(format!(
-                    "method-shape forwarder (`impl {}` block) — `#[qed]` annotation requires a free-fn handler in v2.9. Either refactor to a free fn or wait for v2.10's impl-method support",
-                    impl_type
-                )),
-            },
+            } => {
+                // v2.9 second-pass: impl methods seal end-to-end via
+                // `FnLike::Impl` in the macro and `body_hash_for_impl_fn`
+                // here. Marinade- and Squads-style handlers ride the
+                // same drift loop as free-fn shapes.
+                let body_hash = crate::spec_hash::body_hash_for_impl_fn(&item_fn);
+                AttributeEntry {
+                    handler: handler.name.clone(),
+                    source_path: rel_to(program_root, &source_path),
+                    attribute: render_attribute(
+                        &spec_rel,
+                        &handler.name,
+                        &body_hash,
+                        &spec_hash,
+                        accounts_meta.as_ref(),
+                    ),
+                    note: None,
+                }
+            }
             HandlerLocation::Unrecognized { reason } => AttributeEntry {
                 handler: handler.name.clone(),
                 source_path: program_root.to_path_buf(),
@@ -209,6 +224,83 @@ pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<A
     }
 
     Ok(out)
+}
+
+/// Lookup info for the `#[derive(Accounts)]` struct that backs a
+/// handler's `Context<X>` argument. Carries the bytes the macro will
+/// recompute against, plus the relative path it'll resolve via
+/// `CARGO_MANIFEST_DIR`.
+struct AccountsMeta {
+    /// Type name written in the handler's `Context<X>` (e.g. `Buy`).
+    struct_name: String,
+    /// Source file holding `pub struct <struct_name>`, relative to
+    /// `program_root`. Pasted into the attribute's `accounts_file`.
+    file_rel: PathBuf,
+    /// Sealed hash of the canonicalized struct.
+    hash: String,
+}
+
+/// Pull the `Context<X>` type from the program-mod fn signature, walk
+/// the program crate's `src/` for `pub struct X`, and return enough
+/// metadata for the attribute renderer to seal it. None when the
+/// signature has no `Context<X>` or no matching struct exists.
+fn accounts_struct_for_handler(
+    program_fn: &syn::ItemFn,
+    program_root: &Path,
+) -> Option<AccountsMeta> {
+    let struct_name = extract_accounts_type(program_fn)?;
+    // Walk the crate's src/ and try each file. First match wins —
+    // production Anchor programs don't declare two types with the
+    // same name in different files.
+    let src_dir = program_root.join("src");
+    let mut candidates = walk_rust_files(&src_dir);
+    candidates.sort();
+    for path in candidates {
+        let source = std::fs::read_to_string(&path).ok()?;
+        if let Some(hash) = crate::spec_hash::accounts_struct_hash(&source, &struct_name) {
+            let file_rel = path
+                .strip_prefix(program_root)
+                .map(Path::to_path_buf)
+                .unwrap_or(path);
+            return Some(AccountsMeta {
+                struct_name,
+                file_rel,
+                hash,
+            });
+        }
+    }
+    None
+}
+
+/// Render a single `#[qed(verified, ...)]` attribute line. Folds the
+/// optional `accounts*` triplet in when the adapter could lock onto a
+/// struct.
+fn render_attribute(
+    spec_rel: &Path,
+    handler_name: &str,
+    body_hash: &str,
+    spec_hash: &str,
+    accounts: Option<&AccountsMeta>,
+) -> String {
+    match accounts {
+        Some(meta) => format!(
+            "#[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\", accounts = \"{}\", accounts_file = \"{}\", accounts_hash = \"{}\")]",
+            spec_rel.display(),
+            handler_name,
+            body_hash,
+            spec_hash,
+            meta.struct_name,
+            meta.file_rel.display(),
+            meta.hash,
+        ),
+        None => format!(
+            "#[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]",
+            spec_rel.display(),
+            handler_name,
+            body_hash,
+            spec_hash,
+        ),
+    }
 }
 
 /// Render the attribute entries as a paste-friendly text report:
@@ -1082,6 +1174,183 @@ mod tests {
         let rendered = adapt(&root).unwrap();
         assert!(rendered.contains("`#[error_code] pub enum MyError`"));
         assert!(rendered.contains("| Bad"));
+    }
+
+    /// Method-shape handlers (Marinade `ctx.accounts.process(...)`)
+    /// no longer carry a "refactor or wait for v2.10" note — they
+    /// emit a sealed `#[qed]` attribute via `body_hash_for_impl_fn`.
+    #[test]
+    fn compute_attributes_seals_method_shape_handlers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+
+                    pub mod instructions;
+
+                    #[program]
+                    pub mod stake {
+                        use super::*;
+                        pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+                            ctx.accounts.process(amount)
+                        }
+                    }
+
+                    pub struct Deposit;
+                    "#,
+                ),
+                ("src/instructions/mod.rs", "pub mod deposit;\n"),
+                (
+                    "src/instructions/deposit.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+                    use crate::Deposit;
+
+                    impl Deposit {
+                        pub fn process(&mut self, amount: u64) -> Result<()> {
+                            Ok(())
+                        }
+                    }
+                    "#,
+                ),
+            ],
+        );
+
+        let spec_path = tmp.path().join("stake.qedspec");
+        std::fs::write(
+            &spec_path,
+            r#"
+            spec Stake
+            type State | Active
+            handler deposit (amount : U64) : State.Active -> State.Active {
+              effect { lamports += amount }
+            }
+            type Error | Bad
+            "#,
+        )
+        .unwrap();
+
+        let entries = compute_attributes(&root, &spec_path).unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.handler, "deposit");
+        assert!(
+            e.note.is_none(),
+            "method-shape should seal cleanly: {:?}",
+            e.note
+        );
+        assert!(e.attribute.contains("hash = \""), "attr: {}", e.attribute);
+        assert!(
+            e.attribute.contains("spec_hash = \""),
+            "attr: {}",
+            e.attribute
+        );
+    }
+
+    /// When the adapter can find the `Context<X>` accounts struct, the
+    /// emitted attribute carries `accounts = ..., accounts_file = ...,
+    /// accounts_hash = ...` so the macro can seal the struct too.
+    #[test]
+    fn compute_attributes_includes_accounts_struct_seal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[(
+                "src/lib.rs",
+                r#"
+                use anchor_lang::prelude::*;
+
+                #[program]
+                pub mod p {
+                    use super::*;
+                    pub fn buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
+                        Ok(())
+                    }
+                }
+
+                #[derive(Accounts)]
+                pub struct Buy<'info> {
+                    pub buyer: Signer<'info>,
+                    #[account(mut)]
+                    pub vault: Account<'info, Vault>,
+                }
+
+                pub struct Vault;
+                "#,
+            )],
+        );
+
+        let spec_path = tmp.path().join("p.qedspec");
+        std::fs::write(
+            &spec_path,
+            r#"
+            spec P
+            type State | Active
+            handler buy (amount : U64) : State.Active -> State.Active {
+              effect { count += amount }
+            }
+            type Error | Bad
+            "#,
+        )
+        .unwrap();
+
+        let entries = compute_attributes(&root, &spec_path).unwrap();
+        let buy = entries.iter().find(|e| e.handler == "buy").unwrap();
+        assert!(
+            buy.attribute.contains("accounts = \"Buy\""),
+            "attr: {}",
+            buy.attribute
+        );
+        assert!(buy.attribute.contains("accounts_file = \"src/lib.rs\""));
+        assert!(buy.attribute.contains("accounts_hash = \""));
+    }
+
+    /// Without a `Context<X>` arg, the adapter falls back to the
+    /// body+spec-only attribute. Ensures backward compat with v2.9
+    /// G2a's original output.
+    #[test]
+    fn compute_attributes_omits_accounts_when_struct_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[(
+                "src/lib.rs",
+                r#"
+                #[program]
+                pub mod p {
+                    use super::*;
+                    pub fn ping(ctx: Context<MissingType>) -> Result<()> {
+                        Ok(())
+                    }
+                }
+                "#,
+            )],
+        );
+
+        let spec_path = tmp.path().join("p.qedspec");
+        std::fs::write(
+            &spec_path,
+            r#"
+            spec P
+            type State | Active
+            handler ping : State.Active -> State.Active { effect { } }
+            type Error | Bad
+            "#,
+        )
+        .unwrap();
+
+        let entries = compute_attributes(&root, &spec_path).unwrap();
+        let ping = entries.iter().find(|e| e.handler == "ping").unwrap();
+        assert!(
+            !ping.attribute.contains("accounts = "),
+            "attr: {}",
+            ping.attribute
+        );
+        assert!(ping.attribute.contains("hash = \""));
     }
 
     #[test]

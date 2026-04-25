@@ -16,10 +16,11 @@ The adapter:
 4. Emits `before.qedspec` with `// method on <Type>` per handler and
    the file breadcrumb.
 
-`#[qed]` annotation is **not** supported on impl methods in v2.9 — the
-proc-macro currently parses only `syn::ItemFn`, not `syn::ImplItemFn`.
-Method-shape handlers ride the scaffold path; the drift loop arrives
-in v2.10.
+Method-shape handlers seal end-to-end, the same as free-fn shapes —
+the proc-macro tries `syn::ItemFn` first and falls back to
+`syn::ImplItemFn`, so `#[qed]` works in either position. Run
+`qedgen adapt --program <path> --spec <stake.qedspec>` to get the
+sealed attribute lines for paste, including the `accounts_*` triplet.
 
 ## Reproduce
 

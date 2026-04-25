@@ -102,7 +102,7 @@ Once the spec covers each handler, paint `#[qed]` attributes on the handlers so 
 $QEDGEN adapt --program <crate-dir> --spec <path-to>.qedspec
 ```
 
-Emits one `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ...)]` line per spec handler with the matching source path. Paste each above its handler `pub fn`. The `qedgen-macros` crate recomputes both hashes at compile time — body edits or spec edits without a re-run print a diff and break the build until you re-paste. v2.9 supports inline + free-fn handler shapes; method-shape forwarders (Marinade `ctx.accounts.process(...)` and Squads `Type::method(ctx, args)`) carry through scaffold mode with a `// note: …` instead of an attribute (impl-method support lands in v2.10).
+Emits one `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ..., accounts = ..., accounts_file = ..., accounts_hash = ...)]` line per spec handler with the matching source path. Paste each above its handler `pub fn`. The `qedgen-macros` crate recomputes every hash at compile time — body edits, spec edits, or `#[derive(Accounts)]` constraint edits without a re-run print a diff and break the build until you re-paste. All four forwarder shapes (inline, free-fn, type-associated method, accounts-method) seal end-to-end; the proc-macro tries `syn::ItemFn` and falls back to `syn::ImplItemFn`, so attaching `#[qed]` to a method inside an `impl` block works the same as on a free fn. The `accounts*` triplet is included automatically whenever the adapter can find the `Context<X>` struct in source.
 
 Cross-check spec coverage against the live program in CI:
 
