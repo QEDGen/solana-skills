@@ -949,22 +949,10 @@ fn resolve_and_merge_imports(
     let mut lock = crate::qed_lock::LockFile::new();
 
     for r in resolved {
-        // Multi-file imported deps not yet supported — single .qedspec only.
-        // Remove this guard in v2.9 if real adopters need fragmented library specs.
-        anyhow::ensure!(
-            r.sources.len() == 1,
-            "import `{}` resolved to {} source files; v2.8 supports single-file imports only",
-            r.bound_name,
-            r.sources.len(),
-        );
-
-        let (src_path, src_bytes) = &r.sources[0];
-        let imported = crate::chumsky_adapter::parse_str(src_bytes).with_context(|| {
+        let imported = parse_imported_sources(&r).with_context(|| {
             format!(
-                "parsing imported spec `{}` from {} (dep key `{}`)",
-                r.bound_name,
-                src_path.display(),
-                r.dep_key,
+                "parsing imported spec `{}` (dep key `{}`)",
+                r.bound_name, r.dep_key,
             )
         })?;
 
@@ -974,11 +962,16 @@ fn resolve_and_merge_imports(
             .iter()
             .find(|i| i.name == r.bound_name)
             .ok_or_else(|| {
+                let where_clause = if r.sources.len() == 1 {
+                    format!("at {}", r.sources[0].0.display())
+                } else {
+                    format!("(merged from {} fragments)", r.sources.len())
+                };
                 anyhow::anyhow!(
-                    "import `{}` from `{}` — imported source at {} declares no `interface {}` block",
+                    "import `{}` from `{}` — imported source {} declares no `interface {}` block",
                     r.bound_name,
                     r.dep_key,
-                    src_path.display(),
+                    where_clause,
                     r.bound_name,
                 )
             })?;
@@ -1000,6 +993,55 @@ fn resolve_and_merge_imports(
     crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
 
     Ok(())
+}
+
+/// Parse the source bytes for one resolved import. Single-file deps go
+/// through `chumsky_adapter::parse_str` directly; multi-file deps follow
+/// the same path-sorted merge logic as `parse_spec_dir` — every fragment
+/// must declare the same `spec Name`, and their top items merge into one
+/// AST before the adapter runs.
+///
+/// v2.8 fold-in F4: previously only single-file imports were supported.
+fn parse_imported_sources(r: &crate::import_resolver::ResolvedImport) -> Result<ParsedSpec> {
+    if r.sources.len() == 1 {
+        let (src_path, src_bytes) = &r.sources[0];
+        return crate::chumsky_adapter::parse_str(src_bytes)
+            .with_context(|| format!("parsing imported spec source at {}", src_path.display()));
+    }
+
+    // Multi-file: parse each, merge AST top items, validate name consistency.
+    let mut merged_name: Option<String> = None;
+    let mut merged_items: Vec<crate::ast::Node<crate::ast::TopItem>> = Vec::new();
+    for (path, src) in &r.sources {
+        let typed = crate::chumsky_parser::parse(src).map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(|e| format!("  {}", crate::chumsky_parser::format_parse_error(e, src)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!("parse error in imported {}:\n{}", path.display(), msg)
+        })?;
+        match &merged_name {
+            None => merged_name = Some(typed.name.clone()),
+            Some(existing) if existing != &typed.name => anyhow::bail!(
+                "imported spec fragment {} declares `spec {}`, but a sibling \
+                 fragment declares `spec {}`. Every fragment of a multi-file \
+                 imported dep must declare the same name.",
+                path.display(),
+                typed.name,
+                existing,
+            ),
+            _ => {}
+        }
+        merged_items.extend(typed.items);
+    }
+    let merged = crate::ast::Spec {
+        name: merged_name.expect("non-empty source list implies a name"),
+        items: merged_items,
+    };
+    let parsed = crate::chumsky_adapter::adapt(&merged);
+    crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
+    Ok(parsed)
 }
 
 /// Read the source text of a spec path — single file or directory of
@@ -4874,6 +4916,124 @@ handler h : State.A -> State.A { effect { x := 1 } }
         parse_spec_file(&consumer).unwrap();
         parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen)
             .expect("frozen should pass when lock is current");
+    }
+
+    #[test]
+    fn parse_spec_file_resolves_multi_file_imported_dep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Imported dep is a *directory* of fragments. Each declares the
+        // same `spec MultiToken`; one carries the interface, another
+        // carries a sidecar event used in the interface's docs.
+        let dep_dir = spec_dir.join("multitoken");
+        std::fs::create_dir(&dep_dir).unwrap();
+        std::fs::write(
+            dep_dir.join("a-iface.qedspec"),
+            r#"spec MultiToken
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_dir.join("b-event.qedspec"),
+            r#"spec MultiToken
+event TokenMoved {
+  amount : U64,
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "multitoken" }
+"#,
+        )
+        .unwrap();
+
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer)
+            .expect("multi-file imported dep should parse + merge end-to-end");
+        // Token interface from a-iface.qedspec lives in the merged consumer.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "interface from multi-file dep should be merged in; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_multi_file_dep_fragments_disagree_on_spec_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        let dep_dir = spec_dir.join("bad-multi");
+        std::fs::create_dir(&dep_dir).unwrap();
+        std::fs::write(
+            dep_dir.join("a.qedspec"),
+            "spec NameOne\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep_dir.join("b.qedspec"),
+            "spec NameTwo\nevent E { amount : U64 }\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+bad = { path = "bad-multi" }
+"#,
+        )
+        .unwrap();
+
+        let consumer = spec_dir.join("c.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Caller
+import Token from "bad"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer).unwrap_err());
+        assert!(
+            err.contains("must declare the same name"),
+            "expected name-mismatch error; got: {err}"
+        );
     }
 
     #[test]
