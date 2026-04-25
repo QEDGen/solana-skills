@@ -45,6 +45,15 @@ pub struct ResolvedImport {
     pub commit: Option<String>,
 }
 
+/// Cache-handling options for github fetches. v2.8 fold-in F7.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
+pub struct CacheOpts {
+    /// `--no-cache`: forcibly clear and refetch every github source.
+    /// Path sources are unaffected.
+    pub force_refresh: bool,
+}
+
 /// Resolve every `import` statement against the manifest, fetch sources,
 /// and return them. Errors carry enough context to point the user at the
 /// offending import or manifest entry.
@@ -53,6 +62,17 @@ pub fn resolve_imports(
     imports: &[ParsedImport],
     manifest: &Manifest,
     manifest_dir: &Path,
+) -> Result<Vec<ResolvedImport>> {
+    resolve_imports_with_opts(imports, manifest, manifest_dir, CacheOpts::default())
+}
+
+/// `resolve_imports`, with explicit cache-policy controls.
+#[allow(dead_code)]
+pub fn resolve_imports_with_opts(
+    imports: &[ParsedImport],
+    manifest: &Manifest,
+    manifest_dir: &Path,
+    cache_opts: CacheOpts,
 ) -> Result<Vec<ResolvedImport>> {
     let mut resolved = Vec::with_capacity(imports.len());
     for imp in imports {
@@ -70,7 +90,7 @@ pub fn resolve_imports(
                 repo,
                 git_ref,
                 path,
-            } => resolve_github_dep(&imp.name, repo, git_ref, path.as_deref())?,
+            } => resolve_github_dep(&imp.name, repo, git_ref, path.as_deref(), cache_opts)?,
         };
 
         resolved.push(ResolvedImport {
@@ -125,8 +145,9 @@ fn resolve_github_dep(
     repo: &str,
     git_ref: &GitRef,
     sub_path: Option<&str>,
+    cache_opts: CacheOpts,
 ) -> Result<ResolvedSource> {
-    let cache = ensure_github_cache(repo, git_ref)
+    let cache = ensure_github_cache(repo, git_ref, cache_opts)
         .with_context(|| format!("fetching `{}` ({}@{})", bound_name, repo, git_ref.as_str()))?;
 
     let target = match sub_path {
@@ -154,7 +175,7 @@ struct GithubCache {
     commit: String,
 }
 
-fn ensure_github_cache(repo: &str, git_ref: &GitRef) -> Result<GithubCache> {
+fn ensure_github_cache(repo: &str, git_ref: &GitRef, cache_opts: CacheOpts) -> Result<GithubCache> {
     let cache_root = cache_root();
     let (org, name) = split_repo(repo)?;
     let kind = git_ref.cache_kind();
@@ -168,10 +189,16 @@ fn ensure_github_cache(repo: &str, git_ref: &GitRef) -> Result<GithubCache> {
 
     let commit_marker = dir.join(".qedgen-commit");
 
-    // Cache hit: directory exists and we have a recorded commit. Skip the
-    // clone entirely — `git rev-parse HEAD` would be cheap, but the marker
-    // file lets us skip even spawning git when the cache is warm.
-    if dir.exists() && commit_marker.exists() {
+    // Cache hit: directory exists, we have a recorded commit, --no-cache
+    // wasn't requested, and the marker is fresh enough per QEDGEN_CACHE_TTL
+    // (default 7 days). Skip the clone entirely — `git rev-parse HEAD`
+    // would be cheap, but the marker file lets us skip even spawning git
+    // when the cache is warm.
+    if !cache_opts.force_refresh
+        && dir.exists()
+        && commit_marker.exists()
+        && !marker_is_stale(&commit_marker)
+    {
         let commit = std::fs::read_to_string(&commit_marker)
             .with_context(|| format!("reading cache marker {}", commit_marker.display()))?
             .trim()
@@ -253,6 +280,41 @@ fn cache_root() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".qedgen").join("cache")
+}
+
+/// Default cache TTL: 7 days. Override via QEDGEN_CACHE_TTL=<seconds>.
+/// Branches change content under a stable ref name, so re-fetching every
+/// week catches typical cadence drift; tags and revs are immutable
+/// content-wise, so the TTL only forces a no-op `git rev-parse HEAD`
+/// re-check on those.
+const DEFAULT_CACHE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn cache_ttl_secs() -> u64 {
+    std::env::var("QEDGEN_CACHE_TTL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CACHE_TTL_SECS)
+}
+
+/// True iff the cache marker is older than the configured TTL. Errors
+/// reading mtime fall back to "not stale" — better to use a possibly-
+/// stale cache than to refetch on every run because of a flaky stat.
+fn marker_is_stale(marker: &Path) -> bool {
+    let ttl = cache_ttl_secs();
+    if ttl == 0 {
+        // TTL=0 disables time-based invalidation.
+        return false;
+    }
+    let Ok(meta) = std::fs::metadata(marker) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age.as_secs() > ttl
 }
 
 fn run_git(args: &[&str]) -> Result<String> {
@@ -535,6 +597,47 @@ mod tests {
     #[test]
     fn sanitize_for_path_replaces_slashes() {
         assert_eq!(sanitize_for_path("release/2.8"), "release_2.8");
+    }
+
+    #[test]
+    fn marker_is_stale_disabled_when_ttl_is_zero() {
+        // QEDGEN_CACHE_TTL=0 disables the time-based staleness check —
+        // useful when users want to defer cache invalidation entirely
+        // to --no-cache.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join(".qedgen-commit");
+        std::fs::write(&marker, "abc123").unwrap();
+        std::env::set_var("QEDGEN_CACHE_TTL", "0");
+        assert!(!marker_is_stale(&marker));
+        std::env::remove_var("QEDGEN_CACHE_TTL");
+    }
+
+    // Note: the "TTL exceeded → stale" path is genuinely time-and-env-
+    // dependent, and rust's parallel-by-default test runner makes
+    // QEDGEN_CACHE_TTL races flaky. The unit coverage above (TTL=0
+    // short-circuits, missing marker is non-stale, cache_ttl_secs reads
+    // env) covers the moving parts; the cumulative path is exercised in
+    // ad-hoc integration runs (not part of cargo test).
+
+    #[test]
+    fn marker_is_stale_returns_false_for_missing_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("does-not-exist");
+        // Stat fails → fall back to "not stale" (don't gratuitously refetch).
+        assert!(!marker_is_stale(&marker));
+    }
+
+    #[test]
+    fn cache_ttl_secs_defaults_to_one_week() {
+        std::env::remove_var("QEDGEN_CACHE_TTL");
+        assert_eq!(cache_ttl_secs(), 7 * 24 * 60 * 60);
+    }
+
+    #[test]
+    fn cache_ttl_secs_honors_env_override() {
+        std::env::set_var("QEDGEN_CACHE_TTL", "3600");
+        assert_eq!(cache_ttl_secs(), 3600);
+        std::env::remove_var("QEDGEN_CACHE_TTL");
     }
 
     #[test]

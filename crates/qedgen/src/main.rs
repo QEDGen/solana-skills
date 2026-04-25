@@ -285,6 +285,14 @@ enum Commands {
         /// or missing. Used in CI to detect un-bumped imports.
         #[arg(long)]
         frozen: bool,
+
+        /// Force-refresh the github source cache for every imported dep.
+        /// Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and
+        /// re-clones. Use after a force-pushed tag or when the
+        /// QEDGEN_CACHE_TTL window (default 7 days) hasn't expired but
+        /// you know the upstream changed.
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Run the generated harnesses against the generated implementation.
@@ -979,6 +987,7 @@ async fn main() -> Result<()> {
             asm,
             json,
             frozen,
+            no_cache,
         } => {
             require_git_repo()?;
             let cwd = std::env::current_dir()?;
@@ -995,6 +1004,12 @@ async fn main() -> Result<()> {
                 qed_lock::LockMode::Frozen
             } else {
                 qed_lock::LockMode::Auto
+            };
+
+            // F7 fold-in: --no-cache forces a fresh github fetch for every
+            // imported dep (skips the TTL window). Path sources unaffected.
+            let cache_opts = import_resolver::CacheOpts {
+                force_refresh: no_cache,
             };
 
             let mut has_issues = false;
@@ -1091,7 +1106,7 @@ async fn main() -> Result<()> {
 
             // Coverage matrix (--coverage)
             if coverage {
-                let parsed = check::parse_spec_file_with_lock(&spec, lock_mode)?;
+                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
                 let matrix = check::coverage_matrix(&parsed);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&matrix)?);
@@ -1104,7 +1119,7 @@ async fn main() -> Result<()> {
             // runs whenever the proofs dir exists and is a no-op on specs
             // without preservation obligations.
             if proofs.exists() {
-                let parsed = check::parse_spec_file_with_lock(&spec, lock_mode)?;
+                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
                 let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
                 if !findings.is_empty() {
                     if json {
@@ -1132,7 +1147,7 @@ async fn main() -> Result<()> {
 
             // Lint — always runs (core of spec validation)
             {
-                let warnings = check::lint_with_lock(&spec, lock_mode)?;
+                let warnings = check::lint_with_opts(&spec, lock_mode, cache_opts)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&warnings)?);
                 } else if warnings.is_empty() {

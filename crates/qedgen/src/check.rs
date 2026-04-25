@@ -796,18 +796,39 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
 /// start with `spec <Name>`. Fragments live naturally under `handlers/`,
 /// `properties/`, etc.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
-    parse_spec_file_with_lock(path, crate::qed_lock::LockMode::Auto)
+    parse_spec_file_with_opts(
+        path,
+        crate::qed_lock::LockMode::Auto,
+        crate::import_resolver::CacheOpts::default(),
+    )
 }
 
 /// Parse a spec from disk with explicit control over qed.lock behavior.
 /// Defaults are exposed via `parse_spec_file`; callers like
 /// `qedgen check --frozen` use this variant to pass `LockMode::Frozen`.
+/// Kept as a thin wrapper after F7 added `parse_spec_file_with_opts`,
+/// so existing external callers don't have to update.
+#[allow(dead_code)]
 pub fn parse_spec_file_with_lock(
     path: &Path,
     lock_mode: crate::qed_lock::LockMode,
 ) -> Result<ParsedSpec> {
+    parse_spec_file_with_opts(
+        path,
+        lock_mode,
+        crate::import_resolver::CacheOpts::default(),
+    )
+}
+
+/// Full-control entry: explicit lock mode + cache policy.
+/// `qedgen check --frozen --no-cache` calls this with both overrides.
+pub fn parse_spec_file_with_opts(
+    path: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> Result<ParsedSpec> {
     if path.is_dir() {
-        return parse_spec_dir_with_lock(path, lock_mode);
+        return parse_spec_dir_with_opts(path, lock_mode, cache_opts);
     }
 
     // v2.7 G5: surface a precise error when the --spec target doesn't exist
@@ -844,7 +865,7 @@ pub fn parse_spec_file_with_lock(
     let mut parsed = crate::chumsky_adapter::adapt(&typed);
     crate::chumsky_adapter::typecheck_spec(&typed, &parsed)?;
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    resolve_and_merge_imports(&mut parsed, manifest_dir, lock_mode)?;
+    resolve_and_merge_imports(&mut parsed, manifest_dir, lock_mode, cache_opts)?;
     Ok(parsed)
 }
 
@@ -853,9 +874,10 @@ pub fn parse_spec_file_with_lock(
 /// single typed AST. Files are visited in alphabetically-sorted path order so
 /// the resulting `ParsedSpec` — and every artifact downstream of it — is
 /// deterministic.
-fn parse_spec_dir_with_lock(
+fn parse_spec_dir_with_opts(
     dir: &Path,
     lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
 ) -> Result<ParsedSpec> {
     let mut files = Vec::new();
     collect_qedspec_files(dir, &mut files)?;
@@ -906,7 +928,7 @@ fn parse_spec_dir_with_lock(
     };
     let mut parsed = crate::chumsky_adapter::adapt(&merged);
     crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
-    resolve_and_merge_imports(&mut parsed, dir, lock_mode)?;
+    resolve_and_merge_imports(&mut parsed, dir, lock_mode, cache_opts)?;
     Ok(parsed)
 }
 
@@ -926,6 +948,7 @@ fn resolve_and_merge_imports(
     parsed: &mut ParsedSpec,
     manifest_dir: &Path,
     lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
 ) -> anyhow::Result<()> {
     if parsed.imports.is_empty() {
         return Ok(());
@@ -943,8 +966,12 @@ fn resolve_and_merge_imports(
         ),
     };
 
-    let resolved =
-        crate::import_resolver::resolve_imports(&parsed.imports, &manifest, manifest_dir)?;
+    let resolved = crate::import_resolver::resolve_imports_with_opts(
+        &parsed.imports,
+        &manifest,
+        manifest_dir,
+        cache_opts,
+    )?;
 
     let mut lock = crate::qed_lock::LockFile::new();
 
@@ -2879,11 +2906,26 @@ fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 /// against the manifest. `lock_mode` controls qed.lock behavior — Auto
 /// auto-writes on drift; Frozen errors on drift (used by
 /// `qedgen check --frozen` in CI).
+#[allow(dead_code)]
 pub fn lint_with_lock(
     spec_path: &std::path::Path,
     lock_mode: crate::qed_lock::LockMode,
 ) -> Result<Vec<CompletenessWarning>> {
-    let spec = parse_spec_file_with_lock(spec_path, lock_mode)?;
+    lint_with_opts(
+        spec_path,
+        lock_mode,
+        crate::import_resolver::CacheOpts::default(),
+    )
+}
+
+/// Lint with explicit control over both lock behavior and cache policy.
+/// `qedgen check --frozen --no-cache` calls this.
+pub fn lint_with_opts(
+    spec_path: &std::path::Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> Result<Vec<CompletenessWarning>> {
+    let spec = parse_spec_file_with_opts(spec_path, lock_mode, cache_opts)?;
     Ok(check_completeness(&spec))
 }
 
