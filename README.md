@@ -118,6 +118,15 @@ cd formal_verification && lake build
 
 `qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --format qedspec` is the IDL-only fallback when you don't have source.
 
+Once the spec is filled in, gate CI on it staying in sync with the program:
+
+```bash
+# Errors if the spec declares a handler that's not in the program
+# (stale spec) or a `pub fn` that's not modelled in the spec
+# (uncovered handler). Pure read; no codegen, no writes.
+qedgen check --spec my_program.qedspec --anchor-project ./programs/my_program
+```
+
 ### Spec-driven pipeline
 
 ```bash

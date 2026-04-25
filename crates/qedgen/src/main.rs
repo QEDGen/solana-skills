@@ -1,4 +1,5 @@
 mod anchor_adapt;
+mod anchor_check;
 mod anchor_project;
 mod anchor_resolver;
 mod api;
@@ -281,6 +282,13 @@ enum Commands {
         /// Path to generated Quasar program directory (enables code drift detection)
         #[arg(long)]
         code: Option<PathBuf>,
+
+        /// Path to an existing Anchor program crate (the directory holding
+        /// `Cargo.toml`, with `src/lib.rs` inside). Cross-checks the spec's
+        /// handler list against the program's `#[program]` mod and reports
+        /// any spec/program drift. Pure read; useful as a CI gate.
+        #[arg(long)]
+        anchor_project: Option<PathBuf>,
 
         /// Path to Rust source for #[qed(verified)] drift detection
         #[arg(long)]
@@ -1014,6 +1022,7 @@ async fn main() -> Result<()> {
             explain,
             output,
             code,
+            anchor_project,
             drift,
             update_hashes,
             deep,
@@ -1083,6 +1092,46 @@ async fn main() -> Result<()> {
                     check::check_unified(&spec, &proofs, code.as_deref(), kani.as_deref())?;
                 check::print_unified_report(&spec_name, &report);
                 if report.issue_count() > 0 {
+                    has_issues = true;
+                }
+            }
+
+            // Anchor cross-check (--anchor-project) — verify that the spec's
+            // handler list matches the user's existing Anchor program. M5
+            // catches stale specs and uncovered handlers as a CI gate.
+            if let Some(ref project_path) = anchor_project {
+                let parsed = check::parse_spec_file(&spec)?;
+                let findings = anchor_check::check_anchor_coverage(&parsed, project_path)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &findings
+                                .iter()
+                                .map(|f| serde_json::json!({
+                                    "kind": format!("{:?}", f.kind),
+                                    "handler": f.handler_name,
+                                    "message": f.message(),
+                                }))
+                                .collect::<Vec<_>>(),
+                        )?
+                    );
+                } else if findings.is_empty() {
+                    eprintln!(
+                        "Anchor cross-check (`{}`) — spec and program agree.",
+                        project_path.display()
+                    );
+                } else {
+                    eprintln!(
+                        "Anchor cross-check (`{}`) — {} disagreement(s):",
+                        project_path.display(),
+                        findings.len()
+                    );
+                    for f in &findings {
+                        eprintln!("  ! {}", f.message());
+                    }
+                }
+                if !findings.is_empty() {
                     has_issues = true;
                 }
             }
