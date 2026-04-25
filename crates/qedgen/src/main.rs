@@ -1,3 +1,4 @@
+mod anchor_project;
 mod api;
 mod aristotle;
 mod asm2lean;
