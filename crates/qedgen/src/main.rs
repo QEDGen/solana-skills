@@ -1,3 +1,4 @@
+mod anchor_adapt;
 mod anchor_project;
 mod anchor_resolver;
 mod api;
@@ -113,6 +114,27 @@ enum Commands {
         /// Auto-escalate to Aristotle if sorry markers remain after Leanstral
         #[arg(long)]
         escalate: bool,
+    },
+
+    /// Scaffold a starter .qedspec from an existing Anchor program crate.
+    ///
+    /// Brownfield adapter: parses `<program>/src/lib.rs`, finds the
+    /// `#[program]` mod, walks each instruction to its actual handler
+    /// body (inline / free fn / type method / accounts method), and
+    /// emits a `.qedspec` skeleton with one handler block per
+    /// instruction plus TODO markers for state machine / requires /
+    /// effects. The output round-trips through the parser so a renderer
+    /// regression surfaces here, not on the next `qedgen check`.
+    Adapt {
+        /// Path to the program crate (the directory containing the
+        /// program's own `Cargo.toml`, with `src/lib.rs` inside).
+        #[arg(long)]
+        program: PathBuf,
+
+        /// Path to write the generated .qedspec. If omitted, prints to
+        /// stdout so the caller can redirect.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
@@ -842,6 +864,15 @@ async fn main() -> Result<()> {
                 } else {
                     eprintln!("All sorry markers filled by Leanstral.");
                 }
+            }
+        }
+
+        Commands::Adapt { program, out } => {
+            if let Some(path) = out {
+                anchor_adapt::adapt_to_file(&program, &path)?;
+            } else {
+                let rendered = anchor_adapt::adapt(&program)?;
+                print!("{}", rendered);
             }
         }
 

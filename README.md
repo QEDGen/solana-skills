@@ -99,8 +99,15 @@ export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harm
 ### Existing programs (brownfield)
 
 ```bash
-# Generate a .qedspec scaffold from your Anchor IDL
+# Option A — from an Anchor IDL (program ABI only)
 qedgen spec --idl target/idl/my_program.json --format qedspec
+
+# Option B — from the Anchor program's source (recommended)
+# Walks src/lib.rs, finds the #[program] mod, follows each forwarder
+# (inline / free fn / Type::method / ctx.accounts.method), and emits
+# a .qedspec skeleton with one handler block per instruction plus a
+# breadcrumb to where each handler body lives.
+qedgen adapt --program ./programs/my_program
 
 # Review and complete the TODO items in the generated .qedspec
 # Then use the same pipeline as greenfield:
@@ -109,7 +116,7 @@ qedgen codegen --spec my_program.qedspec --lean
 cd formal_verification && lake build
 ```
 
-The generated `.qedspec` auto-derives state fields, operations, contexts, PDAs, and errors from the IDL. Guards, effects, lifecycle transitions, and properties are stubbed with TODOs for you or your agent to fill in.
+`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --format qedspec` is the IDL-only fallback when you don't have source.
 
 ### Spec-driven pipeline
 
