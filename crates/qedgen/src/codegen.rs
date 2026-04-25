@@ -589,6 +589,119 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
     }
 }
 
+/// Canonical SPL Token program ID. Calls into an interface whose
+/// `program_id "..."` matches this constant get the `anchor_spl::token::*`
+/// CPI shape (v2.8 G4). Other program IDs fall through to the
+/// agent-fill comment for now — generic `invoke` codegen lands in v2.9.
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Try to emit a real Anchor CPI invocation for one `call Interface.handler(...)`
+/// site. Returns `None` when the interface isn't recognized (caller falls
+/// back to a comment + `todo!()` so the user / an LLM fills the body).
+///
+/// v2.8 G4 covers SPL Token's `transfer` only. Other library handlers
+/// (`mint_to`, `burn`, `initialize_account`, `close_account`) and
+/// non-SPL-Token interfaces ship in v2.9. This narrow scope is enough
+/// to remove the `todo!()` from the canonical escrow / lending shapes,
+/// where SPL Token transfers are the bulk of CPI traffic.
+fn try_emit_anchor_cpi(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Option<String> {
+    let iface = spec
+        .interfaces
+        .iter()
+        .find(|i| i.name == call.target_interface)?;
+
+    // Only the canonical SPL Token program is supported in v2.8.
+    if iface.program_id.as_deref() != Some(SPL_TOKEN_PROGRAM_ID) {
+        return None;
+    }
+
+    match call.target_handler.as_str() {
+        "transfer" => emit_spl_token_transfer(call, handler),
+        // Other SPL Token handlers (mint_to, burn, …) — v2.9.
+        _ => None,
+    }
+}
+
+/// Emit the `anchor_spl::token::transfer` CPI builder for a v2.8-canonical
+/// SPL Token transfer call. Returns None if any required arg is missing
+/// from the call site or the calling handler doesn't carry a token
+/// program account.
+fn emit_spl_token_transfer(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+) -> Option<String> {
+    let from = call.args.iter().find(|a| a.name == "from")?;
+    let to = call.args.iter().find(|a| a.name == "to")?;
+    let authority = call.args.iter().find(|a| a.name == "authority")?;
+    let amount = call.args.iter().find(|a| a.name == "amount")?;
+
+    // Find the handler-side `<name> : program` account that points at the
+    // token program. Convention: any `is_program` account named
+    // `token_program`, or the unique `is_program` account otherwise.
+    let token_program_acct = handler
+        .accounts
+        .iter()
+        .find(|a| a.is_program && a.name == "token_program")
+        .or_else(|| {
+            let programs: Vec<_> = handler.accounts.iter().filter(|a| a.is_program).collect();
+            (programs.len() == 1).then_some(programs[0])
+        })?;
+
+    let amount_rhs = resolve_call_arg_for_amount(&amount.rust_expr, handler);
+
+    let mut out = String::new();
+    out.push_str("        {\n");
+    out.push_str("            use anchor_spl::token::{self, Transfer};\n");
+    out.push_str("            let cpi_accounts = Transfer {\n");
+    out.push_str(&format!(
+        "                from:      self.{}.to_account_info(),\n",
+        from.rust_expr
+    ));
+    out.push_str(&format!(
+        "                to:        self.{}.to_account_info(),\n",
+        to.rust_expr
+    ));
+    out.push_str(&format!(
+        "                authority: self.{}.to_account_info(),\n",
+        authority.rust_expr
+    ));
+    out.push_str("            };\n");
+    out.push_str(&format!(
+        "            let cpi_program = self.{}.to_account_info();\n",
+        token_program_acct.name
+    ));
+    out.push_str(&format!(
+        "            token::transfer(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
+        amount_rhs
+    ));
+    out.push_str("        }\n");
+    Some(out)
+}
+
+/// Resolve a numeric / value argument's rust_expr to a form that's in
+/// scope inside the handler `impl` block. Bare identifiers that match a
+/// state field get the `self.<state_acct>.` prefix; handler params and
+/// literals pass through unchanged.
+fn resolve_call_arg_for_amount(rust_expr: &str, handler: &ParsedHandler) -> String {
+    let is_simple_ident = rust_expr
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    if !is_simple_ident {
+        return rust_expr.to_string();
+    }
+    if handler.takes_params.iter().any(|(n, _)| n == rust_expr) {
+        return rust_expr.to_string();
+    }
+    if let Some(sa) = find_state_account(handler) {
+        return format!("self.{}.{}", sa.name, rust_expr);
+    }
+    rust_expr.to_string()
+}
+
 /// Try to translate a single effect tuple to a real Rust statement. Returns
 /// None when the RHS is too complex for mechanical expansion (match/arith/
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
@@ -788,26 +901,38 @@ fn render_handler_scaffold(
     }
 
     // `call Interface.handler(name = expr, ...)` sites — the uniform CPI
-    // surface introduced in v2.5 (slice 2). For MVP this follows the same
-    // agent-fill shape as `transfers { }`: emit a structured comment so the
-    // prompt in fill.rs has everything it needs to generate a correct CPI
-    // envelope. Real codegen from a resolved interface lands in v2.6 once
-    // `import` is in play (see docs/design/spec-composition.md §2).
-    let has_calls = !handler.calls.is_empty();
+    // surface introduced in v2.5 (slice 2). v2.8 G4 lands real Anchor CPI
+    // codegen for the canonical SPL Token transfer; other interfaces and
+    // handlers still emit a structured comment + todo!() so an LLM /
+    // human fills the body. The boolean tracks whether any call site
+    // remained unmechanized so the tail `todo!()` only fires for those.
+    let mut any_unmechanized_call = false;
     for c in &handler.calls {
-        let args = c
-            .args
-            .iter()
-            .map(|a| format!("{}={}", a.name, a.rust_expr))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str(&format!(
-            "        // Spec call: {}.{}({})\n",
-            c.target_interface, c.target_handler, args
-        ));
+        match try_emit_anchor_cpi(c, handler, spec) {
+            Some(rendered) => {
+                out.push_str(&format!(
+                    "        // Spec call: {}.{} (Anchor CPI emitted by v2.8 G4)\n",
+                    c.target_interface, c.target_handler
+                ));
+                out.push_str(&rendered);
+            }
+            None => {
+                let args = c
+                    .args
+                    .iter()
+                    .map(|a| format!("{}={}", a.name, a.rust_expr))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "        // Spec call: {}.{}({}) — v2.9 will emit a generic Anchor CPI\n",
+                    c.target_interface, c.target_handler, args
+                ));
+                any_unmechanized_call = true;
+            }
+        }
     }
 
-    let needs_fill = any_unmechanized || has_events || has_transfers || has_calls;
+    let needs_fill = any_unmechanized || has_events || has_transfers || any_unmechanized_call;
     if needs_fill {
         out.push_str("        todo!(\"fill non-mechanical effects, events, transfers, calls\")\n");
     } else {
@@ -1153,6 +1278,163 @@ mod tests {
         assert!(
             err.contains("UserAccount"),
             "error should name the unsupported inner type: {err}"
+        );
+    }
+
+    // ----- v2.8 G4: Anchor CPI codegen for SPL Token transfer -----
+
+    /// Exercise try_emit_anchor_cpi against an end-to-end-parsed spec.
+    /// Hits the resolver pipeline (no need to construct ParsedSpec by
+    /// hand) and confirms the SPL Token transfer shape lands.
+    #[test]
+    fn cpi_emits_anchor_spl_transfer_for_canonical_program_id() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state         : writable
+    src           : writable
+    dst           : writable
+    auth          : signer
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = n, authority = auth)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "send")
+            .expect("send handler");
+        let call = handler.calls.first().expect("call site");
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit Anchor CPI");
+        assert!(
+            rendered.contains("anchor_spl::token::{self, Transfer}"),
+            "must use anchor_spl::token::Transfer; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("from:      self.src.to_account_info()"),
+            "from arg must resolve to self.src; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("token::transfer(CpiContext::new(cpi_program, cpi_accounts), n)"),
+            "amount arg `n` is a handler param and should pass through bare; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_returns_none_when_program_id_is_not_spl_token() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface MyAmm {
+  program_id "MyAmm22222222222222222222222222222222222222"
+  handler swap (amount : U64) {
+    discriminant "0x01"
+    accounts {
+      src : writable
+      dst : writable
+    }
+    ensures amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    src          : writable
+    dst          : writable
+    amm_program  : program
+  }
+  call MyAmm.swap(src = src, dst = dst, amount = balance)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "send")
+            .expect("send handler");
+        let call = handler.calls.first().expect("call site");
+        // Non-SPL-Token program ID — v2.8 falls back to the comment-only
+        // path, so try_emit_anchor_cpi returns None.
+        assert!(
+            try_emit_anchor_cpi(call, handler, &spec).is_none(),
+            "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+        );
+    }
+
+    #[test]
+    fn cpi_resolves_state_field_amount_to_self_state_field() {
+        // The amount arg references a state field — the emitted code should
+        // bind it as self.<state_acct>.<field>, not bare.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+type State | Active of { stash : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state         : writable
+    src           : writable, type token
+    dst           : writable, type token
+    auth          : signer
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = stash, authority = auth)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(
+            rendered.contains("self.state.stash"),
+            "state-field amount must resolve to self.<state_acct>.<field>; got:\n{rendered}"
         );
     }
 }
