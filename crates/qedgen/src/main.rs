@@ -13,6 +13,7 @@ mod drift;
 mod fill;
 mod fingerprint;
 mod idl2spec;
+mod import_resolver;
 mod init;
 mod integration_test;
 mod interface_gen;
