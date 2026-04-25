@@ -2493,7 +2493,8 @@ fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // (e.g. `"vault"`), named constants are ALL_CAPS, variables are lowercase idents.
     let is_literal = |s: &str| -> bool {
         s.starts_with('"')
-            || s.chars().all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+            || s.chars()
+                .all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
     };
 
     for i in 0..pdas.len() {
@@ -2532,10 +2533,21 @@ fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             }
 
             // Possible collision: same literal seeds, differing only in variable positions.
-            let a_literals: Vec<&str> = a.seeds.iter().filter(|s| is_literal(s)).map(|s| s.as_str()).collect();
-            let b_literals: Vec<&str> = b.seeds.iter().filter(|s| is_literal(s)).map(|s| s.as_str()).collect();
+            let a_literals: Vec<&str> = a
+                .seeds
+                .iter()
+                .filter(|s| is_literal(s))
+                .map(|s| s.as_str())
+                .collect();
+            let b_literals: Vec<&str> = b
+                .seeds
+                .iter()
+                .filter(|s| is_literal(s))
+                .map(|s| s.as_str())
+                .collect();
 
-            if !a_literals.is_empty() && a_literals == b_literals && a.seeds.len() == b.seeds.len() {
+            if !a_literals.is_empty() && a_literals == b_literals && a.seeds.len() == b.seeds.len()
+            {
                 // Same structure, same literals — variable seeds could collide at runtime.
                 warnings.push(CompletenessWarning {
                     rule: "pda_seed_possible_collision".to_string(),
@@ -4473,7 +4485,9 @@ handler tick : State.Active -> State.Active {
         .unwrap();
         let warnings = check_completeness(&spec);
         assert!(
-            warnings.iter().any(|w| w.rule == "pda_seed_possible_collision"),
+            warnings
+                .iter()
+                .any(|w| w.rule == "pda_seed_possible_collision"),
             "must warn on same literals but different variable seeds; got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
