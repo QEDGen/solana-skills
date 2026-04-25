@@ -1,0 +1,31 @@
+// Finding #7 (follow-up) — qedgen check accepts Pubkey := <named-numeric-const>
+//
+// Same root cause as repro-07-pubkey-literal-assign.qedspec but triggered
+// via a named constant rather than a bare integer literal.
+//
+// Expected: `qedgen check` rejects `effect { key := ZERO }` with a type
+//   error: cannot assign numeric constant to Pubkey field.
+//
+// Actual (pre-fix): passed qedgen check, generated `{ key := 0 }` in Lean,
+//   lake build failed:
+//   error: failed to synthesize instance of type class `OfNat Pubkey 0`
+//
+// Fix site: crates/qedgen/src/chumsky_adapter.rs — numeric_literal_value
+// resolves Expr::Path through const_literals so `key := ZERO` is rejected
+// the same as the bare integer `key := 0`.
+
+spec Repro7ConstAssign
+program_id "11111111111111111111111111111111"
+
+const ZERO = 0
+
+type State
+  | Uninitialized
+  | Active of { key : Pubkey }
+
+type Error | E
+
+handler h : State.Uninitialized -> State.Active {
+  permissionless
+  effect { key := ZERO }
+}
