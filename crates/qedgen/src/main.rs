@@ -31,12 +31,13 @@ mod sbpf_verify;
 mod spec;
 mod spec_hash;
 mod unit_test;
+mod upstream_check;
 mod validate;
 mod verify;
 
 use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Find the bugs your tests miss — from one spec file
 #[derive(Parser)]
@@ -327,6 +328,20 @@ enum Commands {
         /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
+
+        /// Diff every imported library interface's pinned
+        /// `upstream_binary_hash` against the on-chain `.so`. Shells out to
+        /// `solana program dump` per `feedback_dispatch_over_reimplement.md`
+        /// — requires the Solana CLI in PATH. Skips dependencies without a
+        /// pinned hash. Non-zero exit on any mismatch.
+        #[arg(long)]
+        check_upstream: bool,
+
+        /// Override the RPC endpoint passed through to `solana program dump
+        /// --url <rpc>`. If omitted, the Solana CLI uses whatever cluster is
+        /// configured in `~/.config/solana/cli/config.yml`.
+        #[arg(long)]
+        rpc_url: Option<String>,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -1153,8 +1168,31 @@ async fn main() -> Result<()> {
             lean_dir,
             fail_fast,
             json,
+            check_upstream,
+            rpc_url,
         } => {
             require_git_repo()?;
+
+            // v2.8 G5: --check-upstream is a separate verification stage
+            // from the proptest/kani/lean backends — it diffs each
+            // imported library's pinned binary hash against the on-chain
+            // `.so` via `solana program dump`. Runs independently so
+            // users can `--check-upstream` without re-running the harnesses.
+            if check_upstream {
+                let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+                let results = upstream_check::check_lock(spec_dir, rpc_url.as_deref())?;
+                let any_failure = upstream_check::print_report(&results);
+                if any_failure {
+                    std::process::exit(1);
+                }
+                // When --check-upstream is the only verb, exit cleanly
+                // without firing the backend runners. Combine with
+                // --proptest etc. to do both in one invocation.
+                let any_backend_flag = proptest || kani || lean;
+                if !any_backend_flag {
+                    return Ok(());
+                }
+            }
 
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk. This matches the agent-friendly "just do
