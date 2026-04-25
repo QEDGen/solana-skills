@@ -674,6 +674,16 @@ pub enum Expr {
         value: Box<Node<Expr>>,
         body: Box<Node<Expr>>,
     },
+    /// `if cond then a else b` — full conditional in expression position
+    /// (v2.8 fold-in F9). Lowers to Lean's `if … then … else …` and to a
+    /// Rust `if … { … } else { … }` block. Both branches must produce a
+    /// value of the same type — Lean's elaborator and Rust's type checker
+    /// enforce this; qedgen just plumbs the structure through.
+    IfThenElse {
+        cond: Box<Node<Expr>>,
+        then_branch: Box<Node<Expr>>,
+        else_branch: Box<Node<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone)]

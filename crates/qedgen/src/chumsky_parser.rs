@@ -559,10 +559,35 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             })
             .boxed();
 
+        // `if cond then a else b` — full conditional in expression
+        // position (v2.8 fold-in F9). `if` / `then` / `else` are
+        // contextual keywords matched only at the start of this atom;
+        // they aren't reserved globally so handler fields named `if` or
+        // `then` (unlikely but possible) keep working.
+        let if_then_else = kw("if")
+            .ignore_then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("then"))
+            .then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("else"))
+            .then(expr.clone())
+            .map_with(|((cond, then_branch), else_branch), e| {
+                Node::new(
+                    Expr::IfThenElse {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(else_branch),
+                    },
+                    e.span().into_range(),
+                )
+            })
+            .boxed();
+
         // atom — must stay under chumsky's `choice` arity limit; split.
         // `.boxed()` tames the type complexity that otherwise trips Apple's
         // linker on overlong symbol names.
-        let group_a = choice((int, bool_lit, old, let_in, sum, quant)).boxed();
+        let group_a = choice((int, bool_lit, old, let_in, if_then_else, sum, quant)).boxed();
         let group_b = choice((mul_div_floor_atom, mul_div_ceil_atom, match_expr)).boxed();
         // `record_update` must precede `ctor` (leading `.` distinguishes
         // them, but this ordering is clearer). `app_expr` must precede
@@ -3231,6 +3256,51 @@ handler withdraw (amount : U64) : State.A -> State.A {
             }
             other => panic!("expected Let at top of ensures, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parses_if_then_else_in_expression_position() {
+        // v2.8 fold-in F9. Use an `ensures` clause to exercise expr-position parsing.
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    if state.x > 0 then state.y == state.x else state.y == 0
+}
+"#;
+        let s = parse_ok(src);
+        // Find the ensures clause and assert its top is an IfThenElse.
+        let clauses = first_handler_clauses(&s);
+        let ensures = clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Ensures(e) => Some(e),
+                _ => None,
+            })
+            .expect("expected an Ensures clause");
+        assert!(
+            matches!(ensures.node, Expr::IfThenElse { .. }),
+            "expected top-level IfThenElse, got {:?}",
+            ensures.node
+        );
+    }
+
+    #[test]
+    fn parses_nested_if_then_else() {
+        // Nested then/else branches.
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    if state.x > 0 then
+      if state.y > 0 then state.x == state.y else state.x > state.y
+    else
+      state.y == 0
+}
+"#;
+        parse_ok(src);
     }
 
     #[test]
