@@ -615,11 +615,24 @@ fn try_emit_anchor_cpi(
         .iter()
         .find(|i| i.name == call.target_interface)?;
 
-    // Only the canonical SPL Token program is supported in v2.8.
-    if iface.program_id.as_deref() != Some(SPL_TOKEN_PROGRAM_ID) {
-        return None;
+    // SPL Token gets the special-case `anchor_spl::token::*` shapes
+    // (typed accounts structs + the existing token::transfer / mint_to /
+    // burn / initialize_account / close_account helpers — fewer lines of
+    // generated code, idiomatic for the bulk of CPI traffic).
+    if iface.program_id.as_deref() == Some(SPL_TOKEN_PROGRAM_ID) {
+        return emit_spl_token_cpi(call, handler);
     }
 
+    // Every other Anchor program gets the generic `invoke` shape
+    // (v2.9 G3): sighash discriminator + Borsh-serialized args +
+    // AccountMeta synthesis from the interface's accounts block.
+    emit_generic_anchor_cpi(call, handler, iface)
+}
+
+/// SPL Token dispatcher. Routes to the right `anchor_spl::token` helper
+/// per the called handler's name. Returns None on unrecognized handlers
+/// (the caller falls back to comment + `todo!()`).
+fn emit_spl_token_cpi(call: &crate::check::ParsedCall, handler: &ParsedHandler) -> Option<String> {
     let token_program_acct = find_token_program_account(handler)?;
     let prog_name = &token_program_acct.name;
 
@@ -709,8 +722,200 @@ fn find_token_program_account(
         .find(|a| a.is_program && a.name == "token_program")
         .or_else(|| {
             let programs: Vec<_> = handler.accounts.iter().filter(|a| a.is_program).collect();
-            (programs.len() == 1).then_some(programs[0])
+            // .then(...) is lazy; .then_some(programs[0]) would evaluate
+            // the index even when len is 0 and panic.
+            (programs.len() == 1).then(|| programs[0])
         })
+}
+
+// ----------------------------------------------------------------------------
+// v2.9 G3 — generic Anchor CPI codegen
+// ----------------------------------------------------------------------------
+
+/// Compute Anchor's instruction discriminator for a handler:
+/// `Sha256("global:<handler_name>")[..8]`. This is the on-the-wire byte
+/// prefix every Anchor instruction starts with — matches `anchor-lang`'s
+/// `Discriminator` derive macro.
+fn anchor_sighash(handler_name: &str) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{}", handler_name).as_bytes());
+    let result = hasher.finalize();
+    let mut sighash = [0u8; 8];
+    sighash.copy_from_slice(&result[..8]);
+    sighash
+}
+
+/// Find the handler-side `<name> : program` account that points at a
+/// non-SPL-Token target. Convention (mirrors `find_token_program_account`):
+///   1. Prefer an account named `<interface_name_snake>_program`
+///      (e.g. interface `MyAmm` → handler account `my_amm_program`).
+///   2. Fall back to the unique `is_program` account if exactly one
+///      exists (excluding any account named `token_program`, which is
+///      reserved for SPL Token interactions and would only confuse a
+///      generic-CPI dispatch).
+///   3. Otherwise None — caller emits comment + `todo!()`.
+fn find_program_account_for_interface<'a>(
+    handler: &'a ParsedHandler,
+    iface_name: &str,
+) -> Option<&'a crate::check::ParsedHandlerAccount> {
+    let expected_name = format!("{}_program", to_snake_case(iface_name));
+    handler
+        .accounts
+        .iter()
+        .find(|a| a.is_program && a.name == expected_name)
+        .or_else(|| {
+            let programs: Vec<_> = handler
+                .accounts
+                .iter()
+                .filter(|a| a.is_program && a.name != "token_program")
+                .collect();
+            // .then(...) is lazy; .then_some(programs[0]) would evaluate
+            // the index even when len is 0 and panic.
+            (programs.len() == 1).then(|| programs[0])
+        })
+}
+
+/// Convert PascalCase to snake_case. Used to map an interface name
+/// (`MyAmm`) to its conventional handler-side program account name
+/// (`my_amm_program`). Single-pass — adds an underscore before each
+/// uppercase letter (except the first) and lowercases the result.
+fn to_snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Emit a generic `solana_program::program::invoke` CPI shape for any
+/// Anchor program that isn't SPL Token. Returns None when:
+/// - the called handler isn't declared in the interface (unknown name);
+/// - no program account is reachable in the calling handler (caller
+///   falls back to comment + `todo!()` so the user can wire it manually).
+///
+/// Emitted shape:
+///
+/// ```rust
+/// {
+///     let mut ix_data: Vec<u8> = vec![<sighash bytes>];
+///     <BorshSerialize each value arg>::serialize(&mut ix_data)?;
+///     let ix = solana_program::instruction::Instruction {
+///         program_id: solana_program::pubkey!("<iface_program_id>"),
+///         accounts: vec![
+///             AccountMeta::new(self.<acct>.key(), <is_signer>),
+///             AccountMeta::new_readonly(self.<acct>.key(), <is_signer>),
+///             // ... per the interface's accounts block, in declared order
+///         ],
+///         data: ix_data,
+///     };
+///     solana_program::program::invoke(&ix, &[
+///         self.<acct>.to_account_info(),
+///         // ... + the program account
+///     ])?;
+/// }
+/// ```
+fn emit_generic_anchor_cpi(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    iface: &crate::check::ParsedInterface,
+) -> Option<String> {
+    let program_id = iface.program_id.as_deref()?;
+    let iface_handler = iface
+        .handlers
+        .iter()
+        .find(|h| h.name == call.target_handler)?;
+    let program_acct = find_program_account_for_interface(handler, &iface.name)?;
+
+    let sighash = anchor_sighash(&call.target_handler);
+    let sighash_literal = sighash
+        .iter()
+        .map(|b| format!("0x{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Collect (interface account name → caller's rust_expr at the call
+    // site) so each AccountMeta and AccountInfo entry can address the
+    // caller-side handler account.
+    let arg_account_lookup: std::collections::HashMap<&str, &str> = call
+        .args
+        .iter()
+        .filter(|a| iface_handler.accounts.iter().any(|ia| ia.name == a.name))
+        .map(|a| (a.name.as_str(), a.rust_expr.as_str()))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str("        {\n");
+    out.push_str(&format!(
+        "            // Generic Anchor CPI to {}.{} (v2.9 G3).\n",
+        iface.name, call.target_handler,
+    ));
+    out.push_str("            use anchor_lang::prelude::*;\n");
+    out.push_str("            use anchor_lang::solana_program::program::invoke;\n");
+    out.push_str(
+        "            use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};\n",
+    );
+    out.push_str("            use anchor_lang::AnchorSerialize;\n\n");
+
+    // Discriminator + Borsh-serialized handler params.
+    out.push_str(&format!(
+        "            let mut ix_data: Vec<u8> = vec![{}];\n",
+        sighash_literal,
+    ));
+    for (param_name, _) in &iface_handler.params {
+        let arg = call.args.iter().find(|a| &a.name == param_name)?;
+        let resolved = resolve_call_arg_for_amount(&arg.rust_expr, handler);
+        out.push_str(&format!(
+            "            AnchorSerialize::serialize(&{}, &mut ix_data).map_err(|_| ProgramError::Custom(0))?;\n",
+            resolved,
+        ));
+    }
+    out.push('\n');
+
+    // AccountMeta vec, in interface-declared order. Match writable / signer
+    // role flags from the interface declaration.
+    out.push_str("            let accounts = vec![\n");
+    for ia in &iface_handler.accounts {
+        let caller_acct = arg_account_lookup.get(ia.name.as_str())?;
+        let constructor = if ia.is_writable {
+            "AccountMeta::new"
+        } else {
+            "AccountMeta::new_readonly"
+        };
+        out.push_str(&format!(
+            "                {}(self.{}.key(), {}),\n",
+            constructor, caller_acct, ia.is_signer,
+        ));
+    }
+    out.push_str("            ];\n\n");
+
+    out.push_str("            let ix = Instruction {\n");
+    out.push_str(&format!(
+        "                program_id: anchor_lang::solana_program::pubkey!(\"{}\"),\n",
+        program_id,
+    ));
+    out.push_str("                accounts,\n");
+    out.push_str("                data: ix_data,\n");
+    out.push_str("            };\n\n");
+
+    out.push_str("            invoke(&ix, &[\n");
+    for ia in &iface_handler.accounts {
+        let caller_acct = arg_account_lookup.get(ia.name.as_str())?;
+        out.push_str(&format!(
+            "                self.{}.to_account_info(),\n",
+            caller_acct,
+        ));
+    }
+    out.push_str(&format!(
+        "                self.{}.to_account_info(),\n",
+        program_acct.name,
+    ));
+    out.push_str("            ])?;\n");
+    out.push_str("        }\n");
+    Some(out)
 }
 
 /// Emit one `anchor_spl::token::<fn>` CPI body. Generic over which SPL
@@ -1461,7 +1666,81 @@ handler send (n : U64) : State.Active -> State.Active {
     }
 
     #[test]
-    fn cpi_returns_none_when_program_id_is_not_spl_token() {
+    fn anchor_sighash_matches_known_discriminators() {
+        // Anchor's discriminator = sha256("global:<handler>")[..8].
+        // Verify the function uses the right input format by computing
+        // the expected value via sha2 directly, confirming both prefix
+        // and slice-length are correct. If `anchor_sighash` ever drifts
+        // (e.g. wrong prefix, different hash, wrong slice), this test
+        // catches it independently of what value the function produces.
+        use sha2::{Digest, Sha256};
+        for handler in ["initialize", "transfer", "swap", "do_nothing"] {
+            let mut hasher = Sha256::new();
+            hasher.update(format!("global:{}", handler).as_bytes());
+            let full = hasher.finalize();
+            let mut expected = [0u8; 8];
+            expected.copy_from_slice(&full[..8]);
+            assert_eq!(
+                anchor_sighash(handler),
+                expected,
+                "sighash for `{handler}` should be sha256(\"global:{handler}\")[..8]"
+            );
+        }
+        // Sanity: different handler names produce different sighashes.
+        assert_ne!(anchor_sighash("a"), anchor_sighash("b"));
+    }
+
+    #[test]
+    fn to_snake_case_handles_pascal_and_camel() {
+        assert_eq!(to_snake_case("MyAmm"), "my_amm");
+        assert_eq!(to_snake_case("SPLToken"), "s_p_l_token");
+        assert_eq!(to_snake_case("Token"), "token");
+        assert_eq!(to_snake_case("simple"), "simple");
+        assert_eq!(to_snake_case("FooBarBaz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn cpi_generic_returns_none_when_program_account_is_missing() {
+        // No `<iface>_program` account, no unique non-token-program
+        // account either. Caller falls back to comment + todo!().
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface MyAmm {
+  program_id "MyAmm22222222222222222222222222222222222222"
+  handler swap (amount : U64) {
+    discriminant "0x01"
+    accounts { src : writable }
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    src : writable
+  }
+  call MyAmm.swap(src = src, amount = balance)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+        let call = handler.calls.first().unwrap();
+        assert!(
+            try_emit_anchor_cpi(call, handler, &spec).is_none(),
+            "missing program account should defer to comment + todo!()"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_generic_invoke_shape_for_non_spl_token_interface() {
+        // v2.9 G3: non-SPL-Token interfaces get the generic
+        // `solana_program::program::invoke` shape rather than v2.8's
+        // None / comment-only fallback.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Caller
 program_id "11111111111111111111111111111111"
@@ -1486,7 +1765,7 @@ handler send : State.Active -> State.Active {
   accounts {
     src          : writable
     dst          : writable
-    amm_program  : program
+    my_amm_program : program
   }
   call MyAmm.swap(src = src, dst = dst, amount = balance)
 }
@@ -1499,12 +1778,24 @@ handler send : State.Active -> State.Active {
             .find(|h| h.name == "send")
             .expect("send handler");
         let call = handler.calls.first().expect("call site");
-        // Non-SPL-Token program ID — v2.8 falls back to the comment-only
-        // path, so try_emit_anchor_cpi returns None.
+        let rendered = try_emit_anchor_cpi(call, handler, &spec)
+            .expect("v2.9 must emit a generic CPI shape for non-SPL Anchor programs");
+
+        // Sanity-check the emitted shape:
+        assert!(rendered.contains("solana_program::program::invoke"));
+        assert!(rendered.contains("Instruction"));
+        assert!(rendered.contains("AccountMeta::new(self.src.key(), false)"));
+        assert!(rendered.contains("AccountMeta::new(self.dst.key(), false)"));
+        // The program account ends up in the AccountInfo array passed to
+        // invoke (so the runtime can validate it).
+        assert!(rendered.contains("self.my_amm_program.to_account_info()"));
+        // Discriminator: first byte of sha256("global:swap") is 0xf8.
         assert!(
-            try_emit_anchor_cpi(call, handler, &spec).is_none(),
-            "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+            rendered.contains("0xf8"),
+            "expected sighash for `swap` to start with 0xf8; got:\n{rendered}"
         );
+        // Borsh-serialized amount arg.
+        assert!(rendered.contains("AnchorSerialize::serialize"));
     }
 
     // ----- v2.8 F8: Error-sum threading via mechanize_effect -----
