@@ -121,6 +121,14 @@ fn render_single_account(spec: &ParsedSpec) -> String {
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
 
+    // Constants
+    for (name, val) in &spec.constants {
+        out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(name), val));
+    }
+    if !spec.constants.is_empty() {
+        out.push('\n');
+    }
+
     // Status inductive (if lifecycle states exist)
     let has_lifecycle = !spec.lifecycle_states.is_empty();
     if has_lifecycle {
@@ -216,6 +224,14 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+
+    // Constants
+    for (name, val) in &spec.constants {
+        out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(name), val));
+    }
+    if !spec.constants.is_empty() {
+        out.push('\n');
+    }
 
     // Per-account sections
     for acct in &spec.account_types {
@@ -4699,6 +4715,27 @@ handler noop : State -> State {
             val.as_str(),
             "0",
             "ZERO const should resolve to 0, not fall back to 1"
+        );
+    }
+
+    #[test]
+    fn lean_gen_single_account_emits_const_abbrevs() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec ConstTest
+program_id "11111111111111111111111111111111"
+const ZERO = 0
+type State | Active of { counter : U64 }
+type Error | E
+handler init : State.Active -> State.Active {
+  permissionless
+  effect { counter := ZERO }
+}"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("abbrev ZERO : Nat := 0"),
+            "single-account render must emit abbrev for spec constants; got:\n{lean}"
         );
     }
 }
