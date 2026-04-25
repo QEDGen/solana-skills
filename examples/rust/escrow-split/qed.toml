@@ -1,0 +1,10 @@
+# v2.8 G1 — qed.toml manifest for the escrow-split spec.
+#
+# Pre-v2.8, this spec carried a copy of the SPL Token interface inlined under
+# `interfaces/token.qedspec`. With `import` + `qed.toml` shipping in v2.8, the
+# canonical interface lives at the workspace root (`interfaces/spl_token.qedspec`)
+# and consumers reference it through a manifest entry. See
+# docs/design/spec-composition.md §3.
+
+[dependencies]
+spl_token = { path = "../../../interfaces/spl_token.qedspec" }
