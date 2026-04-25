@@ -796,8 +796,18 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
 /// start with `spec <Name>`. Fragments live naturally under `handlers/`,
 /// `properties/`, etc.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
+    parse_spec_file_with_lock(path, crate::qed_lock::LockMode::Auto)
+}
+
+/// Parse a spec from disk with explicit control over qed.lock behavior.
+/// Defaults are exposed via `parse_spec_file`; callers like
+/// `qedgen check --frozen` use this variant to pass `LockMode::Frozen`.
+pub fn parse_spec_file_with_lock(
+    path: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> Result<ParsedSpec> {
     if path.is_dir() {
-        return parse_spec_dir(path);
+        return parse_spec_dir_with_lock(path, lock_mode);
     }
 
     // v2.7 G5: surface a precise error when the --spec target doesn't exist
@@ -834,7 +844,7 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     let mut parsed = crate::chumsky_adapter::adapt(&typed);
     crate::chumsky_adapter::typecheck_spec(&typed, &parsed)?;
     let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    resolve_and_merge_imports(&mut parsed, manifest_dir)?;
+    resolve_and_merge_imports(&mut parsed, manifest_dir, lock_mode)?;
     Ok(parsed)
 }
 
@@ -843,7 +853,10 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
 /// single typed AST. Files are visited in alphabetically-sorted path order so
 /// the resulting `ParsedSpec` — and every artifact downstream of it — is
 /// deterministic.
-fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
+fn parse_spec_dir_with_lock(
+    dir: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> Result<ParsedSpec> {
     let mut files = Vec::new();
     collect_qedspec_files(dir, &mut files)?;
     files.sort();
@@ -893,7 +906,7 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
     };
     let mut parsed = crate::chumsky_adapter::adapt(&merged);
     crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
-    resolve_and_merge_imports(&mut parsed, dir)?;
+    resolve_and_merge_imports(&mut parsed, dir, lock_mode)?;
     Ok(parsed)
 }
 
@@ -909,7 +922,11 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
 /// The bound name in `import X from "y"` must match an `interface X { ... }`
 /// declared in the imported source. If it doesn't, this is a hard error
 /// — v2.8 doesn't support import aliasing.
-fn resolve_and_merge_imports(parsed: &mut ParsedSpec, manifest_dir: &Path) -> anyhow::Result<()> {
+fn resolve_and_merge_imports(
+    parsed: &mut ParsedSpec,
+    manifest_dir: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> anyhow::Result<()> {
     if parsed.imports.is_empty() {
         return Ok(());
     }
@@ -928,6 +945,8 @@ fn resolve_and_merge_imports(parsed: &mut ParsedSpec, manifest_dir: &Path) -> an
 
     let resolved =
         crate::import_resolver::resolve_imports(&parsed.imports, &manifest, manifest_dir)?;
+
+    let mut lock = crate::qed_lock::LockFile::new();
 
     for r in resolved {
         // Multi-file imported deps not yet supported — single .qedspec only.
@@ -964,8 +983,21 @@ fn resolve_and_merge_imports(parsed: &mut ParsedSpec, manifest_dir: &Path) -> an
                 )
             })?;
 
+        // Build the lock entry while we have everything in scope: the
+        // resolved import (sources + commit), the manifest dep descriptor
+        // (source kind + ref), and the imported interface's optional
+        // upstream block.
+        let dep = manifest
+            .dependencies
+            .get(&r.dep_key)
+            .expect("resolver only returns deps that are in the manifest");
+        let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface.upstream.as_ref());
+        lock.dependencies.push(lock_entry);
+
         parsed.interfaces.push(iface.clone());
     }
+
+    crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
 
     Ok(())
 }
@@ -2801,8 +2833,15 @@ fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 }
 
 /// Run standalone lint — returns structured JSON for agent consumption.
-pub fn lint(spec_path: &std::path::Path) -> Result<Vec<CompletenessWarning>> {
-    let spec = parse_spec_file(spec_path)?;
+/// Lint a spec end-to-end, including resolving any `import` statements
+/// against the manifest. `lock_mode` controls qed.lock behavior — Auto
+/// auto-writes on drift; Frozen errors on drift (used by
+/// `qedgen check --frozen` in CI).
+pub fn lint_with_lock(
+    spec_path: &std::path::Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> Result<Vec<CompletenessWarning>> {
+    let spec = parse_spec_file_with_lock(spec_path, lock_mode)?;
     Ok(check_completeness(&spec))
 }
 
@@ -4731,5 +4770,143 @@ handler h : State.A -> State.A { effect { x := 1 } }
         // No qed.toml, no imports — should parse cleanly.
         let parsed = parse_spec_file(&path).unwrap();
         assert!(parsed.imports.is_empty());
+    }
+
+    // ----- v2.8 G2: qed.lock integration -----
+
+    fn write_simple_path_dep_setup(spec_dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:9c1edeadbeef"
+    verified_with ["proptest"]
+    verified_at  "2026-04-25"
+  }
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+        consumer
+    }
+
+    #[test]
+    fn parse_spec_file_auto_writes_lock_with_resolved_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Lock should not exist before parse.
+        assert!(!tmp.path().join("qed.lock").exists());
+
+        parse_spec_file(&consumer).expect("parse should succeed and write lock");
+
+        let lock = crate::qed_lock::read(tmp.path())
+            .unwrap()
+            .expect("lock should be written");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(entry.name, "spl_token");
+        assert_eq!(entry.source, "path:token.qedspec");
+        assert!(entry.spec_hash.starts_with("sha256:"));
+        // Path source — no commit, no ref, no sub-path.
+        assert!(entry.git_ref.is_none());
+        assert!(entry.resolved_commit.is_none());
+        // Upstream block from the imported interface flowed through.
+        assert_eq!(
+            entry.upstream_binary_hash.as_deref(),
+            Some("sha256:9c1edeadbeef")
+        );
+        assert_eq!(entry.upstream_version.as_deref(), Some("4.0.3"));
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_errors_when_lock_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Frozen mode + no lock on disk → error.
+        let err = format!(
+            "{:#}",
+            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+        );
+        assert!(err.contains("stale (--frozen)"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_succeeds_when_lock_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Auto first to write the lock, then Frozen to verify it stays current.
+        parse_spec_file(&consumer).unwrap();
+        parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen)
+            .expect("frozen should pass when lock is current");
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_errors_when_imported_source_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Auto-write a baseline lock, then mutate the imported source — the
+        // spec hash should drift, so Frozen catches it.
+        parse_spec_file(&consumer).unwrap();
+        std::fs::write(
+            tmp.path().join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "DIFFERENT11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+        );
+        assert!(err.contains("spec_hash"), "got: {err}");
     }
 }

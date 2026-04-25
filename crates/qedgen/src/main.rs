@@ -22,6 +22,7 @@ mod lean_gen;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
+mod qed_lock;
 mod qed_manifest;
 mod ratchet;
 mod reconcile;
@@ -278,6 +279,11 @@ enum Commands {
         /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
+
+        /// Refuse to update `qed.lock`; error if the on-disk lock is stale
+        /// or missing. Used in CI to detect un-bumped imports.
+        #[arg(long)]
+        frozen: bool,
     },
 
     /// Run the generated harnesses against the generated implementation.
@@ -951,6 +957,7 @@ async fn main() -> Result<()> {
             kani,
             asm,
             json,
+            frozen,
         } => {
             require_git_repo()?;
             let cwd = std::env::current_dir()?;
@@ -959,6 +966,15 @@ async fn main() -> Result<()> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Spec".to_string());
+
+            // v2.8 G2: --frozen elevates qed.lock drift to a hard error
+            // (CI usage). Default Auto mode auto-writes the lock on drift,
+            // which is the right behavior for local development.
+            let lock_mode = if frozen {
+                qed_lock::LockMode::Frozen
+            } else {
+                qed_lock::LockMode::Auto
+            };
 
             let mut has_issues = false;
 
@@ -1054,7 +1070,7 @@ async fn main() -> Result<()> {
 
             // Coverage matrix (--coverage)
             if coverage {
-                let parsed = check::parse_spec_file(&spec)?;
+                let parsed = check::parse_spec_file_with_lock(&spec, lock_mode)?;
                 let matrix = check::coverage_matrix(&parsed);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&matrix)?);
@@ -1067,7 +1083,7 @@ async fn main() -> Result<()> {
             // runs whenever the proofs dir exists and is a no-op on specs
             // without preservation obligations.
             if proofs.exists() {
-                let parsed = check::parse_spec_file(&spec)?;
+                let parsed = check::parse_spec_file_with_lock(&spec, lock_mode)?;
                 let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
                 if !findings.is_empty() {
                     if json {
@@ -1095,7 +1111,7 @@ async fn main() -> Result<()> {
 
             // Lint — always runs (core of spec validation)
             {
-                let warnings = check::lint(&spec)?;
+                let warnings = check::lint_with_lock(&spec, lock_mode)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&warnings)?);
                 } else if warnings.is_empty() {
