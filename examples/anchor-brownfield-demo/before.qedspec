@@ -8,9 +8,9 @@ type State
   | Init
   | Active
 
-// TODO: list domain errors raised by the handlers below.
+// Error variants discovered in src/instructions/increment.rs (`#[error_code] pub enum CounterError`).
 type Error
-  | InvalidArgument
+  | Overflow
 
 /// `initialize` — free-fn forwarder
 /// discovered at: src/instructions/initialize.rs
