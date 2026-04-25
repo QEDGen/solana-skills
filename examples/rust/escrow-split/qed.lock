@@ -7,4 +7,5 @@ version = 1
 name = "spl_token"
 source = "path:../../../interfaces/spl_token.qedspec"
 spec_hash = "sha256:8fde6661e038b2755715a1a4e717999b42bd1b1a82dbdbf1343c20c9b0c2bb96"
+program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 upstream_version = "4.0.3"

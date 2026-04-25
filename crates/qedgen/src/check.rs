@@ -991,7 +991,7 @@ fn resolve_and_merge_imports(
             .dependencies
             .get(&r.dep_key)
             .expect("resolver only returns deps that are in the manifest");
-        let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface.upstream.as_ref());
+        let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface);
         lock.dependencies.push(lock_entry);
 
         parsed.interfaces.push(iface.clone());

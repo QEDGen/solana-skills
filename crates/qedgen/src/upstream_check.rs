@@ -149,20 +149,16 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
         }
     };
 
-    // The lock entry doesn't carry the program_id directly (it's recorded
-    // on the imported interface, not in qed.lock). v2.8 design choice: the
-    // lock's `source` field carries the github-source descriptor which
-    // implies a program_id via the imported interface. For v2.8 minimum,
-    // we surface "Skipped" when no program_id is reachable from the lock
-    // alone — a v2.9 follow-up will thread program_id into the lock entry.
-    //
-    // The skipped reason names the gap so `--check-upstream` users see a
-    // clear next step rather than a silent miss.
+    // program_id flows from the imported interface's
+    // `program_id "..."` declaration into qed.lock at resolution time
+    // (v2.8 fold-in F1). Only `None` when the imported interface itself
+    // omits the field — purely shape-only Tier 0 imports with no
+    // deployed counterpart to verify against.
     let program_id = match resolve_program_id(entry) {
         Some(pid) => pid,
         None => {
             return DepCheckOutcome::Skipped {
-                reason: "program_id not pinned in qed.lock — v2.9 will thread it through"
+                reason: "program_id not pinned (imported interface omits `program_id \"...\"`)"
                     .to_string(),
             }
         }
@@ -191,15 +187,13 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
     }
 }
 
-/// Pull the program_id from a lock entry when possible. v2.8 returns
-/// `None` for github + path sources because the lock schema doesn't yet
-/// carry it (the value lives in the imported interface's `program_id`
-/// declaration). v2.9 will extend the schema; until then, we surface
-/// the gap as a clear "Skipped" reason rather than fabricate a program
-/// ID. The escape hatch for users who need verification today is to
-/// pass `--rpc-url` and use a wrapper that knows the program ID.
-fn resolve_program_id(_entry: &LockEntry) -> Option<String> {
-    None
+/// Pull the program_id from a lock entry. v2.8 fold-in F1: the lock
+/// schema now carries `program_id` directly, copied from the imported
+/// interface's `program_id "..."` declaration at resolution time. None
+/// only when the imported interface itself omits `program_id` (purely
+/// shape-only Tier 0 imports without a deployed counterpart).
+fn resolve_program_id(entry: &LockEntry) -> Option<String> {
+    entry.program_id.clone()
 }
 
 fn format_hash(bytes: &[u8]) -> String {
@@ -288,6 +282,7 @@ mod tests {
             git_ref: Some("v1".to_string()),
             resolved_commit: Some("abc".to_string()),
             path: None,
+            program_id: None,
             upstream_binary_hash: hash.map(str::to_string),
             upstream_version: None,
         }
@@ -311,13 +306,16 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_program_id_unreachable_in_v2_8() {
-        // Lock entry carries a hash but no program_id — v2.8 schema
-        // doesn't thread the pubkey, so we surface the gap honestly.
+    fn skips_when_imported_interface_omits_program_id() {
+        // Lock entry has a hash pin but the imported interface didn't
+        // declare `program_id "..."` — pure shape-only Tier 0 import
+        // with no deployed counterpart. Skipped honestly.
         let hash = format_hash(b"some bytes");
+        let mut e = entry_with_hash("pinned", Some(&hash));
+        e.program_id = None; // imported interface had no program_id
         let lock = LockFile {
             version: LOCK_VERSION,
-            dependencies: vec![entry_with_hash("pinned", Some(&hash))],
+            dependencies: vec![e],
         };
         let mut fetcher = FakeFetcher::new();
         let results = check_lock_with_fetcher(&lock, &mut fetcher);
@@ -325,10 +323,61 @@ mod tests {
             DepCheckOutcome::Skipped { reason } => {
                 assert!(
                     reason.contains("program_id not pinned"),
-                    "should explain v2.8 schema gap; got: {reason}"
+                    "should explain that the imported interface lacks program_id; got: {reason}"
                 );
             }
             other => panic!("expected Skipped (no program_id), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn matches_when_program_id_present_and_hash_matches() {
+        let bytes = b"qedgen-test-binary".to_vec();
+        let hash = format_hash(&bytes);
+        let mut e = entry_with_hash("pinned", Some(&hash));
+        e.program_id = Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string());
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![e],
+        };
+        let mut fetcher =
+            FakeFetcher::new().ok("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", bytes.clone());
+        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        match &results[0].outcome {
+            DepCheckOutcome::Match {
+                program_id,
+                hash: h,
+            } => {
+                assert_eq!(program_id, "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+                assert_eq!(h, &hash);
+            }
+            other => panic!("expected Match, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mismatches_when_on_chain_differs_from_pinned_hash() {
+        let pinned_bytes = b"original-binary".to_vec();
+        let on_chain_bytes = b"redeployed-binary".to_vec();
+        let mut e = entry_with_hash("pinned", Some(&format_hash(&pinned_bytes)));
+        e.program_id = Some("FakeProgramId11111111111111111111111111111111".to_string());
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![e],
+        };
+        let mut fetcher = FakeFetcher::new().ok(
+            "FakeProgramId11111111111111111111111111111111",
+            on_chain_bytes.clone(),
+        );
+        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        match &results[0].outcome {
+            DepCheckOutcome::Mismatch {
+                pinned, on_chain, ..
+            } => {
+                assert_eq!(pinned, &format_hash(&pinned_bytes));
+                assert_eq!(on_chain, &format_hash(&on_chain_bytes));
+            }
+            other => panic!("expected Mismatch, got {:?}", other),
         }
     }
 

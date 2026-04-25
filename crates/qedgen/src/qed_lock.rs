@@ -85,6 +85,14 @@ pub struct LockEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
 
+    /// Program ID of the imported interface, copied from the imported
+    /// `interface { program_id "..." }` declaration. `--check-upstream`
+    /// uses this as the `solana program dump` target. None when the
+    /// imported interface omits `program_id` (purely-shape Tier 0
+    /// imports without a deployment target).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub program_id: Option<String>,
+
     // ---- Upstream binary pin. None unless the imported interface declares
     //      `upstream { binary_hash "..." }`. ----
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -156,12 +164,13 @@ pub fn compute_spec_hash(sources: &[(std::path::PathBuf, String)]) -> String {
 }
 
 /// Build a single lock entry from a resolved import + its manifest dep
-/// descriptor + the imported interface's optional `upstream` block.
+/// descriptor + the imported interface (which carries its `program_id`
+/// and optional `upstream` block).
 #[allow(dead_code)]
 pub fn entry_for_resolved(
     resolved: &crate::import_resolver::ResolvedImport,
     dep: &crate::qed_manifest::Dependency,
-    iface_upstream: Option<&crate::check::ParsedUpstream>,
+    iface: &crate::check::ParsedInterface,
 ) -> LockEntry {
     use crate::qed_manifest::Dependency;
     let spec_hash = compute_spec_hash(&resolved.sources);
@@ -178,7 +187,7 @@ pub fn entry_for_resolved(
         ),
         Dependency::Path { path } => (format!("path:{}", path), None, None, None),
     };
-    let (upstream_binary_hash, upstream_version) = match iface_upstream {
+    let (upstream_binary_hash, upstream_version) = match &iface.upstream {
         Some(u) => (u.binary_hash.clone(), u.version.clone()),
         None => (None, None),
     };
@@ -189,6 +198,7 @@ pub fn entry_for_resolved(
         git_ref,
         resolved_commit,
         path,
+        program_id: iface.program_id.clone(),
         upstream_binary_hash,
         upstream_version,
     }
@@ -375,6 +385,7 @@ mod tests {
             git_ref: None,
             resolved_commit: None,
             path: None,
+            program_id: None,
             upstream_binary_hash: None,
             upstream_version: None,
         }
@@ -404,6 +415,7 @@ mod tests {
                 git_ref: Some("v2.8.0".to_string()),
                 resolved_commit: Some("a1b2c3d4".to_string()),
                 path: Some("interfaces/spl_token".to_string()),
+                program_id: Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string()),
                 upstream_binary_hash: Some("sha256:9c1e".to_string()),
                 upstream_version: Some("spl-token@4.0.3".to_string()),
             }],
