@@ -399,18 +399,31 @@ fn build_guard_cond_parts(
 /// from the spec. These are functions referenced by name in guard /
 /// ensures / effect / property bodies but never defined structurally —
 /// user-facing "named but-not-fully-modeled" security check helpers.
-/// Issue #8 finding #5. Without this emission, generated Lean references
-/// an identifier Lake never sees declared.
+/// Issue #8 finding #5 (initial axiom emission), issue #12 (use
+/// `opaque` rather than `axiom` so transitions stay computable).
+///
+/// `opaque` rather than `axiom`: an `axiom`'s declared identifier is
+/// permanently noncomputable, which propagates to any `def` that
+/// references it — including the per-handler transition functions
+/// generated below. `opaque T` declares a top-level definition whose
+/// body is hidden but is computable via the type's `Inhabited`
+/// instance (`Bool` is auto-`Inhabited`, defaulting to `false`), so
+/// the `if`-guard inside a transition function compiles. Users who
+/// want to strengthen a helper into a real check replace the `opaque`
+/// declaration with a `def` in their `Proofs.lean` (or a sibling
+/// support module imported before `Spec.lean`).
 fn emit_uninterpreted_helpers(out: &mut String, helpers: &[(String, Vec<String>, String)]) {
     if helpers.is_empty() {
         return;
     }
     out.push_str(
-        "-- Uninterpreted helpers: declared axiomatically so generated\n\
-         -- proofs typecheck even though the DSL doesn't model their\n\
-         -- semantics. Treat each as an abstract property; strengthen\n\
-         -- into a concrete definition in your support module if you\n\
-         -- want to discharge it (rather than trust it).\n",
+        "-- Uninterpreted helpers: declared opaquely so generated\n\
+         -- transitions typecheck even though the DSL doesn't model\n\
+         -- their semantics. Treat each as an abstract Bool predicate;\n\
+         -- strengthen into a concrete definition in your support\n\
+         -- module if you want to discharge it (rather than trust it).\n\
+         -- `opaque` keeps the transition functions computable\n\
+         -- (axioms would force them noncomputable).\n",
     );
     for (name, arg_types, return_type) in helpers {
         let sig = if arg_types.is_empty() {
@@ -420,7 +433,7 @@ fn emit_uninterpreted_helpers(out: &mut String, helpers: &[(String, Vec<String>,
             parts.push(return_type.clone());
             parts.join(" \u{2192} ")
         };
-        out.push_str(&format!("axiom {} : {}\n", safe_name(name), sig));
+        out.push_str(&format!("opaque {} : {}\n", safe_name(name), sig));
     }
     out.push('\n');
 }
@@ -4288,31 +4301,49 @@ type State
         }
     }
 
-    // Issue #8 finding #5 regression. `requires foo(y) else E` used to
-    // emit `(foo (y))` in the guard without ever declaring `foo`, so
-    // Lake rejected with "Unknown identifier `foo`". Now `adapt` walks
-    // guard / ensures / effect-RHS / property bodies for Expr::App
-    // sites and populates `uninterpreted_helpers`; lean_gen emits an
-    // `axiom` block at the top of Spec.lean.
+    // Issue #8 finding #5 regression + issue #12 followup. `requires
+    // foo(y) else E` used to emit `(foo (y))` in the guard without
+    // ever declaring `foo`, so Lake rejected with
+    // "Unknown identifier `foo`". v2.7.1 added `axiom foo : T → Prop`
+    // emission, but `requires` lowers to a transition function's
+    // `if`-guard — `axiom … → Prop` is opaque, noncomputable, and
+    // can't satisfy `Decidable`, so `lake build` rejected with a
+    // typeclass synth failure. Issue #12 fixes that by emitting
+    // `opaque foo : T → Bool` instead — `Bool` is auto-`Decidable`
+    // and `opaque` keeps the transition computable.
     #[test]
-    fn finding_5_uninterpreted_helpers_are_axiomatized() {
+    fn finding_5_uninterpreted_helpers_are_opaque_bool() {
         let spec_src = include_str!(
             "../../../examples/regressions/issue-8/repro-05-uninterpreted-helper.qedspec"
         );
         let spec = chumsky_adapter::parse_str(spec_src).unwrap();
         let lean = render(&spec);
         assert!(
-            lean.contains("axiom foo : Nat \u{2192} Prop"),
-            "expected `axiom foo : Nat → Prop`, got:\n{}",
+            lean.contains("opaque foo : Nat \u{2192} Bool"),
+            "expected `opaque foo : Nat → Bool`, got:\n{}",
+            lean
+        );
+        // Bare `axiom` form must not regress — issue #12 specifically
+        // rejects the `axiom`/`Prop` shape because of the Decidable +
+        // computability requirements that downstream transition
+        // functions impose on `requires`-position helpers.
+        assert!(
+            !lean.contains("axiom foo"),
+            "regressed back to `axiom`-form helper (see issue #12):\n{}",
+            lean
+        );
+        assert!(
+            !lean.contains("foo : Nat \u{2192} Prop"),
+            "regressed back to `→ Prop` return (see issue #12):\n{}",
             lean
         );
         // Helper must be declared before first use (namespace position
         // matters for Lean's single-pass elaborator).
-        let axiom_pos = lean.find("axiom foo").expect("axiom present");
+        let decl_pos = lean.find("opaque foo").expect("opaque present");
         let use_pos = lean.find("foo (y)").expect("foo call present");
         assert!(
-            axiom_pos < use_pos,
-            "axiom declared after first use:\n{}",
+            decl_pos < use_pos,
+            "helper declared after first use:\n{}",
             lean
         );
     }

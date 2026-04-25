@@ -1,20 +1,23 @@
 // Finding #5 — Uninterpreted helpers in requires/ensures never declared
 //
-// Generated Spec.lean never declares `foo`. lake build:
-//   error: Unknown identifier `foo`
+// History:
+//   v2.7.0: generated Spec.lean never declared `foo`; lake build failed
+//           with "Unknown identifier `foo`". (issue #8 finding #5)
+//   v2.7.1: emitted `axiom foo : Nat → Prop` — fixed the unknown-
+//           identifier failure, but `requires` lowers to a transition
+//           `if`-guard which needs `Decidable`, and `axiom … → Prop` is
+//           opaque + noncomputable. lake build still rejected.
+//   v2.7.2: emits `opaque foo : Nat → Bool` instead. `Bool` is
+//           auto-`Decidable` so the `if`-guard typechecks; `opaque`
+//           keeps the transition function computable. (issue #12)
 //
-// This directly contradicts the docstring at ast.rs:645 which promises
-// "downstream codegen declares them as uninterpreted symbols (axioms or
-// Lean defs) in the support module." Exhaustive grep across
-// crates/qedgen/src/ finds zero axiom/opaque emission for Expr::App.
+// Expected (v2.7.2+): top of generated Spec.lean contains
+//   `opaque foo : Nat → Bool`
+// and `lake build` succeeds.
 //
-// Expected: top of generated Spec.lean contains `axiom foo : Nat → Prop`.
-// Actual: no declaration → Lean rejects.
-//
-// Fix site: Expr::App renderer needs to walk the spec, collect every
-// distinct (func_name, arity, arg_types), and emit axiom declarations.
-// Simplest v1: assume Prop in boolean contexts, emit
-// `axiom foo : T1 → T2 → ... → Prop` at the top.
+// Fix sites:
+//   crates/qedgen/src/chumsky_adapter.rs::walk_apps  — collects helpers
+//   crates/qedgen/src/lean_gen.rs::emit_uninterpreted_helpers — emits
 
 spec Repro5
 program_id "11111111111111111111111111111111"
