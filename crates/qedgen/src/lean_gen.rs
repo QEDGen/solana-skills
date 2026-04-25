@@ -121,6 +121,14 @@ fn render_single_account(spec: &ParsedSpec) -> String {
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
 
+    // Constants
+    for (name, val) in &spec.constants {
+        out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(name), val));
+    }
+    if !spec.constants.is_empty() {
+        out.push('\n');
+    }
+
     // Status inductive (if lifecycle states exist)
     let has_lifecycle = !spec.lifecycle_states.is_empty();
     if has_lifecycle {
@@ -216,6 +224,14 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+
+    // Constants
+    for (name, val) in &spec.constants {
+        out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(name), val));
+    }
+    if !spec.constants.is_empty() {
+        out.push('\n');
+    }
 
     // Per-account sections
     for acct in &spec.account_types {
@@ -1122,10 +1138,15 @@ impl WitnessState {
 
     /// Apply a handler's effects, updating field values.
     /// `param_values` maps parameter names to chosen concrete values.
-    fn apply(&mut self, handler: &crate::check::ParsedHandler, param_values: &[(String, String)]) {
+    fn apply(
+        &mut self,
+        handler: &crate::check::ParsedHandler,
+        param_values: &[(String, String)],
+        constants: &[(String, String)],
+    ) {
         // Apply effects
         for (field, op_kind, value) in &handler.effects {
-            let resolved = self.resolve_value(value, param_values);
+            let resolved = self.resolve_value(value, param_values, constants);
             match op_kind.as_str() {
                 "set" => {
                     if let Some(f) = self.fields.iter_mut().find(|(n, _)| n == field) {
@@ -1158,7 +1179,12 @@ impl WitnessState {
     /// Resolve an effect value to a concrete string.
     /// Checks param_values first, then tries parsing as integer.
     /// Falls back to "1" for unknown references.
-    fn resolve_value(&self, value: &str, param_values: &[(String, String)]) -> String {
+    fn resolve_value(
+        &self,
+        value: &str,
+        param_values: &[(String, String)],
+        constants: &[(String, String)],
+    ) -> String {
         // Check if it's a parameter
         if let Some((_, v)) = param_values.iter().find(|(n, _)| n == value) {
             return v.clone();
@@ -1171,6 +1197,10 @@ impl WitnessState {
         // in effect values, but handle self-references)
         if let Some(f) = self.fields.iter().find(|(n, _)| n == value) {
             return f.1.clone();
+        }
+        // Check if it's a declared spec constant
+        if let Some((_, v)) = constants.iter().find(|(n, _)| n == value) {
+            return v.clone();
         }
         // Fallback
         "1".to_string()
@@ -1253,7 +1283,7 @@ fn cover_trace_proof(
             status: state.status.clone(),
         };
 
-        state.apply(handler, &param_values);
+        state.apply(handler, &param_values, &spec.constants);
 
         steps.push((op_name.clone(), param_values, state_before));
     }
@@ -1278,7 +1308,7 @@ fn cover_trace_proof(
             let mut s = WitnessState::new(fields, lifecycle);
             for step in steps.iter().take(i + 1) {
                 let handler = spec.handlers.iter().find(|o| o.name == step.0)?;
-                s.apply(handler, &step.1);
+                s.apply(handler, &step.1, &spec.constants);
             }
             proof.push_str(&format!("  let s{} : State := {}\n", i + 1, s.to_lean()));
         }
@@ -4643,6 +4673,68 @@ handler noop : State -> State {
         assert!(
             !lean.contains(":= v ≥ 0"),
             "def must not strip the quantifier leaving v unbound"
+        );
+    }
+
+    #[test]
+    fn witness_state_apply_resolves_spec_const_in_effect() {
+        let mut ws = WitnessState {
+            fields: vec![("counter".to_string(), "0".to_string())],
+            status: None,
+        };
+        let handler = crate::check::ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            doc: None,
+            who: None,
+            on_account: None,
+            pre_status: None,
+            post_status: None,
+            takes_params: vec![],
+            guard_str: None,
+            guard_str_rust: None,
+            aborts_if: vec![],
+            requires: vec![],
+            ensures: vec![],
+            modifies: None,
+            let_bindings: vec![],
+            aborts_total: false,
+            permissionless: true,
+            accounts: vec![],
+            transfers: vec![],
+            emits: vec![],
+            invariants: vec![],
+            properties: vec![],
+            calls: vec![],
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        ws.apply(&handler, &[], &constants);
+        let val = &ws.fields.iter().find(|(n, _)| n == "counter").unwrap().1;
+        assert_eq!(
+            val.as_str(),
+            "0",
+            "ZERO const should resolve to 0, not fall back to 1"
+        );
+    }
+
+    #[test]
+    fn lean_gen_single_account_emits_const_abbrevs() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec ConstTest
+program_id "11111111111111111111111111111111"
+const ZERO = 0
+type State | Active of { counter : U64 }
+type Error | E
+handler init : State.Active -> State.Active {
+  permissionless
+  effect { counter := ZERO }
+}"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("abbrev ZERO : Nat := 0"),
+            "single-account render must emit abbrev for spec constants; got:\n{lean}"
         );
     }
 }

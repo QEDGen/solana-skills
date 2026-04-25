@@ -1375,6 +1375,7 @@ fn build_counterexample(
     prop_fields: &[&str],
     op: &ParsedHandler,
     modified_fields: &[&str],
+    constants: &[(String, String)],
 ) -> Option<Counterexample> {
     let relation = parse_property_relation(expr, prop_fields);
 
@@ -1416,7 +1417,13 @@ fn build_counterexample(
     let mut post_rhs = rhs_val;
     let mut effects = Vec::new();
     for (field, kind, value) in &effect_triples {
-        let v: i64 = value.parse().unwrap_or(1);
+        let v: i64 = value.parse().unwrap_or_else(|_| {
+            constants
+                .iter()
+                .find(|(n, _)| n == value)
+                .and_then(|(_, val)| val.parse().ok())
+                .unwrap_or(1)
+        });
         let desc = match *kind {
             "add" => format!("{} += {}", field, value),
             "sub" => format!("{} -= {}", field, value),
@@ -2253,7 +2260,46 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
             for op in &spec.handlers {
                 if prop.preserved_by.contains(&op.name) {
-                    continue; // this op IS covered
+                    // Handler is claimed to preserve the property — verify via
+                    // effect analysis. Warn when the effect demonstrably violates
+                    // the bound (covers preserved_by all expansion and explicit lists).
+                    let covered_modified: Vec<&str> = op
+                        .effects
+                        .iter()
+                        .filter(|(f, _, _)| prop_fields.contains(&f.as_str()))
+                        .map(|(f, _, _)| f.as_str())
+                        .collect();
+                    if !covered_modified.is_empty() {
+                        if let Some(ce) = build_counterexample(
+                            expr,
+                            &prop.name,
+                            &prop_fields,
+                            op,
+                            &covered_modified,
+                            &spec.constants,
+                        ) {
+                            if !ce.invariant_holds {
+                                warnings.push(CompletenessWarning {
+                                    rule: "preserved_by_all_potential_violation".to_string(),
+                                    severity: Severity::Warning,
+                                    priority: 1,
+                                    message: format!(
+                                        "handler '{}' is in `preserved_by` for property '{}' but effect analysis suggests a violation",
+                                        op.name, prop.name
+                                    ),
+                                    subject: Some(op.name.clone()),
+                                    fix: format!(
+                                        "Add a guard to '{}' ensuring the invariant holds after the effect, or remove it from `preserved_by`",
+                                        op.name
+                                    ),
+                                    example: None,
+                                    counterexample: Some(ce),
+                                    fix_options: vec![],
+                                });
+                            }
+                        }
+                    }
+                    continue;
                 }
                 // Check if this excluded op modifies any field in the property expression
                 let modified_prop_fields: Vec<&str> = op
@@ -2293,6 +2339,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         &prop_fields,
                         op,
                         &modified_prop_fields,
+                        &spec.constants,
                     );
 
                     let fix_options = build_fix_suggestions(
@@ -4228,6 +4275,58 @@ interface Token {
         assert!(
             src.contains("handler inc"),
             "handler fragment missing in merged source"
+        );
+    }
+
+    #[test]
+    fn build_counterexample_resolves_named_const_in_effect() {
+        let handler = ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            ..make_handler("reset")
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        let ce = build_counterexample(
+            "s.counter \u{2264} 5",
+            "bounded",
+            &["counter"],
+            &handler,
+            &["counter"],
+            &constants,
+        )
+        .expect("should produce a counterexample");
+        let post = ce
+            .post_state
+            .iter()
+            .find(|(f, _)| f == "counter")
+            .unwrap()
+            .1;
+        assert_eq!(post, 0, "ZERO should resolve to 0, not fall back to 1");
+    }
+
+    #[test]
+    fn preserved_by_all_potential_violation_fires_for_named_const_effect() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+program_id "11111111111111111111111111111111"
+const STEP = 5
+type State | Active of { counter : U64 }
+type Error | E
+property counter_small :
+  state.counter <= 3
+  preserved_by all
+handler tick : State.Active -> State.Active {
+  permissionless
+  effect { counter := STEP }
+}"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "must warn when preserved_by all handler demonstrably violates the property"
         );
     }
 }
