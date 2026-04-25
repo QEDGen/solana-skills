@@ -72,6 +72,168 @@ pub fn adapt_to_file(program_root: &Path, output_path: &Path) -> Result<()> {
 }
 
 // ----------------------------------------------------------------------------
+// Attribute mode: `qedgen adapt --program <crate> --spec <path>`
+//
+// Given an existing .qedspec and the user's Anchor source, emit one
+// `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ...)]`
+// attribute per spec handler so the user can paste them above each
+// handler body. The body hash matches what `qedgen-macros` will
+// recompute at compile time; the spec hash is computed via the shared
+// `spec_hash::spec_hash_for_handler`.
+// ----------------------------------------------------------------------------
+
+/// One emitted attribute entry, ready for the user to paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeEntry {
+    /// Handler name, as it appears in both the spec and the program's
+    /// `#[program]` mod.
+    pub handler: String,
+    /// Path to the file holding the actual handler body, relative to
+    /// the program root. Free-fn handlers point at e.g.
+    /// `src/instructions/buy.rs`; inline handlers at `src/lib.rs`.
+    pub source_path: PathBuf,
+    /// The `#[qed(...)]` attribute line ready to paste verbatim above
+    /// the handler `pub fn`.
+    pub attribute: String,
+    /// Why we couldn't emit an attribute, when `attribute` is empty.
+    /// E.g. a method-shape forwarder (impl block — macro doesn't
+    /// handle ImplItemFn yet) or an Unrecognized handler.
+    pub note: Option<String>,
+}
+
+/// Compute the `#[qed]` attributes for every handler declared in
+/// `spec_path` against the Anchor program at `program_root`. Returns
+/// one entry per spec handler. Handlers that exist in the spec but
+/// aren't in the program show up as a finding from
+/// `anchor_check::check_anchor_coverage` instead.
+pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<AttributeEntry>> {
+    let project = parse_anchor_project(program_root).with_context(|| {
+        format!(
+            "failed to parse Anchor project at {}",
+            program_root.display()
+        )
+    })?;
+
+    let spec_source = std::fs::read_to_string(spec_path)
+        .with_context(|| format!("reading spec {}", spec_path.display()))?;
+    let parsed_spec = crate::chumsky_adapter::parse_str(&spec_source)
+        .with_context(|| format!("parsing spec {}", spec_path.display()))?;
+
+    // Spec path written into the attribute is relative to program_root —
+    // the macro resolves it against `CARGO_MANIFEST_DIR`, which is
+    // exactly the program crate's root.
+    let spec_rel = spec_path
+        .strip_prefix(program_root)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| spec_path.to_path_buf());
+
+    let mut out = Vec::new();
+    for handler in &parsed_spec.handlers {
+        let Some(instruction) = project.instructions.iter().find(|i| i.name == handler.name) else {
+            // Spec handler with no matching `pub fn` in the program —
+            // surface as a note; the user gets a richer diagnostic
+            // from `qedgen check --anchor-project ...`.
+            out.push(AttributeEntry {
+                handler: handler.name.clone(),
+                source_path: program_root.to_path_buf(),
+                attribute: String::new(),
+                note: Some(format!(
+                    "handler `{}` is in the spec but not in the program's `#[program]` mod — re-run `qedgen check --anchor-project {}` for a deeper diff",
+                    handler.name,
+                    program_root.display()
+                )),
+            });
+            continue;
+        };
+
+        let location = resolve_handler(instruction, &project.lib_rs_path, program_root)?;
+        let entry = match location {
+            HandlerLocation::Inline {
+                item_fn,
+                source_path,
+            }
+            | HandlerLocation::FreeFn {
+                item_fn,
+                source_path,
+            } => {
+                let body_hash = crate::spec_hash::body_hash_for_fn(&item_fn);
+                let spec_hash = crate::spec_hash::spec_hash_for_handler(
+                    &spec_source,
+                    &handler.name,
+                )
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "internal error: parsed handler `{}` but couldn't extract its block from {}",
+                        handler.name,
+                        spec_path.display()
+                    )
+                })?;
+                AttributeEntry {
+                    handler: handler.name.clone(),
+                    source_path: rel_to(program_root, &source_path),
+                    attribute: format!(
+                        "#[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]",
+                        spec_rel.display(),
+                        handler.name,
+                        body_hash,
+                        spec_hash,
+                    ),
+                    note: None,
+                }
+            }
+            HandlerLocation::Method {
+                source_path,
+                impl_type,
+                ..
+            } => AttributeEntry {
+                handler: handler.name.clone(),
+                source_path: rel_to(program_root, &source_path),
+                attribute: String::new(),
+                note: Some(format!(
+                    "method-shape forwarder (`impl {}` block) — `#[qed]` annotation requires a free-fn handler in v2.9. Either refactor to a free fn or wait for v2.10's impl-method support",
+                    impl_type
+                )),
+            },
+            HandlerLocation::Unrecognized { reason } => AttributeEntry {
+                handler: handler.name.clone(),
+                source_path: program_root.to_path_buf(),
+                attribute: String::new(),
+                note: Some(format!(
+                    "unrecognized forwarder shape ({}) — annotate manually or refactor",
+                    reason
+                )),
+            },
+        };
+        out.push(entry);
+    }
+
+    Ok(out)
+}
+
+/// Render the attribute entries as a paste-friendly text report:
+/// per-handler section with the source file pointer + the attribute
+/// line. Skipped handlers carry a `// note: …` block instead.
+pub fn render_attributes(entries: &[AttributeEntry]) -> String {
+    let mut s = String::new();
+    s.push_str("// `qedgen adapt --spec ...` — paste each attribute above the named handler.\n");
+    s.push_str("// The body hash matches what `qedgen-macros` recomputes at compile time;\n");
+    s.push_str("// editing the body fires `compile_error!` until you re-run this command.\n\n");
+    for entry in entries {
+        s.push_str(&format!("// === handler: {} ===\n", entry.handler));
+        s.push_str(&format!("// source: {}\n", entry.source_path.display()));
+        if let Some(note) = &entry.note {
+            s.push_str(&format!("// note: {}\n", note));
+        }
+        if !entry.attribute.is_empty() {
+            s.push_str(&entry.attribute);
+            s.push('\n');
+        }
+        s.push('\n');
+    }
+    s
+}
+
+// ----------------------------------------------------------------------------
 // Rendering
 // ----------------------------------------------------------------------------
 

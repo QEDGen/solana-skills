@@ -117,23 +117,33 @@ enum Commands {
         escalate: bool,
     },
 
-    /// Scaffold a starter .qedspec from an existing Anchor program crate.
+    /// Brownfield adapter for existing Anchor programs. Two modes:
     ///
-    /// Brownfield adapter: parses `<program>/src/lib.rs`, finds the
-    /// `#[program]` mod, walks each instruction to its actual handler
-    /// body (inline / free fn / type method / accounts method), and
-    /// emits a `.qedspec` skeleton with one handler block per
-    /// instruction plus TODO markers for state machine / requires /
-    /// effects. The output round-trips through the parser so a renderer
-    /// regression surfaces here, not on the next `qedgen check`.
+    /// `--program <c>` (scaffold): parses `<c>/src/lib.rs`, finds the
+    /// `#[program]` mod, walks each instruction to its handler body,
+    /// and emits a `.qedspec` skeleton with TODO markers for state
+    /// machine / requires / effects. Round-trips through the parser.
+    ///
+    /// `--program <c> --spec <s>` (attribute): given an existing spec,
+    /// emits one `#[qed(verified, spec = ..., handler = ..., hash = ...,
+    /// spec_hash = ...)]` line per handler. Paste each above its
+    /// handler `pub fn`; future body edits fire `compile_error!`
+    /// until you re-run this command.
     Adapt {
         /// Path to the program crate (the directory containing the
         /// program's own `Cargo.toml`, with `src/lib.rs` inside).
         #[arg(long)]
         program: PathBuf,
 
-        /// Path to write the generated .qedspec. If omitted, prints to
-        /// stdout so the caller can redirect.
+        /// Path to an existing .qedspec. Switches to attribute-emit
+        /// mode: prints one `#[qed(verified, ...)]` line per handler.
+        /// Without this flag, scaffold mode emits a starter `.qedspec`.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+
+        /// Path to write output. Without this flag, prints to stdout.
+        /// In scaffold mode, writes a `.qedspec`; in attribute mode,
+        /// writes a `// === handler … ===` report.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -875,14 +885,29 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Adapt { program, out } => {
-            if let Some(path) = out {
-                anchor_adapt::adapt_to_file(&program, &path)?;
-            } else {
-                let rendered = anchor_adapt::adapt(&program)?;
-                print!("{}", rendered);
+        Commands::Adapt { program, spec, out } => match spec {
+            Some(spec_path) => {
+                let entries = anchor_adapt::compute_attributes(&program, &spec_path)?;
+                let rendered = anchor_adapt::render_attributes(&entries);
+                if let Some(path) = out {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, &rendered)?;
+                    eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
+                } else {
+                    print!("{}", rendered);
+                }
             }
-        }
+            None => {
+                if let Some(path) = out {
+                    anchor_adapt::adapt_to_file(&program, &path)?;
+                } else {
+                    let rendered = anchor_adapt::adapt(&program)?;
+                    print!("{}", rendered);
+                }
+            }
+        },
 
         Commands::Interface { idl, out, vendor } => {
             if vendor {

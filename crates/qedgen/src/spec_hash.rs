@@ -1,12 +1,17 @@
 //! Shared helper: extract a `handler <name> { ... }` block from a `.qedspec`
-//! source and compute its SHA-256-hex16 hash.
+//! source and compute its SHA-256-hex16 hash. Also: compute the body hash
+//! of a `syn::ItemFn` using the same canonicalization as `qedgen-macros`.
 //!
-//! The algorithm here MUST match `qedgen-macros/src/spec_bind.rs`. Codegen
-//! uses this to emit the `spec_hash = "..."` attribute; the proc-macro uses
-//! its own copy to recompute at compile time. Any divergence yields a
-//! spurious drift error — treat any change here as a breaking change of
-//! both crates.
+//! The two algorithms here MUST match `qedgen-macros`:
+//!   - `spec_hash_for_handler` ↔ `qedgen-macros/src/spec_bind.rs`
+//!   - `body_hash_for_fn`      ↔ `qedgen-macros/src/verified.rs::content_hash`
+//!
+//! Codegen + `qedgen adapt --spec ...` emit the `hash = "..."` /
+//! `spec_hash = "..."` attribute values; the proc-macro recomputes both
+//! at compile time. Any divergence yields a spurious drift error — treat
+//! any change here as a breaking change of both crates.
 
+use quote::ToTokens;
 use sha2::{Digest, Sha256};
 
 fn sha256_hex16(input: &str) -> String {
@@ -14,6 +19,20 @@ fn sha256_hex16(input: &str) -> String {
     hasher.update(input.as_bytes());
     let full = format!("{:x}", hasher.finalize());
     full[..16].to_string()
+}
+
+/// Compute the body hash of a `syn::ItemFn`. MUST match
+/// `qedgen-macros::verified::content_hash` byte-for-byte: strip every
+/// outer attribute (doc comments, `#[qed(...)]`, `#[inline]`, etc.),
+/// normalize via `to_token_stream()`, then sha256-hex16.
+///
+/// Used by `qedgen adapt --spec ...` to compute the `hash = "..."`
+/// value the macro will recompute and check at compile time.
+pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
+    let mut stripped = func.clone();
+    stripped.attrs.clear();
+    let canonical = stripped.to_token_stream().to_string();
+    sha256_hex16(&canonical)
 }
 
 /// Extract the raw text of a `handler <name> { ... }` block (braces included)
@@ -173,6 +192,50 @@ handler bar : State.A -> State.B {
     #[test]
     fn missing_handler_is_none() {
         assert!(spec_hash_for_handler(SAMPLE, "nonexistent").is_none());
+    }
+
+    /// Mirrors `qedgen-macros::verified::tests::hash_deterministic`. If
+    /// either side's algorithm drifts, this test breaks alongside the
+    /// macro test — same input, same expected length.
+    #[test]
+    fn body_hash_is_deterministic_and_16_hex() {
+        let func: syn::ItemFn = syn::parse_quote! {
+            pub fn deposit(amount: u64) -> u64 { amount + 1 }
+        };
+        let h1 = body_hash_for_fn(&func);
+        let h2 = body_hash_for_fn(&func);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Mirrors `qedgen-macros::verified::tests::hash_ignores_attributes`.
+    #[test]
+    fn body_hash_ignores_outer_attributes() {
+        let with_attr: syn::ItemFn = syn::parse_quote! {
+            #[inline(always)]
+            #[doc = "ignored"]
+            pub fn deposit(amount: u64) -> u64 { amount + 1 }
+        };
+        let without_attr: syn::ItemFn = syn::parse_quote! {
+            pub fn deposit(amount: u64) -> u64 { amount + 1 }
+        };
+        assert_eq!(
+            body_hash_for_fn(&with_attr),
+            body_hash_for_fn(&without_attr)
+        );
+    }
+
+    /// Mirrors `qedgen-macros::verified::tests::hash_changes_on_body_change`.
+    #[test]
+    fn body_hash_changes_on_body_edit() {
+        let v1: syn::ItemFn = syn::parse_quote! {
+            pub fn deposit(amount: u64) -> u64 { amount + 1 }
+        };
+        let v2: syn::ItemFn = syn::parse_quote! {
+            pub fn deposit(amount: u64) -> u64 { amount + 2 }
+        };
+        assert_ne!(body_hash_for_fn(&v1), body_hash_for_fn(&v2));
     }
 
     #[test]

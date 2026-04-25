@@ -874,6 +874,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "qed-drift-fixture"
+version = "0.1.0"
+dependencies = [
+ "qedgen-macros",
+]
+
+[[package]]
 name = "qedgen-macros"
 version = "0.1.0"
 dependencies = [
