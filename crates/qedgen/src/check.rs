@@ -2388,6 +2388,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // program is verified." See docs/design/spec-composition.md §2.
     warnings.extend(check_shape_only_cpi(spec));
 
+    // PDA seed collision: two PDA declarations with identical seed tuples resolve
+    // to the same on-chain address — a common source of account confusion bugs.
+    warnings.extend(check_pda_collisions(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -2478,6 +2482,89 @@ fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 enum FieldTypeShape<'a> {
     Simple(#[allow(dead_code)] &'a str),
     Map { bound: &'a str, inner: &'a str },
+}
+
+fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let pdas = &spec.pdas;
+
+    // Classify a seed token: is it a literal/constant or a variable reference?
+    // Seeds from the adapter: string literals are stored with surrounding quotes
+    // (e.g. `"vault"`), named constants are ALL_CAPS, variables are lowercase idents.
+    let is_literal = |s: &str| -> bool {
+        s.starts_with('"')
+            || s.chars().all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+    };
+
+    for i in 0..pdas.len() {
+        for j in (i + 1)..pdas.len() {
+            let a = &pdas[i];
+            let b = &pdas[j];
+
+            if a.seeds == b.seeds {
+                // Exact collision — same seed tuple → same address always.
+                warnings.push(CompletenessWarning {
+                    rule: "pda_seed_collision".to_string(),
+                    severity: Severity::Warning,
+                    priority: 1,
+                    message: format!(
+                        "PDA '{}' and PDA '{}' have identical seed tuples [{}] — they will always resolve to the same on-chain address",
+                        a.name, b.name, a.seeds.join(", ")
+                    ),
+                    subject: Some(a.name.clone()),
+                    fix: format!(
+                        "Add a distinguishing seed to '{}' or '{}' (e.g., a discriminator byte or unique program-specific tag)",
+                        a.name, b.name
+                    ),
+                    example: Some(format!(
+                        "  pda {} [\"{}_tag\", {}]\n  pda {} [\"{}_tag\", {}]",
+                        a.name,
+                        a.name.to_lowercase(),
+                        a.seeds.join(", "),
+                        b.name,
+                        b.name.to_lowercase(),
+                        b.seeds.join(", ")
+                    )),
+                    counterexample: None,
+                    fix_options: vec![],
+                });
+                continue;
+            }
+
+            // Possible collision: same literal seeds, differing only in variable positions.
+            let a_literals: Vec<&str> = a.seeds.iter().filter(|s| is_literal(s)).map(|s| s.as_str()).collect();
+            let b_literals: Vec<&str> = b.seeds.iter().filter(|s| is_literal(s)).map(|s| s.as_str()).collect();
+
+            if !a_literals.is_empty() && a_literals == b_literals && a.seeds.len() == b.seeds.len() {
+                // Same structure, same literals — variable seeds could collide at runtime.
+                warnings.push(CompletenessWarning {
+                    rule: "pda_seed_possible_collision".to_string(),
+                    severity: Severity::Warning,
+                    priority: 2,
+                    message: format!(
+                        "PDA '{}' and PDA '{}' share all literal seeds [{}] and differ only in variable positions — they can collide at runtime when variables hold the same values",
+                        a.name, b.name, a_literals.join(", ")
+                    ),
+                    subject: Some(a.name.clone()),
+                    fix: format!(
+                        "Add a unique literal discriminator seed to '{}' or '{}' so their namespaces cannot overlap",
+                        a.name, b.name
+                    ),
+                    example: Some(format!(
+                        "  pda {} [\"{}\", ...]\n  pda {} [\"{}\", ...]",
+                        a.name,
+                        a.name.to_lowercase(),
+                        b.name,
+                        b.name.to_lowercase()
+                    )),
+                    counterexample: None,
+                    fix_options: vec![],
+                });
+            }
+        }
+    }
+
+    warnings
 }
 
 /// Parse a field-type source string into a structured view.
@@ -4327,6 +4414,68 @@ handler tick : State.Active -> State.Active {
                 .iter()
                 .any(|w| w.rule == "preserved_by_all_potential_violation"),
             "must warn when preserved_by all handler demonstrably violates the property"
+        );
+    }
+
+    #[test]
+    fn pda_seed_collision_fires_for_identical_seeds() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+            spec CollisionTest
+
+            pda vault ["vault", user]
+            pda escrow ["vault", user]
+
+            state { dummy : U64 }
+            "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "pda_seed_collision"),
+            "must warn on identical seed tuples; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pda_seed_collision_no_false_positive_for_distinct_seeds() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+            spec CollisionTest
+
+            pda vault ["vault", user]
+            pda escrow ["escrow", user]
+
+            state { dummy : U64 }
+            "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "pda_seed_collision"),
+            "must NOT warn when seeds differ by literal discriminator"
+        );
+    }
+
+    #[test]
+    fn pda_seed_possible_collision_fires_when_literals_match_but_vars_differ() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+            spec CollisionTest
+
+            pda order_a ["order", user_a]
+            pda order_b ["order", user_b]
+
+            state { dummy : U64 }
+            "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "pda_seed_possible_collision"),
+            "must warn on same literals but different variable seeds; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
 }

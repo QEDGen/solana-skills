@@ -1,0 +1,8 @@
+spec PdaCollisionRepro
+
+// Two PDAs with identical seed tuples — qedgen check must emit
+// pda_seed_collision (priority 1).
+pda vault ["vault", user]
+pda escrow ["vault", user]
+
+state { balance : U64 }
