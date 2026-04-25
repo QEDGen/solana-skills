@@ -342,6 +342,12 @@ enum Commands {
         /// configured in `~/.config/solana/cli/config.yml`.
         #[arg(long)]
         rpc_url: Option<String>,
+
+        /// Refuse to reach the network. Any dependency that would require
+        /// an on-chain fetch reports as Error instead. Skipped entries (no
+        /// pinned hash / no program_id) still skip cleanly. CI gate friendly.
+        #[arg(long)]
+        offline: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -1170,6 +1176,7 @@ async fn main() -> Result<()> {
             json,
             check_upstream,
             rpc_url,
+            offline,
         } => {
             require_git_repo()?;
 
@@ -1178,9 +1185,10 @@ async fn main() -> Result<()> {
             // imported library's pinned binary hash against the on-chain
             // `.so` via `solana program dump`. Runs independently so
             // users can `--check-upstream` without re-running the harnesses.
+            // F6 fold-in: --offline refuses any network fetch.
             if check_upstream {
                 let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
-                let results = upstream_check::check_lock(spec_dir, rpc_url.as_deref())?;
+                let results = upstream_check::check_lock(spec_dir, rpc_url.as_deref(), offline)?;
                 let any_failure = upstream_check::print_report(&results);
                 if any_failure {
                     std::process::exit(1);

@@ -59,9 +59,16 @@ pub struct DepCheckResult {
 /// mismatch).
 ///
 /// `rpc_url` (if set) is passed through to `solana program dump --url`.
-/// `None` lets the Solana CLI use its own configured cluster.
+/// `None` lets the Solana CLI use its own configured cluster. `offline`
+/// (v2.8 fold-in F6): when true, any dep that would require an RPC fetch
+/// returns `Error { offline-blocked }` instead of shelling out — useful
+/// for CI gates that should never reach external network.
 #[allow(dead_code)]
-pub fn check_lock(spec_dir: &Path, rpc_url: Option<&str>) -> Result<Vec<DepCheckResult>> {
+pub fn check_lock(
+    spec_dir: &Path,
+    rpc_url: Option<&str>,
+    offline: bool,
+) -> Result<Vec<DepCheckResult>> {
     let lock = match qed_lock::read(spec_dir)? {
         Some(l) => l,
         None => anyhow::bail!(
@@ -70,10 +77,29 @@ pub fn check_lock(spec_dir: &Path, rpc_url: Option<&str>) -> Result<Vec<DepCheck
             spec_dir.display(),
         ),
     };
-    Ok(check_lock_with_fetcher(
-        &lock,
-        &mut SolanaCliFetcher { rpc_url },
-    ))
+    if offline {
+        Ok(check_lock_with_fetcher(&lock, &mut OfflineFetcher))
+    } else {
+        Ok(check_lock_with_fetcher(
+            &lock,
+            &mut SolanaCliFetcher { rpc_url },
+        ))
+    }
+}
+
+/// `--offline` fetcher: unconditionally errors with a clear "offline mode"
+/// message. Skipped entries (no hash / no program_id) bypass `fetch`
+/// entirely and remain skipped, so an offline run still distinguishes
+/// "couldn't reach RPC" from "nothing to verify."
+struct OfflineFetcher;
+
+impl BinaryFetcher for OfflineFetcher {
+    fn fetch(&mut self, program_id: &str) -> Result<Vec<u8>> {
+        anyhow::bail!(
+            "offline mode: would have fetched on-chain bytes for {} via `solana program dump`",
+            program_id
+        )
+    }
 }
 
 /// Test-friendly seam: the `BinaryFetcher` trait separates the side-effecting
@@ -353,6 +379,38 @@ mod tests {
             }
             other => panic!("expected Match, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn offline_fetcher_errors_for_pinned_entries_but_skips_cleanly() {
+        // One entry has both hash + program_id (would fetch); offline mode
+        // converts it to Error. A second entry has no pin → still Skipped.
+        let bytes = b"would-have-fetched".to_vec();
+        let _ = bytes; // unused — offline never reads
+        let mut e_pinned = entry_with_hash("pinned", Some("sha256:abc"));
+        e_pinned.program_id = Some("Px11111111111111111111111111111111".to_string());
+        let e_unpinned = entry_with_hash("unpinned", None);
+
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![e_pinned, e_unpinned],
+        };
+        let mut fetcher = OfflineFetcher;
+        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        assert!(matches!(results[0].outcome, DepCheckOutcome::Error { .. }));
+        match &results[0].outcome {
+            DepCheckOutcome::Error { message } => {
+                assert!(
+                    message.contains("offline mode"),
+                    "should explain why fetch was blocked; got: {message}"
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            results[1].outcome,
+            DepCheckOutcome::Skipped { .. }
+        ));
     }
 
     #[test]
