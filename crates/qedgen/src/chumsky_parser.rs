@@ -2176,13 +2176,20 @@ fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
 // `import_resolver.rs` and runs after parse, before lint.
 // ----------------------------------------------------------------------------
 fn import_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    let as_clause = kw("as").ignore_then(wsc()).ignore_then(non_keyword_ident());
     kw("import")
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
         .then_ignore(kw("from"))
         .then_ignore(wsc())
         .then(string_lit())
-        .map(|(name, from)| TopItem::Import { name, from })
+        .then_ignore(wsc())
+        .then(as_clause.or_not())
+        .map(|((name, from), as_name)| TopItem::Import {
+            name,
+            from,
+            as_name,
+        })
 }
 
 // Top-level item: priority-ordered choice.
@@ -3262,11 +3269,34 @@ handler h (amount : U64) : State.A -> State.A {
         let s = parse_ok("spec T\nimport Token from \"spl_token\"");
         assert_eq!(s.items.len(), 1);
         match &s.items[0].node {
-            TopItem::Import { name, from } => {
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
                 assert_eq!(name, "Token");
                 assert_eq!(from, "spl_token");
+                assert!(as_name.is_none(), "no `as` clause = None alias");
             }
             other => panic!("expected Import, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_import_with_as_alias() {
+        let s = parse_ok("spec T\nimport Token from \"spl_token\" as MyToken");
+        assert_eq!(s.items.len(), 1);
+        match &s.items[0].node {
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
+                assert_eq!(name, "Token");
+                assert_eq!(from, "spl_token");
+                assert_eq!(as_name.as_deref(), Some("MyToken"));
+            }
+            other => panic!("expected Import with alias, got {:?}", other),
         }
     }
 

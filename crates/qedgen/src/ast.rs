@@ -105,6 +105,9 @@ pub enum TopItem {
     Import {
         name: String,
         from: String,
+        /// v2.8 fold-in F5: optional `as Alias` clause renames the
+        /// imported interface in the consumer's namespace.
+        as_name: Option<String>,
     },
     /// `pragma <name> { <top_item>* }` — platform-specific namespace.
     ///

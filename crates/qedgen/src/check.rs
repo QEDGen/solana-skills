@@ -689,16 +689,28 @@ impl ParsedSpec {
     }
 }
 
-/// `import Name from "key"` statement, captured before resolution.
-/// `name` is the local bound name in the importing spec; `from` is the
-/// key into `qed.toml`'s `[dependencies]` table. Once the resolver runs,
-/// the imported `interface` blocks land in `ParsedSpec.interfaces` keyed
-/// by `name`.
+/// `import Name from "key" [as Alias]` statement, captured before
+/// resolution. `name` selects which interface to bring in (must match a
+/// declared `interface Name` in the imported source); `from` is the key
+/// into `qed.toml`'s `[dependencies]` table. `as_name` (v2.8 F5)
+/// optionally renames the merged interface in the consumer's namespace.
+/// The local-name used at `call ...` sites is `as_name.unwrap_or(name)`.
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct ParsedImport {
     pub name: String,
     pub from: String,
+    pub as_name: Option<String>,
+}
+
+impl ParsedImport {
+    /// The name the consumer's `call <X>.handler(...)` uses to address
+    /// this imported interface. Falls back to `name` when no alias is
+    /// declared.
+    #[allow(dead_code)]
+    pub fn local_name(&self) -> &str {
+        self.as_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// Callee contract: program ID + per-handler shape (and optional effects).
@@ -983,7 +995,10 @@ fn resolve_and_merge_imports(
             )
         })?;
 
-        // Imported source must declare an `interface <bound_name>`.
+        // Imported source must declare an `interface <source_name>`.
+        // `r.bound_name` here is the source-side name (the first ident
+        // in `import X from "y" [as Z]`); the local alias, if any, is
+        // applied at merge time below.
         let iface = imported
             .interfaces
             .iter()
@@ -1005,8 +1020,8 @@ fn resolve_and_merge_imports(
 
         // Build the lock entry while we have everything in scope: the
         // resolved import (sources + commit), the manifest dep descriptor
-        // (source kind + ref), and the imported interface's optional
-        // upstream block.
+        // (source kind + ref), and the imported interface (carries
+        // program_id and the optional upstream block).
         let dep = manifest
             .dependencies
             .get(&r.dep_key)
@@ -1014,7 +1029,14 @@ fn resolve_and_merge_imports(
         let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface);
         lock.dependencies.push(lock_entry);
 
-        parsed.interfaces.push(iface.clone());
+        // F5 fold-in: apply the optional `as <alias>` rename when merging
+        // into the consumer's interface set. Without an alias, the
+        // imported interface keeps its source-side name.
+        let mut merged = iface.clone();
+        if let Some(alias) = &r.local_alias {
+            merged.name = alias.clone();
+        }
+        parsed.interfaces.push(merged);
     }
 
     crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
@@ -4958,6 +4980,68 @@ handler h : State.A -> State.A { effect { x := 1 } }
         parse_spec_file(&consumer).unwrap();
         parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen)
             .expect("frozen should pass when lock is current");
+    }
+
+    #[test]
+    fn parse_spec_file_renames_imported_interface_via_as_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+        // Consumer uses `as Tk` to rename Token → Tk in its namespace.
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token" as Tk
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer).expect("alias-renamed import should parse + merge");
+        // Imported interface should appear under its alias name `Tk`,
+        // not the source-side `Token`.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Tk"),
+            "expected interface renamed to `Tk`; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "the source-side name `Token` should not leak into consumer when an alias is set"
+        );
     }
 
     #[test]

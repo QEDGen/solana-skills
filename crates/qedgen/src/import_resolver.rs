@@ -39,8 +39,16 @@ use crate::qed_manifest::{Dependency, GitRef, Manifest};
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ResolvedImport {
+    /// Source-side interface name — what the imported `.qedspec`
+    /// declares as `interface <bound_name> { ... }`. The merge step
+    /// looks up by this name.
     pub bound_name: String,
+    /// Manifest dep key (matches `qed.toml`'s `[dependencies]`).
     pub dep_key: String,
+    /// Local alias from `import X from "y" as <alias>` (v2.8 F5).
+    /// `None` when no alias was declared — the merge keeps `bound_name`
+    /// as the local name.
+    pub local_alias: Option<String>,
     pub sources: Vec<(PathBuf, String)>,
     pub commit: Option<String>,
 }
@@ -96,6 +104,7 @@ pub fn resolve_imports_with_opts(
         resolved.push(ResolvedImport {
             bound_name: imp.name.clone(),
             dep_key: imp.from.clone(),
+            local_alias: imp.as_name.clone(),
             sources: res.sources,
             commit: res.commit,
         });
@@ -428,6 +437,7 @@ mod tests {
         ParsedImport {
             name: name.to_string(),
             from: from.to_string(),
+            as_name: None,
         }
     }
 

@@ -1985,10 +1985,15 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Interface(iface) => {
                 out.interfaces.push(adapt_interface(iface, consts, &env));
             }
-            TopItem::Import { name, from } => {
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
                 out.imports.push(ParsedImport {
                     name: name.clone(),
                     from: from.clone(),
+                    as_name: as_name.clone(),
                 });
             }
             TopItem::Pragma(p) => {
