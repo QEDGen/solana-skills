@@ -599,11 +599,12 @@ const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 /// site. Returns `None` when the interface isn't recognized (caller falls
 /// back to a comment + `todo!()` so the user / an LLM fills the body).
 ///
-/// v2.8 G4 covers SPL Token's `transfer` only. Other library handlers
-/// (`mint_to`, `burn`, `initialize_account`, `close_account`) and
-/// non-SPL-Token interfaces ship in v2.9. This narrow scope is enough
-/// to remove the `todo!()` from the canonical escrow / lending shapes,
-/// where SPL Token transfers are the bulk of CPI traffic.
+/// v2.8 covers all five SPL Token handlers — `transfer`, `mint_to`,
+/// `burn`, `initialize_account`, `close_account` — via `anchor_spl::token::*`.
+/// Non-SPL-Token interfaces ship a generic `solana_program::program::invoke`
+/// shape in v2.9. The canonical SPL handlers are the bulk of CPI traffic
+/// in deployed programs, so this scope is enough to remove `todo!()` from
+/// the typical escrow / lending / vault shape.
 fn try_emit_anchor_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -619,65 +620,170 @@ fn try_emit_anchor_cpi(
         return None;
     }
 
+    let token_program_acct = find_token_program_account(handler)?;
+    let prog_name = &token_program_acct.name;
+
     match call.target_handler.as_str() {
-        "transfer" => emit_spl_token_transfer(call, handler),
-        // Other SPL Token handlers (mint_to, burn, …) — v2.9.
+        "transfer" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "Transfer",
+            &[("from", "from"), ("to", "to"), ("authority", "authority")],
+            Some("amount"),
+            "transfer",
+        ),
+        "mint_to" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "MintTo",
+            &[
+                ("mint", "mint"),
+                ("to", "to"),
+                // anchor_spl's MintTo uses `authority`; the canonical
+                // qedspec interface names it `mint_authority` to match the
+                // SPL Token instruction docs. Map between them at the
+                // codegen boundary.
+                ("authority", "mint_authority"),
+            ],
+            Some("amount"),
+            "mint_to",
+        ),
+        "burn" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "Burn",
+            &[
+                ("mint", "mint"),
+                ("from", "from"),
+                ("authority", "authority"),
+            ],
+            Some("amount"),
+            "burn",
+        ),
+        "initialize_account" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "InitializeAccount",
+            &[
+                ("account", "account"),
+                ("mint", "mint"),
+                // anchor_spl's InitializeAccount uses `authority` for the
+                // owner slot; the canonical qedspec interface names it
+                // `owner` to match SPL Token instruction docs.
+                ("authority", "owner"),
+                ("rent", "rent"),
+            ],
+            None,
+            "initialize_account",
+        ),
+        "close_account" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "CloseAccount",
+            &[
+                ("account", "account"),
+                ("destination", "destination"),
+                ("authority", "authority"),
+            ],
+            None,
+            "close_account",
+        ),
         _ => None,
     }
 }
 
-/// Emit the `anchor_spl::token::transfer` CPI builder for a v2.8-canonical
-/// SPL Token transfer call. Returns None if any required arg is missing
-/// from the call site or the calling handler doesn't carry a token
-/// program account.
-fn emit_spl_token_transfer(
-    call: &crate::check::ParsedCall,
+/// Find the handler-side `<name> : program` account that points at the
+/// token program. Convention: any `is_program` account named
+/// `token_program`, or the unique `is_program` account otherwise.
+fn find_token_program_account(
     handler: &ParsedHandler,
-) -> Option<String> {
-    let from = call.args.iter().find(|a| a.name == "from")?;
-    let to = call.args.iter().find(|a| a.name == "to")?;
-    let authority = call.args.iter().find(|a| a.name == "authority")?;
-    let amount = call.args.iter().find(|a| a.name == "amount")?;
-
-    // Find the handler-side `<name> : program` account that points at the
-    // token program. Convention: any `is_program` account named
-    // `token_program`, or the unique `is_program` account otherwise.
-    let token_program_acct = handler
+) -> Option<&crate::check::ParsedHandlerAccount> {
+    handler
         .accounts
         .iter()
         .find(|a| a.is_program && a.name == "token_program")
         .or_else(|| {
             let programs: Vec<_> = handler.accounts.iter().filter(|a| a.is_program).collect();
             (programs.len() == 1).then_some(programs[0])
-        })?;
+        })
+}
 
-    let amount_rhs = resolve_call_arg_for_amount(&amount.rust_expr, handler);
+/// Emit one `anchor_spl::token::<fn>` CPI body. Generic over which SPL
+/// Token handler is being called — the differences are the Anchor accounts
+/// struct name, the call-arg → struct-field name map, the optional
+/// scalar argument (e.g. `amount` for transfer / mint_to / burn; absent
+/// for initialize_account / close_account), and the function name.
+///
+/// `field_to_arg` is `(anchor_field_name, call_arg_name)` pairs. The arg
+/// name is the call-site identifier (matches the qedspec interface's
+/// account block); the anchor field name is what `anchor_spl::token`'s
+/// accounts struct expects. Most are identity (`("from", "from")`) but
+/// some interfaces expose a more semantic name than anchor_spl uses
+/// (e.g. `mint_authority` vs `authority`).
+fn emit_spl(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    token_program: &str,
+    accounts_struct: &str,
+    field_to_arg: &[(&str, &str)],
+    scalar_arg: Option<&str>,
+    fn_name: &str,
+) -> Option<String> {
+    // Resolve every account argument via the call site.
+    let mut acct_lines: Vec<String> = Vec::with_capacity(field_to_arg.len());
+    let max_field = field_to_arg.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+    for (anchor_field, call_arg) in field_to_arg {
+        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
+        let pad = " ".repeat(max_field - anchor_field.len());
+        acct_lines.push(format!(
+            "                {}:{} self.{}.to_account_info(),\n",
+            anchor_field, pad, arg.rust_expr
+        ));
+    }
+
+    // Resolve the optional scalar arg (e.g. `amount`).
+    let scalar_rhs = match scalar_arg {
+        Some(name) => {
+            let arg = call.args.iter().find(|a| a.name == name)?;
+            Some(resolve_call_arg_for_amount(&arg.rust_expr, handler))
+        }
+        None => None,
+    };
 
     let mut out = String::new();
     out.push_str("        {\n");
-    out.push_str("            use anchor_spl::token::{self, Transfer};\n");
-    out.push_str("            let cpi_accounts = Transfer {\n");
     out.push_str(&format!(
-        "                from:      self.{}.to_account_info(),\n",
-        from.rust_expr
+        "            use anchor_spl::token::{{self, {}}};\n",
+        accounts_struct
     ));
     out.push_str(&format!(
-        "                to:        self.{}.to_account_info(),\n",
-        to.rust_expr
+        "            let cpi_accounts = {} {{\n",
+        accounts_struct
     ));
-    out.push_str(&format!(
-        "                authority: self.{}.to_account_info(),\n",
-        authority.rust_expr
-    ));
+    for line in &acct_lines {
+        out.push_str(line);
+    }
     out.push_str("            };\n");
     out.push_str(&format!(
         "            let cpi_program = self.{}.to_account_info();\n",
-        token_program_acct.name
+        token_program
     ));
-    out.push_str(&format!(
-        "            token::transfer(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
-        amount_rhs
-    ));
+    let invocation = match scalar_rhs {
+        Some(rhs) => format!(
+            "            token::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
+            fn_name, rhs
+        ),
+        None => format!(
+            "            token::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
+            fn_name
+        ),
+    };
+    out.push_str(&invocation);
     out.push_str("        }\n");
     Some(out)
 }
@@ -1388,6 +1494,225 @@ handler send : State.Active -> State.Active {
         assert!(
             try_emit_anchor_cpi(call, handler, &spec).is_none(),
             "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_mint_to_with_authority_renaming() {
+        // Spec exposes `mint_authority` per SPL Token docs; anchor_spl's
+        // MintTo struct calls the same slot `authority`. The codegen
+        // boundary maps the names.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler mint_to (amount : U64) {
+    discriminant "0x07"
+    accounts {
+      mint            : writable
+      to              : writable, type token
+      mint_authority  : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { stash : U64 }
+type Error | E
+
+handler do_mint (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    the_mint       : writable
+    holder_ta      : writable, type token
+    minter         : signer
+    token_program  : program
+  }
+  call Token.mint_to(mint = the_mint, to = holder_ta, mint_authority = minter, amount = n)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_mint").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(
+            rendered.contains("anchor_spl::token::{self, MintTo}"),
+            "should use MintTo struct; got:\n{rendered}"
+        );
+        // anchor_spl uses `authority`; spec uses `mint_authority` — the
+        // mapping should land the call-site `minter` value at the
+        // `authority` field. Padding may insert extra whitespace before
+        // `self`, so we check the substring on each side independently.
+        assert!(
+            rendered.contains("self.minter.to_account_info()"),
+            "minter should be wired into the cpi_accounts struct; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("authority:"),
+            "MintTo struct should use field name `authority`; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("token::mint_to(CpiContext::new(cpi_program, cpi_accounts), n)"),
+            "should invoke token::mint_to with the amount; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_burn() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler burn (amount : U64) {
+    discriminant "0x08"
+    accounts {
+      from      : writable, type token
+      mint      : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_burn (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    holder_ta      : writable, type token
+    the_mint       : writable
+    holder         : signer
+    token_program  : program
+  }
+  call Token.burn(from = holder_ta, mint = the_mint, authority = holder, amount = n)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_burn").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("anchor_spl::token::{self, Burn}"));
+        assert!(rendered.contains("token::burn(CpiContext::new"));
+        // Padding aligns colons across fields; use a substring that's
+        // independent of whitespace.
+        assert!(
+            rendered.contains("self.holder_ta.to_account_info()"),
+            "burn's `from` should resolve to self.holder_ta; got:\n{rendered}"
+        );
+        assert!(rendered.contains("authority: self.holder.to_account_info()"));
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_initialize_account_no_amount() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler initialize_account {
+    discriminant "0x01"
+    accounts {
+      account : writable
+      mint    : readonly
+      owner   : readonly
+      rent    : readonly
+    }
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_init : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    new_acct       : writable
+    the_mint       : writable
+    the_owner      : writable
+    rent_sysvar    : writable
+    token_program  : program
+  }
+  call Token.initialize_account(account = new_acct, mint = the_mint, owner = the_owner, rent = rent_sysvar)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_init").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("InitializeAccount"));
+        // No scalar arg — the invocation has no second positional parameter.
+        assert!(
+            rendered.contains(
+                "token::initialize_account(CpiContext::new(cpi_program, cpi_accounts))?;"
+            ),
+            "no-amount handler should not get a trailing argument; got:\n{rendered}"
+        );
+        // Owner-as-authority renaming.
+        assert!(
+            rendered.contains("self.the_owner.to_account_info()"),
+            "the_owner should be wired in; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("authority:"),
+            "InitializeAccount should use field name `authority` for the owner slot; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_close_account_no_amount() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler close_account {
+    discriminant "0x09"
+    accounts {
+      account     : writable, type token
+      destination : writable
+      authority   : signer
+    }
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_close : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    target_acct    : writable, type token
+    sweep_target   : writable
+    closer         : signer
+    token_program  : program
+  }
+  call Token.close_account(account = target_acct, destination = sweep_target, authority = closer)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_close").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("CloseAccount"));
+        assert!(
+            rendered.contains("token::close_account(CpiContext::new(cpi_program, cpi_accounts))?;")
         );
     }
 
