@@ -74,7 +74,28 @@ pub fn resolve_imports(
     resolve_imports_with_opts(imports, manifest, manifest_dir, CacheOpts::default())
 }
 
-/// `resolve_imports`, with explicit cache-policy controls.
+/// `resolve_imports`, with explicit cache-policy controls. Performs
+/// **transitive** resolution as of v2.9 G5: imported specs that
+/// themselves contain `import` statements are walked depth-first;
+/// the resolved set includes both direct and transitive deps.
+///
+/// Transitive deps are resolved against the **imported spec's own**
+/// `qed.toml` (sibling to its source file), not the consumer's
+/// manifest. This matches cargo / npm semantics — a peer spec
+/// declares its own deps in its own manifest; the consumer doesn't
+/// need to repeat them.
+///
+/// Conflict policy (v2.9 B1, no semver):
+/// - Same dep key (`from "..."`) resolving to the same canonical
+///   source path → dedupe (silent).
+/// - Same dep key resolving to *different* canonical paths →
+///   hard-error with the conflicting paths and the import chain
+///   that brought each.
+/// - Cycle (a transitive walk re-encounters a path already on the
+///   current chain) → hard-error with the cycle path.
+///
+/// Full version-conflict resolution (semver-aware) is v2.10+ scope
+/// (B2 from `SCOPING-v2.9.md`).
 #[allow(dead_code)]
 pub fn resolve_imports_with_opts(
     imports: &[ParsedImport],
@@ -82,13 +103,46 @@ pub fn resolve_imports_with_opts(
     manifest_dir: &Path,
     cache_opts: CacheOpts,
 ) -> Result<Vec<ResolvedImport>> {
-    let mut resolved = Vec::with_capacity(imports.len());
+    let mut state = ResolverState::default();
+    let mut chain: Vec<String> = Vec::new();
+    resolve_recursive(
+        imports,
+        manifest,
+        manifest_dir,
+        cache_opts,
+        &mut state,
+        &mut chain,
+    )?;
+    Ok(state.resolved)
+}
+
+/// Per-invocation resolver state. Tracks the deduplicated set of
+/// resolved imports plus the bookkeeping needed for cycle and
+/// conflict detection.
+#[derive(Default)]
+struct ResolverState {
+    /// All resolved imports, in DFS-pre-order.
+    resolved: Vec<ResolvedImport>,
+    /// `dep_key` → canonical source path of the first source. Used
+    /// for conflict detection across the dep graph.
+    seen: std::collections::HashMap<String, String>,
+}
+
+fn resolve_recursive(
+    imports: &[ParsedImport],
+    manifest: &Manifest,
+    manifest_dir: &Path,
+    cache_opts: CacheOpts,
+    state: &mut ResolverState,
+    chain: &mut Vec<String>,
+) -> Result<()> {
     for imp in imports {
         let dep = manifest.dependencies.get(&imp.from).ok_or_else(|| {
             anyhow!(
-                "import `{}` references manifest dep `{}`, but no such entry in qed.toml under [dependencies]",
+                "import `{}` references manifest dep `{}`, but no such entry in qed.toml under [dependencies] (looking in {})",
                 imp.name,
-                imp.from
+                imp.from,
+                manifest_dir.display(),
             )
         })?;
 
@@ -101,15 +155,136 @@ pub fn resolve_imports_with_opts(
             } => resolve_github_dep(&imp.name, repo, git_ref, path.as_deref(), cache_opts)?,
         };
 
-        resolved.push(ResolvedImport {
+        // Canonical source path = canonicalized first source file.
+        // Stable across multi-file deps (sources are returned in
+        // sorted order); falls back to the raw path if canonicalize
+        // fails (e.g. the file lives under a path that no longer
+        // exists when this is called repeatedly).
+        let first_source = &res.sources[0].0;
+        let canonical = first_source
+            .canonicalize()
+            .unwrap_or_else(|_| first_source.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        // Cycle detection: if this path is already on the current
+        // resolution chain, we have a cycle.
+        if chain.contains(&canonical) {
+            anyhow::bail!(
+                "import cycle detected:\n  {} -> {}\n  Each consumer must declare its own deps; cyclic peer references are not supported.",
+                chain.join("\n    -> "),
+                canonical,
+            );
+        }
+
+        // Conflict detection: same dep_key, different canonical
+        // sources. Diagnose with the chain that brought the second
+        // path so the user can see the conflict point.
+        if let Some(prev_canonical) = state.seen.get(&imp.from) {
+            if prev_canonical != &canonical {
+                anyhow::bail!(
+                    "dep `{}` resolved to two different sources:\n  first:  {}\n  later:  {}\n  reached via: {}\n  v2.9 has no version-conflict resolution; both paths must agree, or one must rename via `import X from \"y\" as Z`.",
+                    imp.from,
+                    prev_canonical,
+                    canonical,
+                    if chain.is_empty() {
+                        "<direct>".to_string()
+                    } else {
+                        chain.join(" -> ")
+                    },
+                );
+            }
+            // Already resolved with the same source — silently dedupe.
+            continue;
+        }
+
+        state.seen.insert(imp.from.clone(), canonical.clone());
+        state.resolved.push(ResolvedImport {
             bound_name: imp.name.clone(),
             dep_key: imp.from.clone(),
             local_alias: imp.as_name.clone(),
-            sources: res.sources,
-            commit: res.commit,
+            sources: res.sources.clone(),
+            commit: res.commit.clone(),
         });
+
+        // Walk into transitive deps. Imported specs that contain
+        // `import` statements need their own qed.toml (sibling to
+        // the source file) to resolve; absence is fine and just
+        // means no transitive deps.
+        let transitive = parse_imports_from_sources(&res.sources).with_context(|| {
+            format!(
+                "scanning imported spec `{}` for transitive imports",
+                imp.name
+            )
+        })?;
+        if !transitive.is_empty() {
+            let imported_manifest_dir = first_source.parent().unwrap_or(manifest_dir).to_path_buf();
+            let imported_manifest = crate::qed_manifest::load_from_dir(&imported_manifest_dir)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "imported spec `{}` has {} `import` statement(s) but no `qed.toml` next to it (expected at {})",
+                        imp.name,
+                        transitive.len(),
+                        imported_manifest_dir
+                            .join(crate::qed_manifest::MANIFEST_FILENAME)
+                            .display(),
+                    )
+                })?;
+
+            chain.push(canonical);
+            resolve_recursive(
+                &transitive,
+                &imported_manifest,
+                &imported_manifest_dir,
+                cache_opts,
+                state,
+                chain,
+            )?;
+            chain.pop();
+        }
     }
-    Ok(resolved)
+    Ok(())
+}
+
+/// Parse an imported spec's source bytes just far enough to extract
+/// its own `import` statements. Equivalent to a full
+/// `chumsky_adapter::parse_str` followed by reading
+/// `parsed.imports`, but tolerates minor parse failures: a malformed
+/// imported spec doesn't block the resolver from reporting the
+/// actual problem (the parse error surfaces when the consumer-side
+/// pipeline parses it for real).
+fn parse_imports_from_sources(sources: &[(PathBuf, String)]) -> Result<Vec<ParsedImport>> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Fast path: single file → parse directly.
+    if sources.len() == 1 {
+        let parsed = match crate::chumsky_adapter::parse_str(&sources[0].1) {
+            Ok(p) => p,
+            Err(_) => return Ok(Vec::new()),
+        };
+        return Ok(parsed.imports);
+    }
+    // Multi-file: concatenate via the same logic check.rs uses
+    // (parse each fragment, merge AST top items, adapt).
+    let mut merged_items = Vec::new();
+    let mut merged_name: Option<String> = None;
+    for (_, src) in sources {
+        let typed = match crate::chumsky_parser::parse(src) {
+            Ok(t) => t,
+            Err(_) => return Ok(Vec::new()),
+        };
+        if merged_name.is_none() {
+            merged_name = Some(typed.name.clone());
+        }
+        merged_items.extend(typed.items);
+    }
+    let merged = crate::ast::Spec {
+        name: merged_name.unwrap_or_else(|| "Merged".to_string()),
+        items: merged_items,
+    };
+    let parsed = crate::chumsky_adapter::adapt(&merged);
+    Ok(parsed.imports)
 }
 
 // ----------------------------------------------------------------------------
@@ -531,6 +706,255 @@ mod tests {
         assert!(
             err.contains("no such entry in qed.toml"),
             "unexpected error: {err}"
+        );
+    }
+
+    // ----- v2.9 G5: transitive resolution -----
+
+    #[test]
+    fn resolves_three_level_chain_via_transitive_walk() {
+        // Layout:
+        //   /tmp/<root>/
+        //     qed.toml           (consumer's manifest, declares spl_token)
+        //     spl_token/
+        //       qed.toml         (spl_token's manifest, declares system)
+        //       spec.qedspec     (declares interface SplToken)
+        //                        + `import System from "system"`
+        //     system/
+        //       spec.qedspec     (declares interface System)
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let token_dir = root.join("spl_token");
+        std::fs::create_dir(&token_dir).unwrap();
+        let system_dir = root.join("system");
+        std::fs::create_dir(&system_dir).unwrap();
+
+        std::fs::write(
+            system_dir.join("spec.qedspec"),
+            r#"spec SystemIface
+interface System {
+  program_id "11111111111111111111111111111111"
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            token_dir.join("qed.toml"),
+            r#"
+[dependencies]
+system = { path = "../system/spec.qedspec" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            token_dir.join("spec.qedspec"),
+            r#"spec SplTokenIface
+import System from "system"
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+}
+"#,
+        )
+        .unwrap();
+
+        // Consumer's manifest only declares the direct dep; transitive
+        // walk discovers `system` through spl_token's own qed.toml.
+        std::fs::write(
+            root.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "spl_token/spec.qedspec" }
+"#,
+        )
+        .unwrap();
+
+        let manifest = crate::qed_manifest::load_from_dir(root).unwrap().unwrap();
+        let imports = vec![imp("Token", "spl_token")];
+        let resolved = resolve_imports(&imports, &manifest, root).unwrap();
+
+        // Both spl_token (direct) and system (transitive) should land.
+        assert_eq!(
+            resolved.len(),
+            2,
+            "expected 2 resolved deps; got {:?}",
+            resolved.iter().map(|r| &r.dep_key).collect::<Vec<_>>()
+        );
+        let keys: Vec<&str> = resolved.iter().map(|r| r.dep_key.as_str()).collect();
+        assert!(keys.contains(&"spl_token"));
+        assert!(keys.contains(&"system"));
+    }
+
+    #[test]
+    fn dedupes_when_same_dep_reached_via_two_paths() {
+        // Diamond: consumer imports A and B; both A and B import C.
+        // C should appear once in the resolved set.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let a = root.join("a");
+        let b = root.join("b");
+        let c = root.join("c");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::create_dir(&c).unwrap();
+
+        std::fs::write(
+            c.join("spec.qedspec"),
+            "spec C\ninterface C { program_id \"22222222222222222222222222222222\" }\n",
+        )
+        .unwrap();
+        for (dir, name) in [(&a, "A"), (&b, "B")] {
+            std::fs::write(
+                dir.join("qed.toml"),
+                "[dependencies]\nc = { path = \"../c/spec.qedspec\" }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("spec.qedspec"),
+                format!(
+                    "spec {0}\nimport C from \"c\"\ninterface {0} {{ program_id \"3333333333333333333333333333333{0}\" }}\n",
+                    name
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("qed.toml"),
+            r#"
+[dependencies]
+a = { path = "a/spec.qedspec" }
+b = { path = "b/spec.qedspec" }
+"#,
+        )
+        .unwrap();
+
+        let manifest = crate::qed_manifest::load_from_dir(root).unwrap().unwrap();
+        let imports = vec![imp("A", "a"), imp("B", "b")];
+        let resolved = resolve_imports(&imports, &manifest, root).unwrap();
+
+        // a, b, and c — c only once despite the diamond.
+        assert_eq!(resolved.len(), 3);
+        let c_count = resolved.iter().filter(|r| r.dep_key == "c").count();
+        assert_eq!(
+            c_count, 1,
+            "diamond should dedupe; c appeared {c_count} times"
+        );
+    }
+
+    #[test]
+    fn errors_on_cycle_in_transitive_chain() {
+        // a/spec.qedspec imports b; b imports a. Resolver should
+        // detect the cycle.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+
+        std::fs::write(
+            a.join("qed.toml"),
+            "[dependencies]\nb = { path = \"../b/spec.qedspec\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            a.join("spec.qedspec"),
+            "spec A\nimport B from \"b\"\ninterface A { program_id \"a\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            b.join("qed.toml"),
+            "[dependencies]\na = { path = \"../a/spec.qedspec\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            b.join("spec.qedspec"),
+            "spec B\nimport A from \"a\"\ninterface B { program_id \"b\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qed.toml"),
+            "[dependencies]\na = { path = \"a/spec.qedspec\" }\n",
+        )
+        .unwrap();
+
+        let manifest = crate::qed_manifest::load_from_dir(root).unwrap().unwrap();
+        let imports = vec![imp("A", "a")];
+        let err = resolve_imports(&imports, &manifest, root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("import cycle detected"),
+            "expected cycle error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn errors_on_conflicting_versions_for_same_dep_key() {
+        // Consumer imports A and B; A imports C from path X; B imports
+        // C from path Y. Same dep key, different sources → conflict.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let a = root.join("a");
+        let b = root.join("b");
+        let c1 = root.join("c1");
+        let c2 = root.join("c2");
+        for d in [&a, &b, &c1, &c2] {
+            std::fs::create_dir(d).unwrap();
+        }
+        std::fs::write(
+            c1.join("spec.qedspec"),
+            "spec C1\ninterface C { program_id \"c1\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c2.join("spec.qedspec"),
+            "spec C2\ninterface C { program_id \"c2\" }\n",
+        )
+        .unwrap();
+        // A imports c from c1
+        std::fs::write(
+            a.join("qed.toml"),
+            "[dependencies]\nc = { path = \"../c1/spec.qedspec\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            a.join("spec.qedspec"),
+            "spec A\nimport C from \"c\"\ninterface A { program_id \"a\" }\n",
+        )
+        .unwrap();
+        // B imports c from c2
+        std::fs::write(
+            b.join("qed.toml"),
+            "[dependencies]\nc = { path = \"../c2/spec.qedspec\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            b.join("spec.qedspec"),
+            "spec B\nimport C from \"c\"\ninterface B { program_id \"b\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("qed.toml"),
+            "[dependencies]\na = { path = \"a/spec.qedspec\" }\nb = { path = \"b/spec.qedspec\" }\n",
+        )
+        .unwrap();
+
+        let manifest = crate::qed_manifest::load_from_dir(root).unwrap().unwrap();
+        let imports = vec![imp("A", "a"), imp("B", "b")];
+        let err = resolve_imports(&imports, &manifest, root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("resolved to two different sources"),
+            "expected conflict error; got: {err}"
+        );
+        assert!(err.contains("c1"), "should mention first source: {err}");
+        assert!(
+            err.contains("c2"),
+            "should mention conflicting source: {err}"
         );
     }
 
