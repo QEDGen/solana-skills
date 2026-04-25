@@ -19,3 +19,4 @@ syn = { version = "2", features = ["full", "parsing", "visit"] }
 quote = "1"
 proc-macro2 = "1"
 sha2 = "0.10"
+toml = "0.8"

@@ -97,6 +97,18 @@ pub enum TopItem {
     /// Declares a callee's public contract so a caller can `call Name.h(...)`
     /// with backend-appropriate artifacts. See docs/design/spec-composition.md §2.
     Interface(InterfaceDecl),
+    /// `import Name from "key"` — bind a local name to an interface declared in
+    /// a dependency. The `from` string is a key into `qed.toml`'s
+    /// `[dependencies]` table; the resolver fetches the source (github / path)
+    /// and merges the imported `interface` declarations into this spec's
+    /// namespace under the given local `name`. See docs/design/spec-composition.md §3.
+    Import {
+        name: String,
+        from: String,
+        /// v2.8 fold-in F5: optional `as Alias` clause renames the
+        /// imported interface in the consumer's namespace.
+        as_name: Option<String>,
+    },
     /// `pragma <name> { <top_item>* }` — platform-specific namespace.
     ///
     /// Keeps the core DSL platform-agnostic while letting target-specific
@@ -661,6 +673,16 @@ pub enum Expr {
         name: String,
         value: Box<Node<Expr>>,
         body: Box<Node<Expr>>,
+    },
+    /// `if cond then a else b` — full conditional in expression position
+    /// (v2.8 fold-in F9). Lowers to Lean's `if … then … else …` and to a
+    /// Rust `if … { … } else { … }` block. Both branches must produce a
+    /// value of the same type — Lean's elaborator and Rust's type checker
+    /// enforce this; qedgen just plumbs the structure through.
+    IfThenElse {
+        cond: Box<Node<Expr>>,
+        then_branch: Box<Node<Expr>>,
+        else_branch: Box<Node<Expr>>,
     },
 }
 

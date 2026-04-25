@@ -155,7 +155,7 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     );
 
     // CPI theorems
-    render_cpi_theorems(&mut out, &ops_refs);
+    render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, "State", spec);
 
     // Invariants
     for (inv_name, _desc) in &spec.invariants {
@@ -282,7 +282,7 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         );
 
         // CPI theorems
-        render_cpi_theorems(&mut out, &ops);
+        render_cpi_theorems(&mut out, &ops, &acct.fields, &state_name, spec);
 
         // Operation inductive + applyOp per account
         render_operation_inductive(&mut out, &ops, &state_name);
@@ -624,13 +624,40 @@ fn render_transitions(
     }
 }
 
-/// Render transfer correctness theorems from handler transfers blocks.
-fn render_cpi_theorems(out: &mut String, ops: &[&crate::check::ParsedHandler]) {
+/// Render CPI-related theorems for each handler.
+///
+/// Two flavors are emitted:
+///
+/// 1. **Transfer-block theorems** (legacy `transfers { ... }` syntax). Kept as
+///    `: True := trivial` for backward compatibility with v2.7-era specs.
+/// 2. **Call-site ensures-as-axiom theorems** (v2.8 G3). For each
+///    `call Interface.handler(...)` site, look up the interface in
+///    `spec.interfaces` (populated by the M1 import resolver), substitute
+///    the call-site arguments into each callee `ensures` clause, and emit
+///    a `theorem ... := by sorry`. Stance 1 axiomatization: the callee's
+///    contract is *assumed* at the caller's call site, not proven here.
+///    Stance 2 (v3.0) will replace `sorry` with imported callee proofs.
+///
+/// Bound-identifier handling: each emitted theorem takes `(s : <state_type>)`
+/// plus the calling handler's params, and any reference inside the
+/// substituted ensures expression that names a state field gets prefixed
+/// with `s.` so the bare DSL form (`amount = taker_amount`) still produces
+/// well-typed Lean (`s.taker_amount > 0`).
+fn render_cpi_theorems(
+    out: &mut String,
+    ops: &[&crate::check::ParsedHandler],
+    state_fields: &[(String, String)],
+    state_type: &str,
+    spec: &crate::check::ParsedSpec,
+) {
+    let state_field_set: std::collections::HashSet<&str> =
+        state_fields.iter().map(|(n, _)| n.as_str()).collect();
     for op in ops {
         if !op.has_calls() {
             continue;
         }
 
+        // (1) Legacy transfer-block theorems.
         for (i, transfer) in op.transfers.iter().enumerate() {
             let suffix = if op.transfers.len() > 1 {
                 format!("_{}", i)
@@ -652,7 +679,95 @@ fn render_cpi_theorems(out: &mut String, ops: &[&crate::check::ParsedHandler]) {
             out.push_str(". -/\n");
             out.push_str(&format!("theorem {} : True := trivial\n\n", theorem_name));
         }
+
+        // (2) Call-site ensures-as-axiom theorems (v2.8 G3, stance 1).
+        for (call_idx, call) in op.calls.iter().enumerate() {
+            // Find the called interface in the consumer's interface set
+            // (this includes interfaces imported via `import` after the M1
+            // resolver merges them in).
+            let iface = match spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface)
+            {
+                Some(i) => i,
+                None => continue, // Lint surfaces this as `[shape_only_cpi]`.
+            };
+
+            // Find the called handler within that interface.
+            let handler = match iface
+                .handlers
+                .iter()
+                .find(|h| h.name == call.target_handler)
+            {
+                Some(h) => h,
+                None => continue,
+            };
+
+            // Build the param-name → call-site-Lean-expr substitution table.
+            let subst: std::collections::HashMap<&str, &str> = call
+                .args
+                .iter()
+                .map(|a| (a.name.as_str(), a.lean_expr.as_str()))
+                .collect();
+
+            for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
+                let substituted = substitute_params(&ensures.lean_expr, &subst);
+                let prefixed = prefix_state_fields(&substituted, &state_field_set);
+                let theorem_name = safe_name(&format!(
+                    "{}_{}_{}_call_{}_post_{}",
+                    op.name, call.target_interface, call.target_handler, call_idx, ens_idx,
+                ));
+                let handler_params = param_sig_str(&op.takes_params);
+                out.push_str(&format!(
+                    "/-- {}.{}.ensures @ `{}` call #{} (stance 1: axiomatized via sorry; \
+                     v3.0 will close via imported callee proofs). -/\n",
+                    call.target_interface, call.target_handler, op.name, call_idx,
+                ));
+                out.push_str(&format!(
+                    "theorem {} (s : {}){} : {} := by sorry\n\n",
+                    theorem_name, state_type, handler_params, prefixed,
+                ));
+            }
+        }
     }
+}
+
+/// Prefix every state-field identifier in `expr` with `s.` so a bare
+/// `taker_amount` becomes `s.taker_amount`. Word-boundary regex avoids
+/// touching substrings of other identifiers.
+fn prefix_state_fields(expr: &str, fields: &std::collections::HashSet<&str>) -> String {
+    let mut out = expr.to_string();
+    for field in fields {
+        // Don't double-prefix: skip if the expression already contains
+        // `s.<field>` literally.
+        let pattern = format!(r"\b{}\b", regex::escape(field));
+        let re = regex::Regex::new(&pattern).expect("regex compiles for state-field name");
+        let replacement = format!("s.{}", field);
+        out = re
+            .replace_all(&out, regex::NoExpand(&replacement))
+            .into_owned();
+    }
+    // Fold accidental double-prefixes back to single. `s.s.x` only happens
+    // when the original expression already had `s.<field>` and the field
+    // also matched as a bare identifier — collapse.
+    let dup = regex::Regex::new(r"\bs\.s\.").expect("static regex");
+    dup.replace_all(&out, "s.").into_owned()
+}
+
+/// Replace each formal-param identifier in `expr` with the caller's
+/// corresponding Lean expression. Word-boundary matching prevents
+/// `amount` from matching inside `amount_squared`.
+fn substitute_params(expr: &str, subst: &std::collections::HashMap<&str, &str>) -> String {
+    let mut out = expr.to_string();
+    for (param, replacement) in subst {
+        let pattern = format!(r"\b{}\b", regex::escape(param));
+        let re = regex::Regex::new(&pattern).expect("regex compiles for word-boundary param name");
+        out = re
+            .replace_all(&out, regex::NoExpand(replacement))
+            .into_owned();
+    }
+    out
 }
 
 /// Render Operation inductive and applyOp dispatcher.
@@ -4736,5 +4851,168 @@ handler init : State.Active -> State.Active {
             lean.contains("abbrev ZERO : Nat := 0"),
             "single-account render must emit abbrev for spec constants; got:\n{lean}"
         );
+    }
+
+    // ----- v2.8 G3: ensures-as-axiom CPI theorems -----
+
+    #[test]
+    fn cpi_call_emits_ensures_axiom_theorem_with_state_param() {
+        // Caller passes a state field as the call argument; the substituted
+        // ensures should appear with `s.` prefix.
+        let spec = chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  call Token.transfer(from = balance, to = balance, amount = balance, authority = balance)
+}
+"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("(s : State)"),
+            "CPI theorem should bind (s : State); got:\n{lean}"
+        );
+        assert!(
+            lean.contains(": s.balance > 0 := by sorry"),
+            "ensures should substitute caller's state-field arg with `s.` prefix; got:\n{lean}"
+        );
+        assert!(
+            lean.contains("send_Token_transfer_call_0_post_0"),
+            "theorem name should follow op_iface_handler_call_idx_post_ens_idx pattern; got:\n{lean}"
+        );
+    }
+
+    #[test]
+    fn cpi_call_includes_handler_params_in_theorem_signature() {
+        // Caller passes a handler param as the call argument; the theorem
+        // should declare that param explicitly so it stays in scope.
+        let spec = chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  call Token.transfer(from = x, to = x, amount = n, authority = x)
+}
+"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        assert!(
+            lean.contains("(s : State) (n : Nat)"),
+            "CPI theorem should declare handler params alongside (s : State); got:\n{lean}"
+        );
+        assert!(
+            lean.contains(": n > 0 := by sorry"),
+            "substituted ensures should reference the bound handler param `n`; got:\n{lean}"
+        );
+    }
+
+    #[test]
+    fn cpi_call_emits_no_theorem_when_interface_unknown() {
+        // No interface declared for the called name; render_cpi_theorems
+        // should silently skip — the [shape_only_cpi] lint flags it elsewhere.
+        let spec = chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  call Mystery.foo(amount = x)
+}
+"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        assert!(
+            !lean.contains("Mystery_foo"),
+            "no theorem should be emitted for an unknown interface; got:\n{lean}"
+        );
+    }
+
+    #[test]
+    fn cpi_call_emits_one_theorem_per_call_site_per_ensures() {
+        // Two call sites + two ensures clauses each → four theorems with
+        // distinct names. Multi-call indexing must keep them apart.
+        let spec = chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+    ensures amount > 0
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  call Token.transfer(from = x, to = x, amount = x, authority = x)
+  call Token.transfer(from = x, to = x, amount = x, authority = x)
+}
+"#,
+        )
+        .unwrap();
+        let lean = render(&spec);
+        for name in [
+            "send_Token_transfer_call_0_post_0",
+            "send_Token_transfer_call_0_post_1",
+            "send_Token_transfer_call_1_post_0",
+            "send_Token_transfer_call_1_post_1",
+        ] {
+            assert!(
+                lean.contains(name),
+                "expected theorem `{name}` to be emitted; got:\n{lean}"
+            );
+        }
     }
 }

@@ -116,6 +116,10 @@ const KEYWORDS: &[&str] = &[
     "in",
     // v2.7 G4: handler-level opt-out of the no_access_control lint.
     "permissionless",
+    // v2.8 G1: top-level `import Name from "key"`. The trailing `from` is
+    // contextual (matched via `kw("from")` only inside `import_decl`), not a
+    // global keyword — handlers still use `from = expr` in call args.
+    "import",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -555,10 +559,35 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
             })
             .boxed();
 
+        // `if cond then a else b` — full conditional in expression
+        // position (v2.8 fold-in F9). `if` / `then` / `else` are
+        // contextual keywords matched only at the start of this atom;
+        // they aren't reserved globally so handler fields named `if` or
+        // `then` (unlikely but possible) keep working.
+        let if_then_else = kw("if")
+            .ignore_then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("then"))
+            .then(expr.clone())
+            .then_ignore(wsc())
+            .then_ignore(kw("else"))
+            .then(expr.clone())
+            .map_with(|((cond, then_branch), else_branch), e| {
+                Node::new(
+                    Expr::IfThenElse {
+                        cond: Box::new(cond),
+                        then_branch: Box::new(then_branch),
+                        else_branch: Box::new(else_branch),
+                    },
+                    e.span().into_range(),
+                )
+            })
+            .boxed();
+
         // atom — must stay under chumsky's `choice` arity limit; split.
         // `.boxed()` tames the type complexity that otherwise trips Apple's
         // linker on overlong symbol names.
-        let group_a = choice((int, bool_lit, old, let_in, sum, quant)).boxed();
+        let group_a = choice((int, bool_lit, old, let_in, if_then_else, sum, quant)).boxed();
         let group_b = choice((mul_div_floor_atom, mul_div_ceil_atom, match_expr)).boxed();
         // `record_update` must precede `ctor` (leading `.` distinguishes
         // them, but this ordering is clearer). `app_expr` must precede
@@ -2164,6 +2193,30 @@ fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|((doc, name), items)| TopItem::Pragma(PragmaDecl { name, doc, items }))
 }
 
+// ----------------------------------------------------------------------------
+// import <Name> from "<dep_key>" — manifest-based import (v2.8 G1).
+//
+// `Name` is the local bound name; `dep_key` is a key into qed.toml's
+// `[dependencies]` table. Resolution (git fetch / path read / cache) lives in
+// `import_resolver.rs` and runs after parse, before lint.
+// ----------------------------------------------------------------------------
+fn import_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    let as_clause = kw("as").ignore_then(wsc()).ignore_then(non_keyword_ident());
+    kw("import")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(kw("from"))
+        .then_ignore(wsc())
+        .then(string_lit())
+        .then_ignore(wsc())
+        .then(as_clause.or_not())
+        .map(|((name, from), as_name)| TopItem::Import {
+            name,
+            from,
+            as_name,
+        })
+}
+
 // Top-level item: priority-ordered choice.
 // record_decl must precede adt_decl (PEG-style backtracking via .or).
 fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
@@ -2192,7 +2245,7 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
     // sugar are platform-specific and only parse inside
     // `pragma sbpf { ... }`. Use `type Error | A | B | ...` for errors at
     // the core-DSL level. The platform-agnostic top level is the point.
-    let group_c = choice((interface_decl(), pragma_decl()));
+    let group_c = choice((interface_decl(), pragma_decl(), import_decl()));
     choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
@@ -2561,6 +2614,7 @@ property conservation :
                 TopItem::Instruction(_) => "instruction",
                 TopItem::Interface(_) => "interface",
                 TopItem::Pragma(_) => "pragma",
+                TopItem::Import { .. } => "import",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
@@ -3205,6 +3259,51 @@ handler withdraw (amount : U64) : State.A -> State.A {
     }
 
     #[test]
+    fn parses_if_then_else_in_expression_position() {
+        // v2.8 fold-in F9. Use an `ensures` clause to exercise expr-position parsing.
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    if state.x > 0 then state.y == state.x else state.y == 0
+}
+"#;
+        let s = parse_ok(src);
+        // Find the ensures clause and assert its top is an IfThenElse.
+        let clauses = first_handler_clauses(&s);
+        let ensures = clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Ensures(e) => Some(e),
+                _ => None,
+            })
+            .expect("expected an Ensures clause");
+        assert!(
+            matches!(ensures.node, Expr::IfThenElse { .. }),
+            "expected top-level IfThenElse, got {:?}",
+            ensures.node
+        );
+    }
+
+    #[test]
+    fn parses_nested_if_then_else() {
+        // Nested then/else branches.
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+
+handler h : State.A -> State.A {
+  ensures
+    if state.x > 0 then
+      if state.y > 0 then state.x == state.y else state.x > state.y
+    else
+      state.y == 0
+}
+"#;
+        parse_ok(src);
+    }
+
+    #[test]
     fn parses_nested_let_in() {
         let src = r#"spec T
 type State | A of { x : U64, y : U64 }
@@ -3231,5 +3330,101 @@ handler h (amount : U64) : State.A -> State.A {
 }
 "#;
         parse_ok(src);
+    }
+
+    // ----- v2.8 G1: import statements -----
+
+    #[test]
+    fn parses_single_import() {
+        let s = parse_ok("spec T\nimport Token from \"spl_token\"");
+        assert_eq!(s.items.len(), 1);
+        match &s.items[0].node {
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
+                assert_eq!(name, "Token");
+                assert_eq!(from, "spl_token");
+                assert!(as_name.is_none(), "no `as` clause = None alias");
+            }
+            other => panic!("expected Import, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_import_with_as_alias() {
+        let s = parse_ok("spec T\nimport Token from \"spl_token\" as MyToken");
+        assert_eq!(s.items.len(), 1);
+        match &s.items[0].node {
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
+                assert_eq!(name, "Token");
+                assert_eq!(from, "spl_token");
+                assert_eq!(as_name.as_deref(), Some("MyToken"));
+            }
+            other => panic!("expected Import with alias, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_multiple_imports() {
+        let src = r#"spec T
+import Token from "spl_token"
+import System from "system_program"
+import MyAmm from "my_amm"
+"#;
+        let s = parse_ok(src);
+        assert_eq!(s.items.len(), 3);
+        let names: Vec<&str> = s
+            .items
+            .iter()
+            .map(|i| match &i.node {
+                TopItem::Import { name, .. } => name.as_str(),
+                other => panic!("expected Import, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(names, vec!["Token", "System", "MyAmm"]);
+    }
+
+    #[test]
+    fn import_does_not_reserve_from_as_global_keyword() {
+        // `from` is contextual to import_decl; users must still be able to
+        // pass `from = expr` as a call argument inside handler bodies.
+        let src = r#"spec T
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+
+handler h (a : U64) : State.A -> State.A {
+  call Token.transfer(from = a, to = a, amount = 1)
+}
+"#;
+        parse_ok(src);
+    }
+
+    #[test]
+    fn import_alongside_interface_and_handler() {
+        // Import + native interface + handler in the same spec all parse.
+        let src = r#"spec T
+import Token from "spl_token"
+
+interface Local {
+  program_id "11111111111111111111111111111111"
+  handler ping { discriminant "0x01" accounts { } }
+}
+
+type State | A of { x : U64 }
+
+handler h : State.A -> State.A { effect { x := 1 } }
+"#;
+        let s = parse_ok(src);
+        // Three top items: Import, Interface, Adt, Handler.
+        assert_eq!(s.items.len(), 4);
+        assert!(matches!(s.items[0].node, TopItem::Import { .. }));
+        assert!(matches!(s.items[1].node, TopItem::Interface(_)));
     }
 }

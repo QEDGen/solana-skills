@@ -589,6 +589,225 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
     }
 }
 
+/// Canonical SPL Token program ID. Calls into an interface whose
+/// `program_id "..."` matches this constant get the `anchor_spl::token::*`
+/// CPI shape (v2.8 G4). Other program IDs fall through to the
+/// agent-fill comment for now — generic `invoke` codegen lands in v2.9.
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Try to emit a real Anchor CPI invocation for one `call Interface.handler(...)`
+/// site. Returns `None` when the interface isn't recognized (caller falls
+/// back to a comment + `todo!()` so the user / an LLM fills the body).
+///
+/// v2.8 covers all five SPL Token handlers — `transfer`, `mint_to`,
+/// `burn`, `initialize_account`, `close_account` — via `anchor_spl::token::*`.
+/// Non-SPL-Token interfaces ship a generic `solana_program::program::invoke`
+/// shape in v2.9. The canonical SPL handlers are the bulk of CPI traffic
+/// in deployed programs, so this scope is enough to remove `todo!()` from
+/// the typical escrow / lending / vault shape.
+fn try_emit_anchor_cpi(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Option<String> {
+    let iface = spec
+        .interfaces
+        .iter()
+        .find(|i| i.name == call.target_interface)?;
+
+    // Only the canonical SPL Token program is supported in v2.8.
+    if iface.program_id.as_deref() != Some(SPL_TOKEN_PROGRAM_ID) {
+        return None;
+    }
+
+    let token_program_acct = find_token_program_account(handler)?;
+    let prog_name = &token_program_acct.name;
+
+    match call.target_handler.as_str() {
+        "transfer" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "Transfer",
+            &[("from", "from"), ("to", "to"), ("authority", "authority")],
+            Some("amount"),
+            "transfer",
+        ),
+        "mint_to" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "MintTo",
+            &[
+                ("mint", "mint"),
+                ("to", "to"),
+                // anchor_spl's MintTo uses `authority`; the canonical
+                // qedspec interface names it `mint_authority` to match the
+                // SPL Token instruction docs. Map between them at the
+                // codegen boundary.
+                ("authority", "mint_authority"),
+            ],
+            Some("amount"),
+            "mint_to",
+        ),
+        "burn" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "Burn",
+            &[
+                ("mint", "mint"),
+                ("from", "from"),
+                ("authority", "authority"),
+            ],
+            Some("amount"),
+            "burn",
+        ),
+        "initialize_account" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "InitializeAccount",
+            &[
+                ("account", "account"),
+                ("mint", "mint"),
+                // anchor_spl's InitializeAccount uses `authority` for the
+                // owner slot; the canonical qedspec interface names it
+                // `owner` to match SPL Token instruction docs.
+                ("authority", "owner"),
+                ("rent", "rent"),
+            ],
+            None,
+            "initialize_account",
+        ),
+        "close_account" => emit_spl(
+            call,
+            handler,
+            prog_name,
+            "CloseAccount",
+            &[
+                ("account", "account"),
+                ("destination", "destination"),
+                ("authority", "authority"),
+            ],
+            None,
+            "close_account",
+        ),
+        _ => None,
+    }
+}
+
+/// Find the handler-side `<name> : program` account that points at the
+/// token program. Convention: any `is_program` account named
+/// `token_program`, or the unique `is_program` account otherwise.
+fn find_token_program_account(
+    handler: &ParsedHandler,
+) -> Option<&crate::check::ParsedHandlerAccount> {
+    handler
+        .accounts
+        .iter()
+        .find(|a| a.is_program && a.name == "token_program")
+        .or_else(|| {
+            let programs: Vec<_> = handler.accounts.iter().filter(|a| a.is_program).collect();
+            (programs.len() == 1).then_some(programs[0])
+        })
+}
+
+/// Emit one `anchor_spl::token::<fn>` CPI body. Generic over which SPL
+/// Token handler is being called — the differences are the Anchor accounts
+/// struct name, the call-arg → struct-field name map, the optional
+/// scalar argument (e.g. `amount` for transfer / mint_to / burn; absent
+/// for initialize_account / close_account), and the function name.
+///
+/// `field_to_arg` is `(anchor_field_name, call_arg_name)` pairs. The arg
+/// name is the call-site identifier (matches the qedspec interface's
+/// account block); the anchor field name is what `anchor_spl::token`'s
+/// accounts struct expects. Most are identity (`("from", "from")`) but
+/// some interfaces expose a more semantic name than anchor_spl uses
+/// (e.g. `mint_authority` vs `authority`).
+fn emit_spl(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    token_program: &str,
+    accounts_struct: &str,
+    field_to_arg: &[(&str, &str)],
+    scalar_arg: Option<&str>,
+    fn_name: &str,
+) -> Option<String> {
+    // Resolve every account argument via the call site.
+    let mut acct_lines: Vec<String> = Vec::with_capacity(field_to_arg.len());
+    let max_field = field_to_arg.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
+    for (anchor_field, call_arg) in field_to_arg {
+        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
+        let pad = " ".repeat(max_field - anchor_field.len());
+        acct_lines.push(format!(
+            "                {}:{} self.{}.to_account_info(),\n",
+            anchor_field, pad, arg.rust_expr
+        ));
+    }
+
+    // Resolve the optional scalar arg (e.g. `amount`).
+    let scalar_rhs = match scalar_arg {
+        Some(name) => {
+            let arg = call.args.iter().find(|a| a.name == name)?;
+            Some(resolve_call_arg_for_amount(&arg.rust_expr, handler))
+        }
+        None => None,
+    };
+
+    let mut out = String::new();
+    out.push_str("        {\n");
+    out.push_str(&format!(
+        "            use anchor_spl::token::{{self, {}}};\n",
+        accounts_struct
+    ));
+    out.push_str(&format!(
+        "            let cpi_accounts = {} {{\n",
+        accounts_struct
+    ));
+    for line in &acct_lines {
+        out.push_str(line);
+    }
+    out.push_str("            };\n");
+    out.push_str(&format!(
+        "            let cpi_program = self.{}.to_account_info();\n",
+        token_program
+    ));
+    let invocation = match scalar_rhs {
+        Some(rhs) => format!(
+            "            token::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
+            fn_name, rhs
+        ),
+        None => format!(
+            "            token::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
+            fn_name
+        ),
+    };
+    out.push_str(&invocation);
+    out.push_str("        }\n");
+    Some(out)
+}
+
+/// Resolve a numeric / value argument's rust_expr to a form that's in
+/// scope inside the handler `impl` block. Bare identifiers that match a
+/// state field get the `self.<state_acct>.` prefix; handler params and
+/// literals pass through unchanged.
+fn resolve_call_arg_for_amount(rust_expr: &str, handler: &ParsedHandler) -> String {
+    let is_simple_ident = rust_expr
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    if !is_simple_ident {
+        return rust_expr.to_string();
+    }
+    if handler.takes_params.iter().any(|(n, _)| n == rust_expr) {
+        return rust_expr.to_string();
+    }
+    if let Some(sa) = find_state_account(handler) {
+        return format!("self.{}.{}", sa.name, rust_expr);
+    }
+    rust_expr.to_string()
+}
+
 /// Try to translate a single effect tuple to a real Rust statement. Returns
 /// None when the RHS is too complex for mechanical expansion (match/arith/
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
@@ -617,12 +836,22 @@ fn mechanize_effect(
     // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
     // `wrapping_add` which produced Kani false-positives and didn't match
     // production behavior. Explicit `+=!` / `+=?` opt into saturating /
-    // wrapping. `MathOverflow` is the default error code; specs with an
-    // `Error` sum can surface it via the existing error_codes pipeline.
+    // wrapping.
+    //
+    // v2.8 F8: thread the user-declared Error sum through. Pre-F8 the
+    // generated code referenced a non-existent `ErrorCode::MathOverflow`,
+    // which only worked when no effect actually exercised checked
+    // arithmetic. Now we emit `<ProgramName>Error::MathOverflow`, which
+    // matches the Anchor `#[error_code]` enum generated alongside.
+    // Specs that use `+=` / `-=` / `*=` should declare a `MathOverflow`
+    // variant in their `type Error | ...` block; the
+    // `effect_uses_checked_arith_without_math_overflow` lint surfaces
+    // missing declarations.
+    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let line = match op_kind.as_str() {
         "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
         "add" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "add_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_add({rhs});\n"
@@ -631,7 +860,7 @@ fn mechanize_effect(
             "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
         ),
         "sub" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "sub_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_sub({rhs});\n"
@@ -788,26 +1017,38 @@ fn render_handler_scaffold(
     }
 
     // `call Interface.handler(name = expr, ...)` sites — the uniform CPI
-    // surface introduced in v2.5 (slice 2). For MVP this follows the same
-    // agent-fill shape as `transfers { }`: emit a structured comment so the
-    // prompt in fill.rs has everything it needs to generate a correct CPI
-    // envelope. Real codegen from a resolved interface lands in v2.6 once
-    // `import` is in play (see docs/design/spec-composition.md §2).
-    let has_calls = !handler.calls.is_empty();
+    // surface introduced in v2.5 (slice 2). v2.8 G4 lands real Anchor CPI
+    // codegen for the canonical SPL Token transfer; other interfaces and
+    // handlers still emit a structured comment + todo!() so an LLM /
+    // human fills the body. The boolean tracks whether any call site
+    // remained unmechanized so the tail `todo!()` only fires for those.
+    let mut any_unmechanized_call = false;
     for c in &handler.calls {
-        let args = c
-            .args
-            .iter()
-            .map(|a| format!("{}={}", a.name, a.rust_expr))
-            .collect::<Vec<_>>()
-            .join(", ");
-        out.push_str(&format!(
-            "        // Spec call: {}.{}({})\n",
-            c.target_interface, c.target_handler, args
-        ));
+        match try_emit_anchor_cpi(c, handler, spec) {
+            Some(rendered) => {
+                out.push_str(&format!(
+                    "        // Spec call: {}.{} (Anchor CPI emitted by v2.8 G4)\n",
+                    c.target_interface, c.target_handler
+                ));
+                out.push_str(&rendered);
+            }
+            None => {
+                let args = c
+                    .args
+                    .iter()
+                    .map(|a| format!("{}={}", a.name, a.rust_expr))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "        // Spec call: {}.{}({}) — v2.9 will emit a generic Anchor CPI\n",
+                    c.target_interface, c.target_handler, args
+                ));
+                any_unmechanized_call = true;
+            }
+        }
     }
 
-    let needs_fill = any_unmechanized || has_events || has_transfers || has_calls;
+    let needs_fill = any_unmechanized || has_events || has_transfers || any_unmechanized_call;
     if needs_fill {
         out.push_str("        todo!(\"fill non-mechanical effects, events, transfers, calls\")\n");
     } else {
@@ -1153,6 +1394,419 @@ mod tests {
         assert!(
             err.contains("UserAccount"),
             "error should name the unsupported inner type: {err}"
+        );
+    }
+
+    // ----- v2.8 G4: Anchor CPI codegen for SPL Token transfer -----
+
+    /// Exercise try_emit_anchor_cpi against an end-to-end-parsed spec.
+    /// Hits the resolver pipeline (no need to construct ParsedSpec by
+    /// hand) and confirms the SPL Token transfer shape lands.
+    #[test]
+    fn cpi_emits_anchor_spl_transfer_for_canonical_program_id() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state         : writable
+    src           : writable
+    dst           : writable
+    auth          : signer
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = n, authority = auth)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "send")
+            .expect("send handler");
+        let call = handler.calls.first().expect("call site");
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit Anchor CPI");
+        assert!(
+            rendered.contains("anchor_spl::token::{self, Transfer}"),
+            "must use anchor_spl::token::Transfer; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("from:      self.src.to_account_info()"),
+            "from arg must resolve to self.src; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("token::transfer(CpiContext::new(cpi_program, cpi_accounts), n)"),
+            "amount arg `n` is a handler param and should pass through bare; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_returns_none_when_program_id_is_not_spl_token() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface MyAmm {
+  program_id "MyAmm22222222222222222222222222222222222222"
+  handler swap (amount : U64) {
+    discriminant "0x01"
+    accounts {
+      src : writable
+      dst : writable
+    }
+    ensures amount > 0
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    src          : writable
+    dst          : writable
+    amm_program  : program
+  }
+  call MyAmm.swap(src = src, dst = dst, amount = balance)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "send")
+            .expect("send handler");
+        let call = handler.calls.first().expect("call site");
+        // Non-SPL-Token program ID — v2.8 falls back to the comment-only
+        // path, so try_emit_anchor_cpi returns None.
+        assert!(
+            try_emit_anchor_cpi(call, handler, &spec).is_none(),
+            "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+        );
+    }
+
+    // ----- v2.8 F8: Error-sum threading via mechanize_effect -----
+
+    #[test]
+    fn mechanize_effect_references_program_error_enum_for_checked_add() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec MyProgram
+program_id "11111111111111111111111111111111"
+type State | Active of { pool : U64 }
+type Error | MathOverflow
+
+handler bump (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state : writable
+  }
+  effect { pool += n }
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
+        let state_acct = find_state_account(handler).expect("state account");
+        let effect = handler.effects.first().unwrap();
+        let rendered = mechanize_effect(effect, state_acct, handler, &spec).expect("mechanized");
+        // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
+        // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
+        // user's declared Error sum.
+        assert!(
+            rendered.contains("MyProgramError::MathOverflow"),
+            "expected program-specific Error enum; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ErrorCode::MathOverflow"),
+            "should not reference the legacy non-existent ErrorCode enum; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_mint_to_with_authority_renaming() {
+        // Spec exposes `mint_authority` per SPL Token docs; anchor_spl's
+        // MintTo struct calls the same slot `authority`. The codegen
+        // boundary maps the names.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler mint_to (amount : U64) {
+    discriminant "0x07"
+    accounts {
+      mint            : writable
+      to              : writable, type token
+      mint_authority  : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { stash : U64 }
+type Error | E
+
+handler do_mint (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    the_mint       : writable
+    holder_ta      : writable, type token
+    minter         : signer
+    token_program  : program
+  }
+  call Token.mint_to(mint = the_mint, to = holder_ta, mint_authority = minter, amount = n)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_mint").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(
+            rendered.contains("anchor_spl::token::{self, MintTo}"),
+            "should use MintTo struct; got:\n{rendered}"
+        );
+        // anchor_spl uses `authority`; spec uses `mint_authority` — the
+        // mapping should land the call-site `minter` value at the
+        // `authority` field. Padding may insert extra whitespace before
+        // `self`, so we check the substring on each side independently.
+        assert!(
+            rendered.contains("self.minter.to_account_info()"),
+            "minter should be wired into the cpi_accounts struct; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("authority:"),
+            "MintTo struct should use field name `authority`; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("token::mint_to(CpiContext::new(cpi_program, cpi_accounts), n)"),
+            "should invoke token::mint_to with the amount; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_burn() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler burn (amount : U64) {
+    discriminant "0x08"
+    accounts {
+      from      : writable, type token
+      mint      : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_burn (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    holder_ta      : writable, type token
+    the_mint       : writable
+    holder         : signer
+    token_program  : program
+  }
+  call Token.burn(from = holder_ta, mint = the_mint, authority = holder, amount = n)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_burn").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("anchor_spl::token::{self, Burn}"));
+        assert!(rendered.contains("token::burn(CpiContext::new"));
+        // Padding aligns colons across fields; use a substring that's
+        // independent of whitespace.
+        assert!(
+            rendered.contains("self.holder_ta.to_account_info()"),
+            "burn's `from` should resolve to self.holder_ta; got:\n{rendered}"
+        );
+        assert!(rendered.contains("authority: self.holder.to_account_info()"));
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_initialize_account_no_amount() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler initialize_account {
+    discriminant "0x01"
+    accounts {
+      account : writable
+      mint    : readonly
+      owner   : readonly
+      rent    : readonly
+    }
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_init : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    new_acct       : writable
+    the_mint       : writable
+    the_owner      : writable
+    rent_sysvar    : writable
+    token_program  : program
+  }
+  call Token.initialize_account(account = new_acct, mint = the_mint, owner = the_owner, rent = rent_sysvar)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_init").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("InitializeAccount"));
+        // No scalar arg — the invocation has no second positional parameter.
+        assert!(
+            rendered.contains(
+                "token::initialize_account(CpiContext::new(cpi_program, cpi_accounts))?;"
+            ),
+            "no-amount handler should not get a trailing argument; got:\n{rendered}"
+        );
+        // Owner-as-authority renaming.
+        assert!(
+            rendered.contains("self.the_owner.to_account_info()"),
+            "the_owner should be wired in; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("authority:"),
+            "InitializeAccount should use field name `authority` for the owner slot; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_anchor_spl_close_account_no_amount() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler close_account {
+    discriminant "0x09"
+    accounts {
+      account     : writable, type token
+      destination : writable
+      authority   : signer
+    }
+  }
+}
+
+type State | Active of { x : U64 }
+type Error | E
+
+handler do_close : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state          : writable
+    target_acct    : writable, type token
+    sweep_target   : writable
+    closer         : signer
+    token_program  : program
+  }
+  call Token.close_account(account = target_acct, destination = sweep_target, authority = closer)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "do_close").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(rendered.contains("CloseAccount"));
+        assert!(
+            rendered.contains("token::close_account(CpiContext::new(cpi_program, cpi_accounts))?;")
+        );
+    }
+
+    #[test]
+    fn cpi_resolves_state_field_amount_to_self_state_field() {
+        // The amount arg references a state field — the emitted code should
+        // bind it as self.<state_acct>.<field>, not bare.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+type State | Active of { stash : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state         : writable
+    src           : writable, type token
+    dst           : writable, type token
+    auth          : signer
+    token_program : program
+  }
+  call Token.transfer(from = src, to = dst, amount = stash, authority = auth)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_anchor_cpi(call, handler, &spec).expect("should emit");
+        assert!(
+            rendered.contains("self.state.stash"),
+            "state-field amount must resolve to self.<state_acct>.<field>; got:\n{rendered}"
         );
     }
 }

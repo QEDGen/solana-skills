@@ -7,6 +7,12 @@
 
 spec Escrow
 
+// v2.8 G1 — Token interface arrives via the qed.toml manifest entry
+// for `spl_token`, which points at the canonical
+// interfaces/spl_token.qedspec at the workspace root. Replaces the
+// pre-v2.8 inlined `interfaces/token.qedspec` fragment.
+import Token from "spl_token"
+
 type State
   | Uninitialized
   | Open of {

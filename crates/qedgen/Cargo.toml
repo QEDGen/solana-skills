@@ -1,6 +1,6 @@
 [package]
 name = "qedgen-solana-skills"
-version = "2.7.2"
+version = "2.8.0"
 edition = "2021"
 authors = ["abishekk92"]
 description = "Spec-driven formal verification for Solana programs: .qedspec → Lean 4 proofs, Kani harnesses, coverage matrix, and Quasar codegen"
@@ -26,6 +26,8 @@ proc-macro2 = { workspace = true }
 tar = "0.4"
 flate2 = "1"
 chumsky = "0.12"
+toml = { workspace = true }
+tempfile = "3"
 
 # ratchet — upgrade-safety + mainnet-readiness lint.
 # `ratchet-anchor` default-features is off to drop `ureq` (ratchet's RPC

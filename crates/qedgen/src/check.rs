@@ -650,6 +650,12 @@ pub struct ParsedSpec {
     /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
     pub interfaces: Vec<ParsedInterface>,
 
+    /// `import Name from "key"` statements at the top of the spec. The
+    /// resolver consumes these together with `qed.toml` to fetch the
+    /// referenced sources and merge their `interface` declarations into
+    /// `interfaces` above. See docs/design/spec-composition.md §3.
+    pub imports: Vec<ParsedImport>,
+
     /// Names of `pragma <name> { ... }` blocks that appeared in the spec.
     /// Used for target inference (`sbpf` → assembly target) and for
     /// platform-scoped feature flags in backends.
@@ -680,6 +686,30 @@ impl ParsedSpec {
     /// Quasar/Anchor (the default). Single source of truth.
     pub fn is_assembly_target(&self) -> bool {
         self.has_pragma("sbpf")
+    }
+}
+
+/// `import Name from "key" [as Alias]` statement, captured before
+/// resolution. `name` selects which interface to bring in (must match a
+/// declared `interface Name` in the imported source); `from` is the key
+/// into `qed.toml`'s `[dependencies]` table. `as_name` (v2.8 F5)
+/// optionally renames the merged interface in the consumer's namespace.
+/// The local-name used at `call ...` sites is `as_name.unwrap_or(name)`.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedImport {
+    pub name: String,
+    pub from: String,
+    pub as_name: Option<String>,
+}
+
+impl ParsedImport {
+    /// The name the consumer's `call <X>.handler(...)` uses to address
+    /// this imported interface. Falls back to `name` when no alias is
+    /// declared.
+    #[allow(dead_code)]
+    pub fn local_name(&self) -> &str {
+        self.as_name.as_deref().unwrap_or(&self.name)
     }
 }
 
@@ -778,8 +808,39 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
 /// start with `spec <Name>`. Fragments live naturally under `handlers/`,
 /// `properties/`, etc.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
+    parse_spec_file_with_opts(
+        path,
+        crate::qed_lock::LockMode::Auto,
+        crate::import_resolver::CacheOpts::default(),
+    )
+}
+
+/// Parse a spec from disk with explicit control over qed.lock behavior.
+/// Defaults are exposed via `parse_spec_file`; callers like
+/// `qedgen check --frozen` use this variant to pass `LockMode::Frozen`.
+/// Kept as a thin wrapper after F7 added `parse_spec_file_with_opts`,
+/// so existing external callers don't have to update.
+#[allow(dead_code)]
+pub fn parse_spec_file_with_lock(
+    path: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> Result<ParsedSpec> {
+    parse_spec_file_with_opts(
+        path,
+        lock_mode,
+        crate::import_resolver::CacheOpts::default(),
+    )
+}
+
+/// Full-control entry: explicit lock mode + cache policy.
+/// `qedgen check --frozen --no-cache` calls this with both overrides.
+pub fn parse_spec_file_with_opts(
+    path: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> Result<ParsedSpec> {
     if path.is_dir() {
-        return parse_spec_dir(path);
+        return parse_spec_dir_with_opts(path, lock_mode, cache_opts);
     }
 
     // v2.7 G5: surface a precise error when the --spec target doesn't exist
@@ -813,8 +874,10 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             .join("\n");
         anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
     })?;
-    let parsed = crate::chumsky_adapter::adapt(&typed);
+    let mut parsed = crate::chumsky_adapter::adapt(&typed);
     crate::chumsky_adapter::typecheck_spec(&typed, &parsed)?;
+    let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    resolve_and_merge_imports(&mut parsed, manifest_dir, lock_mode, cache_opts)?;
     Ok(parsed)
 }
 
@@ -823,7 +886,11 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
 /// single typed AST. Files are visited in alphabetically-sorted path order so
 /// the resulting `ParsedSpec` — and every artifact downstream of it — is
 /// deterministic.
-fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
+fn parse_spec_dir_with_opts(
+    dir: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> Result<ParsedSpec> {
     let mut files = Vec::new();
     collect_qedspec_files(dir, &mut files)?;
     files.sort();
@@ -869,6 +936,156 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
 
     let merged = crate::ast::Spec {
         name: merged_name.expect("non-empty files implies non-empty name"),
+        items: merged_items,
+    };
+    let mut parsed = crate::chumsky_adapter::adapt(&merged);
+    crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
+    resolve_and_merge_imports(&mut parsed, dir, lock_mode, cache_opts)?;
+    Ok(parsed)
+}
+
+/// Resolve every `import Name from "key"` statement against `qed.toml` in
+/// `manifest_dir`, fetch the imported source(s) (path or github), parse
+/// each, and merge the matching `interface Name { ... }` declaration into
+/// `parsed.interfaces`.
+///
+/// v2.8 stance 1: shallow resolution. Imported specs that themselves use
+/// `import` statements are not transitively walked — each consumer
+/// declares its own direct deps in its own qed.toml.
+///
+/// The bound name in `import X from "y"` must match an `interface X { ... }`
+/// declared in the imported source. If it doesn't, this is a hard error
+/// — v2.8 doesn't support import aliasing.
+fn resolve_and_merge_imports(
+    parsed: &mut ParsedSpec,
+    manifest_dir: &Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> anyhow::Result<()> {
+    if parsed.imports.is_empty() {
+        return Ok(());
+    }
+
+    // Locate qed.toml. Required when imports are present.
+    let manifest = match crate::qed_manifest::load_from_dir(manifest_dir)? {
+        Some(m) => m,
+        None => anyhow::bail!(
+            "spec has {} `import` statement(s) but no `qed.toml` next to it (expected at {})",
+            parsed.imports.len(),
+            manifest_dir
+                .join(crate::qed_manifest::MANIFEST_FILENAME)
+                .display(),
+        ),
+    };
+
+    let resolved = crate::import_resolver::resolve_imports_with_opts(
+        &parsed.imports,
+        &manifest,
+        manifest_dir,
+        cache_opts,
+    )?;
+
+    let mut lock = crate::qed_lock::LockFile::new();
+
+    for r in resolved {
+        let imported = parse_imported_sources(&r).with_context(|| {
+            format!(
+                "parsing imported spec `{}` (dep key `{}`)",
+                r.bound_name, r.dep_key,
+            )
+        })?;
+
+        // Imported source must declare an `interface <source_name>`.
+        // `r.bound_name` here is the source-side name (the first ident
+        // in `import X from "y" [as Z]`); the local alias, if any, is
+        // applied at merge time below.
+        let iface = imported
+            .interfaces
+            .iter()
+            .find(|i| i.name == r.bound_name)
+            .ok_or_else(|| {
+                let where_clause = if r.sources.len() == 1 {
+                    format!("at {}", r.sources[0].0.display())
+                } else {
+                    format!("(merged from {} fragments)", r.sources.len())
+                };
+                anyhow::anyhow!(
+                    "import `{}` from `{}` — imported source {} declares no `interface {}` block",
+                    r.bound_name,
+                    r.dep_key,
+                    where_clause,
+                    r.bound_name,
+                )
+            })?;
+
+        // Build the lock entry while we have everything in scope: the
+        // resolved import (sources + commit), the manifest dep descriptor
+        // (source kind + ref), and the imported interface (carries
+        // program_id and the optional upstream block).
+        let dep = manifest
+            .dependencies
+            .get(&r.dep_key)
+            .expect("resolver only returns deps that are in the manifest");
+        let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface);
+        lock.dependencies.push(lock_entry);
+
+        // F5 fold-in: apply the optional `as <alias>` rename when merging
+        // into the consumer's interface set. Without an alias, the
+        // imported interface keeps its source-side name.
+        let mut merged = iface.clone();
+        if let Some(alias) = &r.local_alias {
+            merged.name = alias.clone();
+        }
+        parsed.interfaces.push(merged);
+    }
+
+    crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
+
+    Ok(())
+}
+
+/// Parse the source bytes for one resolved import. Single-file deps go
+/// through `chumsky_adapter::parse_str` directly; multi-file deps follow
+/// the same path-sorted merge logic as `parse_spec_dir` — every fragment
+/// must declare the same `spec Name`, and their top items merge into one
+/// AST before the adapter runs.
+///
+/// v2.8 fold-in F4: previously only single-file imports were supported.
+fn parse_imported_sources(r: &crate::import_resolver::ResolvedImport) -> Result<ParsedSpec> {
+    if r.sources.len() == 1 {
+        let (src_path, src_bytes) = &r.sources[0];
+        return crate::chumsky_adapter::parse_str(src_bytes)
+            .with_context(|| format!("parsing imported spec source at {}", src_path.display()));
+    }
+
+    // Multi-file: parse each, merge AST top items, validate name consistency.
+    let mut merged_name: Option<String> = None;
+    let mut merged_items: Vec<crate::ast::Node<crate::ast::TopItem>> = Vec::new();
+    for (path, src) in &r.sources {
+        let typed = crate::chumsky_parser::parse(src).map_err(|errs| {
+            let msg = errs
+                .iter()
+                .map(|e| format!("  {}", crate::chumsky_parser::format_parse_error(e, src)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            anyhow::anyhow!("parse error in imported {}:\n{}", path.display(), msg)
+        })?;
+        match &merged_name {
+            None => merged_name = Some(typed.name.clone()),
+            Some(existing) if existing != &typed.name => anyhow::bail!(
+                "imported spec fragment {} declares `spec {}`, but a sibling \
+                 fragment declares `spec {}`. Every fragment of a multi-file \
+                 imported dep must declare the same name.",
+                path.display(),
+                typed.name,
+                existing,
+            ),
+            _ => {}
+        }
+        merged_items.extend(typed.items);
+    }
+    let merged = crate::ast::Spec {
+        name: merged_name.expect("non-empty source list implies a name"),
         items: merged_items,
     };
     let parsed = crate::chumsky_adapter::adapt(&merged);
@@ -2392,10 +2609,60 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // to the same on-chain address — a common source of account confusion bugs.
     warnings.extend(check_pda_collisions(spec));
 
+    // v2.8 F8: when a handler uses checked-arithmetic effects (`+=` / `-=`),
+    // the generated Rust references `<ProgramName>Error::MathOverflow`. If
+    // the spec doesn't declare a `MathOverflow` Error variant, the cargo
+    // build will fail loudly. Surface that ahead of time so users see it
+    // at `qedgen check` rather than at `cargo build`.
+    warnings.extend(check_checked_arith_needs_math_overflow(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
     warnings
+}
+
+/// v2.8 F8: emit a `[missing_math_overflow]` warning when a spec uses
+/// checked arithmetic effects (`+=` / `-=` lower to `checked_add` /
+/// `checked_sub`, which return `<ProgramName>Error::MathOverflow` on
+/// overflow) but the spec's `type Error | …` block doesn't declare a
+/// `MathOverflow` variant. Without the declaration, `cargo build` of
+/// the generated code fails with "unknown variant MathOverflow". Surfacing
+/// this at lint time keeps the pre-flight cycle tight.
+fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let has_math_overflow = spec.error_codes.iter().any(|c| c == "MathOverflow");
+    if has_math_overflow {
+        return Vec::new();
+    }
+    let handlers_with_checked: Vec<String> = spec
+        .handlers
+        .iter()
+        .filter(|h| {
+            h.effects
+                .iter()
+                .any(|(_, op_kind, _)| op_kind == "add" || op_kind == "sub")
+        })
+        .map(|h| h.name.clone())
+        .collect();
+    if handlers_with_checked.is_empty() {
+        return Vec::new();
+    }
+    let names = handlers_with_checked.join(", ");
+    vec![CompletenessWarning {
+        rule: "missing_math_overflow".to_string(),
+        severity: Severity::Warning,
+        priority: 2,
+        message: format!(
+            "handler(s) [{}] use checked-arithmetic effects (`+=` / `-=`), but `type Error` doesn't declare a `MathOverflow` variant. The generated Rust references `{}Error::MathOverflow` and won't compile without it.",
+            names,
+            crate::codegen::to_pascal_case(&spec.program_name),
+        ),
+        subject: None,
+        fix: "Add `MathOverflow` to your `type Error | …` block. Example:\n\n    type Error\n      | MathOverflow\n      | …\n\nOr opt out of checked semantics per-effect with `+=!` (saturating) or `+=?` (wrapping).".to_string(),
+        example: None,
+        counterexample: None,
+        fix_options: vec![],
+    }]
 }
 
 /// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
@@ -2707,8 +2974,30 @@ fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 }
 
 /// Run standalone lint — returns structured JSON for agent consumption.
-pub fn lint(spec_path: &std::path::Path) -> Result<Vec<CompletenessWarning>> {
-    let spec = parse_spec_file(spec_path)?;
+/// Lint a spec end-to-end, including resolving any `import` statements
+/// against the manifest. `lock_mode` controls qed.lock behavior — Auto
+/// auto-writes on drift; Frozen errors on drift (used by
+/// `qedgen check --frozen` in CI).
+#[allow(dead_code)]
+pub fn lint_with_lock(
+    spec_path: &std::path::Path,
+    lock_mode: crate::qed_lock::LockMode,
+) -> Result<Vec<CompletenessWarning>> {
+    lint_with_opts(
+        spec_path,
+        lock_mode,
+        crate::import_resolver::CacheOpts::default(),
+    )
+}
+
+/// Lint with explicit control over both lock behavior and cache policy.
+/// `qedgen check --frozen --no-cache` calls this.
+pub fn lint_with_opts(
+    spec_path: &std::path::Path,
+    lock_mode: crate::qed_lock::LockMode,
+    cache_opts: crate::import_resolver::CacheOpts,
+) -> Result<Vec<CompletenessWarning>> {
+    let spec = parse_spec_file_with_opts(spec_path, lock_mode, cache_opts)?;
     Ok(check_completeness(&spec))
 }
 
@@ -4429,6 +4718,8 @@ handler tick : State.Active -> State.Active {
         );
     }
 
+    // ----- PDA seed collision (PR #14) -----
+
     #[test]
     fn pda_seed_collision_fires_for_identical_seeds() {
         let spec = crate::chumsky_adapter::parse_str(
@@ -4491,5 +4782,538 @@ handler tick : State.Active -> State.Active {
             "must warn on same literals but different variable seeds; got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
+    }
+
+    // ----- v2.8 F8: missing_math_overflow lint -----
+
+    #[test]
+    fn missing_math_overflow_fires_when_checked_arith_used_without_declaration() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+program_id "11111111111111111111111111111111"
+type State | Active of { balance : U64 }
+type Error | InvalidAmount
+
+handler deposit (n : U64) : State.Active -> State.Active {
+  permissionless
+  effect { balance += n }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "missing_math_overflow")
+            .expect("expected missing_math_overflow warning");
+        assert!(hit.message.contains("deposit"));
+        assert!(hit.message.contains("PoolError::MathOverflow"));
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_variant_is_declared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+program_id "11111111111111111111111111111111"
+type State | Active of { balance : U64 }
+type Error | MathOverflow | InvalidAmount
+
+handler deposit (n : U64) : State.Active -> State.Active {
+  permissionless
+  effect { balance += n }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "should not warn when MathOverflow is declared in Error sum"
+        );
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_no_checked_arithmetic() {
+        // Spec uses only `effect { x := ... }` (set, no overflow path).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Reset
+program_id "11111111111111111111111111111111"
+type State | Active of { counter : U64 }
+type Error | InvalidAmount
+
+handler clear : State.Active -> State.Active {
+  permissionless
+  effect { counter := 0 }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "no checked arith → no MathOverflow obligation"
+        );
+    }
+
+    // ----- v2.8 G1: import resolution + interface merge -----
+
+    #[test]
+    fn parse_spec_file_resolves_path_imports_and_merges_interface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Imported interface lives at <dir>/token.qedspec.
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        // Manifest declares a path source.
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+
+        // Consumer spec imports the interface.
+        let consumer_path = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer_path).expect("parse + resolve should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].name, "Token");
+        // Token interface from token.qedspec should now be in parsed.interfaces.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "Token interface should be merged into parsed.interfaces; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_imports_present_but_no_qed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer_path = tmp.path().join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer_path).unwrap_err());
+        assert!(
+            err.contains("no `qed.toml`"),
+            "expected `no qed.toml` error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_bound_name_not_in_imported_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        std::fs::write(
+            spec_dir.join("other.qedspec"),
+            r#"spec OtherIface
+interface NotToken {
+  program_id "11111111111111111111111111111111"
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "other.qedspec" }
+"#,
+        )
+        .unwrap();
+        let consumer_path = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer_path).unwrap_err());
+        assert!(
+            err.contains("declares no `interface Token`"),
+            "expected `no interface Token` error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_no_imports_does_not_require_qed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.qedspec");
+        std::fs::write(
+            &path,
+            r#"spec Plain
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+        // No qed.toml, no imports — should parse cleanly.
+        let parsed = parse_spec_file(&path).unwrap();
+        assert!(parsed.imports.is_empty());
+    }
+
+    // ----- v2.8 G2: qed.lock integration -----
+
+    fn write_simple_path_dep_setup(spec_dir: &std::path::Path) -> std::path::PathBuf {
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:9c1edeadbeef"
+    verified_with ["proptest"]
+    verified_at  "2026-04-25"
+  }
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+        consumer
+    }
+
+    #[test]
+    fn parse_spec_file_auto_writes_lock_with_resolved_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Lock should not exist before parse.
+        assert!(!tmp.path().join("qed.lock").exists());
+
+        parse_spec_file(&consumer).expect("parse should succeed and write lock");
+
+        let lock = crate::qed_lock::read(tmp.path())
+            .unwrap()
+            .expect("lock should be written");
+        assert_eq!(lock.dependencies.len(), 1);
+        let entry = &lock.dependencies[0];
+        assert_eq!(entry.name, "spl_token");
+        assert_eq!(entry.source, "path:token.qedspec");
+        assert!(entry.spec_hash.starts_with("sha256:"));
+        // Path source — no commit, no ref, no sub-path.
+        assert!(entry.git_ref.is_none());
+        assert!(entry.resolved_commit.is_none());
+        // Upstream block from the imported interface flowed through.
+        assert_eq!(
+            entry.upstream_binary_hash.as_deref(),
+            Some("sha256:9c1edeadbeef")
+        );
+        assert_eq!(entry.upstream_version.as_deref(), Some("4.0.3"));
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_errors_when_lock_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Frozen mode + no lock on disk → error.
+        let err = format!(
+            "{:#}",
+            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+        );
+        assert!(err.contains("stale (--frozen)"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_succeeds_when_lock_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Auto first to write the lock, then Frozen to verify it stays current.
+        parse_spec_file(&consumer).unwrap();
+        parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen)
+            .expect("frozen should pass when lock is current");
+    }
+
+    #[test]
+    fn parse_spec_file_renames_imported_interface_via_as_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+        // Consumer uses `as Tk` to rename Token → Tk in its namespace.
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token" as Tk
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer).expect("alias-renamed import should parse + merge");
+        // Imported interface should appear under its alias name `Tk`,
+        // not the source-side `Token`.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Tk"),
+            "expected interface renamed to `Tk`; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "the source-side name `Token` should not leak into consumer when an alias is set"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_resolves_multi_file_imported_dep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Imported dep is a *directory* of fragments. Each declares the
+        // same `spec MultiToken`; one carries the interface, another
+        // carries a sidecar event used in the interface's docs.
+        let dep_dir = spec_dir.join("multitoken");
+        std::fs::create_dir(&dep_dir).unwrap();
+        std::fs::write(
+            dep_dir.join("a-iface.qedspec"),
+            r#"spec MultiToken
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dep_dir.join("b-event.qedspec"),
+            r#"spec MultiToken
+event TokenMoved {
+  amount : U64,
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "multitoken" }
+"#,
+        )
+        .unwrap();
+
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer)
+            .expect("multi-file imported dep should parse + merge end-to-end");
+        // Token interface from a-iface.qedspec lives in the merged consumer.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "interface from multi-file dep should be merged in; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_multi_file_dep_fragments_disagree_on_spec_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        let dep_dir = spec_dir.join("bad-multi");
+        std::fs::create_dir(&dep_dir).unwrap();
+        std::fs::write(
+            dep_dir.join("a.qedspec"),
+            "spec NameOne\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep_dir.join("b.qedspec"),
+            "spec NameTwo\nevent E { amount : U64 }\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+bad = { path = "bad-multi" }
+"#,
+        )
+        .unwrap();
+
+        let consumer = spec_dir.join("c.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Caller
+import Token from "bad"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer).unwrap_err());
+        assert!(
+            err.contains("must declare the same name"),
+            "expected name-mismatch error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_with_lock_frozen_errors_when_imported_source_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+
+        // Auto-write a baseline lock, then mutate the imported source — the
+        // spec hash should drift, so Frozen catches it.
+        parse_spec_file(&consumer).unwrap();
+        std::fs::write(
+            tmp.path().join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "DIFFERENT11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+        );
+        assert!(err.contains("spec_hash"), "got: {err}");
     }
 }

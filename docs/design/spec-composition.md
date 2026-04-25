@@ -81,7 +81,7 @@ qedgen interface --idl target/idl/jupiter.json --out interfaces/jupiter.qedspec
 
 produces
 
-```qedspec
+```fsharp
 interface Jupiter {
   program_id "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
 
@@ -116,7 +116,7 @@ When you know what the callee does to your state (and can't get a qedspec for
 it), you add the effects yourself. Upgrade is additive — start from the
 Tier-0 file and fill in clauses as you learn what you need:
 
-```qedspec
+```fsharp
 interface Jupiter {
   program_id "JUP..."
 
@@ -144,7 +144,7 @@ hardcoded `transfers { from X to Y amount N }` primitive becomes sugar for
 No `interface` keyword at all. The callee's qedspec **is** the interface —
 any handler is automatically part of its public surface:
 
-```qedspec
+```fsharp
 // caller spec
 spec Escrow
 import MyAmm from "../my_amm"
@@ -167,7 +167,7 @@ every caller without user action.
 
 ### Call-site syntax (uniform across all tiers)
 
-```qedspec
+```fsharp
 handler exchange : State.Open -> State.Closed {
   call Token.transfer(
     from      = taker_ta,
@@ -234,7 +234,7 @@ that changes upstream behavior would invalidate every consumer's proof with
 no diagnostic. Every library interface therefore carries an **`upstream`
 block** declaring the exact version it was verified against:
 
-```qedspec
+```fsharp
 interface Token {
   program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -325,7 +325,7 @@ test-harness concern, orthogonal to the spec layer.
 
 ### Proposed syntax
 
-```qedspec
+```fsharp
 import Token from "qedgen/interfaces/spl_token"    // library path (Tier 1)
 import Jupiter from "./specs/jupiter_v6"           // local path (Tier 2)
 ```

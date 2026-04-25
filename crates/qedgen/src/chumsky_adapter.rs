@@ -14,7 +14,7 @@ use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
     FlowKind, ParsedAccountType, ParsedCall, ParsedCallArg, ParsedCover, ParsedEnsures,
     ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
-    ParsedHandlerAccount, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
+    ParsedHandlerAccount, ParsedImport, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
     ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
     ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedUpstream, ParsedVariant,
     SbpfPropertyKind,
@@ -266,6 +266,9 @@ impl<'a> TypeEnv<'a> {
             // `let x = v in body` — kind follows the body (the let is
             // transparent from the caller's perspective).
             Expr::Let { body, .. } => self.infer(&body.node),
+            // `if c then a else b` — both branches must agree; in phase 1
+            // we trust the type checker and use the then-branch's kind.
+            Expr::IfThenElse { then_branch, .. } => self.infer(&then_branch.node),
         }
     }
 }
@@ -477,6 +480,16 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
                 expr_to_lean(&body.node, ctx, consts, env)
             )
         }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => format!(
+            "(if {} then {} else {})",
+            expr_to_lean(&cond.node, ctx, consts, env),
+            expr_to_lean(&then_branch.node, ctx, consts, env),
+            expr_to_lean(&else_branch.node, ctx, consts, env),
+        ),
     }
 }
 
@@ -789,6 +802,16 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 expr_to_rust(&body.node, ctx, consts)
             )
         }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => format!(
+            "(if {} {{ {} }} else {{ {} }})",
+            expr_to_rust(&cond.node, ctx, consts),
+            expr_to_rust(&then_branch.node, ctx, consts),
+            expr_to_rust(&else_branch.node, ctx, consts),
+        ),
     }
 }
 
@@ -1985,6 +2008,17 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Interface(iface) => {
                 out.interfaces.push(adapt_interface(iface, consts, &env));
             }
+            TopItem::Import {
+                name,
+                from,
+                as_name,
+            } => {
+                out.imports.push(ParsedImport {
+                    name: name.clone(),
+                    from: from.clone(),
+                    as_name: as_name.clone(),
+                });
+            }
             TopItem::Pragma(p) => {
                 // Record the pragma name for target inference. Any given
                 // pragma may appear at most once per spec; duplicates are
@@ -2739,6 +2773,80 @@ property forall_u64 :
         assert!(
             !rust.contains('\u{2200}'),
             "rust must not contain ∀: {}",
+            rust
+        );
+    }
+
+    // ----- v2.8 G1: adapter populates ParsedSpec.imports -----
+
+    #[test]
+    fn adapter_populates_imports() {
+        let src = r#"spec T
+import Token from "spl_token"
+import MyAmm from "my_amm"
+"#;
+        let spec = parse_str(src).expect("parse");
+        assert_eq!(spec.imports.len(), 2);
+        assert_eq!(spec.imports[0].name, "Token");
+        assert_eq!(spec.imports[0].from, "spl_token");
+        assert_eq!(spec.imports[1].name, "MyAmm");
+        assert_eq!(spec.imports[1].from, "my_amm");
+    }
+
+    #[test]
+    fn adapter_imports_empty_for_specs_without_import_stmts() {
+        let src = r#"spec T
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec.imports.is_empty());
+    }
+
+    // ----- v2.8 fold-in F9: if-then-else expressions -----
+
+    #[test]
+    fn if_then_else_renders_to_lean_native_form() {
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+property if_branch :
+  if state.x > 0 then state.y == state.x else state.y == 0
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "if_branch")
+            .expect("property");
+        let lean = prop.expression.as_deref().expect("lean rendering");
+        // Lean's native if-then-else syntax. State fields prefix with `s.`
+        // in Ctx::Guard.
+        assert!(
+            lean.contains("if s.x > 0 then s.y = s.x else s.y = 0"),
+            "expected native Lean if-then-else; got: {}",
+            lean
+        );
+    }
+
+    #[test]
+    fn if_then_else_renders_to_rust_block_form() {
+        let src = r#"spec T
+type State | A of { x : U64, y : U64 }
+property if_branch :
+  if state.x > 0 then state.y == state.x else state.y == 0
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "if_branch")
+            .unwrap();
+        let rust = prop.rust_expression.as_deref().expect("rust rendering");
+        assert!(
+            rust.contains("if s.x > 0 { s.y == s.x } else { s.y == 0 }"),
+            "expected Rust block-form if-else; got: {}",
             rust
         );
     }

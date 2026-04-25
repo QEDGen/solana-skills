@@ -9,6 +9,7 @@ You (Claude) help the user **specify** what their program must guarantee. The `.
 
 **Reference files** (read on demand — do NOT load all at once):
 - `references/qedspec-dsl.md` — qedspec, qedguards, qedbridge DSL syntax
+- `references/qedspec-imports.md` — `import` keyword, `qed.toml`, `qed.lock`, `--frozen`, `--check-upstream` (v2.8+)
 - `references/adversarial-probes.md` — Probe taxonomy the agent walks against the spec (§3a.5) — a checklist, not a CLI command
 - `references/cli.md` — Full CLI reference with all commands and flags
 - `references/support-library.md` — Lean types, constants, lemmas, arithmetic helpers (Phase 2 only)

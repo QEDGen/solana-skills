@@ -1,5 +1,13 @@
 # Syntax highlighting for .qedspec files on GitHub.
-# OCaml reads closer to the qedspec surface: `type | ... | ...` ADTs,
-# `match with`, camelCase fields, comment form. Ruby was a stopgap from
-# the earlier syntax; OCaml matches what we ship today.
-*.qedspec linguist-language=OCaml
+#
+# F# is the closest existing highlighter for v2.8+ qedspec syntax:
+#   - `//` line comments (qedspec uses these; OCaml's `(* … *)` form
+#      visually breaks every comment line)
+#   - `type T = | A | B of T` ADT variants
+#   - `:` for type annotations, `->` for arrows
+#   - `if … then … else …` (v2.8 F9 fold-in)
+#
+# Pairs with the in-doc fence migration (` ```fsharp `) so the GitHub
+# diff viewer, blob viewer, and inline-doc renderer all agree.
+*.qedspec linguist-language=F#
+*.qedspec linguist-detectable=true

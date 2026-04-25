@@ -13,6 +13,7 @@ mod drift;
 mod fill;
 mod fingerprint;
 mod idl2spec;
+mod import_resolver;
 mod init;
 mod integration_test;
 mod interface_gen;
@@ -21,6 +22,8 @@ mod lean_gen;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
+mod qed_lock;
+mod qed_manifest;
 mod ratchet;
 mod reconcile;
 mod rust_codegen_util;
@@ -28,12 +31,13 @@ mod sbpf_verify;
 mod spec;
 mod spec_hash;
 mod unit_test;
+mod upstream_check;
 mod validate;
 mod verify;
 
 use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Find the bugs your tests miss — from one spec file
 #[derive(Parser)]
@@ -276,6 +280,19 @@ enum Commands {
         /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
+
+        /// Refuse to update `qed.lock`; error if the on-disk lock is stale
+        /// or missing. Used in CI to detect un-bumped imports.
+        #[arg(long)]
+        frozen: bool,
+
+        /// Force-refresh the github source cache for every imported dep.
+        /// Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and
+        /// re-clones. Use after a force-pushed tag or when the
+        /// QEDGEN_CACHE_TTL window (default 7 days) hasn't expired but
+        /// you know the upstream changed.
+        #[arg(long)]
+        no_cache: bool,
     },
 
     /// Run the generated harnesses against the generated implementation.
@@ -319,6 +336,26 @@ enum Commands {
         /// Output as JSON (for agent consumption)
         #[arg(long)]
         json: bool,
+
+        /// Diff every imported library interface's pinned
+        /// `upstream_binary_hash` against the on-chain `.so`. Shells out to
+        /// `solana program dump` per `feedback_dispatch_over_reimplement.md`
+        /// — requires the Solana CLI in PATH. Skips dependencies without a
+        /// pinned hash. Non-zero exit on any mismatch.
+        #[arg(long)]
+        check_upstream: bool,
+
+        /// Override the RPC endpoint passed through to `solana program dump
+        /// --url <rpc>`. If omitted, the Solana CLI uses whatever cluster is
+        /// configured in `~/.config/solana/cli/config.yml`.
+        #[arg(long)]
+        rpc_url: Option<String>,
+
+        /// Refuse to reach the network. Any dependency that would require
+        /// an on-chain fetch reports as Error instead. Skipped entries (no
+        /// pinned hash / no program_id) still skip cleanly. CI gate friendly.
+        #[arg(long)]
+        offline: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -949,6 +986,8 @@ async fn main() -> Result<()> {
             kani,
             asm,
             json,
+            frozen,
+            no_cache,
         } => {
             require_git_repo()?;
             let cwd = std::env::current_dir()?;
@@ -957,6 +996,21 @@ async fn main() -> Result<()> {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Spec".to_string());
+
+            // v2.8 G2: --frozen elevates qed.lock drift to a hard error
+            // (CI usage). Default Auto mode auto-writes the lock on drift,
+            // which is the right behavior for local development.
+            let lock_mode = if frozen {
+                qed_lock::LockMode::Frozen
+            } else {
+                qed_lock::LockMode::Auto
+            };
+
+            // F7 fold-in: --no-cache forces a fresh github fetch for every
+            // imported dep (skips the TTL window). Path sources unaffected.
+            let cache_opts = import_resolver::CacheOpts {
+                force_refresh: no_cache,
+            };
 
             let mut has_issues = false;
 
@@ -1052,7 +1106,7 @@ async fn main() -> Result<()> {
 
             // Coverage matrix (--coverage)
             if coverage {
-                let parsed = check::parse_spec_file(&spec)?;
+                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
                 let matrix = check::coverage_matrix(&parsed);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&matrix)?);
@@ -1065,7 +1119,7 @@ async fn main() -> Result<()> {
             // runs whenever the proofs dir exists and is a no-op on specs
             // without preservation obligations.
             if proofs.exists() {
-                let parsed = check::parse_spec_file(&spec)?;
+                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
                 let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
                 if !findings.is_empty() {
                     if json {
@@ -1093,7 +1147,7 @@ async fn main() -> Result<()> {
 
             // Lint — always runs (core of spec validation)
             {
-                let warnings = check::lint(&spec)?;
+                let warnings = check::lint_with_opts(&spec, lock_mode, cache_opts)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&warnings)?);
                 } else if warnings.is_empty() {
@@ -1135,8 +1189,33 @@ async fn main() -> Result<()> {
             lean_dir,
             fail_fast,
             json,
+            check_upstream,
+            rpc_url,
+            offline,
         } => {
             require_git_repo()?;
+
+            // v2.8 G5: --check-upstream is a separate verification stage
+            // from the proptest/kani/lean backends — it diffs each
+            // imported library's pinned binary hash against the on-chain
+            // `.so` via `solana program dump`. Runs independently so
+            // users can `--check-upstream` without re-running the harnesses.
+            // F6 fold-in: --offline refuses any network fetch.
+            if check_upstream {
+                let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+                let results = upstream_check::check_lock(spec_dir, rpc_url.as_deref(), offline)?;
+                let any_failure = upstream_check::print_report(&results);
+                if any_failure {
+                    std::process::exit(1);
+                }
+                // When --check-upstream is the only verb, exit cleanly
+                // without firing the backend runners. Combine with
+                // --proptest etc. to do both in one invocation.
+                let any_backend_flag = proptest || kani || lean;
+                if !any_backend_flag {
+                    return Ok(());
+                }
+            }
 
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk. This matches the agent-friendly "just do
