@@ -1,0 +1,35 @@
+// Quantifier regression — Lean def must not strip ∀ v binder
+//
+// Expected: `qedgen codegen --lean` emits
+//   def bytes_nonneg (s : State) : Prop :=
+//     ∀ v : Nat, v ≥ 0
+//
+// Actual (pre-fix): stripped the ∀ v quantifier, emitting
+//   def bytes_nonneg (s : State) : Prop := v ≥ 0
+// where v is unbound — lake build fails:
+//   error: unknown identifier 'v'
+//
+// The strip logic was written for "∀ s : StateType, body" (where the def
+// already binds `s`) but fired on all leading ∀ forms, destroying the
+// binder for value quantifiers like "∀ v : Nat, …".
+//
+// Fix site: crates/qedgen/src/lean_gen.rs — render_properties_inner now
+// only strips "∀ s :" (the state variable already bound by the def),
+// preserving value-quantifier binders verbatim.
+
+spec ReproForallValueBinder
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { balance : U64 }
+
+type Error | E
+
+property bytes_nonneg :
+  forall v : U8, v >= 0
+  preserved_by []
+
+handler noop : State.Active -> State.Active {
+  permissionless
+  effect { balance := balance }
+}

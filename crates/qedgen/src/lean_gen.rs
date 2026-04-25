@@ -858,6 +858,17 @@ fn preservation_proof_script(
 ) -> String {
     let trans_name = safe_name(&format!("{}Transition", op.name));
     let has_cond = handler_has_condition(op, fields);
+    let has_quantifier = prop
+        .expression
+        .as_deref()
+        .map(|e| e.contains('\u{2200}') || e.contains('\u{2203}'))
+        .unwrap_or(false);
+    if has_quantifier {
+        return format!(
+            " := by\n  unfold {} at h\n  sorry -- quantified property: fill with intro + cases or Leanstral\n",
+            trans_name
+        );
+    }
 
     // Determine which property fields this handler touches
     let prop_fields: Vec<&str> = if let Some(ref expr) = prop.expression {
@@ -921,16 +932,22 @@ fn render_properties_inner(
 ) {
     for prop in properties {
         if let Some(ref expr) = prop.expression {
-            // Strip leading ∀/forall quantifier if present, since the def already binds `s`
-            // e.g., "∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows"
-            //     → "s.total_deposits ≥ s.total_borrows"
+            // strip leading "∀ s : Type," only when the binder is the state
+            // variable `s` — the def already introduces `(s : state_type)`.
+            // do NOT strip for value quantifiers like "∀ v : Nat, v ≥ 0":
+            // those should be kept verbatim so `v` remains bound in the Prop.
             let body = if let Some(rest) = expr
                 .strip_prefix('\u{2200}')
                 .or_else(|| expr.strip_prefix("forall"))
             {
-                // Skip past "var : Type, " to get the body
-                if let Some(comma_pos) = rest.find(',') {
-                    rest[comma_pos + 1..].trim().to_string()
+                let trimmed = rest.trim_start();
+                // only strip if the quantified binder is the state variable `s`.
+                if trimmed.starts_with("s ") || trimmed.starts_with("s:") {
+                    if let Some(comma_pos) = rest.find(',') {
+                        rest[comma_pos + 1..].trim().to_string()
+                    } else {
+                        expr.clone()
+                    }
                 } else {
                     expr.clone()
                 }
@@ -4550,5 +4567,82 @@ type State
                 .unwrap_or_else(|e| panic!("fixture {} failed to parse: {:?}", name, e));
             let _ = render(&spec);
         }
+    }
+
+    #[test]
+    fn lean_gen_quantified_property_preservation_emits_sorry() {
+        //  quantified property preservation theorem must emit sorry --
+        // omega cannot prove universal goals and would generate non-compiling Lean.
+        // Use `preserved_by all` (which expands to include noop after adapt()).
+        // Single-account spec with lifecycle state so render_single_account is used.
+        let src = r#"spec T
+type State
+  | Active of { balance : U64 }
+
+property all_bytes_nonneg :
+  forall v : U8, v >= 0
+  preserved_by all
+handler noop : State.Active -> State.Active {
+  permissionless
+  effect { balance := balance }
+}
+"#;
+        let spec = chumsky_adapter::parse_str(src).expect("parse");
+        // Confirm the expansion happened (property covers noop)
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "all_bytes_nonneg")
+            .expect("property present");
+        assert!(
+            prop.preserved_by.contains(&"noop".to_string()),
+            "preserved_by all must expand to include noop, got: {:?}",
+            prop.preserved_by
+        );
+        let lean = render(&spec);
+        assert!(
+            lean.contains("sorry"),
+            "quantified property preservation must emit sorry, not omega:\n{}",
+            &lean[lean.find("all_bytes_nonneg").unwrap_or(0)..]
+                .chars()
+                .take(500)
+                .collect::<String>()
+        );
+        assert!(
+            !lean.contains("omega"),
+            "must not emit omega for a quantified property"
+        );
+    }
+
+    #[test]
+    fn lean_gen_forall_value_quantifier_not_stripped_in_def() {
+        // `∀ v : Nat, v ≥ 0` must be preserved verbatim in the Lean def —
+        // stripping the `∀` would leave `v` unbound.
+        let src = r#"spec T
+state { balance : U64 }
+property all_bytes_nonneg :
+  forall v : U8, v >= 0
+  preserved_by []
+handler noop : State -> State {
+  permissionless
+  effect { balance := balance }
+}
+"#;
+        let spec = chumsky_adapter::parse_str(src).expect("parse");
+        let lean = render(&spec);
+        assert!(
+            lean.contains("∀ v : Nat, v ≥ 0"),
+            "def must preserve value quantifier: {}",
+            &lean[lean.find("all_bytes_nonneg").unwrap_or(0)..]
+                .chars()
+                .take(200)
+                .collect::<String>()
+        );
+        // must not produce `def all_bytes_nonneg (s : State) : Prop := v ≥ 0`
+        // (unbound `v`).
+        assert!(
+            !lean.contains(":= v ≥ 0"),
+            "def must not strip the quantifier leaving v unbound"
+        );
     }
 }

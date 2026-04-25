@@ -634,20 +634,37 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             kind,
             binder,
             binder_ty,
-            body: _,
+            body,
         } => {
-            // Quantifiers don't lower to a property-function body directly: the
-            // universal case needs harness-level `kani::any()` scaffolding that's
-            // emitted by the backend, not inlined here. Surface the sentinel so
-            // the caller can replace the generated function body with a skip
-            // marker. See `rust_expr_is_unsupported` in check.rs.
-            let kind_name = match kind {
-                a::Quantifier::Forall => "forall",
-                a::Quantifier::Exists => "exists",
+            // Small integer types (U8, I8) can be exhaustively iterated inside
+            // a property predicate using Rust's RangeInclusive::all / any. This
+            // is correct and cheap enough for test suites (256 iterations max).
+            //
+            // Larger types (U16+) cannot be exhausted in a test loop; surface
+            // the sentinel so the caller knows to skip or escalate.
+            let rust_ty = match binder_ty.as_str() {
+                "U8" => Some("u8"),
+                "I8" => Some("i8"),
+                _ => None,
             };
+            let Some(rust_ty) = rust_ty else {
+                let kind_name = match kind {
+                    a::Quantifier::Forall => "forall",
+                    a::Quantifier::Exists => "exists",
+                };
+                return format!(
+                    "/* QEDGEN_UNSUPPORTED_QUANTIFIER: {} {} : {} — lower at harness level */",
+                    kind_name, binder, binder_ty
+                );
+            };
+            let method = match kind {
+                a::Quantifier::Forall => "all",
+                a::Quantifier::Exists => "any",
+            };
+            let body_rust = expr_to_rust(&body.node, ctx, consts);
             format!(
-                "/* QEDGEN_UNSUPPORTED_QUANTIFIER: {} {} : {} — lower at harness level */",
-                kind_name, binder, binder_ty
+                "({}::MIN..={}::MAX).{}(|{}| {})",
+                rust_ty, rust_ty, method, binder, body_rust
             )
         }
         Expr::BoolOp { op, lhs, rhs } => {
@@ -2535,7 +2552,9 @@ property implies_case :
     }
 
     #[test]
-    fn property_forall_marked_unsupported_in_rust() {
+    fn property_forall_u8_lowers_to_iterator() {
+        // U8 is small enough to exhaust (256 values) — must not emit the
+        // unsupported sentinel; must lower to a `.all(|v| …)` expression.
         let src = r#"spec T
 state { x : U8 }
 property forall_case :
@@ -2550,12 +2569,44 @@ property forall_case :
             .expect("property");
         let rust = prop.rust_expression.as_deref().expect("rust rendering");
         assert!(
-            crate::check::rust_expr_is_unsupported(rust),
-            "forall body should carry the unsupported marker: {}",
+            !crate::check::rust_expr_is_unsupported(rust),
+            "U8 forall must lower to an iterator, not emit the unsupported marker: {}",
             rust
         );
-        // The marker is wrapped in `/* ... */` so downstream emission puts it
-        // inside a comment — no mojibake can leak into compiled Rust.
+        assert!(
+            rust.contains("u8::MIN") && rust.contains("u8::MAX"),
+            "must use u8 range: {}",
+            rust
+        );
+        assert!(rust.contains(".all("), "must use .all(): {}", rust);
+        assert!(
+            !rust.contains('\u{2200}'),
+            "rust must not contain ∀: {}",
+            rust
+        );
+    }
+
+    #[test]
+    fn property_forall_large_type_marked_unsupported_in_rust() {
+        // U64 cannot be exhausted in a test loop — must still emit the sentinel.
+        let src = r#"spec T
+state { x : U64 }
+property forall_u64 :
+  forall v : U64, v >= 0
+  preserved_by all
+"#;
+        let spec = parse_str(src).expect("parse");
+        let prop = spec
+            .properties
+            .iter()
+            .find(|p| p.name == "forall_u64")
+            .expect("property");
+        let rust = prop.rust_expression.as_deref().expect("rust rendering");
+        assert!(
+            crate::check::rust_expr_is_unsupported(rust),
+            "U64 forall must still emit the unsupported sentinel: {}",
+            rust
+        );
         assert!(
             rust.trim_start().starts_with("/*"),
             "marker must be a Rust block comment: {}",

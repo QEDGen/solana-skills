@@ -1793,6 +1793,47 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
+    // Rule: quantifier over a type that can't be exhausted at test time.
+    // U8/I8 are fine (256 iterations); anything larger emits a stub `true`
+    // body, so the property silently passes without being checked.
+    for prop in &spec.properties {
+        if let Some(ref rust_expr) = prop.rust_expression {
+            if rust_expr_is_unsupported(rust_expr) {
+                // Extract the quantifier kind and binder type from the sentinel
+                // comment so the message is specific.
+                let detail = rust_expr
+                    .trim_start_matches("/*")
+                    .trim_end_matches("*/")
+                    .trim()
+                    .trim_start_matches(QEDGEN_UNSUPPORTED_MARKER)
+                    .trim_start_matches(':')
+                    .trim()
+                    .to_string();
+                warnings.push(CompletenessWarning {
+                    rule: "unchecked_quantifier".to_string(),
+                    severity: Severity::Warning,
+                    priority: 1,
+                    message: format!(
+                        "property '{}' uses a quantifier over a type that proptest/Kani \
+                         cannot exhaust — the harness emits `true` and skips the check ({})",
+                        prop.name, detail
+                    ),
+                    subject: Some(prop.name.clone()),
+                    fix: "Use U8 or I8 as the quantifier binder type (≤256 values, exhausted \
+                          automatically), or split the property into a per-element guard."
+                        .to_string(),
+                    example: Some(format!(
+                        "  // instead of: forall v : U64, …\n  \
+                         property {} :\n    forall v : U8, …",
+                        prop.name
+                    )),
+                    counterexample: None,
+                    fix_options: vec![],
+                });
+            }
+        }
+    }
+
     // Rule 7: takes params (U64) with no guard — suggest input validation
     for op in &spec.handlers {
         if op.has_guard() {
@@ -4115,6 +4156,59 @@ interface Token {
         assert_eq!(h.accounts.len(), 3);
         assert_eq!(h.requires.len(), 1);
         assert_eq!(h.ensures.len(), 1);
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_fires_for_large_type() {
+        // U64 quantifier can't be exhausted — check.rs must warn so the user
+        // knows the property is being silently skipped in proptest/Kani.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "all_balances_positive".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some(
+                    "/* QEDGEN_UNSUPPORTED_QUANTIFIER: forall v : U64 \
+                     — lower at harness level */"
+                        .to_string(),
+                ),
+                preserved_by: vec![],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "expected unchecked_quantifier lint for U64 forall, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "unchecked_quantifier")
+            .unwrap();
+        assert_eq!(w.priority, 1, "unchecked_quantifier must be P1");
+        assert!(
+            w.message.contains("all_balances_positive"),
+            "message must name the property"
+        );
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_does_not_fire_for_u8() {
+        // U8 forall lowers to a real iterator — no lint should fire.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "bytes_nonneg".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
+                preserved_by: vec![],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "U8 forall must not fire unchecked_quantifier"
+        );
     }
 
     #[test]
