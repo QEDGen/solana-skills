@@ -4600,7 +4600,6 @@ type State
     }
 
     #[test]
-<<<<<<< HEAD
     fn lean_gen_quantified_property_preservation_emits_sorry() {
         //  quantified property preservation theorem must emit sorry --
         // omega cannot prove universal goals and would generate non-compiling Lean.
