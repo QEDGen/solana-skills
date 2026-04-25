@@ -20,20 +20,23 @@ spec Escrow
 
 import Token   from "spl_token"
 import MyAmm   from "my_amm"
+import Tk      from "spl_token" as Tk      // optional `as <alias>` rename
 
 // ... handler bodies that `call Token.transfer(...)` and `call MyAmm.swap(...)`
 ```
 
-- The first identifier is the **local bound name** in this spec's namespace
-  (`Token`, `MyAmm`).
+- The first identifier is the **source-side interface name** — must match
+  an `interface <Name> { ... }` declared in the imported source.
 - The string after `from` is a **dep key** that must match an entry in
   `qed.toml` under `[dependencies]`.
-- The bound name must match an `interface <Name> { ... }` declaration in the
-  imported source — v2.8 doesn't support import aliasing. If your dep has
-  multiple interfaces, write one `import` per interface.
+- An optional `as <alias>` clause renames the imported interface in the
+  consumer's namespace. Use it when two imports would otherwise clash on
+  the same source-side name, or when the source-side name doesn't fit
+  your local convention. Without `as`, the source-side name is the local
+  name.
 
-`from` is a contextual keyword — handlers still use `from = expr` in CPI call
-arguments without colliding.
+`from` and `as` are contextual keywords — handlers still use `from = expr`
+in CPI call arguments without colliding.
 
 ## The `qed.toml` manifest
 
@@ -78,8 +81,9 @@ my_amm = { path = "../my_amm/spec" }            # auto-extension to .qedspec
 
 Path source resolution accepts a single `.qedspec` file, a directory of
 fragments (multi-file specs in sorted-path order), or a path that's missing
-the `.qedspec` extension (auto-resolved). v2.8 supports **single-file
-imported deps only** for the merge step — directory deps land in v2.9.
+the `.qedspec` extension (auto-resolved). v2.8 supports both single-file
+and **multi-file imported deps** — every fragment must declare the same
+`spec Name`, and their top items merge in sorted-path order.
 
 ## The `qed.lock` snapshot
 
@@ -141,6 +145,22 @@ qedgen check --frozen --spec ./
 Default behavior (no `--frozen`) silently auto-writes the lock when stale,
 which is the right default for local development.
 
+### `qedgen check --no-cache`
+
+Force-refreshes the github source cache for every imported dep. Wipes
+`~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and re-clones from
+upstream. Use when:
+
+- An upstream tag was force-pushed and you want the new commit *now*
+  rather than waiting for the TTL window to expire.
+- You suspect a corrupted cache.
+- You want a hermetic CI run that doesn't trust the cache.
+
+The cache is otherwise refreshed automatically when its
+`.qedgen-commit` marker is older than `QEDGEN_CACHE_TTL` seconds (default
+604800 = 7 days). `QEDGEN_CACHE_TTL=0` disables the time-based check
+entirely; rely solely on `--no-cache`.
+
 ## `qedgen verify --check-upstream`
 
 Diffs every imported library's pinned `upstream_binary_hash` against the
@@ -160,6 +180,10 @@ Pass `--rpc-url <url>` to override the cluster — otherwise the Solana CLI
 inherits whatever's in `~/.config/solana/cli/config.yml`. No qedgen-side RPC
 config to manage.
 
+`--offline` refuses any network fetch — useful in CI gates that should
+never reach external network. Pinned deps report as Error("offline mode")
+instead of shelling out; entries without a pin still skip cleanly.
+
 The `solana` CLI must be in PATH; otherwise the command exits with an
 install pointer.
 
@@ -168,9 +192,11 @@ Per-dep outcomes:
 - **Match** — on-chain hash matches the pinned hash.
 - **Mismatch** — non-zero exit; surface the pinned/on-chain values for the
   user to investigate.
-- **Skipped** — dep has no `upstream_binary_hash` (path source, or library
-  entry that hasn't been pinned yet).
-- **Error** — `solana` CLI failed (network, auth, CLI missing).
+- **Skipped** — dep has no `upstream_binary_hash` (path source, library
+  entry that hasn't been pinned yet, or the imported interface omits a
+  `program_id`).
+- **Error** — `solana` CLI failed (network, auth, CLI missing) or
+  `--offline` blocked a needed fetch.
 
 ## End-to-end example: escrow with SPL Token
 
@@ -235,18 +261,16 @@ What lands downstream:
 - **Transitive resolution.** Imported specs that themselves contain
   `import` statements aren't walked. Each consumer declares its own direct
   deps. Stance-1 design choice — see `docs/design/spec-composition.md` §3.
-- **Multi-file imported deps.** The resolver's directory mode works, but
-  the merge into the consumer's interface set requires single-file. v2.9.
-- **Import aliasing** (`import X from "y" as Z`). The bound name must match
-  an interface name in the imported source. If your dep ships an interface
-  under a name you don't like, file an issue against the dep.
-- **Generic Anchor CPI codegen.** Only `anchor_spl::token::transfer` is
-  mechanized. Other SPL Token handlers (`mint_to`, `burn`,
-  `initialize_account`, `close_account`) and non-SPL interfaces stay on the
-  comment + `todo!()` path. v2.9.
-- **`program_id` in `qed.lock`.** `--check-upstream` skips deps when the
-  program_id can't be resolved from the lock alone — v2.9 will thread it
-  through the lock entry.
+  v2.9 will add transitive walks once version-conflict resolution is
+  designed.
+- **Generic Anchor CPI codegen** for non-SPL interfaces. v2.8 mechanizes
+  every SPL Token handler (transfer / mint_to / burn / initialize_account
+  / close_account); other interfaces still emit comment + `todo!()`.
+  v2.9 (Anchor first-class release) ships generic Anchor CPI via Borsh +
+  sighash + AccountMeta synthesis.
+- **First-class Anchor support** — `#[qed]` on existing Anchor handlers,
+  framework auto-detection (`Anchor.toml` / `Cargo.toml` deps walk),
+  brownfield `qedgen check --anchor-project`. v2.9 headline.
 - **Stance 2 (proof composition).** `sorry` in the ensures-as-axiom theorems
-  stays — v3.0 will replace with imported callee proofs alongside the
-  Anchor adapter that needs it.
+  stays — v3.0 (refactor + breaking-changes release) will replace with
+  imported callee proofs.
