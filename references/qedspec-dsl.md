@@ -104,7 +104,7 @@ transform into the Lean/Rust backends.
 
 ## File structure
 
-```
+```fsharp
 spec ProgramName
 
 // Top-level declarations (any order)
@@ -164,7 +164,7 @@ deterministic.
 
 Convention-based layout (no new grammar required):
 
-```
+```fsharp
 my-program/
   escrow.qedspec            # spec header + types + events + errors
   handlers/
@@ -184,7 +184,7 @@ See `examples/rust/escrow-split/` for a concrete demo.
 
 Required header. Names the program.
 
-```
+```fsharp
 spec Escrow
 ```
 
@@ -192,7 +192,7 @@ spec Escrow
 
 On-chain program address.
 
-```
+```fsharp
 program_id "11111111111111111111111111111111"
 ```
 
@@ -200,7 +200,7 @@ program_id "11111111111111111111111111111111"
 
 Named integer constants. Underscores allowed for readability.
 
-```
+```fsharp
 const MAX_MEMBERS = 32
 const MAX_VAULT_TVL = 10_000_000_000_000_000
 ```
@@ -209,7 +209,7 @@ const MAX_VAULT_TVL = 10_000_000_000_000_000
 
 ### Records
 
-```
+```fsharp
 // Flat record — no sum tag
 type Account = {
   active        : U8,
@@ -225,7 +225,7 @@ type Account = {
 ML-style sum types with optional payloads. Variants without payload are bare
 idents; payload variants use `of { ... }`.
 
-```
+```fsharp
 // State ADT — variants with optional payloads
 type State
   | Uninitialized
@@ -247,7 +247,7 @@ declarations; state ADTs flatten for downstream transition codegen.
 
 `type Error | ...` is a flat enum with optional numeric code + description.
 
-```
+```fsharp
 type Error
   | InvalidAmount
   | Unauthorized
@@ -259,7 +259,7 @@ The legacy `errors [...]` sugar (below) still works and desugars to this.
 
 ### Type aliases
 
-```
+```fsharp
 type AccountIdx = Fin[MAX_ACCOUNTS]
 type Amount     = U128
 ```
@@ -272,7 +272,7 @@ for subscripting a `Map[N] T` field.
 Type expressions: `Pubkey`, `U8`, `U16`, `U64`, `U128`, `I128`, `Vec U64`,
 `Option Pubkey`, `Map[N] T`, `Fin[N]`.
 
-```
+```fsharp
 accounts : Map[MAX_ACCOUNTS] Account
 slots    : Map[16] (Option Pubkey)
 ```
@@ -282,7 +282,7 @@ slots    : Map[16] (Option Pubkey)
 Shorthand for a single unnamed account record. Equivalent to a one-variant
 record type.
 
-```
+```fsharp
 state {
   balance : U64
   owner   : Pubkey
@@ -295,7 +295,7 @@ state {
 
 PDA seed derivation. Seeds can be string literals or identifiers.
 
-```
+```fsharp
 pda escrow ["escrow", initializer]
 pda market ["base_mint", "quote_mint"]
 pda loan ["loan", pool, borrower]
@@ -305,7 +305,7 @@ pda loan ["loan", pool, borrower]
 
 Event type with typed fields.
 
-```
+```fsharp
 event PoolInitialized { authority : Pubkey, rate : U64 }
 event Deposited       { depositor : Pubkey, amount : U64 }
 ```
@@ -314,7 +314,7 @@ event Deposited       { depositor : Pubkey, amount : U64 }
 
 At the top level, declare errors with `type Error | Variant | ...`:
 
-```
+```fsharp
 type Error
   | Unauthorized
   | InvalidAmount
@@ -323,7 +323,7 @@ type Error
 
 Valued form (with codes + descriptions) uses the same ADT syntax:
 
-```
+```fsharp
 type Error
   | InvalidAccountCount  = 1 "Invalid number of accounts"
   | InsufficientLamports = 7 "Sender has insufficient lamports"
@@ -339,7 +339,7 @@ They use an ML-style signature with optional parameters and state transition.
 
 ### Syntax
 
-```
+```fsharp
 /// Doc comment (optional, captured)
 handler name (param1 : Type) (param2 : Type) : PreState -> PostState {
   // clauses
@@ -348,7 +348,7 @@ handler name (param1 : Type) (param2 : Type) : PreState -> PostState {
 
 All parts of the signature are optional:
 
-```
+```fsharp
 // Full signature
 handler initialize (amount : U64) : State.Uninitialized -> State.Active { ... }
 
@@ -390,7 +390,7 @@ handler transfer_sol { ... }
 
 Declares the instruction's account context with attributes.
 
-```
+```fsharp
 accounts {
   authority      : signer, writable
   vault          : writable, pda ["vault", authority]
@@ -416,7 +416,7 @@ Account attributes:
 
 State mutations using `:=` (assignment), `+=` (increment), `-=` (decrement).
 
-```
+```fsharp
 effect {
   interest_rate       := rate
   total_deposits      += amount
@@ -455,7 +455,7 @@ deliberately wants them:
 
 Example:
 
-```
+```fsharp
 effect {
   // default checked — reverts on overflow, matches deployed checked_add
   pool += amount
@@ -475,7 +475,7 @@ Marks a handler as deliberately unauthenticated. Opts out of the P1
 `auth X`. Common on DeFi primitives where *anyone* is supposed to call
 the handler — user slot inits, deposits, donations.
 
-```
+```fsharp
 handler init_user (user : Pubkey) {
   permissionless
   effect { balance := 0 }
@@ -495,7 +495,7 @@ a `contradictory_auth` P1 — pick one.
 
 Token transfer declarations with source, destination, amount, and authority.
 
-```
+```fsharp
 transfers {
   from initializer_ta to escrow_ta amount deposit_amount authority initializer
   from escrow_ta to taker_ta amount initializer_amount authority escrow
@@ -510,7 +510,7 @@ first matching boolean condition. Outcomes are `abort ErrorName`,
 `effect { ... }`, or an empty body (no-op / state unchanged). The final arm
 is typically `_ => ...` as a catch-all.
 
-```
+```fsharp
 handler liquidate (i : AccountIdx) : State.Active -> State.Active {
   auth authority
   accounts { authority : signer, vault : writable }
@@ -535,7 +535,7 @@ the real cases need proofs.
 
 Reusable clause fragments. Handlers include them with `include`.
 
-```
+```fsharp
 schema base_validation {
   requires accounts.count >= 3 else InvalidAccountCount
   requires user.data_len == 0 else UserDataLen
@@ -569,7 +569,7 @@ chumsky grammar:
 
 ### Atoms
 
-```
+```fsharp
 // Integers (underscores allowed)
 42
 10_000_000
@@ -623,7 +623,7 @@ ensures let delta = old(state.balance) - state.balance in delta == amount
 
 ### Constructors, record literals, record updates
 
-```
+```fsharp
 // Bare constructor — variant without payload
 .Uninitialized
 
@@ -647,7 +647,7 @@ Postfix `is .Variant` yields a `Prop` that's true when the LHS was built with
 the given variant. Preferred over a full `match` when you only need the
 discriminator check.
 
-```
+```fsharp
 requires state.accounts[i] is .Active else SlotInactive
 ```
 
@@ -657,7 +657,7 @@ An inline `match` expression yields a value (contrast with the handler-level
 `match` clause above, which dispatches entire handler bodies). Arms name the
 payload binder when destructuring.
 
-```
+```fsharp
 let authority =
   match state with
     | .Active a => a.authority
@@ -667,7 +667,7 @@ let authority =
 
 ### `mul_div_floor` / `mul_div_ceil` — fixed-point helpers
 
-```
+```fsharp
 requires mul_div_floor(size_q, exec_price, POS_SCALE) <= MAX_ACCOUNT_NOTIONAL
 ensures state.F == old(state.F) + mul_div_ceil(fee, numerator, denominator)
 ```
@@ -680,7 +680,7 @@ step wrong. These helpers are built-in so the spec, the generated Rust
 
 ### Function application
 
-```
+```fsharp
 forall n : Node, left(n).key < n.key and n.key < right(n).key
 forall n : Node, left(parent(n)) == n or right(parent(n)) == n
 ```
@@ -695,7 +695,7 @@ calls are rejected; bare identifiers parse as paths.
 
 `.field` applies to any expression, not just bare paths:
 
-```
+```fsharp
 left(n).key          // Field on the result of a function call
 parent(n).color      // Chained
 ```
@@ -710,7 +710,7 @@ non-path base produces `Expr::Field`.
 Generates per-handler sub-lemmas + a master inductive theorem. `preserved_by`
 names the handler scope.
 
-```
+```fsharp
 // Preserved by all handlers
 property conservation :
   state.V >= (sum i : AccountIdx, state.accounts[i].capital)
@@ -736,7 +736,7 @@ property account_solvent :
 Either a quantified expression (emitted as a proof obligation) or a string
 description (kept as documentation for Lean and generated reports).
 
-```
+```fsharp
 invariant collateral_backing :
   forall l : Loan.Active, l.collateral > 0
 
@@ -750,7 +750,7 @@ invariant pda_integrity "derived PDA matches provided account on initialize"
 Declares that a sequence of handlers is reachable. Generates existential
 proofs (Lean) and `kani::cover!` harnesses.
 
-```
+```fsharp
 // One-liner trace
 cover happy_path [initialize, exchange]
 cover cancel_path [initialize, cancel]
@@ -767,7 +767,7 @@ cover cancel_available {
 
 From state A, state B is reachable within N steps via specified handlers.
 
-```
+```fsharp
 liveness escrow_settles : State.Open ~> State.Closed via [exchange, cancel] within 1
 
 liveness drain_completes : State.Draining ~> State.Active
@@ -780,7 +780,7 @@ Declares external state mutations that happen outside handlers (oracle feeds,
 clock ticks, admin pokes). Properties that reference mutated fields must hold
 across those mutations too.
 
-```
+```fsharp
 environment interest_rate_change {
   mutates interest_rate : U64
   constraint interest_rate > 0
@@ -794,7 +794,7 @@ namespace. Pragmas keep the core DSL platform-agnostic: constructs that only
 make sense for one target live inside their pragma block, not at the top
 level.
 
-```
+```fsharp
 pragma sbpf { ... }    // sBPF assembly programs
 ```
 
@@ -829,7 +829,7 @@ parameter. When in doubt about whether a clause is durable, prefer
 fewer clauses plus a Kani harness against the deployed binary over
 more clauses that need rewriting with every upstream release.
 
-```
+```fsharp
 interface Token {
   program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -862,7 +862,7 @@ See `docs/design/spec-composition.md` §2 for the tier model and
 Inside a handler body, a `call` is a terminal statement — the uniform CPI
 surface. Not an expression, not nestable.
 
-```
+```fsharp
 handler exchange : State.Open -> State.Closed {
   call Token.transfer(
     from      = taker_ta,
@@ -884,7 +884,7 @@ Everything in this section lives inside `pragma sbpf { ... }`. The pragma
 wrapping is mandatory in v2.5; the grammar rejects these items at the top
 level. See `examples/sbpf/dropset/dropset.qedspec` for a full example.
 
-```
+```fsharp
 pragma sbpf {
   pubkey SYSTEM_PROGRAM_ID [0, 0, 0, 0]
   pubkey RENT_SYSVAR_ID    [0x6a7d51..., 0xb8b9f5..., 0xc01b2f..., 0xb85e22...]
@@ -914,7 +914,7 @@ sBPF-only.
 Groups discriminant, entry point, layouts, guards, and properties for a
 single sBPF instruction. Any of the sub-clauses is optional.
 
-```
+```fsharp
 instruction register_market {
   discriminant 0
   entry 0
@@ -966,7 +966,7 @@ A single validation check. `checks` is the guard predicate, `error` names the
 failure code, `fuel` bounds the sBPF execution steps needed to close the
 goal.
 
-```
+```fsharp
 guard check_discriminant {
   checks discriminant == 0
   error InvalidDiscriminant
@@ -991,7 +991,7 @@ WP-based proof backend:
 | `after all guards` | Property asserted after all guards pass | `after all guards` |
 | `exit N` | Expected exit code | `exit 0` |
 
-```
+```fsharp
 property rejects_wrong_account_count {
   expr accounts.count != 3 implies exit_code == 1
   scope guards
@@ -1008,7 +1008,7 @@ property accepts_valid_transfer {
 
 ### CPI envelope block (inside sBPF `property`)
 
-```
+```fsharp
 property transfer_cpi_correct {
   cpi system_program transfer {
     accounts [sender, recipient, system_program]
@@ -1053,7 +1053,7 @@ and `references/cli.md` for `qedgen reconcile` / `qedgen check --drift`.
 Prints a verification matrix showing which handlers are covered by which
 properties.
 
-```
+```fsharp
 $ qedgen check --spec multisig.qedspec --coverage
 
 handler           threshold_bounded votes_bounded
