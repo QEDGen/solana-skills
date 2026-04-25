@@ -116,6 +116,10 @@ const KEYWORDS: &[&str] = &[
     "in",
     // v2.7 G4: handler-level opt-out of the no_access_control lint.
     "permissionless",
+    // v2.8 G1: top-level `import Name from "key"`. The trailing `from` is
+    // contextual (matched via `kw("from")` only inside `import_decl`), not a
+    // global keyword — handlers still use `from = expr` in call args.
+    "import",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -2164,6 +2168,23 @@ fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|((doc, name), items)| TopItem::Pragma(PragmaDecl { name, doc, items }))
 }
 
+// ----------------------------------------------------------------------------
+// import <Name> from "<dep_key>" — manifest-based import (v2.8 G1).
+//
+// `Name` is the local bound name; `dep_key` is a key into qed.toml's
+// `[dependencies]` table. Resolution (git fetch / path read / cache) lives in
+// `import_resolver.rs` and runs after parse, before lint.
+// ----------------------------------------------------------------------------
+fn import_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    kw("import")
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(kw("from"))
+        .then_ignore(wsc())
+        .then(string_lit())
+        .map(|(name, from)| TopItem::Import { name, from })
+}
+
 // Top-level item: priority-ordered choice.
 // record_decl must precede adt_decl (PEG-style backtracking via .or).
 fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
@@ -2192,7 +2213,7 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
     // sugar are platform-specific and only parse inside
     // `pragma sbpf { ... }`. Use `type Error | A | B | ...` for errors at
     // the core-DSL level. The platform-agnostic top level is the point.
-    let group_c = choice((interface_decl(), pragma_decl()));
+    let group_c = choice((interface_decl(), pragma_decl(), import_decl()));
     choice((group_a, group_b, group_c)).map_with(|item, e| Node::new(item, e.span().into_range()))
 }
 
@@ -2561,6 +2582,7 @@ property conservation :
                 TopItem::Instruction(_) => "instruction",
                 TopItem::Interface(_) => "interface",
                 TopItem::Pragma(_) => "pragma",
+                TopItem::Import { .. } => "import",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
@@ -3231,5 +3253,78 @@ handler h (amount : U64) : State.A -> State.A {
 }
 "#;
         parse_ok(src);
+    }
+
+    // ----- v2.8 G1: import statements -----
+
+    #[test]
+    fn parses_single_import() {
+        let s = parse_ok("spec T\nimport Token from \"spl_token\"");
+        assert_eq!(s.items.len(), 1);
+        match &s.items[0].node {
+            TopItem::Import { name, from } => {
+                assert_eq!(name, "Token");
+                assert_eq!(from, "spl_token");
+            }
+            other => panic!("expected Import, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_multiple_imports() {
+        let src = r#"spec T
+import Token from "spl_token"
+import System from "system_program"
+import MyAmm from "my_amm"
+"#;
+        let s = parse_ok(src);
+        assert_eq!(s.items.len(), 3);
+        let names: Vec<&str> = s
+            .items
+            .iter()
+            .map(|i| match &i.node {
+                TopItem::Import { name, .. } => name.as_str(),
+                other => panic!("expected Import, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(names, vec!["Token", "System", "MyAmm"]);
+    }
+
+    #[test]
+    fn import_does_not_reserve_from_as_global_keyword() {
+        // `from` is contextual to import_decl; users must still be able to
+        // pass `from = expr` as a call argument inside handler bodies.
+        let src = r#"spec T
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+
+handler h (a : U64) : State.A -> State.A {
+  call Token.transfer(from = a, to = a, amount = 1)
+}
+"#;
+        parse_ok(src);
+    }
+
+    #[test]
+    fn import_alongside_interface_and_handler() {
+        // Import + native interface + handler in the same spec all parse.
+        let src = r#"spec T
+import Token from "spl_token"
+
+interface Local {
+  program_id "11111111111111111111111111111111"
+  handler ping { discriminant "0x01" accounts { } }
+}
+
+type State | A of { x : U64 }
+
+handler h : State.A -> State.A { effect { x := 1 } }
+"#;
+        let s = parse_ok(src);
+        // Three top items: Import, Interface, Adt, Handler.
+        assert_eq!(s.items.len(), 4);
+        assert!(matches!(s.items[0].node, TopItem::Import { .. }));
+        assert!(matches!(s.items[1].node, TopItem::Interface(_)));
     }
 }

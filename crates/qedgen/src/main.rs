@@ -21,6 +21,7 @@ mod lean_gen;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
+mod qed_manifest;
 mod ratchet;
 mod reconcile;
 mod rust_codegen_util;

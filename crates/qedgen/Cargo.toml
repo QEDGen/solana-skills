@@ -26,6 +26,7 @@ proc-macro2 = { workspace = true }
 tar = "0.4"
 flate2 = "1"
 chumsky = "0.12"
+toml = { workspace = true }
 
 # ratchet — upgrade-safety + mainnet-readiness lint.
 # `ratchet-anchor` default-features is off to drop `ureq` (ratchet's RPC

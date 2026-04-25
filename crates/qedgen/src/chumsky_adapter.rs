@@ -14,7 +14,7 @@ use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
     FlowKind, ParsedAccountType, ParsedCall, ParsedCallArg, ParsedCover, ParsedEnsures,
     ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
-    ParsedHandlerAccount, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
+    ParsedHandlerAccount, ParsedImport, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
     ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
     ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedUpstream, ParsedVariant,
     SbpfPropertyKind,
@@ -1985,6 +1985,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Interface(iface) => {
                 out.interfaces.push(adapt_interface(iface, consts, &env));
             }
+            TopItem::Import { name, from } => {
+                out.imports.push(ParsedImport {
+                    name: name.clone(),
+                    from: from.clone(),
+                });
+            }
             TopItem::Pragma(p) => {
                 // Record the pragma name for target inference. Any given
                 // pragma may appear at most once per spec; duplicates are
@@ -2741,5 +2747,31 @@ property forall_u64 :
             "rust must not contain ∀: {}",
             rust
         );
+    }
+
+    // ----- v2.8 G1: adapter populates ParsedSpec.imports -----
+
+    #[test]
+    fn adapter_populates_imports() {
+        let src = r#"spec T
+import Token from "spl_token"
+import MyAmm from "my_amm"
+"#;
+        let spec = parse_str(src).expect("parse");
+        assert_eq!(spec.imports.len(), 2);
+        assert_eq!(spec.imports[0].name, "Token");
+        assert_eq!(spec.imports[0].from, "spl_token");
+        assert_eq!(spec.imports[1].name, "MyAmm");
+        assert_eq!(spec.imports[1].from, "my_amm");
+    }
+
+    #[test]
+    fn adapter_imports_empty_for_specs_without_import_stmts() {
+        let src = r#"spec T
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec.imports.is_empty());
     }
 }

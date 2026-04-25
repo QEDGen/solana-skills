@@ -650,6 +650,12 @@ pub struct ParsedSpec {
     /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
     pub interfaces: Vec<ParsedInterface>,
 
+    /// `import Name from "key"` statements at the top of the spec. The
+    /// resolver consumes these together with `qed.toml` to fetch the
+    /// referenced sources and merge their `interface` declarations into
+    /// `interfaces` above. See docs/design/spec-composition.md §3.
+    pub imports: Vec<ParsedImport>,
+
     /// Names of `pragma <name> { ... }` blocks that appeared in the spec.
     /// Used for target inference (`sbpf` → assembly target) and for
     /// platform-scoped feature flags in backends.
@@ -681,6 +687,18 @@ impl ParsedSpec {
     pub fn is_assembly_target(&self) -> bool {
         self.has_pragma("sbpf")
     }
+}
+
+/// `import Name from "key"` statement, captured before resolution.
+/// `name` is the local bound name in the importing spec; `from` is the
+/// key into `qed.toml`'s `[dependencies]` table. Once the resolver runs,
+/// the imported `interface` blocks land in `ParsedSpec.interfaces` keyed
+/// by `name`.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedImport {
+    pub name: String,
+    pub from: String,
 }
 
 /// Callee contract: program ID + per-handler shape (and optional effects).

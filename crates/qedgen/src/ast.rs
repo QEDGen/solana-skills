@@ -97,6 +97,15 @@ pub enum TopItem {
     /// Declares a callee's public contract so a caller can `call Name.h(...)`
     /// with backend-appropriate artifacts. See docs/design/spec-composition.md §2.
     Interface(InterfaceDecl),
+    /// `import Name from "key"` — bind a local name to an interface declared in
+    /// a dependency. The `from` string is a key into `qed.toml`'s
+    /// `[dependencies]` table; the resolver fetches the source (github / path)
+    /// and merges the imported `interface` declarations into this spec's
+    /// namespace under the given local `name`. See docs/design/spec-composition.md §3.
+    Import {
+        name: String,
+        from: String,
+    },
     /// `pragma <name> { <top_item>* }` — platform-specific namespace.
     ///
     /// Keeps the core DSL platform-agnostic while letting target-specific
