@@ -1347,7 +1347,17 @@ fn walk_apps(
                     .iter()
                     .map(|n| infer_lean_type(&n.node, field_types, param_types))
                     .collect();
-                out.push((func.clone(), arg_types, "Prop".to_string()));
+                // Bool, not Prop. The original v2.7.1 F5 emission used
+                // `→ Prop`, which lands at codegen but breaks `lake build`
+                // — `requires` / `ensures` clauses lower to a transition
+                // function's `if`-guard, which Lean requires to be
+                // `Decidable`. `axiom foo : T → Prop` is opaque and
+                // noncomputable, so the transition fails to compile.
+                // `Bool` is auto-`Decidable` and lifts cleanly into
+                // `Prop` positions via the standard `b = true` coercion
+                // that the call-site renderer already produces. See
+                // issue #12.
+                out.push((func.clone(), arg_types, "Bool".to_string()));
             }
             for n in args {
                 walk_apps(&n.node, field_types, param_types, out, seen);
