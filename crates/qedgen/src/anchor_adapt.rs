@@ -917,44 +917,68 @@ mod tests {
         assert!(contents.contains("handler ping"));
     }
 
-    /// Snapshot test against the worked-example fixture in
-    /// `examples/anchor-brownfield-demo/`. Holds the renderer steady
-    /// across refactors and gives the README's "the output matches
-    /// before.qedspec byte-for-byte" claim something to rest on.
+    /// Repo-root-relative snapshot driver. Tests assert that
+    /// `adapt(<repo>/<demo_rel>)` matches `<repo>/<demo_rel>/before.qedspec`
+    /// byte-for-byte. Locks the renderer + classifier output across
+    /// the four shipped fixtures.
     ///
-    /// To regenerate after an intentional renderer change:
+    /// To regenerate after an intentional renderer change, run e.g.:
     ///   cargo run -- adapt --program examples/anchor-brownfield-demo \
     ///     --out examples/anchor-brownfield-demo/before.qedspec
-    #[test]
-    fn adapt_matches_brownfield_demo_snapshot() {
+    fn assert_snapshot(demo_rel: &str) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        // Tests run from `crates/qedgen/`; walk up to the repo root.
         let repo_root = Path::new(manifest_dir)
             .parent()
             .and_then(|p| p.parent())
             .expect("repo root must be two parents up from CARGO_MANIFEST_DIR");
-        let demo = repo_root.join("examples/anchor-brownfield-demo");
+        let demo = repo_root.join(demo_rel);
         let expected_path = demo.join("before.qedspec");
 
         let expected = std::fs::read_to_string(&expected_path).unwrap_or_else(|e| {
             panic!(
                 "could not read snapshot at {}: {}\n\
-                 (run `cargo run -- adapt --program examples/anchor-brownfield-demo \\\n\
-                 --out examples/anchor-brownfield-demo/before.qedspec` to create it)",
+                 (run `cargo run -- adapt --program {} --out {}` to create it)",
                 expected_path.display(),
                 e,
+                demo_rel,
+                expected_path.display(),
             )
         });
 
-        let actual = adapt(&demo).expect("adapter must succeed on the demo fixture");
+        let actual = adapt(&demo).expect("adapter must succeed on the fixture");
 
         assert_eq!(
-            actual, expected,
-            "snapshot drift in examples/anchor-brownfield-demo/before.qedspec.\n\
-             If this is intentional, regenerate with:\n\
-             cargo run -- adapt --program examples/anchor-brownfield-demo \\\n\
-                --out examples/anchor-brownfield-demo/before.qedspec",
+            actual,
+            expected,
+            "snapshot drift in {}/before.qedspec.\n\
+             If intentional, regenerate with:\n\
+             cargo run -- adapt --program {} --out {}",
+            demo_rel,
+            demo_rel,
+            expected_path.display(),
         );
+    }
+
+    /// Anchor-scaffold style: free-fn forwarders into
+    /// `instructions/<name>.rs`. Exercises `FreeFn` classifier.
+    #[test]
+    fn adapt_matches_brownfield_demo_snapshot() {
+        assert_snapshot("examples/anchor-brownfield-demo");
+    }
+
+    /// Marinade style: `ctx.accounts.<method>(...)` forwarder.
+    /// Exercises `AccountsMethod` classifier + impl-method resolution.
+    #[test]
+    fn adapt_matches_marinade_style_demo_snapshot() {
+        assert_snapshot("examples/anchor-marinade-style-demo");
+    }
+
+    /// Squads V4 style: `<Type>::<method>(ctx, args)` forwarder.
+    /// Exercises `TypeAssoc` classifier + impl-method resolution
+    /// (impls inline with the program mod, not in a sibling file).
+    #[test]
+    fn adapt_matches_squads_style_demo_snapshot() {
+        assert_snapshot("examples/anchor-squads-style-demo");
     }
 
     #[test]
