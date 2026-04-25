@@ -831,8 +831,10 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
             .join("\n");
         anyhow::anyhow!("parse error in {}:\n{}", path.display(), msg)
     })?;
-    let parsed = crate::chumsky_adapter::adapt(&typed);
+    let mut parsed = crate::chumsky_adapter::adapt(&typed);
     crate::chumsky_adapter::typecheck_spec(&typed, &parsed)?;
+    let manifest_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    resolve_and_merge_imports(&mut parsed, manifest_dir)?;
     Ok(parsed)
 }
 
@@ -889,9 +891,83 @@ fn parse_spec_dir(dir: &Path) -> Result<ParsedSpec> {
         name: merged_name.expect("non-empty files implies non-empty name"),
         items: merged_items,
     };
-    let parsed = crate::chumsky_adapter::adapt(&merged);
+    let mut parsed = crate::chumsky_adapter::adapt(&merged);
     crate::chumsky_adapter::typecheck_spec(&merged, &parsed)?;
+    resolve_and_merge_imports(&mut parsed, dir)?;
     Ok(parsed)
+}
+
+/// Resolve every `import Name from "key"` statement against `qed.toml` in
+/// `manifest_dir`, fetch the imported source(s) (path or github), parse
+/// each, and merge the matching `interface Name { ... }` declaration into
+/// `parsed.interfaces`.
+///
+/// v2.8 stance 1: shallow resolution. Imported specs that themselves use
+/// `import` statements are not transitively walked — each consumer
+/// declares its own direct deps in its own qed.toml.
+///
+/// The bound name in `import X from "y"` must match an `interface X { ... }`
+/// declared in the imported source. If it doesn't, this is a hard error
+/// — v2.8 doesn't support import aliasing.
+fn resolve_and_merge_imports(parsed: &mut ParsedSpec, manifest_dir: &Path) -> anyhow::Result<()> {
+    if parsed.imports.is_empty() {
+        return Ok(());
+    }
+
+    // Locate qed.toml. Required when imports are present.
+    let manifest = match crate::qed_manifest::load_from_dir(manifest_dir)? {
+        Some(m) => m,
+        None => anyhow::bail!(
+            "spec has {} `import` statement(s) but no `qed.toml` next to it (expected at {})",
+            parsed.imports.len(),
+            manifest_dir
+                .join(crate::qed_manifest::MANIFEST_FILENAME)
+                .display(),
+        ),
+    };
+
+    let resolved =
+        crate::import_resolver::resolve_imports(&parsed.imports, &manifest, manifest_dir)?;
+
+    for r in resolved {
+        // Multi-file imported deps not yet supported — single .qedspec only.
+        // Remove this guard in v2.9 if real adopters need fragmented library specs.
+        anyhow::ensure!(
+            r.sources.len() == 1,
+            "import `{}` resolved to {} source files; v2.8 supports single-file imports only",
+            r.bound_name,
+            r.sources.len(),
+        );
+
+        let (src_path, src_bytes) = &r.sources[0];
+        let imported = crate::chumsky_adapter::parse_str(src_bytes).with_context(|| {
+            format!(
+                "parsing imported spec `{}` from {} (dep key `{}`)",
+                r.bound_name,
+                src_path.display(),
+                r.dep_key,
+            )
+        })?;
+
+        // Imported source must declare an `interface <bound_name>`.
+        let iface = imported
+            .interfaces
+            .iter()
+            .find(|i| i.name == r.bound_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "import `{}` from `{}` — imported source at {} declares no `interface {}` block",
+                    r.bound_name,
+                    r.dep_key,
+                    src_path.display(),
+                    r.bound_name,
+                )
+            })?;
+
+        parsed.interfaces.push(iface.clone());
+    }
+
+    Ok(())
 }
 
 /// Read the source text of a spec path — single file or directory of
@@ -4447,6 +4523,8 @@ handler tick : State.Active -> State.Active {
         );
     }
 
+    // ----- PDA seed collision (PR #14) -----
+
     #[test]
     fn pda_seed_collision_fires_for_identical_seeds() {
         let spec = crate::chumsky_adapter::parse_str(
@@ -4509,5 +4587,149 @@ handler tick : State.Active -> State.Active {
             "must warn on same literals but different variable seeds; got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
+    }
+
+    // ----- v2.8 G1: import resolution + interface merge -----
+
+    #[test]
+    fn parse_spec_file_resolves_path_imports_and_merges_interface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Imported interface lives at <dir>/token.qedspec.
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec SplTokenInterface
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        // Manifest declares a path source.
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+
+        // Consumer spec imports the interface.
+        let consumer_path = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer_path).expect("parse + resolve should succeed");
+        assert_eq!(parsed.imports.len(), 1);
+        assert_eq!(parsed.imports[0].name, "Token");
+        // Token interface from token.qedspec should now be in parsed.interfaces.
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Token"),
+            "Token interface should be merged into parsed.interfaces; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_imports_present_but_no_qed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer_path = tmp.path().join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer_path).unwrap_err());
+        assert!(
+            err.contains("no `qed.toml`"),
+            "expected `no qed.toml` error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_errors_when_bound_name_not_in_imported_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        std::fs::write(
+            spec_dir.join("other.qedspec"),
+            r#"spec OtherIface
+interface NotToken {
+  program_id "11111111111111111111111111111111"
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "other.qedspec" }
+"#,
+        )
+        .unwrap();
+        let consumer_path = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer_path,
+            r#"spec Escrow
+import Token from "spl_token"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let err = format!("{:#}", parse_spec_file(&consumer_path).unwrap_err());
+        assert!(
+            err.contains("declares no `interface Token`"),
+            "expected `no interface Token` error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_file_no_imports_does_not_require_qed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("plain.qedspec");
+        std::fs::write(
+            &path,
+            r#"spec Plain
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+        // No qed.toml, no imports — should parse cleanly.
+        let parsed = parse_spec_file(&path).unwrap();
+        assert!(parsed.imports.is_empty());
     }
 }
