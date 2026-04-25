@@ -2609,10 +2609,60 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // to the same on-chain address — a common source of account confusion bugs.
     warnings.extend(check_pda_collisions(spec));
 
+    // v2.8 F8: when a handler uses checked-arithmetic effects (`+=` / `-=`),
+    // the generated Rust references `<ProgramName>Error::MathOverflow`. If
+    // the spec doesn't declare a `MathOverflow` Error variant, the cargo
+    // build will fail loudly. Surface that ahead of time so users see it
+    // at `qedgen check` rather than at `cargo build`.
+    warnings.extend(check_checked_arith_needs_math_overflow(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
     warnings
+}
+
+/// v2.8 F8: emit a `[missing_math_overflow]` warning when a spec uses
+/// checked arithmetic effects (`+=` / `-=` lower to `checked_add` /
+/// `checked_sub`, which return `<ProgramName>Error::MathOverflow` on
+/// overflow) but the spec's `type Error | …` block doesn't declare a
+/// `MathOverflow` variant. Without the declaration, `cargo build` of
+/// the generated code fails with "unknown variant MathOverflow". Surfacing
+/// this at lint time keeps the pre-flight cycle tight.
+fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let has_math_overflow = spec.error_codes.iter().any(|c| c == "MathOverflow");
+    if has_math_overflow {
+        return Vec::new();
+    }
+    let handlers_with_checked: Vec<String> = spec
+        .handlers
+        .iter()
+        .filter(|h| {
+            h.effects
+                .iter()
+                .any(|(_, op_kind, _)| op_kind == "add" || op_kind == "sub")
+        })
+        .map(|h| h.name.clone())
+        .collect();
+    if handlers_with_checked.is_empty() {
+        return Vec::new();
+    }
+    let names = handlers_with_checked.join(", ");
+    vec![CompletenessWarning {
+        rule: "missing_math_overflow".to_string(),
+        severity: Severity::Warning,
+        priority: 2,
+        message: format!(
+            "handler(s) [{}] use checked-arithmetic effects (`+=` / `-=`), but `type Error` doesn't declare a `MathOverflow` variant. The generated Rust references `{}Error::MathOverflow` and won't compile without it.",
+            names,
+            crate::codegen::to_pascal_case(&spec.program_name),
+        ),
+        subject: None,
+        fix: "Add `MathOverflow` to your `type Error | …` block. Example:\n\n    type Error\n      | MathOverflow\n      | …\n\nOr opt out of checked semantics per-effect with `+=!` (saturating) or `+=?` (wrapping).".to_string(),
+        example: None,
+        counterexample: None,
+        fix_options: vec![],
+    }]
 }
 
 /// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
@@ -4731,6 +4781,77 @@ handler tick : State.Active -> State.Active {
                 .any(|w| w.rule == "pda_seed_possible_collision"),
             "must warn on same literals but different variable seeds; got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ----- v2.8 F8: missing_math_overflow lint -----
+
+    #[test]
+    fn missing_math_overflow_fires_when_checked_arith_used_without_declaration() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+program_id "11111111111111111111111111111111"
+type State | Active of { balance : U64 }
+type Error | InvalidAmount
+
+handler deposit (n : U64) : State.Active -> State.Active {
+  permissionless
+  effect { balance += n }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "missing_math_overflow")
+            .expect("expected missing_math_overflow warning");
+        assert!(hit.message.contains("deposit"));
+        assert!(hit.message.contains("PoolError::MathOverflow"));
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_variant_is_declared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+program_id "11111111111111111111111111111111"
+type State | Active of { balance : U64 }
+type Error | MathOverflow | InvalidAmount
+
+handler deposit (n : U64) : State.Active -> State.Active {
+  permissionless
+  effect { balance += n }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "should not warn when MathOverflow is declared in Error sum"
+        );
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_no_checked_arithmetic() {
+        // Spec uses only `effect { x := ... }` (set, no overflow path).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Reset
+program_id "11111111111111111111111111111111"
+type State | Active of { counter : U64 }
+type Error | InvalidAmount
+
+handler clear : State.Active -> State.Active {
+  permissionless
+  effect { counter := 0 }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "no checked arith → no MathOverflow obligation"
         );
     }
 

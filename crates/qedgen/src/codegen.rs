@@ -836,12 +836,22 @@ fn mechanize_effect(
     // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
     // `wrapping_add` which produced Kani false-positives and didn't match
     // production behavior. Explicit `+=!` / `+=?` opt into saturating /
-    // wrapping. `MathOverflow` is the default error code; specs with an
-    // `Error` sum can surface it via the existing error_codes pipeline.
+    // wrapping.
+    //
+    // v2.8 F8: thread the user-declared Error sum through. Pre-F8 the
+    // generated code referenced a non-existent `ErrorCode::MathOverflow`,
+    // which only worked when no effect actually exercised checked
+    // arithmetic. Now we emit `<ProgramName>Error::MathOverflow`, which
+    // matches the Anchor `#[error_code]` enum generated alongside.
+    // Specs that use `+=` / `-=` / `*=` should declare a `MathOverflow`
+    // variant in their `type Error | ...` block; the
+    // `effect_uses_checked_arith_without_math_overflow` lint surfaces
+    // missing declarations.
+    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let line = match op_kind.as_str() {
         "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
         "add" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "add_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_add({rhs});\n"
@@ -850,7 +860,7 @@ fn mechanize_effect(
             "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
         ),
         "sub" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or(ErrorCode::MathOverflow)?;\n"
+            "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "sub_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_sub({rhs});\n"
@@ -1494,6 +1504,43 @@ handler send : State.Active -> State.Active {
         assert!(
             try_emit_anchor_cpi(call, handler, &spec).is_none(),
             "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+        );
+    }
+
+    // ----- v2.8 F8: Error-sum threading via mechanize_effect -----
+
+    #[test]
+    fn mechanize_effect_references_program_error_enum_for_checked_add() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec MyProgram
+program_id "11111111111111111111111111111111"
+type State | Active of { pool : U64 }
+type Error | MathOverflow
+
+handler bump (n : U64) : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state : writable
+  }
+  effect { pool += n }
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
+        let state_acct = find_state_account(handler).expect("state account");
+        let effect = handler.effects.first().unwrap();
+        let rendered = mechanize_effect(effect, state_acct, handler, &spec).expect("mechanized");
+        // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
+        // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
+        // user's declared Error sum.
+        assert!(
+            rendered.contains("MyProgramError::MathOverflow"),
+            "expected program-specific Error enum; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("ErrorCode::MathOverflow"),
+            "should not reference the legacy non-existent ErrorCode enum; got:\n{rendered}"
         );
     }
 
