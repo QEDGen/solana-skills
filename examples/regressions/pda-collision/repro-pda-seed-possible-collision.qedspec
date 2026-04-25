@@ -1,0 +1,8 @@
+spec PdaPossibleCollisionRepro
+
+// Two PDAs with same literal seed but different variable seeds — qedgen check
+// must emit pda_seed_possible_collision (priority 2).
+pda order_a ["order", user_a]
+pda order_b ["order", user_b]
+
+state { balance : U64 }
