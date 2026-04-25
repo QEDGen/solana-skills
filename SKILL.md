@@ -89,9 +89,28 @@ An existing Rust program being onboarded to qedgen for the first time.
 
 1. **Read the source code** — Understand the program's state, instructions, guards, and invariants directly from Rust source. This is always the ground truth.
 2. **Check for existing Rust tests** — Look for `tests/`, `#[cfg(test)]`, or `#[cfg(kani)]` modules. Existing tests reveal the program's testing patterns, helper infrastructure, and what's already covered. These shape how you write Kani harnesses (see "Brownfield projects" under Code generation).
-3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path> --format qedspec` to generate a `.qedspec` scaffold, then review TODO items against the source and run `$QEDGEN codegen --spec <path> --lean` to produce `Spec.lean`.
-4. **Rust source only** (no IDL, no framework) → Extract the spec from source using LSP. See "Writing a .qedspec from Rust source" below.
-5. **Nothing to start from** → Read the source code and ask scoping questions (Step 2).
+3. **Anchor program** (`#[program] pub mod` exists) → Run `$QEDGEN adapt --program <crate-dir>` to scaffold a `.qedspec` from source. The adapter follows each `pub fn` in the `#[program]` mod to its actual handler body, picks up typed arguments + the `Context<X>` accounts struct + `#[error_code]` variants, and leaves a path breadcrumb to each handler. Edit the generated TODOs (lifecycle, requires, effect, transfers), then continue at Step 2 / 3.
+4. **IDL exists** (`target/idl/<program>.json`, no source) → Run `$QEDGEN spec --idl <path> --format qedspec` for an ABI-only scaffold. Less precise than `qedgen adapt` (no handler bodies, no error variants), but works when only the IDL is available.
+5. **Native / non-Anchor Rust source** (no `#[program]`) → Extract the spec using LSP. See "Writing a .qedspec from Rust source" below.
+6. **Nothing to start from** → Read the source code and ask scoping questions (Step 2).
+
+#### After the .qedspec is filled in: the `#[qed]` drift loop
+
+Once the spec covers each handler, paint `#[qed]` attributes on the handlers so future body edits trip a compile error:
+
+```
+$QEDGEN adapt --program <crate-dir> --spec <path-to>.qedspec
+```
+
+Emits one `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ...)]` line per spec handler with the matching source path. Paste each above its handler `pub fn`. The `qedgen-macros` crate recomputes both hashes at compile time — body edits or spec edits without a re-run print a diff and break the build until you re-paste. v2.9 supports inline + free-fn handler shapes; method-shape forwarders (Marinade `ctx.accounts.process(...)` and Squads `Type::method(ctx, args)`) carry through scaffold mode with a `// note: …` instead of an attribute (impl-method support lands in v2.10).
+
+Cross-check spec coverage against the live program in CI:
+
+```
+$QEDGEN check --spec <path> --anchor-project <crate-dir>
+```
+
+Errors when the spec declares a handler the program doesn't have, or vice versa. Pure read; pairs with `--frozen` for full CI gating.
 
 ### Writing a .qedspec from Rust source
 
