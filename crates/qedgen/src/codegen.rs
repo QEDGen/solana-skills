@@ -4,6 +4,165 @@ use std::path::Path;
 use crate::check::{self, ParsedHandler, ParsedSpec};
 use crate::fingerprint::SpecFingerprint;
 use crate::spec_hash;
+use crate::Target;
+
+/// Placeholder string spliced into the `hash = "..."` field of the
+/// `#[qed(verified, ...)]` attribute during scaffold rendering. The
+/// fixup pass at the end of `render_handler_scaffold` parses the
+/// rendered impl method, computes the real body hash via
+/// `body_hash_for_impl_fn`, and string-replaces this placeholder.
+/// Picked to be obviously not a SHA-hex value so a missed fixup is
+/// caught by the macro's "expected hash format" error rather than
+/// silently shipping a placeholder.
+const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
+
+/// Per-framework strings for the surface that differs between Anchor
+/// and Quasar codegen (imports, ctx type, return type, lifetime,
+/// program-mod visibility, discriminator attribute).
+///
+/// All other generated content (`#[derive(Accounts)]` shape, account
+/// constraints, `ctx.accounts.handler(...)` forwarder pattern, guard
+/// module shape) is identical across the two — both frameworks support
+/// the accounts-method forwarder idiom that the rest of the emitter
+/// produces.
+#[derive(Clone, Copy)]
+struct FrameworkSurface {
+    /// Crate-root attributes line, e.g. `"#![no_std]\n\n"`. Empty for
+    /// targets that build against std.
+    crate_attrs: &'static str,
+    /// `"use anchor_lang::prelude::*;\n"` or
+    /// `"use quasar_lang::prelude::*;\n"`. Caller appends the trailing
+    /// blank line (some generators add additional imports first).
+    prelude_import: &'static str,
+    /// Type written as `<context_type>::<X>` in handler signatures —
+    /// `"Context"` (Anchor) or `"Ctx"` (Quasar).
+    context_type: &'static str,
+    /// Handler return type — `"Result<()>"` (Anchor; the `Result`
+    /// alias from `anchor_lang::prelude` defaults the error to
+    /// `anchor_lang::error::Error`) or `"Result<(), ProgramError>"`
+    /// (Quasar).
+    handler_result_type: &'static str,
+    /// Lifetime threaded into `#[derive(Accounts)]` structs and impl
+    /// blocks. Anchor uses `"'info"`; Quasar's `Account<()>` doesn't
+    /// need one and uses `""`.
+    accounts_lifetime: &'static str,
+    /// Visibility keyword for the `#[program]` mod — Anchor convention
+    /// is `pub mod`, Quasar is bare `mod`.
+    program_mod_vis: &'static str,
+    /// True when each handler in the `#[program]` mod needs an
+    /// `#[instruction(discriminator = N)]` attribute. Quasar requires
+    /// it; Anchor auto-derives.
+    explicit_handler_discriminator: bool,
+    /// True when each `#[account]` struct in `state.rs` needs an
+    /// explicit `discriminator = N` parameter (Quasar) vs Anchor's
+    /// auto-derived form.
+    explicit_account_discriminator: bool,
+}
+
+impl FrameworkSurface {
+    fn for_target(target: Target) -> Self {
+        match target {
+            Target::Anchor => FrameworkSurface {
+                crate_attrs: "",
+                prelude_import: "use anchor_lang::prelude::*;\n",
+                context_type: "Context",
+                handler_result_type: "Result<()>",
+                accounts_lifetime: "'info",
+                program_mod_vis: "pub mod",
+                explicit_handler_discriminator: false,
+                explicit_account_discriminator: false,
+            },
+            Target::Quasar => FrameworkSurface {
+                crate_attrs: "#![no_std]\n\n",
+                prelude_import: "use quasar_lang::prelude::*;\n",
+                context_type: "Ctx",
+                handler_result_type: "Result<(), ProgramError>",
+                accounts_lifetime: "",
+                program_mod_vis: "mod",
+                explicit_handler_discriminator: true,
+                explicit_account_discriminator: true,
+            },
+            Target::Pinocchio => {
+                unreachable!("Pinocchio is rejected at the init dispatcher")
+            }
+        }
+    }
+
+    /// Render the lifetime parameter list for a `#[derive(Accounts)]`
+    /// struct or impl block — e.g. `"<'info>"` (Anchor) or `""`
+    /// (Quasar).
+    fn lifetime_params(&self) -> String {
+        if self.accounts_lifetime.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.accounts_lifetime)
+        }
+    }
+}
+
+/// Render the Rust type for a `#[derive(Accounts)]` field for the
+/// given target framework.
+///
+/// `is_state_account` is true when this account is the handler's
+/// writable state holder (per `find_state_account`); in that case we
+/// emit `Account<{state_name}>` (Quasar) or `Account<'info,
+/// {state_name}>` (Anchor) so the field-access path
+/// `self.<acct>.<field>` resolves through the typed inner data. For
+/// non-state accounts we fall back to the framework's neutral
+/// placeholder — `Account<()>` / `Signer` / `Program<()>` for Quasar,
+/// `AccountInfo<'info>` / `Signer<'info>` / `Program<'info, System>`
+/// for Anchor.
+fn render_account_field_type(
+    acct: &crate::check::ParsedHandlerAccount,
+    surface: &FrameworkSurface,
+    is_state_account: bool,
+    state_name: &str,
+) -> String {
+    if surface.accounts_lifetime.is_empty() {
+        // Quasar branch — bare types, no lifetime parameters. Real
+        // Quasar conventions per `~/code/blueshift/quasar/examples/`:
+        //   - `Signer` — bare
+        //   - `Program<System>` — parameterized with the program type
+        //   - `Account<T>` — bare, with the typed inner data
+        //   - `Account<Token>` / `Account<Mint>` — for token accounts
+        if acct.is_signer {
+            "Signer".to_string()
+        } else if acct.is_program {
+            // Quasar wants the program-type as a generic param. We
+            // default to `System` for the system program and let the
+            // user customise for non-System programs (tokens etc.).
+            "Program<System>".to_string()
+        } else if acct.account_type.as_deref() == Some("token") {
+            "Account<Token>".to_string()
+        } else if acct.account_type.as_deref() == Some("mint") {
+            "Account<Mint>".to_string()
+        } else if is_state_account {
+            format!("Account<{}>", state_name)
+        } else {
+            // Quasar's escape hatch for opaque accounts — same shape
+            // as Anchor's `AccountInfo`. Used for non-state,
+            // non-token accounts where the spec doesn't carry a
+            // concrete type.
+            "UncheckedAccount".to_string()
+        }
+    } else {
+        // Anchor branch — every type carries `'info`.
+        let lt = surface.accounts_lifetime;
+        if acct.is_signer {
+            format!("Signer<{}>", lt)
+        } else if acct.is_program {
+            format!("Program<{}, System>", lt)
+        } else if acct.account_type.as_deref() == Some("token") {
+            format!("Account<{}, TokenAccount>", lt)
+        } else if acct.account_type.as_deref() == Some("mint") {
+            format!("Account<{}, Mint>", lt)
+        } else if is_state_account {
+            format!("Account<{}, {}>", lt, state_name)
+        } else {
+            format!("AccountInfo<{}>", lt)
+        }
+    }
+}
 
 /// Compute a path, as a string, from a program `Cargo.toml` directory to the
 /// spec file. This value is embedded verbatim in the `#[qed(spec = "...")]`
@@ -221,7 +380,13 @@ fn marker(label: &str, fp: &SpecFingerprint, file_key: &str) -> String {
 /// stamped custom imports or extra modules onto the crate shell, regenerating
 /// it would silently clobber that edit. Paired with the per-handler
 /// `instructions/<name>.rs` skip, this keeps `qedgen codegen` idempotent.
-fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+fn generate_lib(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
+    let surface = FrameworkSurface::for_target(target);
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -245,8 +410,9 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/lib.rs"));
-    out.push_str("#![no_std]\n\n");
-    out.push_str("use anchor_lang::prelude::*;\n\n");
+    out.push_str(surface.crate_attrs);
+    out.push_str(surface.prelude_import);
+    out.push('\n');
     out.push_str("mod instructions;\nuse instructions::*;\n");
 
     if !spec.events.is_empty() {
@@ -261,7 +427,10 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
     out.push_str("#[program]\n");
-    out.push_str(&format!("mod {} {{\n", program_name));
+    out.push_str(&format!(
+        "{} {} {{\n",
+        surface.program_mod_vis, program_name
+    ));
     out.push_str("    use super::*;\n\n");
 
     for (i, handler) in spec.handlers.iter().enumerate() {
@@ -270,19 +439,19 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
         if let Some(ref doc) = handler.doc {
             out.push_str(&format!("    /// {}\n", doc));
         }
-        out.push_str(&format!("    #[instruction(discriminator = {})]\n", i));
+        if surface.explicit_handler_discriminator {
+            out.push_str(&format!("    #[instruction(discriminator = {})]\n", i));
+        }
 
-        let mut params = String::from("ctx: Ctx<");
-        params.push_str(&pascal);
-        params.push('>');
+        let mut params = format!("ctx: {}<{}>", surface.context_type, pascal);
 
         for (pname, ptype) in &handler.takes_params {
             params.push_str(&format!(", {}: {}", pname, map_type(ptype, spec)?));
         }
 
         out.push_str(&format!(
-            "    pub fn {}({}) -> Result<(), ProgramError> {{\n",
-            handler.name, params
+            "    pub fn {}({}) -> {} {{\n",
+            handler.name, params, surface.handler_result_type
         ));
 
         if handler.has_bumps() {
@@ -309,6 +478,32 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
     }
 
     out.push_str("}\n");
+
+    // Anchor: emit `#[derive(Accounts)]` structs at crate root so the
+    // `#[program]` macro can find them via `crate::<Pascal>`. Quasar
+    // keeps structs in `instructions/<name>.rs` (handled by
+    // `render_handler_scaffold`).
+    if matches!(target, Target::Anchor) {
+        let is_multi = spec.account_types.len() > 1;
+        let default_state_name = format!("{}Account", to_pascal_case(&spec.program_name));
+        out.push('\n');
+        out.push_str("// `#[derive(Accounts)]` structs live at the crate root so the\n");
+        out.push_str("// Anchor `#[program]` macro can resolve them via `crate::*`.\n");
+        out.push_str("// The handler impl blocks live next to the (always-regenerated)\n");
+        out.push_str("// guard module in `instructions/<name>.rs`.\n");
+        out.push_str("use crate::state::*;\n");
+        for handler in &spec.handlers {
+            out.push('\n');
+            out.push_str(&render_handler_accounts_struct(
+                handler,
+                spec,
+                is_multi,
+                &default_state_name,
+                &surface,
+            ));
+        }
+    }
+
     out.push_str("// ---- END GENERATED ----\n");
 
     std::fs::write(src_dir.join("lib.rs"), &out)?;
@@ -316,7 +511,13 @@ fn generate_lib(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> R
 }
 
 /// Generate src/state.rs
-fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+fn generate_state(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
+    let surface = FrameworkSurface::for_target(target);
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -324,7 +525,8 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/state.rs"));
-    out.push_str("use anchor_lang::prelude::*;\n\n");
+    out.push_str(surface.prelude_import);
+    out.push('\n');
 
     if is_multi {
         for (idx, acct) in spec.account_types.iter().enumerate() {
@@ -340,11 +542,14 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
                 String::new()
             };
 
+            let account_attr = if surface.explicit_account_discriminator {
+                format!("#[account(discriminator = {}, set_inner)]\n", idx + 1)
+            } else {
+                "#[account]\n".to_string()
+            };
             out.push_str(&format!(
-                "#[account(discriminator = {}, set_inner)]\n{}pub struct {} {{\n",
-                idx + 1,
-                pda_seeds,
-                struct_name
+                "{}{}pub struct {} {{\n",
+                account_attr, pda_seeds, struct_name
             ));
 
             for (fname, ftype) in &acct.fields {
@@ -377,9 +582,14 @@ fn generate_state(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) ->
             String::new()
         };
 
+        let account_attr = if surface.explicit_account_discriminator {
+            "#[account(discriminator = 1, set_inner)]\n"
+        } else {
+            "#[account]\n"
+        };
         out.push_str(&format!(
-            "#[account(discriminator = 1, set_inner)]\n{}pub struct {} {{\n",
-            pda_seeds, state_name
+            "{}{}pub struct {} {{\n",
+            account_attr, pda_seeds, state_name
         ));
 
         for (fname, ftype) in &spec.state_fields {
@@ -433,20 +643,33 @@ fn gen_pda_seeds_attr(
 }
 
 /// Generate src/events.rs (only if events are declared)
-fn generate_events(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+fn generate_events(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
     if spec.events.is_empty() {
         return Ok(());
     }
 
+    let surface = FrameworkSurface::for_target(target);
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/events.rs"));
-    out.push_str("use anchor_lang::prelude::*;\n\n");
+    out.push_str(surface.prelude_import);
+    out.push('\n');
 
     for (i, event) in spec.events.iter().enumerate() {
-        out.push_str(&format!("#[event(discriminator = {})]\n", i + 1));
+        if surface.explicit_account_discriminator {
+            // Quasar uses the same explicit-discriminator convention
+            // for events as for accounts.
+            out.push_str(&format!("#[event(discriminator = {})]\n", i + 1));
+        } else {
+            out.push_str("#[event]\n");
+        }
         out.push_str(&format!("pub struct {} {{\n", event.name));
         for (fname, ftype) in &event.fields {
             out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
@@ -461,11 +684,17 @@ fn generate_events(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 }
 
 /// Generate src/errors.rs (only if error codes are declared)
-fn generate_errors(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+fn generate_errors(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
     if spec.error_codes.is_empty() {
         return Ok(());
     }
 
+    let surface = FrameworkSurface::for_target(target);
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -473,7 +702,8 @@ fn generate_errors(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
 
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/errors.rs"));
-    out.push_str("use anchor_lang::prelude::*;\n\n");
+    out.push_str(surface.prelude_import);
+    out.push('\n');
 
     out.push_str("#[error_code]\n");
     out.push_str(&format!("pub enum {} {{\n", error_name));
@@ -501,6 +731,7 @@ fn generate_instructions(
     fp: &SpecFingerprint,
     spec_path: &Path,
     output_dir: &Path,
+    target: Target,
 ) -> Result<()> {
     let instr_dir = output_dir.join("src").join("instructions");
     std::fs::create_dir_all(&instr_dir)?;
@@ -514,10 +745,17 @@ fn generate_instructions(
     for handler in &spec.handlers {
         mod_out.push_str(&format!("pub mod {};\n", handler.name));
     }
-    mod_out.push('\n');
-    for handler in &spec.handlers {
-        let pascal = to_pascal_case(&handler.name);
-        mod_out.push_str(&format!("pub use {}::{};\n", handler.name, pascal));
+    // Quasar: re-export the `#[derive(Accounts)]` structs that live in
+    // `instructions/<name>.rs` so the `#[program]` mod's
+    // `use super::*;` brings them into scope. Anchor: structs live in
+    // lib.rs at crate root, so no re-export is needed (and emitting
+    // one would fail because the module no longer defines them).
+    if matches!(target, Target::Quasar) {
+        mod_out.push('\n');
+        for handler in &spec.handlers {
+            let pascal = to_pascal_case(&handler.name);
+            mod_out.push_str(&format!("pub use {}::{};\n", handler.name, pascal));
+        }
     }
     mod_out.push_str("// ---- END GENERATED ----\n");
     std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
@@ -547,6 +785,7 @@ fn generate_instructions(
             &default_state_name,
             &spec_src,
             &spec_attr,
+            target,
         )?;
         std::fs::write(&handler_path, &out)?;
     }
@@ -615,11 +854,24 @@ fn try_emit_anchor_cpi(
         .iter()
         .find(|i| i.name == call.target_interface)?;
 
-    // Only the canonical SPL Token program is supported in v2.8.
-    if iface.program_id.as_deref() != Some(SPL_TOKEN_PROGRAM_ID) {
-        return None;
+    // SPL Token gets the special-case `anchor_spl::token::*` shapes
+    // (typed accounts structs + the existing token::transfer / mint_to /
+    // burn / initialize_account / close_account helpers — fewer lines of
+    // generated code, idiomatic for the bulk of CPI traffic).
+    if iface.program_id.as_deref() == Some(SPL_TOKEN_PROGRAM_ID) {
+        return emit_spl_token_cpi(call, handler);
     }
 
+    // Every other Anchor program gets the generic `invoke` shape
+    // (v2.9 G3): sighash discriminator + Borsh-serialized args +
+    // AccountMeta synthesis from the interface's accounts block.
+    emit_generic_anchor_cpi(call, handler, iface)
+}
+
+/// SPL Token dispatcher. Routes to the right `anchor_spl::token` helper
+/// per the called handler's name. Returns None on unrecognized handlers
+/// (the caller falls back to comment + `todo!()`).
+fn emit_spl_token_cpi(call: &crate::check::ParsedCall, handler: &ParsedHandler) -> Option<String> {
     let token_program_acct = find_token_program_account(handler)?;
     let prog_name = &token_program_acct.name;
 
@@ -709,8 +961,200 @@ fn find_token_program_account(
         .find(|a| a.is_program && a.name == "token_program")
         .or_else(|| {
             let programs: Vec<_> = handler.accounts.iter().filter(|a| a.is_program).collect();
-            (programs.len() == 1).then_some(programs[0])
+            // .then(...) is lazy; .then_some(programs[0]) would evaluate
+            // the index even when len is 0 and panic.
+            (programs.len() == 1).then(|| programs[0])
         })
+}
+
+// ----------------------------------------------------------------------------
+// v2.9 G3 — generic Anchor CPI codegen
+// ----------------------------------------------------------------------------
+
+/// Compute Anchor's instruction discriminator for a handler:
+/// `Sha256("global:<handler_name>")[..8]`. This is the on-the-wire byte
+/// prefix every Anchor instruction starts with — matches `anchor-lang`'s
+/// `Discriminator` derive macro.
+fn anchor_sighash(handler_name: &str) -> [u8; 8] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{}", handler_name).as_bytes());
+    let result = hasher.finalize();
+    let mut sighash = [0u8; 8];
+    sighash.copy_from_slice(&result[..8]);
+    sighash
+}
+
+/// Find the handler-side `<name> : program` account that points at a
+/// non-SPL-Token target. Convention (mirrors `find_token_program_account`):
+///   1. Prefer an account named `<interface_name_snake>_program`
+///      (e.g. interface `MyAmm` → handler account `my_amm_program`).
+///   2. Fall back to the unique `is_program` account if exactly one
+///      exists (excluding any account named `token_program`, which is
+///      reserved for SPL Token interactions and would only confuse a
+///      generic-CPI dispatch).
+///   3. Otherwise None — caller emits comment + `todo!()`.
+fn find_program_account_for_interface<'a>(
+    handler: &'a ParsedHandler,
+    iface_name: &str,
+) -> Option<&'a crate::check::ParsedHandlerAccount> {
+    let expected_name = format!("{}_program", to_snake_case(iface_name));
+    handler
+        .accounts
+        .iter()
+        .find(|a| a.is_program && a.name == expected_name)
+        .or_else(|| {
+            let programs: Vec<_> = handler
+                .accounts
+                .iter()
+                .filter(|a| a.is_program && a.name != "token_program")
+                .collect();
+            // .then(...) is lazy; .then_some(programs[0]) would evaluate
+            // the index even when len is 0 and panic.
+            (programs.len() == 1).then(|| programs[0])
+        })
+}
+
+/// Convert PascalCase to snake_case. Used to map an interface name
+/// (`MyAmm`) to its conventional handler-side program account name
+/// (`my_amm_program`). Single-pass — adds an underscore before each
+/// uppercase letter (except the first) and lowercases the result.
+fn to_snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Emit a generic `solana_program::program::invoke` CPI shape for any
+/// Anchor program that isn't SPL Token. Returns None when:
+/// - the called handler isn't declared in the interface (unknown name);
+/// - no program account is reachable in the calling handler (caller
+///   falls back to comment + `todo!()` so the user can wire it manually).
+///
+/// Emitted shape:
+///
+/// ```rust
+/// {
+///     let mut ix_data: Vec<u8> = vec![<sighash bytes>];
+///     <BorshSerialize each value arg>::serialize(&mut ix_data)?;
+///     let ix = solana_program::instruction::Instruction {
+///         program_id: solana_program::pubkey!("<iface_program_id>"),
+///         accounts: vec![
+///             AccountMeta::new(self.<acct>.key(), <is_signer>),
+///             AccountMeta::new_readonly(self.<acct>.key(), <is_signer>),
+///             // ... per the interface's accounts block, in declared order
+///         ],
+///         data: ix_data,
+///     };
+///     solana_program::program::invoke(&ix, &[
+///         self.<acct>.to_account_info(),
+///         // ... + the program account
+///     ])?;
+/// }
+/// ```
+fn emit_generic_anchor_cpi(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    iface: &crate::check::ParsedInterface,
+) -> Option<String> {
+    let program_id = iface.program_id.as_deref()?;
+    let iface_handler = iface
+        .handlers
+        .iter()
+        .find(|h| h.name == call.target_handler)?;
+    let program_acct = find_program_account_for_interface(handler, &iface.name)?;
+
+    let sighash = anchor_sighash(&call.target_handler);
+    let sighash_literal = sighash
+        .iter()
+        .map(|b| format!("0x{:02x}", b))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Collect (interface account name → caller's rust_expr at the call
+    // site) so each AccountMeta and AccountInfo entry can address the
+    // caller-side handler account.
+    let arg_account_lookup: std::collections::HashMap<&str, &str> = call
+        .args
+        .iter()
+        .filter(|a| iface_handler.accounts.iter().any(|ia| ia.name == a.name))
+        .map(|a| (a.name.as_str(), a.rust_expr.as_str()))
+        .collect();
+
+    let mut out = String::new();
+    out.push_str("        {\n");
+    out.push_str(&format!(
+        "            // Generic Anchor CPI to {}.{} (v2.9 G3).\n",
+        iface.name, call.target_handler,
+    ));
+    out.push_str("            use anchor_lang::prelude::*;\n");
+    out.push_str("            use anchor_lang::solana_program::program::invoke;\n");
+    out.push_str(
+        "            use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};\n",
+    );
+    out.push_str("            use anchor_lang::AnchorSerialize;\n\n");
+
+    // Discriminator + Borsh-serialized handler params.
+    out.push_str(&format!(
+        "            let mut ix_data: Vec<u8> = vec![{}];\n",
+        sighash_literal,
+    ));
+    for (param_name, _) in &iface_handler.params {
+        let arg = call.args.iter().find(|a| &a.name == param_name)?;
+        let resolved = resolve_call_arg_for_amount(&arg.rust_expr, handler);
+        out.push_str(&format!(
+            "            AnchorSerialize::serialize(&{}, &mut ix_data).map_err(|_| ProgramError::Custom(0))?;\n",
+            resolved,
+        ));
+    }
+    out.push('\n');
+
+    // AccountMeta vec, in interface-declared order. Match writable / signer
+    // role flags from the interface declaration.
+    out.push_str("            let accounts = vec![\n");
+    for ia in &iface_handler.accounts {
+        let caller_acct = arg_account_lookup.get(ia.name.as_str())?;
+        let constructor = if ia.is_writable {
+            "AccountMeta::new"
+        } else {
+            "AccountMeta::new_readonly"
+        };
+        out.push_str(&format!(
+            "                {}(self.{}.key(), {}),\n",
+            constructor, caller_acct, ia.is_signer,
+        ));
+    }
+    out.push_str("            ];\n\n");
+
+    out.push_str("            let ix = Instruction {\n");
+    out.push_str(&format!(
+        "                program_id: anchor_lang::solana_program::pubkey!(\"{}\"),\n",
+        program_id,
+    ));
+    out.push_str("                accounts,\n");
+    out.push_str("                data: ix_data,\n");
+    out.push_str("            };\n\n");
+
+    out.push_str("            invoke(&ix, &[\n");
+    for ia in &iface_handler.accounts {
+        let caller_acct = arg_account_lookup.get(ia.name.as_str())?;
+        out.push_str(&format!(
+            "                self.{}.to_account_info(),\n",
+            caller_acct,
+        ));
+    }
+    out.push_str(&format!(
+        "                self.{}.to_account_info(),\n",
+        program_acct.name,
+    ));
+    out.push_str("            ])?;\n");
+    out.push_str("        }\n");
+    Some(out)
 }
 
 /// Emit one `anchor_spl::token::<fn>` CPI body. Generic over which SPL
@@ -873,6 +1317,50 @@ fn mechanize_effect(
     Some(line)
 }
 
+/// Render the `#[derive(Accounts)] pub struct X<'info>? { fields }`
+/// block for one handler. Used by `generate_lib` (Anchor target —
+/// structs live at crate root so `#[program]` can find them) and by
+/// `render_handler_scaffold` (Quasar target — struct + impl together
+/// in `instructions/<name>.rs`).
+fn render_handler_accounts_struct(
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    is_multi: bool,
+    default_state_name: &str,
+    surface: &FrameworkSurface,
+) -> String {
+    let pascal = to_pascal_case(&handler.name);
+    let lifetime_params = surface.lifetime_params();
+    let mut out = String::new();
+    out.push_str("#[derive(Accounts)]\n");
+    out.push_str(&format!("pub struct {}{} {{\n", pascal, lifetime_params));
+
+    if !handler.accounts.is_empty() {
+        let state_acct = find_state_account(handler);
+        for acct in &handler.accounts {
+            let state_name = if is_multi {
+                infer_state_name(acct, spec, default_state_name)
+            } else {
+                default_state_name.to_string()
+            };
+            let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
+            let attr = acct.quasar_account_attr(handler, &state_name);
+            let field_type = render_account_field_type(acct, surface, is_state, &state_name);
+            out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
+        }
+    } else if handler.who.is_some() {
+        let signer_ty = if surface.accounts_lifetime.is_empty() {
+            "Signer".to_string()
+        } else {
+            format!("Signer<{}>", surface.accounts_lifetime)
+        };
+        out.push_str(&format!("    pub signer: {},\n", signer_ty));
+    }
+
+    out.push_str("}\n");
+    out
+}
+
 fn render_handler_scaffold(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
@@ -880,10 +1368,19 @@ fn render_handler_scaffold(
     default_state_name: &str,
     spec_src: &str,
     spec_attr: &str,
+    target: Target,
 ) -> Result<String> {
+    let surface = FrameworkSurface::for_target(target);
     let pascal = to_pascal_case(&handler.name);
     let bumps_name = format!("{}Bumps", pascal);
     let any_mut = handler.accounts.iter().any(|a| a.is_writable);
+    let lifetime_params = surface.lifetime_params();
+    // Anchor puts the `#[derive(Accounts)]` struct at crate root (in
+    // lib.rs) so the `#[program]` macro can find it; Quasar keeps
+    // struct + impl together in `instructions/<name>.rs`. The flag
+    // also flips the imports — Anchor's instructions file pulls the
+    // struct in via `use crate::<Pascal>;`.
+    let render_struct = matches!(target, Target::Quasar);
 
     let mut out = String::new();
     out.push_str("// User-owned. Regenerating the spec does NOT overwrite this file.\n");
@@ -891,10 +1388,15 @@ fn render_handler_scaffold(
     out.push_str("// regenerated on every `qedgen codegen`. Drift between the spec\n");
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
-    out.push_str("use anchor_lang::prelude::*;\n");
+    out.push_str(surface.prelude_import);
     out.push_str("use crate::state::*;\n");
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
+    if !render_struct {
+        // Anchor: bring the Accounts struct (defined in lib.rs) into
+        // scope so the impl block can reference it bare.
+        out.push_str(&format!("use crate::{};\n", pascal));
+    }
     if !spec.events.is_empty() && !handler.emits.is_empty() {
         out.push_str("use crate::events::*;\n");
     }
@@ -903,39 +1405,38 @@ fn render_handler_scaffold(
     }
     out.push('\n');
 
-    // #[derive(Accounts)] struct
-    out.push_str("#[derive(Accounts)]\n");
-    out.push_str(&format!("pub struct {} {{\n", pascal));
-
-    if !handler.accounts.is_empty() {
-        for acct in &handler.accounts {
-            let state_name = if is_multi {
-                infer_state_name(acct, spec, default_state_name)
-            } else {
-                default_state_name.to_string()
-            };
-            let attr = acct.quasar_account_attr(handler, &state_name);
-            let field_type = acct.quasar_field_type();
-            out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
-        }
-    } else if handler.who.is_some() {
-        out.push_str("    pub signer: Signer,\n");
+    if render_struct {
+        out.push_str(&render_handler_accounts_struct(
+            handler,
+            spec,
+            is_multi,
+            default_state_name,
+            &surface,
+        ));
+        out.push('\n');
     }
 
-    out.push_str("}\n\n");
-
-    // impl block with handler
-    out.push_str(&format!("impl {} {{\n", pascal));
+    // impl block with handler — lifetime threaded for Anchor.
+    out.push_str(&format!(
+        "impl{} {}{} {{\n",
+        lifetime_params, pascal, lifetime_params
+    ));
     if let Some(ref doc) = handler.doc {
         out.push_str(&format!("    /// {}\n", doc));
     }
 
-    // Emit the spec-bound #[qed(...)] attribute. Hashes are empty on first
-    // scaffold — the macro errors with the computed values for copy-paste.
+    // Emit the spec-bound #[qed(...)] attribute with a body-hash
+    // sentinel. The fixup pass at the bottom of this function parses
+    // the rendered impl method, computes the real body hash, and
+    // splices it into the placeholder. Both `qedgen::spec_hash` and
+    // `qedgen-macros::FnLike::content_hash` normalize via
+    // `proc_macro2::TokenStream::from_str` before hashing, so the
+    // codegen-emitted `hash` agrees with the macro's compile-time
+    // recomputation.
     let spec_h = spec_hash::spec_hash_for_handler(spec_src, &handler.name).unwrap_or_default();
     out.push_str(&format!(
-        "    #[qed(verified, spec = \"{}\", handler = \"{}\", spec_hash = \"{}\")]\n",
-        spec_attr, handler.name, spec_h
+        "    #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]\n",
+        spec_attr, handler.name, BODY_HASH_PLACEHOLDER, spec_h
     ));
 
     out.push_str("    #[inline(always)]\n");
@@ -952,8 +1453,9 @@ fn render_handler_scaffold(
     }
 
     out.push_str(&format!(
-        "    pub fn handler({}) -> Result<(), ProgramError> {{\n",
-        handler_params.join(", ")
+        "    pub fn handler({}) -> {} {{\n",
+        handler_params.join(", "),
+        surface.handler_result_type
     ));
 
     // Call the always-regenerated guards module. Signature: takes `&Self`
@@ -1056,13 +1558,75 @@ fn render_handler_scaffold(
     }
     out.push_str("    }\n");
     out.push_str("}\n");
+
+    // Fixup: parse the rendered scaffold, find the impl method,
+    // compute the body hash, and splice it into the
+    // `hash = "QEDGEN_FIXUP_BODY_HASH"` placeholder.
+    // `qedgen::spec_hash::body_hash_for_*` and
+    // `qedgen-macros::FnLike::content_hash` both normalize via
+    // `proc_macro2::TokenStream::from_str` so codegen-time and
+    // compile-time agree on the hash; first `cargo build` is clean.
+    if let Some(body_hash) = precompute_body_hash(&out) {
+        out = out.replace(BODY_HASH_PLACEHOLDER, &body_hash);
+    }
     Ok(out)
+}
+
+/// Re-parse a rendered handler scaffold (with `BODY_HASH_PLACEHOLDER`
+/// still in the `#[qed]` attribute), find the impl method named
+/// `handler`, and compute its body hash. MUST mirror
+/// `qedgen-macros::FnLike::from_tokens`'s parse order (try `ItemFn`
+/// first, fall back to `ImplItemFn`) so we hit the same arm — both
+/// produce the same canonical bytes after the `from_str`
+/// normalization in `body_hash_for_*`, but only when fed equivalent
+/// inputs.
+fn precompute_body_hash(scaffold_source: &str) -> Option<String> {
+    use quote::ToTokens;
+    let file: syn::File = syn::parse_str(scaffold_source).ok()?;
+    for item in &file.items {
+        if let syn::Item::Impl(item_impl) = item {
+            for impl_item in &item_impl.items {
+                if let syn::ImplItem::Fn(impl_fn) = impl_item {
+                    if impl_fn.sig.ident == "handler" {
+                        let tokens = impl_fn.to_token_stream();
+                        if let Ok(item_fn) = syn::parse2::<syn::ItemFn>(tokens.clone()) {
+                            return Some(spec_hash::body_hash_for_fn(&item_fn));
+                        }
+                        if let Ok(impl_fn2) = syn::parse2::<syn::ImplItemFn>(tokens) {
+                            return Some(spec_hash::body_hash_for_impl_fn(&impl_fn2));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Generate src/guards.rs — one function per handler containing all the
 /// spec-declared guard checks. This file is always regenerated; any edit
 /// is clobbered on the next `qedgen codegen` (by design).
-fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+fn generate_guards(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
+    let surface = FrameworkSurface::for_target(target);
+    let lifetime_params = surface.lifetime_params();
+    // Anchor errors flow through `Result<()>` (the `Result` alias from
+    // `anchor_lang::prelude` defaults the error to
+    // `anchor_lang::error::Error`); Anchor error enums implement
+    // `Into<anchor_lang::error::Error>`, so `Err(MyError::Foo.into())`
+    // is the idiomatic return. Quasar uses `ProgramError::from(...)`
+    // because its error enums implement `Into<ProgramError>` instead.
+    let err_ctor: fn(&str, &str) -> String = match target {
+        Target::Anchor => |enum_name, variant| format!("{}::{}.into()", enum_name, variant),
+        Target::Quasar => {
+            |enum_name, variant| format!("ProgramError::from({}::{})", enum_name, variant)
+        }
+        Target::Pinocchio => unreachable!(),
+    };
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -1078,17 +1642,24 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
     out.push_str(
         "#![allow(unused_variables, unused_imports, dead_code, clippy::too_many_arguments)]\n\n",
     );
-    out.push_str("use anchor_lang::prelude::*;\n");
+    out.push_str(surface.prelude_import);
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
     }
-    out.push_str("use crate::instructions::*;\n\n");
+    // Pick up the per-handler `Accounts` structs. Anchor places them
+    // at crate root (lib.rs); Quasar places them in
+    // `instructions/<name>.rs` and re-exports via `instructions::*`.
+    match target {
+        Target::Anchor => out.push_str("use crate::*;\n\n"),
+        Target::Quasar => out.push_str("use crate::instructions::*;\n\n"),
+        Target::Pinocchio => unreachable!(),
+    }
 
     for handler in &spec.handlers {
         let pascal = to_pascal_case(&handler.name);
         let any_mut = handler.accounts.iter().any(|a| a.is_writable);
         let self_ref = if any_mut { "&mut " } else { "&" };
-        let mut params = vec![format!("ctx: {}{}", self_ref, pascal)];
+        let mut params = vec![format!("ctx: {}{}{}", self_ref, pascal, lifetime_params)];
         for (pname, ptype) in &handler.takes_params {
             params.push(format!("{}: {}", pname, map_type(ptype, spec)?));
         }
@@ -1097,9 +1668,11 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
             handler.name
         ));
         out.push_str(&format!(
-            "pub fn {}({}) -> Result<(), ProgramError> {{\n",
+            "pub fn {}{}({}) -> {} {{\n",
             handler.name,
-            params.join(", ")
+            lifetime_params,
+            params.join(", "),
+            surface.handler_result_type
         ));
 
         if handler.requires.is_empty() && handler.aborts_if.is_empty() {
@@ -1115,10 +1688,9 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
-                    "    if !({}) {{ return Err(ProgramError::from({}::{})); }}\n",
+                    "    if !({}) {{ return Err({}); }}\n",
                     req.rust_expr.trim(),
-                    err_enum,
-                    err
+                    err_ctor(&err_enum, err),
                 ));
             } else {
                 out.push_str(&format!("    debug_assert!({});\n", req.rust_expr.trim()));
@@ -1128,10 +1700,9 @@ fn generate_guards(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -
         let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
         for ab in &handler.aborts_if {
             out.push_str(&format!(
-                "    if ({}) {{ return Err(ProgramError::from({}::{})); }}\n",
+                "    if ({}) {{ return Err({}); }}\n",
                 ab.rust_expr.trim(),
-                err_enum,
-                ab.error_name
+                err_ctor(&err_enum, &ab.error_name),
             ));
         }
 
@@ -1160,8 +1731,12 @@ fn infer_state_name(
 }
 
 /// Generate Cargo.toml
-fn generate_cargo_toml(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
-    const TEMPLATE: &str = include_str!("../templates/program-Cargo.toml");
+fn generate_cargo_toml(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
     let program_name = spec.program_name.to_lowercase().replace('_', "-");
     let needs_spl = spec.handlers.iter().any(|h| h.has_token_accounts());
     let hash = fp
@@ -1169,15 +1744,43 @@ fn generate_cargo_toml(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Pat
         .get("Cargo.toml")
         .cloned()
         .unwrap_or_default();
+    let qedgen_version = env!("CARGO_PKG_VERSION");
 
-    let mut out = TEMPLATE
-        .replace("{SPEC_HASH}", &hash)
-        .replace("{PROGRAM_NAME}", &program_name)
-        .replace("{QEDGEN_VERSION}", env!("CARGO_PKG_VERSION"));
-    if needs_spl {
-        out.push_str("\n# TODO: SPL helper crate (spec declares token transfers) — e.g.:\n");
-        out.push_str("# anchor-spl = \"0.32.1\"\n");
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# ---- GENERATED BY QEDGEN ---- spec-hash:{}\n\n",
+        hash
+    ));
+    out.push_str("[package]\n");
+    out.push_str(&format!("name = \"{}\"\n", program_name));
+    out.push_str("version = \"0.1.0\"\n");
+    out.push_str("edition = \"2021\"\n\n");
+    out.push_str("[lib]\n");
+    out.push_str("crate-type = [\"cdylib\", \"lib\"]\n\n");
+    out.push_str("[features]\n");
+    out.push_str("client = []\n");
+    out.push_str("debug = []\n\n");
+    out.push_str("[dependencies]\n");
+    match target {
+        Target::Anchor => {
+            out.push_str("anchor-lang = \"0.32.1\"\n");
+            if needs_spl {
+                out.push_str("anchor-spl = \"0.32.1\"\n");
+            }
+        }
+        Target::Quasar => {
+            out.push_str("quasar-lang = { version = \"0.0.0\" }\n");
+            if needs_spl {
+                out.push_str("# TODO: Quasar SPL helper crate (spec declares token transfers).\n");
+            }
+        }
+        Target::Pinocchio => unreachable!("Pinocchio is rejected at the init dispatcher"),
     }
+    out.push_str(&format!(
+        "qedgen-macros = {{ git = \"https://github.com/qedgen/solana-skills\", tag = \"v{}\" }}\n",
+        qedgen_version
+    ));
+
     std::fs::write(output_dir.join("Cargo.toml"), &out)?;
     Ok(())
 }
@@ -1186,8 +1789,16 @@ fn generate_cargo_toml(spec: &ParsedSpec, fp: &SpecFingerprint, output_dir: &Pat
 // Public API
 // ============================================================================
 
-/// Generate a Quasar program skeleton from a spec file (.lean or .qedspec).
-pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
+/// Generate a framework-flavored Rust program skeleton from a `.qedspec`.
+///
+/// `target` selects which framework's idioms the emitter uses
+/// (`Target::Anchor` → `anchor_lang::prelude::*`, `Context<X>`,
+/// `Result<()>`, auto-derived discriminators; `Target::Quasar` →
+/// `quasar_lang::prelude::*`, `#![no_std]`, `Ctx<X>`, `Result<(),
+/// ProgramError>`, explicit `#[instruction(discriminator = N)]`).
+/// `Target::Pinocchio` is rejected at the `init` dispatcher and won't
+/// reach this function in v2.9.
+pub fn generate(spec_path: &Path, output_dir: &Path, target: crate::Target) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
     if spec.handlers.is_empty() {
@@ -1211,13 +1822,13 @@ pub fn generate(spec_path: &Path, output_dir: &Path) -> Result<()> {
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
 
-    generate_lib(&spec, &fp, output_dir)?;
-    generate_state(&spec, &fp, output_dir)?;
-    generate_events(&spec, &fp, output_dir)?;
-    generate_errors(&spec, &fp, output_dir)?;
-    generate_instructions(&spec, &fp, spec_path, output_dir)?;
-    generate_guards(&spec, &fp, output_dir)?;
-    generate_cargo_toml(&spec, &fp, output_dir)?;
+    generate_lib(&spec, &fp, output_dir, target)?;
+    generate_state(&spec, &fp, output_dir, target)?;
+    generate_events(&spec, &fp, output_dir, target)?;
+    generate_errors(&spec, &fp, output_dir, target)?;
+    generate_instructions(&spec, &fp, spec_path, output_dir, target)?;
+    generate_guards(&spec, &fp, output_dir, target)?;
+    generate_cargo_toml(&spec, &fp, output_dir, target)?;
 
     let file_count = 4
         + spec.handlers.len()
@@ -1461,7 +2072,81 @@ handler send (n : U64) : State.Active -> State.Active {
     }
 
     #[test]
-    fn cpi_returns_none_when_program_id_is_not_spl_token() {
+    fn anchor_sighash_matches_known_discriminators() {
+        // Anchor's discriminator = sha256("global:<handler>")[..8].
+        // Verify the function uses the right input format by computing
+        // the expected value via sha2 directly, confirming both prefix
+        // and slice-length are correct. If `anchor_sighash` ever drifts
+        // (e.g. wrong prefix, different hash, wrong slice), this test
+        // catches it independently of what value the function produces.
+        use sha2::{Digest, Sha256};
+        for handler in ["initialize", "transfer", "swap", "do_nothing"] {
+            let mut hasher = Sha256::new();
+            hasher.update(format!("global:{}", handler).as_bytes());
+            let full = hasher.finalize();
+            let mut expected = [0u8; 8];
+            expected.copy_from_slice(&full[..8]);
+            assert_eq!(
+                anchor_sighash(handler),
+                expected,
+                "sighash for `{handler}` should be sha256(\"global:{handler}\")[..8]"
+            );
+        }
+        // Sanity: different handler names produce different sighashes.
+        assert_ne!(anchor_sighash("a"), anchor_sighash("b"));
+    }
+
+    #[test]
+    fn to_snake_case_handles_pascal_and_camel() {
+        assert_eq!(to_snake_case("MyAmm"), "my_amm");
+        assert_eq!(to_snake_case("SPLToken"), "s_p_l_token");
+        assert_eq!(to_snake_case("Token"), "token");
+        assert_eq!(to_snake_case("simple"), "simple");
+        assert_eq!(to_snake_case("FooBarBaz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn cpi_generic_returns_none_when_program_account_is_missing() {
+        // No `<iface>_program` account, no unique non-token-program
+        // account either. Caller falls back to comment + todo!().
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Caller
+program_id "11111111111111111111111111111111"
+
+interface MyAmm {
+  program_id "MyAmm22222222222222222222222222222222222222"
+  handler swap (amount : U64) {
+    discriminant "0x01"
+    accounts { src : writable }
+  }
+}
+
+type State | Active of { balance : U64 }
+type Error | E
+
+handler send : State.Active -> State.Active {
+  permissionless
+  accounts {
+    src : writable
+  }
+  call MyAmm.swap(src = src, amount = balance)
+}
+"#,
+        )
+        .unwrap();
+        let handler = spec.handlers.iter().find(|h| h.name == "send").unwrap();
+        let call = handler.calls.first().unwrap();
+        assert!(
+            try_emit_anchor_cpi(call, handler, &spec).is_none(),
+            "missing program account should defer to comment + todo!()"
+        );
+    }
+
+    #[test]
+    fn cpi_emits_generic_invoke_shape_for_non_spl_token_interface() {
+        // v2.9 G3: non-SPL-Token interfaces get the generic
+        // `solana_program::program::invoke` shape rather than v2.8's
+        // None / comment-only fallback.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Caller
 program_id "11111111111111111111111111111111"
@@ -1486,7 +2171,7 @@ handler send : State.Active -> State.Active {
   accounts {
     src          : writable
     dst          : writable
-    amm_program  : program
+    my_amm_program : program
   }
   call MyAmm.swap(src = src, dst = dst, amount = balance)
 }
@@ -1499,12 +2184,24 @@ handler send : State.Active -> State.Active {
             .find(|h| h.name == "send")
             .expect("send handler");
         let call = handler.calls.first().expect("call site");
-        // Non-SPL-Token program ID — v2.8 falls back to the comment-only
-        // path, so try_emit_anchor_cpi returns None.
+        let rendered = try_emit_anchor_cpi(call, handler, &spec)
+            .expect("v2.9 must emit a generic CPI shape for non-SPL Anchor programs");
+
+        // Sanity-check the emitted shape:
+        assert!(rendered.contains("solana_program::program::invoke"));
+        assert!(rendered.contains("Instruction"));
+        assert!(rendered.contains("AccountMeta::new(self.src.key(), false)"));
+        assert!(rendered.contains("AccountMeta::new(self.dst.key(), false)"));
+        // The program account ends up in the AccountInfo array passed to
+        // invoke (so the runtime can validate it).
+        assert!(rendered.contains("self.my_amm_program.to_account_info()"));
+        // Discriminator: first byte of sha256("global:swap") is 0xf8.
         assert!(
-            try_emit_anchor_cpi(call, handler, &spec).is_none(),
-            "v2.8 must defer non-SPL-Token CPI codegen (None ⇒ caller emits comment + todo!())"
+            rendered.contains("0xf8"),
+            "expected sighash for `swap` to start with 0xf8; got:\n{rendered}"
         );
+        // Borsh-serialized amount arg.
+        assert!(rendered.contains("AnchorSerialize::serialize"));
     }
 
     // ----- v2.8 F8: Error-sum threading via mechanize_effect -----

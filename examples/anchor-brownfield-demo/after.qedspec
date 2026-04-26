@@ -1,0 +1,50 @@
+// Hand-edited from the `before.qedspec` produced by `qedgen adapt`.
+// This is what the spec looks like after a user fills in the TODOs
+// the adapter left behind.
+//
+// Source: src/lib.rs (program mod: `counter`)
+
+spec Counter
+
+type State
+  | Uninitialized
+  | Active of {
+      value     : U64,
+      authority : Pubkey,
+    }
+
+type Error
+  | Overflow
+
+/// Initialize a fresh counter to a starting value.
+handler initialize (start : U64) : State.Uninitialized -> State.Active {
+  auth authority
+
+  accounts {
+    counter        : writable
+    authority      : signer, writable
+    system_program : program
+  }
+
+  effect {
+    value := start
+    authority := authority
+  }
+}
+
+/// Increment the counter by `delta`. Errors if the increment would
+/// overflow `u64::MAX`.
+handler increment (delta : U64) : State.Active -> State.Active {
+  auth authority
+
+  accounts {
+    counter   : writable
+    authority : signer
+  }
+
+  requires value + delta <= U64.MAX else Overflow
+
+  effect {
+    value +=! delta
+  }
+}

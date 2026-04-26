@@ -1,0 +1,46 @@
+// Pinned spec for the drift-loop fixture. The handler blocks here are
+// hashed at compile time by `qedgen-macros::spec_bind` and compared
+// against the `spec_hash = "..."` value committed to `src/lib.rs`.
+//
+// Editing any of these blocks (even whitespace inside the braces)
+// fires `compile_error!` on the next `cargo build` until you re-run
+// `qedgen adapt --program examples/qed-drift-fixture --spec
+// examples/qed-drift-fixture/example.qedspec` and paste the new
+// hashes.
+
+spec DriftFixture
+
+type State
+  | Active
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  effect {
+    balance += amount
+  }
+}
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  requires balance >= amount else InsufficientFunds
+
+  effect {
+    balance -= amount
+  }
+}
+
+handler deposit_with_accounts (amount : U64) : State.Active -> State.Active {
+  effect {
+    balance += amount
+  }
+}
+
+handler process (delta : U64) : State.Active -> State.Active {
+  requires balance + delta <= U64.MAX else Overflow
+
+  effect {
+    balance +=! delta
+  }
+}
+
+type Error
+  | InsufficientFunds
+  | Overflow

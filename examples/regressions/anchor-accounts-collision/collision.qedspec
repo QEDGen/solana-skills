@@ -1,0 +1,20 @@
+// Hand-authored spec for the regression. Both handlers share the
+// same shape (state machine, args, effects) — what matters here is
+// that the adapter's emitted `#[qed]` attributes seal `lite` against
+// `src/a/mod.rs` and `heavy` against `src/b/mod.rs`.
+
+spec Collision
+
+type State
+  | Active
+
+type Error
+  | Bad
+
+handler lite (amount : U64) : State.Active -> State.Active {
+  effect { count += amount }
+}
+
+handler heavy (amount : U64) : State.Active -> State.Active {
+  effect { count += amount }
+}

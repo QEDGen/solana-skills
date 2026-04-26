@@ -1,0 +1,12 @@
+[package]
+name = "qed-drift-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "v2.9 drift-loop fixture. Exercises `#[qed(verified, spec=, handler=, hash=, spec_hash=)]` against committed hashes — `cargo build` succeeds when both hashes match the recomputed values, fires `compile_error!` on any drift. Pin between `qedgen-macros::content_hash` and `qedgen::spec_hash::body_hash_for_fn`."
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+qedgen-macros = { path = "../../crates/qedgen-macros" }

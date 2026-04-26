@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/qedgen", "crates/qedgen-macros"]
+members = ["crates/qedgen", "crates/qedgen-macros", "examples/qed-drift-fixture"]
 exclude = [
     "examples/rust/escrow",
     "examples/rust/lending",

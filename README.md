@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.10+.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -71,7 +71,7 @@ CPI calls are axiomatic — we verify the program passes correct parameters. SPL
 npx skills add qedgen/solana-skills
 
 # 2. Initialize the project — records the spec path in .qed/config.json
-qedgen init --name my_program --spec my_program.qedspec --quasar
+qedgen init --name my_program --spec my_program.qedspec --target anchor
 
 # 3. Validate and generate artifacts (no --spec needed from inside the project)
 qedgen check
@@ -99,8 +99,15 @@ export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harm
 ### Existing programs (brownfield)
 
 ```bash
-# Generate a .qedspec scaffold from your Anchor IDL
+# Option A — from an Anchor IDL (program ABI only)
 qedgen spec --idl target/idl/my_program.json --format qedspec
+
+# Option B — from the Anchor program's source (recommended)
+# Walks src/lib.rs, finds the #[program] mod, follows each forwarder
+# (inline / free fn / Type::method / ctx.accounts.method), and emits
+# a .qedspec skeleton with one handler block per instruction plus a
+# breadcrumb to where each handler body lives.
+qedgen adapt --program ./programs/my_program
 
 # Review and complete the TODO items in the generated .qedspec
 # Then use the same pipeline as greenfield:
@@ -109,7 +116,16 @@ qedgen codegen --spec my_program.qedspec --lean
 cd formal_verification && lake build
 ```
 
-The generated `.qedspec` auto-derives state fields, operations, contexts, PDAs, and errors from the IDL. Guards, effects, lifecycle transitions, and properties are stubbed with TODOs for you or your agent to fill in.
+`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --format qedspec` is the IDL-only fallback when you don't have source.
+
+Once the spec is filled in, gate CI on it staying in sync with the program:
+
+```bash
+# Errors if the spec declares a handler that's not in the program
+# (stale spec) or a `pub fn` that's not modelled in the spec
+# (uncovered handler). Pure read; no codegen, no writes.
+qedgen check --spec my_program.qedspec --anchor-project ./programs/my_program
+```
 
 ### Spec-driven pipeline
 
@@ -130,7 +146,7 @@ qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
 qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
 qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
-qedgen codegen --spec my_program.qedspec --integration  # + QuasarSVM integration tests
+qedgen codegen --spec my_program.qedspec --integration  # + in-process SVM integration tests
 
 # Check with drift detection and verification report
 qedgen check --spec my_program.qedspec --coverage       # operation × property matrix

@@ -1,9 +1,9 @@
 [package]
 name = "qedgen-solana-skills"
-version = "2.8.0"
+version = "2.9.0"
 edition = "2021"
 authors = ["abishekk92"]
-description = "Spec-driven formal verification for Solana programs: .qedspec → Lean 4 proofs, Kani harnesses, coverage matrix, and Quasar codegen"
+description = "Spec-driven formal verification for Solana programs: .qedspec → Lean 4 proofs, Kani harnesses, coverage matrix, and Anchor-compatible Rust codegen"
 license = "MIT"
 repository = "https://github.com/qedgen/solana-skills"
 

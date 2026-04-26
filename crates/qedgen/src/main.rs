@@ -1,3 +1,7 @@
+mod anchor_adapt;
+mod anchor_check;
+mod anchor_project;
+mod anchor_resolver;
 mod api;
 mod aristotle;
 mod asm2lean;
@@ -36,7 +40,7 @@ mod validate;
 mod verify;
 
 use anyhow::{ensure, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 /// Find the bugs your tests miss — from one spec file
@@ -46,6 +50,27 @@ use std::path::{Path, PathBuf};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Solana program framework target for greenfield codegen
+/// (`qedgen init --target ...`). v2.9 wires `anchor` and `quasar`
+/// end-to-end; `pinocchio` reserves the CLI surface and selecting
+/// it today errors with a v2.10+ pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum Target {
+    /// Anchor-compatible Rust program. `use anchor_lang::prelude::*`,
+    /// `Context<X>`, `Result<()>`, `#[program] pub mod`, `'info`
+    /// lifetimes on `#[derive(Accounts)]` structs. Auto-derived
+    /// instruction discriminators.
+    Anchor,
+    /// Quasar (Blueshift) Rust program. `#![no_std]`,
+    /// `use quasar_lang::prelude::*`, `Ctx<X>`, `Result<(),
+    /// ProgramError>`, `#[program] mod`, explicit
+    /// `#[instruction(discriminator = N)]` on each handler.
+    Quasar,
+    /// Pinocchio (no_std) Rust program. Codegen branch ships in
+    /// v2.10+ — selecting today errors.
+    Pinocchio,
 }
 
 #[derive(Subcommand)]
@@ -110,6 +135,45 @@ enum Commands {
         /// Auto-escalate to Aristotle if sorry markers remain after Leanstral
         #[arg(long)]
         escalate: bool,
+    },
+
+    /// Brownfield adapter for existing Anchor programs. Two modes:
+    ///
+    /// `--program <c>` (scaffold): parses `<c>/src/lib.rs`, finds the
+    /// `#[program]` mod, walks each instruction to its handler body,
+    /// and emits a `.qedspec` skeleton with TODO markers for state
+    /// machine / requires / effects. Round-trips through the parser.
+    ///
+    /// `--program <c> --spec <s>` (attribute): given an existing spec,
+    /// emits one `#[qed(verified, spec = ..., handler = ..., hash = ...,
+    /// spec_hash = ...)]` line per handler. Paste each above its
+    /// handler `pub fn`; future body edits fire `compile_error!`
+    /// until you re-run this command.
+    Adapt {
+        /// Path to the program crate (the directory containing the
+        /// program's own `Cargo.toml`, with `src/lib.rs` inside).
+        #[arg(long)]
+        program: PathBuf,
+
+        /// Path to an existing .qedspec. Switches to attribute-emit
+        /// mode: prints one `#[qed(verified, ...)]` line per handler.
+        /// Without this flag, scaffold mode emits a starter `.qedspec`.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+
+        /// Path to write output. Without this flag, prints to stdout.
+        /// In scaffold mode, writes a `.qedspec`; in attribute mode,
+        /// writes a `// === handler … ===` report.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Manually point an unrecognized handler at its actual
+        /// implementation. Format: `<handler>=<rust_path>` where the
+        /// path is `module::sub::function` (or just `function`).
+        /// Repeatable: pass once per handler. Drift's custom
+        /// dispatcher is the canonical use case.
+        #[arg(long = "handler", value_name = "NAME=PATH")]
+        handler_overrides: Vec<String>,
     },
 
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
@@ -216,9 +280,13 @@ enum Commands {
         #[arg(long)]
         mathlib: bool,
 
-        /// Also generate a Quasar program skeleton and Kani harnesses
-        #[arg(long)]
-        quasar: bool,
+        /// Also generate the program crate + Kani harnesses for the
+        /// named framework target. `anchor` is fully implemented today;
+        /// `quasar` and `pinocchio` reserve the CLI surface for v2.10+
+        /// codegen branches and error cleanly when selected. Omit to
+        /// skip program scaffolding entirely.
+        #[arg(long, value_enum)]
+        target: Option<Target>,
 
         /// Output directory (default: ./formal_verification)
         #[arg(long, default_value = "./formal_verification")]
@@ -253,9 +321,16 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
 
-        /// Path to generated Quasar program directory (enables code drift detection)
+        /// Path to the generated Rust program directory (enables code drift detection)
         #[arg(long)]
         code: Option<PathBuf>,
+
+        /// Path to an existing Anchor program crate (the directory holding
+        /// `Cargo.toml`, with `src/lib.rs` inside). Cross-checks the spec's
+        /// handler list against the program's `#[program]` mod and reports
+        /// any spec/program drift. Pure read; useful as a CI gate.
+        #[arg(long)]
+        anchor_project: Option<PathBuf>,
 
         /// Path to Rust source for #[qed(verified)] drift detection
         #[arg(long)]
@@ -433,8 +508,9 @@ enum Commands {
 
     /// Generate committed artifacts from a qedspec
     ///
-    /// Default (no flags): generates Quasar Rust skeleton only.
-    /// Use flags to generate additional artifacts, or --all for everything.
+    /// Default (no flags): generates the Rust program skeleton for the
+    /// chosen `--target` (default: `anchor`). Use flags to generate
+    /// additional artifacts, or `--all` for everything.
     Codegen {
         /// Path to the spec file (.qedspec or a directory of fragments).
         /// Optional — falls back to the `spec` field in the nearest
@@ -442,7 +518,14 @@ enum Commands {
         #[arg(long)]
         spec: Option<PathBuf>,
 
-        /// Output directory for the generated Quasar project
+        /// Framework target for the Rust program crate. `anchor` is
+        /// fully implemented (default); `quasar` is fully implemented
+        /// (Blueshift's `quasar_lang`); `pinocchio` reserves the CLI
+        /// surface and ships in v2.10+.
+        #[arg(long, value_enum, default_value_t = Target::Anchor)]
+        target: Target,
+
+        /// Output directory for the generated Rust program crate
         #[arg(long, default_value = "./programs")]
         output_dir: PathBuf,
 
@@ -475,7 +558,7 @@ enum Commands {
         #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_output: PathBuf,
 
-        /// Generate QuasarSVM integration test scaffolds
+        /// Generate in-process SVM integration test scaffolds
         #[arg(long)]
         integration: bool,
 
@@ -842,6 +925,43 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Adapt {
+            program,
+            spec,
+            out,
+            handler_overrides,
+        } => {
+            let mut overrides = std::collections::HashMap::new();
+            for raw in &handler_overrides {
+                let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
+                overrides.insert(name, parsed);
+            }
+            match spec {
+                Some(spec_path) => {
+                    let entries =
+                        anchor_adapt::compute_attributes(&program, &spec_path, &overrides)?;
+                    let rendered = anchor_adapt::render_attributes(&entries);
+                    if let Some(path) = out {
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&path, &rendered)?;
+                        eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
+                    } else {
+                        print!("{}", rendered);
+                    }
+                }
+                None => {
+                    if let Some(path) = out {
+                        anchor_adapt::adapt_to_file(&program, &path, &overrides)?;
+                    } else {
+                        let rendered = anchor_adapt::adapt(&program, &overrides)?;
+                        print!("{}", rendered);
+                    }
+                }
+            }
+        }
+
         Commands::Interface { idl, out, vendor } => {
             if vendor {
                 // Drop into `.qed/interfaces/<program>.qedspec`. The program
@@ -928,9 +1048,33 @@ async fn main() -> Result<()> {
             spec,
             asm,
             mathlib,
-            quasar,
+            target,
             output_dir,
         } => {
+            // Pinocchio reserves the CLI surface for v2.10+. Anchor and
+            // Quasar branches are wired end-to-end below.
+            if matches!(target, Some(Target::Pinocchio)) {
+                anyhow::bail!(
+                    "`--target pinocchio` codegen ships in v2.10+. \
+                     Today `--target anchor` and `--target quasar` are \
+                     implemented; omit `--target` to skip program \
+                     scaffolding entirely."
+                );
+            }
+
+            // Program scaffolding (codegen + kani harnesses + unit tests)
+            // requires the original `.qedspec` — `init` writes a
+            // separate `Spec.lean` skeleton, but the codegen path parses
+            // the qedspec directly. Refuse cleanly when `--target` is
+            // set without `--spec`.
+            let scaffold_target = target;
+            if scaffold_target.is_some() && spec.is_none() {
+                anyhow::bail!(
+                    "`--target` requires `--spec <path.qedspec>` — the \
+                     program codegen runs against the spec directly."
+                );
+            }
+
             // .qed/ lives at the program root. If the user passed --spec, anchor
             // to the spec's parent directory (what they expect); otherwise fall
             // back to the output_dir's parent. See init::resolve_program_root.
@@ -947,10 +1091,15 @@ async fn main() -> Result<()> {
             });
             init::init_qed_dir(&program_root, &name, spec_rel.as_deref())?;
 
-            init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
+            init::init(
+                &name,
+                &output_dir,
+                asm.as_deref(),
+                mathlib,
+                scaffold_target.is_some(),
+            )?;
 
-            if quasar {
-                let spec_path = output_dir.join("Spec.lean");
+            if let (Some(target), Some(qedspec_path)) = (scaffold_target, spec.as_ref()) {
                 let program_dir = program_root.join(format!("programs/{}", name));
                 // v2.6: tests live INSIDE the program package so cargo-kani
                 // and cargo-test can resolve the governing Cargo.toml via the
@@ -958,15 +1107,17 @@ async fn main() -> Result<()> {
                 // program_root, which had no Cargo.toml above it.
                 let kani_path = program_dir.join("tests/kani.rs");
 
-                // Generate Quasar program skeleton
-                codegen::generate(&spec_path, &program_dir)?;
+                // Generate the framework-flavored Rust program skeleton.
+                codegen::generate(qedspec_path, &program_dir, target)?;
 
-                // Generate Kani proof harnesses
-                kani::generate(&spec_path, &kani_path)?;
+                // Kani harnesses are framework-neutral (no Anchor/Quasar
+                // types — pure spec-derived state model).
+                kani::generate(qedspec_path, &kani_path)?;
 
-                // Generate unit tests
+                // Unit tests are framework-neutral too — plain `cargo
+                // test` over the spec-derived state struct.
                 let test_path = program_dir.join("src/tests.rs");
-                unit_test::generate(&spec_path, &test_path)?;
+                unit_test::generate(qedspec_path, &test_path)?;
             }
         }
 
@@ -980,6 +1131,7 @@ async fn main() -> Result<()> {
             explain,
             output,
             code,
+            anchor_project,
             drift,
             update_hashes,
             deep,
@@ -1049,6 +1201,68 @@ async fn main() -> Result<()> {
                     check::check_unified(&spec, &proofs, code.as_deref(), kani.as_deref())?;
                 check::print_unified_report(&spec_name, &report);
                 if report.issue_count() > 0 {
+                    has_issues = true;
+                }
+            }
+
+            // Anchor cross-check (--anchor-project) — verify that the spec's
+            // handler list matches the user's existing Anchor program. M5
+            // catches stale specs and uncovered handlers as a CI gate.
+            if let Some(ref project_path) = anchor_project {
+                let parsed = check::parse_spec_file(&spec)?;
+                let findings = anchor_check::check_anchor_coverage(&parsed, project_path)?;
+                let effect_findings = anchor_check::check_effect_coverage(&parsed, project_path)?;
+                if json {
+                    let payload = serde_json::json!({
+                        "handler_coverage": findings
+                            .iter()
+                            .map(|f| serde_json::json!({
+                                "kind": format!("{:?}", f.kind),
+                                "handler": f.handler_name,
+                                "message": f.message(),
+                            }))
+                            .collect::<Vec<_>>(),
+                        "effect_coverage": effect_findings
+                            .iter()
+                            .map(|f| serde_json::json!({
+                                "handler": f.handler,
+                                "field": f.field,
+                                "message": f.message(),
+                            }))
+                            .collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    if findings.is_empty() {
+                        eprintln!(
+                            "Anchor cross-check (`{}`) — spec and program handler sets agree.",
+                            project_path.display()
+                        );
+                    } else {
+                        eprintln!(
+                            "Anchor cross-check (`{}`) — {} handler-set disagreement(s):",
+                            project_path.display(),
+                            findings.len()
+                        );
+                        for f in &findings {
+                            eprintln!("  ! {}", f.message());
+                        }
+                    }
+                    if effect_findings.is_empty() {
+                        eprintln!(
+                            "Effect coverage — every spec effect has a matching mutation in the Rust body."
+                        );
+                    } else {
+                        eprintln!(
+                            "Effect coverage — {} unimplemented effect(s):",
+                            effect_findings.len()
+                        );
+                        for f in &effect_findings {
+                            eprintln!("  ! {}", f.message());
+                        }
+                    }
+                }
+                if !findings.is_empty() || !effect_findings.is_empty() {
                     has_issues = true;
                 }
             }
@@ -1345,6 +1559,7 @@ async fn main() -> Result<()> {
         // ==================================================================
         Commands::Codegen {
             spec,
+            target,
             output_dir,
             kani,
             kani_output,
@@ -1366,10 +1581,17 @@ async fn main() -> Result<()> {
             fill_tests,
         } => {
             require_git_repo()?;
+            if matches!(target, Target::Pinocchio) {
+                anyhow::bail!(
+                    "`--target pinocchio` codegen ships in v2.10+. \
+                     Today `--target anchor` and `--target quasar` are \
+                     implemented."
+                );
+            }
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             // Rust skeleton (always)
-            codegen::generate(&spec, &output_dir)?;
+            codegen::generate(&spec, &output_dir, target)?;
 
             if kani || all {
                 deps::require_kani()?;

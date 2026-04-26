@@ -89,13 +89,36 @@ An existing Rust program being onboarded to qedgen for the first time.
 
 1. **Read the source code** — Understand the program's state, instructions, guards, and invariants directly from Rust source. This is always the ground truth.
 2. **Check for existing Rust tests** — Look for `tests/`, `#[cfg(test)]`, or `#[cfg(kani)]` modules. Existing tests reveal the program's testing patterns, helper infrastructure, and what's already covered. These shape how you write Kani harnesses (see "Brownfield projects" under Code generation).
-3. **IDL exists** (`target/idl/<program>.json`) → Run `$QEDGEN spec --idl <path> --format qedspec` to generate a `.qedspec` scaffold, then review TODO items against the source and run `$QEDGEN codegen --spec <path> --lean` to produce `Spec.lean`.
-4. **Rust source only** (no IDL, no framework) → Extract the spec from source using LSP. See "Writing a .qedspec from Rust source" below.
-5. **Nothing to start from** → Read the source code and ask scoping questions (Step 2).
+3. **Anchor program** (`#[program] pub mod` exists) → Run `$QEDGEN adapt --program <crate-dir>` to scaffold a `.qedspec` from source. The adapter follows each `pub fn` in the `#[program]` mod to its actual handler body, picks up typed arguments + the `Context<X>` accounts struct + `#[error_code]` variants, and leaves a path breadcrumb to each handler. Edit the generated TODOs (lifecycle, requires, effect, transfers), then continue at Step 2 / 3.
+4. **IDL exists** (`target/idl/<program>.json`, no source) → Run `$QEDGEN spec --idl <path> --format qedspec` for an ABI-only scaffold. Less precise than `qedgen adapt` (no handler bodies, no error variants), but works when only the IDL is available.
+5. **Native / non-Anchor Rust source** (no `#[program]`) → Extract the spec using LSP. See "Writing a .qedspec from Rust source" below.
+6. **Nothing to start from** → Read the source code and ask scoping questions (Step 2).
+
+#### After the .qedspec is filled in: the `#[qed]` drift loop
+
+Once the spec covers each handler, paint `#[qed]` attributes on the handlers so future body edits trip a compile error:
+
+```
+$QEDGEN adapt --program <crate-dir> --spec <path-to>.qedspec
+```
+
+Emits one `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ..., accounts = ..., accounts_file = ..., accounts_hash = ...)]` line per spec handler with the matching source path. Paste each above its handler `pub fn`. The `qedgen-macros` crate recomputes every hash at compile time — body edits, spec edits, or `#[derive(Accounts)]` constraint edits without a re-run print a diff and break the build until you re-paste. All four forwarder shapes (inline, free-fn, type-associated method, accounts-method) seal end-to-end; the proc-macro tries `syn::ItemFn` and falls back to `syn::ImplItemFn`, so attaching `#[qed]` to a method inside an `impl` block works the same as on a free fn. The `accounts*` triplet is included automatically whenever the adapter can find the `Context<X>` struct in source.
+
+Cross-check spec coverage against the live program in CI:
+
+```
+$QEDGEN check --spec <path> --anchor-project <crate-dir>
+```
+
+Two gates fire here:
+- **Handler coverage.** Errors when the spec declares a handler the program doesn't have, or vice versa.
+- **Effect coverage.** Heuristic lint: for each spec effect, asserts the corresponding Rust handler body contains at least one assignment-like mutation whose LHS leaf matches the effect's field name. Catches the "I added a spec effect but forgot to wire the code" footgun.
+
+Pure read; pairs with `--frozen` for full CI gating. For handlers with custom dispatcher shapes the classifier can't follow automatically (runtime lookup tables, closure calls, non-path tails), use `qedgen adapt --handler <name>=<rust_path>` to point at the actual implementation manually (repeatable per handler).
 
 ### Writing a .qedspec from Rust source
 
-For native Rust programs without an IDL (no Anchor/Quasar), use LSP and source reading to extract the program structure into a `.qedspec`. Work through these in order:
+For native Rust programs without an IDL (no Anchor framework), use LSP and source reading to extract the program structure into a `.qedspec`. Work through these in order:
 
 1. **Find the entry point** — Look for `process_instruction` or the instruction dispatcher. Use LSP to find all match arms or handler functions. Each handler becomes an `operation` block.
 
@@ -419,9 +442,11 @@ $QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 # With Mathlib (for u128 arithmetic helpers)
 $QEDGEN init --name engine --spec engine.qedspec --mathlib
 
-# With the full Anchor handler + Kani codegen pipeline (--quasar flag name
-# is retained for backward compatibility; v2.6 emits Anchor-compatible Rust)
-$QEDGEN init --name counter --spec counter.qedspec --quasar
+# With the full handler + Kani codegen pipeline. `--target` selects
+# the framework: `anchor` and `quasar` are both implemented in v2.9;
+# `pinocchio` reserves the CLI surface for v2.10+ and errors cleanly
+# when selected.
+$QEDGEN init --name counter --spec counter.qedspec --target anchor
 ```
 
 After init, subsequent commands find the spec automatically by walking up
@@ -662,7 +687,7 @@ $QEDGEN codegen --spec program.qedspec --proptest        # Proptest harnesses on
 $QEDGEN codegen --spec program.qedspec --integration     # Integration tests only
 ```
 
-With `qedgen init --quasar`, the generated outputs are created automatically.
+With `qedgen init --target anchor`, the generated outputs are created automatically.
 
 ### v2.0 spec features
 
