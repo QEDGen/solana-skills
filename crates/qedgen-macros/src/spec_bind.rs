@@ -125,26 +125,39 @@ pub(crate) fn parse_args(attr: &TokenStream) -> Result<Args, syn::Error> {
     })
 }
 
-/// Parse `source` as Rust, find a top-level `pub struct <name>`, and
-/// return the canonical hash of its tokens (after outer-attribute
-/// stripping). Mirrors `qedgen::spec_hash::accounts_struct_hash` so
-/// the proc-macro and the qedgen-side computation produce identical
-/// values; any divergence yields a spurious accounts-hash drift.
+/// Parse `source` as Rust, find a `pub struct <name>` (top-level or
+/// inside an inline `pub mod`), and return the canonical hash of its
+/// tokens (after outer-attribute stripping). Mirrors
+/// `qedgen::spec_hash::accounts_struct_hash` so the proc-macro and
+/// the qedgen-side computation produce identical values; any
+/// divergence yields a spurious accounts-hash drift.
 ///
 /// Returns `None` when:
 ///   - the file isn't valid Rust source
-///   - no `struct <name>` is declared at the top level (we don't
-///     descend into mods to keep the search predictable)
+///   - no `struct <name>` is declared anywhere in the file
 pub(crate) fn accounts_struct_hash_in(source: &str, struct_name: &str) -> Option<String> {
-    use quote::ToTokens;
     let file: syn::File = syn::parse_str(source).ok()?;
-    for item in file.items {
-        if let syn::Item::Struct(mut s) = item {
-            if s.ident == struct_name {
-                s.attrs.clear();
-                let canonical = s.to_token_stream().to_string();
+    accounts_struct_hash_in_items(&file.items, struct_name)
+}
+
+fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Option<String> {
+    use quote::ToTokens;
+    for item in items {
+        match item {
+            syn::Item::Struct(s) if s.ident == struct_name => {
+                let mut stripped = s.clone();
+                stripped.attrs.clear();
+                let canonical = stripped.to_token_stream().to_string();
                 return Some(sha256_hex16(&canonical));
             }
+            syn::Item::Mod(item_mod) => {
+                if let Some((_, sub_items)) = &item_mod.content {
+                    if let Some(h) = accounts_struct_hash_in_items(sub_items, struct_name) {
+                        return Some(h);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -278,9 +291,77 @@ pub(crate) fn extract_handler_block(source: &str, handler_name: &str) -> Option<
     None
 }
 
-/// Compute the spec hash for a handler: extract the block text, then sha256-hex16 it.
+/// Normalize a spec handler block before hashing so cosmetic edits
+/// (reformatting, comment changes, blank-line shuffling) don't fire
+/// drift while semantic edits still do. MUST match
+/// `qedgen::spec_hash::normalize_spec_block` byte-for-byte; any
+/// divergence yields a spurious spec-hash drift.
+pub(crate) fn normalize_spec_block(block: &str) -> String {
+    let bytes = block.as_bytes();
+    let mut out = String::with_capacity(block.len());
+    let mut i = 0;
+    let mut in_str = false;
+    let mut last_emit_was_ws = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            out.push(b as char);
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            last_emit_was_ws = false;
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = i.saturating_add(2);
+            if !out.is_empty() && !last_emit_was_ws {
+                out.push(' ');
+                last_emit_was_ws = true;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+            last_emit_was_ws = false;
+            continue;
+        }
+        if b.is_ascii_whitespace() {
+            if !out.is_empty() && !last_emit_was_ws {
+                out.push(' ');
+                last_emit_was_ws = true;
+            }
+            i += 1;
+            continue;
+        }
+        out.push(b as char);
+        last_emit_was_ws = false;
+        i += 1;
+    }
+    out.trim().to_string()
+}
+
+/// Compute the spec hash for a handler: extract the block text,
+/// normalize whitespace + comments, then sha256-hex16.
 pub(crate) fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&s))
+    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&normalize_spec_block(&s)))
 }
 
 /// Main expansion for `#[qed(verified, spec=..., handler=..., hash=..., spec_hash=...)]`.
@@ -540,14 +621,22 @@ handler withdraw (i : AccountIdx) (amount : U128) : State.Active -> State.Active
     }
 
     #[test]
-    fn spec_hash_whitespace_sensitive() {
-        // Whitespace inside the block is part of the extracted text. We
-        // choose sensitivity over normalisation so minor reformats are
-        // surfaced by the same compile_error that catches real edits.
+    fn spec_hash_tolerates_cosmetic_whitespace() {
+        // v2.9 second-pass: cosmetic reformats (extra spaces, blank
+        // lines, indentation changes) don't fire drift. Real edits
+        // still do (covered by `spec_hash_changes_on_edit`).
         let h_orig = spec_hash_for_handler(SAMPLE_SPEC, "deposit").unwrap();
-        let spaced = SAMPLE_SPEC.replace("active == 1", "active  ==  1");
-        let h_spaced = spec_hash_for_handler(&spaced, "deposit").unwrap();
-        assert_ne!(h_orig, h_spaced);
+        let reformatted = SAMPLE_SPEC.replace("active == 1", "active   ==   1");
+        let h_reformatted = spec_hash_for_handler(&reformatted, "deposit").unwrap();
+        assert_eq!(h_orig, h_reformatted);
+    }
+
+    #[test]
+    fn spec_hash_tolerates_added_line_comments() {
+        let with_comment = SAMPLE_SPEC.replace("effect {", "// new comment, harmless\n  effect {");
+        let h_orig = spec_hash_for_handler(SAMPLE_SPEC, "deposit").unwrap();
+        let h_commented = spec_hash_for_handler(&with_comment, "deposit").unwrap();
+        assert_eq!(h_orig, h_commented);
     }
 
     #[test]

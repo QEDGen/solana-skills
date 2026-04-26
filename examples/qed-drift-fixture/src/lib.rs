@@ -41,7 +41,7 @@ use qedgen_macros::qed;
     spec = "example.qedspec",
     handler = "deposit",
     hash = "ac26f349ac12dd3e",
-    spec_hash = "ead5f06cee4818d0"
+    spec_hash = "fe6610e4cf4a98e3"
 )]
 pub fn deposit(amount: u64) -> u64 {
     amount + 1
@@ -52,7 +52,7 @@ pub fn deposit(amount: u64) -> u64 {
     spec = "example.qedspec",
     handler = "withdraw",
     hash = "cc247c5a61f6bbba",
-    spec_hash = "cd2763ac8735efc7"
+    spec_hash = "24f34f81bd83188c"
 )]
 pub fn withdraw(amount: u64) -> Result<u64, &'static str> {
     if amount == 0 {
@@ -80,7 +80,7 @@ pub struct Vault {
     spec = "example.qedspec",
     handler = "deposit_with_accounts",
     hash = "d3ca667dc9867fd2",
-    spec_hash = "ead5f06cee4818d0",
+    spec_hash = "fe6610e4cf4a98e3",
     accounts = "Vault",
     accounts_file = "src/lib.rs",
     accounts_hash = "133e997ce3d3b469"
@@ -104,7 +104,7 @@ impl Account {
         spec = "example.qedspec",
         handler = "process",
         hash = "8dc48270e93d2a13",
-        spec_hash = "8059060599929629"
+        spec_hash = "98282f05baf0b306"
     )]
     pub fn process(&mut self, delta: u64) -> Result<(), &'static str> {
         self.balance = self.balance.checked_add(delta).ok_or("Overflow")?;

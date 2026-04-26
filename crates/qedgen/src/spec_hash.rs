@@ -46,28 +46,42 @@ pub fn body_hash_for_impl_fn(func: &syn::ImplItemFn) -> String {
     sha256_hex16(&canonical)
 }
 
-/// Hash a top-level `pub struct <name>` from a Rust source file. MUST
-/// match `qedgen-macros::spec_bind::accounts_struct_hash_in`. Used by
+/// Hash a `pub struct <name>` from a Rust source file. MUST match
+/// `qedgen-macros::spec_bind::accounts_struct_hash_in`. Used by
 /// `qedgen adapt --spec` to seal each handler's accompanying
 /// `#[derive(Accounts)]` struct so edits to the constraints there
 /// (e.g. `#[account(mut)]`, `has_one = ...`, `seeds = [...]`) trip
 /// `compile_error!` the same way handler body edits do.
 ///
-/// `None` when:
+/// Walks the file's top-level items first, then descends into any
+/// inline `pub mod foo { ... }` blocks (e.g. `pub mod accounts {
+/// pub struct Buy { ... } }`). First match wins.
+///
+/// Returns `None` when:
 ///   - the source isn't valid Rust
-///   - no `struct <name>` exists at the top level (we don't descend
-///     into mods to keep the search predictable; users with nested
-///     accounts structs can either move the struct top-level or wait
-///     for v2.10's mod-walking pass).
+///   - no `struct <name>` exists anywhere in the file
 pub fn accounts_struct_hash(source: &str, struct_name: &str) -> Option<String> {
     let file: syn::File = syn::parse_str(source).ok()?;
-    for item in file.items {
-        if let syn::Item::Struct(mut s) = item {
-            if s.ident == struct_name {
-                s.attrs.clear();
-                let canonical = s.to_token_stream().to_string();
+    accounts_struct_hash_in_items(&file.items, struct_name)
+}
+
+fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Option<String> {
+    for item in items {
+        match item {
+            syn::Item::Struct(s) if s.ident == struct_name => {
+                let mut stripped = s.clone();
+                stripped.attrs.clear();
+                let canonical = stripped.to_token_stream().to_string();
                 return Some(sha256_hex16(&canonical));
             }
+            syn::Item::Mod(item_mod) => {
+                if let Some((_, sub_items)) = &item_mod.content {
+                    if let Some(h) = accounts_struct_hash_in_items(sub_items, struct_name) {
+                        return Some(h);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -183,12 +197,96 @@ pub fn extract_handler_block(source: &str, handler_name: &str) -> Option<String>
     None
 }
 
+/// Normalize a spec handler block before hashing so cosmetic edits
+/// (reformatting, comment changes, blank-line shuffling) don't fire
+/// drift while semantic edits still do. Rules:
+///
+///   - `// ...` line comments and `/* ... */` block comments are stripped.
+///   - Runs of whitespace outside strings collapse to a single space.
+///   - Leading and trailing whitespace are trimmed.
+///   - String literals (`"..."`, including `\"` escapes) pass through
+///     verbatim — `"Hello   World"` stays `"Hello   World"` because the
+///     spaces inside the literal carry semantic meaning.
+///
+/// MUST match `qedgen-macros::spec_bind::normalize_spec_block`. Any
+/// divergence yields a spurious spec-hash drift.
+pub fn normalize_spec_block(block: &str) -> String {
+    let bytes = block.as_bytes();
+    let mut out = String::with_capacity(block.len());
+    let mut i = 0;
+    let mut in_str = false;
+    let mut last_emit_was_ws = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_str {
+            out.push(b as char);
+            if b == b'\\' && i + 1 < bytes.len() {
+                out.push(bytes[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            last_emit_was_ws = false;
+            continue;
+        }
+        // Line comment
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            // The newline ends the comment; fall through so the
+            // whitespace-collapse arm below treats it as a separator.
+            continue;
+        }
+        // Block comment
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = i.saturating_add(2);
+            // Treat the comment gap as a single whitespace separator
+            // unless we'd otherwise emit two spaces in a row.
+            if !out.is_empty() && !last_emit_was_ws {
+                out.push(' ');
+                last_emit_was_ws = true;
+            }
+            continue;
+        }
+        if b == b'"' {
+            in_str = true;
+            out.push('"');
+            i += 1;
+            last_emit_was_ws = false;
+            continue;
+        }
+        if b.is_ascii_whitespace() {
+            if !out.is_empty() && !last_emit_was_ws {
+                out.push(' ');
+                last_emit_was_ws = true;
+            }
+            i += 1;
+            continue;
+        }
+        out.push(b as char);
+        last_emit_was_ws = false;
+        i += 1;
+    }
+    out.trim().to_string()
+}
+
 /// Compute the spec hash for a handler. Returns `None` if the handler block
 /// is absent or a handler declared with no body (e.g. `handler foo : A -> B`
 /// with no braces — treated as an empty contract so codegen emits an empty
 /// placeholder hash that the macro side will also compute as `None`).
+///
+/// The block is run through `normalize_spec_block` before hashing so
+/// cosmetic edits (whitespace, comments) don't fire drift.
 pub fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&s))
+    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&normalize_spec_block(&s)))
 }
 
 #[cfg(test)]
@@ -276,6 +374,47 @@ handler bar : State.A -> State.B {
         assert_ne!(body_hash_for_fn(&v1), body_hash_for_fn(&v2));
     }
 
+    /// v2.9 second-pass: cosmetic edits don't fire drift; semantic
+    /// edits still do.
+    #[test]
+    fn spec_hash_is_whitespace_tolerant() {
+        let h = spec_hash_for_handler(SAMPLE, "foo").unwrap();
+        let reflowed = SAMPLE.replace("count += x", "count   +=   x");
+        let h_reflowed = spec_hash_for_handler(&reflowed, "foo").unwrap();
+        assert_eq!(h, h_reflowed);
+
+        // Adding a line comment doesn't change the hash either.
+        let with_comment = SAMPLE.replace("count += x", "// commentary\n    count += x");
+        let h_commented = spec_hash_for_handler(&with_comment, "foo").unwrap();
+        assert_eq!(h, h_commented);
+    }
+
+    #[test]
+    fn spec_hash_still_changes_on_semantic_edit() {
+        let h = spec_hash_for_handler(SAMPLE, "foo").unwrap();
+        // Identifier change → must change hash.
+        let renamed = SAMPLE.replace("count += x", "count += y");
+        let h_renamed = spec_hash_for_handler(&renamed, "foo").unwrap();
+        assert_ne!(h, h_renamed);
+        // Operator change → must change hash.
+        let op_changed = SAMPLE.replace("count += x", "count -= x");
+        let h_op = spec_hash_for_handler(&op_changed, "foo").unwrap();
+        assert_ne!(h, h_op);
+    }
+
+    #[test]
+    fn normalize_preserves_string_literal_internal_whitespace() {
+        // Spaces inside `"..."` are semantically meaningful and stay.
+        let input = "  foo  \"hello   world\"  bar  ";
+        assert_eq!(normalize_spec_block(input), "foo \"hello   world\" bar");
+    }
+
+    #[test]
+    fn normalize_strips_block_comments() {
+        let input = "foo /* inline comment */ bar";
+        assert_eq!(normalize_spec_block(input), "foo bar");
+    }
+
     /// Mirrors `qedgen-macros::verified::tests::fn_like_handles_method_shape_input`.
     /// Same impl-method body run through both sides should produce
     /// identical 16-hex hashes.
@@ -326,6 +465,50 @@ handler bar : State.A -> State.B {
     fn accounts_struct_hash_returns_none_for_missing_struct() {
         let src = "pub struct Other { pub x: u64 }";
         assert!(accounts_struct_hash(src, "DoesNotExist").is_none());
+    }
+
+    /// Nested-mod discovery: `pub struct Buy` declared inside
+    /// `pub mod accounts { ... }` resolves the same as a top-level
+    /// declaration. Hash bytes are identical (the mod wrapper is
+    /// stripped — only the struct's own tokens go into the hash).
+    #[test]
+    fn accounts_struct_hash_descends_into_nested_mods() {
+        let nested = r#"
+            pub mod accounts {
+                use anchor_lang::prelude::*;
+
+                #[derive(Accounts)]
+                pub struct Buy<'info> {
+                    pub buyer: Signer<'info>,
+                }
+            }
+        "#;
+        let top_level = r#"
+            use anchor_lang::prelude::*;
+
+            #[derive(Accounts)]
+            pub struct Buy<'info> {
+                pub buyer: Signer<'info>,
+            }
+        "#;
+        let h_nested = accounts_struct_hash(nested, "Buy").unwrap();
+        let h_top = accounts_struct_hash(top_level, "Buy").unwrap();
+        // Both find the struct; both produce the same hash because
+        // the mod wrapper isn't part of the hashed token stream.
+        assert_eq!(h_nested, h_top);
+    }
+
+    #[test]
+    fn accounts_struct_hash_handles_doubly_nested_mods() {
+        let src = r#"
+            pub mod a {
+                pub mod b {
+                    pub struct Buy { pub x: u64 }
+                }
+            }
+        "#;
+        let h = accounts_struct_hash(src, "Buy").unwrap();
+        assert_eq!(h.len(), 16);
     }
 
     #[test]

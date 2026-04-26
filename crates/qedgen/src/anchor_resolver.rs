@@ -296,7 +296,13 @@ fn is_pascal_case(s: &str) -> bool {
 /// Walk the program crate's `src/` for a `pub fn <fn_name>` whose
 /// surrounding module path matches the forwarder's path. Returns
 /// `Unrecognized` if the function can't be found.
-fn resolve_free_fn(
+///
+/// `pub` so `qedgen adapt --handler <name>=<rust_path>` overrides can
+/// reuse the same lookup path: an override is, semantically, a
+/// hand-supplied free-fn forwarder for handlers the classifier
+/// returned `Unrecognized` for (Drift's custom dispatcher being the
+/// canonical case).
+pub fn resolve_free_fn(
     module_path: &[String],
     fn_name: &str,
     program_root: &Path,

@@ -110,7 +110,11 @@ Cross-check spec coverage against the live program in CI:
 $QEDGEN check --spec <path> --anchor-project <crate-dir>
 ```
 
-Errors when the spec declares a handler the program doesn't have, or vice versa. Pure read; pairs with `--frozen` for full CI gating.
+Two gates fire here:
+- **Handler coverage.** Errors when the spec declares a handler the program doesn't have, or vice versa.
+- **Effect coverage.** Heuristic lint: for each spec effect, asserts the corresponding Rust handler body contains at least one assignment-like mutation whose LHS leaf matches the effect's field name. Catches the "I added a spec effect but forgot to wire the code" footgun.
+
+Pure read; pairs with `--frozen` for full CI gating. For Drift-style handlers whose forwarders the classifier can't follow automatically, use `qedgen adapt --handler <name>=<rust_path>` to point at the actual implementation manually (repeatable per handler).
 
 ### Writing a .qedspec from Rust source
 

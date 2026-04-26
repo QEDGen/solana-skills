@@ -146,6 +146,14 @@ enum Commands {
         /// writes a `// === handler … ===` report.
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Manually point an unrecognized handler at its actual
+        /// implementation. Format: `<handler>=<rust_path>` where the
+        /// path is `module::sub::function` (or just `function`).
+        /// Repeatable: pass once per handler. Drift's custom
+        /// dispatcher is the canonical use case.
+        #[arg(long = "handler", value_name = "NAME=PATH")]
+        handler_overrides: Vec<String>,
     },
 
     /// Generate a Tier-0 .qedspec interface block from an Anchor IDL.
@@ -885,29 +893,42 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Adapt { program, spec, out } => match spec {
-            Some(spec_path) => {
-                let entries = anchor_adapt::compute_attributes(&program, &spec_path)?;
-                let rendered = anchor_adapt::render_attributes(&entries);
-                if let Some(path) = out {
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)?;
+        Commands::Adapt {
+            program,
+            spec,
+            out,
+            handler_overrides,
+        } => {
+            let mut overrides = std::collections::HashMap::new();
+            for raw in &handler_overrides {
+                let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
+                overrides.insert(name, parsed);
+            }
+            match spec {
+                Some(spec_path) => {
+                    let entries =
+                        anchor_adapt::compute_attributes(&program, &spec_path, &overrides)?;
+                    let rendered = anchor_adapt::render_attributes(&entries);
+                    if let Some(path) = out {
+                        if let Some(parent) = path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&path, &rendered)?;
+                        eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
+                    } else {
+                        print!("{}", rendered);
                     }
-                    std::fs::write(&path, &rendered)?;
-                    eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
-                } else {
-                    print!("{}", rendered);
+                }
+                None => {
+                    if let Some(path) = out {
+                        anchor_adapt::adapt_to_file(&program, &path, &overrides)?;
+                    } else {
+                        let rendered = anchor_adapt::adapt(&program, &overrides)?;
+                        print!("{}", rendered);
+                    }
                 }
             }
-            None => {
-                if let Some(path) = out {
-                    anchor_adapt::adapt_to_file(&program, &path)?;
-                } else {
-                    let rendered = anchor_adapt::adapt(&program)?;
-                    print!("{}", rendered);
-                }
-            }
-        },
+        }
 
         Commands::Interface { idl, out, vendor } => {
             if vendor {
@@ -1127,36 +1148,58 @@ async fn main() -> Result<()> {
             if let Some(ref project_path) = anchor_project {
                 let parsed = check::parse_spec_file(&spec)?;
                 let findings = anchor_check::check_anchor_coverage(&parsed, project_path)?;
+                let effect_findings = anchor_check::check_effect_coverage(&parsed, project_path)?;
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &findings
-                                .iter()
-                                .map(|f| serde_json::json!({
-                                    "kind": format!("{:?}", f.kind),
-                                    "handler": f.handler_name,
-                                    "message": f.message(),
-                                }))
-                                .collect::<Vec<_>>(),
-                        )?
-                    );
-                } else if findings.is_empty() {
-                    eprintln!(
-                        "Anchor cross-check (`{}`) — spec and program agree.",
-                        project_path.display()
-                    );
+                    let payload = serde_json::json!({
+                        "handler_coverage": findings
+                            .iter()
+                            .map(|f| serde_json::json!({
+                                "kind": format!("{:?}", f.kind),
+                                "handler": f.handler_name,
+                                "message": f.message(),
+                            }))
+                            .collect::<Vec<_>>(),
+                        "effect_coverage": effect_findings
+                            .iter()
+                            .map(|f| serde_json::json!({
+                                "handler": f.handler,
+                                "field": f.field,
+                                "message": f.message(),
+                            }))
+                            .collect::<Vec<_>>(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
-                    eprintln!(
-                        "Anchor cross-check (`{}`) — {} disagreement(s):",
-                        project_path.display(),
-                        findings.len()
-                    );
-                    for f in &findings {
-                        eprintln!("  ! {}", f.message());
+                    if findings.is_empty() {
+                        eprintln!(
+                            "Anchor cross-check (`{}`) — spec and program handler sets agree.",
+                            project_path.display()
+                        );
+                    } else {
+                        eprintln!(
+                            "Anchor cross-check (`{}`) — {} handler-set disagreement(s):",
+                            project_path.display(),
+                            findings.len()
+                        );
+                        for f in &findings {
+                            eprintln!("  ! {}", f.message());
+                        }
+                    }
+                    if effect_findings.is_empty() {
+                        eprintln!(
+                            "Effect coverage — every spec effect has a matching mutation in the Rust body."
+                        );
+                    } else {
+                        eprintln!(
+                            "Effect coverage — {} unimplemented effect(s):",
+                            effect_findings.len()
+                        );
+                        for f in &effect_findings {
+                            eprintln!("  ! {}", f.message());
+                        }
                     }
                 }
-                if !findings.is_empty() {
+                if !findings.is_empty() || !effect_findings.is_empty() {
                     has_issues = true;
                 }
             }

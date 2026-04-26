@@ -22,17 +22,76 @@
 //! at adapt-time rather than the next `qedgen check`.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::anchor_project::{parse_anchor_project, AnchorProject, Instruction};
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
 
+/// Per-handler override that names where the actual implementation
+/// lives when the classifier can't follow a forwarder automatically.
+/// Drift's custom dispatcher is the canonical case. Path is parsed
+/// the same way as a free-fn forwarder (`module::sub_module::function`
+/// or just `function`), with the function name as the last segment.
+#[derive(Debug, Clone)]
+pub struct HandlerOverride {
+    pub module_path: Vec<String>,
+    pub fn_name: String,
+}
+
+impl HandlerOverride {
+    /// Parse `module::sub::function` → `HandlerOverride`. Bare
+    /// `function` → empty module path. Returns `None` when the input
+    /// is empty or has an empty segment.
+    pub fn parse(rust_path: &str) -> Option<Self> {
+        let trimmed = rust_path.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let mut segments: Vec<String> = trimmed.split("::").map(|s| s.trim().to_string()).collect();
+        if segments.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        let fn_name = segments.pop()?;
+        Some(HandlerOverride {
+            module_path: segments,
+            fn_name,
+        })
+    }
+}
+
+/// Parse one `--handler <name>=<rust_path>` CLI value. Returns
+/// `(handler_name, override)`. Errors clearly when the format is
+/// wrong so the user gets a useful message rather than silent
+/// fallback to the unrecognized-handler path.
+pub fn parse_handler_override(value: &str) -> Result<(String, HandlerOverride)> {
+    let (name, path) = value.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!(
+            "expected `<handler>=<rust_path>` for `--handler`, got `{}`",
+            value
+        )
+    })?;
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("`--handler` value `{}` has empty handler name", value);
+    }
+    let rust_override = HandlerOverride::parse(path).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`--handler {}=<path>` rust path is empty or has empty segments",
+            name
+        )
+    })?;
+    Ok((name.to_string(), rust_override))
+}
+
 /// Generate a starter `.qedspec` for an existing Anchor program.
 ///
 /// `program_root` is the program crate's directory (sibling of `src/`).
+/// `overrides` lets the caller manually point unrecognized handlers
+/// at their actual implementation (`<handler_name>` → `<rust_path>`).
 /// Returns the rendered source so the caller can choose between
 /// stdout (one-shot inspection) and writing to a file.
-pub fn adapt(program_root: &Path) -> Result<String> {
+pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
     let project = parse_anchor_project(program_root).with_context(|| {
         format!(
             "failed to parse Anchor project at {}",
@@ -42,7 +101,12 @@ pub fn adapt(program_root: &Path) -> Result<String> {
 
     let mut entries = Vec::with_capacity(project.instructions.len());
     for instruction in &project.instructions {
-        let location = resolve_handler(instruction, &project.lib_rs_path, program_root)?;
+        let location = resolve_with_override(
+            instruction,
+            &project.lib_rs_path,
+            program_root,
+            overrides.get(&instruction.name),
+        )?;
         entries.push(HandlerEntry::from(instruction, &location, program_root));
     }
 
@@ -60,8 +124,12 @@ pub fn adapt(program_root: &Path) -> Result<String> {
 }
 
 /// Convenience wrapper: write the adapted `.qedspec` to disk.
-pub fn adapt_to_file(program_root: &Path, output_path: &Path) -> Result<()> {
-    let rendered = adapt(program_root)?;
+pub fn adapt_to_file(
+    program_root: &Path,
+    output_path: &Path,
+    overrides: &HashMap<String, HandlerOverride>,
+) -> Result<()> {
+    let rendered = adapt(program_root, overrides)?;
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating output directory {}", parent.display()))?;
@@ -70,6 +138,36 @@ pub fn adapt_to_file(program_root: &Path, output_path: &Path) -> Result<()> {
         .with_context(|| format!("writing {}", output_path.display()))?;
     eprintln!("Wrote {} ({} bytes)", output_path.display(), rendered.len());
     Ok(())
+}
+
+/// Resolve a handler with an optional CLI override. The override is
+/// consulted in two cases:
+///
+///   1. The classifier returned `Unrecognized` (custom dispatchers,
+///      closures, anything the classifier can't follow).
+///   2. The classifier returned a `FreeFn` / `Method` shape but the
+///      filesystem walk couldn't find the target (shape was right,
+///      location was wrong).
+///
+/// In both cases, an override path is treated like a hand-supplied
+/// free-fn forwarder: walk the crate's `src/` for `pub fn <name>`
+/// matching the override's module path.
+fn resolve_with_override(
+    instruction: &Instruction,
+    lib_rs_path: &Path,
+    program_root: &Path,
+    override_: Option<&HandlerOverride>,
+) -> Result<HandlerLocation> {
+    let location = resolve_handler(instruction, lib_rs_path, program_root)?;
+    match (&location, override_) {
+        (HandlerLocation::Unrecognized { .. }, Some(o)) => crate::anchor_resolver::resolve_free_fn(
+            &o.module_path,
+            &o.fn_name,
+            program_root,
+            lib_rs_path,
+        ),
+        _ => Ok(location),
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -107,7 +205,11 @@ pub struct AttributeEntry {
 /// one entry per spec handler. Handlers that exist in the spec but
 /// aren't in the program show up as a finding from
 /// `anchor_check::check_anchor_coverage` instead.
-pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<AttributeEntry>> {
+pub fn compute_attributes(
+    program_root: &Path,
+    spec_path: &Path,
+    overrides: &HashMap<String, HandlerOverride>,
+) -> Result<Vec<AttributeEntry>> {
     let project = parse_anchor_project(program_root).with_context(|| {
         format!(
             "failed to parse Anchor project at {}",
@@ -147,7 +249,12 @@ pub fn compute_attributes(program_root: &Path, spec_path: &Path) -> Result<Vec<A
             continue;
         };
 
-        let location = resolve_handler(instruction, &project.lib_rs_path, program_root)?;
+        let location = resolve_with_override(
+            instruction,
+            &project.lib_rs_path,
+            program_root,
+            overrides.get(&instruction.name),
+        )?;
         let spec_hash = crate::spec_hash::spec_hash_for_handler(&spec_source, &handler.name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -839,7 +946,7 @@ mod tests {
             ],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
 
         // Spec name is PascalCase'd from the program mod ident.
         assert!(
@@ -885,7 +992,7 @@ mod tests {
             )],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(rendered.contains("inline body in the `#[program]` mod"));
         assert!(rendered.contains("src/lib.rs"));
     }
@@ -915,7 +1022,7 @@ mod tests {
             )],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(rendered.contains("UNRECOGNIZED"), "rendered:\n{}", rendered);
         assert!(rendered.contains("classify this handler manually"));
     }
@@ -943,7 +1050,7 @@ mod tests {
             )],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(
             rendered.contains("(args : CreateArgs)"),
             "expected user-defined type passthrough, got:\n{}",
@@ -973,7 +1080,7 @@ mod tests {
             )],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         // Placeholder type lives in the signature; the explanatory
         // TODO is in the body so the spec parses.
         assert!(rendered.contains("(payload : U64)"));
@@ -1002,7 +1109,7 @@ mod tests {
         );
 
         let out = tmp.path().join("nested/out/tiny.qedspec");
-        adapt_to_file(&root, &out).unwrap();
+        adapt_to_file(&root, &out, &HashMap::new()).unwrap();
         assert!(out.exists());
         let contents = std::fs::read_to_string(&out).unwrap();
         assert!(contents.contains("spec Tiny"));
@@ -1037,7 +1144,7 @@ mod tests {
             )
         });
 
-        let actual = adapt(&demo).expect("adapter must succeed on the fixture");
+        let actual = adapt(&demo, &HashMap::new()).expect("adapter must succeed on the fixture");
 
         assert_eq!(
             actual,
@@ -1110,7 +1217,7 @@ mod tests {
             ],
         );
 
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(
             rendered.contains("`#[error_code] pub enum ErrorCode`"),
             "rendered:\n{}",
@@ -1143,7 +1250,7 @@ mod tests {
                 "#,
             )],
         );
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(rendered.contains("(No `#[error_code]` enum found"));
         assert!(rendered.contains("| InvalidArgument"));
     }
@@ -1171,7 +1278,7 @@ mod tests {
                 "#,
             )],
         );
-        let rendered = adapt(&root).unwrap();
+        let rendered = adapt(&root, &HashMap::new()).unwrap();
         assert!(rendered.contains("`#[error_code] pub enum MyError`"));
         assert!(rendered.contains("| Bad"));
     }
@@ -1234,7 +1341,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = compute_attributes(&root, &spec_path).unwrap();
+        let entries = compute_attributes(&root, &spec_path, &HashMap::new()).unwrap();
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
         assert_eq!(e.handler, "deposit");
@@ -1298,7 +1405,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = compute_attributes(&root, &spec_path).unwrap();
+        let entries = compute_attributes(&root, &spec_path, &HashMap::new()).unwrap();
         let buy = entries.iter().find(|e| e.handler == "buy").unwrap();
         assert!(
             buy.attribute.contains("accounts = \"Buy\""),
@@ -1343,7 +1450,7 @@ mod tests {
         )
         .unwrap();
 
-        let entries = compute_attributes(&root, &spec_path).unwrap();
+        let entries = compute_attributes(&root, &spec_path, &HashMap::new()).unwrap();
         let ping = entries.iter().find(|e| e.handler == "ping").unwrap();
         assert!(
             !ping.attribute.contains("accounts = "),
@@ -1351,6 +1458,102 @@ mod tests {
             ping.attribute
         );
         assert!(ping.attribute.contains("hash = \""));
+    }
+
+    #[test]
+    fn handler_override_parses_module_paths() {
+        let p = HandlerOverride::parse("instructions::buy::handler").unwrap();
+        assert_eq!(p.module_path, vec!["instructions", "buy"]);
+        assert_eq!(p.fn_name, "handler");
+
+        let bare = HandlerOverride::parse("handler").unwrap();
+        assert!(bare.module_path.is_empty());
+        assert_eq!(bare.fn_name, "handler");
+
+        // Empty input → None
+        assert!(HandlerOverride::parse("").is_none());
+        // Empty trailing segment → None
+        assert!(HandlerOverride::parse("instructions::buy::").is_none());
+        // Empty leading segment → None
+        assert!(HandlerOverride::parse("::handler").is_none());
+    }
+
+    #[test]
+    fn parse_handler_override_splits_on_first_equals() {
+        let (name, parsed) =
+            parse_handler_override("dispatch=instructions::dispatch::run").unwrap();
+        assert_eq!(name, "dispatch");
+        assert_eq!(parsed.module_path, vec!["instructions", "dispatch"]);
+        assert_eq!(parsed.fn_name, "run");
+
+        // Missing `=`: error
+        assert!(parse_handler_override("dispatch").is_err());
+        // Empty handler name: error
+        assert!(parse_handler_override("=path::fn").is_err());
+        // Empty rust path: error
+        assert!(parse_handler_override("dispatch=").is_err());
+    }
+
+    #[test]
+    fn override_resolves_unrecognized_handler_to_free_fn() {
+        // Drift-style: the program-mod fn body uses a closure-call
+        // shape the classifier can't follow. With a `--handler`
+        // override pointing at the actual free-fn handler, the
+        // adapter resolves it cleanly.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+
+                    pub mod instructions;
+
+                    #[program]
+                    pub mod dispatcher {
+                        use super::*;
+                        pub fn dispatch(ctx: Context<Dispatch>, data: u64) -> Result<()> {
+                            // Custom dispatcher — classifier can't follow this.
+                            DISPATCH_TABLE.lookup(data)(ctx, data)
+                        }
+                    }
+
+                    pub struct Dispatch;
+                    "#,
+                ),
+                ("src/instructions/mod.rs", "pub mod dispatch;\n"),
+                (
+                    "src/instructions/dispatch.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+                    use crate::Dispatch;
+
+                    pub fn handler(ctx: Context<Dispatch>, data: u64) -> Result<()> {
+                        Ok(())
+                    }
+                    "#,
+                ),
+            ],
+        );
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "dispatch".to_string(),
+            HandlerOverride::parse("instructions::dispatch::handler").unwrap(),
+        );
+
+        let rendered = adapt(&root, &overrides).unwrap();
+        // No "UNRECOGNIZED" marker — the override resolved it.
+        assert!(
+            !rendered.contains("UNRECOGNIZED"),
+            "rendered:\n{}",
+            rendered
+        );
+        // Attribution lands on the override target file.
+        assert!(rendered.contains("free-fn forwarder"));
+        assert!(rendered.contains("src/instructions/dispatch.rs"));
     }
 
     #[test]

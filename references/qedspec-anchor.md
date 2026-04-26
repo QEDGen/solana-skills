@@ -105,8 +105,68 @@ qedgen check --spec my_program.qedspec \
 
 Output is plain stderr by default, JSON via `--json` for tools.
 
+## Custom dispatcher override
+
+Drift-style handlers whose program-mod fn body uses a custom
+dispatcher table can't be followed by the classifier. Use the
+`--handler` flag to point the adapter at the actual implementation:
+
+```
+qedgen adapt --program ./programs/drift \
+  --handler dispatch=instructions::dispatch::handler \
+  --handler ix2=instructions::ix2::run
+```
+
+Each `--handler <name>=<rust_path>` is repeatable. The path uses
+`module::sub::function` syntax (or just `function` for a top-level
+free fn). Override paths are treated like hand-supplied free-fn
+forwarders: the resolver walks `src/` for `pub fn <function>` at the
+named module path. Both scaffold mode and attribute mode honor
+overrides.
+
+## Effect coverage gate
+
+`qedgen check --anchor-project <path>` also runs an effect-coverage
+lint: for each spec handler with an `effect { ... }` block, it
+verifies the resolved Rust handler body contains at least one
+assignment-like mutation whose LHS leaf matches each declared
+effect's field name. Catches the "I added an effect to the spec but
+forgot to wire it in code" footgun. Heuristic — not a proof of
+semantic equivalence — but cheap and bounded.
+
+```
+$ qedgen check --spec my_program.qedspec \
+    --anchor-project ./programs/my_program
+
+Anchor cross-check (`./programs/my_program`) — spec and program handler sets agree.
+Effect coverage — 1 unimplemented effect(s):
+  ! handler `withdraw`: spec effect on `balance` has no matching mutation in the Rust body — either implement it (assign to a path ending in `.balance`) or remove the effect from the spec
+```
+
+## Cosmetic-edit tolerance for spec hash
+
+Spec-hash computation runs the extracted `handler { ... }` block
+through a normalizer before hashing. Cosmetic edits don't fire drift:
+
+  - Runs of whitespace outside string literals collapse to one space.
+  - `// ...` line comments and `/* ... */` block comments are stripped.
+  - Leading/trailing whitespace is trimmed.
+  - String literal contents (including escape sequences) pass through
+    verbatim — `"hello   world"` stays `"hello   world"` because the
+    spaces inside the literal are semantically meaningful.
+
+Semantic edits — operator changes, identifier changes, added/removed
+clauses — still trip drift, since the canonical bytes change.
+
 ## Limitations + roadmap
 
-- **Drift custom dispatchers:** the adapter classifies these as `Unrecognized`. The planned `--handler <name>=<rust_path>` override flag is on the roadmap.
-- **Nested accounts struct:** `accounts_struct_hash` walks top-level items only. If `#[derive(Accounts)] pub struct Buy` lives inside `pub mod accounts { ... }`, the macro won't find it. Move it to the file's top level or use a sibling file (see `accounts_file` in the attribute).
-- **Cosmetic-edit tolerance:** the spec hash is whitespace-sensitive on purpose (small reformats today, larger drift later — pinning whitespace surfaces the small ones early). v3.0+ may add a normalize-on-hash mode behind a flag.
+- **Effect coverage is heuristic.** The lint checks that *some*
+  mutation targets each effect's field; it doesn't verify the RHS
+  matches the spec's expression or that the operator (`=` vs `+=`)
+  agrees. A handler with `state.balance = 0;` "covers" a spec effect
+  `balance += amount`. Future passes (v3.0+) can tighten this once
+  we have signal on which precision level pays.
+- **Override path syntax.** `--handler <name>=<path>` resolves a free
+  fn. Method-shape overrides aren't yet supported via this flag —
+  refactor the dispatcher target to a free fn or use the existing
+  scaffold-then-paste loop.
