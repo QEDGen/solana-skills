@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** (today) — **Quasar** and **Pinocchio** advertised via `--target` and ship in v2.10+; plus **sBPF assembly**.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.10+.
 
 ```bash
 npx skills add qedgen/solana-skills

@@ -442,9 +442,10 @@ $QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 # With Mathlib (for u128 arithmetic helpers)
 $QEDGEN init --name engine --spec engine.qedspec --mathlib
 
-# With the full Anchor handler + Kani codegen pipeline. `--target`
-# selects the framework: `anchor` is implemented today; `quasar` and
-# `pinocchio` are reserved for v2.10+ and error cleanly when selected.
+# With the full handler + Kani codegen pipeline. `--target` selects
+# the framework: `anchor` and `quasar` are both implemented in v2.9;
+# `pinocchio` reserves the CLI surface for v2.10+ and errors cleanly
+# when selected.
 $QEDGEN init --name counter --spec counter.qedspec --target anchor
 ```
 

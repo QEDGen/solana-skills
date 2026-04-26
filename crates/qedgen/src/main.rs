@@ -53,17 +53,20 @@ struct Cli {
 }
 
 /// Solana program framework target for greenfield codegen
-/// (`qedgen init --target ...`). v2.9 wires `anchor` end-to-end;
-/// `quasar` and `pinocchio` are advertised here so the surface is
-/// stable, but the codegen branches land in v2.10+ and selecting them
-/// today errors cleanly with a v2.10+ pointer.
+/// (`qedgen init --target ...`). v2.9 wires `anchor` and `quasar`
+/// end-to-end; `pinocchio` reserves the CLI surface and selecting
+/// it today errors with a v2.10+ pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum Target {
-    /// Anchor-compatible Rust program. Uses `anchor_lang::prelude::*`,
-    /// `#[derive(Accounts)]`, `#[program]` mod, etc. Fully implemented.
+pub(crate) enum Target {
+    /// Anchor-compatible Rust program. `use anchor_lang::prelude::*`,
+    /// `Context<X>`, `Result<()>`, `#[program] pub mod`, `'info`
+    /// lifetimes on `#[derive(Accounts)]` structs. Auto-derived
+    /// instruction discriminators.
     Anchor,
-    /// Quasar (Blueshift) Rust program. Uses `quasar_lang::prelude::*`.
-    /// Codegen branch ships in v2.10+ — selecting today errors.
+    /// Quasar (Blueshift) Rust program. `#![no_std]`,
+    /// `use quasar_lang::prelude::*`, `Ctx<X>`, `Result<(),
+    /// ProgramError>`, `#[program] mod`, explicit
+    /// `#[instruction(discriminator = N)]` on each handler.
     Quasar,
     /// Pinocchio (no_std) Rust program. Codegen branch ships in
     /// v2.10+ — selecting today errors.
@@ -505,15 +508,22 @@ enum Commands {
 
     /// Generate committed artifacts from a qedspec
     ///
-    /// Default (no flags): generates the Anchor-compatible Rust program
-    /// skeleton only. Use flags to generate additional artifacts, or
-    /// --all for everything.
+    /// Default (no flags): generates the Rust program skeleton for the
+    /// chosen `--target` (default: `anchor`). Use flags to generate
+    /// additional artifacts, or `--all` for everything.
     Codegen {
         /// Path to the spec file (.qedspec or a directory of fragments).
         /// Optional — falls back to the `spec` field in the nearest
         /// `.qed/config.json` discovered by walking up from cwd.
         #[arg(long)]
         spec: Option<PathBuf>,
+
+        /// Framework target for the Rust program crate. `anchor` is
+        /// fully implemented (default); `quasar` is fully implemented
+        /// (Blueshift's `quasar_lang`); `pinocchio` reserves the CLI
+        /// surface and ships in v2.10+.
+        #[arg(long, value_enum, default_value_t = Target::Anchor)]
+        target: Target,
 
         /// Output directory for the generated Rust program crate
         #[arg(long, default_value = "./programs")]
@@ -1041,24 +1051,29 @@ async fn main() -> Result<()> {
             target,
             output_dir,
         } => {
-            // Reject not-yet-implemented framework targets up front so
-            // `init` doesn't half-scaffold a project that can't be
-            // populated. The CLI surface advertises every variant; only
-            // Anchor's codegen branch is wired in v2.9.
-            match target {
-                Some(Target::Quasar) => anyhow::bail!(
-                    "`--target quasar` codegen ships in v2.10+. \
-                     Today only `--target anchor` is implemented; \
-                     omit `--target` to skip program scaffolding entirely."
-                ),
-                Some(Target::Pinocchio) => anyhow::bail!(
+            // Pinocchio reserves the CLI surface for v2.10+. Anchor and
+            // Quasar branches are wired end-to-end below.
+            if matches!(target, Some(Target::Pinocchio)) {
+                anyhow::bail!(
                     "`--target pinocchio` codegen ships in v2.10+. \
-                     Today only `--target anchor` is implemented; \
-                     omit `--target` to skip program scaffolding entirely."
-                ),
-                None | Some(Target::Anchor) => {}
+                     Today `--target anchor` and `--target quasar` are \
+                     implemented; omit `--target` to skip program \
+                     scaffolding entirely."
+                );
             }
-            let scaffold_program = matches!(target, Some(Target::Anchor));
+
+            // Program scaffolding (codegen + kani harnesses + unit tests)
+            // requires the original `.qedspec` — `init` writes a
+            // separate `Spec.lean` skeleton, but the codegen path parses
+            // the qedspec directly. Refuse cleanly when `--target` is
+            // set without `--spec`.
+            let scaffold_target = target;
+            if scaffold_target.is_some() && spec.is_none() {
+                anyhow::bail!(
+                    "`--target` requires `--spec <path.qedspec>` — the \
+                     program codegen runs against the spec directly."
+                );
+            }
 
             // .qed/ lives at the program root. If the user passed --spec, anchor
             // to the spec's parent directory (what they expect); otherwise fall
@@ -1081,11 +1096,10 @@ async fn main() -> Result<()> {
                 &output_dir,
                 asm.as_deref(),
                 mathlib,
-                scaffold_program,
+                scaffold_target.is_some(),
             )?;
 
-            if scaffold_program {
-                let spec_path = output_dir.join("Spec.lean");
+            if let (Some(target), Some(qedspec_path)) = (scaffold_target, spec.as_ref()) {
                 let program_dir = program_root.join(format!("programs/{}", name));
                 // v2.6: tests live INSIDE the program package so cargo-kani
                 // and cargo-test can resolve the governing Cargo.toml via the
@@ -1093,16 +1107,17 @@ async fn main() -> Result<()> {
                 // program_root, which had no Cargo.toml above it.
                 let kani_path = program_dir.join("tests/kani.rs");
 
-                // Generate the Anchor-compatible Rust program skeleton.
-                // (v2.10+ will branch on `target` here for Quasar / Pinocchio.)
-                codegen::generate(&spec_path, &program_dir)?;
+                // Generate the framework-flavored Rust program skeleton.
+                codegen::generate(qedspec_path, &program_dir, target)?;
 
-                // Generate Kani proof harnesses
-                kani::generate(&spec_path, &kani_path)?;
+                // Kani harnesses are framework-neutral (no Anchor/Quasar
+                // types — pure spec-derived state model).
+                kani::generate(qedspec_path, &kani_path)?;
 
-                // Generate unit tests
+                // Unit tests are framework-neutral too — plain `cargo
+                // test` over the spec-derived state struct.
                 let test_path = program_dir.join("src/tests.rs");
-                unit_test::generate(&spec_path, &test_path)?;
+                unit_test::generate(qedspec_path, &test_path)?;
             }
         }
 
@@ -1544,6 +1559,7 @@ async fn main() -> Result<()> {
         // ==================================================================
         Commands::Codegen {
             spec,
+            target,
             output_dir,
             kani,
             kani_output,
@@ -1565,10 +1581,17 @@ async fn main() -> Result<()> {
             fill_tests,
         } => {
             require_git_repo()?;
+            if matches!(target, Target::Pinocchio) {
+                anyhow::bail!(
+                    "`--target pinocchio` codegen ships in v2.10+. \
+                     Today `--target anchor` and `--target quasar` are \
+                     implemented."
+                );
+            }
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             // Rust skeleton (always)
-            codegen::generate(&spec, &output_dir)?;
+            codegen::generate(&spec, &output_dir, target)?;
 
             if kani || all {
                 deps::require_kani()?;

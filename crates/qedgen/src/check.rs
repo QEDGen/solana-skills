@@ -476,20 +476,9 @@ impl ParsedHandler {
 }
 
 impl ParsedHandlerAccount {
-    /// Infer the Quasar/Anchor field type string for codegen.
-    pub fn quasar_field_type(&self) -> String {
-        if self.is_signer {
-            "Signer".to_string()
-        } else if self.is_program {
-            "Program<()>".to_string()
-        } else if self.account_type.as_deref() == Some("token") {
-            "Account<Token>".to_string()
-        } else {
-            "Account<()>".to_string()
-        }
-    }
-
-    /// Generate the #[account(...)] attribute for codegen.
+    /// Generate the #[account(...)] attribute for codegen. Same shape
+    /// in both Anchor and Quasar (`#[account(mut, init, payer = ...,
+    /// seeds = ..., bump)]`).
     pub fn quasar_account_attr(&self, handler: &ParsedHandler, state_name: &str) -> String {
         let mut parts = Vec::new();
 
