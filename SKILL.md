@@ -114,11 +114,11 @@ Two gates fire here:
 - **Handler coverage.** Errors when the spec declares a handler the program doesn't have, or vice versa.
 - **Effect coverage.** Heuristic lint: for each spec effect, asserts the corresponding Rust handler body contains at least one assignment-like mutation whose LHS leaf matches the effect's field name. Catches the "I added a spec effect but forgot to wire the code" footgun.
 
-Pure read; pairs with `--frozen` for full CI gating. For Drift-style handlers whose forwarders the classifier can't follow automatically, use `qedgen adapt --handler <name>=<rust_path>` to point at the actual implementation manually (repeatable per handler).
+Pure read; pairs with `--frozen` for full CI gating. For handlers with custom dispatcher shapes the classifier can't follow automatically (runtime lookup tables, closure calls, non-path tails), use `qedgen adapt --handler <name>=<rust_path>` to point at the actual implementation manually (repeatable per handler).
 
 ### Writing a .qedspec from Rust source
 
-For native Rust programs without an IDL (no Anchor/Quasar), use LSP and source reading to extract the program structure into a `.qedspec`. Work through these in order:
+For native Rust programs without an IDL (no Anchor framework), use LSP and source reading to extract the program structure into a `.qedspec`. Work through these in order:
 
 1. **Find the entry point** — Look for `process_instruction` or the instruction dispatcher. Use LSP to find all match arms or handler functions. Each handler becomes an `operation` block.
 
@@ -442,9 +442,10 @@ $QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 # With Mathlib (for u128 arithmetic helpers)
 $QEDGEN init --name engine --spec engine.qedspec --mathlib
 
-# With the full Anchor handler + Kani codegen pipeline (--quasar flag name
-# is retained for backward compatibility; v2.6 emits Anchor-compatible Rust)
-$QEDGEN init --name counter --spec counter.qedspec --quasar
+# With the full Anchor handler + Kani codegen pipeline. `--target`
+# selects the framework: `anchor` is implemented today; `quasar` and
+# `pinocchio` are reserved for v2.10+ and error cleanly when selected.
+$QEDGEN init --name counter --spec counter.qedspec --target anchor
 ```
 
 After init, subsequent commands find the spec automatically by walking up
@@ -685,7 +686,7 @@ $QEDGEN codegen --spec program.qedspec --proptest        # Proptest harnesses on
 $QEDGEN codegen --spec program.qedspec --integration     # Integration tests only
 ```
 
-With `qedgen init --quasar`, the generated outputs are created automatically.
+With `qedgen init --target anchor`, the generated outputs are created automatically.
 
 ### v2.0 spec features
 

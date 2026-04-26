@@ -90,7 +90,9 @@ transform into the Lean/Rust backends.
   constructs (`instruction`, `pubkey`, top-level `errors [...]`) now live
   only inside `pragma sbpf { ... }`. See *Pragmas* below.
 - **`target` keyword removed.** Target is inferred from pragma presence —
-  `pragma sbpf` → assembly target, absent → Quasar/Anchor (the default).
+  `pragma sbpf` → assembly target, absent → Anchor-flavored Rust (the
+  default; framework selection at codegen time is via `qedgen init
+  --target {anchor,quasar,pinocchio}` — only `anchor` ships today).
 - **`assembly "..."` keyword removed.** Assembly source path is tooling
   config, not spec intent — pass `qedgen asm2lean --input <path>` or use
   the convention of `src/program.s` next to the spec.
@@ -799,7 +801,9 @@ pragma sbpf { ... }    // sBPF assembly programs
 ```
 
 The presence of `pragma sbpf` also selects the assembly target — no explicit
-`target` keyword needed. Absent → Quasar/Anchor (the default).
+`target` keyword needed. Absent → Anchor-flavored Rust (the default
+qedspec target — framework selection happens at codegen time via
+`qedgen init --target`, not in the spec).
 
 Body whitelist for `pragma sbpf`: `const`, `pubkey`, `instruction`, `errors`.
 Core DSL items (`handler`, `type`, `property`, `invariant`, `interface`, …)
@@ -1087,7 +1091,7 @@ From a `.qedspec`, codegen produces:
   detection
 - **Proptest suites** (`--proptest`): randomised testing of all properties
 - **Unit tests** (`--test`): Rust unit tests for handler logic
-- **Integration tests** (`--integration`): QuasarSVM integration tests
+- **Integration tests** (`--integration`): in-process SVM integration tests
 - **CI workflows** (`--ci`): GitHub Actions workflow for the verification
   waterfall
 

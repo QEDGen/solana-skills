@@ -235,7 +235,7 @@ pub fn init(
     output_dir: &Path,
     asm_source: Option<&Path>,
     mathlib: bool,
-    quasar: bool,
+    program: bool,
 ) -> Result<()> {
     ensure!(!name.is_empty(), "project name must not be empty");
     ensure!(
@@ -297,8 +297,8 @@ pub fn init(
     std::fs::write(output_dir.join("lakefile.lean"), lakefile)?;
 
     // Spec.lean skeleton
-    let spec = if quasar {
-        generate_quasar_spec_skeleton(name)
+    let spec = if program {
+        generate_program_spec_skeleton(name)
     } else {
         generate_spec_skeleton(name)
     };
@@ -397,7 +397,7 @@ This file is the source of truth — proofs must satisfy the properties declared
     )
 }
 
-fn generate_quasar_spec_skeleton(name: &str) -> String {
+fn generate_program_spec_skeleton(name: &str) -> String {
     let cap = capitalize(name);
     format!(
         r#"import QEDGen.Solana.Spec
@@ -406,7 +406,7 @@ open QEDGen.Solana.SpecDSL
 /-!
 # {cap} Verification Spec
 
-This spec drives Quasar codegen, Lean proofs, and Kani harnesses.
+This spec drives Rust codegen, Lean proofs, and Kani harnesses.
 Edit operations, context blocks, and properties to match your program.
 -/
 

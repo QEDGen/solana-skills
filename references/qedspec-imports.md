@@ -268,9 +268,11 @@ What lands downstream:
   / close_account); other interfaces still emit comment + `todo!()`.
   v2.9 (Anchor first-class release) ships generic Anchor CPI via Borsh +
   sighash + AccountMeta synthesis.
-- **First-class Anchor support** — `#[qed]` on existing Anchor handlers,
-  framework auto-detection (`Anchor.toml` / `Cargo.toml` deps walk),
-  brownfield `qedgen check --anchor-project`. v2.9 headline.
+- **First-class Anchor support** — `#[qed]` on existing Anchor handlers
+  (free-fn, type-associated, accounts-method, and inline shapes),
+  brownfield `qedgen adapt` and `qedgen check --anchor-project`. v2.9
+  headline. Anchor is the only supported framework today; non-Anchor /
+  raw-program support lands in v2.10+.
 - **Stance 2 (proof composition).** `sorry` in the ensures-as-axiom theorems
   stays — v3.0 (refactor + breaking-changes release) will replace with
   imported callee proofs.

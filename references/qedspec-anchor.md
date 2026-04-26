@@ -24,28 +24,29 @@ What stays as `// TODO:` is everything that needs *semantic* judgment: lifecycle
 
 ## Forwarder shapes the adapter handles
 
-The classifier in `anchor_resolver` walks each handler's tail expression. Production Anchor programs split across these conventions (per `reference_anchor_patterns.md`):
+The classifier in `anchor_resolver` walks each handler's tail expression. Production Anchor programs split across five conventions (the in-the-wild survey driving the taxonomy is internal):
 
-| Shape                | Tail expression                              | Real-world program     | Adapter behavior |
-|----------------------|----------------------------------------------|------------------------|------------------|
-| Inline               | multi-stmt body in the program mod fn        | Jito tip-distribution  | program mod fn IS the handler |
-| Free-fn forwarder    | `module::function(args)`                     | Anchor scaffold, Raydium | walks `src/` to `pub fn function` |
-| Type-associated      | `Type::method(ctx, args)` (PascalCase)       | Squads V4              | walks for `impl Type { pub fn method }` |
-| Accounts-method      | `ctx.accounts.method(args)`                  | Marinade               | reads `Context<X>`, walks for `impl X { pub fn method }` |
-| Unrecognized         | custom dispatcher / closure / non-path call  | Drift                  | scaffolded with a `// TODO: classify manually` note |
+| Shape                | Tail expression                                                          | Adapter behavior |
+|----------------------|--------------------------------------------------------------------------|------------------|
+| Inline               | multi-stmt body in the program mod fn (incl. `let`-bindings, `require!`) | program mod fn IS the handler |
+| Free-fn forwarder    | `module::function(args)` (also `<call>?` and `<call>?; Ok(())`)          | walks `src/` to `pub fn function` |
+| Type-associated      | `Type::method(ctx, args)` (PascalCase prefix)                            | walks for `impl Type { pub fn method }` |
+| Accounts-method      | `ctx.accounts.method(args)`                                              | reads `Context<X>`, walks for `impl X { pub fn method }` |
+| Unrecognized         | custom dispatcher / closure / non-path call                              | scaffolded with a `// TODO: classify manually` note + `--handler` override |
 
 File-to-module mapping (`src/foo/bar.rs` → `["foo", "bar"]`) seeds the resolver so a forwarder like `instructions::buy::handler` resolves against `src/instructions/buy.rs` even when the file's items aren't syntactically wrapped in `pub mod instructions { pub mod buy { ... } }`.
 
 See the worked examples:
-- `examples/anchor-brownfield-demo/` — Anchor scaffold (free-fn forwarders)
+- `examples/anchor-brownfield-demo/` — free-fn forwarders
 - `examples/anchor-marinade-style-demo/` — accounts-method forwarders
 - `examples/anchor-squads-style-demo/` — type-associated forwarders
+- `examples/regressions/anchor-forwarder-multistmt/` — `<call>?; Ok(())` two-stmt forwarders + Inline
 
 ## `#[qed]` drift loop
 
 The proc-macro `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ..., [accounts = ..., accounts_file = ..., accounts_hash = ...])]` is the seal. Three legs, two required, one optional:
 
-- **Required** — `hash`: SHA-256-hex16 of the function body's canonical token stream after outer-attribute stripping. Works on free fns (`syn::ItemFn`) and impl methods (`syn::ImplItemFn`) alike via the `FnLike` shim, so Marinade-style `ctx.accounts.process(...)` and Squads-style `Type::method(ctx, args)` handlers seal end-to-end.
+- **Required** — `hash`: SHA-256-hex16 of the function body's canonical token stream after outer-attribute stripping. Works on free fns (`syn::ItemFn`) and impl methods (`syn::ImplItemFn`) alike via the `FnLike` shim, so accounts-method (`ctx.accounts.process(...)`) and type-associated (`Type::method(ctx, args)`) handlers seal end-to-end.
 - **Required** — `spec_hash`: SHA-256-hex16 of the `handler <name> { ... }` block's raw text (braces included), whitespace-sensitive.
 - **Optional** — `accounts` / `accounts_file` / `accounts_hash`: when present, the macro reads the file at `accounts_file` (resolved against `CARGO_MANIFEST_DIR`), finds `pub struct <accounts>`, hashes its tokens after outer-attr stripping, and compares to `accounts_hash`. Edits to fields, types, or `#[account(...)]` constraints fire drift.
 
@@ -73,7 +74,7 @@ For the success path + drift demo end-to-end, see `examples/qed-drift-fixture/`.
 
 ### Method-shape forwarders
 
-Marinade-style (`ctx.accounts.process(...)`) and Squads-style (`Type::method(ctx, args)`) handlers seal end-to-end, the same as free-fn shapes. Place `#[qed]` directly on the impl method:
+Accounts-method (`ctx.accounts.process(...)`) and type-associated (`Type::method(ctx, args)`) handlers seal end-to-end, the same as free-fn shapes. Place `#[qed]` directly on the impl method:
 
 ```rust
 impl<'info> Deposit<'info> {
@@ -107,12 +108,13 @@ Output is plain stderr by default, JSON via `--json` for tools.
 
 ## Custom dispatcher override
 
-Drift-style handlers whose program-mod fn body uses a custom
-dispatcher table can't be followed by the classifier. Use the
-`--handler` flag to point the adapter at the actual implementation:
+Handlers whose program-mod fn body uses a custom dispatcher table
+(runtime lookup, function pointer indirection, closure-call shape)
+can't be followed by the classifier. Use the `--handler` flag to
+point the adapter at the actual implementation:
 
 ```
-qedgen adapt --program ./programs/drift \
+qedgen adapt --program ./programs/dispatcher \
   --handler dispatch=instructions::dispatch::handler \
   --handler ix2=instructions::ix2::run
 ```

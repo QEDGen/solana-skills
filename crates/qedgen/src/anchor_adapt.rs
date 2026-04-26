@@ -373,10 +373,11 @@ fn accounts_struct_for_handler(
     let src_dir = program_root.join("src");
     let candidates = walk_rust_files(&src_dir);
 
-    // Prefer files whose module path matches the qualifying prefix.
-    // When the handler used a bare type (`Context<Shared>`) the
-    // prefix is empty and every file is a candidate (the historical
-    // behavior — first match wins).
+    // Prefer files whose module path matches the qualifying prefix —
+    // qualified `Context<crate::b::Shared>` always wins over an
+    // alphabetically-earlier `crate::a::Shared` of the same name.
+    // When the handler used a bare `Context<Shared>` the prefix is
+    // empty and the historical first-match-wins ordering applies.
     let prioritized = prioritize_candidates(&candidates, &src_dir, &module_prefix);
 
     for path in prioritized {

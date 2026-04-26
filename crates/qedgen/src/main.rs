@@ -40,7 +40,7 @@ mod validate;
 mod verify;
 
 use anyhow::{ensure, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
 /// Find the bugs your tests miss — from one spec file
@@ -50,6 +50,24 @@ use std::path::{Path, PathBuf};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Solana program framework target for greenfield codegen
+/// (`qedgen init --target ...`). v2.9 wires `anchor` end-to-end;
+/// `quasar` and `pinocchio` are advertised here so the surface is
+/// stable, but the codegen branches land in v2.10+ and selecting them
+/// today errors cleanly with a v2.10+ pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Target {
+    /// Anchor-compatible Rust program. Uses `anchor_lang::prelude::*`,
+    /// `#[derive(Accounts)]`, `#[program]` mod, etc. Fully implemented.
+    Anchor,
+    /// Quasar (Blueshift) Rust program. Uses `quasar_lang::prelude::*`.
+    /// Codegen branch ships in v2.10+ — selecting today errors.
+    Quasar,
+    /// Pinocchio (no_std) Rust program. Codegen branch ships in
+    /// v2.10+ — selecting today errors.
+    Pinocchio,
 }
 
 #[derive(Subcommand)]
@@ -259,9 +277,13 @@ enum Commands {
         #[arg(long)]
         mathlib: bool,
 
-        /// Also generate a Quasar program skeleton and Kani harnesses
-        #[arg(long)]
-        quasar: bool,
+        /// Also generate the program crate + Kani harnesses for the
+        /// named framework target. `anchor` is fully implemented today;
+        /// `quasar` and `pinocchio` reserve the CLI surface for v2.10+
+        /// codegen branches and error cleanly when selected. Omit to
+        /// skip program scaffolding entirely.
+        #[arg(long, value_enum)]
+        target: Option<Target>,
 
         /// Output directory (default: ./formal_verification)
         #[arg(long, default_value = "./formal_verification")]
@@ -296,7 +318,7 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
 
-        /// Path to generated Quasar program directory (enables code drift detection)
+        /// Path to the generated Rust program directory (enables code drift detection)
         #[arg(long)]
         code: Option<PathBuf>,
 
@@ -483,8 +505,9 @@ enum Commands {
 
     /// Generate committed artifacts from a qedspec
     ///
-    /// Default (no flags): generates Quasar Rust skeleton only.
-    /// Use flags to generate additional artifacts, or --all for everything.
+    /// Default (no flags): generates the Anchor-compatible Rust program
+    /// skeleton only. Use flags to generate additional artifacts, or
+    /// --all for everything.
     Codegen {
         /// Path to the spec file (.qedspec or a directory of fragments).
         /// Optional — falls back to the `spec` field in the nearest
@@ -492,7 +515,7 @@ enum Commands {
         #[arg(long)]
         spec: Option<PathBuf>,
 
-        /// Output directory for the generated Quasar project
+        /// Output directory for the generated Rust program crate
         #[arg(long, default_value = "./programs")]
         output_dir: PathBuf,
 
@@ -525,7 +548,7 @@ enum Commands {
         #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_output: PathBuf,
 
-        /// Generate QuasarSVM integration test scaffolds
+        /// Generate in-process SVM integration test scaffolds
         #[arg(long)]
         integration: bool,
 
@@ -1015,9 +1038,28 @@ async fn main() -> Result<()> {
             spec,
             asm,
             mathlib,
-            quasar,
+            target,
             output_dir,
         } => {
+            // Reject not-yet-implemented framework targets up front so
+            // `init` doesn't half-scaffold a project that can't be
+            // populated. The CLI surface advertises every variant; only
+            // Anchor's codegen branch is wired in v2.9.
+            match target {
+                Some(Target::Quasar) => anyhow::bail!(
+                    "`--target quasar` codegen ships in v2.10+. \
+                     Today only `--target anchor` is implemented; \
+                     omit `--target` to skip program scaffolding entirely."
+                ),
+                Some(Target::Pinocchio) => anyhow::bail!(
+                    "`--target pinocchio` codegen ships in v2.10+. \
+                     Today only `--target anchor` is implemented; \
+                     omit `--target` to skip program scaffolding entirely."
+                ),
+                None | Some(Target::Anchor) => {}
+            }
+            let scaffold_program = matches!(target, Some(Target::Anchor));
+
             // .qed/ lives at the program root. If the user passed --spec, anchor
             // to the spec's parent directory (what they expect); otherwise fall
             // back to the output_dir's parent. See init::resolve_program_root.
@@ -1034,9 +1076,15 @@ async fn main() -> Result<()> {
             });
             init::init_qed_dir(&program_root, &name, spec_rel.as_deref())?;
 
-            init::init(&name, &output_dir, asm.as_deref(), mathlib, quasar)?;
+            init::init(
+                &name,
+                &output_dir,
+                asm.as_deref(),
+                mathlib,
+                scaffold_program,
+            )?;
 
-            if quasar {
+            if scaffold_program {
                 let spec_path = output_dir.join("Spec.lean");
                 let program_dir = program_root.join(format!("programs/{}", name));
                 // v2.6: tests live INSIDE the program package so cargo-kani
@@ -1045,7 +1093,8 @@ async fn main() -> Result<()> {
                 // program_root, which had no Cargo.toml above it.
                 let kani_path = program_dir.join("tests/kani.rs");
 
-                // Generate Quasar program skeleton
+                // Generate the Anchor-compatible Rust program skeleton.
+                // (v2.10+ will branch on `target` here for Quasar / Pinocchio.)
                 codegen::generate(&spec_path, &program_dir)?;
 
                 // Generate Kani proof harnesses

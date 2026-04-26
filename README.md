@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Supports **Anchor**, **Quasar**, and **sBPF assembly**.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** (today) — **Quasar** and **Pinocchio** advertised via `--target` and ship in v2.10+; plus **sBPF assembly**.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -71,7 +71,7 @@ CPI calls are axiomatic — we verify the program passes correct parameters. SPL
 npx skills add qedgen/solana-skills
 
 # 2. Initialize the project — records the spec path in .qed/config.json
-qedgen init --name my_program --spec my_program.qedspec --quasar
+qedgen init --name my_program --spec my_program.qedspec --target anchor
 
 # 3. Validate and generate artifacts (no --spec needed from inside the project)
 qedgen check
@@ -146,7 +146,7 @@ qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
 qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
 qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
-qedgen codegen --spec my_program.qedspec --integration  # + QuasarSVM integration tests
+qedgen codegen --spec my_program.qedspec --integration  # + in-process SVM integration tests
 
 # Check with drift detection and verification report
 qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
