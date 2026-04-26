@@ -8,8 +8,8 @@
 //! (operate on the spec) by design; per-runtime spec-less predicates
 //! live in the auditor SKILL.md.
 //!
-//! v2.10 initial cut: `missing_signer` only. Other categories
-//! (`arbitrary_cpi`, `arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
+//! v2.10 initial cut: `missing_signer` and `arbitrary_cpi`. Other categories
+//! (`arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
 //! `cpi_param_swap`, `pda_canonical_bump`) land alongside the eval pass that
 //! tunes their predicate sharpness.
 
@@ -28,6 +28,7 @@ const SCHEMA_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum Category {
     MissingSigner,
+    ArbitraryCpi,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +82,9 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
         if let Some(f) = predicate_missing_signer(handler) {
             findings.push(f);
         }
+        if let Some(f) = predicate_arbitrary_cpi(handler) {
+            findings.push(f);
+        }
     }
 
     Ok(ProbeOutput {
@@ -122,6 +126,53 @@ fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
             handler.name
         ),
         category_tag: "missing_signer".to_string(),
+    })
+}
+
+/// Spec-aware predicate: handler has a `writable` `token`-typed account
+/// (which signals external token state will change) but the spec declares
+/// no `transfers { ... }` block and no `call Interface.handler(...)` site.
+/// Without a CPI declaration, codegen has nothing to mechanize; the user
+/// is left to fill `todo!()` by hand or — worse — the impl emits no
+/// transfer at all and silently violates the handler's evident intent.
+///
+/// Auditor classification (per SKILL.md draft): this is usually a
+/// **spec-gap** finding (impl is incomplete or under-specified) rather
+/// than a real-vulnerability finding (impl is doing arbitrary CPI). The
+/// auditor confirms by reading the handler body for `invoke` /
+/// `invoke_signed` calls; if present without spec coverage, escalate to
+/// real-vulnerability.
+fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
+    if handler.has_calls() {
+        return None;
+    }
+    let writable_token = handler
+        .accounts
+        .iter()
+        .find(|a| a.is_writable && a.account_type.as_deref() == Some("token") && !a.is_program)?;
+
+    Some(Finding {
+        id: stable_id(&handler.name, "arbitrary_cpi"),
+        category: Category::ArbitraryCpi,
+        severity: Severity::High,
+        handler: handler.name.clone(),
+        spec_silent_on: format!(
+            "handler `{}` has writable token account `{}` but declares no `transfers` block or `call` site",
+            handler.name, writable_token.name
+        ),
+        suppression_hint: format!(
+            "Add `transfers {{ from <src> to <dst> amount <amt> authority <signer> }}` to handler `{}` — \
+             or a `call Interface.handler(...)` site if invoking a non-Token CPI. \
+             Without one of these, the codegen cannot mechanize the transfer.",
+            handler.name
+        ),
+        investigation_hint: format!(
+            "Open the impl for handler `{}`. If the body has `invoke_signed` / `invoke` calls without \
+             corresponding spec declarations, this is a real arbitrary-CPI vulnerability. \
+             If the body is `todo!()` or empty, this is a spec-gap (impl incomplete).",
+            handler.name
+        ),
+        category_tag: "arbitrary_cpi".to_string(),
     })
 }
 
@@ -184,6 +235,52 @@ mod tests {
     fn missing_signer_silent_when_permissionless() {
         let h = make_handler("crank", None, true);
         assert!(predicate_missing_signer(&h).is_none());
+    }
+
+    #[test]
+    fn arbitrary_cpi_fires_on_writable_token_without_transfers() {
+        use crate::check::ParsedHandlerAccount;
+        let mut h = make_handler("deposit", Some("user"), false);
+        h.accounts.push(ParsedHandlerAccount {
+            name: "vault".to_string(),
+            is_signer: false,
+            is_writable: true,
+            is_program: false,
+            pda_seeds: None,
+            account_type: Some("token".to_string()),
+            authority: Some("pool".to_string()),
+        });
+        let f = predicate_arbitrary_cpi(&h).expect("expected arbitrary_cpi finding");
+        assert_eq!(f.category_tag, "arbitrary_cpi");
+        assert!(f.spec_silent_on.contains("vault"));
+    }
+
+    #[test]
+    fn arbitrary_cpi_silent_when_transfers_declared() {
+        use crate::check::{ParsedHandlerAccount, ParsedTransfer};
+        let mut h = make_handler("deposit", Some("user"), false);
+        h.accounts.push(ParsedHandlerAccount {
+            name: "vault".to_string(),
+            is_signer: false,
+            is_writable: true,
+            is_program: false,
+            pda_seeds: None,
+            account_type: Some("token".to_string()),
+            authority: None,
+        });
+        h.transfers.push(ParsedTransfer {
+            from: "src".into(),
+            to: "dst".into(),
+            amount: Some("amount".into()),
+            authority: Some("user".into()),
+        });
+        assert!(predicate_arbitrary_cpi(&h).is_none());
+    }
+
+    #[test]
+    fn arbitrary_cpi_silent_when_no_writable_token() {
+        let h = make_handler("crank", None, true);
+        assert!(predicate_arbitrary_cpi(&h).is_none());
     }
 
     #[test]
