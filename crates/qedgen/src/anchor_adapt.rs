@@ -140,34 +140,40 @@ pub fn adapt_to_file(
     Ok(())
 }
 
-/// Resolve a handler with an optional CLI override. The override is
-/// consulted in two cases:
+/// Resolve a handler with an optional CLI override. The override
+/// always wins when supplied — the user is asserting "treat this
+/// handler as a free-fn forwarder pointing at <rust_path>", which
+/// matters in three cases the classifier can't reach on its own:
 ///
-///   1. The classifier returned `Unrecognized` (custom dispatchers,
-///      closures, anything the classifier can't follow).
-///   2. The classifier returned a `FreeFn` / `Method` shape but the
-///      filesystem walk couldn't find the target (shape was right,
-///      location was wrong).
+///   1. `Unrecognized` (custom dispatchers, closures, anything the
+///      classifier can't follow — Drift's runtime lookup table is the
+///      canonical example).
+///   2. `Inline` that isn't actually inline — a multi-statement
+///      forwarder where the user's body has a few helper statements
+///      around the actual handler call (`let cfg = …; handler(ctx)?;
+///      emit!(…); Ok(())`). The classifier conservatively treats
+///      multi-stmt bodies as Inline, but the user knows better.
+///   3. `FreeFn` / `Method` where the filesystem walk landed on the
+///      wrong file (e.g. a similarly-named helper in another module).
 ///
-/// In both cases, an override path is treated like a hand-supplied
-/// free-fn forwarder: walk the crate's `src/` for `pub fn <name>`
-/// matching the override's module path.
+/// In every case the override is treated like a hand-supplied free-fn
+/// forwarder: walk the crate's `src/` for `pub fn <name>` matching
+/// the override's module path.
 fn resolve_with_override(
     instruction: &Instruction,
     lib_rs_path: &Path,
     program_root: &Path,
     override_: Option<&HandlerOverride>,
 ) -> Result<HandlerLocation> {
-    let location = resolve_handler(instruction, lib_rs_path, program_root)?;
-    match (&location, override_) {
-        (HandlerLocation::Unrecognized { .. }, Some(o)) => crate::anchor_resolver::resolve_free_fn(
+    if let Some(o) = override_ {
+        return crate::anchor_resolver::resolve_free_fn(
             &o.module_path,
             &o.fn_name,
             program_root,
             lib_rs_path,
-        ),
-        _ => Ok(location),
+        );
     }
+    resolve_handler(instruction, lib_rs_path, program_root)
 }
 
 // ----------------------------------------------------------------------------
@@ -351,19 +357,33 @@ struct AccountsMeta {
 /// the program crate's `src/` for `pub struct X`, and return enough
 /// metadata for the attribute renderer to seal it. None when the
 /// signature has no `Context<X>` or no matching struct exists.
+///
+/// When the handler writes `Context<X>` with a qualifying path —
+/// `Context<crate::accounts::Shared>` or `Context<modules::Shared>` —
+/// the prefix narrows the walk to files whose module path matches,
+/// so two `pub struct Shared`s in different modules don't collide.
 fn accounts_struct_for_handler(
     program_fn: &syn::ItemFn,
     program_root: &Path,
 ) -> Option<AccountsMeta> {
-    let struct_name = extract_accounts_type(program_fn)?;
-    // Walk the crate's src/ and try each file. First match wins —
-    // production Anchor programs don't declare two types with the
-    // same name in different files.
+    let segments = extract_accounts_path(program_fn)?;
+    let struct_name = segments.last()?.clone();
+    let module_prefix = normalize_module_prefix(&segments[..segments.len() - 1]);
+
     let src_dir = program_root.join("src");
-    let mut candidates = walk_rust_files(&src_dir);
-    candidates.sort();
-    for path in candidates {
-        let source = std::fs::read_to_string(&path).ok()?;
+    let candidates = walk_rust_files(&src_dir);
+
+    // Prefer files whose module path matches the qualifying prefix.
+    // When the handler used a bare type (`Context<Shared>`) the
+    // prefix is empty and every file is a candidate (the historical
+    // behavior — first match wins).
+    let prioritized = prioritize_candidates(&candidates, &src_dir, &module_prefix);
+
+    for path in prioritized {
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
         if let Some(hash) = crate::spec_hash::accounts_struct_hash(&source, &struct_name) {
             let file_rel = path
                 .strip_prefix(program_root)
@@ -377,6 +397,74 @@ fn accounts_struct_for_handler(
         }
     }
     None
+}
+
+/// Drop leading `crate` / `self` segments from the qualifying prefix.
+/// `super` is left in place so the file walk just won't match (and
+/// we fall through to the whole-tree pass) — resolving `super` would
+/// need to know the program-mod fn's source position, which is more
+/// machinery than the symptom warrants today.
+fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = prefix.to_vec();
+    if matches!(
+        out.first().map(String::as_str),
+        Some("crate") | Some("self")
+    ) {
+        out.remove(0);
+    }
+    out
+}
+
+/// Order `candidates` so files matching `module_prefix` come first,
+/// then everything else (in original sort order). Empty prefix is a
+/// no-op — the historical first-match-wins ordering is preserved for
+/// handlers that don't qualify their accounts type.
+fn prioritize_candidates(
+    candidates: &[PathBuf],
+    src_dir: &Path,
+    module_prefix: &[String],
+) -> Vec<PathBuf> {
+    if module_prefix.is_empty() {
+        return candidates.to_vec();
+    }
+    let (matching, rest): (Vec<_>, Vec<_>) = candidates
+        .iter()
+        .cloned()
+        .partition(|p| file_module_path(p, src_dir) == module_prefix);
+    let mut out = matching;
+    out.extend(rest);
+    out
+}
+
+/// `src/foo/bar.rs` → `["foo", "bar"]`; `src/foo/bar/mod.rs` →
+/// `["foo", "bar"]`; `src/lib.rs` → `[]`. Mirrors
+/// `anchor_resolver::file_module_path` (kept private there because
+/// of asymmetric callers; duplicating ten lines is cheaper than
+/// adding a `pub` and a cross-module edge for a private utility).
+fn file_module_path(file_path: &Path, src_dir: &Path) -> Vec<String> {
+    let rel = match file_path.strip_prefix(src_dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut segments: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if let Some(last) = segments.last_mut() {
+        if let Some(stripped) = last.strip_suffix(".rs") {
+            *last = stripped.to_string();
+        }
+    }
+    if matches!(
+        segments.last().map(|s| s.as_str()),
+        Some("mod") | Some("lib")
+    ) {
+        segments.pop();
+    }
+    segments
 }
 
 /// Render a single `#[qed(verified, ...)]` attribute line. Folds the
@@ -560,6 +648,16 @@ fn is_context_type(ty: &syn::Type) -> bool {
 /// Context — the adapter still emits the handler, just without the
 /// accounts breadcrumb.
 fn extract_accounts_type(program_fn: &syn::ItemFn) -> Option<String> {
+    extract_accounts_path(program_fn)?.pop()
+}
+
+/// Like `extract_accounts_type` but returns every segment of the
+/// qualifying path (including the type ident as the last entry).
+/// `Context<crate::a::Shared>` → `["crate", "a", "Shared"]`;
+/// `Context<Shared>` → `["Shared"]`. Drives the use of the qualifying
+/// prefix to narrow the accounts-struct lookup when two structs in
+/// different modules share a name.
+fn extract_accounts_path(program_fn: &syn::ItemFn) -> Option<Vec<String>> {
     let first = program_fn.sig.inputs.first()?;
     let syn::FnArg::Typed(pt) = first else {
         return None;
@@ -576,9 +674,16 @@ fn extract_accounts_type(program_fn: &syn::ItemFn) -> Option<String> {
     };
     for arg in &ab.args {
         if let syn::GenericArgument::Type(syn::Type::Path(tp)) = arg {
-            if let Some(seg) = tp.path.segments.last() {
-                return Some(seg.ident.to_string());
+            let segments: Vec<String> = tp
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect();
+            if segments.is_empty() {
+                continue;
             }
+            return Some(segments);
         }
     }
     None
@@ -1458,6 +1563,100 @@ mod tests {
             ping.attribute
         );
         assert!(ping.attribute.contains("hash = \""));
+    }
+
+    /// Reviewer-reported: when two `pub struct Shared` exist in
+    /// different modules and the handler writes
+    /// `Context<crate::b::Shared>`, the adapter MUST seal against
+    /// `crate::b::Shared`. Pre-fix, the file walk returned the first
+    /// match by ident name (often `crate::a::Shared`), silently
+    /// binding the macro to the wrong type.
+    #[test]
+    fn compute_attributes_respects_qualified_accounts_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+
+                    pub mod a;
+                    pub mod b;
+
+                    #[program]
+                    pub mod p {
+                        use super::*;
+                        pub fn act(ctx: Context<crate::b::Shared>, amount: u64) -> Result<()> {
+                            Ok(())
+                        }
+                    }
+                    "#,
+                ),
+                (
+                    "src/a.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+
+                    #[derive(Accounts)]
+                    pub struct Shared<'info> {
+                        pub user: Signer<'info>,
+                        // a's version: just a signer.
+                    }
+                    "#,
+                ),
+                (
+                    "src/b.rs",
+                    r#"
+                    use anchor_lang::prelude::*;
+
+                    #[derive(Accounts)]
+                    pub struct Shared<'info> {
+                        #[account(mut)]
+                        pub vault: Account<'info, Vault>,
+                        pub authority: Signer<'info>,
+                    }
+
+                    pub struct Vault;
+                    "#,
+                ),
+            ],
+        );
+
+        let spec_path = tmp.path().join("p.qedspec");
+        std::fs::write(
+            &spec_path,
+            r#"
+            spec P
+            type State | Active
+            handler act (amount : U64) : State.Active -> State.Active {
+              effect { count += amount }
+            }
+            type Error | Bad
+            "#,
+        )
+        .unwrap();
+
+        let entries = compute_attributes(&root, &spec_path, &HashMap::new()).unwrap();
+        let act = entries.iter().find(|e| e.handler == "act").unwrap();
+        assert!(
+            act.attribute.contains("accounts_file = \"src/b.rs\""),
+            "qualified path `crate::b::Shared` should resolve to src/b.rs, got: {}",
+            act.attribute
+        );
+        // And the hash MUST be the b.rs version, not the a.rs first-match.
+        let b_hash = crate::spec_hash::accounts_struct_hash(
+            &std::fs::read_to_string(root.join("src/b.rs")).unwrap(),
+            "Shared",
+        )
+        .unwrap();
+        assert!(
+            act.attribute
+                .contains(&format!("accounts_hash = \"{}\"", b_hash)),
+            "expected hash from b.rs, got: {}",
+            act.attribute
+        );
     }
 
     #[test]

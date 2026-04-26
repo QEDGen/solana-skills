@@ -16,7 +16,6 @@ mod deps;
 mod drift;
 mod fill;
 mod fingerprint;
-mod framework;
 mod idl2spec;
 mod import_resolver;
 mod init;

@@ -10,12 +10,15 @@
 //! coexist in production Anchor code. v2.9 M4.2 supports four of them
 //! plus a graceful `Unrecognized` fall-through:
 //!
-//! 1. **Inline** (Jito tip-distribution): body has multiple statements
-//!    or a non-forwarder tail; the program_fn IS the handler.
+//! 1. **Inline** (Jito tip-distribution): body has multiple effectful
+//!    statements (`require!`, `let`-bindings, `msg!`) or a non-forwarder
+//!    tail; the program_fn IS the handler.
 //! 2. **Free-fn forwarder** (Anchor scaffold, Raydium): tail expression
 //!    is `<path>::<function>(args)`. Resolved by walking the program
 //!    crate's source files for a `pub fn <function>` matching the path
-//!    segments.
+//!    segments. Also accepts the two-statement propagate-then-`Ok(())`
+//!    form (`<call>?; Ok(())`) and a `?`-tail single statement —
+//!    these are pure forwarder plumbing, not user logic.
 //! 3. **Type-associated forwarder** (Squads V4): tail is
 //!    `<Type>::<method>(ctx, args)`. Resolved by walking source for an
 //!    `impl <Type>` block containing the named method.
@@ -175,36 +178,122 @@ enum ForwarderKind {
 }
 
 fn classify_forwarder(program_fn: &syn::ItemFn) -> ForwarderKind {
-    // The body might have non-trivial leading statements (require!
-    // macros, let-bindings, etc.) followed by a tail forwarder. We
-    // treat anything with more than one effectful statement as
-    // "inline" — preserving leading guards in the spec_hash that
-    // way is the safer choice. Pure forwarders are exactly: a body
-    // with one statement that's an expression (the tail).
+    // Production Anchor handlers wrap their forwarder in a few common
+    // shapes. We accept the ones whose only "extra" content is the
+    // forwarder's own plumbing (Ok(...) wrappers, `?` propagation,
+    // a `let _ = …; Ok(())` two-step). Any leading user logic —
+    // `require!`, `msg!`, validation let-bindings — keeps the body
+    // Inline so its bytes flow into the spec hash.
     let stmts = &program_fn.block.stmts;
-    let tail_expr = match stmts.len() {
-        0 => return ForwarderKind::Inline,
-        1 => match &stmts[0] {
-            syn::Stmt::Expr(expr, _) => expr,
-            _ => return ForwarderKind::Inline,
-        },
-        _ => {
-            // Multi-statement body. If the last stmt is an expression,
-            // it could still be a forwarder, but the leading stmts
-            // (likely require! / let-bindings) are part of the user's
-            // body and shouldn't be skipped. Treat as inline.
-            return ForwarderKind::Inline;
-        }
+    let tail_expr = match extract_forwarder_tail(stmts) {
+        Some(expr) => expr,
+        None => return ForwarderKind::Inline,
     };
 
     // Strip a wrapping Ok(...) if present (some programs return
     // `Ok(handler::call(ctx)?)`). Look for the inner call.
-    let actual = unwrap_ok_tail(tail_expr).unwrap_or(tail_expr);
+    let unwrapped = unwrap_ok_tail(tail_expr).unwrap_or(tail_expr);
+    // Strip a trailing `?` (try-expression) — `handler(ctx)?` is the
+    // same forwarder shape as `handler(ctx)` for our purposes; the
+    // `?` just surfaces an Err to the caller.
+    let actual = unwrap_try(unwrapped).unwrap_or(unwrapped);
 
     match actual {
         syn::Expr::Call(call) => classify_call(call),
         syn::Expr::MethodCall(mcall) => classify_method_call(mcall),
         _ => ForwarderKind::Inline,
+    }
+}
+
+/// Find the forwarder call expression in `stmts`, if the body is a
+/// pure forwarder. Recognized shapes:
+///   - `[Stmt::Expr(call, _)]` — single expression body (the v2.9 G2
+///     baseline; works for `handler(ctx)`, `Type::method(ctx, args)`,
+///     `ctx.accounts.fn(args)`).
+///   - `[Stmt::Expr(call?, Semi)]` followed by `Stmt::Expr(Ok(()), _)`
+///     — explicit propagate-then-Ok two-statement form.
+///   - Same as above but the trailing Ok is `return Ok(())`.
+///
+/// Anything else (multiple effectful stmts, `let` bindings, `require!`
+/// macros, blocks, …) returns None so the classifier falls back to
+/// Inline and the user's leading code keeps flowing into the body
+/// hash.
+fn extract_forwarder_tail(stmts: &[syn::Stmt]) -> Option<&syn::Expr> {
+    match stmts.len() {
+        0 => None,
+        1 => match &stmts[0] {
+            syn::Stmt::Expr(expr, _) => Some(expr),
+            _ => None,
+        },
+        2 => {
+            // Pattern: `<call>?;` then `Ok(())`. The first statement
+            // is an expression-with-trailing-semicolon whose expr is
+            // a try-expression; the second is the `Ok(())` literal
+            // (with or without a trailing `;` and with or without a
+            // `return` keyword).
+            let call_stmt = match &stmts[0] {
+                syn::Stmt::Expr(expr, Some(_)) => expr,
+                _ => return None,
+            };
+            // The leading statement must be `<call>?` — a try-expr.
+            // If it's not, the user has hand-rolled validation and we
+            // shouldn't skip past it.
+            if !matches!(call_stmt, syn::Expr::Try(_)) {
+                return None;
+            }
+            if !is_ok_unit_terminal(&stmts[1]) {
+                return None;
+            }
+            Some(call_stmt)
+        }
+        _ => None,
+    }
+}
+
+/// True when `stmt` is one of the trailing forms we accept after a
+/// `<call>?;` first statement: `Ok(())`, `Ok(())`-as-expr-with-semi,
+/// `return Ok(())`, or `return Ok(());`.
+fn is_ok_unit_terminal(stmt: &syn::Stmt) -> bool {
+    let expr = match stmt {
+        syn::Stmt::Expr(expr, _) => expr,
+        _ => return false,
+    };
+    let unwrapped = match expr {
+        syn::Expr::Return(ret) => match &ret.expr {
+            Some(inner) => inner.as_ref(),
+            None => return false,
+        },
+        other => other,
+    };
+    let call = match unwrapped {
+        syn::Expr::Call(c) => c,
+        _ => return false,
+    };
+    let path = match &*call.func {
+        syn::Expr::Path(p) => &p.path,
+        _ => return false,
+    };
+    let last = match path.segments.last() {
+        Some(s) => s,
+        None => return false,
+    };
+    if last.ident != "Ok" {
+        return false;
+    }
+    // Accept `Ok(())` (one tuple-empty arg); reject `Ok(value)` since
+    // that would be propagating a real return value the body produced
+    // (which is no longer pure forwarding).
+    if call.args.len() != 1 {
+        return false;
+    }
+    matches!(&call.args[0], syn::Expr::Tuple(t) if t.elems.is_empty())
+}
+
+/// `<call>?` → `<call>`; otherwise None.
+fn unwrap_try(expr: &syn::Expr) -> Option<&syn::Expr> {
+    match expr {
+        syn::Expr::Try(t) => Some(&t.expr),
+        _ => None,
     }
 }
 
@@ -710,8 +799,9 @@ mod tests {
 
     #[test]
     fn unwraps_ok_tail_to_recognize_forwarder() {
-        // Some programs wrap the forwarder call in Ok(...) explicitly.
-        // We unwrap one level of Ok(...) before classifying.
+        // Some programs wrap the forwarder call in Ok(...) explicitly:
+        // `Ok(handler(ctx)?)` is `Ok(`-unwrap → `handler(ctx)?` →
+        // try-unwrap → `handler(ctx)`. Both wrappers strip cleanly.
         let kind = classify(
             r#"
             #[program]
@@ -723,16 +813,135 @@ mod tests {
             }
         "#,
         );
-        // The `?` on the inner call makes this an Expr::Try, not a
-        // call directly — unwrap_ok_tail returns the inner expr, but
-        // it's `instructions::buy::handler(ctx)?` (a try expression).
-        // Document what we do here: try-expressions don't classify;
-        // we treat them as Inline. (More aggressive try-handling can
-        // come in v2.10 if real adopters need it.)
         match kind {
-            ForwarderKind::Inline | ForwarderKind::FreeFn { .. } => {}
-            other => panic!("expected Inline or FreeFn, got {:?}", other),
+            ForwarderKind::FreeFn {
+                module_path,
+                fn_name,
+            } => {
+                assert_eq!(module_path, vec!["instructions", "buy"]);
+                assert_eq!(fn_name, "handler");
+            }
+            other => panic!("expected FreeFn, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn classifies_try_tail_as_forwarder() {
+        // Single-statement body with a `?` tail: `handler(ctx)?` is
+        // pure forwarding plumbing, the same shape as `handler(ctx)`.
+        let kind = classify(
+            r#"
+            #[program]
+            pub mod p {
+                use super::*;
+                pub fn buy(ctx: Context<Buy>) -> Result<()> {
+                    instructions::buy::handler(ctx)?
+                }
+            }
+        "#,
+        );
+        match kind {
+            ForwarderKind::FreeFn {
+                module_path,
+                fn_name,
+            } => {
+                assert_eq!(module_path, vec!["instructions", "buy"]);
+                assert_eq!(fn_name, "handler");
+            }
+            other => panic!("expected FreeFn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classifies_two_stmt_propagate_then_ok_as_forwarder() {
+        // The propagate-then-`Ok(())` two-step is a common Anchor
+        // pattern: the handler returns `Result<()>` and the wrapper
+        // wants to forward errors via `?` while still returning `()`.
+        // No user logic between the call and the final `Ok(())`.
+        let kind = classify(
+            r#"
+            #[program]
+            pub mod p {
+                use super::*;
+                pub fn buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
+                    instructions::buy::handler(ctx, amount)?;
+                    Ok(())
+                }
+            }
+        "#,
+        );
+        match kind {
+            ForwarderKind::FreeFn {
+                module_path,
+                fn_name,
+            } => {
+                assert_eq!(module_path, vec!["instructions", "buy"]);
+                assert_eq!(fn_name, "handler");
+            }
+            other => panic!("expected FreeFn, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classifies_two_stmt_with_return_ok_as_forwarder() {
+        // Same shape, but the trailing statement is `return Ok(())`
+        // instead of bare `Ok(())`.
+        let kind = classify(
+            r#"
+            #[program]
+            pub mod p {
+                use super::*;
+                pub fn buy(ctx: Context<Buy>) -> Result<()> {
+                    instructions::buy::handler(ctx)?;
+                    return Ok(());
+                }
+            }
+        "#,
+        );
+        assert!(matches!(kind, ForwarderKind::FreeFn { .. }));
+    }
+
+    #[test]
+    fn classifies_three_stmt_forwarder_as_inline() {
+        // Three statements: `<call>?;` then user logic then `Ok(())`.
+        // The user inserted real work between the forwarder and the
+        // return; that work has to flow into the body hash, so we
+        // keep this classified Inline.
+        let kind = classify(
+            r#"
+            #[program]
+            pub mod p {
+                use super::*;
+                pub fn buy(ctx: Context<Buy>) -> Result<()> {
+                    instructions::buy::handler(ctx)?;
+                    msg!("buy done");
+                    Ok(())
+                }
+            }
+        "#,
+        );
+        assert!(matches!(kind, ForwarderKind::Inline));
+    }
+
+    #[test]
+    fn classifies_let_binding_then_ok_as_inline() {
+        // `let _result = call?; Ok(())` introduces a binding the user
+        // could later add to — that's user logic, not forwarder
+        // plumbing. Keep Inline so the let-binding stays in the body
+        // hash.
+        let kind = classify(
+            r#"
+            #[program]
+            pub mod p {
+                use super::*;
+                pub fn buy(ctx: Context<Buy>) -> Result<()> {
+                    let _r = instructions::buy::handler(ctx)?;
+                    Ok(())
+                }
+            }
+        "#,
+        );
+        assert!(matches!(kind, ForwarderKind::Inline));
     }
 
     #[test]
