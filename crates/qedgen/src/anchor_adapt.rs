@@ -1274,16 +1274,16 @@ mod tests {
     /// Marinade style: `ctx.accounts.<method>(...)` forwarder.
     /// Exercises `AccountsMethod` classifier + impl-method resolution.
     #[test]
-    fn adapt_matches_marinade_style_demo_snapshot() {
-        assert_snapshot("examples/anchor-marinade-style-demo");
+    fn adapt_matches_marinade_style_snapshot() {
+        assert_snapshot("examples/regressions/anchor-adapter-shapes/marinade-style");
     }
 
     /// Squads V4 style: `<Type>::<method>(ctx, args)` forwarder.
     /// Exercises `TypeAssoc` classifier + impl-method resolution
     /// (impls inline with the program mod, not in a sibling file).
     #[test]
-    fn adapt_matches_squads_style_demo_snapshot() {
-        assert_snapshot("examples/anchor-squads-style-demo");
+    fn adapt_matches_squads_style_snapshot() {
+        assert_snapshot("examples/regressions/anchor-adapter-shapes/squads-style");
     }
 
     #[test]

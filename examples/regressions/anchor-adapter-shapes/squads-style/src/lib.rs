@@ -2,7 +2,7 @@
 //! forwarder shape. Each handler in `#[program]` mod calls a
 //! type-associated function on the accounts type.
 //!
-//! `qedgen adapt --program examples/anchor-squads-style-demo`
+//! `qedgen adapt --program examples/regressions/anchor-adapter-shapes/squads-style`
 //! resolves these via the `TypeAssoc` classifier and `find_impl_method`
 //! (M4.2). The output is `before.qedspec` here.
 

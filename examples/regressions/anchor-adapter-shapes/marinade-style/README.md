@@ -1,9 +1,13 @@
 # `qedgen adapt` — Marinade-style fixture
 
-Companion to `examples/anchor-brownfield-demo/`. Same pipeline, but
-exercises the `ctx.accounts.<method>(...)` forwarder shape (the
-Marinade convention from `reference_anchor_patterns.md`) instead of
-the Anchor scaffold's `instructions::<name>::handler(ctx, args)`.
+Adapter-output regression fixture. Locks down the `ctx.accounts.<method>(...)`
+forwarder shape (the Marinade convention from `reference_anchor_patterns.md`),
+distinct from the Anchor scaffold's `instructions::<name>::handler(ctx, args)`
+covered by `examples/anchor-brownfield-demo/`.
+
+Scope: this fixture asserts `qedgen adapt` byte-matches `before.qedspec`. The
+end-to-end before→after agent-fill story is told once in the brownfield demo;
+this fixture only proves the handler-shape detector emits a parseable spec.
 
 The adapter:
 
@@ -25,6 +29,6 @@ sealed attribute lines for paste, including the `accounts_*` triplet.
 ## Reproduce
 
 ```bash
-qedgen adapt --program examples/anchor-marinade-style-demo
+qedgen adapt --program examples/regressions/anchor-adapter-shapes/marinade-style
 # matches before.qedspec byte-for-byte
 ```

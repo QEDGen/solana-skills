@@ -1,8 +1,13 @@
 # `qedgen adapt` — Squads-style fixture
 
-Companion to `examples/anchor-brownfield-demo/`. Exercises the
-`<Type>::<method>(ctx, args)` forwarder shape (Squads V4 convention
-per `reference_anchor_patterns.md`).
+Adapter-output regression fixture. Locks down the
+`<Type>::<method>(ctx, args)` forwarder shape (Squads V4 convention per
+`reference_anchor_patterns.md`), distinct from the free-fn forwarder
+covered by `examples/anchor-brownfield-demo/`.
+
+Scope: this fixture asserts `qedgen adapt` byte-matches `before.qedspec`. The
+end-to-end before→after agent-fill story is told once in the brownfield demo;
+this fixture only proves the handler-shape detector emits a parseable spec.
 
 The adapter:
 
@@ -24,6 +29,6 @@ the impl methods.
 ## Reproduce
 
 ```bash
-qedgen adapt --program examples/anchor-squads-style-demo
+qedgen adapt --program examples/regressions/anchor-adapter-shapes/squads-style
 # matches before.qedspec byte-for-byte
 ```

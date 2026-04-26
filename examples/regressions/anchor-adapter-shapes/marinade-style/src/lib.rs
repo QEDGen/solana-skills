@@ -3,7 +3,7 @@
 //! method on the `Context<X>`'s accounts struct, defined in a sibling
 //! module.
 //!
-//! `qedgen adapt --program examples/anchor-marinade-style-demo`
+//! `qedgen adapt --program examples/regressions/anchor-adapter-shapes/marinade-style`
 //! resolves these handlers via the `AccountsMethod` classifier and
 //! `find_impl_method` (M4.2). The output is `before.qedspec` here.
 
