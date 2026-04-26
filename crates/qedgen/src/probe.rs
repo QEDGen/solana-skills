@@ -232,11 +232,43 @@ fn detect_runtime(root: &Path) -> Runtime {
 /// Wrap `anchor_project::parse_anchor_project` to map discovered
 /// instructions into `BootstrapHandler` entries. Returns empty vec on
 /// failure (auditor falls back to source-walking).
+///
+/// Handles two layouts:
+/// 1. **Program crate root** — `<root>/src/lib.rs` exists. Single
+///    `#[program]` mod parsed directly.
+/// 2. **Anchor workspace root** — `<root>/programs/*/src/lib.rs`
+///    exists. Each child crate is parsed independently and handlers
+///    are aggregated. Brownfield users naturally point at workspace
+///    roots, so this is the common case.
 fn discover_anchor_handlers(root: &Path) -> Result<Vec<BootstrapHandler>> {
-    let project = parse_anchor_project(root)?;
+    let direct_lib = root.join("src").join("lib.rs");
+    if direct_lib.is_file() {
+        return single_crate_handlers(root, root);
+    }
+
+    let programs_dir = root.join("programs");
+    if !programs_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut all = Vec::new();
+    for entry in std::fs::read_dir(&programs_dir)?.flatten() {
+        let crate_root = entry.path();
+        if !crate_root.join("src").join("lib.rs").is_file() {
+            continue;
+        }
+        if let Ok(handlers) = single_crate_handlers(&crate_root, root) {
+            all.extend(handlers);
+        }
+    }
+    Ok(all)
+}
+
+fn single_crate_handlers(crate_root: &Path, project_root: &Path) -> Result<Vec<BootstrapHandler>> {
+    let project = parse_anchor_project(crate_root)?;
     let lib_path = project
         .lib_rs_path
-        .strip_prefix(root)
+        .strip_prefix(project_root)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| project.lib_rs_path.display().to_string());
     Ok(project
