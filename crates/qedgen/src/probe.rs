@@ -8,10 +8,10 @@
 //! (operate on the spec) by design; per-runtime spec-less predicates
 //! live in the auditor SKILL.md.
 //!
-//! v2.10 initial cut: `missing_signer` and `arbitrary_cpi`. Other categories
-//! (`arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
-//! `cpi_param_swap`, `pda_canonical_bump`) land alongside the eval pass that
-//! tunes their predicate sharpness.
+//! v2.10 initial cut: `missing_signer`, `arbitrary_cpi`, and
+//! `arithmetic_overflow_wrapping`. Remaining categories
+//! (`lifecycle_one_shot_violation`, `cpi_param_swap`, `pda_canonical_bump`)
+//! land alongside the eval pass that tunes their predicate sharpness.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -29,11 +29,12 @@ const SCHEMA_VERSION: u32 = 1;
 pub enum Category {
     MissingSigner,
     ArbitraryCpi,
+    ArithmeticOverflowWrapping,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // High/Medium/Low used by upcoming categories
+#[allow(dead_code)] // Low used by upcoming categories
 pub enum Severity {
     Critical,
     High,
@@ -85,6 +86,7 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
         if let Some(f) = predicate_arbitrary_cpi(handler) {
             findings.push(f);
         }
+        findings.extend(predicate_arithmetic_overflow_wrapping(handler));
     }
 
     Ok(ProbeOutput {
@@ -174,6 +176,62 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
         ),
         category_tag: "arbitrary_cpi".to_string(),
     })
+}
+
+/// Spec-aware predicate: handler uses explicit non-default arithmetic
+/// operators (`+=?` / `-=?` wrapping, or `+=!` / `-=!` saturating).
+/// Default `+=` / `-=` (v2.7 G3 checked semantics) are silent — they
+/// abort on overflow, which is the safe default. The non-default
+/// variants are explicit user opt-ins that almost always carry a
+/// vulnerability story for amount-shaped fields:
+///
+/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N. Almost
+///   always wrong on monetary amounts. Severity: HIGH.
+/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN. Hides bugs that
+///   should propagate as errors. Sometimes legitimate (rate limiters,
+///   epoch counters). Severity: MEDIUM.
+///
+/// Fires once per (field, op) pair on the handler. Auditor SKILL.md
+/// classification rules separate "intentional design" (suppress with
+/// rationale comment) from "real vulnerability" (change to default `+=`).
+fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (field, op, _value) in &handler.effects {
+        let (severity, kind) = match op.as_str() {
+            "add_wrap" | "sub_wrap" => (Severity::High, "wrapping"),
+            "add_sat" | "sub_sat" => (Severity::Medium, "saturating"),
+            _ => continue,
+        };
+
+        out.push(Finding {
+            id: stable_id(
+                &format!("{}::{}::{}", handler.name, field, op),
+                "arithmetic_overflow_wrapping",
+            ),
+            category: Category::ArithmeticOverflowWrapping,
+            severity,
+            handler: handler.name.clone(),
+            spec_silent_on: format!(
+                "handler `{}` uses {} arithmetic on `{}` (op `{}`)",
+                handler.name, kind, field, op
+            ),
+            suppression_hint: format!(
+                "If the {} semantics are intended, document the invariant inline in the spec. \
+                 If not, change the operator to `+=` / `-=` (default checked — aborts on overflow). \
+                 Wrap/saturate on amount-shaped fields silently masks bugs.",
+                kind
+            ),
+            investigation_hint: format!(
+                "Open the impl for handler `{}`. Confirm the `{}` semantics are deliberate \
+                 (e.g., epoch counter wrap, rate limiter saturation). For amount fields, \
+                 wrap/saturate is almost always a vulnerability — consult the auditor's \
+                 saturating-by-design suppression rules in SKILL.md.",
+                handler.name, kind
+            ),
+            category_tag: "arithmetic_overflow_wrapping".to_string(),
+        });
+    }
+    out
 }
 
 fn stable_id(handler: &str, category: &str) -> String {
@@ -281,6 +339,56 @@ mod tests {
     fn arbitrary_cpi_silent_when_no_writable_token() {
         let h = make_handler("crank", None, true);
         assert!(predicate_arbitrary_cpi(&h).is_none());
+    }
+
+    #[test]
+    fn arith_predicate_fires_on_wrap() {
+        let mut h = make_handler("tick", Some("crank"), false);
+        h.effects
+            .push(("epoch".to_string(), "add_wrap".to_string(), "1".to_string()));
+        let findings = predicate_arithmetic_overflow_wrapping(&h);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category_tag, "arithmetic_overflow_wrapping");
+        assert!(findings[0].spec_silent_on.contains("wrapping"));
+    }
+
+    #[test]
+    fn arith_predicate_fires_on_saturating() {
+        let mut h = make_handler("apply", Some("user"), false);
+        h.effects.push((
+            "balance".to_string(),
+            "add_sat".to_string(),
+            "delta".to_string(),
+        ));
+        let findings = predicate_arithmetic_overflow_wrapping(&h);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].spec_silent_on.contains("saturating"));
+    }
+
+    #[test]
+    fn arith_predicate_silent_on_default_checked() {
+        let mut h = make_handler("deposit", Some("user"), false);
+        h.effects
+            .push(("total".to_string(), "add".to_string(), "amount".to_string()));
+        h.effects.push((
+            "fee_pool".to_string(),
+            "sub".to_string(),
+            "amount".to_string(),
+        ));
+        h.effects
+            .push(("balance".to_string(), "set".to_string(), "x".to_string()));
+        assert!(predicate_arithmetic_overflow_wrapping(&h).is_empty());
+    }
+
+    #[test]
+    fn arith_predicate_fires_per_op() {
+        let mut h = make_handler("complex", Some("user"), false);
+        h.effects
+            .push(("a".to_string(), "add_wrap".to_string(), "1".to_string()));
+        h.effects
+            .push(("b".to_string(), "add_sat".to_string(), "delta".to_string()));
+        let findings = predicate_arithmetic_overflow_wrapping(&h);
+        assert_eq!(findings.len(), 2);
     }
 
     #[test]
