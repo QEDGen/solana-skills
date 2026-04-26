@@ -201,13 +201,28 @@ enum Commands {
     },
 
     /// Probe a `.qedspec` for category-coverage gaps. Emits JSON consumed
-    /// by the auditor subagent (or readable directly). v2.10 ships a
-    /// minimal spec-aware mode; `--bootstrap` (spec-less) and the rest of
-    /// the category catalog land alongside auditor SKILL.md and eval.
+    /// by the auditor subagent (or readable directly).
+    ///
+    /// Two modes:
+    /// - **Spec-aware** (`--spec <path>`): runs runtime-agnostic predicates
+    ///   against the parsed `.qedspec`, emits per-handler findings.
+    /// - **Spec-less** (`--bootstrap --root <path>`): walks a brownfield
+    ///   project, detects runtime, discovers handlers, emits the work-list
+    ///   envelope (handlers + applicable categories) for the auditor to
+    ///   investigate via Read/Grep on the impl source.
     Probe {
         /// Path to `.qedspec` file (spec-aware mode)
+        #[arg(long, conflicts_with = "bootstrap")]
+        spec: Option<PathBuf>,
+
+        /// Spec-less mode — walk a project root and emit the auditor work list
+        #[arg(long, requires = "root")]
+        bootstrap: bool,
+
+        /// Project root for spec-less mode (the program crate dir, e.g.
+        /// `programs/lending` for an Anchor project)
         #[arg(long)]
-        spec: PathBuf,
+        root: Option<PathBuf>,
 
         /// Emit JSON to stdout (currently the only output mode)
         #[arg(long, default_value_t = true)]
@@ -1012,8 +1027,22 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Probe { spec, json: _ } => {
-            let output = probe::run_probe(&spec)?;
+        Commands::Probe {
+            spec,
+            bootstrap,
+            root,
+            json: _,
+        } => {
+            let output = if bootstrap {
+                let root = root
+                    .ok_or_else(|| anyhow::anyhow!("--bootstrap requires --root <project-path>"))?;
+                probe::run_bootstrap(&root)?
+            } else {
+                let spec = spec.ok_or_else(|| {
+                    anyhow::anyhow!("provide --spec <path> for spec-aware mode, or --bootstrap --root <path> for spec-less")
+                })?;
+                probe::run_probe(&spec)?
+            };
             let rendered = serde_json::to_string_pretty(&output)?;
             println!("{}", rendered);
         }

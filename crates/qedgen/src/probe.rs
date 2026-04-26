@@ -15,11 +15,12 @@
 //! calibration); their spec-aware predicates are weak. Land alongside
 //! the auditor SKILL.md per-runtime predicates rather than here.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+use crate::anchor_project::parse_anchor_project;
 use crate::check::{parse_spec_file, ParsedHandler};
 
 /// Probe output schema version. Bump on incompatible finding-shape changes;
@@ -47,10 +48,36 @@ pub enum Severity {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)] // SpecLess used by --bootstrap mode landing later in v2.10
 pub enum Mode {
     SpecAware,
     SpecLess,
+}
+
+/// Runtime detected by `--bootstrap`. Determines which categories apply
+/// in spec-less mode and which auditor SKILL.md predicate set to invoke.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Runtime {
+    /// Anchor (anchor-lang dep + Anchor.toml or `#[program]` mod present).
+    Anchor,
+    /// Native Rust solana-program (no anchor-lang dep).
+    Native,
+    /// sBPF assembly (`.s` files in src/).
+    Sbpf,
+    /// QEDGen's own codegen target (quasar-lang or `#[qed(verified)]` markers).
+    QedgenCodegen,
+    /// Detection inconclusive — auditor falls back to source-walking.
+    Unknown,
+}
+
+/// One discovered handler in bootstrap (spec-less) mode. Auditor reads
+/// `source_file` to investigate per-handler categories.
+#[derive(Debug, Clone, Serialize)]
+pub struct BootstrapHandler {
+    pub name: String,
+    /// Path to the source file containing the handler, relative to
+    /// `project_root` if possible. Auditor uses this for Read tool dispatch.
+    pub source_file: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,8 +100,23 @@ pub struct Finding {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeOutput {
     pub version: u32,
-    pub spec_path: String,
     pub mode: Mode,
+    /// Path to `.qedspec` (spec-aware mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_path: Option<String>,
+    /// Project root walked in spec-less mode (`--bootstrap`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    /// Detected runtime (spec-less mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Runtime>,
+    /// Handlers discovered via runtime-aware walking (spec-less mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handlers: Option<Vec<BootstrapHandler>>,
+    /// Categories the auditor should investigate per handler (spec-less mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicable_categories: Option<Vec<String>>,
+    /// Findings (spec-aware mode only — spec-less is investigation-by-auditor).
     pub findings: Vec<Finding>,
 }
 
@@ -99,10 +141,136 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
 
     Ok(ProbeOutput {
         version: SCHEMA_VERSION,
-        spec_path: spec_path.display().to_string(),
         mode: Mode::SpecAware,
+        spec_path: Some(spec_path.display().to_string()),
+        project_root: None,
+        runtime: None,
+        handlers: None,
+        applicable_categories: None,
         findings,
     })
+}
+
+/// Spec-less probe (the `--bootstrap` mode). Walks a project root,
+/// detects runtime, discovers handlers, and emits the work-list envelope
+/// the auditor consumes. **The CLI does not investigate handlers in this
+/// mode** — that's the auditor's job per the v2.10 architecture
+/// (`feedback_audit_as_subagent.md`). The CLI's role is structured
+/// dispatch: tell the auditor what runtime, which handlers, and which
+/// categories to investigate.
+///
+/// Per-runtime handler discovery in v2.10:
+/// - **Anchor**: `parse_anchor_project` walks the program crate's
+///   `lib.rs`, finds the `#[program]` mod, lists its `pub fn`s.
+/// - **Native / sBPF / qedgen-codegen**: handler list is left empty;
+///   auditor walks source directly via Read+Grep. Future v2.x adds
+///   per-runtime discovery as adoption demand justifies.
+pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
+    if !project_root.exists() {
+        return Err(anyhow!(
+            "project root does not exist: {}",
+            project_root.display()
+        ));
+    }
+
+    let runtime = detect_runtime(project_root);
+    let handlers = match runtime {
+        Runtime::Anchor => discover_anchor_handlers(project_root).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let applicable = applicable_categories(&runtime);
+
+    Ok(ProbeOutput {
+        version: SCHEMA_VERSION,
+        mode: Mode::SpecLess,
+        spec_path: None,
+        project_root: Some(project_root.display().to_string()),
+        runtime: Some(runtime),
+        handlers: Some(handlers),
+        applicable_categories: Some(applicable),
+        findings: Vec::new(),
+    })
+}
+
+/// Runtime detection by filesystem heuristics. Order matters: a project
+/// with both `Anchor.toml` and `solana-program` dep is Anchor.
+fn detect_runtime(root: &Path) -> Runtime {
+    if root.join("Anchor.toml").exists() {
+        return Runtime::Anchor;
+    }
+
+    // sBPF: any `.s` file under src/ or programs/.
+    let asm_roots = [root.join("src"), root.join("programs")];
+    for asm_root in &asm_roots {
+        if let Ok(entries) = std::fs::read_dir(asm_root) {
+            for entry in entries.flatten() {
+                if entry.path().extension().and_then(|s| s.to_str()) == Some("s") {
+                    return Runtime::Sbpf;
+                }
+            }
+        }
+    }
+
+    // Cargo.toml dep heuristics.
+    let cargo = root.join("Cargo.toml");
+    if cargo.exists() {
+        let content = std::fs::read_to_string(&cargo).unwrap_or_default();
+        if content.contains("quasar-lang") {
+            return Runtime::QedgenCodegen;
+        }
+        if content.contains("anchor-lang") {
+            return Runtime::Anchor;
+        }
+        if content.contains("solana-program") || content.contains("solana_program") {
+            return Runtime::Native;
+        }
+    }
+
+    Runtime::Unknown
+}
+
+/// Wrap `anchor_project::parse_anchor_project` to map discovered
+/// instructions into `BootstrapHandler` entries. Returns empty vec on
+/// failure (auditor falls back to source-walking).
+fn discover_anchor_handlers(root: &Path) -> Result<Vec<BootstrapHandler>> {
+    let project = parse_anchor_project(root)?;
+    let lib_path = project
+        .lib_rs_path
+        .strip_prefix(root)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| project.lib_rs_path.display().to_string());
+    Ok(project
+        .instructions
+        .into_iter()
+        .map(|ix| BootstrapHandler {
+            name: ix.name,
+            source_file: lib_path.clone(),
+        })
+        .collect())
+}
+
+/// Categories the auditor should investigate per runtime in spec-less
+/// mode. Reflects the v2.10 design table in
+/// `docs/prds/PRD-v2.10.md` (runtime coverage section).
+fn applicable_categories(runtime: &Runtime) -> Vec<String> {
+    let universal = [
+        "missing_signer",
+        "arbitrary_cpi",
+        "arithmetic_overflow_wrapping",
+        "lifecycle_one_shot_violation",
+    ];
+    let anchor_native = ["cpi_param_swap", "pda_canonical_bump"];
+
+    match runtime {
+        Runtime::Anchor | Runtime::Native => universal
+            .iter()
+            .chain(anchor_native.iter())
+            .map(|s| s.to_string())
+            .collect(),
+        Runtime::Sbpf => universal.iter().map(|s| s.to_string()).collect(),
+        Runtime::QedgenCodegen => Vec::new(),
+        Runtime::Unknown => universal.iter().map(|s| s.to_string()).collect(),
+    }
 }
 
 /// Spec-aware predicate: handler has no `auth X` clause and is not marked
