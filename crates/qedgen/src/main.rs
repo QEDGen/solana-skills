@@ -16,6 +16,7 @@ mod deps;
 mod drift;
 mod fill;
 mod fingerprint;
+mod idl;
 mod idl2spec;
 mod import_resolver;
 mod init;
@@ -33,7 +34,6 @@ mod ratchet;
 mod reconcile;
 mod rust_codegen_util;
 mod sbpf_verify;
-mod spec;
 mod spec_hash;
 mod unit_test;
 mod upstream_check;
@@ -229,27 +229,24 @@ enum Commands {
         json: bool,
     },
 
-    /// Generate SPEC.md or .qedspec from an Anchor IDL or a .qedspec file
+    /// Scaffold a .qedspec from an Anchor IDL JSON file.
+    ///
+    /// v2.10 cleanup: this subcommand previously also generated SPEC.md
+    /// (via `--from-spec` and the default `--format md` path). The
+    /// SPEC.md generators have been removed — `.qedspec` is QEDGen's
+    /// front-door human-readable artifact (`feedback_spec_design.md`),
+    /// and parallel Markdown duplicates drifted from spec without a
+    /// real consumer. `qedgen spec` is now exclusively IDL → `.qedspec`.
     Spec {
         /// Path to Anchor IDL JSON file
-        #[arg(long, required_unless_present = "from_spec")]
-        idl: Option<PathBuf>,
-
-        /// Path to .qedspec file (alternative to --idl)
-        #[arg(long, conflicts_with = "idl")]
-        from_spec: Option<PathBuf>,
-
-        /// Path to proofs directory (for --from-spec status checking)
         #[arg(long)]
-        proofs: Option<PathBuf>,
+        idl: PathBuf,
 
-        /// Directory to write output (default: ./formal_verification)
+        /// Directory to write the scaffolded `.qedspec` (default:
+        /// `./formal_verification`). The file is named
+        /// `<idl-stem>.qedspec`.
         #[arg(long, default_value = "./formal_verification")]
         output_dir: PathBuf,
-
-        /// Output format: "md" (default) or "qedspec"
-        #[arg(long, default_value = "md")]
-        format: String,
     },
 
     /// Consolidate multiple proof projects into a single Lean project
@@ -1047,30 +1044,15 @@ async fn main() -> Result<()> {
             println!("{}", rendered);
         }
 
-        Commands::Spec {
-            idl,
-            from_spec,
-            proofs,
-            output_dir,
-            format,
-        } => {
-            if let Some(spec_path) = from_spec {
-                spec::generate_spec_from_qedspec(&spec_path, proofs.as_deref(), &output_dir)?;
-            } else if let Some(idl_path) = idl {
-                if format == "qedspec" {
-                    let stem = idl_path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let output_file = output_dir.join(format!("{}.qedspec", stem));
-                    idl2spec::generate_qedspec(&idl_path, &output_file)?;
-                } else {
-                    spec::generate_spec(&idl_path, &output_dir)?;
-                }
-            } else {
-                anyhow::bail!("Either --idl or --from-spec must be specified");
-            }
+        Commands::Spec { idl, output_dir } => {
+            let stem = idl
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            std::fs::create_dir_all(&output_dir)?;
+            let output_file = output_dir.join(format!("{}.qedspec", stem));
+            idl2spec::generate_qedspec(&idl, &output_file)?;
         }
 
         Commands::Consolidate {

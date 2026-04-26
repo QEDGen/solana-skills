@@ -12,12 +12,12 @@ use anyhow::{Context, Result};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::spec::{self, Idl, IdlAccount, IdlInstruction};
+use crate::idl::{self, Idl, IdlAccount, IdlInstruction};
 
 /// Generate an interface `.qedspec` from an Anchor IDL. Returns the rendered
 /// source; the caller writes it to disk.
 pub fn generate(idl_path: &Path) -> Result<String> {
-    let (idl, _analyses) = spec::parse_idl(idl_path)?;
+    let (idl, _analyses) = idl::parse_idl(idl_path)?;
     Ok(render(&idl))
 }
 
@@ -123,7 +123,7 @@ fn render_handler(out: &mut String, ix: &IdlInstruction) {
     // handler signature: `handler name (p : T) (q : U)` — params, no transition.
     write!(out, "  handler {}", name).unwrap();
     for arg in &ix.args {
-        let ty = spec::type_label(&arg.ty);
+        let ty = idl::type_label(&arg.ty);
         write!(out, " ({} : {})", arg.name, ty).unwrap();
     }
     writeln!(out, " {{").unwrap();

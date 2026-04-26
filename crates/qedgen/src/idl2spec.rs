@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use std::path::Path;
 
-use crate::spec::{self, Idl, IdlInstruction, InstructionAnalysis};
+use crate::idl::{self, Idl, IdlInstruction, InstructionAnalysis};
 
 // ── Type mapping ──────────────────────────────────────────────────────────
 
@@ -98,7 +98,7 @@ fn infer_then(ix_name: &str, analysis: &InstructionAnalysis) -> Option<&'static 
 
 // ── PDA seed rendering ───────────────────────────────────────────────────
 
-fn render_pda_seeds(pda: &spec::IdlPda) -> Vec<String> {
+fn render_pda_seeds(pda: &idl::IdlPda) -> Vec<String> {
     pda.seeds
         .iter()
         .map(|seed| {
@@ -125,7 +125,7 @@ fn render_pda_seeds(pda: &spec::IdlPda) -> Vec<String> {
 // ── Context attribute inference ──────────────────────────────────────────
 
 fn render_account_entry(
-    acct: &spec::IdlAccount,
+    acct: &idl::IdlAccount,
     _is_init_ix: bool,
     _first_signer: Option<&str>,
     type_names: &HashSet<String>,
@@ -206,7 +206,7 @@ fn render_account_entry(
 
 pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     let mut s = String::new();
-    let program_name = spec::snake_to_title(&idl.metadata.name).replace(' ', "");
+    let program_name = idl::snake_to_title(&idl.metadata.name).replace(' ', "");
     let lifecycle = infer_lifecycle(analyses);
     let multi_account = idl.types.iter().filter(|t| t.ty.kind == "struct").count() > 1;
 
@@ -386,7 +386,7 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
 
         // transfers hint (if token program present)
         if analysis.has_token_program {
-            let writable_token: Vec<&spec::IdlAccount> = ix
+            let writable_token: Vec<&idl::IdlAccount> = ix
                 .accounts
                 .iter()
                 .filter(|a| a.writable && a.name.contains("token") && !a.name.contains("program"))
@@ -468,7 +468,7 @@ fn infer_target_account(ix: &IdlInstruction, type_names: &HashSet<String>) -> Op
 // ── Public API ────────────────────────────────────────────────────────────
 
 pub fn generate_qedspec(idl_path: &Path, output_path: &Path) -> Result<()> {
-    let (idl, analyses) = spec::parse_idl(idl_path)?;
+    let (idl, analyses) = idl::parse_idl(idl_path)?;
     let content = render(&idl, &analyses);
 
     // Round-trip validation: ensure generated output parses cleanly
@@ -491,7 +491,7 @@ pub fn generate_qedspec(idl_path: &Path, output_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{analyze_instruction, Idl};
+    use crate::idl::{analyze_instruction, Idl};
 
     const ESCROW_IDL: &str = r#"{
         "metadata": { "name": "escrow" },

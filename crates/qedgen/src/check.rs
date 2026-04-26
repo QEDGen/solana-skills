@@ -489,6 +489,7 @@ impl ParsedHandler {
         out.extend(self.calls.iter().cloned());
         out
     }
+    #[allow(dead_code)]
     pub fn has_when(&self) -> bool {
         self.pre_status.is_some()
     }

@@ -106,22 +106,22 @@ $QEDGEN interface --idl target/idl/jupiter.json --vendor
 | `--vendor` | bool | false | Drop into `.qed/interfaces/<program>.qedspec`. Requires a discoverable `.qed/` ancestor. |
 
 ### `spec`
-Generate SPEC.md or .qedspec from IDL or .qedspec. (For Tier-0 interface
-scaffolding from an IDL, prefer `interface` — it's more focused.)
+Scaffold a `.qedspec` from an Anchor IDL JSON. (For Tier-0 interface
+scaffolding from an IDL — program ID + handler signatures only — prefer
+`interface`, which is more focused.) v2.10 dropped the SPEC.md
+generators that previously lived behind `--from-spec` and the default
+`--format md` path; `.qedspec` is QEDGen's front-door artifact and
+parallel Markdown duplicates were drifting in practice.
 
 ```bash
 $QEDGEN spec --idl target/idl/program.json
-$QEDGEN spec --idl target/idl/program.json --format qedspec
-$QEDGEN spec --from-spec my_program.qedspec --proofs formal_verification/
+$QEDGEN spec --idl target/idl/program.json --output-dir ./formal_verification
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--idl` | Path | - | Anchor IDL JSON file |
-| `--from-spec` | Path | - | .qedspec file (alternative to --idl) |
-| `--proofs` | Path | - | Proofs directory (for status checking) |
-| `--output-dir` | Path | `./formal_verification` | Output directory |
-| `--format` | String | `md` | Output format: `md` or `qedspec` |
+| `--idl` | Path | required | Anchor IDL JSON file |
+| `--output-dir` | Path | `./formal_verification` | Output directory; `<idl-stem>.qedspec` is written inside |
 
 ### `adapt`
 Brownfield adapter for existing Anchor programs. Two modes:

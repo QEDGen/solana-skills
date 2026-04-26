@@ -100,7 +100,7 @@ export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harm
 
 ```bash
 # Option A — from an Anchor IDL (program ABI only)
-qedgen spec --idl target/idl/my_program.json --format qedspec
+qedgen spec --idl target/idl/my_program.json
 
 # Option B — from the Anchor program's source (recommended)
 # Walks src/lib.rs, finds the #[program] mod, follows each forwarder
@@ -116,7 +116,7 @@ qedgen codegen --spec my_program.qedspec --lean
 cd formal_verification && lake build
 ```
 
-`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --format qedspec` is the IDL-only fallback when you don't have source.
+`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --idl <path>` is the IDL-only fallback when you don't have source.
 
 Once the spec is filled in, gate CI on it staying in sync with the program:
 

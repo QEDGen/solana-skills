@@ -111,7 +111,7 @@ qedgen verify --spec program.qedspec --kani             # cargo kani --tests
 qedgen verify --spec program.qedspec --lean             # lake build
 qedgen verify --spec program.qedspec --json             # machine-readable for CI
 
-# Generate a draft SPEC.md from an Anchor IDL
+# Scaffold a .qedspec from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
 
 # Consolidate multiple proof projects into single project
@@ -155,7 +155,7 @@ qedgen asm2lean \
 - `fingerprint.rs` - Spec section hashing for generated artifact staleness detection
 - `project.rs` - Lean project scaffolding generation
 - `consolidate.rs` - Merges multiple proof projects
-- `spec.rs` - SPEC.md generation from Anchor IDL or `.qedspec`
+- `idl.rs` - Anchor IDL parsing + first-pass pattern inference (consumed by `idl2spec` and `interface_gen`)
 
 **`lean_solana/`** - Standalone Lean 4 library: Solana axioms (QEDGen.Solana)
 - `QEDGen/Solana/Account.lean` - Account structure
