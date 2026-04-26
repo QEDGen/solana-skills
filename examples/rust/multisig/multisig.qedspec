@@ -84,6 +84,8 @@ handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized 
 
 /// Submit a new transaction proposal — any vault member can propose
 handler propose : State.Active -> State.HasProposal {
+  auth proposer
+
   accounts {
     proposer : signer
     vault    : writable, pda ["vault", creator]
@@ -99,6 +101,8 @@ handler propose : State.Active -> State.HasProposal {
 
 /// Approve the current proposal — each member may vote once
 handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth approver
+
   accounts {
     approver : signer
     vault    : writable, pda ["vault", creator]
@@ -116,6 +120,8 @@ handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
 
 /// Reject the current proposal — each member may vote once
 handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth rejecter
+
   accounts {
     rejecter : signer
     vault    : writable, pda ["vault", creator]
@@ -133,6 +139,8 @@ handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
 
 /// Execute the proposal once the approval threshold is met
 handler execute : State.HasProposal -> State.Active {
+  auth executor
+
   accounts {
     executor : signer
     vault    : writable, pda ["vault", creator]
@@ -150,6 +158,8 @@ handler execute : State.HasProposal -> State.Active {
 
 /// Cancel a proposal that can no longer reach the approval threshold
 handler cancel_proposal : State.HasProposal -> State.Active {
+  auth canceller
+
   accounts {
     canceller : signer
     vault     : writable, pda ["vault", creator]

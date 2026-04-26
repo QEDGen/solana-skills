@@ -69,6 +69,8 @@ handler init_pool (rate : U64) : Pool.Uninitialized -> Pool.Active {
 
 /// Deposit tokens into the pool
 handler deposit (amount : U64) : Pool.Active -> Pool.Active {
+  auth depositor
+
   accounts {
     depositor     : signer, writable
     pool          : writable, pda ["pool", authority]
@@ -81,6 +83,10 @@ handler deposit (amount : U64) : Pool.Active -> Pool.Active {
 
   effect {
     total_deposits += amount
+  }
+
+  transfers {
+    from depositor_ta to pool_vault amount amount authority depositor
   }
 
   emits Deposited
@@ -107,6 +113,10 @@ handler borrow (amount : U64) (collateral : U64) : Loan.Empty -> Loan.Active {
     collateral := collateral
   }
 
+  transfers {
+    from pool_vault to borrower_ta amount amount authority pool
+  }
+
   emits Borrowed
 }
 
@@ -128,21 +138,32 @@ handler repay : Loan.Active -> Loan.Empty {
     collateral := 0
   }
 
+  transfers {
+    from borrower_ta to pool_vault amount amount authority borrower
+  }
+
   emits Repaid
 }
 
 /// Liquidate an undercollateralized loan
 handler liquidate : Loan.Active -> Loan.Liquidated {
+  auth liquidator
+
   accounts {
-    liquidator    : signer, writable
-    loan          : writable, pda ["loan", pool, borrower]
-    pool          : writable, pda ["pool", authority]
-    pool_vault    : writable, token, authority pool
-    token_program : program
+    liquidator     : signer, writable
+    loan           : writable, pda ["loan", pool, borrower]
+    pool           : writable, pda ["pool", authority]
+    pool_vault     : writable, token, authority pool
+    liquidator_ta  : writable, token
+    token_program  : program
   }
 
   effect {
     amount := 0
+  }
+
+  transfers {
+    from pool_vault to liquidator_ta amount amount authority pool
   }
 
   emits LoanLiquidated
