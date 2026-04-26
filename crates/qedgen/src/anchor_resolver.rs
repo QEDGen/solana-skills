@@ -567,13 +567,12 @@ fn find_pub_fn_in_items(
 ) -> Option<syn::ItemFn> {
     for item in items {
         match item {
-            syn::Item::Fn(item_fn) => {
+            syn::Item::Fn(item_fn)
                 if matches!(item_fn.vis, syn::Visibility::Public(_))
                     && item_fn.sig.ident == fn_name
-                    && (target_path.is_empty() || target_path == current_path)
-                {
-                    return Some(item_fn.clone());
-                }
+                    && (target_path.is_empty() || target_path == current_path) =>
+            {
+                return Some(item_fn.clone());
             }
             syn::Item::Mod(item_mod) => {
                 if let Some((_, sub_items)) = &item_mod.content {
