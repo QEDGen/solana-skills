@@ -6,6 +6,16 @@ use crate::fingerprint::SpecFingerprint;
 use crate::spec_hash;
 use crate::Target;
 
+/// Placeholder string spliced into the `hash = "..."` field of the
+/// `#[qed(verified, ...)]` attribute during scaffold rendering. The
+/// fixup pass at the end of `render_handler_scaffold` parses the
+/// rendered impl method, computes the real body hash via
+/// `body_hash_for_impl_fn`, and string-replaces this placeholder.
+/// Picked to be obviously not a SHA-hex value so a missed fixup is
+/// caught by the macro's "expected hash format" error rather than
+/// silently shipping a placeholder.
+const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
+
 /// Per-framework strings for the surface that differs between Anchor
 /// and Quasar codegen (imports, ctx type, return type, lifetime,
 /// program-mod visibility, discriminator attribute).
@@ -1415,19 +1425,18 @@ fn render_handler_scaffold(
         out.push_str(&format!("    /// {}\n", doc));
     }
 
-    // Emit the spec-bound #[qed(...)] attribute. The body `hash`
-    // field is left empty on first scaffold — `qedgen-macros` errors
-    // at compile time with the computed value, the user pastes it
-    // once, and subsequent builds are clean. (Pre-computing the hash
-    // server-side is a v2.10 polish item — the macro's parse path
-    // and the codegen's `body_hash_for_impl_fn` path produce
-    // different `to_token_stream` bytes for the same function in
-    // some impl-method contexts; aligning them is its own
-    // engineering task.)
+    // Emit the spec-bound #[qed(...)] attribute with a body-hash
+    // sentinel. The fixup pass at the bottom of this function parses
+    // the rendered impl method, computes the real body hash, and
+    // splices it into the placeholder. Both `qedgen::spec_hash` and
+    // `qedgen-macros::FnLike::content_hash` normalize via
+    // `proc_macro2::TokenStream::from_str` before hashing, so the
+    // codegen-emitted `hash` agrees with the macro's compile-time
+    // recomputation.
     let spec_h = spec_hash::spec_hash_for_handler(spec_src, &handler.name).unwrap_or_default();
     out.push_str(&format!(
-        "    #[qed(verified, spec = \"{}\", handler = \"{}\", spec_hash = \"{}\")]\n",
-        spec_attr, handler.name, spec_h
+        "    #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]\n",
+        spec_attr, handler.name, BODY_HASH_PLACEHOLDER, spec_h
     ));
 
     out.push_str("    #[inline(always)]\n");
@@ -1550,7 +1559,48 @@ fn render_handler_scaffold(
     out.push_str("    }\n");
     out.push_str("}\n");
 
+    // Fixup: parse the rendered scaffold, find the impl method,
+    // compute the body hash, and splice it into the
+    // `hash = "QEDGEN_FIXUP_BODY_HASH"` placeholder.
+    // `qedgen::spec_hash::body_hash_for_*` and
+    // `qedgen-macros::FnLike::content_hash` both normalize via
+    // `proc_macro2::TokenStream::from_str` so codegen-time and
+    // compile-time agree on the hash; first `cargo build` is clean.
+    if let Some(body_hash) = precompute_body_hash(&out) {
+        out = out.replace(BODY_HASH_PLACEHOLDER, &body_hash);
+    }
     Ok(out)
+}
+
+/// Re-parse a rendered handler scaffold (with `BODY_HASH_PLACEHOLDER`
+/// still in the `#[qed]` attribute), find the impl method named
+/// `handler`, and compute its body hash. MUST mirror
+/// `qedgen-macros::FnLike::from_tokens`'s parse order (try `ItemFn`
+/// first, fall back to `ImplItemFn`) so we hit the same arm — both
+/// produce the same canonical bytes after the `from_str`
+/// normalization in `body_hash_for_*`, but only when fed equivalent
+/// inputs.
+fn precompute_body_hash(scaffold_source: &str) -> Option<String> {
+    use quote::ToTokens;
+    let file: syn::File = syn::parse_str(scaffold_source).ok()?;
+    for item in &file.items {
+        if let syn::Item::Impl(item_impl) = item {
+            for impl_item in &item_impl.items {
+                if let syn::ImplItem::Fn(impl_fn) = impl_item {
+                    if impl_fn.sig.ident == "handler" {
+                        let tokens = impl_fn.to_token_stream();
+                        if let Ok(item_fn) = syn::parse2::<syn::ItemFn>(tokens.clone()) {
+                            return Some(spec_hash::body_hash_for_fn(&item_fn));
+                        }
+                        if let Ok(impl_fn2) = syn::parse2::<syn::ImplItemFn>(tokens) {
+                            return Some(spec_hash::body_hash_for_impl_fn(&impl_fn2));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Generate src/guards.rs — one function per handler containing all the

@@ -40,7 +40,7 @@ use qedgen_macros::qed;
     verified,
     spec = "example.qedspec",
     handler = "deposit",
-    hash = "ac26f349ac12dd3e",
+    hash = "cd876f6bf941e7f0",
     spec_hash = "fe6610e4cf4a98e3"
 )]
 pub fn deposit(amount: u64) -> u64 {
@@ -51,7 +51,7 @@ pub fn deposit(amount: u64) -> u64 {
     verified,
     spec = "example.qedspec",
     handler = "withdraw",
-    hash = "cc247c5a61f6bbba",
+    hash = "29707bdb4444dae5",
     spec_hash = "24f34f81bd83188c"
 )]
 pub fn withdraw(amount: u64) -> Result<u64, &'static str> {
@@ -79,7 +79,7 @@ pub struct Vault {
     verified,
     spec = "example.qedspec",
     handler = "deposit_with_accounts",
-    hash = "d3ca667dc9867fd2",
+    hash = "1c2437bf5cdfc688",
     spec_hash = "fe6610e4cf4a98e3",
     accounts = "Vault",
     accounts_file = "src/lib.rs",
@@ -103,7 +103,7 @@ impl Account {
         verified,
         spec = "example.qedspec",
         handler = "process",
-        hash = "8dc48270e93d2a13",
+        hash = "480a7764187e2bc6",
         spec_hash = "98282f05baf0b306"
     )]
     pub fn process(&mut self, delta: u64) -> Result<(), &'static str> {

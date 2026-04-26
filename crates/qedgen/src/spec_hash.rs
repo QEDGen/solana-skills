@@ -31,8 +31,7 @@ fn sha256_hex16(input: &str) -> String {
 pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
-    let canonical = stripped.to_token_stream().to_string();
-    sha256_hex16(&canonical)
+    sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
 }
 
 /// Body hash for an impl method (`syn::ImplItemFn`). Same algorithm
@@ -42,8 +41,54 @@ pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
 pub fn body_hash_for_impl_fn(func: &syn::ImplItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
-    let canonical = stripped.to_token_stream().to_string();
-    sha256_hex16(&canonical)
+    sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
+}
+
+/// Walk a `TokenStream` and emit a canonical string by visiting each
+/// token in order with a single-space separator. MUST mirror
+/// `qedgen-macros::canonical_token_string` byte-for-byte. See that
+/// function's comment for the rationale (rustc-vs-from_str spacing
+/// divergence forces a hand-rolled traversal).
+fn canonical_token_string(stream: &proc_macro2::TokenStream) -> String {
+    use proc_macro2::{Delimiter, TokenTree};
+    let mut out = String::new();
+    fn walk(stream: proc_macro2::TokenStream, out: &mut String) {
+        for tt in stream {
+            match tt {
+                TokenTree::Group(g) => {
+                    let (open, close) = match g.delimiter() {
+                        Delimiter::Brace => ('{', '}'),
+                        Delimiter::Bracket => ('[', ']'),
+                        Delimiter::Parenthesis => ('(', ')'),
+                        Delimiter::None => (' ', ' '),
+                    };
+                    if g.delimiter() != Delimiter::None {
+                        out.push(open);
+                        out.push(' ');
+                    }
+                    walk(g.stream(), out);
+                    if g.delimiter() != Delimiter::None {
+                        out.push(close);
+                        out.push(' ');
+                    }
+                }
+                TokenTree::Ident(i) => {
+                    out.push_str(&i.to_string());
+                    out.push(' ');
+                }
+                TokenTree::Literal(l) => {
+                    out.push_str(&l.to_string());
+                    out.push(' ');
+                }
+                TokenTree::Punct(p) => {
+                    out.push(p.as_char());
+                    out.push(' ');
+                }
+            }
+        }
+    }
+    walk(stream.clone(), &mut out);
+    out
 }
 
 /// Hash a `pub struct <name>` from a Rust source file. MUST match

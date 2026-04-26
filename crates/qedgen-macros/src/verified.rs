@@ -50,25 +50,100 @@ impl FnLike {
     }
 
     /// Hash the canonical token stream after stripping every outer
-    /// attribute (doc comments, `#[qed(...)]`, `#[inline]`, etc.).
-    /// Identical algorithm whether the input was free-fn or
-    /// impl-method, modulo each variant's own ToTokens emission. Free-fn
-    /// and impl-method differ syntactically in the rare `default fn`
-    /// position; otherwise produce identical bytes.
+    /// attribute (doc comments, `#[qed(...)]`, `#[inline]`, etc.) and
+    /// normalizing the spacing via a `from_str` round-trip. Identical
+    /// algorithm whether the input was free-fn or impl-method.
+    ///
+    /// The normalization step is load-bearing: rustc-supplied
+    /// proc-macro `TokenStream`s carry per-`Punct` `Spacing` info that
+    /// reflects the original source file's formatting. Two visually-
+    /// equivalent functions can produce different
+    /// `to_token_stream().to_string()` bytes when one was parsed by
+    /// rustc (preserving source spacing) and the other by
+    /// `proc_macro2::TokenStream::from_str` (using `from_str` defaults).
+    /// We push both through `from_str` once before hashing so the hash
+    /// depends only on the function's syntactic structure — making
+    /// codegen-side `body_hash_for_*` agree with this compile-time
+    /// recomputation regardless of how the function was originally
+    /// tokenized.
     pub fn content_hash(&self) -> String {
-        match self {
+        let tokens = match self {
             FnLike::Item(f) => {
                 let mut stripped = f.clone();
                 stripped.attrs.clear();
-                sha256_hex16(&stripped.to_token_stream().to_string())
+                stripped.to_token_stream()
             }
             FnLike::Impl(f) => {
                 let mut stripped = f.clone();
                 stripped.attrs.clear();
-                sha256_hex16(&stripped.to_token_stream().to_string())
+                stripped.to_token_stream()
+            }
+        };
+        sha256_hex16(&canonical_token_string(tokens))
+    }
+}
+
+/// Walk a `TokenStream` and emit a canonical string by visiting each
+/// token in order and writing it with a single space separator —
+/// regardless of `proc_macro2`'s built-in `to_string` spacing
+/// decisions.
+///
+/// Why a custom walker instead of `to_token_stream().to_string()`:
+/// rustc-supplied proc-macro `TokenStream`s carry per-`Punct`
+/// `Spacing` info plus per-token span metadata that subtly affect the
+/// default `to_string` output. Two visually-equivalent functions
+/// therefore produce different `to_string` bytes when one was parsed
+/// by rustc (preserving source spacing) and the other by
+/// `proc_macro2::TokenStream::from_str` (using its own defaults).
+/// Forcing `Spacing::Alone` on every Punct narrows but doesn't
+/// eliminate the gap (Group/Ident formatting still varies). Only a
+/// hand-rolled traversal that emits `<token> ' '` for every token —
+/// independent of any built-in formatter — gives a canonical form
+/// that depends purely on the function's syntactic structure.
+///
+/// This makes codegen-side `qedgen::spec_hash::body_hash_for_*` agree
+/// with the proc-macro's compile-time recomputation regardless of how
+/// the function was originally tokenized.
+pub(crate) fn canonical_token_string(stream: TokenStream) -> String {
+    use proc_macro2::{Delimiter, TokenTree};
+    let mut out = String::new();
+    fn walk(stream: TokenStream, out: &mut String) {
+        for tt in stream {
+            match tt {
+                TokenTree::Group(g) => {
+                    let (open, close) = match g.delimiter() {
+                        Delimiter::Brace => ('{', '}'),
+                        Delimiter::Bracket => ('[', ']'),
+                        Delimiter::Parenthesis => ('(', ')'),
+                        Delimiter::None => (' ', ' '),
+                    };
+                    if g.delimiter() != Delimiter::None {
+                        out.push(open);
+                        out.push(' ');
+                    }
+                    walk(g.stream(), out);
+                    if g.delimiter() != Delimiter::None {
+                        out.push(close);
+                        out.push(' ');
+                    }
+                }
+                TokenTree::Ident(i) => {
+                    out.push_str(&i.to_string());
+                    out.push(' ');
+                }
+                TokenTree::Literal(l) => {
+                    out.push_str(&l.to_string());
+                    out.push(' ');
+                }
+                TokenTree::Punct(p) => {
+                    out.push(p.as_char());
+                    out.push(' ');
+                }
             }
         }
     }
+    walk(stream, &mut out);
+    out
 }
 
 /// Compute a deterministic content hash for a free `fn`. Kept for
