@@ -8,10 +8,12 @@
 //! (operate on the spec) by design; per-runtime spec-less predicates
 //! live in the auditor SKILL.md.
 //!
-//! v2.10 initial cut: `missing_signer`, `arbitrary_cpi`, and
-//! `arithmetic_overflow_wrapping`. Remaining categories
-//! (`lifecycle_one_shot_violation`, `cpi_param_swap`, `pda_canonical_bump`)
-//! land alongside the eval pass that tunes their predicate sharpness.
+//! v2.10 initial cut: `missing_signer`, `arbitrary_cpi`,
+//! `arithmetic_overflow_wrapping`, and `lifecycle_one_shot_violation`.
+//! Remaining categories (`cpi_param_swap`, `pda_canonical_bump`) lean
+//! more heavily on spec-less / impl-side analysis (per the manual-audit
+//! calibration); their spec-aware predicates are weak. Land alongside
+//! the auditor SKILL.md per-runtime predicates rather than here.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -30,6 +32,7 @@ pub enum Category {
     MissingSigner,
     ArbitraryCpi,
     ArithmeticOverflowWrapping,
+    LifecycleOneShotViolation,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -77,6 +80,8 @@ pub struct ProbeOutput {
 
 pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     let spec = parse_spec_file(spec_path)?;
+    let spec_models_lifecycle = !spec.lifecycle_states.is_empty()
+        || spec.account_types.iter().any(|a| !a.lifecycle.is_empty());
     let mut findings = Vec::new();
 
     for handler in &spec.handlers {
@@ -87,6 +92,9 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
             findings.push(f);
         }
         findings.extend(predicate_arithmetic_overflow_wrapping(handler));
+        if let Some(f) = predicate_lifecycle_one_shot_violation(handler, spec_models_lifecycle) {
+            findings.push(f);
+        }
     }
 
     Ok(ProbeOutput {
@@ -232,6 +240,65 @@ fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Findin
         });
     }
     out
+}
+
+/// Spec-aware predicate: spec models lifecycle states (either via top-level
+/// `state ... lifecycle [...]` or per-account-type lifecycle), but this
+/// handler declares no `pre_status` AND mutates state in some way
+/// (effects / transfers / calls). Without a lifecycle gate, the handler
+/// can be invoked in any program state — replay surface, ordering
+/// surface, init-after-close surface.
+///
+/// Suppressed by:
+/// - `permissionless` marker (handler is intentionally always-callable)
+/// - the spec doesn't model lifecycle at all (stateless program — no gate
+///   to declare)
+///
+/// Auditor classification: usually a spec-gap finding (state machine is
+/// modeled but this handler is undeclared). Real-vulnerability if the
+/// impl actually has cross-state replay paths the spec is silent on.
+fn predicate_lifecycle_one_shot_violation(
+    handler: &ParsedHandler,
+    spec_models_lifecycle: bool,
+) -> Option<Finding> {
+    if !spec_models_lifecycle {
+        return None;
+    }
+    if handler.permissionless {
+        return None;
+    }
+    if handler.pre_status.is_some() {
+        return None;
+    }
+    let mutates_state =
+        !handler.effects.is_empty() || !handler.transfers.is_empty() || handler.has_calls();
+    if !mutates_state {
+        return None;
+    }
+
+    Some(Finding {
+        id: stable_id(&handler.name, "lifecycle_one_shot_violation"),
+        category: Category::LifecycleOneShotViolation,
+        severity: Severity::Medium,
+        handler: handler.name.clone(),
+        spec_silent_on: format!(
+            "handler `{}` mutates state but declares no lifecycle pre-condition (`pre_status`); \
+             spec models lifecycle states elsewhere",
+            handler.name
+        ),
+        suppression_hint: format!(
+            "Add a lifecycle clause (`: State.X -> State.Y`) to handler `{}` declaring which \
+             state it operates on — or mark `permissionless` if intentionally always-callable.",
+            handler.name
+        ),
+        investigation_hint: format!(
+            "Open the impl for handler `{}`. Confirm it cannot be invoked in unintended states \
+             (closed account, in-progress proposal, etc.). If reachable from multiple lifecycle \
+             states without explicit handling, this is a real replay/ordering vulnerability.",
+            handler.name
+        ),
+        category_tag: "lifecycle_one_shot_violation".to_string(),
+    })
 }
 
 fn stable_id(handler: &str, category: &str) -> String {
@@ -389,6 +456,47 @@ mod tests {
             .push(("b".to_string(), "add_sat".to_string(), "delta".to_string()));
         let findings = predicate_arithmetic_overflow_wrapping(&h);
         assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn lifecycle_predicate_fires_when_state_mutating_no_pre_status() {
+        let mut h = make_handler("withdraw", Some("user"), false);
+        h.effects
+            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        let f =
+            predicate_lifecycle_one_shot_violation(&h, true).expect("expected lifecycle finding");
+        assert_eq!(f.category_tag, "lifecycle_one_shot_violation");
+    }
+
+    #[test]
+    fn lifecycle_predicate_silent_when_pre_status_declared() {
+        let mut h = make_handler("withdraw", Some("user"), false);
+        h.pre_status = Some("Active".to_string());
+        h.effects
+            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        assert!(predicate_lifecycle_one_shot_violation(&h, true).is_none());
+    }
+
+    #[test]
+    fn lifecycle_predicate_silent_when_permissionless() {
+        let mut h = make_handler("crank", None, true);
+        h.effects
+            .push(("x".to_string(), "set".to_string(), "1".to_string()));
+        assert!(predicate_lifecycle_one_shot_violation(&h, true).is_none());
+    }
+
+    #[test]
+    fn lifecycle_predicate_silent_when_spec_has_no_lifecycle() {
+        let mut h = make_handler("withdraw", Some("user"), false);
+        h.effects
+            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        assert!(predicate_lifecycle_one_shot_violation(&h, false).is_none());
+    }
+
+    #[test]
+    fn lifecycle_predicate_silent_when_no_state_mutation() {
+        let h = make_handler("read", Some("user"), false);
+        assert!(predicate_lifecycle_one_shot_violation(&h, true).is_none());
     }
 
     #[test]
