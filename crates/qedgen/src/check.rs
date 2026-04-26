@@ -437,10 +437,57 @@ impl ParsedHandler {
         !self.effects.is_empty()
     }
     /// Whether this handler initiates a CPI. True if the handler has a
-    /// `transfers { }` block (legacy sugar for Token.transfer) OR any
-    /// `call Interface.handler(...)` site (v2.5 uniform CPI surface).
+    /// `transfers { }` block (legacy sugar for `call Token.transfer(...)`)
+    /// OR any `call Interface.handler(...)` site (v2.5 uniform CPI surface).
     pub fn has_calls(&self) -> bool {
         !self.transfers.is_empty() || !self.calls.is_empty()
+    }
+
+    /// Unified iterator over all CPIs the handler initiates. Yields
+    /// synthetic `ParsedCall` entries for each `transfers { ... }` block
+    /// (mapped as `call Token.transfer(from, to, amount, authority)`)
+    /// followed by the explicit `call Interface.handler(...)` sites.
+    ///
+    /// **Use this for new code reading the CPI surface.** The dual
+    /// representation (`transfers` + `calls`) is a v2.x backward-compat
+    /// holdover; v3.0 collapses to `calls` only and removes the
+    /// `transfers` field entirely. The `transfers { ... }` keyword
+    /// itself stays as user-facing sugar — it just desugars at parse
+    /// time. See the v2.10 transfers/calls unification thread.
+    #[allow(dead_code)] // v2.10+ canonical reader; existing modules read transfers/calls directly until v3.0
+    pub fn all_cpi_calls(&self) -> Vec<ParsedCall> {
+        let mut out: Vec<ParsedCall> = self
+            .transfers
+            .iter()
+            .map(|t| ParsedCall {
+                target_interface: "Token".to_string(),
+                target_handler: "transfer".to_string(),
+                args: vec![
+                    ParsedCallArg {
+                        name: "from".to_string(),
+                        lean_expr: t.from.clone(),
+                        rust_expr: t.from.clone(),
+                    },
+                    ParsedCallArg {
+                        name: "to".to_string(),
+                        lean_expr: t.to.clone(),
+                        rust_expr: t.to.clone(),
+                    },
+                    ParsedCallArg {
+                        name: "amount".to_string(),
+                        lean_expr: t.amount.clone().unwrap_or_default(),
+                        rust_expr: t.amount.clone().unwrap_or_default(),
+                    },
+                    ParsedCallArg {
+                        name: "authority".to_string(),
+                        lean_expr: t.authority.clone().unwrap_or_default(),
+                        rust_expr: t.authority.clone().unwrap_or_default(),
+                    },
+                ],
+            })
+            .collect();
+        out.extend(self.calls.iter().cloned());
+        out
     }
     pub fn has_when(&self) -> bool {
         self.pre_status.is_some()
@@ -538,6 +585,15 @@ pub struct ParsedHandlerAccount {
 }
 
 /// A token transfer intent within a handler's `transfers` block.
+///
+/// **Note (v2.10+):** `transfers { from X to Y amount Z authority W }` is
+/// declarative sugar over `call Token.transfer(from = X, to = Y, amount = Z,
+/// authority = W)`. New code consuming the CPI surface should call
+/// [`ParsedHandler::all_cpi_calls`] which yields a synthetic `ParsedCall`
+/// for each `ParsedTransfer` plus the explicit `calls`. The dual storage
+/// here is backward-compat for codegen/lean_gen/fill — v3.0 collapses to
+/// `ParsedCall` only and the `transfers` field is removed (the keyword
+/// stays as parse-time sugar that desugars directly into `calls`).
 #[derive(Debug, Clone)]
 pub struct ParsedTransfer {
     pub from: String,

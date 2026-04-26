@@ -171,9 +171,10 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
             handler.name, writable_token.name
         ),
         suppression_hint: format!(
-            "Add `transfers {{ from <src> to <dst> amount <amt> authority <signer> }}` to handler `{}` — \
-             or a `call Interface.handler(...)` site if invoking a non-Token CPI. \
-             Without one of these, the codegen cannot mechanize the transfer.",
+            "Add `call Token.transfer(from = <src>, to = <dst>, amount = <amt>, authority = <signer>)` \
+             to handler `{}` (the v2.5+ uniform CPI surface) — or the legacy `transfers {{ ... }}` sugar \
+             which desugars to the same call. For non-Token CPIs, declare the interface and use \
+             `call Interface.handler(...)`. Without one of these, the codegen cannot mechanize the transfer.",
             handler.name
         ),
         investigation_hint: format!(
