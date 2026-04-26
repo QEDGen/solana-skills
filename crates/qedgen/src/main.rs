@@ -23,6 +23,7 @@ mod integration_test;
 mod interface_gen;
 mod kani;
 mod lean_gen;
+mod probe;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
@@ -197,6 +198,20 @@ enum Commands {
         /// Overrides `--out`; errors if no `.qed/` ancestor is found.
         #[arg(long)]
         vendor: bool,
+    },
+
+    /// Probe a `.qedspec` for category-coverage gaps. Emits JSON consumed
+    /// by the auditor subagent (or readable directly). v2.10 ships a
+    /// minimal spec-aware mode; `--bootstrap` (spec-less) and the rest of
+    /// the category catalog land alongside auditor SKILL.md and eval.
+    Probe {
+        /// Path to `.qedspec` file (spec-aware mode)
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Emit JSON to stdout (currently the only output mode)
+        #[arg(long, default_value_t = true)]
+        json: bool,
     },
 
     /// Generate SPEC.md or .qedspec from an Anchor IDL or a .qedspec file
@@ -995,6 +1010,12 @@ async fn main() -> Result<()> {
                 let rendered = interface_gen::generate(&idl)?;
                 print!("{}", rendered);
             }
+        }
+
+        Commands::Probe { spec, json: _ } => {
+            let output = probe::run_probe(&spec)?;
+            let rendered = serde_json::to_string_pretty(&output)?;
+            println!("{}", rendered);
         }
 
         Commands::Spec {
