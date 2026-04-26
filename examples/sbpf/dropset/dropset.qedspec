@@ -46,6 +46,8 @@ pda market ["base_mint", "quote_mint"]
 
 /// Register a new market — derives PDA from token pair, creates via CPI
 handler register_market : State.Uninitialized -> State.Registered {
+  auth user
+
   accounts {
     user           : signer, writable
     market         : writable, pda ["base_mint", "quote_mint"]
@@ -59,6 +61,14 @@ handler register_market : State.Uninitialized -> State.Registered {
     system_program : program
     rent           : readonly
   }
+
+  // base_vault / quote_vault are writable token accounts but the
+  // System Program CPI creates them rather than transferring tokens —
+  // this is account-creation, not value movement, so no `transfers`
+  // block is appropriate. The probe's arbitrary_cpi predicate fires
+  // on this shape; it's a known false positive on init-via-CPI
+  // handlers (Anchor's `init` constraint produces the same shape
+  // and Anchor handles it idiomatically).
 
   requires discriminant == 0 else InvalidDiscriminant
   requires instruction_data_len == 1 else InvalidInstructionLength

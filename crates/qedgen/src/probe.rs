@@ -356,6 +356,17 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
     if handler.has_calls() {
         return None;
     }
+    // Init pattern: handler transitioning from a "no-fields" pre-state
+    // (Uninitialized / Empty / Inactive) is creating accounts via System
+    // Program CPI, not transferring tokens. Writable token accounts in
+    // this shape are creation targets, not transfer targets. Suppress
+    // the finding — spec-author intent is captured structurally by the
+    // lifecycle transition.
+    if let Some(pre) = handler.pre_status.as_deref() {
+        if matches!(pre, "Uninitialized" | "Empty" | "Inactive") {
+            return None;
+        }
+    }
     let writable_token = handler
         .accounts
         .iter()
@@ -606,6 +617,26 @@ mod tests {
     #[test]
     fn arbitrary_cpi_silent_when_no_writable_token() {
         let h = make_handler("crank", None, true);
+        assert!(predicate_arbitrary_cpi(&h).is_none());
+    }
+
+    #[test]
+    fn arbitrary_cpi_silent_on_init_pattern() {
+        // Init-via-System: handler with Uninitialized pre-state has
+        // writable token accounts as CREATION targets (not transfers).
+        // No `transfers` block expected.
+        use crate::check::ParsedHandlerAccount;
+        let mut h = make_handler("register_market", Some("user"), false);
+        h.pre_status = Some("Uninitialized".to_string());
+        h.accounts.push(ParsedHandlerAccount {
+            name: "base_vault".to_string(),
+            is_signer: false,
+            is_writable: true,
+            is_program: false,
+            pda_seeds: None,
+            account_type: Some("token".to_string()),
+            authority: None,
+        });
         assert!(predicate_arbitrary_cpi(&h).is_none());
     }
 

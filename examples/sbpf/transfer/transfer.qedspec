@@ -21,6 +21,8 @@ type Error
 
 /// Transfer SOL from sender to recipient via System Program CPI
 handler transfer_sol {
+  auth sender
+
   accounts {
     sender         : signer, writable
     recipient      : writable
