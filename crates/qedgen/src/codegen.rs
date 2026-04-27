@@ -2097,6 +2097,55 @@ fn generate_guards(
             out.push_str(&lifecycle_pre_check);
         }
 
+        // R27: token-vault authority binding. The spec declares
+        // `pool_vault : token, authority pool` — meaning the SPL token
+        // account's `owner` field (i.e. the entity that can sign
+        // transfers from it) must equal the `pool` PDA's address. R6
+        // dropped Quasar's `token::authority = X` constraint on
+        // non-init accounts (the macro rejects it without `init`), so
+        // the static check is gone for every load after init. Without
+        // a runtime equivalent the pool_vault parameter could be any
+        // SPL-Token-program-owned account, breaking the deposit/repay/
+        // liquidate transfer routing intent (audit HIGH 5).
+        //
+        // Emit a runtime owner check on every non-init token account
+        // that declares `authority X` — the token account's `owner()`
+        // accessor returns the authority address, compared against the
+        // bound account's address.
+        let err_enum_name = format!("{}Error", to_pascal_case(&spec.program_name));
+        for acct in &handler.accounts {
+            let is_init_target = matches!(
+                handler.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            ) && match handler.on_account.as_deref() {
+                Some(adt) => {
+                    let lower = adt.to_lowercase();
+                    acct.name == lower || acct.name.starts_with(&lower)
+                }
+                None => true,
+            } && acct.pda_seeds.is_some()
+                && !acct.is_signer;
+            let is_token = acct.account_type.as_deref() == Some("token");
+            if !is_token || is_init_target {
+                continue;
+            }
+            let Some(ref auth_name) = acct.authority else {
+                continue;
+            };
+            let unauthorized = if spec.error_codes.iter().any(|c| c == "Unauthorized") {
+                "Unauthorized"
+            } else {
+                "InvalidLifecycle"
+            };
+            out.push_str(&format!(
+                "    // authority: ctx.{acct}.owner() == ctx.{auth}.address()\n    if *ctx.{acct}.owner() != *ctx.{auth}.to_account_view().address() {{ return Err(ProgramError::from({err_enum}::{var})); }}\n",
+                acct = acct.name,
+                auth = auth_name,
+                err_enum = err_enum_name,
+                var = unauthorized,
+            ));
+        }
+
         if handler.requires.is_empty()
             && handler.aborts_if.is_empty()
             && lifecycle_pre_check.is_empty()

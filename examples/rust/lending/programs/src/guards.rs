@@ -25,6 +25,8 @@ pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<(), Prog
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
     if ctx.pool.status != PoolStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
+    // authority: ctx.pool_vault.owner() == ctx.pool.address()
+    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0
     if !(amount > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -33,6 +35,8 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), Progr
 /// Guards for `borrow`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> Result<(), ProgramError> {
+    // authority: ctx.pool_vault.owner() == ctx.pool.address()
+    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0 ∧ collateral > 0
     if !((amount > 0) && (collateral > 0)) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -41,6 +45,8 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
 /// Guards for `repay`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
+    // authority: ctx.pool_vault.owner() == ctx.pool.address()
+    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // No guards declared in spec — nothing to check.
     Ok(())
 }
@@ -48,6 +54,8 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
 /// Guards for `liquidate`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> {
+    // authority: ctx.pool_vault.owner() == ctx.pool.address()
+    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // No guards declared in spec — nothing to check.
     Ok(())
 }
