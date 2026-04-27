@@ -18,7 +18,7 @@ pub struct LiquidateOtherwise<'info> {
 }
 
 impl<'info> LiquidateOtherwise<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate_otherwise", hash = "0acf8b80d22d297b", spec_hash = "")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate", hash = "0acf8b80d22d297b", spec_hash = "7bd0413339d25826")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::liquidate_otherwise(self, i)?;

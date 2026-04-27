@@ -1596,10 +1596,31 @@ fn render_handler_scaffold(
     // `proc_macro2::TokenStream::from_str` before hashing, so the
     // codegen-emitted `hash` agrees with the macro's compile-time
     // recomputation.
-    let spec_h = spec_hash::spec_hash_for_handler(spec_src, &handler.name).unwrap_or_default();
+    // Match-arm-derived handlers (`liquidate_case_0`, `..._case_1`,
+    // `..._otherwise`) don't appear in the source by their split name —
+    // look them up under the parent handler's name. Both the `handler`
+    // attribute and the `spec_hash` reference the parent so the qedgen
+    // macro can resolve the block at compile time and every arm shares
+    // the same drift-tracking key. (The split is purely a codegen
+    // artifact; the spec contract is one block.)
+    let parent_name: &str = if let Some(stripped) = handler.name.strip_suffix("_otherwise") {
+        stripped.strip_suffix('_').unwrap_or(stripped)
+    } else if let Some(idx) = handler.name.rfind("_case_") {
+        &handler.name[..idx]
+    } else {
+        handler.name.as_str()
+    };
+    let parent_exists =
+        spec_hash::spec_hash_for_handler(spec_src, parent_name).is_some();
+    let attr_handler_name = if parent_exists {
+        parent_name
+    } else {
+        handler.name.as_str()
+    };
+    let spec_h = spec_hash::spec_hash_for_handler(spec_src, attr_handler_name).unwrap_or_default();
     out.push_str(&format!(
         "    #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]\n",
-        spec_attr, handler.name, BODY_HASH_PLACEHOLDER, spec_h
+        spec_attr, attr_handler_name, BODY_HASH_PLACEHOLDER, spec_h
     ));
 
     out.push_str("    #[inline(always)]\n");

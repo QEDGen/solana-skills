@@ -18,7 +18,7 @@ pub struct LiquidateCase0<'info> {
 }
 
 impl<'info> LiquidateCase0<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate_case_0", hash = "cf44a92c87457290", spec_hash = "")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate", hash = "cf44a92c87457290", spec_hash = "7bd0413339d25826")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::liquidate_case_0(self, i)?;
