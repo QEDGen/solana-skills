@@ -542,11 +542,7 @@ impl ParsedHandler {
 /// field named `field`. For multi-state specs the lookup walks
 /// `spec.account_types`; for single-state specs the union lives in
 /// `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
-fn state_account_has_field(
-    acct: &ParsedHandlerAccount,
-    spec: &ParsedSpec,
-    field: &str,
-) -> bool {
+fn state_account_has_field(acct: &ParsedHandlerAccount, spec: &ParsedSpec, field: &str) -> bool {
     // Multi-state: match the account by name → ADT name (lowercase), then
     // walk that ADT's field list.
     for at in &spec.account_types {
@@ -613,10 +609,8 @@ impl ParsedHandlerAccount {
             // Single-state spec: any writable PDA can be the init target.
             None => true,
         };
-        let is_init = lifecycle_is_init
-            && on_account_matches
-            && !self.is_signer
-            && self.pda_seeds.is_some();
+        let is_init =
+            lifecycle_is_init && on_account_matches && !self.is_signer && self.pda_seeds.is_some();
 
         if is_init {
             parts.push("init".to_string());
@@ -2933,9 +2927,10 @@ fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         // explicit `requires` clause. If any `requires` references both
         // `who` and a state field, treat the spec as deliberately
         // self-binding and skip the warning.
-        let manually_bound = handler.requires.iter().any(|r| {
-            r.lean_expr.contains(who) && r.lean_expr.contains("s.")
-        });
+        let manually_bound = handler
+            .requires
+            .iter()
+            .any(|r| r.lean_expr.contains(who) && r.lean_expr.contains("s."));
         if manually_bound {
             continue;
         }
@@ -2984,8 +2979,7 @@ fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<CompletenessWarnin
             .iter()
             .filter(|(_, t)| {
                 let tt = t.trim();
-                tt.starts_with("Fin")
-                    || matches!(tt, "U8" | "U16" | "U32" | "U64")
+                tt.starts_with("Fin") || matches!(tt, "U8" | "U16" | "U32" | "U64")
             })
             .map(|(n, _)| n.as_str())
             .collect();
@@ -3054,10 +3048,7 @@ fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
     // `processed : Map[N] Bool`).
     let has_dedup_shaped_field = |spec: &ParsedSpec| -> bool {
         let by_state = spec.state_fields.iter();
-        let by_account = spec
-            .account_types
-            .iter()
-            .flat_map(|at| at.fields.iter());
+        let by_account = spec.account_types.iter().flat_map(|at| at.fields.iter());
         by_state.chain(by_account).any(|(_, t)| {
             let tt = t.trim();
             tt.starts_with("Map[") && (tt.ends_with("Bool") || tt.ends_with("U8"))
@@ -3204,19 +3195,16 @@ fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarn
             // If it has a token authority that points at a writable
             // PDA-typed account in this handler, the source is program-
             // owned.
-            let Some(from_acct) = handler
-                .accounts
-                .iter()
-                .find(|a| a.name == transfer.from)
-            else {
+            let Some(from_acct) = handler.accounts.iter().find(|a| a.name == transfer.from) else {
                 continue;
             };
             let Some(ref auth_name) = from_acct.authority else {
                 continue;
             };
-            let auth_is_program_owned = handler.accounts.iter().any(|a| {
-                &a.name == auth_name && a.is_writable && a.pda_seeds.is_some()
-            });
+            let auth_is_program_owned = handler
+                .accounts
+                .iter()
+                .any(|a| &a.name == auth_name && a.is_writable && a.pda_seeds.is_some());
             if !auth_is_program_owned {
                 continue;
             }
@@ -4653,8 +4641,8 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn lint_unbound_auth_fires() {
-        let spec = crate::chumsky_adapter::parse_str(UNBOUND_AUTH_FIXTURE)
-            .expect("fixture should parse");
+        let spec =
+            crate::chumsky_adapter::parse_str(UNBOUND_AUTH_FIXTURE).expect("fixture should parse");
         let warnings = check_completeness(&spec);
         let unbound: Vec<&CompletenessWarning> = warnings
             .iter()

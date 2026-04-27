@@ -37,7 +37,7 @@ $QEDGEN init --name counter  --spec counter.qedspec --target anchor
 | `--spec` | Path | - | Spec path (file or directory) — written into `.qed/config.json` so `check`/`codegen` can resolve it automatically |
 | `--asm` | Path | - | sBPF assembly source (runs asm2lean automatically) |
 | `--mathlib` | bool | false | Include Mathlib dependency |
-| `--target` | enum | - | Also generate the program crate + Kani harnesses for the named framework target. Values: `anchor` (Anchor-compatible Rust), `quasar` (Blueshift Quasar — `#![no_std]`, explicit discriminators, `Ctx<X>`), `pinocchio` (v2.10+). Selecting `pinocchio` errors with a v2.10+ pointer. Requires `--spec`. Omit to skip program scaffolding entirely. |
+| `--target` | enum | - | Also generate the program crate + Kani harnesses for the named framework target. Values: `anchor` (Anchor-compatible Rust), `quasar` (Blueshift Quasar — `#![no_std]`, explicit discriminators, `Ctx<X>`; full codegen + security pass shipped in v2.10), `pinocchio` (v2.11+). Selecting `pinocchio` errors with a v2.11+ pointer. Requires `--spec`. Omit to skip program scaffolding entirely. |
 | `--output-dir` | Path | `./formal_verification` | Output directory |
 
 The written `.qed/config.json`:

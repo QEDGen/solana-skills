@@ -982,12 +982,7 @@ fn render_rust_binary_with_coercion(
 /// so the helper signature is honored uniformly. (The `as u128` from u64
 /// is widening; from i128 it's saturating-by-truncation, which matches
 /// the spec's Int → u128 lowering used by the Lean side.)
-fn render_helper_arg(
-    e: &Expr,
-    ctx: Ctx,
-    consts: ConstTable,
-    opts: RustOpts<'_, '_>,
-) -> String {
+fn render_helper_arg(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) -> String {
     let rendered = expr_to_rust(e, ctx, consts, opts);
     if !opts.pod_aware {
         return rendered;

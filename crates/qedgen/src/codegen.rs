@@ -78,7 +78,8 @@ impl FrameworkSurface {
                 // gets a panic_handler / global_allocator from the standard
                 // library. Quasar provides solana-target panic_handler /
                 // global_allocator below via `panic_handler!()` / `no_alloc!()`.
-                crate_attrs: "#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
+                crate_attrs:
+                    "#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import: "use quasar_lang::prelude::*;\n",
                 context_type: "Ctx",
                 handler_result_type: "Result<(), ProgramError>",
@@ -655,10 +656,7 @@ fn generate_state(
             } else {
                 "#[account]\n".to_string()
             };
-            out.push_str(&format!(
-                "{}pub struct {} {{\n",
-                account_attr, struct_name
-            ));
+            out.push_str(&format!("{}pub struct {} {{\n", account_attr, struct_name));
 
             for (fname, ftype) in &acct.fields {
                 out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
@@ -704,10 +702,7 @@ fn generate_state(
         } else {
             "#[account]\n"
         };
-        out.push_str(&format!(
-            "{}pub struct {} {{\n",
-            account_attr, state_name
-        ));
+        out.push_str(&format!("{}pub struct {} {{\n", account_attr, state_name));
 
         for (fname, ftype) in &spec.state_fields {
             out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
@@ -742,28 +737,6 @@ fn generate_state(
 
     std::fs::write(src_dir.join("state.rs"), &out)?;
     Ok(())
-}
-
-/// Generate PDA seeds attribute for a PDA declaration.
-fn gen_pda_seeds_attr(
-    pda: &crate::check::ParsedPda,
-    fields: &[(String, String)],
-    spec: &ParsedSpec,
-) -> Result<String> {
-    let mut seed_parts = Vec::new();
-    for seed in &pda.seeds {
-        let trimmed = seed.trim_matches('"');
-        if seed.starts_with('"') || seed.starts_with('\"') {
-            seed_parts.push(format!("b\"{}\"", trimmed));
-        } else {
-            let field_type = match fields.iter().find(|(n, _)| n == trimmed) {
-                Some((_, t)) => map_type(t, spec)?,
-                None => "Address".to_string(),
-            };
-            seed_parts.push(format!("{}: {}", trimmed, field_type));
-        }
-    }
-    Ok(format!("#[seeds({})]\n", seed_parts.join(", ")))
 }
 
 /// Generate src/events.rs (only if events are declared)
@@ -1721,12 +1694,10 @@ fn render_handler_accounts_struct(
             //      lending's `borrow` (loan + pool both writable PDAs)
             //      drops `loan` to `UncheckedAccount` even though it's the
             //      lifecycle target.
-            let inferred_match =
-                is_multi && inferred_name != default_state_name;
+            let inferred_match = is_multi && inferred_name != default_state_name;
             let is_state =
                 state_acct.map(|sa| sa.name == acct.name).unwrap_or(false) || inferred_match;
-            let attr =
-                acct.quasar_account_attr(handler, &inferred_name, target, spec, is_state);
+            let attr = acct.quasar_account_attr(handler, &inferred_name, target, spec, is_state);
             let field_type = render_account_field_type(acct, surface, is_state, &inferred_name);
             out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
         }
@@ -1840,8 +1811,7 @@ fn render_handler_scaffold(
     } else {
         handler.name.as_str()
     };
-    let parent_exists =
-        spec_hash::spec_hash_for_handler(spec_src, parent_name).is_some();
+    let parent_exists = spec_hash::spec_hash_for_handler(spec_src, parent_name).is_some();
     let attr_handler_name = if parent_exists {
         parent_name
     } else {
@@ -2057,9 +2027,7 @@ fn generate_math(fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&src_dir)?;
     let mut out = String::new();
     out.push_str(&marker("DO NOT EDIT", fp, "src/math.rs"));
-    out.push_str(
-        "//! Fixed-point math helpers used by spec-derived guards and properties.\n\n",
-    );
+    out.push_str("//! Fixed-point math helpers used by spec-derived guards and properties.\n\n");
     out.push_str("#![allow(dead_code)]\n\n");
     out.push_str(
         "/// Floor of `(a * b) / d`. Returns `0` if `d == 0` (caller must guard).\n\
@@ -2243,10 +2211,7 @@ fn generate_guards(
                     seed_exprs.push(format!("b\"{}\"", inner));
                 } else if bound_account_names.contains(seed.as_str()) {
                     // Handler-bound account: read its address.
-                    seed_exprs.push(format!(
-                        "ctx.{}.to_account_view().address().as_ref()",
-                        seed
-                    ));
+                    seed_exprs.push(format!("ctx.{}.to_account_view().address().as_ref()", seed));
                 } else {
                     // State-field seed: read off the same PDA's stored
                     // value (the field that R13 couldn't pass through
@@ -2334,11 +2299,8 @@ fn generate_guards(
         // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
         // Without this, the spec's signer-binding compiles to `... ==
         // approver` where `approver` resolves to nothing in scope.
-        let handler_account_names: Vec<String> = handler
-            .accounts
-            .iter()
-            .map(|a| a.name.clone())
-            .collect();
+        let handler_account_names: Vec<String> =
+            handler.accounts.iter().map(|a| a.name.clone()).collect();
         let bind_state = |expr: &str| -> String {
             // Step 1: rewrite handler-account idents to address loads.
             let mut after_accounts = String::with_capacity(expr.len() + 32);
@@ -2350,7 +2312,8 @@ fn generate_guards(
                 if prev_ok {
                     for name in &handler_account_names {
                         let nbytes = name.as_bytes();
-                        if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes {
+                        if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes
+                        {
                             // Boundary check on the trailing edge: don't
                             // match `approver_x` when looking for `approver`.
                             let after = i + nbytes.len();
@@ -2984,8 +2947,8 @@ handler bump (n : U64) : State.Active -> State.Active {
         let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
         let state_acct = find_state_account(handler).expect("state account");
         let effect = handler.effects.first().unwrap();
-        let rendered =
-            mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
+        let rendered = mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor)
+            .expect("mechanized");
         // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
         // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
         // user's declared Error sum.

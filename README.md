@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.10+.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.11+.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -76,6 +76,12 @@ qedgen init --name my_program --spec my_program.qedspec --target anchor
 # 3. Validate and generate artifacts (no --spec needed from inside the project)
 qedgen check
 qedgen codegen --all
+
+# 4. Audit a brownfield project before adopting a spec — emits the
+#    auditor work list (per-handler categories) consumed by the
+#    `qedgen-auditor` agent skill, or run spec-aware against an
+#    existing .qedspec for category-coverage findings.
+qedgen probe --json --spec my_program.qedspec
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need
