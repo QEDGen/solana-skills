@@ -471,7 +471,8 @@ enum Commands {
     ///
     /// Exit codes: 0 = additive/safe, 1 = breaking, 2 = unsafe.
     Readiness {
-        /// Path to the Anchor IDL JSON (typically target/idl/<program>.json)
+        /// Path to the IDL JSON (typically target/idl/<program>.json
+        /// from `anchor build` or `quasar build`).
         #[arg(long, required_unless_present = "list_rules")]
         idl: Option<PathBuf>,
 
@@ -482,6 +483,13 @@ enum Commands {
         /// is linked in as a library, so surface it here.
         #[arg(long)]
         list_rules: bool,
+
+        /// Treat `--idl` as a Quasar-emitted IDL rather than an Anchor
+        /// IDL. Auto-detected when a `Quasar.toml` (and no shadowing
+        /// `Anchor.toml`) lives in the current working directory; pass
+        /// explicitly to force Quasar mode from elsewhere.
+        #[arg(long)]
+        quasar: bool,
 
         /// Output as JSON (for agent / CI consumption)
         #[arg(long)]
@@ -527,6 +535,15 @@ enum Commands {
         /// binary on PATH — this flag fills the gap.
         #[arg(long)]
         list_rules: bool,
+
+        /// Treat both IDLs as Quasar-emitted rather than Anchor.
+        /// Auto-detected from `Quasar.toml`; the flag forces Quasar
+        /// mode when running from elsewhere. Mixed-framework diffs
+        /// aren't supported — Anchor IDLs and Quasar IDLs both lower
+        /// into the same IR, but the loaders differ and a "rename a
+        /// program from Anchor to Quasar" diff is out of scope.
+        #[arg(long)]
+        quasar: bool,
 
         /// Output as JSON (for agent / CI consumption)
         #[arg(long)]
@@ -779,6 +796,27 @@ fn require_git_repo() -> anyhow::Result<()> {
 /// unit-testable without spawning a process — the template bytes are
 /// `include_str!`'d at compile time, so the test wires them in the
 /// same way.
+/// Pick the Anchor / Quasar loader for `qedgen readiness` and
+/// `qedgen check-upgrade`. Explicit `--quasar` always wins; otherwise
+/// the framework is inferred from the project marker in the current
+/// working directory (`Quasar.toml` → Quasar; default → Anchor). A
+/// short stderr banner lights up the first time autodetect picks
+/// Quasar so the dev sees which loader fired without re-reading
+/// `--help`. Suppressed under `--json` to keep machine consumers'
+/// output clean.
+fn resolve_framework(explicit_quasar: bool, as_json: bool) -> ratchet::Framework {
+    if explicit_quasar {
+        return ratchet::Framework::Quasar;
+    }
+    let detected = ratchet::Framework::detect_from_cwd();
+    if detected == ratchet::Framework::Quasar && !as_json {
+        eprintln!(
+            "qedgen: Quasar project detected (Quasar.toml in cwd) — using ratchet's Quasar IDL parser"
+        );
+    }
+    detected
+}
+
 fn expand_ci_template(template: &str, verify_step: &str, ratchet_step: &str) -> String {
     let mut out = template
         .replace("{{VERIFY_STEP}}", verify_step)
@@ -1517,6 +1555,7 @@ async fn main() -> Result<()> {
         Commands::Readiness {
             idl,
             list_rules,
+            quasar,
             json,
         } => {
             if list_rules {
@@ -1526,7 +1565,8 @@ async fn main() -> Result<()> {
             // clap's `required_unless_present = "list_rules"` guarantees
             // `idl` is Some here — unwrap is safe in shape.
             let idl = idl.expect("--idl is required unless --list-rules");
-            let report = match ratchet::run_readiness(&ratchet::ReadinessOpts { idl }) {
+            let framework = resolve_framework(quasar, json);
+            let report = match ratchet::run_readiness(&ratchet::ReadinessOpts { idl, framework }) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("Error: {:#}", e);
@@ -1554,6 +1594,7 @@ async fn main() -> Result<()> {
             migrated_accounts,
             realloc_accounts,
             list_rules,
+            quasar,
             json,
         } => {
             if list_rules {
@@ -1562,12 +1603,14 @@ async fn main() -> Result<()> {
             }
             let old = old.expect("--old is required unless --list-rules");
             let new = new.expect("--new is required unless --list-rules");
+            let framework = resolve_framework(quasar, json);
             let report = match ratchet::run_check_upgrade(&ratchet::CheckUpgradeOpts {
                 old,
                 new,
                 unsafes,
                 migrated_accounts,
                 realloc_accounts,
+                framework,
             }) {
                 Ok(r) => r,
                 Err(e) => {

@@ -18,16 +18,49 @@
 //   3 = qedgen-level error before the engine ran (caller-side).
 
 use anyhow::{Context, Result};
-use ratchet_anchor::{normalize, AnchorIdl};
+use ratchet_anchor::{normalize as normalize_anchor, AnchorIdl};
 use ratchet_core::{
-    check, default_preflight_rules, default_rules, preflight, CheckContext, Report, Severity,
+    check, default_preflight_rules, default_rules, preflight, CheckContext, ProgramSurface, Report,
+    Severity,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+/// Which framework's IDL the caller is handing us. Picks the loader +
+/// normaliser path; the rule engine downstream is identical either
+/// way (every R-rule and P-rule operates on the framework-agnostic
+/// `ProgramSurface` IR).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Framework {
+    #[default]
+    Anchor,
+    Quasar,
+}
+
+impl Framework {
+    /// Walk the current working directory's parents looking for a
+    /// project marker — `Anchor.toml` or `Quasar.toml`. Returns
+    /// `Quasar` only when a `Quasar.toml` is found *without* an
+    /// Anchor.toml shadowing it (mixed projects pick Anchor by
+    /// default to preserve the historical behaviour).
+    ///
+    /// Used as a default when the CLI flag isn't passed; explicit
+    /// `--quasar` always wins.
+    pub fn detect_from_cwd() -> Self {
+        if std::path::Path::new("Quasar.toml").exists()
+            && !std::path::Path::new("Anchor.toml").exists()
+        {
+            Framework::Quasar
+        } else {
+            Framework::Anchor
+        }
+    }
+}
+
 /// Options accepted by the `qedgen readiness` subcommand.
 pub struct ReadinessOpts {
     pub idl: PathBuf,
+    pub framework: Framework,
 }
 
 /// Options accepted by the `qedgen check-upgrade` subcommand.
@@ -40,29 +73,28 @@ pub struct CheckUpgradeOpts {
     pub migrated_accounts: Vec<String>,
     /// `--realloc-account <Name>` declarations for R005 demotion.
     pub realloc_accounts: Vec<String>,
+    /// Framework for both `old` and `new`. Mixed-framework diffs
+    /// aren't supported — Anchor + Quasar IDLs lower into the same
+    /// IR but the loaders differ, and a "what does it mean to
+    /// rename a program from Anchor to Quasar" diff is out of scope.
+    pub framework: Framework,
 }
 
-/// Run the preflight rule set against a single Anchor IDL and return
-/// the resulting [`Report`].
+/// Run the preflight rule set against a single IDL (Anchor or
+/// Quasar) and return the resulting [`Report`].
 pub fn run_readiness(opts: &ReadinessOpts) -> Result<Report> {
-    let idl = load_idl(&opts.idl)?;
-    let surface =
-        normalize(&idl).with_context(|| format!("normalizing IDL at {}", opts.idl.display()))?;
+    let surface = load_surface(&opts.idl, opts.framework)?;
     let ctx = CheckContext::new();
     let rules = default_preflight_rules();
     Ok(preflight(&surface, &ctx, &rules))
 }
 
-/// Diff two Anchor IDLs under the default rule set. Allow-flags flow
+/// Diff two IDLs under the default rule set. Allow-flags flow
 /// through to the engine so intentional unsafe changes can be
 /// acknowledged at the CLI boundary.
 pub fn run_check_upgrade(opts: &CheckUpgradeOpts) -> Result<Report> {
-    let old = load_idl(&opts.old)?;
-    let new = load_idl(&opts.new)?;
-    let old_surface = normalize(&old)
-        .with_context(|| format!("normalizing old IDL at {}", opts.old.display()))?;
-    let new_surface = normalize(&new)
-        .with_context(|| format!("normalizing new IDL at {}", opts.new.display()))?;
+    let old_surface = load_surface(&opts.old, opts.framework)?;
+    let new_surface = load_surface(&opts.new, opts.framework)?;
 
     let mut ctx = CheckContext::new();
     for flag in &opts.unsafes {
@@ -79,7 +111,26 @@ pub fn run_check_upgrade(opts: &CheckUpgradeOpts) -> Result<Report> {
     Ok(check(&old_surface, &new_surface, &ctx, &rules))
 }
 
-fn load_idl(path: &Path) -> Result<AnchorIdl> {
+/// Load + normalise an IDL JSON for either framework. Both lower
+/// into the same `ProgramSurface` so every rule downstream is
+/// identical.
+fn load_surface(path: &Path, framework: Framework) -> Result<ProgramSurface> {
+    match framework {
+        Framework::Anchor => {
+            let idl = load_anchor_idl(path)?;
+            normalize_anchor(&idl)
+                .with_context(|| format!("normalizing Anchor IDL at {}", path.display()))
+        }
+        Framework::Quasar => {
+            let idl = ratchet_quasar::load_quasar_idl(path)
+                .with_context(|| format!("loading Quasar IDL at {}", path.display()))?;
+            ratchet_quasar::normalize(&idl)
+                .with_context(|| format!("normalizing Quasar IDL at {}", path.display()))
+        }
+    }
+}
+
+fn load_anchor_idl(path: &Path) -> Result<AnchorIdl> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice::<AnchorIdl>(&bytes)
         .with_context(|| format!("parsing Anchor IDL at {}", path.display()))
@@ -226,7 +277,11 @@ mod tests {
     fn readiness_flags_bare_v1_surface() {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
-        let report = run_readiness(&ReadinessOpts { idl }).unwrap();
+        let report = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Anchor,
+        })
+        .unwrap();
         let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
         // Known bare-surface traps: no `version` prefix, no `_reserved`
         // padding, struct name collides with the account name.
@@ -239,7 +294,11 @@ mod tests {
     fn readiness_exit_code_matches_severity() {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
-        let report = run_readiness(&ReadinessOpts { idl }).unwrap();
+        let report = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Anchor,
+        })
+        .unwrap();
         // Bare v1 surface fires P001 (unsafe) and P002 (unsafe); exit 2.
         assert_eq!(exit_code(&report), 2);
     }
@@ -255,6 +314,7 @@ mod tests {
             unsafes: vec![],
             migrated_accounts: vec![],
             realloc_accounts: vec![],
+            framework: Framework::Anchor,
         })
         .unwrap();
         assert!(report.findings.is_empty());
@@ -292,6 +352,7 @@ mod tests {
             unsafes: vec![],
             migrated_accounts: vec![],
             realloc_accounts: vec![],
+            framework: Framework::Anchor,
         })
         .unwrap();
         assert!(report.findings.iter().any(|f| f.rule_id == "R007"));
@@ -302,6 +363,7 @@ mod tests {
     fn missing_idl_is_surfaced_as_io_error() {
         let err = run_readiness(&ReadinessOpts {
             idl: PathBuf::from("/does/not/exist.json"),
+            framework: Framework::Anchor,
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("reading"));
@@ -311,7 +373,11 @@ mod tests {
     fn malformed_json_is_surfaced_as_parse_error() {
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", "not json");
-        let err = run_readiness(&ReadinessOpts { idl }).unwrap_err();
+        let err = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Anchor,
+        })
+        .unwrap_err();
         assert!(format!("{err:#}").contains("parsing"));
     }
 
@@ -346,5 +412,99 @@ mod tests {
         for expected in &["R001", "R006", "R007", "R013", "R016"] {
             assert!(ids.contains(expected), "missing {expected} in catalog");
         }
+    }
+
+    // --- Quasar dispatch -------------------------------------------------
+    //
+    // Quasar's IDL JSON is a different shape from Anchor's: 1-byte
+    // variable-length account discriminators, an untagged `IdlType`
+    // union, and struct-only typedefs joined to accounts by name.
+    // ratchet-quasar handles the lowering; these tests just prove that
+    // dispatching through `Framework::Quasar` reaches that codepath and
+    // that the same R/P rule engine fires on the resulting surface.
+
+    const QUASAR_BARE_V1_IDL: &str = r#"{
+        "address": "11111111111111111111111111111111",
+        "metadata": { "name": "t", "version": "0.1.0", "spec": "0.1.0" },
+        "instructions": [],
+        "accounts": [
+            { "name": "State", "discriminator": [42] }
+        ],
+        "types": [
+            {
+                "name": "State",
+                "type": {
+                    "kind": "struct",
+                    "fields": [{ "name": "balance", "type": "u64" }]
+                }
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn quasar_readiness_flags_bare_v1_surface() {
+        let tmp = TempDir::new().unwrap();
+        let idl = write(tmp.path(), "t.json", QUASAR_BARE_V1_IDL);
+        let report = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Quasar,
+        })
+        .unwrap();
+        let ids: Vec<&str> = report.findings.iter().map(|f| f.rule_id.as_str()).collect();
+        // Same readiness gaps as the Anchor case — no `version` prefix,
+        // no `_reserved` padding. P003/P004 are intentionally silenced
+        // for Quasar (devs always pin discriminators in source, so the
+        // sha256-default rules are a category error).
+        assert!(ids.contains(&"P001"));
+        assert!(ids.contains(&"P002"));
+        assert!(!ids.contains(&"P003"));
+        assert!(!ids.contains(&"P004"));
+    }
+
+    #[test]
+    fn quasar_check_upgrade_catches_discriminator_change() {
+        let tmp = TempDir::new().unwrap();
+        let old = write(tmp.path(), "old.json", QUASAR_BARE_V1_IDL);
+        let new = write(
+            tmp.path(),
+            "new.json",
+            // Same shape but discriminator flipped 42 → 99.
+            &QUASAR_BARE_V1_IDL.replace("\"discriminator\": [42]", "\"discriminator\": [99]"),
+        );
+        let report = run_check_upgrade(&CheckUpgradeOpts {
+            old,
+            new,
+            unsafes: vec![],
+            migrated_accounts: vec![],
+            realloc_accounts: vec![],
+            framework: Framework::Quasar,
+        })
+        .unwrap();
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "R006"),
+            "expected R006 account-discriminator-change, got {:?}",
+            report
+                .findings
+                .iter()
+                .map(|f| &f.rule_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn quasar_anchor_idl_under_quasar_mode_is_a_parse_error() {
+        // Anchor IDLs use a `type: { kind: "struct", fields: ... }` shape
+        // for typedefs; Quasar's loader rejects that. Confirms the
+        // dispatch is wired to the Quasar parser, not silently falling
+        // back to Anchor.
+        let tmp = TempDir::new().unwrap();
+        let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
+        let err = run_readiness(&ReadinessOpts {
+            idl,
+            framework: Framework::Quasar,
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("parsing"));
     }
 }

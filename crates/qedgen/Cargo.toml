@@ -35,8 +35,11 @@ tempfile = "3"
 # already has on disk, never an on-chain pubkey. The `package = …`
 # aliases keep the import path (`ratchet_core::`, `ratchet_anchor::`)
 # short without renaming the upstream crates.
-ratchet-core = { package = "solana-ratchet-core", version = "0.3.1" }
-ratchet-anchor = { package = "solana-ratchet-anchor", version = "0.3.1", default-features = false }
+ratchet-core = { package = "solana-ratchet-core", version = "0.3.2" }
+ratchet-anchor = { package = "solana-ratchet-anchor", version = "0.3.2", default-features = false }
+# `ratchet-quasar` covers Quasar IDLs end-to-end. Not RPC-bearing —
+# the loader reads JSON straight off disk, no fetch path to gate.
+ratchet-quasar = { package = "solana-ratchet-quasar", version = "0.3.2" }
 
 [dev-dependencies]
 tempfile = "3"
