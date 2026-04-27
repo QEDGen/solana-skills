@@ -14,7 +14,7 @@ use crate::errors::*;
 #[derive(Accounts)]
 pub struct CancelProposal {
     pub canceller: Signer,
-    #[account(mut, seeds = MultisigAccount::seeds(vault), bump)]
+    #[account(mut, seeds = [b"vault", vault.creator.as_ref()], bump)]
     pub vault: Account<MultisigAccount>,
 }
 

@@ -547,14 +547,50 @@ impl ParsedHandlerAccount {
             }
         }
 
-        if let Some(ref _seeds) = self.pda_seeds {
-            let struct_name = if state_name.ends_with("Account") {
-                state_name.to_string()
-            } else {
-                format!("{}Account", state_name)
-            };
-            parts.push(format!("seeds = {}::seeds({})", struct_name, self.name));
+        if let Some(ref seeds) = self.pda_seeds {
+            // Render each seed in quasar's literal-array form for the
+            // `#[account(seeds = [...], bump)]` attribute. Three cases:
+            //
+            //   1. **String literal** (`"vault"` in spec, parsed with
+            //      quotes re-attached by `chumsky_parser`):
+            //          → `b"vault"` byte-string literal
+            //   2. **Handler-account seed** (seed name matches an account
+            //      in this handler, typical for `init` handlers where the
+            //      signer's pubkey is the PDA seed source):
+            //          → `<seed>.key().as_ref()`
+            //   3. **State-field seed** (seed name doesn't match any
+            //      handler account; assume it's a field on this PDA's
+            //      parent account, typical for non-init handlers that
+            //      access a previously-stored pubkey field):
+            //          → `<pda-account>.<seed>.as_ref()`
+            //
+            // Earlier `seeds = TypeName::seeds(arg)` form (function-call
+            // style) was rejected by quasar with `expected square brackets`.
+            let bound_account_names: std::collections::HashSet<&str> =
+                handler.accounts.iter().map(|a| a.name.as_str()).collect();
+            let seed_parts: Vec<String> = seeds
+                .iter()
+                .map(|seed| {
+                    if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                        format!("b\"{}\"", inner)
+                    } else if bound_account_names.contains(seed.as_str()) {
+                        format!("{}.key().as_ref()", seed)
+                    } else {
+                        // Resolve via the PDA-typed account in this handler
+                        // (the account *being* the PDA). For multisig's
+                        // non-init handlers (propose/approve/etc.), seed
+                        // `creator` resolves to `<self>.creator.as_ref()` —
+                        // i.e., the field on the PDA account itself.
+                        format!("{}.{}.as_ref()", self.name, seed)
+                    }
+                })
+                .collect();
+            parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
             parts.push("bump".to_string());
+            // `state_name` retained for future use (e.g., emitting
+            // `MultisigAccount` as the account discriminator helper)
+            // but the seeds attribute itself no longer references it.
+            let _ = state_name;
         }
 
         if let Some(ref auth) = self.authority {

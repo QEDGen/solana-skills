@@ -14,7 +14,7 @@ use crate::errors::*;
 #[derive(Accounts)]
 pub struct Execute {
     pub executor: Signer,
-    #[account(mut, seeds = MultisigAccount::seeds(vault), bump)]
+    #[account(mut, seeds = [b"vault", vault.creator.as_ref()], bump)]
     pub vault: Account<MultisigAccount>,
 }
 

@@ -15,7 +15,7 @@ use crate::errors::*;
 pub struct CreateVault {
     #[account(mut)]
     pub creator: Signer,
-    #[account(mut, init, payer = creator, seeds = MultisigAccount::seeds(vault), bump)]
+    #[account(mut, init, payer = creator, seeds = [b"vault", creator.key().as_ref()], bump)]
     pub vault: Account<MultisigAccount>,
     pub system_program: Program<System>,
 }
