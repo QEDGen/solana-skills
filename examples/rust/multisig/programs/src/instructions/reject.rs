@@ -15,16 +15,16 @@ use crate::errors::*;
 pub struct Reject {
     pub rejecter: Signer,
     #[account(mut, seeds = MultisigAccount::seeds(vault), bump)]
-    pub vault: Account<()>,
+    pub vault: Account<MultisigAccount>,
 }
 
 impl Reject {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", spec_hash = "a1b6f8e6f9e21a39")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "e7c7e12019595139", spec_hash = "ea0dd20a238e67a6")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {
         guards::reject(self, member_index)?;
-        // Spec effect: rejection_count add 1
+        self.vault.rejection_count = self.vault.rejection_count.checked_add(1).ok_or(MultisigError::MathOverflow)?;
         // Spec: emit!(ProposalRejected)
-        todo!("user business logic")
+        todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }

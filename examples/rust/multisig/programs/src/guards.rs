@@ -13,7 +13,7 @@ use crate::instructions::*;
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn create_vault(ctx: &mut CreateVault, threshold: u8, member_count: u8) -> Result<(), ProgramError> {
     // requires: threshold > 0 ∧ threshold ≤ member_count
-    if !(threshold > 0 && threshold <= member_count) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
+    if !((threshold > 0) && (threshold <= member_count)) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
     // requires: member_count ≤ 32
     if !(member_count <= 32) { return Err(ProgramError::from(MultisigError::TooManyMembers)); }
     Ok(())
@@ -30,9 +30,9 @@ pub fn propose(ctx: &mut Propose) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn approve(ctx: &mut Approve, member_index: u8) -> Result<(), ProgramError> {
     // requires: member_index < s.member_count
-    if !(member_index < state.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    if !(member_index < s.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(state.approval_count + state.rejection_count < state.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(s.approval_count + s.rejection_count < s.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
@@ -40,9 +40,9 @@ pub fn approve(ctx: &mut Approve, member_index: u8) -> Result<(), ProgramError> 
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn reject(ctx: &mut Reject, member_index: u8) -> Result<(), ProgramError> {
     // requires: member_index < s.member_count
-    if !(member_index < state.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    if !(member_index < s.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(state.approval_count + state.rejection_count < state.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(s.approval_count + s.rejection_count < s.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
@@ -50,7 +50,7 @@ pub fn reject(ctx: &mut Reject, member_index: u8) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn execute(ctx: &mut Execute) -> Result<(), ProgramError> {
     // requires: s.approval_count ≥ s.threshold
-    if !(state.approval_count >= state.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
+    if !(s.approval_count >= s.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
     Ok(())
 }
 
@@ -58,7 +58,7 @@ pub fn execute(ctx: &mut Execute) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn cancel_proposal(ctx: &mut CancelProposal) -> Result<(), ProgramError> {
     // requires: s.member_count - s.rejection_count < s.threshold
-    if !(state.member_count - state.rejection_count < state.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
+    if !(s.member_count - s.rejection_count < s.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
     Ok(())
 }
 
@@ -66,9 +66,9 @@ pub fn cancel_proposal(ctx: &mut CancelProposal) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn remove_member(ctx: &mut RemoveMember) -> Result<(), ProgramError> {
     // requires: s.member_count > s.threshold
-    debug_assert!(state.member_count > state.threshold);
+    debug_assert!(s.member_count > s.threshold);
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0
-    debug_assert!(state.approval_count == 0 && state.rejection_count == 0);
+    debug_assert!((s.approval_count == 0) && (s.rejection_count == 0));
     Ok(())
 }
 
