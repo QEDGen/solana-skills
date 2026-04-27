@@ -149,6 +149,11 @@ pub struct Exchange<'info> {
         mut,
         seeds = [b"escrow", escrow.initializer.as_ref()],
         bump = escrow.bump,
+        // Issue #18 fix: bind close-recipient to the initializer pubkey
+        // recorded at initialize time. Without `has_one = initializer`,
+        // the `close = initializer` directive routes rent to whatever
+        // writable account the caller passes as `initializer` below.
+        has_one = initializer,
         close = initializer
     )]
     pub escrow: Account<'info, EscrowState>,
@@ -159,7 +164,15 @@ pub struct Exchange<'info> {
     #[account(mut)]
     pub taker_receive_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        // Issue #17 fix: bind to the initializer_token_account stored on
+        // the escrow at initialize time. Without this, taker can pass
+        // attacker-controlled accounts and steal escrowed tokens by
+        // routing the taker→initializer transfer to an account they
+        // also control.
+        address = escrow.initializer_token_account
+    )]
     pub initializer_receive_token_account: Account<'info, TokenAccount>,
 
     #[account(
@@ -169,7 +182,10 @@ pub struct Exchange<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: This is the initializer account that will receive rent
+    /// CHECK: receives close-rent on escrow account. Constrained via
+    /// `has_one = initializer` on the escrow state (Issue #18 fix) so
+    /// the close-recipient must be the initializer pubkey recorded at
+    /// initialize time, not an arbitrary writable account.
     #[account(mut)]
     pub initializer: AccountInfo<'info>,
 

@@ -107,6 +107,53 @@ Spec-less per-runtime:
 - **sBPF:** look for the bytes-comparison pattern that checks the signer
   flag in the AccountInfo header.
 
+### `unconstrained_account_info` — HIGH (Anchor; spec-less)
+Anchor's `/// CHECK:` annotation is the framework's escape hatch for
+`AccountInfo<'info>` accounts that the user has manually verified.
+**The annotation alone is not justification** — it must be paired with
+a real `constraint = ...` / `address = ...` / `has_one = ...` clause
+that semantically pins the account.
+
+Investigate:
+- Each `/// CHECK:` site in `#[derive(Accounts)]` structs.
+- For each, confirm there's an accompanying constraint that makes the
+  comment's "I take responsibility" stance verifiable.
+- Particularly suspect: `AccountInfo` accounts used as `close = X`
+  recipient, transfer destination, or PDA seed input. These are
+  passive-recipient roles that look harmless but redirect value when
+  the caller controls the account.
+
+Real-world hit: escrow Issue #18 (2026-04-26) — `Exchange.initializer:
+AccountInfo<'info>` with `/// CHECK:` and `close = initializer` on the
+escrow account, but no `has_one = initializer` constraint. Caller
+passed any writable account; rent went there.
+
+### `unchecked_account_against_state` — HIGH (Anchor; spec-less)
+Handler has a writable account whose name semantically matches a
+state-stored Pubkey field, but the impl doesn't bind them. Without
+the binding, the caller can pass any account that satisfies the
+mechanical type constraint, defeating the spec's intent.
+
+Investigate per-handler:
+- Read the `#[derive(Accounts)]` struct for `mut` accounts of token
+  / account types.
+- Cross-reference each against the program's State struct (typically
+  `#[account] pub struct StateName { ... }`) for Pubkey fields with
+  similar names.
+- For each suspicious pair, look for a binding: `address = state.X`,
+  `constraint = account.key() == state.X`, `has_one = X`, or `seeds`
+  derivation that incorporates `state.X`.
+- Absence of any binding on a writable account that could redirect
+  value (token transfers, close-rent, account closure) is the
+  finding.
+
+Real-world hit: escrow Issue #17 (2026-04-26) —
+`Exchange.initializer_receive_token_account: Account<'info, TokenAccount>`
+with no constraint, despite escrow state storing
+`initializer_token_account: Pubkey` at initialize time. Taker passed
+attacker-controlled accounts, routed taker→initializer transfer to
+themselves, drained escrow.
+
 ### `arbitrary_cpi` — HIGH
 Spec-aware: handler has a writable `token`-typed account but spec
 declares no `transfers` block or `call Interface.handler(...)` site.
