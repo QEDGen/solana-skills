@@ -11,7 +11,7 @@ use crate::instructions::*;
 
 /// Guards for `create_vault`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn create_vault(ctx: &mut CreateVault, threshold: u8, member_count: u8) -> Result<(), ProgramError> {
+pub fn create_vault<'info>(ctx: &mut CreateVault<'info>, threshold: u8, member_count: u8) -> Result<(), ProgramError> {
     // requires: threshold > 0 ∧ threshold ≤ member_count
     if !((threshold > 0) && (threshold <= member_count)) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
     // requires: member_count ≤ 32
@@ -21,54 +21,54 @@ pub fn create_vault(ctx: &mut CreateVault, threshold: u8, member_count: u8) -> R
 
 /// Guards for `propose`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn propose(ctx: &mut Propose) -> Result<(), ProgramError> {
+pub fn propose<'info>(ctx: &mut Propose<'info>) -> Result<(), ProgramError> {
     // No guards declared in spec — nothing to check.
     Ok(())
 }
 
 /// Guards for `approve`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn approve(ctx: &mut Approve, member_index: u8) -> Result<(), ProgramError> {
+pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), ProgramError> {
     // requires: member_index < s.member_count
-    if !(member_index < s.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(s.approval_count + s.rejection_count < s.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(ctx.vault.approval_count + ctx.vault.rejection_count < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
 /// Guards for `reject`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn reject(ctx: &mut Reject, member_index: u8) -> Result<(), ProgramError> {
+pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), ProgramError> {
     // requires: member_index < s.member_count
-    if !(member_index < s.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(s.approval_count + s.rejection_count < s.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(ctx.vault.approval_count + ctx.vault.rejection_count < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
 /// Guards for `execute`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn execute(ctx: &mut Execute) -> Result<(), ProgramError> {
+pub fn execute<'info>(ctx: &mut Execute<'info>) -> Result<(), ProgramError> {
     // requires: s.approval_count ≥ s.threshold
-    if !(s.approval_count >= s.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
+    if !(ctx.vault.approval_count >= ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
     Ok(())
 }
 
 /// Guards for `cancel_proposal`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn cancel_proposal(ctx: &mut CancelProposal) -> Result<(), ProgramError> {
+pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), ProgramError> {
     // requires: s.member_count - s.rejection_count < s.threshold
-    if !(s.member_count - s.rejection_count < s.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
+    if !(ctx.vault.member_count - ctx.vault.rejection_count < ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
     Ok(())
 }
 
 /// Guards for `remove_member`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn remove_member(ctx: &mut RemoveMember) -> Result<(), ProgramError> {
+pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), ProgramError> {
     // requires: s.member_count > s.threshold
-    debug_assert!(s.member_count > s.threshold);
+    debug_assert!(ctx.vault.member_count > ctx.vault.threshold);
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0
-    debug_assert!((s.approval_count == 0) && (s.rejection_count == 0));
+    debug_assert!((ctx.vault.approval_count == 0) && (ctx.vault.rejection_count == 0));
     Ok(())
 }
 

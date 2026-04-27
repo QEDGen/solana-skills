@@ -5,6 +5,7 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
+use quasar_spl::{Token, Mint};
 use crate::state::*;
 use crate::guards;
 use qedgen_macros::qed;
@@ -12,21 +13,21 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct Repay {
+pub struct Repay<'info> {
     #[account(mut)]
-    pub borrower: Signer,
-    #[account(mut, seeds = [b"loan", pool.key().as_ref(), borrower.key().as_ref()], bump)]
-    pub loan: UncheckedAccount,
-    #[account(mut, seeds = [b"pool", pool.authority.as_ref()], bump)]
-    pub pool: UncheckedAccount,
-    #[account(mut, token::authority = pool)]
-    pub pool_vault: Account<Token>,
+    pub borrower: &'info mut Signer,
+    #[account(mut, seeds = [b"loan", pool, borrower], bump)]
+    pub loan: &'info mut Account<LoanAccount>,
     #[account(mut)]
-    pub borrower_ta: Account<Token>,
-    pub token_program: Program<System>,
+    pub pool: &'info mut Account<PoolAccount>,
+    #[account(mut)]
+    pub pool_vault: &'info mut Account<Token>,
+    #[account(mut)]
+    pub borrower_ta: &'info mut Account<Token>,
+    pub token_program: &'info Program<System>,
 }
 
-impl Repay {
+impl<'info> Repay<'info> {
     #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "5ffb3b8d1270c3f4", spec_hash = "38b9e7598cf201bb")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RepayBumps) -> Result<(), ProgramError> {

@@ -11,13 +11,13 @@ use qedgen_macros::qed;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct RemoveMember {
-    pub creator: Signer,
-    #[account(mut, seeds = [b"vault", creator.key().as_ref()], bump)]
-    pub vault: Account<MultisigAccount>,
+pub struct RemoveMember<'info> {
+    pub creator: &'info Signer,
+    #[account(mut, seeds = [b"vault", creator], bump)]
+    pub vault: &'info mut Account<MultisigAccount>,
 }
 
-impl RemoveMember {
+impl<'info> RemoveMember<'info> {
     #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "eea3ddaf89ccbad2", spec_hash = "30f1786f10a626f5")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RemoveMemberBumps) -> Result<(), ProgramError> {

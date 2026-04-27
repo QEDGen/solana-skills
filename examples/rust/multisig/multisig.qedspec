@@ -28,6 +28,7 @@ type Error
   | ThresholdNotMet
   | ThresholdUnreachable
   | NotAMember
+  | MathOverflow
 
 pda vault ["vault", creator]
 

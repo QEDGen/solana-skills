@@ -5,6 +5,7 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
+use quasar_spl::{Token, Mint};
 use crate::state::*;
 use crate::guards;
 use qedgen_macros::qed;
@@ -12,19 +13,19 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct Deposit {
+pub struct Deposit<'info> {
     #[account(mut)]
-    pub depositor: Signer,
-    #[account(mut, seeds = [b"pool", pool.authority.as_ref()], bump)]
-    pub pool: Account<PoolAccount>,
-    #[account(mut, token::authority = pool)]
-    pub pool_vault: Account<Token>,
+    pub depositor: &'info mut Signer,
     #[account(mut)]
-    pub depositor_ta: Account<Token>,
-    pub token_program: Program<System>,
+    pub pool: &'info mut Account<PoolAccount>,
+    #[account(mut)]
+    pub pool_vault: &'info mut Account<Token>,
+    #[account(mut)]
+    pub depositor_ta: &'info mut Account<Token>,
+    pub token_program: &'info Program<System>,
 }
 
-impl Deposit {
+impl<'info> Deposit<'info> {
     #[qed(verified, spec = "../lending.qedspec", handler = "deposit", hash = "13df0b620c042001", spec_hash = "21d81bae58c5abca")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, bumps: &DepositBumps) -> Result<(), ProgramError> {

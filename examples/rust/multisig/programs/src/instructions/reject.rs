@@ -12,13 +12,13 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct Reject {
-    pub rejecter: Signer,
-    #[account(mut, seeds = [b"vault", vault.creator.as_ref()], bump)]
-    pub vault: Account<MultisigAccount>,
+pub struct Reject<'info> {
+    pub rejecter: &'info Signer,
+    #[account(mut)]
+    pub vault: &'info mut Account<MultisigAccount>,
 }
 
-impl Reject {
+impl<'info> Reject<'info> {
     #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "e7c7e12019595139", spec_hash = "ea0dd20a238e67a6")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {

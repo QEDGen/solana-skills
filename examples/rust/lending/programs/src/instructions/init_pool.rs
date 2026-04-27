@@ -12,15 +12,15 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct InitPool {
+pub struct InitPool<'info> {
     #[account(mut)]
-    pub authority: Signer,
-    #[account(mut, init, payer = authority, seeds = [b"pool", authority.key().as_ref()], bump)]
-    pub pool: Account<PoolAccount>,
-    pub system_program: Program<System>,
+    pub authority: &'info mut Signer,
+    #[account(mut, init, payer = authority, seeds = [b"pool", authority], bump)]
+    pub pool: &'info mut Account<PoolAccount>,
+    pub system_program: &'info Program<System>,
 }
 
-impl InitPool {
+impl<'info> InitPool<'info> {
     #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "b0db21ece9560e17", spec_hash = "b5d51ab2e00d8e0e")]
     #[inline(always)]
     pub fn handler(&mut self, rate: u64, bumps: &InitPoolBumps) -> Result<(), ProgramError> {

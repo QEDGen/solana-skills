@@ -14,5 +14,5 @@ debug = []
 
 [dependencies]
 quasar-lang = { version = "0.0.0" }
-# TODO: Quasar SPL helper crate (spec declares token transfers).
+quasar-spl = { version = "0.0.0" }
 qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.9.0" }

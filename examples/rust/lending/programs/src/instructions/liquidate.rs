@@ -5,6 +5,7 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
+use quasar_spl::{Token, Mint};
 use crate::state::*;
 use crate::guards;
 use qedgen_macros::qed;
@@ -12,21 +13,21 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct Liquidate {
+pub struct Liquidate<'info> {
     #[account(mut)]
-    pub liquidator: Signer,
-    #[account(mut, seeds = [b"loan", pool.key().as_ref(), loan.borrower.as_ref()], bump)]
-    pub loan: UncheckedAccount,
-    #[account(mut, seeds = [b"pool", pool.authority.as_ref()], bump)]
-    pub pool: UncheckedAccount,
-    #[account(mut, token::authority = pool)]
-    pub pool_vault: Account<Token>,
+    pub liquidator: &'info mut Signer,
     #[account(mut)]
-    pub liquidator_ta: Account<Token>,
-    pub token_program: Program<System>,
+    pub loan: &'info mut Account<LoanAccount>,
+    #[account(mut)]
+    pub pool: &'info mut Account<PoolAccount>,
+    #[account(mut)]
+    pub pool_vault: &'info mut Account<Token>,
+    #[account(mut)]
+    pub liquidator_ta: &'info mut Account<Token>,
+    pub token_program: &'info Program<System>,
 }
 
-impl Liquidate {
+impl<'info> Liquidate<'info> {
     #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "fdcb8dadabdb3a67", spec_hash = "b3815843622e25b9")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &LiquidateBumps) -> Result<(), ProgramError> {

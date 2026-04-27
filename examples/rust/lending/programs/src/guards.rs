@@ -11,7 +11,7 @@ use crate::instructions::*;
 
 /// Guards for `init_pool`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn init_pool(ctx: &mut InitPool, rate: u64) -> Result<(), ProgramError> {
+pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<(), ProgramError> {
     // requires: rate > 0
     if !(rate > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -19,7 +19,7 @@ pub fn init_pool(ctx: &mut InitPool, rate: u64) -> Result<(), ProgramError> {
 
 /// Guards for `deposit`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn deposit(ctx: &mut Deposit, amount: u64) -> Result<(), ProgramError> {
+pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), ProgramError> {
     // requires: amount > 0
     if !(amount > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -27,7 +27,7 @@ pub fn deposit(ctx: &mut Deposit, amount: u64) -> Result<(), ProgramError> {
 
 /// Guards for `borrow`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn borrow(ctx: &mut Borrow, amount: u64, collateral: u64) -> Result<(), ProgramError> {
+pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> Result<(), ProgramError> {
     // requires: amount > 0 ∧ collateral > 0
     if !((amount > 0) && (collateral > 0)) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -35,14 +35,14 @@ pub fn borrow(ctx: &mut Borrow, amount: u64, collateral: u64) -> Result<(), Prog
 
 /// Guards for `repay`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn repay(ctx: &mut Repay) -> Result<(), ProgramError> {
+pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
     // No guards declared in spec — nothing to check.
     Ok(())
 }
 
 /// Guards for `liquidate`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn liquidate(ctx: &mut Liquidate) -> Result<(), ProgramError> {
+pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> {
     // No guards declared in spec — nothing to check.
     Ok(())
 }

@@ -73,11 +73,22 @@ impl FrameworkSurface {
                 explicit_account_discriminator: false,
             },
             Target::Quasar => FrameworkSurface {
-                crate_attrs: "#![no_std]\n\n",
+                // `no_std` only for the on-chain (Solana/BPF) build. Host
+                // builds (`cargo check`/`cargo test`) keep std so the host
+                // gets a panic_handler / global_allocator from the standard
+                // library. Quasar provides solana-target panic_handler /
+                // global_allocator below via `panic_handler!()` / `no_alloc!()`.
+                crate_attrs: "#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import: "use quasar_lang::prelude::*;\n",
                 context_type: "Ctx",
                 handler_result_type: "Result<(), ProgramError>",
-                accounts_lifetime: "",
+                // Quasar's `#[derive(Accounts)]` expands to
+                // `impl<'info> ParseAccounts<'info> for #name<'info>`,
+                // so the user struct must carry `<'info>`. Field types
+                // are references to wrappers (e.g. `&'info Signer`,
+                // `&'info mut Account<T>`) per the canonical pattern in
+                // `quasar_lang/tests/compile_fail/*.rs`.
+                accounts_lifetime: "'info",
                 program_mod_vis: "mod",
                 explicit_handler_discriminator: true,
                 explicit_account_discriminator: true,
@@ -118,32 +129,29 @@ fn render_account_field_type(
     is_state_account: bool,
     state_name: &str,
 ) -> String {
-    if surface.accounts_lifetime.is_empty() {
-        // Quasar branch — bare types, no lifetime parameters. Real
-        // Quasar conventions per `~/code/blueshift/quasar/examples/`:
-        //   - `Signer` — bare
-        //   - `Program<System>` — parameterized with the program type
-        //   - `Account<T>` — bare, with the typed inner data
-        //   - `Account<Token>` / `Account<Mint>` — for token accounts
+    // Both Anchor and Quasar carry `'info` on field types; the divergence
+    // is just inner-shape (Quasar uses `&'info` references to the wrapper,
+    // Anchor uses bare typed wrappers parameterized by `'info`).
+    if surface.context_type == "Ctx" {
+        // Quasar branch — fields are references to wrappers.
+        // Pattern from `quasar_lang/tests/compile_fail/*.rs`:
+        //   `pub signer: &'info Signer` (read-only)
+        //   `pub vault:  &'info mut Account<MyState>` (writable)
+        // Writability mirrors the spec's `writable` flag.
+        let lt = surface.accounts_lifetime;
+        let mut_kw = if acct.is_writable { "mut " } else { "" };
         if acct.is_signer {
-            "Signer".to_string()
+            format!("&{} {}Signer", lt, mut_kw)
         } else if acct.is_program {
-            // Quasar wants the program-type as a generic param. We
-            // default to `System` for the system program and let the
-            // user customise for non-System programs (tokens etc.).
-            "Program<System>".to_string()
+            format!("&{} {}Program<System>", lt, mut_kw)
         } else if acct.account_type.as_deref() == Some("token") {
-            "Account<Token>".to_string()
+            format!("&{} {}Account<Token>", lt, mut_kw)
         } else if acct.account_type.as_deref() == Some("mint") {
-            "Account<Mint>".to_string()
+            format!("&{} {}Account<Mint>", lt, mut_kw)
         } else if is_state_account {
-            format!("Account<{}>", state_name)
+            format!("&{} {}Account<{}>", lt, mut_kw, state_name)
         } else {
-            // Quasar's escape hatch for opaque accounts — same shape
-            // as Anchor's `AccountInfo`. Used for non-state,
-            // non-token accounts where the spec doesn't carry a
-            // concrete type.
-            "UncheckedAccount".to_string()
+            format!("&{} {}UncheckedAccount", lt, mut_kw)
         }
     } else {
         // Anchor branch — every type carries `'info`.
@@ -500,6 +508,7 @@ fn generate_lib(
                 is_multi,
                 &default_state_name,
                 &surface,
+                target,
             ));
         }
     }
@@ -532,15 +541,11 @@ fn generate_state(
         for (idx, acct) in spec.account_types.iter().enumerate() {
             let struct_name = format!("{}Account", acct.name);
 
-            let pda_seeds = if let Some(ref pda_name) = acct.pda_ref {
-                if let Some(pda) = spec.pdas.iter().find(|p| &p.name == pda_name) {
-                    gen_pda_seeds_attr(pda, &acct.fields, spec)?
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            // Note: a previous pass emitted a `#[seeds(...)]` attribute on
+            // the state struct from `gen_pda_seeds_attr`, but neither
+            // Anchor nor Quasar recognize it (PDA seeds live on the
+            // per-handler `#[account]` attribute, not the state struct).
+            // Suppressed to avoid E0658 from an unknown attribute.
 
             let account_attr = if surface.explicit_account_discriminator {
                 format!("#[account(discriminator = {})]\n", idx + 1)
@@ -548,8 +553,8 @@ fn generate_state(
                 "#[account]\n".to_string()
             };
             out.push_str(&format!(
-                "{}{}pub struct {} {{\n",
-                account_attr, pda_seeds, struct_name
+                "{}pub struct {} {{\n",
+                account_attr, struct_name
             ));
 
             for (fname, ftype) in &acct.fields {
@@ -576,11 +581,10 @@ fn generate_state(
     } else {
         let state_name = format!("{}Account", to_pascal_case(&spec.program_name));
 
-        let pda_seeds = if !spec.pdas.is_empty() {
-            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields, spec)?
-        } else {
-            String::new()
-        };
+        // No `#[seeds(...)]` on the state struct — see the multi-account
+        // branch above. Per-handler PDA seeds are emitted on the
+        // `#[account(seeds = [...], bump)]` attribute on the handler's
+        // Accounts struct field.
 
         let account_attr = if surface.explicit_account_discriminator {
             "#[account(discriminator = 1)]\n"
@@ -588,8 +592,8 @@ fn generate_state(
             "#[account]\n"
         };
         out.push_str(&format!(
-            "{}{}pub struct {} {{\n",
-            account_attr, pda_seeds, state_name
+            "{}pub struct {} {{\n",
+            account_attr, state_name
         ));
 
         for (fname, ftype) in &spec.state_fields {
@@ -1328,6 +1332,7 @@ fn render_handler_accounts_struct(
     is_multi: bool,
     default_state_name: &str,
     surface: &FrameworkSurface,
+    target: Target,
 ) -> String {
     let pascal = to_pascal_case(&handler.name);
     let lifetime_params = surface.lifetime_params();
@@ -1338,14 +1343,26 @@ fn render_handler_accounts_struct(
     if !handler.accounts.is_empty() {
         let state_acct = find_state_account(handler);
         for acct in &handler.accounts {
-            let state_name = if is_multi {
+            let inferred_name = if is_multi {
                 infer_state_name(acct, spec, default_state_name)
             } else {
                 default_state_name.to_string()
             };
-            let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
-            let attr = acct.quasar_account_attr(handler, &state_name);
-            let field_type = render_account_field_type(acct, surface, is_state, &state_name);
+            // An account is "state-bearing" if either:
+            //   1. `find_state_account` picked it as the unique writable
+            //      non-token PDA (single-state-ADT specs), or
+            //   2. `infer_state_name` matched its name to a declared state
+            //      ADT in this multi-state spec (e.g., `loan` ↔ `Loan` ADT
+            //      → `LoanAccount`). Without this, a multi-PDA handler like
+            //      lending's `borrow` (loan + pool both writable PDAs)
+            //      drops `loan` to `UncheckedAccount` even though it's the
+            //      lifecycle target.
+            let inferred_match =
+                is_multi && inferred_name != default_state_name;
+            let is_state =
+                state_acct.map(|sa| sa.name == acct.name).unwrap_or(false) || inferred_match;
+            let attr = acct.quasar_account_attr(handler, &inferred_name, target);
+            let field_type = render_account_field_type(acct, surface, is_state, &inferred_name);
             out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
         }
     } else if handler.who.is_some() {
@@ -1389,6 +1406,16 @@ fn render_handler_scaffold(
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
     out.push_str(surface.prelude_import);
+    // Token / Mint live in a separate crate per framework; only pull
+    // them in when the spec actually declares token accounts.
+    let needs_spl = handler.has_token_accounts();
+    if needs_spl {
+        match target {
+            Target::Anchor => out.push_str("use anchor_spl::token::{Token, Mint, TokenAccount};\n"),
+            Target::Quasar => out.push_str("use quasar_spl::{Token, Mint};\n"),
+            Target::Pinocchio => unreachable!(),
+        }
+    }
     out.push_str("use crate::state::*;\n");
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
@@ -1412,6 +1439,7 @@ fn render_handler_scaffold(
             is_multi,
             default_state_name,
             &surface,
+            target,
         ));
         out.push('\n');
     }
@@ -1679,29 +1707,43 @@ fn generate_guards(
             out.push_str("    // No guards declared in spec — nothing to check.\n");
         }
 
+        // `rust_expr` references state fields as `s.<field>` (lowered from
+        // `state.<field>` in the spec). Inside guards.rs the state-bearing
+        // account is reached via `ctx.<state_account>.<field>` (Anchor's
+        // `Account<T>` and Quasar's typed account both auto-deref to T).
+        // When we can identify a single state account, rewrite `s.` to that
+        // path so the guards compile. Multi-state handlers fall through with
+        // the raw `s.` form — caller must hand-edit. R12 fix.
+        let state_acct = find_state_account(handler);
+        let bind_state = |expr: &str| -> String {
+            match state_acct {
+                Some(sa) => expr.replace("s.", &format!("ctx.{}.", sa.name)),
+                None => expr.to_string(),
+            }
+        };
+
         for req in &handler.requires {
             // Emit as a comment for human readers + an executable check.
-            // The Rust expression comes directly from the spec; callers are
-            // expected to bring the identifiers in scope (typically via
-            // `ctx.<account>.<field>` style access).
             out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+            let rust = bind_state(req.rust_expr.trim());
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
                     "    if !({}) {{ return Err({}); }}\n",
-                    req.rust_expr.trim(),
+                    rust,
                     err_ctor(&err_enum, err),
                 ));
             } else {
-                out.push_str(&format!("    debug_assert!({});\n", req.rust_expr.trim()));
+                out.push_str(&format!("    debug_assert!({});\n", rust));
             }
         }
 
         let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
         for ab in &handler.aborts_if {
+            let rust = bind_state(ab.rust_expr.trim());
             out.push_str(&format!(
                 "    if ({}) {{ return Err({}); }}\n",
-                ab.rust_expr.trim(),
+                rust,
                 err_ctor(&err_enum, &ab.error_name),
             ));
         }
@@ -1771,7 +1813,10 @@ fn generate_cargo_toml(
         Target::Quasar => {
             out.push_str("quasar-lang = { version = \"0.0.0\" }\n");
             if needs_spl {
-                out.push_str("# TODO: Quasar SPL helper crate (spec declares token transfers).\n");
+                // Token / Mint live in `quasar-spl`, not the core
+                // `quasar-lang` prelude. Pull it in whenever the spec
+                // declares token accounts or transfers.
+                out.push_str("quasar-spl = { version = \"0.0.0\" }\n");
             }
         }
         Target::Pinocchio => unreachable!("Pinocchio is rejected at the init dispatcher"),

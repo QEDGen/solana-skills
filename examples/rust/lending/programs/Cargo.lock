@@ -170,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "qedgen-macros",
  "quasar-lang",
+ "quasar-spl",
 ]
 
 [[package]]
@@ -255,6 +256,16 @@ name = "quasar-pod"
 version = "0.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77bfb6e40210b4e61cdf6424fc78ebc4ee15ed0a7b68d270ba9b098bf89b418e"
+
+[[package]]
+name = "quasar-spl"
+version = "0.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ae5cf8c79704cb04dd20836cefaceb8b8378f72480f617eb49be5ccb4afc4c1"
+dependencies = [
+ "quasar-lang",
+ "solana-address",
+]
 
 [[package]]
 name = "quote"

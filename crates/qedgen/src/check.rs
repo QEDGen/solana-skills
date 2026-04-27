@@ -524,19 +524,59 @@ impl ParsedHandler {
 }
 
 impl ParsedHandlerAccount {
-    /// Generate the #[account(...)] attribute for codegen. Same shape
-    /// in both Anchor and Quasar (`#[account(mut, init, payer = ...,
-    /// seeds = ..., bump)]`).
-    pub fn quasar_account_attr(&self, handler: &ParsedHandler, state_name: &str) -> String {
+    /// Generate the #[account(...)] attribute for codegen, target-aware.
+    ///
+    /// Anchor and Quasar both spell the attribute `#[account(...)]` but
+    /// disagree on:
+    ///
+    /// - **Pubkey accessor**: Anchor uses `<acct>.key()`; Quasar uses
+    ///   `<acct>.address()`. Quasar's `#[account]` macro also auto-handles
+    ///   bare-ident seeds matching field names (expanding to
+    ///   `<ident>.to_account_view().address().as_ref()`), so Quasar bare
+    ///   idents are preferred over `.key().as_ref()`.
+    /// - **State-field seeds in non-init handlers**: Anchor's macro evaluates
+    ///   `<pda>.<field>.as_ref()` in a scope where `<pda>` is bound to the
+    ///   parsed account. Quasar re-uses the same expression in a `Bumps::seeds()`
+    ///   method where only `self` is in scope, so `vault.creator.as_ref()`
+    ///   fails with E0425. For Quasar we omit the `seeds = [...]` directive
+    ///   entirely on non-init handlers when seeds reference state fields —
+    ///   `Account<T>`'s owner+discriminator check still protects type
+    ///   confusion. Anchor keeps the original behavior.
+    pub fn quasar_account_attr(
+        &self,
+        handler: &ParsedHandler,
+        state_name: &str,
+        target: crate::Target,
+    ) -> String {
+        let _ = state_name;
         let mut parts = Vec::new();
 
         if self.is_writable {
             parts.push("mut".to_string());
         }
 
-        // Infer init from lifecycle: handler creates the account
-        let is_init = (handler.pre_status.as_deref() == Some("Uninitialized")
-            || handler.pre_status.as_deref() == Some("Empty"))
+        // Infer init from lifecycle: handler creates the account.
+        //
+        // In multi-state specs (e.g. lending: Loan + Pool ADTs), only the
+        // account whose name matches the handler's `on_account` (the ADT
+        // whose lifecycle is being driven) is init'd — sibling writable
+        // PDAs in the same handler are pre-existing. The previous logic
+        // marked every writable PDA as init whenever the lifecycle was
+        // Uninit/Empty → ..., which broke lending's `borrow` (init'd both
+        // `loan` and `pool`).
+        let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
+            || handler.pre_status.as_deref() == Some("Empty");
+        let on_account_matches = match handler.on_account.as_deref() {
+            // Multi-state: only the named state account init's.
+            Some(adt_name) => {
+                let lower = adt_name.to_lowercase();
+                self.name == lower || self.name.starts_with(&lower)
+            }
+            // Single-state spec: any writable PDA can be the init target.
+            None => true,
+        };
+        let is_init = lifecycle_is_init
+            && on_account_matches
             && !self.is_signer
             && self.pda_seeds.is_some();
 
@@ -548,53 +588,62 @@ impl ParsedHandlerAccount {
         }
 
         if let Some(ref seeds) = self.pda_seeds {
-            // Render each seed in quasar's literal-array form for the
-            // `#[account(seeds = [...], bump)]` attribute. Three cases:
-            //
-            //   1. **String literal** (`"vault"` in spec, parsed with
-            //      quotes re-attached by `chumsky_parser`):
-            //          → `b"vault"` byte-string literal
-            //   2. **Handler-account seed** (seed name matches an account
-            //      in this handler, typical for `init` handlers where the
-            //      signer's pubkey is the PDA seed source):
-            //          → `<seed>.key().as_ref()`
-            //   3. **State-field seed** (seed name doesn't match any
-            //      handler account; assume it's a field on this PDA's
-            //      parent account, typical for non-init handlers that
-            //      access a previously-stored pubkey field):
-            //          → `<pda-account>.<seed>.as_ref()`
-            //
-            // Earlier `seeds = TypeName::seeds(arg)` form (function-call
-            // style) was rejected by quasar with `expected square brackets`.
             let bound_account_names: std::collections::HashSet<&str> =
                 handler.accounts.iter().map(|a| a.name.as_str()).collect();
-            let seed_parts: Vec<String> = seeds
-                .iter()
-                .map(|seed| {
-                    if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                        format!("b\"{}\"", inner)
-                    } else if bound_account_names.contains(seed.as_str()) {
-                        format!("{}.key().as_ref()", seed)
-                    } else {
-                        // Resolve via the PDA-typed account in this handler
-                        // (the account *being* the PDA). For multisig's
-                        // non-init handlers (propose/approve/etc.), seed
-                        // `creator` resolves to `<self>.creator.as_ref()` —
-                        // i.e., the field on the PDA account itself.
-                        format!("{}.{}.as_ref()", self.name, seed)
-                    }
-                })
-                .collect();
-            parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
-            parts.push("bump".to_string());
-            // `state_name` retained for future use (e.g., emitting
-            // `MultisigAccount` as the account discriminator helper)
-            // but the seeds attribute itself no longer references it.
-            let _ = state_name;
+
+            // Detect the case-3 (state-field) seeds. For Quasar non-init
+            // handlers these don't survive the `Bumps::<acct>_seeds(self)`
+            // method generation because `self.<seed>` isn't auto-captured —
+            // omit `seeds`/`bump` on the per-handler attribute and rely on
+            // owner+discriminator from `Account<T>`.
+            let needs_state_field_seed = seeds.iter().any(|seed| {
+                let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                !is_literal && !bound_account_names.contains(seed.as_str())
+            });
+
+            let suppress_seeds =
+                matches!(target, crate::Target::Quasar) && !is_init && needs_state_field_seed;
+
+            if !suppress_seeds {
+                let seed_parts: Vec<String> = seeds
+                    .iter()
+                    .map(|seed| {
+                        if let Some(inner) =
+                            seed.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                        {
+                            format!("b\"{}\"", inner)
+                        } else if bound_account_names.contains(seed.as_str()) {
+                            // Quasar auto-handles bare idents matching field
+                            // names; Anchor needs the explicit `.key().as_ref()`
+                            // call.
+                            match target {
+                                crate::Target::Quasar => seed.clone(),
+                                _ => format!("{}.key().as_ref()", seed),
+                            }
+                        } else {
+                            // State-field seed (only reached on Anchor or on
+                            // init handlers — non-init Quasar suppresses the
+                            // whole seeds directive above).
+                            format!("{}.{}.as_ref()", self.name, seed)
+                        }
+                    })
+                    .collect();
+                parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
+                parts.push("bump".to_string());
+            }
         }
 
-        if let Some(ref auth) = self.authority {
-            parts.push(format!("token::authority = {}", auth));
+        // `token::authority = X` is only valid on accounts that are also
+        // `init` / `init_if_needed` — quasar (and anchor) reject it on
+        // already-existing accounts. The spec authority annotation
+        // captures "this token account should belong to this authority";
+        // for non-init accounts that's already enforced at init time and
+        // doesn't need re-emission. For init accounts we emit it so the
+        // macro can wire up the SPL InitToken CPI correctly.
+        if is_init {
+            if let Some(ref auth) = self.authority {
+                parts.push(format!("token::authority = {}", auth));
+            }
         }
 
         if parts.is_empty() {

@@ -12,15 +12,15 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct CreateVault {
+pub struct CreateVault<'info> {
     #[account(mut)]
-    pub creator: Signer,
-    #[account(mut, init, payer = creator, seeds = [b"vault", creator.key().as_ref()], bump)]
-    pub vault: Account<MultisigAccount>,
-    pub system_program: Program<System>,
+    pub creator: &'info mut Signer,
+    #[account(mut, init, payer = creator, seeds = [b"vault", creator], bump)]
+    pub vault: &'info mut Account<MultisigAccount>,
+    pub system_program: &'info Program<System>,
 }
 
-impl CreateVault {
+impl<'info> CreateVault<'info> {
     #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "5153647095626903", spec_hash = "17cb8535550bbe69")]
     #[inline(always)]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
