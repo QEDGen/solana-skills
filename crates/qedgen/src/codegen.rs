@@ -839,9 +839,47 @@ fn generate_errors(
         let is_init = matches!(pre, "Uninitialized" | "Empty");
         !pre.is_empty() && !is_init
     });
+    // R28: same shape — when guards.rs emits a runtime PDA verification
+    // (driven by R13 suppression on Quasar non-init handlers), it raises
+    // `<Program>Error::InvalidPda` on mismatch. Auto-add similarly.
+    let needs_invalid_pda = matches!(target, Target::Quasar)
+        && spec.handlers.iter().any(|h| {
+            let bound: std::collections::HashSet<&str> =
+                h.accounts.iter().map(|a| a.name.as_str()).collect();
+            let is_init_handler = matches!(
+                h.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            );
+            h.accounts.iter().any(|acct| {
+                let Some(seeds) = &acct.pda_seeds else {
+                    return false;
+                };
+                if acct.is_signer {
+                    return false;
+                }
+                // Skip the init target — its seeds are macro-verified.
+                let on_account_matches = match h.on_account.as_deref() {
+                    Some(adt) => {
+                        let lower = adt.to_lowercase();
+                        acct.name == lower || acct.name.starts_with(&lower)
+                    }
+                    None => true,
+                };
+                if is_init_handler && on_account_matches {
+                    return false;
+                }
+                seeds.iter().any(|seed| {
+                    let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                    !is_literal && !bound.contains(seed.as_str())
+                })
+            })
+        });
     let mut codes: Vec<String> = spec.error_codes.clone();
     if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {
         codes.push("InvalidLifecycle".to_string());
+    }
+    if needs_invalid_pda && !codes.iter().any(|c| c == "InvalidPda") {
+        codes.push("InvalidPda".to_string());
     }
 
     out.push_str("#[error_code]\n");
@@ -2095,6 +2133,74 @@ fn generate_guards(
         let lifecycle_post_write = lifecycle_check_line(handler, spec, true);
         if !lifecycle_pre_check.is_empty() {
             out.push_str(&lifecycle_pre_check);
+        }
+
+        let err_enum_name_r28 = format!("{}Error", to_pascal_case(&spec.program_name));
+        let _ = &err_enum_name_r28;
+        // R28: per-handler PDA verification. R13 suppresses
+        // `seeds = [...]` on Quasar non-init handlers when seeds
+        // reference state fields (the macro's `Bumps::seeds()` method
+        // can't auto-capture `self.<state-field>`). Owner+discriminator
+        // protects against type confusion but not wrong-PDA passing —
+        // the audit's MED-tier finding. Emit a runtime
+        // `verify_program_address` check using the stored bump for
+        // every account whose `seeds = [...]` would have been
+        // suppressed. The cost is one syscall (~544 CU on first-try
+        // bump 255) per affected handler load.
+        for acct in &handler.accounts {
+            let Some(ref seeds) = acct.pda_seeds else {
+                continue;
+            };
+            let is_init_target = matches!(
+                handler.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            ) && match handler.on_account.as_deref() {
+                Some(adt) => {
+                    let lower = adt.to_lowercase();
+                    acct.name == lower || acct.name.starts_with(&lower)
+                }
+                None => true,
+            } && !acct.is_signer;
+            if is_init_target {
+                continue; // init flow already verifies via #[account(seeds=…, bump)]
+            }
+            // Was R13 going to suppress on this handler? Mirror the
+            // detection logic from `quasar_account_attr`.
+            let bound_account_names: std::collections::HashSet<&str> =
+                handler.accounts.iter().map(|a| a.name.as_str()).collect();
+            let needs_state_field_seed = seeds.iter().any(|seed| {
+                let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                !is_literal && !bound_account_names.contains(seed.as_str())
+            });
+            if !matches!(target, Target::Quasar) || !needs_state_field_seed {
+                continue;
+            }
+
+            let mut seed_exprs: Vec<String> = Vec::with_capacity(seeds.len() + 1);
+            for seed in seeds {
+                if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                    seed_exprs.push(format!("b\"{}\"", inner));
+                } else if bound_account_names.contains(seed.as_str()) {
+                    // Handler-bound account: read its address.
+                    seed_exprs.push(format!(
+                        "ctx.{}.to_account_view().address().as_ref()",
+                        seed
+                    ));
+                } else {
+                    // State-field seed: read off the same PDA's stored
+                    // value (the field that R13 couldn't pass through
+                    // the macro's seeds method).
+                    seed_exprs.push(format!("ctx.{}.{}.as_ref()", acct.name, seed));
+                }
+            }
+            seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
+
+            out.push_str(&format!(
+                "    // R28 PDA check: ctx.{acct} matches its declared seeds\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.{acct}.to_account_view().address()).is_err() {{\n            return Err(ProgramError::from({err_enum}::InvalidPda));\n        }}\n    }}\n",
+                acct = acct.name,
+                seeds = seed_exprs.join(", "),
+                err_enum = err_enum_name_r28,
+            ));
         }
 
         // R27: token-vault authority binding. The spec declares

@@ -25,6 +25,13 @@ pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<(), Prog
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
     if ctx.pool.status != PoolStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.pool matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.pool.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(LendingError::InvalidPda));
+        }
+    }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0
@@ -35,6 +42,13 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), Progr
 /// Guards for `borrow`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> Result<(), ProgramError> {
+    // R28 PDA check: ctx.pool matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.pool.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(LendingError::InvalidPda));
+        }
+    }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0 ∧ collateral > 0
@@ -45,6 +59,13 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
 /// Guards for `repay`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
+    // R28 PDA check: ctx.pool matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.pool.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(LendingError::InvalidPda));
+        }
+    }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // No guards declared in spec — nothing to check.
@@ -54,6 +75,20 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
 /// Guards for `liquidate`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> {
+    // R28 PDA check: ctx.loan matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"loan", ctx.pool.to_account_view().address().as_ref(), ctx.loan.borrower.as_ref(), &[ctx.loan.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.loan.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(LendingError::InvalidPda));
+        }
+    }
+    // R28 PDA check: ctx.pool matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.pool.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(LendingError::InvalidPda));
+        }
+    }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // No guards declared in spec — nothing to check.

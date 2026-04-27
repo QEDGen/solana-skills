@@ -11,5 +11,6 @@ pub enum MultisigError {
     NotAMember = 5,
     MathOverflow = 6,
     InvalidLifecycle = 7,
+    InvalidPda = 8,
 }
 // ---- END GENERATED ----
