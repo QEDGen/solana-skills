@@ -1265,6 +1265,7 @@ fn mechanize_effect(
     state_acct: &crate::check::ParsedHandlerAccount,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
+    target: Target,
 ) -> Option<String> {
     let (field, op_kind, value) = effect;
 
@@ -1296,26 +1297,57 @@ fn mechanize_effect(
     // `effect_uses_checked_arith_without_math_overflow` lint surfaces
     // missing declarations.
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+    // Quasar's `#[account]` macro auto-wraps integer state fields in their
+    // Pod companions (u64 → PodU64). Plain `=` and `wrapping_*` between a
+    // `u64` rhs and a `PodU64` lhs fail to type-check, so on Quasar:
+    //   - `set` lhs gets `.into()` on the rhs (PodU64: From<u64>).
+    //   - `checked_*` / `saturating_*` work as-is — PodU64 ships them.
+    //   - `wrapping_*` is unwound to `<lhs>.get().wrapping_*(rhs).into()`
+    //     because PodU64 doesn't expose `wrapping_*` directly.
+    // Anchor uses native ints, so its branch matches the previous output.
+    let is_quasar = matches!(target, Target::Quasar);
     let line = match op_kind.as_str() {
-        "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
+        "set" => {
+            if is_quasar {
+                format!("        self.{}.{} = ({}).into();\n", acct, field, rhs)
+            } else {
+                format!("        self.{}.{} = {};\n", acct, field, rhs)
+            }
+        }
         "add" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "add_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_add({rhs});\n"
         ),
-        "add_wrap" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
-        ),
+        "add_wrap" => {
+            if is_quasar {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.get().wrapping_add({rhs}).into();\n"
+                )
+            } else {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
+                )
+            }
+        }
         "sub" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "sub_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_sub({rhs});\n"
         ),
-        "sub_wrap" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_sub({rhs});\n"
-        ),
+        "sub_wrap" => {
+            if is_quasar {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.get().wrapping_sub({rhs}).into();\n"
+                )
+            } else {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.wrapping_sub({rhs});\n"
+                )
+            }
+        }
         _ => return None,
     };
     Some(line)
@@ -1512,7 +1544,8 @@ fn render_handler_scaffold(
     let state_acct = find_state_account(handler);
     let mut any_unmechanized = false;
     for effect in &handler.effects {
-        let mechanized = state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec));
+        let mechanized =
+            state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec, target));
         match mechanized {
             Some(line) => out.push_str(&line),
             None => {
@@ -1825,6 +1858,14 @@ fn generate_cargo_toml(
         "qedgen-macros = {{ git = \"https://github.com/qedgen/solana-skills\", tag = \"v{}\" }}\n",
         qedgen_version
     ));
+
+    // Stand the generated crate up as its own workspace root. Without this,
+    // when the spec lives inside a parent crate that has its own `[package]`
+    // (e.g. percolator's pure-no_std host library), cargo tries to read the
+    // parent as a workspace root and fails with "current package believes
+    // it's in a workspace when it's not". Empty `[workspace]` makes the
+    // generated crate self-contained.
+    out.push_str("\n[workspace]\n");
 
     std::fs::write(output_dir.join("Cargo.toml"), &out)?;
     Ok(())
@@ -2272,7 +2313,8 @@ handler bump (n : U64) : State.Active -> State.Active {
         let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
         let state_acct = find_state_account(handler).expect("state account");
         let effect = handler.effects.first().unwrap();
-        let rendered = mechanize_effect(effect, state_acct, handler, &spec).expect("mechanized");
+        let rendered =
+            mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
         // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
         // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
         // user's declared Error sum.

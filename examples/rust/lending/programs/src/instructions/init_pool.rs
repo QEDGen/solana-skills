@@ -21,13 +21,13 @@ pub struct InitPool<'info> {
 }
 
 impl<'info> InitPool<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "b0db21ece9560e17", spec_hash = "b5d51ab2e00d8e0e")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "d909751a1b86b238", spec_hash = "b5d51ab2e00d8e0e")]
     #[inline(always)]
     pub fn handler(&mut self, rate: u64, bumps: &InitPoolBumps) -> Result<(), ProgramError> {
         guards::init_pool(self, rate)?;
-        self.pool.interest_rate = rate;
-        self.pool.total_deposits = 0;
-        self.pool.total_borrows = 0;
+        self.pool.interest_rate = (rate).into();
+        self.pool.total_deposits = (0).into();
+        self.pool.total_borrows = (0).into();
         // Spec: emit!(PoolInitialized)
         todo!("fill non-mechanical effects, events, transfers, calls")
     }

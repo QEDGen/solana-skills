@@ -18,7 +18,7 @@ pub struct Borrow<'info> {
     pub borrower: &'info mut Signer,
     #[account(mut, init, payer = borrower, seeds = [b"loan", pool, borrower], bump)]
     pub loan: &'info mut Account<LoanAccount>,
-    #[account(mut, init, payer = borrower, seeds = [b"pool", pool.authority.as_ref()], bump)]
+    #[account(mut)]
     pub pool: &'info mut Account<PoolAccount>,
     #[account(mut)]
     pub pool_vault: &'info mut Account<Token>,
