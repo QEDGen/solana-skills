@@ -543,7 +543,7 @@ fn generate_state(
             };
 
             let account_attr = if surface.explicit_account_discriminator {
-                format!("#[account(discriminator = {}, set_inner)]\n", idx + 1)
+                format!("#[account(discriminator = {})]\n", idx + 1)
             } else {
                 "#[account]\n".to_string()
             };
@@ -583,7 +583,7 @@ fn generate_state(
         };
 
         let account_attr = if surface.explicit_account_discriminator {
-            "#[account(discriminator = 1, set_inner)]\n"
+            "#[account(discriminator = 1)]\n"
         } else {
             "#[account]\n"
         };

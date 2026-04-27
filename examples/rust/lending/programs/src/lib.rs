@@ -8,6 +8,7 @@ use instructions::*;
 pub mod events;
 pub mod errors;
 pub mod state;
+pub mod guards;
 
 declare_id!("11111111111111111111111111111111");
 
@@ -15,31 +16,26 @@ declare_id!("11111111111111111111111111111111");
 mod lending {
     use super::*;
 
-    /// Initialize the lending pool with an interest rate
     #[instruction(discriminator = 0)]
     pub fn init_pool(ctx: Ctx<InitPool>, rate: u64) -> Result<(), ProgramError> {
         ctx.accounts.handler(rate, &ctx.bumps)
     }
 
-    /// Deposit tokens into the pool
     #[instruction(discriminator = 1)]
     pub fn deposit(ctx: Ctx<Deposit>, amount: u64) -> Result<(), ProgramError> {
         ctx.accounts.handler(amount, &ctx.bumps)
     }
 
-    /// Borrow tokens from the pool against collateral
     #[instruction(discriminator = 2)]
     pub fn borrow(ctx: Ctx<Borrow>, amount: u64, collateral: u64) -> Result<(), ProgramError> {
         ctx.accounts.handler(amount, collateral, &ctx.bumps)
     }
 
-    /// Repay a loan in full
     #[instruction(discriminator = 3)]
     pub fn repay(ctx: Ctx<Repay>) -> Result<(), ProgramError> {
         ctx.accounts.handler(&ctx.bumps)
     }
 
-    /// Liquidate an undercollateralized loan
     #[instruction(discriminator = 4)]
     pub fn liquidate(ctx: Ctx<Liquidate>) -> Result<(), ProgramError> {
         ctx.accounts.handler(&ctx.bumps)
