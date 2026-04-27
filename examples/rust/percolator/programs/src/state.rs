@@ -18,6 +18,7 @@ pub struct PercolatorAccount {
     pub I: u128,
     pub F: u128,
     pub accounts: [Account; 1024],
+    pub status: u8,
 }
 
 /// Program lifecycle states.

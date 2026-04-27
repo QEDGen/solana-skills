@@ -7,6 +7,7 @@
 
 use quasar_lang::prelude::*;
 use crate::errors::*;
+use crate::state::*;
 use crate::instructions::*;
 
 /// Guards for `init_pool`.  
@@ -14,12 +15,16 @@ use crate::instructions::*;
 pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<(), ProgramError> {
     // requires: rate > 0
     if !(rate > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
+    // lifecycle: status := Active
+    ctx.pool.status = PoolStatus::Active as u8;
     Ok(())
 }
 
 /// Guards for `deposit`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.pool.status != PoolStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
     // requires: amount > 0
     if !(amount > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())

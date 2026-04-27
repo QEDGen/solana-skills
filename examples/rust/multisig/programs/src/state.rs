@@ -9,6 +9,7 @@ pub struct MultisigAccount {
     pub approval_count: u8,
     pub rejection_count: u8,
     pub bump: u8,
+    pub status: u8,
 }
 
 /// Program lifecycle states.

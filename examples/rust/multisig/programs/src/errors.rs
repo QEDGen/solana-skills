@@ -10,5 +10,6 @@ pub enum MultisigError {
     ThresholdUnreachable = 4,
     NotAMember = 5,
     MathOverflow = 6,
+    InvalidLifecycle = 7,
 }
 // ---- END GENERATED ----

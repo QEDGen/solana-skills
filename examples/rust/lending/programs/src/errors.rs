@@ -9,5 +9,6 @@ pub enum LendingError {
     AlreadyActive = 3,
     InvalidAmount = 4,
     MathOverflow = 5,
+    InvalidLifecycle = 6,
 }
 // ---- END GENERATED ----

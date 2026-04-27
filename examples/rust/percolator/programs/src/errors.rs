@@ -11,5 +11,6 @@ pub enum PercolatorError {
     BankruptPosition = 5,
     VaultOverflow = 6,
     MathOverflow = 7,
+    InvalidLifecycle = 8,
 }
 // ---- END GENERATED ----

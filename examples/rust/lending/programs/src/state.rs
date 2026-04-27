@@ -8,6 +8,7 @@ pub struct PoolAccount {
     pub total_borrows: u64,
     pub interest_rate: u64,
     pub bump: u8,
+    pub status: u8,
 }
 
 /// Pool lifecycle states.
@@ -26,6 +27,7 @@ pub struct LoanAccount {
     pub amount: u64,
     pub collateral: u64,
     pub bump: u8,
+    pub status: u8,
 }
 
 /// Loan lifecycle states.

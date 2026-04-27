@@ -7,12 +7,15 @@
 
 use quasar_lang::prelude::*;
 use crate::errors::*;
+use crate::state::*;
 use crate::math::*;
 use crate::instructions::*;
 
 /// Guards for `add_user`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn add_user<'info>(ctx: &mut AddUser<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 0
     if !(ctx.vault.accounts[i].active == 0) { return Err(ProgramError::from(PercolatorError::SlotAlreadyActive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
@@ -23,6 +26,8 @@ pub fn add_user<'info>(ctx: &mut AddUser<'info>, i: usize) -> Result<(), Program
 /// Guards for `add_lp`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn add_lp<'info>(ctx: &mut AddLp<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 0
     if !(ctx.vault.accounts[i].active == 0) { return Err(ProgramError::from(PercolatorError::SlotAlreadyActive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
@@ -33,6 +38,8 @@ pub fn add_lp<'info>(ctx: &mut AddLp<'info>, i: usize) -> Result<(), ProgramErro
 /// Guards for `reclaim_empty_account`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn reclaim_empty_account<'info>(ctx: &mut ReclaimEmptyAccount<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].capital = 0
@@ -47,6 +54,8 @@ pub fn reclaim_empty_account<'info>(ctx: &mut ReclaimEmptyAccount<'info>, i: usi
 /// Guards for `close_account`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn close_account<'info>(ctx: &mut CloseAccount<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V ≥ s.accounts[i].capital
@@ -57,6 +66,8 @@ pub fn close_account<'info>(ctx: &mut CloseAccount<'info>, i: usize) -> Result<(
 /// Guards for `deposit`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, i: usize, amount: u128) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V + amount ≤ 10000000000000000
@@ -67,6 +78,8 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, i: usize, amount: u128) -> Resul
 /// Guards for `withdraw`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn withdraw<'info>(ctx: &mut Withdraw<'info>, i: usize, amount: u128) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].capital ≥ amount
@@ -79,6 +92,8 @@ pub fn withdraw<'info>(ctx: &mut Withdraw<'info>, i: usize, amount: u128) -> Res
 /// Guards for `top_up_insurance`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn top_up_insurance<'info>(ctx: &mut TopUpInsurance<'info>, amount: u128) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.V + amount ≤ 10000000000000000
     if !(ctx.vault.V.get() + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
     Ok(())
@@ -87,6 +102,8 @@ pub fn top_up_insurance<'info>(ctx: &mut TopUpInsurance<'info>, amount: u128) ->
 /// Guards for `deposit_fee_credits`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit_fee_credits<'info>(ctx: &mut DepositFeeCredits<'info>, i: usize, amount: u128) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V + amount ≤ 10000000000000000
@@ -97,6 +114,8 @@ pub fn deposit_fee_credits<'info>(ctx: &mut DepositFeeCredits<'info>, i: usize, 
 /// Guards for `convert_released_pnl`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn convert_released_pnl<'info>(ctx: &mut ConvertReleasedPnl<'info>, i: usize, x: u128) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].reserved_pnl ≥ x
@@ -109,6 +128,8 @@ pub fn convert_released_pnl<'info>(ctx: &mut ConvertReleasedPnl<'info>, i: usize
 /// Guards for `execute_trade`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn execute_trade<'info>(ctx: &mut ExecuteTrade<'info>, a: usize, b: usize, size_q: i128, exec_price: u64) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[a].active = 1
     if !(ctx.vault.accounts[a].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[b].active = 1
@@ -123,6 +144,8 @@ pub fn execute_trade<'info>(ctx: &mut ExecuteTrade<'info>, a: usize, b: usize, s
 /// Guards for `liquidate_case_0`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate_case_0<'info>(ctx: &mut LiquidateCase0<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
@@ -135,6 +158,8 @@ pub fn liquidate_case_0<'info>(ctx: &mut LiquidateCase0<'info>, i: usize) -> Res
 /// Guards for `liquidate_case_1`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate_case_1<'info>(ctx: &mut LiquidateCase1<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: ¬((((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int)))
@@ -147,6 +172,8 @@ pub fn liquidate_case_1<'info>(ctx: &mut LiquidateCase1<'info>, i: usize) -> Res
 /// Guards for `liquidate_otherwise`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate_otherwise<'info>(ctx: &mut LiquidateOtherwise<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: ¬((((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int)))
@@ -161,6 +188,8 @@ pub fn liquidate_otherwise<'info>(ctx: &mut LiquidateOtherwise<'info>, i: usize)
 /// Guards for `settle_account`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn settle_account<'info>(ctx: &mut SettleAccount<'info>, i: usize) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     Ok(())
@@ -169,21 +198,30 @@ pub fn settle_account<'info>(ctx: &mut SettleAccount<'info>, i: usize) -> Result
 /// Guards for `trigger_adl`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn trigger_adl<'info>(ctx: &mut TriggerAdl<'info>) -> Result<(), ProgramError> {
-    // No guards declared in spec — nothing to check.
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
+    // lifecycle: status := Draining
+    ctx.vault.status = Status::Draining as u8;
     Ok(())
 }
 
 /// Guards for `complete_drain`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn complete_drain<'info>(ctx: &mut CompleteDrain<'info>) -> Result<(), ProgramError> {
-    // No guards declared in spec — nothing to check.
+    // lifecycle: require status == Draining
+    if ctx.vault.status != Status::Draining as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
+    // lifecycle: status := Resetting
+    ctx.vault.status = Status::Resetting as u8;
     Ok(())
 }
 
 /// Guards for `reset`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn reset<'info>(ctx: &mut Reset<'info>) -> Result<(), ProgramError> {
-    // No guards declared in spec — nothing to check.
+    // lifecycle: require status == Resetting
+    if ctx.vault.status != Status::Resetting as u8 { return Err(ProgramError::from(PercolatorError::InvalidLifecycle)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 

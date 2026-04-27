@@ -7,6 +7,7 @@
 
 use quasar_lang::prelude::*;
 use crate::errors::*;
+use crate::state::*;
 use crate::instructions::*;
 
 /// Guards for `create_vault`.  
@@ -16,19 +17,26 @@ pub fn create_vault<'info>(ctx: &mut CreateVault<'info>, threshold: u8, member_c
     if !((threshold > 0) && (threshold <= member_count)) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
     // requires: member_count ≤ 32
     if !(member_count <= 32) { return Err(ProgramError::from(MultisigError::TooManyMembers)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `propose`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn propose<'info>(ctx: &mut Propose<'info>) -> Result<(), ProgramError> {
-    // No guards declared in spec — nothing to check.
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // lifecycle: status := HasProposal
+    ctx.vault.status = Status::HasProposal as u8;
     Ok(())
 }
 
 /// Guards for `approve`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: member_index < s.member_count
     if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
@@ -39,6 +47,8 @@ pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), 
 /// Guards for `reject`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: member_index < s.member_count
     if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
     // requires: s.approval_count + s.rejection_count < s.member_count
@@ -49,22 +59,32 @@ pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), Pr
 /// Guards for `execute`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn execute<'info>(ctx: &mut Execute<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: s.approval_count ≥ s.threshold
     if !(ctx.vault.approval_count >= ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `cancel_proposal`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: s.member_count - s.rejection_count < s.threshold
     if !(ctx.vault.member_count - ctx.vault.rejection_count < ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `remove_member`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: s.member_count > s.threshold
     debug_assert!(ctx.vault.member_count > ctx.vault.threshold);
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0

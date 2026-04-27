@@ -668,6 +668,16 @@ fn generate_state(
                 out.push_str("    pub bump: u8,\n");
             }
 
+            // R26: lifecycle status field. Stored as `u8` (matches the
+            // `#[repr(u8)]` enum below; alignment 1 so it's safe inside a
+            // Quasar zero-copy struct). Handlers `require!(status == Pre)`
+            // / `status = Post` via guards.rs to enforce state-machine
+            // transitions at runtime, closing the propose-erasure CRIT and
+            // the broader lifecycle gap surfaced in audit-20260427.
+            if !acct.lifecycle.is_empty() && !acct.fields.iter().any(|(n, _)| n == "status") {
+                out.push_str("    pub status: u8,\n");
+            }
+
             out.push_str("}\n\n");
 
             if !acct.lifecycle.is_empty() {
@@ -705,6 +715,13 @@ fn generate_state(
 
         if !spec.pdas.is_empty() && !spec.state_fields.iter().any(|(n, _)| n == "bump") {
             out.push_str("    pub bump: u8,\n");
+        }
+
+        // R26: see the multi-account branch above for rationale.
+        if !spec.lifecycle_states.is_empty()
+            && !spec.state_fields.iter().any(|(n, _)| n == "status")
+        {
+            out.push_str("    pub status: u8,\n");
         }
 
         out.push_str("}\n");
@@ -812,9 +829,24 @@ fn generate_errors(
     out.push_str(surface.prelude_import);
     out.push('\n');
 
+    // R26: when any handler has a non-init lifecycle transition, the
+    // generated guards.rs raises `<Program>Error::InvalidLifecycle` on
+    // pre-status mismatch. Auto-add the variant if the spec doesn't
+    // already declare one — this is a purely operational error, not a
+    // spec-level concept the user reasons about.
+    let needs_lifecycle = spec.handlers.iter().any(|h| {
+        let pre = h.pre_status.as_deref().unwrap_or("");
+        let is_init = matches!(pre, "Uninitialized" | "Empty");
+        !pre.is_empty() && !is_init
+    });
+    let mut codes: Vec<String> = spec.error_codes.clone();
+    if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {
+        codes.push("InvalidLifecycle".to_string());
+    }
+
     out.push_str("#[error_code]\n");
     out.push_str(&format!("pub enum {} {{\n", error_name));
-    for (i, code) in spec.error_codes.iter().enumerate() {
+    for (i, code) in codes.iter().enumerate() {
         out.push_str(&format!("    {} = {},\n", code, i));
     }
     out.push_str("}\n");
@@ -912,6 +944,97 @@ fn generate_instructions(
 /// Rust identifier.
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Render the pre-status check (when `write` is false) or the post-status
+/// write (when `write` is true) for R26 lifecycle enforcement. Returns an
+/// empty string when the lifecycle clause doesn't require a runtime
+/// emission (init handlers skip the pre-check; pre==post handlers skip
+/// the post-write; specs without lifecycle declarations skip everything).
+fn lifecycle_check_line(handler: &ParsedHandler, spec: &ParsedSpec, write: bool) -> String {
+    // Find the state-bearing account name and its `<ADT>Status` enum.
+    let state_acct = find_state_account(handler);
+    let Some(sa) = state_acct else {
+        return String::new();
+    };
+
+    // Resolve the Status enum name. Mirrors `generate_state`'s naming:
+    //   - `is_multi` (account_types.len() > 1): emit `<ADT>Status` per
+    //     lifecycle (lending: `PoolStatus`, `LoanStatus`).
+    //   - Otherwise: emit a single `Status` enum.
+    // Important: `account_types` can contain ONE entry (e.g. multisig's
+    // `type State | …`) and still be "single-state" for naming purposes.
+    let is_multi = spec.account_types.len() > 1;
+    let (enum_name, lifecycle): (String, &Vec<String>) = if is_multi {
+        let Some(adt) = handler.on_account.as_deref() else {
+            return String::new();
+        };
+        let Some(at) = spec.account_types.iter().find(|a| a.name == adt) else {
+            return String::new();
+        };
+        if at.lifecycle.is_empty() {
+            return String::new();
+        }
+        (format!("{}Status", at.name), &at.lifecycle)
+    } else {
+        // Single-state: the spec may declare its lifecycle either via a
+        // single ADT (then `account_types[0].lifecycle` carries the
+        // variants) or via the legacy flat `state {}` form (then they
+        // live on `spec.lifecycle_states`). Prefer the ADT slot.
+        let lifecycle: &Vec<String> = spec
+            .account_types
+            .first()
+            .map(|at| &at.lifecycle)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&spec.lifecycle_states);
+        if lifecycle.is_empty() {
+            return String::new();
+        }
+        ("Status".to_string(), lifecycle)
+    };
+
+    let pre = handler.pre_status.as_deref().unwrap_or("");
+    let post = handler.post_status.as_deref().unwrap_or("");
+    if pre.is_empty() && post.is_empty() {
+        return String::new();
+    }
+
+    let is_init_pre = matches!(pre, "Uninitialized" | "Empty");
+
+    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+
+    if write {
+        // Post-status write: only when post is set and differs from pre.
+        if post.is_empty() || pre == post {
+            return String::new();
+        }
+        if !lifecycle.iter().any(|s| s == post) {
+            return String::new();
+        }
+        format!(
+            "    // lifecycle: status := {post}\n    ctx.{acct}.status = {enum_name}::{post} as u8;\n",
+            post = post,
+            acct = sa.name,
+            enum_name = enum_name,
+        )
+    } else {
+        // Pre-status check: skip on init transitions (init zeros the
+        // account) and when there's no pre to check.
+        if is_init_pre || pre.is_empty() {
+            return String::new();
+        }
+        if !lifecycle.iter().any(|s| s == pre) {
+            return String::new();
+        }
+        let err_ctor = format!("ProgramError::from({}::InvalidLifecycle)", err_enum);
+        format!(
+            "    // lifecycle: require status == {pre}\n    if ctx.{acct}.status != {enum_name}::{pre} as u8 {{ return Err({err_ctor}); }}\n",
+            pre = pre,
+            acct = sa.name,
+            enum_name = enum_name,
+            err_ctor = err_ctor,
+        )
+    }
 }
 
 fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHandlerAccount> {
@@ -1915,6 +2038,11 @@ fn generate_guards(
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
     }
+    // R26: `<ADT>Status` / `Status` enums live in `crate::state`. Pull
+    // them in unconditionally — guards.rs always emits the enum-typed
+    // pre-check / post-write when lifecycle is present, and a
+    // never-used import is harmless under `#![allow(unused_imports)]`.
+    out.push_str("use crate::state::*;\n");
     // `crate::math` carries `mul_div_floor_u128` / `mul_div_ceil_u128`.
     // Only import when a spec expression actually uses them, otherwise
     // existing `pub mod math;`-less lib.rs (user-owned, skip-if-exists)
@@ -1951,7 +2079,29 @@ fn generate_guards(
             surface.handler_result_type
         ));
 
-        if handler.requires.is_empty() && handler.aborts_if.is_empty() {
+        // R26: lifecycle pre-status check. The spec's `: State.Pre ->
+        // State.Post` expresses a state-machine transition; without a
+        // runtime guard, every handler is reachable in every state
+        // (which is how the multisig::propose proposal-erasure CRIT
+        // surfaced — calling `propose` again from `HasProposal` zeroes
+        // approval/rejection counts). The pre-check uses the `status:
+        // u8` field added by `generate_state` and the `<ADT>Status`
+        // enum's discriminator. We elide the check on init handlers
+        // (Quasar's `init` zeroes the account, so `status == 0` is the
+        // default; we just write the post variant). We also elide when
+        // the spec doesn't declare lifecycle states for the relevant
+        // ADT.
+        let lifecycle_pre_check = lifecycle_check_line(handler, spec, false);
+        let lifecycle_post_write = lifecycle_check_line(handler, spec, true);
+        if !lifecycle_pre_check.is_empty() {
+            out.push_str(&lifecycle_pre_check);
+        }
+
+        if handler.requires.is_empty()
+            && handler.aborts_if.is_empty()
+            && lifecycle_pre_check.is_empty()
+            && lifecycle_post_write.is_empty()
+        {
             out.push_str("    // No guards declared in spec — nothing to check.\n");
         }
 
@@ -2028,6 +2178,13 @@ fn generate_guards(
                 rust,
                 err_ctor(&err_enum, &ab.error_name),
             ));
+        }
+
+        // R26: lifecycle post-status write — runs after all guards have
+        // passed so a failed guard doesn't half-transition. Only emitted
+        // when the post variant differs from the pre variant.
+        if !lifecycle_post_write.is_empty() {
+            out.push_str(&lifecycle_post_write);
         }
 
         out.push_str("    Ok(())\n");
