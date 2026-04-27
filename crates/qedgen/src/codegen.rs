@@ -463,7 +463,11 @@ fn generate_lib(
         out.push_str("pub mod errors;\n");
     }
     out.push_str("pub mod state;\n");
-    out.push_str("pub mod guards;\n\n");
+    out.push_str("pub mod guards;\n");
+    if guards_use_math_helpers(spec) {
+        out.push_str("pub mod math;\n");
+    }
+    out.push('\n');
 
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
@@ -1721,6 +1725,82 @@ fn precompute_body_hash(scaffold_source: &str) -> Option<String> {
     None
 }
 
+/// True if any rendered Rust expression in the spec references one of the
+/// fixed-point helpers in `src/math.rs`. Used to gate the `use crate::math::*;`
+/// import in `guards.rs` so legacy programs whose user-owned `lib.rs` doesn't
+/// declare `pub mod math;` keep compiling.
+fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
+    let mut any = false;
+    let probe = |s: &str| s.contains("mul_div_floor_u128") || s.contains("mul_div_ceil_u128");
+    for h in &spec.handlers {
+        if h.requires.iter().any(|r| probe(&r.rust_expr)) {
+            any = true;
+        }
+        if h.aborts_if.iter().any(|a| probe(&a.rust_expr)) {
+            any = true;
+        }
+        if h.ensures.iter().any(|e| probe(&e.rust_expr)) {
+            any = true;
+        }
+    }
+    for prop in &spec.properties {
+        if let Some(ref r) = prop.rust_expression {
+            if probe(r) {
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+/// Generate `src/math.rs` — small helper module with the fixed-point
+/// `mul_div_*` primitives that property guards / handler bodies emit when
+/// the spec uses `Expr::MulDivFloor` / `Expr::MulDivCeil`. Always emitted
+/// because any non-trivial DeFi spec eventually wants them and the cost is
+/// a few inlined functions; suppressing them would just create a
+/// "generated-vs-not" coupling between the parser and codegen.
+fn generate_math(fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+    let src_dir = output_dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    let mut out = String::new();
+    out.push_str(&marker("DO NOT EDIT", fp, "src/math.rs"));
+    out.push_str(
+        "//! Fixed-point math helpers used by spec-derived guards and properties.\n\n",
+    );
+    out.push_str("#![allow(dead_code)]\n\n");
+    out.push_str(
+        "/// Floor of `(a * b) / d`. Returns `0` if `d == 0` (caller must guard).\n\
+/// Uses saturating multiplication as a safe approximation; specs that need\n\
+/// exact u256-width fixed-point math should pin a checked widening crate\n\
+/// once the spec language exposes one.\n\
+#[inline]\n\
+pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 {\n\
+        return 0;\n\
+    }\n\
+    a.saturating_mul(b) / d\n\
+}\n\n",
+    );
+    out.push_str(
+        "/// Ceiling of `(a * b) / d`. Same caveats as `mul_div_floor_u128`.\n\
+#[inline]\n\
+pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 {\n\
+        return 0;\n\
+    }\n\
+    let prod = a.saturating_mul(b);\n\
+    if prod % d == 0 {\n\
+        prod / d\n\
+    } else {\n\
+        (prod / d).saturating_add(1)\n\
+    }\n\
+}\n",
+    );
+    out.push_str("// ---- END GENERATED ----\n");
+    std::fs::write(src_dir.join("math.rs"), &out)?;
+    Ok(())
+}
+
 /// Generate src/guards.rs — one function per handler containing all the
 /// spec-declared guard checks. This file is always regenerated; any edit
 /// is clobbered on the next `qedgen codegen` (by design).
@@ -1763,6 +1843,13 @@ fn generate_guards(
     out.push_str(surface.prelude_import);
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
+    }
+    // `crate::math` carries `mul_div_floor_u128` / `mul_div_ceil_u128`.
+    // Only import when a spec expression actually uses them, otherwise
+    // existing `pub mod math;`-less lib.rs (user-owned, skip-if-exists)
+    // would fail to resolve the path.
+    if guards_use_math_helpers(spec) {
+        out.push_str("use crate::math::*;\n");
     }
     // Pick up the per-handler `Accounts` structs. Anchor places them
     // at crate root (lib.rs); Quasar places them in
@@ -1971,6 +2058,9 @@ pub fn generate(spec_path: &Path, output_dir: &Path, target: crate::Target) -> R
     generate_errors(&spec, &fp, output_dir, target)?;
     generate_instructions(&spec, &fp, spec_path, output_dir, target)?;
     generate_guards(&spec, &fp, output_dir, target)?;
+    if guards_use_math_helpers(&spec) {
+        generate_math(&fp, output_dir)?;
+    }
     generate_cargo_toml(&spec, &fp, output_dir, target)?;
 
     let file_count = 4

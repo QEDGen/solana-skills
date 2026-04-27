@@ -7,6 +7,7 @@
 
 use quasar_lang::prelude::*;
 use crate::errors::*;
+use crate::math::*;
 use crate::instructions::*;
 
 /// Guards for `add_user`.  

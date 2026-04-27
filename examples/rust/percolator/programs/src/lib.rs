@@ -8,6 +8,7 @@ use instructions::*;
 pub mod errors;
 pub mod state;
 pub mod guards;
+pub mod math;
 
 declare_id!("11111111111111111111111111111111");
 
