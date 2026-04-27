@@ -93,6 +93,10 @@ pub struct ParsedVariant {
 pub struct ParsedAbort {
     pub lean_expr: String,
     pub rust_expr: String,
+    /// Pod-aware Rust expression for Quasar target — Pod field accesses
+    /// carry a `.get()` postfix and mixed-kind binops add `as i128` casts.
+    /// Codegen picks between this and `rust_expr` based on `Target`.
+    pub rust_expr_pod: String,
     pub error_name: String,
 }
 
@@ -103,6 +107,7 @@ pub struct ParsedAbort {
 pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
+    pub rust_expr_pod: String,
     pub error_name: Option<String>,
 }
 
@@ -114,6 +119,8 @@ pub struct ParsedEnsures {
     pub lean_expr: String,
     #[allow(dead_code)]
     pub rust_expr: String,
+    #[allow(dead_code)]
+    pub rust_expr_pod: String,
 }
 
 /// Parsed cover block (reachability).
@@ -190,6 +197,9 @@ pub struct ParsedProperty {
     /// can't lower to a bool-valued function body; callers skip emission in
     /// that case.
     pub rust_expression: Option<String>,
+    /// Pod-aware Rust body for Quasar target (mirrors `rust_expr_pod` on
+    /// guard/abort/ensures). Codegen picks based on `Target`.
+    pub rust_expression_pod: Option<String>,
     pub preserved_by: Vec<String>,
 }
 
@@ -427,6 +437,7 @@ pub struct ParsedCallArg {
     pub name: String,
     pub lean_expr: String,
     pub rust_expr: String,
+    pub rust_expr_pod: String,
 }
 
 impl ParsedHandler {
@@ -467,21 +478,25 @@ impl ParsedHandler {
                         name: "from".to_string(),
                         lean_expr: t.from.clone(),
                         rust_expr: t.from.clone(),
+                        rust_expr_pod: t.from.clone(),
                     },
                     ParsedCallArg {
                         name: "to".to_string(),
                         lean_expr: t.to.clone(),
                         rust_expr: t.to.clone(),
+                        rust_expr_pod: t.to.clone(),
                     },
                     ParsedCallArg {
                         name: "amount".to_string(),
                         lean_expr: t.amount.clone().unwrap_or_default(),
                         rust_expr: t.amount.clone().unwrap_or_default(),
+                        rust_expr_pod: t.amount.clone().unwrap_or_default(),
                     },
                     ParsedCallArg {
                         name: "authority".to_string(),
                         lean_expr: t.authority.clone().unwrap_or_default(),
                         rust_expr: t.authority.clone().unwrap_or_default(),
+                        rust_expr_pod: t.authority.clone().unwrap_or_default(),
                     },
                 ],
             })
@@ -3895,6 +3910,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4177,6 +4193,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()], // only covers deposit
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4206,6 +4223,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("s.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4737,6 +4755,7 @@ interface Token {
                      — lower at harness level */"
                         .to_string(),
                 ),
+                rust_expression_pod: None,
                 preserved_by: vec![],
             }],
             ..empty_spec()
@@ -4766,6 +4785,7 @@ interface Token {
                 name: "bytes_nonneg".to_string(),
                 expression: Some("∀ v : Nat, v ≥ 0".to_string()),
                 rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
+                rust_expression_pod: None,
                 preserved_by: vec![],
             }],
             ..empty_spec()

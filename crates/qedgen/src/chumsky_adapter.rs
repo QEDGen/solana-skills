@@ -271,6 +271,75 @@ impl<'a> TypeEnv<'a> {
             Expr::IfThenElse { then_branch, .. } => self.infer(&then_branch.node),
         }
     }
+
+    /// True iff this Path resolves to a state/record field whose type would
+    /// be lowered to a Quasar Pod companion (`U16`/`U32`/`U64`/`U128` →
+    /// `PodU16`/…/`PodU128`; `I16`/…/`I128` → `PodI16`/…; `Bool` →
+    /// `PodBool`). `U8`/`I8` stay native (alignment 1 already), so they
+    /// don't need `.get()` and are reported as not Pod.
+    ///
+    /// Only state-rooted paths apply — handler parameters arrive at the
+    /// inner handler in their native form (the dispatch shim unwraps
+    /// `PodU64` → `u64` etc.) so a bare-ident param load isn't Pod.
+    fn path_is_pod_field(&self, p: &a::Path) -> bool {
+        if p.root != "state" {
+            return false;
+        }
+        let Some(t) = self.path_type_ref(p) else {
+            return false;
+        };
+        match t {
+            a::TypeRef::Named(n) => matches!(
+                n.as_str(),
+                "U16" | "U32" | "U64" | "U128" | "I16" | "I32" | "I64" | "I128" | "Bool"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Resolve the leaf TypeRef of a Path, walking through state fields,
+    /// records, and Map subscripts. Mirrors `path_kind` but returns the
+    /// raw `TypeRef` instead of collapsing to `Kind`. Bare-ident params
+    /// resolve through `params`.
+    fn path_type_ref(&self, p: &a::Path) -> Option<&'a a::TypeRef> {
+        if p.root == "state" {
+            let mut current: Option<&a::TypeRef> = None;
+            for seg in &p.segments {
+                match seg {
+                    a::PathSeg::Field(f) => {
+                        let next = match current {
+                            None => self.state_fields.get(f).copied(),
+                            Some(a::TypeRef::Named(rec)) => {
+                                self.records.get(rec).and_then(|m| m.get(f).copied())
+                            }
+                            Some(a::TypeRef::Map { inner, .. }) => match inner.as_ref() {
+                                a::TypeRef::Named(rec) => {
+                                    self.records.get(rec).and_then(|m| m.get(f).copied())
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        current = next;
+                    }
+                    a::PathSeg::Index(_) => {
+                        if let Some(a::TypeRef::Map { inner, .. }) = current {
+                            current = Some(inner.as_ref());
+                        }
+                    }
+                }
+            }
+            return current;
+        }
+        if p.segments.is_empty() {
+            return self
+                .params
+                .iter()
+                .find(|(n, _)| n == &p.root)
+                .map(|(_, t)| *t);
+        }
+        None
+    }
 }
 
 /// Render typed expression to a Lean-compatible string (unicode operators).
@@ -623,15 +692,56 @@ fn strip_state_prefix(s: &str) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
+/// Per-render options for `expr_to_rust`. `pod_aware` is set when the
+/// containing codegen target is Quasar — that's where state/record
+/// integer fields are lowered to Pod companions and need `.get()` on
+/// access plus a Nat→Int promotion for mixed-kind binops. `env` carries
+/// the `TypeEnv` used to infer kinds and detect Pod fields.
+#[derive(Copy, Clone)]
+struct RustOpts<'a, 'env> {
+    pod_aware: bool,
+    env: &'a TypeEnv<'env>,
+}
+
+/// Empty `RustOpts` for callsites that don't have a real `TypeEnv` (e.g.
+/// pre-spec rendering). Shape is identical to passing through the legacy
+/// signature: no Pod-awareness, no kind promotion.
+#[allow(dead_code)]
+fn rust_opts_default<'a>() -> RustOpts<'a, 'a> {
+    RustOpts {
+        pod_aware: false,
+        env: Box::leak(Box::new(TypeEnv::default())),
+    }
+}
+
+/// `RustOpts` matching the legacy non-Pod-aware behavior. Used for the
+/// `rust_expr` field that codegen consumes when emitting for Anchor (or
+/// for any consumer that expects native Rust integer types).
+fn opts_native<'a, 'env>(env: &'a TypeEnv<'env>) -> RustOpts<'a, 'env> {
+    RustOpts {
+        pod_aware: false,
+        env,
+    }
+}
+
+/// `RustOpts` for the Pod-aware companion field (`rust_expr_pod`). Used
+/// when codegen is emitting for Quasar.
+fn opts_pod<'a, 'env>(env: &'a TypeEnv<'env>) -> RustOpts<'a, 'env> {
+    RustOpts {
+        pod_aware: true,
+        env,
+    }
+}
+
 /// Render typed expression to a Rust-compatible string (ASCII operators).
-fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
+fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) -> String {
     match e {
         Expr::Int(v) => v.to_string(),
         Expr::Bool(b) => b.to_string(),
-        Expr::Path(p) => path_to_rust(p, ctx, false, consts),
+        Expr::Path(p) => render_path_with_pod(p, ctx, false, consts, opts),
         Expr::Old(inner) => match &inner.node {
-            Expr::Path(p) => path_to_rust(p, ctx, true, consts),
-            other => format!("/*old({})*/", expr_to_rust(other, ctx, consts)),
+            Expr::Path(p) => render_path_with_pod(p, ctx, true, consts, opts),
+            other => format!("/*old({})*/", expr_to_rust(other, ctx, consts, opts)),
         },
         Expr::Sum {
             binder,
@@ -641,7 +751,7 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             "sum_over::<{}>(|{}| {})",
             binder_ty,
             binder,
-            expr_to_rust(&body.node, ctx, consts)
+            expr_to_rust(&body.node, ctx, consts, opts)
         ),
         Expr::Quant {
             kind,
@@ -674,15 +784,15 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 a::Quantifier::Forall => "all",
                 a::Quantifier::Exists => "any",
             };
-            let body_rust = expr_to_rust(&body.node, ctx, consts);
+            let body_rust = expr_to_rust(&body.node, ctx, consts, opts);
             format!(
                 "({}::MIN..={}::MAX).{}(|{}| {})",
                 rust_ty, rust_ty, method, binder, body_rust
             )
         }
         Expr::BoolOp { op, lhs, rhs } => {
-            let lhs_r = expr_to_rust(&lhs.node, ctx, consts);
-            let rhs_r = expr_to_rust(&rhs.node, ctx, consts);
+            let lhs_r = expr_to_rust(&lhs.node, ctx, consts, opts);
+            let rhs_r = expr_to_rust(&rhs.node, ctx, consts, opts);
             match op {
                 a::BoolOp::And => format!("({}) && ({})", lhs_r, rhs_r),
                 a::BoolOp::Or => format!("({}) || ({})", lhs_r, rhs_r),
@@ -691,7 +801,7 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 a::BoolOp::Implies => format!("(!({})) || ({})", lhs_r, rhs_r),
             }
         }
-        Expr::Not(inner) => format!("!({})", expr_to_rust(&inner.node, ctx, consts)),
+        Expr::Not(inner) => format!("!({})", expr_to_rust(&inner.node, ctx, consts, opts)),
         Expr::Cmp { op, lhs, rhs } => {
             let sym = match op {
                 a::CmpOp::Eq => "==",
@@ -701,12 +811,8 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 a::CmpOp::Lt => "<",
                 a::CmpOp::Gt => ">",
             };
-            format!(
-                "{} {} {}",
-                expr_to_rust(&lhs.node, ctx, consts),
-                sym,
-                expr_to_rust(&rhs.node, ctx, consts)
-            )
+            let (l_str, r_str) = render_rust_binary_with_coercion(lhs, rhs, ctx, consts, opts);
+            format!("{} {} {}", l_str, sym, r_str)
         }
         Expr::Arith { op, lhs, rhs } => {
             let sym = match op {
@@ -716,28 +822,24 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 a::ArithOp::Div => " / ",
                 a::ArithOp::Mod => " % ",
             };
-            format!(
-                "{}{}{}",
-                expr_to_rust(&lhs.node, ctx, consts),
-                sym,
-                expr_to_rust(&rhs.node, ctx, consts)
-            )
+            let (l_str, r_str) = render_rust_binary_with_coercion(lhs, rhs, ctx, consts, opts);
+            format!("{}{}{}", l_str, sym, r_str)
         }
-        Expr::Paren(inner) => format!("({})", expr_to_rust(&inner.node, ctx, consts)),
+        Expr::Paren(inner) => format!("({})", expr_to_rust(&inner.node, ctx, consts, opts)),
         Expr::MulDivFloor { a, b, d } => format!(
             "mul_div_floor_u128({}, {}, {})",
-            expr_to_rust(&a.node, ctx, consts),
-            expr_to_rust(&b.node, ctx, consts),
-            expr_to_rust(&d.node, ctx, consts)
+            render_helper_arg(&a.node, ctx, consts, opts),
+            render_helper_arg(&b.node, ctx, consts, opts),
+            render_helper_arg(&d.node, ctx, consts, opts)
         ),
         Expr::MulDivCeil { a, b, d } => format!(
             "mul_div_ceil_u128({}, {}, {})",
-            expr_to_rust(&a.node, ctx, consts),
-            expr_to_rust(&b.node, ctx, consts),
-            expr_to_rust(&d.node, ctx, consts)
+            render_helper_arg(&a.node, ctx, consts, opts),
+            render_helper_arg(&b.node, ctx, consts, opts),
+            render_helper_arg(&d.node, ctx, consts, opts)
         ),
         Expr::Match { scrutinee, arms } => {
-            let sc = expr_to_rust(&scrutinee.node, ctx, consts);
+            let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             let mut out = format!("match {} {{", sc);
             for arm in arms {
                 out.push_str(&format!("\n    {}::{}", "/* ty */", arm.variant));
@@ -745,7 +847,7 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                     out.push_str(&format!("({})", b));
                 }
                 out.push_str(" => ");
-                out.push_str(&expr_to_rust(&arm.body.node, ctx, consts));
+                out.push_str(&expr_to_rust(&arm.body.node, ctx, consts, opts));
                 out.push(',');
             }
             out.push_str("\n}");
@@ -757,39 +859,39 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
                 "{}::{}({})",
                 "/* ty */",
                 variant,
-                expr_to_rust(&p.node, ctx, consts)
+                expr_to_rust(&p.node, ctx, consts, opts)
             ),
         },
         Expr::RecordLit(fields) => {
             let body = fields
                 .iter()
-                .map(|(n, v)| format!("{}: {}", n, expr_to_rust(&v.node, ctx, consts)))
+                .map(|(n, v)| format!("{}: {}", n, expr_to_rust(&v.node, ctx, consts, opts)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{} {{ {} }}", "/* ty */", body)
         }
         Expr::RecordUpdate { base, updates } => {
-            let base_str = expr_to_rust(&base.node, ctx, consts);
+            let base_str = expr_to_rust(&base.node, ctx, consts, opts);
             let body = updates
                 .iter()
-                .map(|(n, v)| format!("{}: {}", n, expr_to_rust(&v.node, ctx, consts)))
+                .map(|(n, v)| format!("{}: {}", n, expr_to_rust(&v.node, ctx, consts, opts)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{} {{ {}, ..{} }}", "/* ty */", body, base_str)
         }
         Expr::IsVariant { scrutinee, variant } => {
-            let sc = expr_to_rust(&scrutinee.node, ctx, consts);
+            let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             format!("matches!({}, {}::{}(..))", sc, "/* ty */", variant)
         }
         Expr::App { func, args } => {
             let args_str: Vec<String> = args
                 .iter()
-                .map(|n| expr_to_rust(&n.node, ctx, consts))
+                .map(|n| expr_to_rust(&n.node, ctx, consts, opts))
                 .collect();
             format!("{}({})", func, args_str.join(", "))
         }
         Expr::Field { base, field } => {
-            let base_str = expr_to_rust(&base.node, ctx, consts);
+            let base_str = expr_to_rust(&base.node, ctx, consts, opts);
             format!("{}.{}", base_str, field)
         }
         Expr::Let { name, value, body } => {
@@ -798,8 +900,8 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             format!(
                 "({{ let {} = {}; {} }})",
                 name,
-                expr_to_rust(&value.node, ctx, consts),
-                expr_to_rust(&body.node, ctx, consts)
+                expr_to_rust(&value.node, ctx, consts, opts),
+                expr_to_rust(&body.node, ctx, consts, opts)
             )
         }
         Expr::IfThenElse {
@@ -808,11 +910,89 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable) -> String {
             else_branch,
         } => format!(
             "(if {} {{ {} }} else {{ {} }})",
-            expr_to_rust(&cond.node, ctx, consts),
-            expr_to_rust(&then_branch.node, ctx, consts),
-            expr_to_rust(&else_branch.node, ctx, consts),
+            expr_to_rust(&cond.node, ctx, consts, opts),
+            expr_to_rust(&then_branch.node, ctx, consts, opts),
+            expr_to_rust(&else_branch.node, ctx, consts, opts),
         ),
     }
+}
+
+/// Render a Path expression, applying a `.get()` postfix when the path
+/// resolves to a Pod-flavored field on Quasar (`pod_aware`). Non-Pod
+/// fields (`u8`/`i8`/`Bool` already alignment 1, plus paths into
+/// non-state types) pass through unchanged.
+fn render_path_with_pod(
+    p: &a::Path,
+    ctx: Ctx,
+    inside_old: bool,
+    consts: ConstTable,
+    opts: RustOpts<'_, '_>,
+) -> String {
+    let base = path_to_rust(p, ctx, inside_old, consts);
+    if opts.pod_aware && opts.env.path_is_pod_field(p) {
+        format!("{}.get()", base)
+    } else {
+        base
+    }
+}
+
+/// Rust-flavor kind inference: mostly the same as `TypeEnv::infer` but
+/// `MulDivFloor` / `MulDivCeil` always report `Nat` because the codegen
+/// lowers them to `mul_div_floor_u128` / `_ceil_u128` helpers that
+/// return `u128`. Without this override the Lean-style inheritance
+/// (`Int` if any operand is `Int`) bleeds the wrong type into Rust
+/// comparisons against the helper's u128 result.
+fn rust_infer_kind(env: &TypeEnv, e: &Expr) -> Kind {
+    match e {
+        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } => Kind::Nat,
+        Expr::Paren(inner) => rust_infer_kind(env, &inner.node),
+        Expr::Old(inner) => rust_infer_kind(env, &inner.node),
+        _ => env.infer(e),
+    }
+}
+
+/// Render both sides of a binary op, applying a `... as i128` cast on
+/// whichever side is `Nat` when the other is `Int`. Mirrors the Lean-side
+/// `render_binary_with_coercion`. Without this Quasar emits expressions
+/// like `u128 + i128` which Rust rejects (no built-in mixed-sign ops).
+fn render_rust_binary_with_coercion(
+    lhs: &Node<Expr>,
+    rhs: &Node<Expr>,
+    ctx: Ctx,
+    consts: ConstTable,
+    opts: RustOpts<'_, '_>,
+) -> (String, String) {
+    let lk = rust_infer_kind(opts.env, &lhs.node);
+    let rk = rust_infer_kind(opts.env, &rhs.node);
+    let l = expr_to_rust(&lhs.node, ctx, consts, opts);
+    let r = expr_to_rust(&rhs.node, ctx, consts, opts);
+    if !opts.pod_aware {
+        return (l, r);
+    }
+    match (lk, rk) {
+        (Kind::Nat, Kind::Int) => (format!("(({}) as i128)", l), r),
+        (Kind::Int, Kind::Nat) => (l, format!("(({}) as i128)", r)),
+        _ => (l, r),
+    }
+}
+
+/// `mul_div_floor_u128` / `mul_div_ceil_u128` accept `u128` arguments.
+/// Spec operands may be U64 / I64 / I128 / native handler params — all of
+/// which fail the `u128` parameter check. Cast unconditionally on Quasar
+/// so the helper signature is honored uniformly. (The `as u128` from u64
+/// is widening; from i128 it's saturating-by-truncation, which matches
+/// the spec's Int → u128 lowering used by the Lean side.)
+fn render_helper_arg(
+    e: &Expr,
+    ctx: Ctx,
+    consts: ConstTable,
+    opts: RustOpts<'_, '_>,
+) -> String {
+    let rendered = expr_to_rust(e, ctx, consts, opts);
+    if !opts.pod_aware {
+        return rendered;
+    }
+    format!("(({}) as u128)", rendered)
 }
 
 fn path_to_rust(p: &a::Path, _ctx: Ctx, _inside_old: bool, consts: ConstTable) -> String {
@@ -1872,7 +2052,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Property(p) => {
                 let lean = expr_to_lean(&p.body.node, Ctx::Guard, consts, &env);
-                let rust = expr_to_rust(&p.body.node, Ctx::Guard, consts);
+                let rust = expr_to_rust(&p.body.node, Ctx::Guard, consts, opts_native(&env));
+                let rust_pod = expr_to_rust(&p.body.node, Ctx::Guard, consts, opts_pod(&env));
                 let preserved = match &p.preserved_by {
                     // `preserved_by all` — kept as the sentinel "all".
                     // Expanded to the full handler-name list below after all
@@ -1884,6 +2065,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     name: p.name.clone(),
                     expression: Some(lean),
                     rust_expression: Some(rust),
+                    rust_expression_pod: Some(rust_pod),
                     preserved_by: preserved,
                 });
             }
@@ -1994,7 +2176,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                                 consts,
                                 &env,
                             ));
-                            constraints_rust.push(expr_to_rust(&e.node, Ctx::Ensures, consts));
+                            constraints_rust.push(expr_to_rust(
+                                &e.node,
+                                Ctx::Ensures,
+                                consts,
+                                opts_native(&env),
+                            ));
                         }
                     }
                 }
@@ -2125,8 +2312,9 @@ fn expand_handler(
     let base = adapt_handler(h, consts, env);
 
     // Accumulate negated guards so that earlier arms' failure implies
-    // later arms' precondition (first-match semantics).
-    let mut prior_conds: Vec<(String, String)> = Vec::new(); // (lean, rust) negations
+    // later arms' precondition (first-match semantics). Triple is
+    // (lean, rust_native, rust_pod).
+    let mut prior_conds: Vec<(String, String, String)> = Vec::new();
     let mut out = Vec::with_capacity(branch.arms.len());
 
     for arm in &branch.arms {
@@ -2134,10 +2322,11 @@ fn expand_handler(
         synth.name = format!("{}_{}", h.name, arm.label);
 
         // Add all prior-arm negations to this arm's requires.
-        for (lean_neg, rust_neg) in &prior_conds {
+        for (lean_neg, rust_neg, rust_pod_neg) in &prior_conds {
             synth.requires.push(ParsedRequires {
                 lean_expr: lean_neg.clone(),
                 rust_expr: rust_neg.clone(),
+                rust_expr_pod: rust_pod_neg.clone(),
                 error_name: None,
             });
         }
@@ -2146,13 +2335,19 @@ fn expand_handler(
         // recorded for subsequent arms.
         if let Some(guard) = &arm.guard {
             let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, env);
-            let rust = expr_to_rust(&guard.node, Ctx::Guard, consts);
+            let rust = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env));
+            let rust_pod = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env));
             synth.requires.push(ParsedRequires {
                 lean_expr: lean.clone(),
                 rust_expr: rust.clone(),
+                rust_expr_pod: rust_pod.clone(),
                 error_name: None,
             });
-            prior_conds.push((format!("\u{00AC}({})", lean), format!("!({})", rust)));
+            prior_conds.push((
+                format!("\u{00AC}({})", lean),
+                format!("!({})", rust),
+                format!("!({})", rust_pod),
+            ));
         }
 
         // Arm body: abort → additional aborting requires; effect → effects
@@ -2165,6 +2360,7 @@ fn expand_handler(
                 synth.requires.push(ParsedRequires {
                     lean_expr: "0 = 1".to_string(),
                     rust_expr: "false".to_string(),
+                    rust_expr_pod: "false".to_string(),
                     error_name: Some(err.clone()),
                 });
             }
@@ -2262,14 +2458,16 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             a::HandlerClause::Requires { guard, on_fail } => {
                 handler.requires.push(ParsedRequires {
                     lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
-                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts),
+                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
+                    rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
                     error_name: on_fail.clone(),
                 });
             }
             a::HandlerClause::Ensures(e) => {
                 handler.ensures.push(ParsedEnsures {
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
-                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts),
+                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
+                    rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
                 });
             }
             a::HandlerClause::Modifies(fs) => {
@@ -2279,7 +2477,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 handler.let_bindings.push((
                     name.clone(),
                     expr_to_lean(&value.node, Ctx::Guard, consts, env),
-                    expr_to_rust(&value.node, Ctx::Guard, consts),
+                    expr_to_rust(&value.node, Ctx::Guard, consts, opts_native(env)),
                 ));
             }
             a::HandlerClause::Effect(stmts) => {
@@ -2355,7 +2553,18 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     .map(|arg| ParsedCallArg {
                         name: arg.name.clone(),
                         lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
-                        rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts),
+                        rust_expr: expr_to_rust(
+                            &arg.value.node,
+                            Ctx::Guard,
+                            consts,
+                            opts_native(env),
+                        ),
+                        rust_expr_pod: expr_to_rust(
+                            &arg.value.node,
+                            Ctx::Guard,
+                            consts,
+                            opts_pod(env),
+                        ),
                     })
                     .collect();
                 handler.calls.push(ParsedCall {
@@ -2456,14 +2665,16 @@ fn adapt_interface_handler<'a>(
             a::InterfaceHandlerClause::Requires { guard, on_fail } => {
                 out.requires.push(ParsedRequires {
                     lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
-                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts),
+                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
+                    rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
                     error_name: on_fail.clone(),
                 });
             }
             a::InterfaceHandlerClause::Ensures(e) => {
                 out.ensures.push(ParsedEnsures {
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
-                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts),
+                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
+                    rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
                 });
             }
         }

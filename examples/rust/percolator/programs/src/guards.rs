@@ -16,7 +16,7 @@ pub fn add_user<'info>(ctx: &mut AddUser<'info>, i: usize) -> Result<(), Program
     // requires: s.accounts[i].active = 0
     if !(ctx.vault.accounts[i].active == 0) { return Err(ProgramError::from(PercolatorError::SlotAlreadyActive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
-    if !(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= 0) { return Err(ProgramError::from(PercolatorError::AccountUnderwater)); }
+    if !(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((0) as i128)) { return Err(ProgramError::from(PercolatorError::AccountUnderwater)); }
     Ok(())
 }
 
@@ -26,7 +26,7 @@ pub fn add_lp<'info>(ctx: &mut AddLp<'info>, i: usize) -> Result<(), ProgramErro
     // requires: s.accounts[i].active = 0
     if !(ctx.vault.accounts[i].active == 0) { return Err(ProgramError::from(PercolatorError::SlotAlreadyActive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
-    if !(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= 0) { return Err(ProgramError::from(PercolatorError::AccountUnderwater)); }
+    if !(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((0) as i128)) { return Err(ProgramError::from(PercolatorError::AccountUnderwater)); }
     Ok(())
 }
 
@@ -36,11 +36,11 @@ pub fn reclaim_empty_account<'info>(ctx: &mut ReclaimEmptyAccount<'info>, i: usi
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].capital = 0
-    debug_assert!(ctx.vault.accounts[i].capital == 0);
+    debug_assert!(ctx.vault.accounts[i].capital.get() == 0);
     // requires: s.accounts[i].reserved_pnl = 0
-    debug_assert!(ctx.vault.accounts[i].reserved_pnl == 0);
+    debug_assert!(ctx.vault.accounts[i].reserved_pnl.get() == 0);
     // requires: s.accounts[i].fee_credits = 0
-    debug_assert!(ctx.vault.accounts[i].fee_credits == 0);
+    debug_assert!(ctx.vault.accounts[i].fee_credits.get() == 0);
     Ok(())
 }
 
@@ -50,7 +50,7 @@ pub fn close_account<'info>(ctx: &mut CloseAccount<'info>, i: usize) -> Result<(
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V ≥ s.accounts[i].capital
-    if !(ctx.vault.V >= ctx.vault.accounts[i].capital) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
+    if !(ctx.vault.V.get() >= ctx.vault.accounts[i].capital.get()) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
     Ok(())
 }
 
@@ -60,7 +60,7 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, i: usize, amount: u128) -> Resul
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V + amount ≤ 10000000000000000
-    if !(ctx.vault.V + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
+    if !(ctx.vault.V.get() + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
     Ok(())
 }
 
@@ -70,9 +70,9 @@ pub fn withdraw<'info>(ctx: &mut Withdraw<'info>, i: usize, amount: u128) -> Res
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].capital ≥ amount
-    if !(ctx.vault.accounts[i].capital >= amount) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
+    if !(ctx.vault.accounts[i].capital.get() >= amount) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((amount) : Int))
-    if !(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= amount) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
+    if !(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((amount) as i128)) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
     Ok(())
 }
 
@@ -80,7 +80,7 @@ pub fn withdraw<'info>(ctx: &mut Withdraw<'info>, i: usize, amount: u128) -> Res
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn top_up_insurance<'info>(ctx: &mut TopUpInsurance<'info>, amount: u128) -> Result<(), ProgramError> {
     // requires: s.V + amount ≤ 10000000000000000
-    if !(ctx.vault.V + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
+    if !(ctx.vault.V.get() + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
     Ok(())
 }
 
@@ -90,7 +90,7 @@ pub fn deposit_fee_credits<'info>(ctx: &mut DepositFeeCredits<'info>, i: usize, 
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.V + amount ≤ 10000000000000000
-    if !(ctx.vault.V + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
+    if !(ctx.vault.V.get() + amount <= 10000000000000000) { return Err(ProgramError::from(PercolatorError::VaultOverflow)); }
     Ok(())
 }
 
@@ -100,9 +100,9 @@ pub fn convert_released_pnl<'info>(ctx: &mut ConvertReleasedPnl<'info>, i: usize
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: s.accounts[i].reserved_pnl ≥ x
-    if !(ctx.vault.accounts[i].reserved_pnl >= x) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
+    if !(ctx.vault.accounts[i].reserved_pnl.get() >= x) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
     // requires: s.V ≥ x
-    if !(ctx.vault.V >= x) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
+    if !(ctx.vault.V.get() >= x) { return Err(ProgramError::from(PercolatorError::InsufficientFunds)); }
     Ok(())
 }
 
@@ -116,7 +116,7 @@ pub fn execute_trade<'info>(ctx: &mut ExecuteTrade<'info>, a: usize, b: usize, s
     // requires: a ≠ b
     debug_assert!(a != b);
     // requires: (((size_q) * ((((exec_price) : Int)))) / (1000000)) ≤ (((100000000000000000000) : Int))
-    debug_assert!(mul_div_floor_u128(size_q, exec_price, 1000000) <= 100000000000000000000);
+    debug_assert!(mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000);
     Ok(())
 }
 
@@ -126,7 +126,7 @@ pub fn liquidate_case_0<'info>(ctx: &mut LiquidateCase0<'info>, i: usize) -> Res
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
-    debug_assert!(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= 0);
+    debug_assert!(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((0) as i128));
     // requires: 0 = 1
     if !(false) { return Err(ProgramError::from(PercolatorError::AccountHealthy)); }
     Ok(())
@@ -138,9 +138,9 @@ pub fn liquidate_case_1<'info>(ctx: &mut LiquidateCase1<'info>, i: usize) -> Res
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: ¬((((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int)))
-    debug_assert!(!(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= 0));
+    debug_assert!(!(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((0) as i128)));
     // requires: (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl + (((s.I) : Int)) ≥ (((0) : Int))
-    debug_assert!(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl + ctx.vault.I >= 0);
+    debug_assert!(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() + ((ctx.vault.I.get()) as i128) >= ((0) as i128));
     Ok(())
 }
 
@@ -150,9 +150,9 @@ pub fn liquidate_otherwise<'info>(ctx: &mut LiquidateOtherwise<'info>, i: usize)
     // requires: s.accounts[i].active = 1
     if !(ctx.vault.accounts[i].active == 1) { return Err(ProgramError::from(PercolatorError::SlotInactive)); }
     // requires: ¬((((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int)))
-    debug_assert!(!(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl >= 0));
+    debug_assert!(!(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() >= ((0) as i128)));
     // requires: ¬((((s.accounts[i].capital) : Int)) + s.accounts[i].pnl + (((s.I) : Int)) ≥ (((0) : Int)))
-    debug_assert!(!(ctx.vault.accounts[i].capital + ctx.vault.accounts[i].pnl + ctx.vault.I >= 0));
+    debug_assert!(!(((ctx.vault.accounts[i].capital.get()) as i128) + ctx.vault.accounts[i].pnl.get() + ((ctx.vault.I.get()) as i128) >= ((0) as i128)));
     // requires: 0 = 1
     if !(false) { return Err(ProgramError::from(PercolatorError::BankruptPosition)); }
     Ok(())

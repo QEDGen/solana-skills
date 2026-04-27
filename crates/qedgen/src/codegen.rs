@@ -907,6 +907,13 @@ fn generate_instructions(
 /// effect expansion. Returns None when the handler has zero or multiple
 /// plausible state accounts — in which case the caller must fall back to
 /// `todo!()` and let a human (or M4 agent) disambiguate.
+/// Identifier-character predicate for the `bind_state` word-bounded
+/// rewrite: ASCII alphanumerics plus underscore mark the inside of a
+/// Rust identifier.
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHandlerAccount> {
     let mut candidates: Vec<&crate::check::ParsedHandlerAccount> = handler
         .accounts
@@ -1956,17 +1963,46 @@ fn generate_guards(
         // the raw `s.` form — caller must hand-edit. R12 fix.
         let state_acct = find_state_account(handler);
         let bind_state = |expr: &str| -> String {
-            match state_acct {
-                Some(sa) => expr.replace("s.", &format!("ctx.{}.", sa.name)),
-                None => expr.to_string(),
+            let Some(sa) = state_acct else {
+                return expr.to_string();
+            };
+            // Word-bounded replace: substitute `s.` only when it begins a
+            // path token, never when it appears inside an identifier (e.g.
+            // `accounts[i].fee_credits.get()` would otherwise become
+            // `accounts[i].fee_creditctx.vault.get()` — corrupted).
+            let target = format!("ctx.{}.", sa.name);
+            let bytes = expr.as_bytes();
+            let mut out = String::with_capacity(expr.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
+                    out.push_str(&target);
+                    i += 2;
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
             }
+            out
         };
+
+        // Pick the Pod-aware rust expression on Quasar so Pod field
+        // accesses carry `.get()` and mixed-kind binops add `as i128`
+        // casts — without it `state.foo.x + state.foo.y` fails when
+        // `x: PodU128` and `y: PodI128`.
+        let pod_target = matches!(target, Target::Quasar);
 
         for req in &handler.requires {
             // Emit as a comment for human readers + an executable check.
             out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
-            let rust = bind_state(req.rust_expr.trim());
+            let raw = if pod_target {
+                req.rust_expr_pod.trim()
+            } else {
+                req.rust_expr.trim()
+            };
+            let rust = bind_state(raw);
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
                     "    if !({}) {{ return Err({}); }}\n",
@@ -1980,7 +2016,12 @@ fn generate_guards(
 
         let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
         for ab in &handler.aborts_if {
-            let rust = bind_state(ab.rust_expr.trim());
+            let raw = if pod_target {
+                ab.rust_expr_pod.trim()
+            } else {
+                ab.rust_expr.trim()
+            };
+            let rust = bind_state(raw);
             out.push_str(&format!(
                 "    if ({}) {{ return Err({}); }}\n",
                 rust,
