@@ -290,6 +290,39 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     );
 }
 
+/// Map a DSL type to its Quasar-Pod Rust equivalent. Used inside Quasar's
+/// zero-copy `#[account]` and nested record structs where every field must
+/// have alignment 1. `u64` becomes `PodU64`, etc. Non-integer types fall
+/// through to `map_type`.
+pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    let dsl_type = dsl_type.trim();
+    if let Some(pod) = primitive_pod_map(dsl_type) {
+        return Ok(pod.to_string());
+    }
+    if let Some(rust) = primitive_map(dsl_type) {
+        return Ok(rust.to_string());
+    }
+    // Fall back to map_type for compound / user-defined types — those
+    // don't need (and can't take) the pod conversion.
+    map_type(dsl_type, spec)
+}
+
+fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
+    Some(match dsl_type {
+        "U16" => "PodU16",
+        "U32" => "PodU32",
+        "U64" => "PodU64",
+        "U128" => "PodU128",
+        "I16" => "PodI16",
+        "I32" => "PodI32",
+        "I64" => "PodI64",
+        "I128" => "PodI128",
+        "Bool" => "PodBool",
+        // u8, i8 already alignment 1; no Pod wrapper needed.
+        _ => return None,
+    })
+}
+
 /// Map a DSL primitive name to its Rust equivalent, if one exists. Factored
 /// out of `map_type` so both the primitive fast-path and the alias-recursion
 /// base case can share it.
@@ -536,6 +569,30 @@ fn generate_state(
     out.push_str(&marker("DO NOT EDIT", fp, "src/state.rs"));
     out.push_str(surface.prelude_import);
     out.push('\n');
+
+    // User-declared record types (`type T = { field : Type, ... }`) get
+    // emitted as plain `#[repr(C)]` structs ahead of the account structs
+    // that reference them. Without this, a state field like
+    // `accounts: Map[N] Account` lowers to `[Account; N]` where `Account`
+    // resolves to whatever the prelude exports (e.g. quasar's
+    // `Account<T>`), shadowing the user's intended record type.
+    //
+    // For Quasar these records are nested inside zero-copy `#[account]`
+    // structs, so all integer fields must use Pod companions (PodU64,
+    // PodU128, …) so the whole struct keeps alignment 1.
+    for record in &spec.records {
+        out.push_str("#[repr(C)]\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str(&format!("pub struct {} {{\n", record.name));
+        for (fname, ftype) in &record.fields {
+            let rust_ty = match target {
+                Target::Quasar => map_type_pod(ftype, spec)?,
+                _ => map_type(ftype, spec)?,
+            };
+            out.push_str(&format!("    pub {}: {},\n", fname, rust_ty));
+        }
+        out.push_str("}\n\n");
+    }
 
     if is_multi {
         for (idx, acct) in spec.account_types.iter().enumerate() {

@@ -46,6 +46,7 @@ type Error
   | AccountHealthy
   | BankruptPosition
   | VaultOverflow
+  | MathOverflow
 
 // ---------------------------------------------------------------------------
 // Account lifecycle
