@@ -28,7 +28,7 @@ pub struct Liquidate<'info> {
 }
 
 impl<'info> Liquidate<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "9a62f58d23c76d3a", spec_hash = "51eeccc10cee5384")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "9a62f58d23c76d3a", spec_hash = "4181bd50e04fa158")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &LiquidateBumps) -> Result<(), ProgramError> {
         guards::liquidate(self)?;

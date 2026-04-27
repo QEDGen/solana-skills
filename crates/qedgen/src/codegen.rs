@@ -984,6 +984,45 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Rewrite each `[<idx>]` substring to `[(<idx>) as usize]`. Used by
+/// `mechanize_effect` (Rust output) to keep the field-string Lean-clean
+/// while still satisfying Rust's `usize`-only array indexing. Same
+/// transform as `path_to_rust`'s Index emission, applied at codegen
+/// time instead of at expr-render time so both Lean and Rust read the
+/// same `(field, op_kind, value)` tuple.
+fn rewrite_index_to_usize(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = String::with_capacity(field.len() + 16);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            // Find matching `]`.
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b']' {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                // Unbalanced — give up and emit verbatim.
+                out.push_str(&field[i..]);
+                break;
+            }
+            let idx_expr = &field[start..end];
+            // Don't double-wrap if already cast.
+            if idx_expr.contains("as usize") {
+                out.push_str(&field[i..=end]);
+            } else {
+                out.push_str(&format!("[({}) as usize]", idx_expr));
+            }
+            i = end + 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Render the pre-status check (when `write` is false) or the post-status
 /// write (when `write` is true) for R26 lifecycle enforcement. Returns an
 /// empty string when the lifecycle clause doesn't require a runtime
@@ -1567,6 +1606,13 @@ fn mechanize_effect(
 
     let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec);
     let acct = &state_acct.name;
+    // Cast index expressions in the LHS path to `usize`. `render_effect`
+    // emits the field as `voted[member_index]` (Lean-friendly); on the
+    // Rust side, indexing `[u8; N]` with `u8`/`u16`/Fin fails — Rust
+    // requires `usize`. Same shape as `path_to_rust`'s Index emission;
+    // applied here so the Lean output stays untouched.
+    let field = rewrite_index_to_usize(field);
+    let field = field.as_str();
     // v2.7 G3: `+=` default lowers to `checked_add(...).ok_or(err)?` — the
     // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
     // `wrapping_add` which produced Kani false-positives and didn't match

@@ -69,9 +69,11 @@ handler init_pool (rate : U64) : Pool.Uninitialized -> Pool.Active {
   emits PoolInitialized
 }
 
-/// Deposit tokens into the pool
+/// Deposit tokens into the pool — anyone can deposit; the depositor
+/// receives credit by being the source-account owner of the token
+/// transfer, not by being privileged.
 handler deposit (amount : U64) : Pool.Active -> Pool.Active {
-  auth depositor
+  permissionless
 
   accounts {
     depositor     : signer, writable
@@ -147,9 +149,10 @@ handler repay : Loan.Active -> Loan.Empty {
   emits Repaid
 }
 
-/// Liquidate an undercollateralized loan
+/// Liquidate an undercollateralized loan — anyone can liquidate; the
+/// authorization is the health check, not the liquidator's identity.
 handler liquidate : Loan.Active -> Loan.Liquidated {
-  auth liquidator
+  permissionless
 
   accounts {
     liquidator     : signer, writable

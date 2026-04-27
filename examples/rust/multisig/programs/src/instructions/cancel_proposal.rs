@@ -19,7 +19,7 @@ pub struct CancelProposal<'info> {
 }
 
 impl<'info> CancelProposal<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "8acac11c9628cb80", spec_hash = "816a905224142489")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "8acac11c9628cb80", spec_hash = "35605e3ff8d9be8a")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelProposalBumps) -> Result<(), ProgramError> {
         guards::cancel_proposal(self)?;

@@ -26,7 +26,7 @@ pub struct Deposit<'info> {
 }
 
 impl<'info> Deposit<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "deposit", hash = "13df0b620c042001", spec_hash = "21d81bae58c5abca")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "deposit", hash = "13df0b620c042001", spec_hash = "85eff0394c972250")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, bumps: &DepositBumps) -> Result<(), ProgramError> {
         guards::deposit(self, amount)?;

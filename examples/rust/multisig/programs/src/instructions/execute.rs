@@ -19,7 +19,7 @@ pub struct Execute<'info> {
 }
 
 impl<'info> Execute<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "855f4999905f6418", spec_hash = "f1085840ed69a1d7")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "855f4999905f6418", spec_hash = "84fd7f21daf375f3")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
         guards::execute(self)?;

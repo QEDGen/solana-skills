@@ -93,7 +93,10 @@ handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized 
 
 /// Submit a new transaction proposal — any vault member can propose
 handler propose : State.Active -> State.HasProposal {
-  auth proposer
+  // Anyone can submit a proposal; authorization for the resulting
+  // transaction comes from the approve/reject vote tally, not from
+  // the proposer's identity.
+  permissionless
 
   accounts {
     proposer : signer
@@ -157,7 +160,9 @@ handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
 
 /// Execute the proposal once the approval threshold is met
 handler execute : State.HasProposal -> State.Active {
-  auth executor
+  // Anyone can trigger execution once the threshold is met — the
+  // approval tally is the authorization, not the executor's identity.
+  permissionless
 
   accounts {
     executor : signer
@@ -176,7 +181,10 @@ handler execute : State.HasProposal -> State.Active {
 
 /// Cancel a proposal that can no longer reach the approval threshold
 handler cancel_proposal : State.HasProposal -> State.Active {
-  auth canceller
+  // Cancelling a doomed proposal is a cleanup op — anyone observing
+  // the rejection tally can call it. The `requires` proves the
+  // proposal is unreachable; no extra signer gate adds value.
+  permissionless
 
   accounts {
     canceller : signer
