@@ -296,11 +296,22 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
 /// through to `map_type`.
 pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     let dsl_type = dsl_type.trim();
+    // Fin[N] is a bounded index type; usize has 8-byte alignment on most
+    // targets, so pack it as PodU32 for the alignment-1 constraint. Wider
+    // bounds would need PodU64 — the bound itself is informational here.
+    if dsl_type.starts_with("Fin") {
+        return Ok("PodU32".to_string());
+    }
     if let Some(pod) = primitive_pod_map(dsl_type) {
         return Ok(pod.to_string());
     }
     if let Some(rust) = primitive_map(dsl_type) {
         return Ok(rust.to_string());
+    }
+    // Type alias: `type Foo = Bar` — recurse on the RHS so an alias like
+    // `AccountIdx = Fin[N]` ends up as `PodU32` instead of `usize`.
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return map_type_pod(rhs, spec);
     }
     // Fall back to map_type for compound / user-defined types — those
     // don't need (and can't take) the pod conversion.
@@ -490,8 +501,31 @@ fn generate_lib(
 
         let mut params = format!("ctx: {}<{}>", surface.context_type, pascal);
 
+        // Quasar's `#[instruction]` macro auto-converts native integers
+        // (`u64` → `PodU64`, …) inside the `InstructionDataZc` struct, so
+        // we can keep the user-facing handler signature in native types.
+        // `usize`, however, isn't recognized — it falls through unchanged
+        // and the ZC struct fails the alignment-1 assertion. Resolve
+        // `Fin[N]` (and its aliases) to `u32` on Quasar so the auto-Pod
+        // conversion picks it up as `PodU32`. The inner impl still takes
+        // `usize` for indexing, which we cast at the dispatch boundary.
+        let needs_fin_cast = |ptype: &str| -> bool {
+            if !matches!(target, Target::Quasar) {
+                return false;
+            }
+            let mut resolved = ptype.trim().to_string();
+            while let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == &resolved) {
+                resolved = rhs.trim().to_string();
+            }
+            resolved.starts_with("Fin")
+        };
         for (pname, ptype) in &handler.takes_params {
-            params.push_str(&format!(", {}: {}", pname, map_type(ptype, spec)?));
+            let rust_ty = if needs_fin_cast(ptype) {
+                "u32".to_string()
+            } else {
+                map_type(ptype, spec)?
+            };
+            params.push_str(&format!(", {}: {}", pname, rust_ty));
         }
 
         out.push_str(&format!(
@@ -499,13 +533,21 @@ fn generate_lib(
             handler.name, params, surface.handler_result_type
         ));
 
+        let cast_arg = |pname: &str, ptype: &str| -> String {
+            if needs_fin_cast(ptype) {
+                format!("{} as usize", pname)
+            } else {
+                pname.to_string()
+            }
+        };
+
         if handler.has_bumps() {
             out.push_str(&format!(
                 "        ctx.accounts.handler({}&ctx.bumps)\n",
                 handler
                     .takes_params
                     .iter()
-                    .map(|(n, _)| format!("{}, ", n))
+                    .map(|(n, t)| format!("{}, ", cast_arg(n, t)))
                     .collect::<String>()
             ));
         } else {
@@ -514,7 +556,7 @@ fn generate_lib(
                 handler
                     .takes_params
                     .iter()
-                    .map(|(n, _)| n.clone())
+                    .map(|(n, t)| cast_arg(n, t))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

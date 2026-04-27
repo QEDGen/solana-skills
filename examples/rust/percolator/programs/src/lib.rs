@@ -17,33 +17,33 @@ mod percolator {
     use super::*;
 
     #[instruction(discriminator = 0)]
-    pub fn add_user(ctx: Ctx<AddUser>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn add_user(ctx: Ctx<AddUser>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 1)]
-    pub fn add_lp(ctx: Ctx<AddLp>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn add_lp(ctx: Ctx<AddLp>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 2)]
-    pub fn reclaim_empty_account(ctx: Ctx<ReclaimEmptyAccount>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn reclaim_empty_account(ctx: Ctx<ReclaimEmptyAccount>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 3)]
-    pub fn close_account(ctx: Ctx<CloseAccount>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn close_account(ctx: Ctx<CloseAccount>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 4)]
-    pub fn deposit(ctx: Ctx<Deposit>, i: usize, amount: u128) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i, amount)
+    pub fn deposit(ctx: Ctx<Deposit>, i: u32, amount: u128) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize, amount)
     }
 
     #[instruction(discriminator = 5)]
-    pub fn withdraw(ctx: Ctx<Withdraw>, i: usize, amount: u128) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i, amount)
+    pub fn withdraw(ctx: Ctx<Withdraw>, i: u32, amount: u128) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize, amount)
     }
 
     #[instruction(discriminator = 6)]
@@ -52,38 +52,38 @@ mod percolator {
     }
 
     #[instruction(discriminator = 7)]
-    pub fn deposit_fee_credits(ctx: Ctx<DepositFeeCredits>, i: usize, amount: u128) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i, amount)
+    pub fn deposit_fee_credits(ctx: Ctx<DepositFeeCredits>, i: u32, amount: u128) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize, amount)
     }
 
     #[instruction(discriminator = 8)]
-    pub fn convert_released_pnl(ctx: Ctx<ConvertReleasedPnl>, i: usize, x: u128) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i, x)
+    pub fn convert_released_pnl(ctx: Ctx<ConvertReleasedPnl>, i: u32, x: u128) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize, x)
     }
 
     #[instruction(discriminator = 9)]
-    pub fn execute_trade(ctx: Ctx<ExecuteTrade>, a: usize, b: usize, size_q: i128, exec_price: u64) -> Result<(), ProgramError> {
-        ctx.accounts.handler(a, b, size_q, exec_price)
+    pub fn execute_trade(ctx: Ctx<ExecuteTrade>, a: u32, b: u32, size_q: i128, exec_price: u64) -> Result<(), ProgramError> {
+        ctx.accounts.handler(a as usize, b as usize, size_q, exec_price)
     }
 
     #[instruction(discriminator = 10)]
-    pub fn liquidate_case_0(ctx: Ctx<LiquidateCase0>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn liquidate_case_0(ctx: Ctx<LiquidateCase0>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 11)]
-    pub fn liquidate_case_1(ctx: Ctx<LiquidateCase1>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn liquidate_case_1(ctx: Ctx<LiquidateCase1>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 12)]
-    pub fn liquidate_otherwise(ctx: Ctx<LiquidateOtherwise>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn liquidate_otherwise(ctx: Ctx<LiquidateOtherwise>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 13)]
-    pub fn settle_account(ctx: Ctx<SettleAccount>, i: usize) -> Result<(), ProgramError> {
-        ctx.accounts.handler(i)
+    pub fn settle_account(ctx: Ctx<SettleAccount>, i: u32) -> Result<(), ProgramError> {
+        ctx.accounts.handler(i as usize)
     }
 
     #[instruction(discriminator = 14)]
