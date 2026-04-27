@@ -29,12 +29,12 @@ pub struct Borrow<'info> {
 }
 
 impl<'info> Borrow<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "f94a35e667f6acc5", spec_hash = "6a1c2376f61d1679")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "68a6f572d6d6f6ca", spec_hash = "6a1c2376f61d1679")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, collateral: u64, bumps: &BorrowBumps) -> Result<(), ProgramError> {
         guards::borrow(self, amount, collateral)?;
-        // Spec effect (needs fill): amount set amount
-        // Spec effect (needs fill): collateral set collateral
+        self.loan.amount = (amount).into();
+        self.loan.collateral = (collateral).into();
         // Spec: emit!(Borrowed)
         // Spec transfer: pool_vault -> borrower_ta amount=amount
         todo!("fill non-mechanical effects, events, transfers, calls")

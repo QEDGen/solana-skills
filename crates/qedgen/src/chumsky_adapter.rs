@@ -1021,8 +1021,15 @@ fn path_to_rust(p: &a::Path, _ctx: Ctx, _inside_old: bool, consts: ConstTable) -
                 out.push_str(f);
             }
             a::PathSeg::Index(i) => {
+                // Cast index expression to `usize`. A Map[N] T lowers to
+                // `[T; N]`; the spec's index could be a u8/u16/u32/Fin
+                // handler param, none of which Rust accepts directly as
+                // an array index. The `as usize` cast is always safe (no
+                // negative values reach this path — Fin/U* are unsigned).
                 out.push('[');
+                out.push('(');
                 out.push_str(i);
+                out.push_str(") as usize");
                 out.push(']');
             }
         }
@@ -1117,6 +1124,9 @@ fn render_effect(
     consts: ConstTable,
 ) -> (String, String, String) {
     // Field name: preserve subscript syntax as-is (e.g., `accounts[i].capital`).
+    // Both Lean and Rust consumers read this string; Rust-side `as usize`
+    // index casting is applied at the codegen.rs::mechanize_effect site
+    // so the Lean output stays untouched.
     let field = {
         let mut s = stmt.lhs.root.clone();
         for seg in &stmt.lhs.segments {

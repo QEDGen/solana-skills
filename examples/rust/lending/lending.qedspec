@@ -35,6 +35,7 @@ type Error
   | AlreadyActive
   | InvalidAmount
   | MathOverflow
+  | AccountHealthy
 
 pda pool ["pool", authority]
 pda loan ["loan", pool, borrower]
@@ -158,6 +159,13 @@ handler liquidate : Loan.Active -> Loan.Liquidated {
     liquidator_ta  : writable, token
     token_program  : program
   }
+
+  // Liquidations only fire when the loan is underwater — debt exceeds
+  // collateral. Healthy positions are protected; only insolvent loans
+  // can be seized. Real protocols would parameterize this by an LTV
+  // factor (e.g. `amount * 100 > collateral * 80` for an 80% trigger);
+  // the simplest formulation captures the security shape.
+  requires state.amount > state.collateral else AccountHealthy
 
   effect {
     amount := 0

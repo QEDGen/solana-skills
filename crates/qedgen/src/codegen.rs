@@ -1097,10 +1097,25 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
     }
 
     if candidates.len() == 1 {
-        Some(candidates[0])
-    } else {
-        None
+        return Some(candidates[0]);
     }
+    // Multi-state spec disambiguator: when the handler declares
+    // `on_account = "Loan"` (parsed from `: Loan.Pre -> Loan.Post`), pick
+    // the handler-account whose name matches the ADT (lowercase). Without
+    // this, lending::liquidate has both `loan` and `pool` as writable
+    // PDA candidates and `find_state_account` returned None, leaving
+    // `s.amount > s.collateral` un-rewritten in guards.rs.
+    if let Some(adt) = handler.on_account.as_deref() {
+        let lower = adt.to_lowercase();
+        if let Some(matched) = candidates
+            .iter()
+            .copied()
+            .find(|a| a.name == lower || a.name.starts_with(&lower))
+        {
+            return Some(matched);
+        }
+    }
+    None
 }
 
 /// Canonical SPL Token program ID. Calls into an interface whose
@@ -2268,17 +2283,63 @@ fn generate_guards(
         // path so the guards compile. Multi-state handlers fall through with
         // the raw `s.` form — caller must hand-edit. R12 fix.
         let state_acct = find_state_account(handler);
+        // Bare handler-account idents in spec expressions (e.g. the
+        // `approver` in `state.members[i] == approver`) need to be
+        // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
+        // Without this, the spec's signer-binding compiles to `... ==
+        // approver` where `approver` resolves to nothing in scope.
+        let handler_account_names: Vec<String> = handler
+            .accounts
+            .iter()
+            .map(|a| a.name.clone())
+            .collect();
         let bind_state = |expr: &str| -> String {
-            let Some(sa) = state_acct else {
-                return expr.to_string();
-            };
-            // Word-bounded replace: substitute `s.` only when it begins a
-            // path token, never when it appears inside an identifier (e.g.
-            // `accounts[i].fee_credits.get()` would otherwise become
-            // `accounts[i].fee_creditctx.vault.get()` — corrupted).
-            let target = format!("ctx.{}.", sa.name);
+            // Step 1: rewrite handler-account idents to address loads.
+            let mut after_accounts = String::with_capacity(expr.len() + 32);
             let bytes = expr.as_bytes();
-            let mut out = String::with_capacity(expr.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let mut matched = false;
+                if prev_ok {
+                    for name in &handler_account_names {
+                        let nbytes = name.as_bytes();
+                        if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes {
+                            // Boundary check on the trailing edge: don't
+                            // match `approver_x` when looking for `approver`.
+                            let after = i + nbytes.len();
+                            if after >= bytes.len() || !is_ident_char(bytes[after]) {
+                                // Don't rewrite `name.` (field access on
+                                // the handler-account is a different
+                                // expression — keep the `.` access path).
+                                if after >= bytes.len() || bytes[after] != b'.' {
+                                    after_accounts.push_str(&format!(
+                                        "(*ctx.{}.to_account_view().address())",
+                                        name
+                                    ));
+                                    i = after;
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !matched {
+                    after_accounts.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+
+            // Step 2: rewrite `s.` to `ctx.<state>.` if we have a state
+            // account. Word-bounded so `accounts[i].fee_credits.get()`
+            // doesn't get corrupted to `fee_creditctx.vault.get()`.
+            let Some(sa) = state_acct else {
+                return after_accounts;
+            };
+            let target = format!("ctx.{}.", sa.name);
+            let bytes = after_accounts.as_bytes();
+            let mut out = String::with_capacity(after_accounts.len());
             let mut i = 0;
             while i < bytes.len() {
                 let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);

@@ -19,11 +19,12 @@ pub struct Reject<'info> {
 }
 
 impl<'info> Reject<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "e7c7e12019595139", spec_hash = "ea0dd20a238e67a6")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "a0e6cd311d3a3e6f", spec_hash = "e48b57fe558f7776")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {
         guards::reject(self, member_index)?;
         self.vault.rejection_count = self.vault.rejection_count.checked_add(1).ok_or(MultisigError::MathOverflow)?;
+        self.vault.voted[(member_index) as usize] = (1).into();
         // Spec: emit!(ProposalRejected)
         todo!("fill non-mechanical effects, events, transfers, calls")
     }

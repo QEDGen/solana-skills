@@ -19,11 +19,11 @@ pub struct AddUser<'info> {
 }
 
 impl<'info> AddUser<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "add_user", hash = "04e9a2bb3fefe484", spec_hash = "bd20261ef292bca6")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "add_user", hash = "0d46efdeb2687a8f", spec_hash = "bd20261ef292bca6")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::add_user(self, i)?;
-        self.vault.accounts[i].active = (1).into();
+        self.vault.accounts[(i) as usize].active = (1).into();
         Ok(())
     }
 }

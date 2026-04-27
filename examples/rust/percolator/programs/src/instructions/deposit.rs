@@ -19,12 +19,12 @@ pub struct Deposit<'info> {
 }
 
 impl<'info> Deposit<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "deposit", hash = "ba5ea0e0f0aa2732", spec_hash = "c1246b21825b0ed2")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "deposit", hash = "ec60291f63e98a6d", spec_hash = "c1246b21825b0ed2")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize, amount: u128) -> Result<(), ProgramError> {
         guards::deposit(self, i, amount)?;
         self.vault.V = self.vault.V.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
-        self.vault.accounts[i].capital = self.vault.accounts[i].capital.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
+        self.vault.accounts[(i) as usize].capital = self.vault.accounts[(i) as usize].capital.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
         Ok(())
     }
 }

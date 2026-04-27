@@ -28,11 +28,11 @@ pub struct Liquidate<'info> {
 }
 
 impl<'info> Liquidate<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "fdcb8dadabdb3a67", spec_hash = "b3815843622e25b9")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "9a62f58d23c76d3a", spec_hash = "51eeccc10cee5384")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &LiquidateBumps) -> Result<(), ProgramError> {
         guards::liquidate(self)?;
-        // Spec effect (needs fill): amount set 0
+        self.loan.amount = (0).into();
         // Spec: emit!(LoanLiquidated)
         // Spec transfer: pool_vault -> liquidator_ta amount=amount
         todo!("fill non-mechanical effects, events, transfers, calls")

@@ -19,13 +19,13 @@ pub struct DepositFeeCredits<'info> {
 }
 
 impl<'info> DepositFeeCredits<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "deposit_fee_credits", hash = "b72580bb27230339", spec_hash = "2ec166fc7b6d1c47")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "deposit_fee_credits", hash = "964f865af58d906d", spec_hash = "2ec166fc7b6d1c47")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize, amount: u128) -> Result<(), ProgramError> {
         guards::deposit_fee_credits(self, i, amount)?;
         self.vault.V = self.vault.V.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
         self.vault.F = self.vault.F.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
-        self.vault.accounts[i].fee_credits = self.vault.accounts[i].fee_credits.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
+        self.vault.accounts[(i) as usize].fee_credits = self.vault.accounts[(i) as usize].fee_credits.checked_add(amount).ok_or(PercolatorError::MathOverflow)?;
         Ok(())
     }
 }

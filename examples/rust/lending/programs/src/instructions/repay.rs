@@ -28,12 +28,12 @@ pub struct Repay<'info> {
 }
 
 impl<'info> Repay<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "5ffb3b8d1270c3f4", spec_hash = "38b9e7598cf201bb")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "35b202d29903fba0", spec_hash = "38b9e7598cf201bb")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RepayBumps) -> Result<(), ProgramError> {
         guards::repay(self)?;
-        // Spec effect (needs fill): amount set 0
-        // Spec effect (needs fill): collateral set 0
+        self.loan.amount = (0).into();
+        self.loan.collateral = (0).into();
         // Spec: emit!(Repaid)
         // Spec transfer: borrower_ta -> pool_vault amount=amount
         todo!("fill non-mechanical effects, events, transfers, calls")

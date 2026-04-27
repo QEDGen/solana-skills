@@ -3743,6 +3743,150 @@ mod tests {
 
     const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
+    /// Scalar-only minimal multisig fixture used by the auto-prove tests
+    /// that pre-date v2.10's audit-driven member-list addition. The
+    /// committed `multisig.qedspec` now models a `members : Map[N] Pubkey`
+    /// list (closing the audit's HIGH on signer↔member binding), which
+    /// routes lean_gen through `render_indexed_state` — that path
+    /// deliberately doesn't emit theorem bodies (proofs live in
+    /// user-owned `Proofs.lean`). These tests still verify the legacy
+    /// scalar auto-prove path; pinning them to a frozen mini-spec keeps
+    /// the assertions meaningful while the real fixture evolves.
+    const MULTISIG_SCALAR_FIXTURE: &str = r#"
+spec Multisig
+
+const MAX_MEMBERS = 32
+
+type State
+  | Uninitialized
+  | Active of {
+      creator         : Pubkey,
+      threshold       : U8,
+      member_count    : U8,
+      approval_count  : U8,
+      rejection_count : U8,
+    }
+  | HasProposal
+
+type Error
+  | InvalidThreshold
+  | TooManyMembers
+  | AlreadyVoted
+  | ThresholdNotMet
+  | ThresholdUnreachable
+  | NotAMember
+  | MathOverflow
+
+pda vault ["vault", creator]
+
+handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized -> State.Active {
+  auth creator
+  accounts {
+    creator        : signer, writable
+    vault          : writable, pda ["vault", creator]
+    system_program : program
+  }
+  requires threshold > 0 and threshold <= member_count else InvalidThreshold
+  requires member_count <= MAX_MEMBERS else TooManyMembers
+  effect {
+    threshold        := threshold
+    member_count     := member_count
+    approval_count   := 0
+    rejection_count  := 0
+  }
+}
+
+handler propose : State.Active -> State.HasProposal {
+  auth proposer
+  accounts {
+    proposer : signer
+    vault    : writable, pda ["vault", creator]
+  }
+  effect {
+    approval_count  := 0
+    rejection_count := 0
+  }
+}
+
+handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth approver
+  accounts {
+    approver : signer
+    vault    : writable, pda ["vault", creator]
+  }
+  requires member_index < state.member_count else NotAMember
+  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+  effect {
+    approval_count += 1
+  }
+}
+
+handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth rejecter
+  accounts {
+    rejecter : signer
+    vault    : writable, pda ["vault", creator]
+  }
+  requires member_index < state.member_count else NotAMember
+  effect {
+    rejection_count += 1
+  }
+}
+
+handler execute : State.HasProposal -> State.Active {
+  auth executor
+  accounts {
+    executor : signer
+    vault    : writable, pda ["vault", creator]
+  }
+  requires state.approval_count >= state.threshold else ThresholdNotMet
+  effect {
+    approval_count  := 0
+    rejection_count := 0
+  }
+}
+
+handler cancel_proposal : State.HasProposal -> State.Active {
+  auth canceller
+  accounts {
+    canceller : signer
+    vault     : writable, pda ["vault", creator]
+  }
+  requires state.member_count - state.rejection_count < state.threshold else ThresholdUnreachable
+  effect {
+    approval_count  := 0
+    rejection_count := 0
+  }
+}
+
+handler remove_member : State.Active -> State.Active {
+  auth creator
+  accounts {
+    creator : signer
+    vault   : writable, pda ["vault", creator]
+  }
+  requires state.member_count > state.threshold
+  requires state.approval_count == 0 and state.rejection_count == 0
+  effect {
+    member_count -= 1
+  }
+}
+
+property threshold_bounded :
+  state.threshold <= state.member_count and state.threshold > 0
+  preserved_by all
+
+property votes_bounded :
+  state.approval_count + state.rejection_count <= state.member_count
+  preserved_by all
+
+cover proposal_lifecycle [create_vault, propose, approve, execute]
+
+cover rejection_flow [create_vault, propose, reject, cancel_proposal]
+
+liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, cancel_proposal] within 1
+"#;
+
     // Issue #8 fixture bundle (contributed by @lmvdz, gist at
     // https://gist.github.com/lmvdz/639804a0585317cb56cb14d2620e0ade).
     // Each `ISSUE_8_FIXTURES` entry is a `(name, source)` pair so a
@@ -3857,22 +4001,23 @@ mod tests {
 
     #[test]
     fn lean_gen_has_properties() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         assert!(lean.contains("def threshold_bounded (s : State) : Prop :="));
         assert!(lean.contains("theorem threshold_bounded_inductive"));
         assert!(lean.contains("theorem votes_bounded_inductive"));
-        // Multisig is fully auto-proven: all preservation, abort, overflow, cover,
-        // and liveness theorems have mechanical proofs — no sorry markers remain.
+        // Scalar-only multisig is fully auto-proven: all preservation,
+        // abort, overflow, cover, and liveness theorems have mechanical
+        // proofs — no sorry markers remain.
         assert!(
             !lean.contains(":= sorry"),
-            "multisig should be fully auto-proven"
+            "scalar multisig should be fully auto-proven"
         );
     }
 
     #[test]
     fn lean_gen_sub_auto_guard() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         // remove_member has effect: member_count -= 1
         // Should auto-generate underflow guard: 1 ≤ s.member_count
@@ -4245,7 +4390,7 @@ pragma sbpf {
 
     #[test]
     fn lean_gen_proof_decomposition_sub_lemmas() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         // Per-operation sub-lemmas for threshold_bounded
         assert!(lean.contains("theorem threshold_bounded_preserved_by_create_vault"));
@@ -4259,7 +4404,7 @@ pragma sbpf {
 
     #[test]
     fn lean_gen_aborts_if_theorems() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         assert!(lean.contains("theorem create_vault_aborts_if_InvalidThreshold"));
         assert!(lean.contains("theorem create_vault_aborts_if_TooManyMembers"));
@@ -4271,7 +4416,7 @@ pragma sbpf {
 
     #[test]
     fn lean_gen_cover_theorems() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         assert!(lean.contains("theorem cover_proposal_lifecycle"));
         assert!(lean.contains("theorem cover_rejection_flow"));
@@ -4295,7 +4440,7 @@ pragma sbpf {
 
     #[test]
     fn lean_gen_overflow_obligations() {
-        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let spec = chumsky_adapter::parse_str(MULTISIG_SCALAR_FIXTURE).unwrap();
         let lean = render(&spec);
         // approve has an add effect (approval_count += 1)
         assert!(lean.contains("theorem approve_overflow_safe"));

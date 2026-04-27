@@ -19,12 +19,12 @@ pub struct Withdraw<'info> {
 }
 
 impl<'info> Withdraw<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "withdraw", hash = "0859e05e99e3954a", spec_hash = "16390bf2da1be4e7")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "withdraw", hash = "a1ffd9a30364a620", spec_hash = "16390bf2da1be4e7")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize, amount: u128) -> Result<(), ProgramError> {
         guards::withdraw(self, i, amount)?;
         self.vault.V = self.vault.V.checked_sub(amount).ok_or(PercolatorError::MathOverflow)?;
-        self.vault.accounts[i].capital = self.vault.accounts[i].capital.checked_sub(amount).ok_or(PercolatorError::MathOverflow)?;
+        self.vault.accounts[(i) as usize].capital = self.vault.accounts[(i) as usize].capital.checked_sub(amount).ok_or(PercolatorError::MathOverflow)?;
         Ok(())
     }
 }

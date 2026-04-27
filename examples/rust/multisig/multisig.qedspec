@@ -16,6 +16,14 @@ type State
       creator          : Pubkey,
       threshold        : U8,
       member_count     : U8,
+      // Per-member pubkey list. The signer's address must match
+      // `members[member_index]` for any approve/reject vote to count.
+      members          : Map[MAX_MEMBERS] Pubkey,
+      // Per-member voting record for the active proposal: 0 = not yet
+      // voted, 1 = voted. `propose` resets it; `approve` / `reject` flip
+      // the corresponding slot. Without this, a member could re-vote
+      // through different signers across the threshold window.
+      voted            : Map[MAX_MEMBERS] U8,
       approval_count   : U8,
       rejection_count  : U8,
     }
@@ -110,10 +118,17 @@ handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
   }
 
   requires member_index < state.member_count else NotAMember
-  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+  // Bind the index to the signer: the caller must own the pubkey at
+  // `members[member_index]`. Closes the audit's HIGH on signer↔member.
+  requires state.members[member_index] == approver else NotAMember
+  // Per-member dedup: this slot must not have voted yet on the active
+  // proposal. `propose` resets the bitmap, `approve`/`reject` flip the
+  // slot.
+  requires state.voted[member_index] == 0 else AlreadyVoted
 
   effect {
     approval_count += 1
+    voted[member_index] := 1
   }
 
   emits ProposalApproved
@@ -129,10 +144,12 @@ handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
   }
 
   requires member_index < state.member_count else NotAMember
-  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+  requires state.members[member_index] == rejecter else NotAMember
+  requires state.voted[member_index] == 0 else AlreadyVoted
 
   effect {
     rejection_count += 1
+    voted[member_index] := 1
   }
 
   emits ProposalRejected

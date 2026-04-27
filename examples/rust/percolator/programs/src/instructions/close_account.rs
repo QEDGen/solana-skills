@@ -19,13 +19,13 @@ pub struct CloseAccount<'info> {
 }
 
 impl<'info> CloseAccount<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "close_account", hash = "28a438cd97744da4", spec_hash = "6537f7c1d89dcb54")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "close_account", hash = "e24a268229eed324", spec_hash = "6537f7c1d89dcb54")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::close_account(self, i)?;
         // Spec effect (needs fill): V sub accounts[i].capital
-        self.vault.accounts[i].capital = (0).into();
-        self.vault.accounts[i].active = (0).into();
+        self.vault.accounts[(i) as usize].capital = (0).into();
+        self.vault.accounts[(i) as usize].active = (0).into();
         todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }

@@ -18,11 +18,11 @@ pub struct LiquidateCase1<'info> {
 }
 
 impl<'info> LiquidateCase1<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate", hash = "3326abd4e85addbd", spec_hash = "7bd0413339d25826")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "liquidate", hash = "367898d036b25cdc", spec_hash = "7bd0413339d25826")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::liquidate_case_1(self, i)?;
-        self.vault.accounts[i].active = (0).into();
+        self.vault.accounts[(i) as usize].active = (0).into();
         Ok(())
     }
 }

@@ -19,12 +19,12 @@ pub struct ConvertReleasedPnl<'info> {
 }
 
 impl<'info> ConvertReleasedPnl<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "convert_released_pnl", hash = "b616936ec856cc3a", spec_hash = "cad0809661eff4aa")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "convert_released_pnl", hash = "e41a233700311ac6", spec_hash = "cad0809661eff4aa")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize, x: u128) -> Result<(), ProgramError> {
         guards::convert_released_pnl(self, i, x)?;
         self.vault.V = self.vault.V.checked_sub(x).ok_or(PercolatorError::MathOverflow)?;
-        self.vault.accounts[i].reserved_pnl = self.vault.accounts[i].reserved_pnl.checked_sub(x).ok_or(PercolatorError::MathOverflow)?;
+        self.vault.accounts[(i) as usize].reserved_pnl = self.vault.accounts[(i) as usize].reserved_pnl.checked_sub(x).ok_or(PercolatorError::MathOverflow)?;
         Ok(())
     }
 }

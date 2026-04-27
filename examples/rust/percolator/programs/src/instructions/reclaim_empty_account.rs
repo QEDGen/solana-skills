@@ -18,11 +18,11 @@ pub struct ReclaimEmptyAccount<'info> {
 }
 
 impl<'info> ReclaimEmptyAccount<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "reclaim_empty_account", hash = "bba97c39895a4d1f", spec_hash = "131b0df2f49fa778")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "reclaim_empty_account", hash = "d7f716c1f6c51de1", spec_hash = "131b0df2f49fa778")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::reclaim_empty_account(self, i)?;
-        self.vault.accounts[i].active = (0).into();
+        self.vault.accounts[(i) as usize].active = (0).into();
         Ok(())
     }
 }

@@ -53,8 +53,10 @@ pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), 
     }
     // requires: member_index < s.member_count
     if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
-    // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(ctx.vault.approval_count + ctx.vault.rejection_count < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    // requires: s.members[member_index] = approver
+    if !(ctx.vault.members[(member_index) as usize] == (*ctx.approver.to_account_view().address())) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.voted[member_index] = 0
+    if !(ctx.vault.voted[(member_index) as usize] == 0) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
@@ -72,8 +74,10 @@ pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), Pr
     }
     // requires: member_index < s.member_count
     if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
-    // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(ctx.vault.approval_count + ctx.vault.rejection_count < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    // requires: s.members[member_index] = rejecter
+    if !(ctx.vault.members[(member_index) as usize] == (*ctx.rejecter.to_account_view().address())) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.voted[member_index] = 0
+    if !(ctx.vault.voted[(member_index) as usize] == 0) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 

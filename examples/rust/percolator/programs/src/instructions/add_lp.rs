@@ -19,11 +19,11 @@ pub struct AddLp<'info> {
 }
 
 impl<'info> AddLp<'info> {
-    #[qed(verified, spec = "../percolator.qedspec", handler = "add_lp", hash = "bd03bd97810286c7", spec_hash = "bd20261ef292bca6")]
+    #[qed(verified, spec = "../percolator.qedspec", handler = "add_lp", hash = "055e063829674979", spec_hash = "bd20261ef292bca6")]
     #[inline(always)]
     pub fn handler(&mut self, i: usize) -> Result<(), ProgramError> {
         guards::add_lp(self, i)?;
-        self.vault.accounts[i].active = (1).into();
+        self.vault.accounts[(i) as usize].active = (1).into();
         Ok(())
     }
 }

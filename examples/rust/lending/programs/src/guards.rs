@@ -53,12 +53,16 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0 ∧ collateral > 0
     if !((amount > 0) && (collateral > 0)) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
+    // lifecycle: status := Active
+    ctx.loan.status = LoanStatus::Active as u8;
     Ok(())
 }
 
 /// Guards for `repay`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
     // R28 PDA check: ctx.pool matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
@@ -68,13 +72,16 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
     }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
-    // No guards declared in spec — nothing to check.
+    // lifecycle: status := Empty
+    ctx.loan.status = LoanStatus::Empty as u8;
     Ok(())
 }
 
 /// Guards for `liquidate`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
     // R28 PDA check: ctx.loan matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"loan", ctx.pool.to_account_view().address().as_ref(), ctx.loan.borrower.as_ref(), &[ctx.loan.bump]];
@@ -91,7 +98,10 @@ pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> 
     }
     // authority: ctx.pool_vault.owner() == ctx.pool.address()
     if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
-    // No guards declared in spec — nothing to check.
+    // requires: s.amount > s.collateral
+    if !(ctx.loan.amount.get() > ctx.loan.collateral.get()) { return Err(ProgramError::from(LendingError::AccountHealthy)); }
+    // lifecycle: status := Liquidated
+    ctx.loan.status = LoanStatus::Liquidated as u8;
     Ok(())
 }
 
