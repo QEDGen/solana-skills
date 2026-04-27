@@ -13,7 +13,7 @@ use crate::errors::*;
 #[derive(Accounts)]
 pub struct LiquidateCase0<'info> {
     pub authority: &'info Signer,
-    #[account(mut)]
+    #[account(mut, has_one = authority)]
     pub vault: &'info mut Account<PercolatorAccount>,
 }
 

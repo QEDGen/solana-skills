@@ -14,7 +14,7 @@ use crate::errors::*;
 pub struct ConvertReleasedPnl<'info> {
     #[account(mut)]
     pub authority: &'info mut Signer,
-    #[account(mut)]
+    #[account(mut, has_one = authority)]
     pub vault: &'info mut Account<PercolatorAccount>,
 }
 

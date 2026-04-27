@@ -16,7 +16,7 @@ use crate::errors::*;
 pub struct Borrow<'info> {
     #[account(mut)]
     pub borrower: &'info mut Signer,
-    #[account(mut, init, payer = borrower, seeds = [b"loan", pool, borrower], bump)]
+    #[account(mut, init, payer = borrower, seeds = [b"loan", pool, borrower], bump, has_one = borrower)]
     pub loan: &'info mut Account<LoanAccount>,
     #[account(mut)]
     pub pool: &'info mut Account<PoolAccount>,

@@ -15,7 +15,7 @@ use crate::errors::*;
 pub struct InitPool<'info> {
     #[account(mut)]
     pub authority: &'info mut Signer,
-    #[account(mut, init, payer = authority, seeds = [b"pool", authority], bump)]
+    #[account(mut, init, payer = authority, seeds = [b"pool", authority], bump, has_one = authority)]
     pub pool: &'info mut Account<PoolAccount>,
     pub system_program: &'info Program<System>,
 }

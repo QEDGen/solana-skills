@@ -538,6 +538,27 @@ impl ParsedHandler {
     }
 }
 
+/// True if the parsed state struct that backs this handler-account has a
+/// field named `field`. For multi-state specs the lookup walks
+/// `spec.account_types`; for single-state specs the union lives in
+/// `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
+fn state_account_has_field(
+    acct: &ParsedHandlerAccount,
+    spec: &ParsedSpec,
+    field: &str,
+) -> bool {
+    // Multi-state: match the account by name → ADT name (lowercase), then
+    // walk that ADT's field list.
+    for at in &spec.account_types {
+        let lower = at.name.to_lowercase();
+        if acct.name == lower || acct.name.starts_with(&lower) {
+            return at.fields.iter().any(|(n, _)| n == field);
+        }
+    }
+    // Single-state spec — fields union lives on the spec.
+    spec.state_fields.iter().any(|(n, _)| n == field)
+}
+
 impl ParsedHandlerAccount {
     /// Generate the #[account(...)] attribute for codegen, target-aware.
     ///
@@ -562,6 +583,8 @@ impl ParsedHandlerAccount {
         handler: &ParsedHandler,
         state_name: &str,
         target: crate::Target,
+        spec: &ParsedSpec,
+        is_state_account: bool,
     ) -> String {
         let _ = state_name;
         let mut parts = Vec::new();
@@ -658,6 +681,23 @@ impl ParsedHandlerAccount {
         if is_init {
             if let Some(ref auth) = self.authority {
                 parts.push(format!("token::authority = {}", auth));
+            }
+        }
+
+        // R25: lower `auth X` to `has_one = X` when the state-bearing
+        // account in this handler has a field named X. The spec's `auth
+        // X` clause + accounts block already names the authority — the
+        // codegen just needs to bind it. Without this every handler
+        // taking an authority signer is reachable by ANY signer (the
+        // signer check only verifies "someone signed", not "the right
+        // someone"). Closes the percolator-CRIT, multisig::remove_member
+        // CRIT, and the lending init_pool/borrow/repay HIGHs in one
+        // emit. Anchor and Quasar both accept `has_one = field`.
+        if is_state_account {
+            if let Some(ref who) = handler.who {
+                if state_account_has_field(self, spec, who) {
+                    parts.push(format!("has_one = {}", who));
+                }
             }
         }
 

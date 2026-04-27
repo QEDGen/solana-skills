@@ -13,7 +13,7 @@ use crate::errors::*;
 #[derive(Accounts)]
 pub struct RemoveMember<'info> {
     pub creator: &'info Signer,
-    #[account(mut, seeds = [b"vault", creator], bump)]
+    #[account(mut, seeds = [b"vault", creator], bump, has_one = creator)]
     pub vault: &'info mut Account<MultisigAccount>,
 }
 

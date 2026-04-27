@@ -19,12 +19,12 @@ pub struct CancelProposal<'info> {
 }
 
 impl<'info> CancelProposal<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "2625d4f5e45311fa", spec_hash = "816a905224142489")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "cancel_proposal", hash = "8acac11c9628cb80", spec_hash = "816a905224142489")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelProposalBumps) -> Result<(), ProgramError> {
         guards::cancel_proposal(self)?;
-        self.vault.approval_count = 0;
-        self.vault.rejection_count = 0;
+        self.vault.approval_count = (0).into();
+        self.vault.rejection_count = (0).into();
         // Spec: emit!(ProposalCancelled)
         todo!("fill non-mechanical effects, events, transfers, calls")
     }

@@ -15,20 +15,20 @@ use crate::errors::*;
 pub struct CreateVault<'info> {
     #[account(mut)]
     pub creator: &'info mut Signer,
-    #[account(mut, init, payer = creator, seeds = [b"vault", creator], bump)]
+    #[account(mut, seeds = [b"vault", creator], bump, has_one = creator)]
     pub vault: &'info mut Account<MultisigAccount>,
     pub system_program: &'info Program<System>,
 }
 
 impl<'info> CreateVault<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "5153647095626903", spec_hash = "17cb8535550bbe69")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "e411681e3bddfed7", spec_hash = "17cb8535550bbe69")]
     #[inline(always)]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
         guards::create_vault(self, threshold, member_count)?;
-        self.vault.threshold = threshold;
-        self.vault.member_count = member_count;
-        self.vault.approval_count = 0;
-        self.vault.rejection_count = 0;
+        self.vault.threshold = (threshold).into();
+        self.vault.member_count = (member_count).into();
+        self.vault.approval_count = (0).into();
+        self.vault.rejection_count = (0).into();
         // Spec: emit!(VaultCreated)
         todo!("fill non-mechanical effects, events, transfers, calls")
     }

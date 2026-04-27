@@ -13,7 +13,7 @@ use crate::errors::*;
 #[derive(Accounts)]
 pub struct TriggerAdl<'info> {
     pub authority: &'info Signer,
-    #[account(mut)]
+    #[account(mut, has_one = authority)]
     pub vault: &'info mut Account<PercolatorAccount>,
 }
 
