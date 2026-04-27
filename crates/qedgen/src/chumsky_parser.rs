@@ -921,10 +921,19 @@ fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a>> + Clone 
         .ignore_then(just('['))
         .then_ignore(wsc())
         .ignore_then(
-            choice((string_lit(), non_keyword_ident()))
-                .then_ignore(wsc())
-                .separated_by(just(',').then_ignore(wsc()))
-                .collect::<Vec<String>>(),
+            // Distinguish string-literal seeds (`"vault"`) from identifier
+            // seeds (`creator`) at parse time. Codegen emits the former as
+            // `b"vault"` byte-string literals and the latter as
+            // `<name>.key().as_ref()` Pubkey accessors. We mark literals by
+            // re-attaching the quote chars; the consumer in
+            // `check.rs::quasar_account_attr` splits on leading `"`.
+            choice((
+                string_lit().map(|s| format!("\"{}\"", s)),
+                non_keyword_ident(),
+            ))
+            .then_ignore(wsc())
+            .separated_by(just(',').then_ignore(wsc()))
+            .collect::<Vec<String>>(),
         )
         .then_ignore(wsc())
         .then_ignore(just(']'))

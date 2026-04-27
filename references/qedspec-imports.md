@@ -271,8 +271,8 @@ What lands downstream:
 - **First-class Anchor support** — `#[qed]` on existing Anchor handlers
   (free-fn, type-associated, accounts-method, and inline shapes),
   brownfield `qedgen adapt` and `qedgen check --anchor-project`. v2.9
-  headline. Anchor is the only supported framework today; non-Anchor /
-  raw-program support lands in v2.10+.
+  headline. Anchor and Quasar are both fully supported as of v2.10;
+  non-Anchor / raw-program (Pinocchio) support lands in v2.11+.
 - **Stance 2 (proof composition).** `sorry` in the ensures-as-axiom theorems
   stays — v3.0 (refactor + breaking-changes release) will replace with
   imported callee proofs.

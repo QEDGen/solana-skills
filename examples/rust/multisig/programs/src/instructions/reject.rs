@@ -12,19 +12,20 @@ use crate::events::*;
 use crate::errors::*;
 
 #[derive(Accounts)]
-pub struct Reject {
-    pub rejecter: Signer,
-    #[account(mut, seeds = MultisigAccount::seeds(vault), bump)]
-    pub vault: Account<()>,
+pub struct Reject<'info> {
+    pub rejecter: &'info Signer,
+    #[account(mut)]
+    pub vault: &'info mut Account<MultisigAccount>,
 }
 
-impl Reject {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", spec_hash = "a1b6f8e6f9e21a39")]
+impl<'info> Reject<'info> {
+    #[qed(verified, spec = "../multisig.qedspec", handler = "reject", hash = "a0e6cd311d3a3e6f", spec_hash = "e48b57fe558f7776")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &RejectBumps) -> Result<(), ProgramError> {
         guards::reject(self, member_index)?;
-        // Spec effect: rejection_count add 1
+        self.vault.rejection_count = self.vault.rejection_count.checked_add(1).ok_or(MultisigError::MathOverflow)?;
+        self.vault.voted[(member_index) as usize] = (1).into();
         // Spec: emit!(ProposalRejected)
-        todo!("user business logic")
+        todo!("fill non-mechanical effects, events, transfers, calls")
     }
 }

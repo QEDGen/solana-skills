@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.10+.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.11+.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -76,6 +76,12 @@ qedgen init --name my_program --spec my_program.qedspec --target anchor
 # 3. Validate and generate artifacts (no --spec needed from inside the project)
 qedgen check
 qedgen codegen --all
+
+# 4. Audit a brownfield project before adopting a spec — emits the
+#    auditor work list (per-handler categories) consumed by the
+#    `qedgen-auditor` agent skill, or run spec-aware against an
+#    existing .qedspec for category-coverage findings.
+qedgen probe --json --spec my_program.qedspec
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need
@@ -100,7 +106,7 @@ export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harm
 
 ```bash
 # Option A — from an Anchor IDL (program ABI only)
-qedgen spec --idl target/idl/my_program.json --format qedspec
+qedgen spec --idl target/idl/my_program.json
 
 # Option B — from the Anchor program's source (recommended)
 # Walks src/lib.rs, finds the #[program] mod, follows each forwarder
@@ -116,7 +122,7 @@ qedgen codegen --spec my_program.qedspec --lean
 cd formal_verification && lake build
 ```
 
-`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --format qedspec` is the IDL-only fallback when you don't have source.
+`qedgen adapt` carries forward what it can read from the source: handler names, argument types, the `Context<X>` accounts struct, and a pointer to the actual handler body in your repo. Lifecycle, requires, effects, and transfers stay as TODOs for you or your agent to fill in. `qedgen spec --idl <path>` is the IDL-only fallback when you don't have source.
 
 Once the spec is filled in, gate CI on it staying in sync with the program:
 

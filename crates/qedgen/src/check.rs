@@ -93,6 +93,10 @@ pub struct ParsedVariant {
 pub struct ParsedAbort {
     pub lean_expr: String,
     pub rust_expr: String,
+    /// Pod-aware Rust expression for Quasar target — Pod field accesses
+    /// carry a `.get()` postfix and mixed-kind binops add `as i128` casts.
+    /// Codegen picks between this and `rust_expr` based on `Target`.
+    pub rust_expr_pod: String,
     pub error_name: String,
 }
 
@@ -103,6 +107,7 @@ pub struct ParsedAbort {
 pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
+    pub rust_expr_pod: String,
     pub error_name: Option<String>,
 }
 
@@ -114,6 +119,8 @@ pub struct ParsedEnsures {
     pub lean_expr: String,
     #[allow(dead_code)]
     pub rust_expr: String,
+    #[allow(dead_code)]
+    pub rust_expr_pod: String,
 }
 
 /// Parsed cover block (reachability).
@@ -190,6 +197,9 @@ pub struct ParsedProperty {
     /// can't lower to a bool-valued function body; callers skip emission in
     /// that case.
     pub rust_expression: Option<String>,
+    /// Pod-aware Rust body for Quasar target (mirrors `rust_expr_pod` on
+    /// guard/abort/ensures). Codegen picks based on `Target`.
+    pub rust_expression_pod: Option<String>,
     pub preserved_by: Vec<String>,
 }
 
@@ -427,6 +437,7 @@ pub struct ParsedCallArg {
     pub name: String,
     pub lean_expr: String,
     pub rust_expr: String,
+    pub rust_expr_pod: String,
 }
 
 impl ParsedHandler {
@@ -437,11 +448,63 @@ impl ParsedHandler {
         !self.effects.is_empty()
     }
     /// Whether this handler initiates a CPI. True if the handler has a
-    /// `transfers { }` block (legacy sugar for Token.transfer) OR any
-    /// `call Interface.handler(...)` site (v2.5 uniform CPI surface).
+    /// `transfers { }` block (legacy sugar for `call Token.transfer(...)`)
+    /// OR any `call Interface.handler(...)` site (v2.5 uniform CPI surface).
     pub fn has_calls(&self) -> bool {
         !self.transfers.is_empty() || !self.calls.is_empty()
     }
+
+    /// Unified iterator over all CPIs the handler initiates. Yields
+    /// synthetic `ParsedCall` entries for each `transfers { ... }` block
+    /// (mapped as `call Token.transfer(from, to, amount, authority)`)
+    /// followed by the explicit `call Interface.handler(...)` sites.
+    ///
+    /// **Use this for new code reading the CPI surface.** The dual
+    /// representation (`transfers` + `calls`) is a v2.x backward-compat
+    /// holdover; v3.0 collapses to `calls` only and removes the
+    /// `transfers` field entirely. The `transfers { ... }` keyword
+    /// itself stays as user-facing sugar — it just desugars at parse
+    /// time. See the v2.10 transfers/calls unification thread.
+    #[allow(dead_code)] // v2.10+ canonical reader; existing modules read transfers/calls directly until v3.0
+    pub fn all_cpi_calls(&self) -> Vec<ParsedCall> {
+        let mut out: Vec<ParsedCall> = self
+            .transfers
+            .iter()
+            .map(|t| ParsedCall {
+                target_interface: "Token".to_string(),
+                target_handler: "transfer".to_string(),
+                args: vec![
+                    ParsedCallArg {
+                        name: "from".to_string(),
+                        lean_expr: t.from.clone(),
+                        rust_expr: t.from.clone(),
+                        rust_expr_pod: t.from.clone(),
+                    },
+                    ParsedCallArg {
+                        name: "to".to_string(),
+                        lean_expr: t.to.clone(),
+                        rust_expr: t.to.clone(),
+                        rust_expr_pod: t.to.clone(),
+                    },
+                    ParsedCallArg {
+                        name: "amount".to_string(),
+                        lean_expr: t.amount.clone().unwrap_or_default(),
+                        rust_expr: t.amount.clone().unwrap_or_default(),
+                        rust_expr_pod: t.amount.clone().unwrap_or_default(),
+                    },
+                    ParsedCallArg {
+                        name: "authority".to_string(),
+                        lean_expr: t.authority.clone().unwrap_or_default(),
+                        rust_expr: t.authority.clone().unwrap_or_default(),
+                        rust_expr_pod: t.authority.clone().unwrap_or_default(),
+                    },
+                ],
+            })
+            .collect();
+        out.extend(self.calls.iter().cloned());
+        out
+    }
+    #[allow(dead_code)]
     pub fn has_when(&self) -> bool {
         self.pre_status.is_some()
     }
@@ -475,22 +538,79 @@ impl ParsedHandler {
     }
 }
 
+/// True if the parsed state struct that backs this handler-account has a
+/// field named `field`. For multi-state specs the lookup walks
+/// `spec.account_types`; for single-state specs the union lives in
+/// `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
+fn state_account_has_field(acct: &ParsedHandlerAccount, spec: &ParsedSpec, field: &str) -> bool {
+    // Multi-state: match the account by name → ADT name (lowercase), then
+    // walk that ADT's field list.
+    for at in &spec.account_types {
+        let lower = at.name.to_lowercase();
+        if acct.name == lower || acct.name.starts_with(&lower) {
+            return at.fields.iter().any(|(n, _)| n == field);
+        }
+    }
+    // Single-state spec — fields union lives on the spec.
+    spec.state_fields.iter().any(|(n, _)| n == field)
+}
+
 impl ParsedHandlerAccount {
-    /// Generate the #[account(...)] attribute for codegen. Same shape
-    /// in both Anchor and Quasar (`#[account(mut, init, payer = ...,
-    /// seeds = ..., bump)]`).
-    pub fn quasar_account_attr(&self, handler: &ParsedHandler, state_name: &str) -> String {
+    /// Generate the #[account(...)] attribute for codegen, target-aware.
+    ///
+    /// Anchor and Quasar both spell the attribute `#[account(...)]` but
+    /// disagree on:
+    ///
+    /// - **Pubkey accessor**: Anchor uses `<acct>.key()`; Quasar uses
+    ///   `<acct>.address()`. Quasar's `#[account]` macro also auto-handles
+    ///   bare-ident seeds matching field names (expanding to
+    ///   `<ident>.to_account_view().address().as_ref()`), so Quasar bare
+    ///   idents are preferred over `.key().as_ref()`.
+    /// - **State-field seeds in non-init handlers**: Anchor's macro evaluates
+    ///   `<pda>.<field>.as_ref()` in a scope where `<pda>` is bound to the
+    ///   parsed account. Quasar re-uses the same expression in a `Bumps::seeds()`
+    ///   method where only `self` is in scope, so `vault.creator.as_ref()`
+    ///   fails with E0425. For Quasar we omit the `seeds = [...]` directive
+    ///   entirely on non-init handlers when seeds reference state fields —
+    ///   `Account<T>`'s owner+discriminator check still protects type
+    ///   confusion. Anchor keeps the original behavior.
+    pub fn quasar_account_attr(
+        &self,
+        handler: &ParsedHandler,
+        state_name: &str,
+        target: crate::Target,
+        spec: &ParsedSpec,
+        is_state_account: bool,
+    ) -> String {
+        let _ = state_name;
         let mut parts = Vec::new();
 
         if self.is_writable {
             parts.push("mut".to_string());
         }
 
-        // Infer init from lifecycle: handler creates the account
-        let is_init = (handler.pre_status.as_deref() == Some("Uninitialized")
-            || handler.pre_status.as_deref() == Some("Empty"))
-            && !self.is_signer
-            && self.pda_seeds.is_some();
+        // Infer init from lifecycle: handler creates the account.
+        //
+        // In multi-state specs (e.g. lending: Loan + Pool ADTs), only the
+        // account whose name matches the handler's `on_account` (the ADT
+        // whose lifecycle is being driven) is init'd — sibling writable
+        // PDAs in the same handler are pre-existing. The previous logic
+        // marked every writable PDA as init whenever the lifecycle was
+        // Uninit/Empty → ..., which broke lending's `borrow` (init'd both
+        // `loan` and `pool`).
+        let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
+            || handler.pre_status.as_deref() == Some("Empty");
+        let on_account_matches = match handler.on_account.as_deref() {
+            // Multi-state: only the named state account init's.
+            Some(adt_name) => {
+                let lower = adt_name.to_lowercase();
+                self.name == lower || self.name.starts_with(&lower)
+            }
+            // Single-state spec: any writable PDA can be the init target.
+            None => true,
+        };
+        let is_init =
+            lifecycle_is_init && on_account_matches && !self.is_signer && self.pda_seeds.is_some();
 
         if is_init {
             parts.push("init".to_string());
@@ -499,18 +619,80 @@ impl ParsedHandlerAccount {
             }
         }
 
-        if let Some(ref _seeds) = self.pda_seeds {
-            let struct_name = if state_name.ends_with("Account") {
-                state_name.to_string()
-            } else {
-                format!("{}Account", state_name)
-            };
-            parts.push(format!("seeds = {}::seeds({})", struct_name, self.name));
-            parts.push("bump".to_string());
+        if let Some(ref seeds) = self.pda_seeds {
+            let bound_account_names: std::collections::HashSet<&str> =
+                handler.accounts.iter().map(|a| a.name.as_str()).collect();
+
+            // Detect the case-3 (state-field) seeds. For Quasar non-init
+            // handlers these don't survive the `Bumps::<acct>_seeds(self)`
+            // method generation because `self.<seed>` isn't auto-captured —
+            // omit `seeds`/`bump` on the per-handler attribute and rely on
+            // owner+discriminator from `Account<T>`.
+            let needs_state_field_seed = seeds.iter().any(|seed| {
+                let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                !is_literal && !bound_account_names.contains(seed.as_str())
+            });
+
+            let suppress_seeds =
+                matches!(target, crate::Target::Quasar) && !is_init && needs_state_field_seed;
+
+            if !suppress_seeds {
+                let seed_parts: Vec<String> = seeds
+                    .iter()
+                    .map(|seed| {
+                        if let Some(inner) =
+                            seed.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                        {
+                            format!("b\"{}\"", inner)
+                        } else if bound_account_names.contains(seed.as_str()) {
+                            // Quasar auto-handles bare idents matching field
+                            // names; Anchor needs the explicit `.key().as_ref()`
+                            // call.
+                            match target {
+                                crate::Target::Quasar => seed.clone(),
+                                _ => format!("{}.key().as_ref()", seed),
+                            }
+                        } else {
+                            // State-field seed (only reached on Anchor or on
+                            // init handlers — non-init Quasar suppresses the
+                            // whole seeds directive above).
+                            format!("{}.{}.as_ref()", self.name, seed)
+                        }
+                    })
+                    .collect();
+                parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
+                parts.push("bump".to_string());
+            }
         }
 
-        if let Some(ref auth) = self.authority {
-            parts.push(format!("token::authority = {}", auth));
+        // `token::authority = X` is only valid on accounts that are also
+        // `init` / `init_if_needed` — quasar (and anchor) reject it on
+        // already-existing accounts. The spec authority annotation
+        // captures "this token account should belong to this authority";
+        // for non-init accounts that's already enforced at init time and
+        // doesn't need re-emission. For init accounts we emit it so the
+        // macro can wire up the SPL InitToken CPI correctly.
+        if is_init {
+            if let Some(ref auth) = self.authority {
+                parts.push(format!("token::authority = {}", auth));
+            }
+        }
+
+        // R25: lower `auth X` to `has_one = X` when the state-bearing
+        // account in this handler has a field named X. The spec's `auth
+        // X` clause + accounts block already names the authority — the
+        // codegen just needs to bind it. Without this every handler
+        // taking an authority signer is reachable by ANY signer (the
+        // signer check only verifies "someone signed", not "the right
+        // someone"). Closes the percolator-CRIT, multisig::remove_member
+        // CRIT, and the lending init_pool/borrow/repay HIGHs in one
+        // emit. Anchor and Quasar both accept `has_one = field`.
+        if is_state_account {
+            if let Some(ref who) = handler.who {
+                if state_account_has_field(self, spec, who) {
+                    parts.push(format!("has_one = {}", who));
+                }
+            }
         }
 
         if parts.is_empty() {
@@ -538,6 +720,15 @@ pub struct ParsedHandlerAccount {
 }
 
 /// A token transfer intent within a handler's `transfers` block.
+///
+/// **Note (v2.10+):** `transfers { from X to Y amount Z authority W }` is
+/// declarative sugar over `call Token.transfer(from = X, to = Y, amount = Z,
+/// authority = W)`. New code consuming the CPI surface should call
+/// [`ParsedHandler::all_cpi_calls`] which yields a synthetic `ParsedCall`
+/// for each `ParsedTransfer` plus the explicit `calls`. The dual storage
+/// here is backward-compat for codegen/lean_gen/fill — v3.0 collapses to
+/// `ParsedCall` only and the `transfers` field is removed (the keyword
+/// stays as parse-time sugar that desugars directly into `calls`).
 #[derive(Debug, Clone)]
 pub struct ParsedTransfer {
     pub from: String,
@@ -2605,6 +2796,16 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // at `qedgen check` rather than at `cargo build`.
     warnings.extend(check_checked_arith_needs_math_overflow(spec));
 
+    // v2.10 — spec-authoring lints covering the security shapes the
+    // v2.10 post-codegen audit caught. See
+    // `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` for the full proposal and
+    // the auditor-finding mapping.
+    warnings.extend(check_unbound_auth(spec));
+    warnings.extend(check_unguarded_indexed_mutation(spec));
+    warnings.extend(check_scalar_counter_no_dedup(spec));
+    warnings.extend(check_unguarded_terminal_transition(spec));
+    warnings.extend(check_unconditional_value_transfer(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -2658,6 +2859,397 @@ fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<Completenes
 /// sites whose target declares no `ensures`. The call still generates a real
 /// Rust CPI builder; the lint simply makes the proof-side gap explicit so
 /// nobody mistakes a compiling CPI for a verified one.
+/// True iff this handler's `auth X` will be lowered to `has_one = X` by
+/// R25 — that is, `X` is a field on a state account this handler
+/// touches. Used by terminal-transition and value-transfer lints to
+/// avoid false positives on auth-bound handlers (the signer identity
+/// IS the gate).
+fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
+    let Some(ref who) = handler.who else {
+        return false;
+    };
+    if spec.account_types.is_empty() {
+        return spec.state_fields.iter().any(|(n, _)| n == who);
+    }
+    spec.account_types
+        .iter()
+        .any(|at| at.fields.iter().any(|(n, _)| n == who))
+}
+
+// ============================================================================
+// v2.10 spec-authoring lints (audit follow-up)
+//
+// These complement codegen fixes R25–R28 by surfacing the *spec shapes*
+// that lead to under-specified auth, value transfer, and lifecycle
+// transitions. Each lint maps 1:1 to a finding from the v2.10 post-codegen
+// audit (.qed/findings/audit-20260427-v210.md). Catching them at
+// `qedgen check` time means routine spec gaps don't have to wait for an
+// auditor invocation.
+// ============================================================================
+
+/// `[unbound_auth]` — `auth X` doesn't match a state field, so codegen's
+/// `auth → has_one` lowering (R25) can't fire. The signer check verifies
+/// "someone signed," not "the right someone."
+///
+/// Closed by R25 when `X` IS a state field. Catches the percolator-CRIT
+/// shape — auth name without a state-side anchor.
+fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for handler in &spec.handlers {
+        if handler.permissionless {
+            continue;
+        }
+        let Some(ref who) = handler.who else {
+            // `no_access_control` already covers the no-auth case; don't
+            // double-flag.
+            continue;
+        };
+        // Skip handlers without a discoverable state account — single-
+        // signer admin handlers without state aren't this lint's target.
+        if handler.accounts.is_empty() {
+            continue;
+        }
+        // The state-bearing account in this handler — same logic as
+        // codegen.rs::find_state_account, but we only need to know
+        // *whether* one exists for field lookup. A handler with multiple
+        // state candidates falls back to single-state field set.
+        let has_who_field = if spec.account_types.is_empty() {
+            spec.state_fields.iter().any(|(n, _)| n == who)
+        } else {
+            spec.account_types
+                .iter()
+                .any(|at| at.fields.iter().any(|(n, _)| n == who))
+        };
+        if has_who_field {
+            continue;
+        }
+        // The auth name might still have a state-side binding via an
+        // explicit `requires` clause. If any `requires` references both
+        // `who` and a state field, treat the spec as deliberately
+        // self-binding and skip the warning.
+        let manually_bound = handler
+            .requires
+            .iter()
+            .any(|r| r.lean_expr.contains(who) && r.lean_expr.contains("s."));
+        if manually_bound {
+            continue;
+        }
+        warnings.push(CompletenessWarning {
+            rule: "unbound_auth".to_string(),
+            severity: Severity::Warning,
+            priority: 1,
+            message: format!(
+                "handler '{handler}' declares `auth {who}` but no state field is named `{who}`. R25's `auth → has_one` lowering only fires when the auth name matches a state field — as written, any signer can call this handler against any program-owned account.",
+                handler = handler.name,
+                who = who,
+            ),
+            subject: Some(handler.name.clone()),
+            fix: format!(
+                "Either (a) add `{who} : Pubkey` to the state account so codegen emits `has_one = {who}`, (b) add an explicit `requires state.<field> == {who} else Unauthorized` clause that binds the signer to a stored value, or (c) mark the handler `permissionless` if it's deliberately open.",
+                who = who,
+            ),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        });
+    }
+    warnings
+}
+
+/// `[unguarded_indexed_mutation]` — handler takes an index parameter
+/// and mutates `state.<map>[i]`, but no `requires` binds the index to
+/// the signer. Catches the multisig::approve/reject shape — anyone can
+/// vote with any `member_index` because the spec doesn't tie the index
+/// to the signer's pubkey.
+fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for handler in &spec.handlers {
+        if handler.permissionless {
+            continue;
+        }
+        let Some(ref who) = handler.who else {
+            continue;
+        };
+        // Index-shaped params (Fin[N], U8/U16/U32 used for indexing).
+        // We accept any unsigned int as a candidate; the trigger is
+        // whether the param actually appears as an index in an effect's
+        // LHS.
+        let index_params: Vec<&str> = handler
+            .takes_params
+            .iter()
+            .filter(|(_, t)| {
+                let tt = t.trim();
+                tt.starts_with("Fin") || matches!(tt, "U8" | "U16" | "U32" | "U64")
+            })
+            .map(|(n, _)| n.as_str())
+            .collect();
+        if index_params.is_empty() {
+            continue;
+        }
+        // Does any effect LHS use one of the index params?
+        let mut indexed_effect_param: Option<&str> = None;
+        for (lhs, _, _) in &handler.effects {
+            for p in &index_params {
+                let needle = format!("[{}]", p);
+                if lhs.contains(&needle) {
+                    indexed_effect_param = Some(p);
+                    break;
+                }
+            }
+            if indexed_effect_param.is_some() {
+                break;
+            }
+        }
+        let Some(idx_param) = indexed_effect_param else {
+            continue;
+        };
+        // Is there a requires that binds `who` to `state.<map>[<idx_param>]`?
+        let has_binding = handler.requires.iter().any(|r| {
+            let e = r.lean_expr.as_str();
+            e.contains(who) && e.contains(&format!("[{}]", idx_param))
+        });
+        if has_binding {
+            continue;
+        }
+        warnings.push(CompletenessWarning {
+            rule: "unguarded_indexed_mutation".to_string(),
+            severity: Severity::Warning,
+            priority: 1,
+            message: format!(
+                "handler '{handler}' takes index `{idx} : <int>` and mutates `state.<map>[{idx}]`, but no `requires` clause binds `{idx}` to the signer `{who}`. As written, any signer can drive the indexed mutation against any slot — the only existing check is the bounds (`{idx} < bound`), which rules out out-of-range but not unauthorized writes.",
+                handler = handler.name,
+                idx = idx_param,
+                who = who,
+            ),
+            subject: Some(handler.name.clone()),
+            fix: format!(
+                "Add a `requires` clause that ties `{idx}` to `{who}`, e.g.:\n\n    requires state.members[{idx}] == {who} else NotAMember\n\nWithout it, `{idx}` is just a number the caller picks.",
+                idx = idx_param,
+                who = who,
+            ),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        });
+    }
+    warnings
+}
+
+/// `[scalar_counter_no_dedup]` — handler increments a scalar counter
+/// (e.g. `approval_count += 1`) bounded by another scalar
+/// (e.g. `approval_count + rejection_count < member_count`), but the
+/// spec has no per-actor tracking field that prevents the same actor
+/// from voting multiple times. Catches the dedup arm of the multisig
+/// approve/reject HIGH.
+fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    // Map field names whose type starts with Bool/U8 + "Map[" — the kinds
+    // of fields users add for per-actor dedup (`voted : Map[N] U8`,
+    // `processed : Map[N] Bool`).
+    let has_dedup_shaped_field = |spec: &ParsedSpec| -> bool {
+        let by_state = spec.state_fields.iter();
+        let by_account = spec.account_types.iter().flat_map(|at| at.fields.iter());
+        by_state.chain(by_account).any(|(_, t)| {
+            let tt = t.trim();
+            tt.starts_with("Map[") && (tt.ends_with("Bool") || tt.ends_with("U8"))
+        })
+    };
+    if has_dedup_shaped_field(spec) {
+        // Spec already has at least one dedup-shaped field — assume the
+        // user has thought about this and skip. (If they have one but
+        // forgot to use it, that's a separate concern.)
+        return warnings;
+    }
+    for handler in &spec.handlers {
+        for (lhs, op_kind, _) in &handler.effects {
+            if op_kind != "add" {
+                continue;
+            }
+            // Scalar increment — no subscript on the LHS.
+            if lhs.contains('[') {
+                continue;
+            }
+            // Is the incremented field bounded by ANOTHER STATE FIELD
+            // in any requires clause? Const-bounded scalars (TVL caps,
+            // overflow guards) don't fit this lint's shape — the
+            // multisig pattern is specifically "this counter ceiling
+            // is itself a state field" (`approval_count + ... <
+            // member_count`), where the ceiling is per-vault dynamic
+            // data and per-actor dedup is the missing piece.
+            let bounded_by_state = handler.requires.iter().any(|r| {
+                let e = &r.lean_expr;
+                if !e.contains(lhs.as_str()) {
+                    return false;
+                }
+                if !e.contains('<') && !e.contains('≤') {
+                    return false;
+                }
+                // At least two distinct state-field references
+                // (ours + at least one other on the bound side).
+                e.matches("s.").count() >= 2 || e.matches("state.").count() >= 2
+            });
+            if !bounded_by_state {
+                continue;
+            }
+            warnings.push(CompletenessWarning {
+                rule: "scalar_counter_no_dedup".to_string(),
+                severity: Severity::Info,
+                priority: 2,
+                message: format!(
+                    "handler '{handler}' increments scalar counter `{lhs}` toward an existing bound, but the spec has no per-actor record (e.g. `voted : Map[N] U8`) preventing the same actor from incrementing across different signer pubkeys.",
+                    handler = handler.name,
+                    lhs = lhs,
+                ),
+                subject: Some(handler.name.clone()),
+                fix: format!(
+                    "Add a per-actor tracking field and a corresponding requires clause:\n\n    state.Active of {{ ... voted : Map[N] U8 ... }}\n\n    handler {handler} (i : U8) ... {{\n      requires state.voted[i] == 0 else AlreadyVoted\n      effect {{\n        {lhs} += 1\n        voted[i] := 1\n      }}\n    }}",
+                    handler = handler.name,
+                    lhs = lhs,
+                ),
+                example: None,
+                counterexample: None,
+                fix_options: vec![],
+            });
+            // Only one warning per handler.
+            break;
+        }
+    }
+    warnings
+}
+
+/// `[unguarded_terminal_transition]` — handler transitions to a terminal
+/// lifecycle state (a state that's not the post of any other handler,
+/// or matches the heuristic terminal-name list) with no `requires`
+/// clauses AND no R25-eligible auth binding. Catches the
+/// lending::liquidate HIGH (anyone-can-liquidate).
+fn check_unguarded_terminal_transition(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let terminal_name_heuristic: &[&str] = &[
+        "Liquidated",
+        "Closed",
+        "Drained",
+        "Cancelled",
+        "Burned",
+        "Settled",
+        "Redeemed",
+        "Finalized",
+    ];
+    for handler in &spec.handlers {
+        let Some(ref post) = handler.post_status else {
+            continue;
+        };
+        let is_named_terminal = terminal_name_heuristic.iter().any(|t| t == post);
+        let is_structurally_terminal = !spec
+            .handlers
+            .iter()
+            .any(|h| h.pre_status.as_deref() == Some(post.as_str()));
+        if !is_named_terminal && !is_structurally_terminal {
+            continue;
+        }
+        // Init handlers (Uninitialized → Active) aren't this lint's target —
+        // a fresh-account creation transition with no requires is fine.
+        let pre = handler.pre_status.as_deref().unwrap_or("");
+        if matches!(pre, "Uninitialized" | "Empty") {
+            continue;
+        }
+        if !handler.requires.is_empty() {
+            continue;
+        }
+        // R25 has_one binding counts as a gate. If the handler's `auth X`
+        // matches a state field, R25 emits `has_one = X` and only the
+        // matching pubkey can trigger the transition. This is the
+        // escrow::cancel / escrow::exchange shape — gated by signer
+        // identity, no data precondition needed.
+        if r25_will_bind_auth(handler, spec) {
+            continue;
+        }
+        warnings.push(CompletenessWarning {
+            rule: "unguarded_terminal_transition".to_string(),
+            severity: Severity::Warning,
+            priority: 1,
+            message: format!(
+                "handler '{handler}' transitions to terminal state `{post}` with no `requires` clauses. Terminal transitions usually need a guard — anyone with the right account shape can otherwise trigger the transition.",
+                handler = handler.name,
+                post = post,
+            ),
+            subject: Some(handler.name.clone()),
+            fix: "Add a `requires` clause that gates the transition. For liquidation: a health threshold (`requires state.amount > state.collateral else AccountHealthy`). For closing: an empty-balance check (`requires state.balance == 0`). For settlement: a finality predicate.".to_string(),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        });
+    }
+    warnings
+}
+
+/// `[unconditional_value_transfer]` — handler has a `transfers` clause
+/// where the source account is owned by program state (i.e. has
+/// `authority X` with X being a handler-bound account that's program-
+/// derived), AND the handler has no `requires` clause that constrains
+/// who can call it. Catches the lending::liquidate vault-drain shape.
+fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for handler in &spec.handlers {
+        for transfer in &handler.transfers {
+            // Look up the `from` account in the handler's accounts list.
+            // If it has a token authority that points at a writable
+            // PDA-typed account in this handler, the source is program-
+            // owned.
+            let Some(from_acct) = handler.accounts.iter().find(|a| a.name == transfer.from) else {
+                continue;
+            };
+            let Some(ref auth_name) = from_acct.authority else {
+                continue;
+            };
+            let auth_is_program_owned = handler
+                .accounts
+                .iter()
+                .any(|a| &a.name == auth_name && a.is_writable && a.pda_seeds.is_some());
+            if !auth_is_program_owned {
+                continue;
+            }
+            // Does the handler have a constraining requires beyond
+            // amount-validity? We treat "amount > 0" / "amount < ..." as
+            // not constraining caller identity.
+            let has_caller_requires = handler.requires.iter().any(|r| {
+                let e = &r.lean_expr;
+                // Heuristic: caller-binding requires reference state.<field>
+                // rather than just the amount param.
+                e.contains("s.") || e.contains("state.")
+            });
+            if has_caller_requires {
+                continue;
+            }
+            // R25 has_one binding counts as a caller gate — escrow::exchange
+            // and ::cancel are both auth-bound (`auth taker` / `auth
+            // initializer` matching state fields), so the transfer is
+            // already gated by signer identity even without an explicit
+            // `requires`.
+            if r25_will_bind_auth(handler, spec) {
+                continue;
+            }
+            warnings.push(CompletenessWarning {
+                rule: "unconditional_value_transfer".to_string(),
+                severity: Severity::Warning,
+                priority: 1,
+                message: format!(
+                    "handler '{handler}' transfers from program-owned `{from}` (authority `{auth}`) with no `requires` clauses constraining who can call it. Value-extracting handlers usually need an authority binding or a precondition that gates the transfer.",
+                    handler = handler.name,
+                    from = transfer.from,
+                    auth = auth_name,
+                ),
+                subject: Some(handler.name.clone()),
+                fix: "Either bind the auth to a state field (so R25 emits `has_one = X`) or add a precondition that gates the transfer (e.g. health check, redemption ratio, allowance). Without one, any signer can extract value from the program-owned account.".to_string(),
+                example: None,
+                counterexample: None,
+                fix_options: vec![],
+            });
+            break; // one warning per handler
+        }
+    }
+    warnings
+}
+
 fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
 
@@ -3753,6 +4345,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4006,6 +4599,195 @@ mod tests {
     }
 
     // ========================================================================
+    // v2.10 spec-authoring lint regression tests. Each fixture mirrors the
+    // shape of an audit finding from `.qed/findings/audit-20260427-v210.md`.
+    // These guard against the lints silently regressing — if they stop
+    // firing, the audit's recurring spec-shape gaps go uncaught.
+    // ========================================================================
+
+    /// Fixture mirroring the percolator-CRIT shape: `auth authority` but
+    /// no `authority` field on the state. Every handler is reachable by
+    /// any signer.
+    const UNBOUND_AUTH_FIXTURE: &str = r#"
+spec Vault
+
+type State
+  | Uninitialized
+  | Active of {
+      balance : U64,
+    }
+
+type Error | InvalidAmount
+
+handler init : State.Uninitialized -> State.Active {
+  auth authority
+  accounts {
+    authority : signer
+    vault     : writable
+  }
+  effect { balance := 0 }
+}
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  auth authority
+  accounts {
+    authority : signer
+    vault     : writable
+  }
+  requires amount > 0 else InvalidAmount
+  effect { balance -= amount }
+}
+"#;
+
+    #[test]
+    fn lint_unbound_auth_fires() {
+        let spec =
+            crate::chumsky_adapter::parse_str(UNBOUND_AUTH_FIXTURE).expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let unbound: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unbound_auth")
+            .collect();
+        assert!(
+            !unbound.is_empty(),
+            "expected unbound_auth to fire on a spec with `auth authority` and no state field; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// Fixture mirroring the multisig::approve/reject HIGH: handler
+    /// takes `member_index` and mutates `state.voted[member_index]` but
+    /// no `requires` binds the index to the signer.
+    const UNGUARDED_INDEXED_FIXTURE: &str = r#"
+spec Voting
+
+const N = 8
+
+type State
+  | Uninitialized
+  | Active of {
+      voted : Map[N] U8,
+      count : U8,
+    }
+
+type Error | OutOfRange | MathOverflow
+
+handler vote (member_index : U8) : State.Active -> State.Active {
+  auth voter
+  accounts {
+    voter : signer
+    vault : writable
+  }
+  requires member_index < 8 else OutOfRange
+  effect {
+    count += 1
+    voted[member_index] := 1
+  }
+}
+"#;
+
+    #[test]
+    fn lint_unguarded_indexed_mutation_fires() {
+        let spec = crate::chumsky_adapter::parse_str(UNGUARDED_INDEXED_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_indexed_mutation")
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "expected unguarded_indexed_mutation to fire on a vote-by-index handler with no signer↔index binding; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// Fixture mirroring the lending::liquidate HIGH: handler
+    /// transitions to a terminal state with no `requires`.
+    const UNGUARDED_TERMINAL_FIXTURE: &str = r#"
+spec Loan
+
+type State
+  | Empty
+  | Active of {
+      borrower : Pubkey,
+      amount   : U64,
+    }
+  | Liquidated
+
+type Error | NotFound
+
+handler liquidate : State.Active -> State.Liquidated {
+  auth liquidator
+  accounts {
+    liquidator : signer
+    loan       : writable
+  }
+  effect { amount := 0 }
+}
+"#;
+
+    #[test]
+    fn lint_unguarded_terminal_transition_fires() {
+        let spec = crate::chumsky_adapter::parse_str(UNGUARDED_TERMINAL_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_terminal_transition")
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "expected unguarded_terminal_transition to fire on a Liquidated transition with no requires; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// Inverse: when the transition IS gated by an explicit `requires`,
+    /// the lint should NOT fire (audit-fixed lending::liquidate shape).
+    const GATED_TERMINAL_FIXTURE: &str = r#"
+spec Loan
+
+type State
+  | Empty
+  | Active of {
+      borrower   : Pubkey,
+      amount     : U64,
+      collateral : U64,
+    }
+  | Liquidated
+
+type Error | AccountHealthy
+
+handler liquidate : State.Active -> State.Liquidated {
+  auth liquidator
+  accounts {
+    liquidator : signer
+    loan       : writable
+  }
+  requires state.amount > state.collateral else AccountHealthy
+  effect { amount := 0 }
+}
+"#;
+
+    #[test]
+    fn lint_gated_terminal_transition_does_not_fire() {
+        let spec = crate::chumsky_adapter::parse_str(GATED_TERMINAL_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_terminal_transition")
+            .map(|w| w.rule.as_str())
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "unguarded_terminal_transition should not fire on health-gated liquidate; got: {:?}",
+            hits
+        );
+    }
+
+    // ========================================================================
     // v2.0 tests: coverage matrix, write_without_read, circular_lifecycle
     // ========================================================================
 
@@ -4035,6 +4817,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("state.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()], // only covers deposit
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4064,6 +4847,7 @@ mod tests {
                 name: "conservation".to_string(),
                 expression: Some("s.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
             }],
             lifecycle_states: vec!["Active".to_string()],
@@ -4595,6 +5379,7 @@ interface Token {
                      — lower at harness level */"
                         .to_string(),
                 ),
+                rust_expression_pod: None,
                 preserved_by: vec![],
             }],
             ..empty_spec()
@@ -4624,6 +5409,7 @@ interface Token {
                 name: "bytes_nonneg".to_string(),
                 expression: Some("∀ v : Nat, v ≥ 0".to_string()),
                 rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
+                rust_expression_pod: None,
                 preserved_by: vec![],
             }],
             ..empty_spec()

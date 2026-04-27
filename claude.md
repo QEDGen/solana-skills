@@ -111,7 +111,7 @@ qedgen verify --spec program.qedspec --kani             # cargo kani --tests
 qedgen verify --spec program.qedspec --lean             # lake build
 qedgen verify --spec program.qedspec --json             # machine-readable for CI
 
-# Generate a draft SPEC.md from an Anchor IDL
+# Scaffold a .qedspec from an Anchor IDL
 qedgen spec --idl target/idl/program.json --output-dir ./formal_verification
 
 # Consolidate multiple proof projects into single project
@@ -139,7 +139,7 @@ qedgen asm2lean \
 - `chumsky_parser.rs` - chumsky parser for `.qedspec` files (produces typed AST via `chumsky_adapter.rs`)
 - `check.rs` - Spec validation: lint, coverage matrix, drift detection
 - `lean_gen.rs` - Lean 4 code generation from parsed spec (Rust + sBPF renderers)
-- `codegen.rs` - Rust program skeleton generation from spec (Anchor target today; `--target quasar`/`pinocchio` branches land in v2.10+)
+- `codegen.rs` - Rust program skeleton generation from spec (Anchor and Quasar targets fully supported as of v2.10; `--target pinocchio` reserves CLI surface and lands in v2.11+)
 - `kani.rs` - Kani BMC harness generation
 - `proptest_gen.rs` - Proptest harness generation
 - `unit_test.rs` - Unit test generation
@@ -155,7 +155,7 @@ qedgen asm2lean \
 - `fingerprint.rs` - Spec section hashing for generated artifact staleness detection
 - `project.rs` - Lean project scaffolding generation
 - `consolidate.rs` - Merges multiple proof projects
-- `spec.rs` - SPEC.md generation from Anchor IDL or `.qedspec`
+- `idl.rs` - Anchor IDL parsing + first-pass pattern inference (consumed by `idl2spec` and `interface_gen`)
 
 **`lean_solana/`** - Standalone Lean 4 library: Solana axioms (QEDGen.Solana)
 - `QEDGen/Solana/Account.lean` - Account structure

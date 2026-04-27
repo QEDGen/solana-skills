@@ -11,11 +11,12 @@ spec Escrow
 type State
   | Uninitialized
   | Open of {
-      initializer          : Pubkey,
-      taker                : Pubkey,
-      initializer_amount   : U64,
-      taker_amount         : U64,
-      escrow_token_account : Pubkey,
+      initializer               : Pubkey,
+      initializer_token_account : Pubkey,
+      taker                     : Pubkey,
+      initializer_amount        : U64,
+      taker_amount              : U64,
+      escrow_token_account      : Pubkey,
     }
   | Closed
 
@@ -57,8 +58,9 @@ handler initialize (deposit_amount : U64) (receive_amount : U64) : State.Uniniti
   requires deposit_amount > 0 and receive_amount > 0 else InvalidAmount
 
   effect {
-    initializer_amount := deposit_amount
-    taker_amount := receive_amount
+    initializer_amount        := deposit_amount
+    taker_amount              := receive_amount
+    initializer_token_account := initializer_ta.pubkey
   }
 
   transfers {

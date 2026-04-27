@@ -7,68 +7,127 @@
 
 use quasar_lang::prelude::*;
 use crate::errors::*;
+use crate::state::*;
 use crate::instructions::*;
 
 /// Guards for `create_vault`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn create_vault(ctx: &mut CreateVault, threshold: u8, member_count: u8) -> Result<(), ProgramError> {
+pub fn create_vault<'info>(ctx: &mut CreateVault<'info>, threshold: u8, member_count: u8) -> Result<(), ProgramError> {
     // requires: threshold > 0 ∧ threshold ≤ member_count
-    if !(threshold > 0 && threshold <= member_count) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
+    if !((threshold > 0) && (threshold <= member_count)) { return Err(ProgramError::from(MultisigError::InvalidThreshold)); }
     // requires: member_count ≤ 32
     if !(member_count <= 32) { return Err(ProgramError::from(MultisigError::TooManyMembers)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `propose`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn propose(ctx: &mut Propose) -> Result<(), ProgramError> {
-    // No guards declared in spec — nothing to check.
+pub fn propose<'info>(ctx: &mut Propose<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.vault matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.vault.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(MultisigError::InvalidPda));
+        }
+    }
+    // lifecycle: status := HasProposal
+    ctx.vault.status = Status::HasProposal as u8;
     Ok(())
 }
 
 /// Guards for `approve`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn approve(ctx: &mut Approve, member_index: u8) -> Result<(), ProgramError> {
+pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.vault matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.vault.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(MultisigError::InvalidPda));
+        }
+    }
     // requires: member_index < s.member_count
-    if !(member_index < state.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
-    // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(state.approval_count + state.rejection_count < state.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.members[member_index] = approver
+    if !(ctx.vault.members[(member_index) as usize] == (*ctx.approver.to_account_view().address())) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.voted[member_index] = 0
+    if !(ctx.vault.voted[(member_index) as usize] == 0) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
 /// Guards for `reject`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn reject(ctx: &mut Reject, member_index: u8) -> Result<(), ProgramError> {
+pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.vault matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.vault.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(MultisigError::InvalidPda));
+        }
+    }
     // requires: member_index < s.member_count
-    if !(member_index < state.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
-    // requires: s.approval_count + s.rejection_count < s.member_count
-    if !(state.approval_count + state.rejection_count < state.member_count) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.members[member_index] = rejecter
+    if !(ctx.vault.members[(member_index) as usize] == (*ctx.rejecter.to_account_view().address())) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    // requires: s.voted[member_index] = 0
+    if !(ctx.vault.voted[(member_index) as usize] == 0) { return Err(ProgramError::from(MultisigError::AlreadyVoted)); }
     Ok(())
 }
 
 /// Guards for `execute`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn execute(ctx: &mut Execute) -> Result<(), ProgramError> {
+pub fn execute<'info>(ctx: &mut Execute<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.vault matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.vault.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(MultisigError::InvalidPda));
+        }
+    }
     // requires: s.approval_count ≥ s.threshold
-    if !(state.approval_count >= state.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
+    if !(ctx.vault.approval_count >= ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdNotMet)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `cancel_proposal`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn cancel_proposal(ctx: &mut CancelProposal) -> Result<(), ProgramError> {
+pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == HasProposal
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // R28 PDA check: ctx.vault matches its declared seeds
+    {
+        let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
+        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.vault.to_account_view().address()).is_err() {
+            return Err(ProgramError::from(MultisigError::InvalidPda));
+        }
+    }
     // requires: s.member_count - s.rejection_count < s.threshold
-    if !(state.member_count - state.rejection_count < state.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
+    if !(ctx.vault.member_count - ctx.vault.rejection_count < ctx.vault.threshold) { return Err(ProgramError::from(MultisigError::ThresholdUnreachable)); }
+    // lifecycle: status := Active
+    ctx.vault.status = Status::Active as u8;
     Ok(())
 }
 
 /// Guards for `remove_member`.  
 /// Generated from the `requires` clauses of the spec handler block.
-pub fn remove_member(ctx: &mut RemoveMember) -> Result<(), ProgramError> {
+pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
     // requires: s.member_count > s.threshold
-    debug_assert!(state.member_count > state.threshold);
+    debug_assert!(ctx.vault.member_count > ctx.vault.threshold);
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0
-    debug_assert!(state.approval_count == 0 && state.rejection_count == 0);
+    debug_assert!((ctx.vault.approval_count == 0) && (ctx.vault.rejection_count == 0));
     Ok(())
 }
 

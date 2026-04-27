@@ -34,6 +34,8 @@ type Error
   | Unauthorized
   | AlreadyActive
   | InvalidAmount
+  | MathOverflow
+  | AccountHealthy
 
 pda pool ["pool", authority]
 pda loan ["loan", pool, borrower]
@@ -67,8 +69,12 @@ handler init_pool (rate : U64) : Pool.Uninitialized -> Pool.Active {
   emits PoolInitialized
 }
 
-/// Deposit tokens into the pool
+/// Deposit tokens into the pool — anyone can deposit; the depositor
+/// receives credit by being the source-account owner of the token
+/// transfer, not by being privileged.
 handler deposit (amount : U64) : Pool.Active -> Pool.Active {
+  permissionless
+
   accounts {
     depositor     : signer, writable
     pool          : writable, pda ["pool", authority]
@@ -81,6 +87,10 @@ handler deposit (amount : U64) : Pool.Active -> Pool.Active {
 
   effect {
     total_deposits += amount
+  }
+
+  transfers {
+    from depositor_ta to pool_vault amount amount authority depositor
   }
 
   emits Deposited
@@ -107,6 +117,10 @@ handler borrow (amount : U64) (collateral : U64) : Loan.Empty -> Loan.Active {
     collateral := collateral
   }
 
+  transfers {
+    from pool_vault to borrower_ta amount amount authority pool
+  }
+
   emits Borrowed
 }
 
@@ -128,21 +142,40 @@ handler repay : Loan.Active -> Loan.Empty {
     collateral := 0
   }
 
+  transfers {
+    from borrower_ta to pool_vault amount amount authority borrower
+  }
+
   emits Repaid
 }
 
-/// Liquidate an undercollateralized loan
+/// Liquidate an undercollateralized loan — anyone can liquidate; the
+/// authorization is the health check, not the liquidator's identity.
 handler liquidate : Loan.Active -> Loan.Liquidated {
+  permissionless
+
   accounts {
-    liquidator    : signer, writable
-    loan          : writable, pda ["loan", pool, borrower]
-    pool          : writable, pda ["pool", authority]
-    pool_vault    : writable, token, authority pool
-    token_program : program
+    liquidator     : signer, writable
+    loan           : writable, pda ["loan", pool, borrower]
+    pool           : writable, pda ["pool", authority]
+    pool_vault     : writable, token, authority pool
+    liquidator_ta  : writable, token
+    token_program  : program
   }
+
+  // Liquidations only fire when the loan is underwater — debt exceeds
+  // collateral. Healthy positions are protected; only insolvent loans
+  // can be seized. Real protocols would parameterize this by an LTV
+  // factor (e.g. `amount * 100 > collateral * 80` for an 80% trigger);
+  // the simplest formulation captures the security shape.
+  requires state.amount > state.collateral else AccountHealthy
 
   effect {
     amount := 0
+  }
+
+  transfers {
+    from pool_vault to liquidator_ta amount amount authority pool
   }
 
   emits LoanLiquidated

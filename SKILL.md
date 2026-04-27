@@ -443,9 +443,11 @@ $QEDGEN init --name dropset --spec dropset.qedspec --asm src/dropset.s
 $QEDGEN init --name engine --spec engine.qedspec --mathlib
 
 # With the full handler + Kani codegen pipeline. `--target` selects
-# the framework: `anchor` and `quasar` are both implemented in v2.9;
-# `pinocchio` reserves the CLI surface for v2.10+ and errors cleanly
-# when selected.
+# the framework: `anchor` and `quasar` are both implemented; quasar
+# went through a full codegen + security pass in v2.10 (defense layers
+# include lifecycle pre-checks, PDA re-verification, token authority
+# binding, and `has_one` lowering). `pinocchio` reserves the CLI
+# surface for v2.11+ and errors cleanly when selected.
 $QEDGEN init --name counter --spec counter.qedspec --target anchor
 ```
 

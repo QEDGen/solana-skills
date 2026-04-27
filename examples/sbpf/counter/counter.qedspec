@@ -37,6 +37,8 @@ type Error
 
 /// Create a new PDA counter via System Program CPI
 handler initialize : State.Uninitialized -> State.Active {
+  auth user
+
   accounts {
     user           : signer, writable
     pda            : writable
@@ -59,6 +61,8 @@ handler initialize : State.Uninitialized -> State.Active {
 
 /// Increment an existing counter
 handler increment : State.Active -> State.Active {
+  auth user
+
   accounts {
     user : signer, writable
     pda  : writable

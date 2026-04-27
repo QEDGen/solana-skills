@@ -41,6 +41,8 @@ type Error
 
 /// Create tree account via System Program CPI, initialize header
 handler initialize : State.Uninitialized -> State.Active {
+  auth user
+
   accounts {
     user           : signer, writable
     tree           : writable
@@ -64,6 +66,8 @@ handler initialize : State.Uninitialized -> State.Active {
 
 /// Insert a key-value pair — performs RB fixup after insertion
 handler insert (key : U16) (value : U16) : State.Active -> State.Active {
+  auth user
+
   accounts {
     user : signer, writable
     tree : writable
@@ -81,6 +85,8 @@ handler insert (key : U16) (value : U16) : State.Active -> State.Active {
 
 /// Remove a key — performs RB rebalance after deletion
 handler remove (key : U16) : State.Active -> State.Active {
+  auth user
+
   accounts {
     user : signer, writable
     tree : writable

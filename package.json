@@ -26,7 +26,8 @@
   "homepage": "https://github.com/qedgen/solana-skills#readme",
   "agentSkills": {
     "skills": [
-      "SKILL.md"
+      "SKILL.md",
+      "skills/qedgen-auditor/SKILL.md"
     ]
   }
 }

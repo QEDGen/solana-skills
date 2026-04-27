@@ -16,6 +16,14 @@ type State
       creator          : Pubkey,
       threshold        : U8,
       member_count     : U8,
+      // Per-member pubkey list. The signer's address must match
+      // `members[member_index]` for any approve/reject vote to count.
+      members          : Map[MAX_MEMBERS] Pubkey,
+      // Per-member voting record for the active proposal: 0 = not yet
+      // voted, 1 = voted. `propose` resets it; `approve` / `reject` flip
+      // the corresponding slot. Without this, a member could re-vote
+      // through different signers across the threshold window.
+      voted            : Map[MAX_MEMBERS] U8,
       approval_count   : U8,
       rejection_count  : U8,
     }
@@ -28,6 +36,7 @@ type Error
   | ThresholdNotMet
   | ThresholdUnreachable
   | NotAMember
+  | MathOverflow
 
 pda vault ["vault", creator]
 
@@ -84,6 +93,11 @@ handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized 
 
 /// Submit a new transaction proposal — any vault member can propose
 handler propose : State.Active -> State.HasProposal {
+  // Anyone can submit a proposal; authorization for the resulting
+  // transaction comes from the approve/reject vote tally, not from
+  // the proposer's identity.
+  permissionless
+
   accounts {
     proposer : signer
     vault    : writable, pda ["vault", creator]
@@ -99,16 +113,25 @@ handler propose : State.Active -> State.HasProposal {
 
 /// Approve the current proposal — each member may vote once
 handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth approver
+
   accounts {
     approver : signer
     vault    : writable, pda ["vault", creator]
   }
 
   requires member_index < state.member_count else NotAMember
-  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+  // Bind the index to the signer: the caller must own the pubkey at
+  // `members[member_index]`. Closes the audit's HIGH on signer↔member.
+  requires state.members[member_index] == approver else NotAMember
+  // Per-member dedup: this slot must not have voted yet on the active
+  // proposal. `propose` resets the bitmap, `approve`/`reject` flip the
+  // slot.
+  requires state.voted[member_index] == 0 else AlreadyVoted
 
   effect {
     approval_count += 1
+    voted[member_index] := 1
   }
 
   emits ProposalApproved
@@ -116,16 +139,20 @@ handler approve (member_index : U8) : State.HasProposal -> State.HasProposal {
 
 /// Reject the current proposal — each member may vote once
 handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
+  auth rejecter
+
   accounts {
     rejecter : signer
     vault    : writable, pda ["vault", creator]
   }
 
   requires member_index < state.member_count else NotAMember
-  requires state.approval_count + state.rejection_count < state.member_count else AlreadyVoted
+  requires state.members[member_index] == rejecter else NotAMember
+  requires state.voted[member_index] == 0 else AlreadyVoted
 
   effect {
     rejection_count += 1
+    voted[member_index] := 1
   }
 
   emits ProposalRejected
@@ -133,6 +160,10 @@ handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
 
 /// Execute the proposal once the approval threshold is met
 handler execute : State.HasProposal -> State.Active {
+  // Anyone can trigger execution once the threshold is met — the
+  // approval tally is the authorization, not the executor's identity.
+  permissionless
+
   accounts {
     executor : signer
     vault    : writable, pda ["vault", creator]
@@ -150,6 +181,11 @@ handler execute : State.HasProposal -> State.Active {
 
 /// Cancel a proposal that can no longer reach the approval threshold
 handler cancel_proposal : State.HasProposal -> State.Active {
+  // Cancelling a doomed proposal is a cleanup op — anyone observing
+  // the rejection tally can call it. The `requires` proves the
+  // proposal is unreachable; no extra signer gate adds value.
+  permissionless
+
   accounts {
     canceller : signer
     vault     : writable, pda ["vault", creator]

@@ -12,8 +12,11 @@ pragma sbpf {}
 type Error
   | SlippageExceeded = 1 "Token balance below minimum threshold"
 
-/// Check that token account balance meets minimum threshold
+/// Check that token account balance meets minimum threshold.
+/// Read-only guard — no signer required, no state mutation.
 handler check_slippage {
+  permissionless
+
   accounts {
     token_account : readonly
   }

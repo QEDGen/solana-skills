@@ -92,8 +92,8 @@ transform into the Lean/Rust backends.
 - **`target` keyword removed.** Target is inferred from pragma presence —
   `pragma sbpf` → assembly target, absent → framework-flavored Rust.
   Framework selection happens at codegen time via `qedgen init
-  --target {anchor,quasar,pinocchio}` (anchor and quasar ship in v2.9;
-  pinocchio in v2.10+).
+  --target {anchor,quasar,pinocchio}` (anchor + quasar fully supported
+  as of v2.10; pinocchio in v2.11+).
 - **`assembly "..."` keyword removed.** Assembly source path is tooling
   config, not spec intent — pass `qedgen asm2lean --input <path>` or use
   the convention of `src/program.s` next to the spec.

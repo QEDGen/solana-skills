@@ -73,11 +73,23 @@ impl FrameworkSurface {
                 explicit_account_discriminator: false,
             },
             Target::Quasar => FrameworkSurface {
-                crate_attrs: "#![no_std]\n\n",
+                // `no_std` only for the on-chain (Solana/BPF) build. Host
+                // builds (`cargo check`/`cargo test`) keep std so the host
+                // gets a panic_handler / global_allocator from the standard
+                // library. Quasar provides solana-target panic_handler /
+                // global_allocator below via `panic_handler!()` / `no_alloc!()`.
+                crate_attrs:
+                    "#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import: "use quasar_lang::prelude::*;\n",
                 context_type: "Ctx",
                 handler_result_type: "Result<(), ProgramError>",
-                accounts_lifetime: "",
+                // Quasar's `#[derive(Accounts)]` expands to
+                // `impl<'info> ParseAccounts<'info> for #name<'info>`,
+                // so the user struct must carry `<'info>`. Field types
+                // are references to wrappers (e.g. `&'info Signer`,
+                // `&'info mut Account<T>`) per the canonical pattern in
+                // `quasar_lang/tests/compile_fail/*.rs`.
+                accounts_lifetime: "'info",
                 program_mod_vis: "mod",
                 explicit_handler_discriminator: true,
                 explicit_account_discriminator: true,
@@ -118,32 +130,29 @@ fn render_account_field_type(
     is_state_account: bool,
     state_name: &str,
 ) -> String {
-    if surface.accounts_lifetime.is_empty() {
-        // Quasar branch — bare types, no lifetime parameters. Real
-        // Quasar conventions per `~/code/blueshift/quasar/examples/`:
-        //   - `Signer` — bare
-        //   - `Program<System>` — parameterized with the program type
-        //   - `Account<T>` — bare, with the typed inner data
-        //   - `Account<Token>` / `Account<Mint>` — for token accounts
+    // Both Anchor and Quasar carry `'info` on field types; the divergence
+    // is just inner-shape (Quasar uses `&'info` references to the wrapper,
+    // Anchor uses bare typed wrappers parameterized by `'info`).
+    if surface.context_type == "Ctx" {
+        // Quasar branch — fields are references to wrappers.
+        // Pattern from `quasar_lang/tests/compile_fail/*.rs`:
+        //   `pub signer: &'info Signer` (read-only)
+        //   `pub vault:  &'info mut Account<MyState>` (writable)
+        // Writability mirrors the spec's `writable` flag.
+        let lt = surface.accounts_lifetime;
+        let mut_kw = if acct.is_writable { "mut " } else { "" };
         if acct.is_signer {
-            "Signer".to_string()
+            format!("&{} {}Signer", lt, mut_kw)
         } else if acct.is_program {
-            // Quasar wants the program-type as a generic param. We
-            // default to `System` for the system program and let the
-            // user customise for non-System programs (tokens etc.).
-            "Program<System>".to_string()
+            format!("&{} {}Program<System>", lt, mut_kw)
         } else if acct.account_type.as_deref() == Some("token") {
-            "Account<Token>".to_string()
+            format!("&{} {}Account<Token>", lt, mut_kw)
         } else if acct.account_type.as_deref() == Some("mint") {
-            "Account<Mint>".to_string()
+            format!("&{} {}Account<Mint>", lt, mut_kw)
         } else if is_state_account {
-            format!("Account<{}>", state_name)
+            format!("&{} {}Account<{}>", lt, mut_kw, state_name)
         } else {
-            // Quasar's escape hatch for opaque accounts — same shape
-            // as Anchor's `AccountInfo`. Used for non-state,
-            // non-token accounts where the spec doesn't carry a
-            // concrete type.
-            "UncheckedAccount".to_string()
+            format!("&{} {}UncheckedAccount", lt, mut_kw)
         }
     } else {
         // Anchor branch — every type carries `'info`.
@@ -280,6 +289,50 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
         "unsupported DSL type `{}` — expected a primitive (U8/U16/U32/U64/U128, I8/I16/I32/I64/I128, Bool, Pubkey), a compound (Map[N] T, Fin[N]), or a user-defined type declared with `type` in the spec",
         dsl_type
     );
+}
+
+/// Map a DSL type to its Quasar-Pod Rust equivalent. Used inside Quasar's
+/// zero-copy `#[account]` and nested record structs where every field must
+/// have alignment 1. `u64` becomes `PodU64`, etc. Non-integer types fall
+/// through to `map_type`.
+pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    let dsl_type = dsl_type.trim();
+    // Fin[N] is a bounded index type; usize has 8-byte alignment on most
+    // targets, so pack it as PodU32 for the alignment-1 constraint. Wider
+    // bounds would need PodU64 — the bound itself is informational here.
+    if dsl_type.starts_with("Fin") {
+        return Ok("PodU32".to_string());
+    }
+    if let Some(pod) = primitive_pod_map(dsl_type) {
+        return Ok(pod.to_string());
+    }
+    if let Some(rust) = primitive_map(dsl_type) {
+        return Ok(rust.to_string());
+    }
+    // Type alias: `type Foo = Bar` — recurse on the RHS so an alias like
+    // `AccountIdx = Fin[N]` ends up as `PodU32` instead of `usize`.
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return map_type_pod(rhs, spec);
+    }
+    // Fall back to map_type for compound / user-defined types — those
+    // don't need (and can't take) the pod conversion.
+    map_type(dsl_type, spec)
+}
+
+fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
+    Some(match dsl_type {
+        "U16" => "PodU16",
+        "U32" => "PodU32",
+        "U64" => "PodU64",
+        "U128" => "PodU128",
+        "I16" => "PodI16",
+        "I32" => "PodI32",
+        "I64" => "PodI64",
+        "I128" => "PodI128",
+        "Bool" => "PodBool",
+        // u8, i8 already alignment 1; no Pod wrapper needed.
+        _ => return None,
+    })
 }
 
 /// Map a DSL primitive name to its Rust equivalent, if one exists. Factored
@@ -422,7 +475,11 @@ fn generate_lib(
         out.push_str("pub mod errors;\n");
     }
     out.push_str("pub mod state;\n");
-    out.push_str("pub mod guards;\n\n");
+    out.push_str("pub mod guards;\n");
+    if guards_use_math_helpers(spec) {
+        out.push_str("pub mod math;\n");
+    }
+    out.push('\n');
 
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
 
@@ -445,8 +502,31 @@ fn generate_lib(
 
         let mut params = format!("ctx: {}<{}>", surface.context_type, pascal);
 
+        // Quasar's `#[instruction]` macro auto-converts native integers
+        // (`u64` → `PodU64`, …) inside the `InstructionDataZc` struct, so
+        // we can keep the user-facing handler signature in native types.
+        // `usize`, however, isn't recognized — it falls through unchanged
+        // and the ZC struct fails the alignment-1 assertion. Resolve
+        // `Fin[N]` (and its aliases) to `u32` on Quasar so the auto-Pod
+        // conversion picks it up as `PodU32`. The inner impl still takes
+        // `usize` for indexing, which we cast at the dispatch boundary.
+        let needs_fin_cast = |ptype: &str| -> bool {
+            if !matches!(target, Target::Quasar) {
+                return false;
+            }
+            let mut resolved = ptype.trim().to_string();
+            while let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == &resolved) {
+                resolved = rhs.trim().to_string();
+            }
+            resolved.starts_with("Fin")
+        };
         for (pname, ptype) in &handler.takes_params {
-            params.push_str(&format!(", {}: {}", pname, map_type(ptype, spec)?));
+            let rust_ty = if needs_fin_cast(ptype) {
+                "u32".to_string()
+            } else {
+                map_type(ptype, spec)?
+            };
+            params.push_str(&format!(", {}: {}", pname, rust_ty));
         }
 
         out.push_str(&format!(
@@ -454,13 +534,21 @@ fn generate_lib(
             handler.name, params, surface.handler_result_type
         ));
 
+        let cast_arg = |pname: &str, ptype: &str| -> String {
+            if needs_fin_cast(ptype) {
+                format!("{} as usize", pname)
+            } else {
+                pname.to_string()
+            }
+        };
+
         if handler.has_bumps() {
             out.push_str(&format!(
                 "        ctx.accounts.handler({}&ctx.bumps)\n",
                 handler
                     .takes_params
                     .iter()
-                    .map(|(n, _)| format!("{}, ", n))
+                    .map(|(n, t)| format!("{}, ", cast_arg(n, t)))
                     .collect::<String>()
             ));
         } else {
@@ -469,7 +557,7 @@ fn generate_lib(
                 handler
                     .takes_params
                     .iter()
-                    .map(|(n, _)| n.clone())
+                    .map(|(n, t)| cast_arg(n, t))
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
@@ -500,6 +588,7 @@ fn generate_lib(
                 is_multi,
                 &default_state_name,
                 &surface,
+                target,
             ));
         }
     }
@@ -528,29 +617,46 @@ fn generate_state(
     out.push_str(surface.prelude_import);
     out.push('\n');
 
+    // User-declared record types (`type T = { field : Type, ... }`) get
+    // emitted as plain `#[repr(C)]` structs ahead of the account structs
+    // that reference them. Without this, a state field like
+    // `accounts: Map[N] Account` lowers to `[Account; N]` where `Account`
+    // resolves to whatever the prelude exports (e.g. quasar's
+    // `Account<T>`), shadowing the user's intended record type.
+    //
+    // For Quasar these records are nested inside zero-copy `#[account]`
+    // structs, so all integer fields must use Pod companions (PodU64,
+    // PodU128, …) so the whole struct keeps alignment 1.
+    for record in &spec.records {
+        out.push_str("#[repr(C)]\n");
+        out.push_str("#[derive(Clone, Copy)]\n");
+        out.push_str(&format!("pub struct {} {{\n", record.name));
+        for (fname, ftype) in &record.fields {
+            let rust_ty = match target {
+                Target::Quasar => map_type_pod(ftype, spec)?,
+                _ => map_type(ftype, spec)?,
+            };
+            out.push_str(&format!("    pub {}: {},\n", fname, rust_ty));
+        }
+        out.push_str("}\n\n");
+    }
+
     if is_multi {
         for (idx, acct) in spec.account_types.iter().enumerate() {
             let struct_name = format!("{}Account", acct.name);
 
-            let pda_seeds = if let Some(ref pda_name) = acct.pda_ref {
-                if let Some(pda) = spec.pdas.iter().find(|p| &p.name == pda_name) {
-                    gen_pda_seeds_attr(pda, &acct.fields, spec)?
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
+            // Note: a previous pass emitted a `#[seeds(...)]` attribute on
+            // the state struct from `gen_pda_seeds_attr`, but neither
+            // Anchor nor Quasar recognize it (PDA seeds live on the
+            // per-handler `#[account]` attribute, not the state struct).
+            // Suppressed to avoid E0658 from an unknown attribute.
 
             let account_attr = if surface.explicit_account_discriminator {
-                format!("#[account(discriminator = {}, set_inner)]\n", idx + 1)
+                format!("#[account(discriminator = {})]\n", idx + 1)
             } else {
                 "#[account]\n".to_string()
             };
-            out.push_str(&format!(
-                "{}{}pub struct {} {{\n",
-                account_attr, pda_seeds, struct_name
-            ));
+            out.push_str(&format!("{}pub struct {} {{\n", account_attr, struct_name));
 
             for (fname, ftype) in &acct.fields {
                 out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
@@ -558,6 +664,16 @@ fn generate_state(
 
             if acct.pda_ref.is_some() && !acct.fields.iter().any(|(n, _)| n == "bump") {
                 out.push_str("    pub bump: u8,\n");
+            }
+
+            // R26: lifecycle status field. Stored as `u8` (matches the
+            // `#[repr(u8)]` enum below; alignment 1 so it's safe inside a
+            // Quasar zero-copy struct). Handlers `require!(status == Pre)`
+            // / `status = Post` via guards.rs to enforce state-machine
+            // transitions at runtime, closing the propose-erasure CRIT and
+            // the broader lifecycle gap surfaced in audit-20260427.
+            if !acct.lifecycle.is_empty() && !acct.fields.iter().any(|(n, _)| n == "status") {
+                out.push_str("    pub status: u8,\n");
             }
 
             out.push_str("}\n\n");
@@ -576,21 +692,17 @@ fn generate_state(
     } else {
         let state_name = format!("{}Account", to_pascal_case(&spec.program_name));
 
-        let pda_seeds = if !spec.pdas.is_empty() {
-            gen_pda_seeds_attr(&spec.pdas[0], &spec.state_fields, spec)?
-        } else {
-            String::new()
-        };
+        // No `#[seeds(...)]` on the state struct — see the multi-account
+        // branch above. Per-handler PDA seeds are emitted on the
+        // `#[account(seeds = [...], bump)]` attribute on the handler's
+        // Accounts struct field.
 
         let account_attr = if surface.explicit_account_discriminator {
-            "#[account(discriminator = 1, set_inner)]\n"
+            "#[account(discriminator = 1)]\n"
         } else {
             "#[account]\n"
         };
-        out.push_str(&format!(
-            "{}{}pub struct {} {{\n",
-            account_attr, pda_seeds, state_name
-        ));
+        out.push_str(&format!("{}pub struct {} {{\n", account_attr, state_name));
 
         for (fname, ftype) in &spec.state_fields {
             out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
@@ -598,6 +710,13 @@ fn generate_state(
 
         if !spec.pdas.is_empty() && !spec.state_fields.iter().any(|(n, _)| n == "bump") {
             out.push_str("    pub bump: u8,\n");
+        }
+
+        // R26: see the multi-account branch above for rationale.
+        if !spec.lifecycle_states.is_empty()
+            && !spec.state_fields.iter().any(|(n, _)| n == "status")
+        {
+            out.push_str("    pub status: u8,\n");
         }
 
         out.push_str("}\n");
@@ -618,28 +737,6 @@ fn generate_state(
 
     std::fs::write(src_dir.join("state.rs"), &out)?;
     Ok(())
-}
-
-/// Generate PDA seeds attribute for a PDA declaration.
-fn gen_pda_seeds_attr(
-    pda: &crate::check::ParsedPda,
-    fields: &[(String, String)],
-    spec: &ParsedSpec,
-) -> Result<String> {
-    let mut seed_parts = Vec::new();
-    for seed in &pda.seeds {
-        let trimmed = seed.trim_matches('"');
-        if seed.starts_with('"') || seed.starts_with('\"') {
-            seed_parts.push(format!("b\"{}\"", trimmed));
-        } else {
-            let field_type = match fields.iter().find(|(n, _)| n == trimmed) {
-                Some((_, t)) => map_type(t, spec)?,
-                None => "Address".to_string(),
-            };
-            seed_parts.push(format!("{}: {}", trimmed, field_type));
-        }
-    }
-    Ok(format!("#[seeds({})]\n", seed_parts.join(", ")))
 }
 
 /// Generate src/events.rs (only if events are declared)
@@ -705,9 +802,62 @@ fn generate_errors(
     out.push_str(surface.prelude_import);
     out.push('\n');
 
+    // R26: when any handler has a non-init lifecycle transition, the
+    // generated guards.rs raises `<Program>Error::InvalidLifecycle` on
+    // pre-status mismatch. Auto-add the variant if the spec doesn't
+    // already declare one — this is a purely operational error, not a
+    // spec-level concept the user reasons about.
+    let needs_lifecycle = spec.handlers.iter().any(|h| {
+        let pre = h.pre_status.as_deref().unwrap_or("");
+        let is_init = matches!(pre, "Uninitialized" | "Empty");
+        !pre.is_empty() && !is_init
+    });
+    // R28: same shape — when guards.rs emits a runtime PDA verification
+    // (driven by R13 suppression on Quasar non-init handlers), it raises
+    // `<Program>Error::InvalidPda` on mismatch. Auto-add similarly.
+    let needs_invalid_pda = matches!(target, Target::Quasar)
+        && spec.handlers.iter().any(|h| {
+            let bound: std::collections::HashSet<&str> =
+                h.accounts.iter().map(|a| a.name.as_str()).collect();
+            let is_init_handler = matches!(
+                h.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            );
+            h.accounts.iter().any(|acct| {
+                let Some(seeds) = &acct.pda_seeds else {
+                    return false;
+                };
+                if acct.is_signer {
+                    return false;
+                }
+                // Skip the init target — its seeds are macro-verified.
+                let on_account_matches = match h.on_account.as_deref() {
+                    Some(adt) => {
+                        let lower = adt.to_lowercase();
+                        acct.name == lower || acct.name.starts_with(&lower)
+                    }
+                    None => true,
+                };
+                if is_init_handler && on_account_matches {
+                    return false;
+                }
+                seeds.iter().any(|seed| {
+                    let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                    !is_literal && !bound.contains(seed.as_str())
+                })
+            })
+        });
+    let mut codes: Vec<String> = spec.error_codes.clone();
+    if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {
+        codes.push("InvalidLifecycle".to_string());
+    }
+    if needs_invalid_pda && !codes.iter().any(|c| c == "InvalidPda") {
+        codes.push("InvalidPda".to_string());
+    }
+
     out.push_str("#[error_code]\n");
     out.push_str(&format!("pub enum {} {{\n", error_name));
-    for (i, code) in spec.error_codes.iter().enumerate() {
+    for (i, code) in codes.iter().enumerate() {
         out.push_str(&format!("    {} = {},\n", code, i));
     }
     out.push_str("}\n");
@@ -800,6 +950,143 @@ fn generate_instructions(
 /// effect expansion. Returns None when the handler has zero or multiple
 /// plausible state accounts — in which case the caller must fall back to
 /// `todo!()` and let a human (or M4 agent) disambiguate.
+/// Identifier-character predicate for the `bind_state` word-bounded
+/// rewrite: ASCII alphanumerics plus underscore mark the inside of a
+/// Rust identifier.
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Rewrite each `[<idx>]` substring to `[(<idx>) as usize]`. Used by
+/// `mechanize_effect` (Rust output) to keep the field-string Lean-clean
+/// while still satisfying Rust's `usize`-only array indexing. Same
+/// transform as `path_to_rust`'s Index emission, applied at codegen
+/// time instead of at expr-render time so both Lean and Rust read the
+/// same `(field, op_kind, value)` tuple.
+fn rewrite_index_to_usize(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = String::with_capacity(field.len() + 16);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            // Find matching `]`.
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != b']' {
+                end += 1;
+            }
+            if end >= bytes.len() {
+                // Unbalanced — give up and emit verbatim.
+                out.push_str(&field[i..]);
+                break;
+            }
+            let idx_expr = &field[start..end];
+            // Don't double-wrap if already cast.
+            if idx_expr.contains("as usize") {
+                out.push_str(&field[i..=end]);
+            } else {
+                out.push_str(&format!("[({}) as usize]", idx_expr));
+            }
+            i = end + 1;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Render the pre-status check (when `write` is false) or the post-status
+/// write (when `write` is true) for R26 lifecycle enforcement. Returns an
+/// empty string when the lifecycle clause doesn't require a runtime
+/// emission (init handlers skip the pre-check; pre==post handlers skip
+/// the post-write; specs without lifecycle declarations skip everything).
+fn lifecycle_check_line(handler: &ParsedHandler, spec: &ParsedSpec, write: bool) -> String {
+    // Find the state-bearing account name and its `<ADT>Status` enum.
+    let state_acct = find_state_account(handler);
+    let Some(sa) = state_acct else {
+        return String::new();
+    };
+
+    // Resolve the Status enum name. Mirrors `generate_state`'s naming:
+    //   - `is_multi` (account_types.len() > 1): emit `<ADT>Status` per
+    //     lifecycle (lending: `PoolStatus`, `LoanStatus`).
+    //   - Otherwise: emit a single `Status` enum.
+    // Important: `account_types` can contain ONE entry (e.g. multisig's
+    // `type State | …`) and still be "single-state" for naming purposes.
+    let is_multi = spec.account_types.len() > 1;
+    let (enum_name, lifecycle): (String, &Vec<String>) = if is_multi {
+        let Some(adt) = handler.on_account.as_deref() else {
+            return String::new();
+        };
+        let Some(at) = spec.account_types.iter().find(|a| a.name == adt) else {
+            return String::new();
+        };
+        if at.lifecycle.is_empty() {
+            return String::new();
+        }
+        (format!("{}Status", at.name), &at.lifecycle)
+    } else {
+        // Single-state: the spec may declare its lifecycle either via a
+        // single ADT (then `account_types[0].lifecycle` carries the
+        // variants) or via the legacy flat `state {}` form (then they
+        // live on `spec.lifecycle_states`). Prefer the ADT slot.
+        let lifecycle: &Vec<String> = spec
+            .account_types
+            .first()
+            .map(|at| &at.lifecycle)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&spec.lifecycle_states);
+        if lifecycle.is_empty() {
+            return String::new();
+        }
+        ("Status".to_string(), lifecycle)
+    };
+
+    let pre = handler.pre_status.as_deref().unwrap_or("");
+    let post = handler.post_status.as_deref().unwrap_or("");
+    if pre.is_empty() && post.is_empty() {
+        return String::new();
+    }
+
+    let is_init_pre = matches!(pre, "Uninitialized" | "Empty");
+
+    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+
+    if write {
+        // Post-status write: only when post is set and differs from pre.
+        if post.is_empty() || pre == post {
+            return String::new();
+        }
+        if !lifecycle.iter().any(|s| s == post) {
+            return String::new();
+        }
+        format!(
+            "    // lifecycle: status := {post}\n    ctx.{acct}.status = {enum_name}::{post} as u8;\n",
+            post = post,
+            acct = sa.name,
+            enum_name = enum_name,
+        )
+    } else {
+        // Pre-status check: skip on init transitions (init zeros the
+        // account) and when there's no pre to check.
+        if is_init_pre || pre.is_empty() {
+            return String::new();
+        }
+        if !lifecycle.iter().any(|s| s == pre) {
+            return String::new();
+        }
+        let err_ctor = format!("ProgramError::from({}::InvalidLifecycle)", err_enum);
+        format!(
+            "    // lifecycle: require status == {pre}\n    if ctx.{acct}.status != {enum_name}::{pre} as u8 {{ return Err({err_ctor}); }}\n",
+            pre = pre,
+            acct = sa.name,
+            enum_name = enum_name,
+            err_ctor = err_ctor,
+        )
+    }
+}
+
 fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHandlerAccount> {
     let mut candidates: Vec<&crate::check::ParsedHandlerAccount> = handler
         .accounts
@@ -822,10 +1109,25 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
     }
 
     if candidates.len() == 1 {
-        Some(candidates[0])
-    } else {
-        None
+        return Some(candidates[0]);
     }
+    // Multi-state spec disambiguator: when the handler declares
+    // `on_account = "Loan"` (parsed from `: Loan.Pre -> Loan.Post`), pick
+    // the handler-account whose name matches the ADT (lowercase). Without
+    // this, lending::liquidate has both `loan` and `pool` as writable
+    // PDA candidates and `find_state_account` returned None, leaving
+    // `s.amount > s.collateral` un-rewritten in guards.rs.
+    if let Some(adt) = handler.on_account.as_deref() {
+        let lower = adt.to_lowercase();
+        if let Some(matched) = candidates
+            .iter()
+            .copied()
+            .find(|a| a.name == lower || a.name.starts_with(&lower))
+        {
+            return Some(matched);
+        }
+    }
+    None
 }
 
 /// Canonical SPL Token program ID. Calls into an interface whose
@@ -1261,6 +1563,7 @@ fn mechanize_effect(
     state_acct: &crate::check::ParsedHandlerAccount,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
+    target: Target,
 ) -> Option<String> {
     let (field, op_kind, value) = effect;
 
@@ -1276,6 +1579,13 @@ fn mechanize_effect(
 
     let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec);
     let acct = &state_acct.name;
+    // Cast index expressions in the LHS path to `usize`. `render_effect`
+    // emits the field as `voted[member_index]` (Lean-friendly); on the
+    // Rust side, indexing `[u8; N]` with `u8`/`u16`/Fin fails — Rust
+    // requires `usize`. Same shape as `path_to_rust`'s Index emission;
+    // applied here so the Lean output stays untouched.
+    let field = rewrite_index_to_usize(field);
+    let field = field.as_str();
     // v2.7 G3: `+=` default lowers to `checked_add(...).ok_or(err)?` — the
     // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
     // `wrapping_add` which produced Kani false-positives and didn't match
@@ -1292,26 +1602,57 @@ fn mechanize_effect(
     // `effect_uses_checked_arith_without_math_overflow` lint surfaces
     // missing declarations.
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+    // Quasar's `#[account]` macro auto-wraps integer state fields in their
+    // Pod companions (u64 → PodU64). Plain `=` and `wrapping_*` between a
+    // `u64` rhs and a `PodU64` lhs fail to type-check, so on Quasar:
+    //   - `set` lhs gets `.into()` on the rhs (PodU64: From<u64>).
+    //   - `checked_*` / `saturating_*` work as-is — PodU64 ships them.
+    //   - `wrapping_*` is unwound to `<lhs>.get().wrapping_*(rhs).into()`
+    //     because PodU64 doesn't expose `wrapping_*` directly.
+    // Anchor uses native ints, so its branch matches the previous output.
+    let is_quasar = matches!(target, Target::Quasar);
     let line = match op_kind.as_str() {
-        "set" => format!("        self.{}.{} = {};\n", acct, field, rhs),
+        "set" => {
+            if is_quasar {
+                format!("        self.{}.{} = ({}).into();\n", acct, field, rhs)
+            } else {
+                format!("        self.{}.{} = {};\n", acct, field, rhs)
+            }
+        }
         "add" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.checked_add({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "add_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_add({rhs});\n"
         ),
-        "add_wrap" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
-        ),
+        "add_wrap" => {
+            if is_quasar {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.get().wrapping_add({rhs}).into();\n"
+                )
+            } else {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.wrapping_add({rhs});\n"
+                )
+            }
+        }
         "sub" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.checked_sub({rhs}).ok_or({err_enum}::MathOverflow)?;\n"
         ),
         "sub_sat" => format!(
             "        self.{acct}.{field} = self.{acct}.{field}.saturating_sub({rhs});\n"
         ),
-        "sub_wrap" => format!(
-            "        self.{acct}.{field} = self.{acct}.{field}.wrapping_sub({rhs});\n"
-        ),
+        "sub_wrap" => {
+            if is_quasar {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.get().wrapping_sub({rhs}).into();\n"
+                )
+            } else {
+                format!(
+                    "        self.{acct}.{field} = self.{acct}.{field}.wrapping_sub({rhs});\n"
+                )
+            }
+        }
         _ => return None,
     };
     Some(line)
@@ -1328,6 +1669,7 @@ fn render_handler_accounts_struct(
     is_multi: bool,
     default_state_name: &str,
     surface: &FrameworkSurface,
+    target: Target,
 ) -> String {
     let pascal = to_pascal_case(&handler.name);
     let lifetime_params = surface.lifetime_params();
@@ -1338,14 +1680,25 @@ fn render_handler_accounts_struct(
     if !handler.accounts.is_empty() {
         let state_acct = find_state_account(handler);
         for acct in &handler.accounts {
-            let state_name = if is_multi {
+            let inferred_name = if is_multi {
                 infer_state_name(acct, spec, default_state_name)
             } else {
                 default_state_name.to_string()
             };
-            let is_state = state_acct.map(|sa| sa.name == acct.name).unwrap_or(false);
-            let attr = acct.quasar_account_attr(handler, &state_name);
-            let field_type = render_account_field_type(acct, surface, is_state, &state_name);
+            // An account is "state-bearing" if either:
+            //   1. `find_state_account` picked it as the unique writable
+            //      non-token PDA (single-state-ADT specs), or
+            //   2. `infer_state_name` matched its name to a declared state
+            //      ADT in this multi-state spec (e.g., `loan` ↔ `Loan` ADT
+            //      → `LoanAccount`). Without this, a multi-PDA handler like
+            //      lending's `borrow` (loan + pool both writable PDAs)
+            //      drops `loan` to `UncheckedAccount` even though it's the
+            //      lifecycle target.
+            let inferred_match = is_multi && inferred_name != default_state_name;
+            let is_state =
+                state_acct.map(|sa| sa.name == acct.name).unwrap_or(false) || inferred_match;
+            let attr = acct.quasar_account_attr(handler, &inferred_name, target, spec, is_state);
+            let field_type = render_account_field_type(acct, surface, is_state, &inferred_name);
             out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
         }
     } else if handler.who.is_some() {
@@ -1389,6 +1742,16 @@ fn render_handler_scaffold(
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
     out.push_str(surface.prelude_import);
+    // Token / Mint live in a separate crate per framework; only pull
+    // them in when the spec actually declares token accounts.
+    let needs_spl = handler.has_token_accounts();
+    if needs_spl {
+        match target {
+            Target::Anchor => out.push_str("use anchor_spl::token::{Token, Mint, TokenAccount};\n"),
+            Target::Quasar => out.push_str("use quasar_spl::{Token, Mint};\n"),
+            Target::Pinocchio => unreachable!(),
+        }
+    }
     out.push_str("use crate::state::*;\n");
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
@@ -1412,6 +1775,7 @@ fn render_handler_scaffold(
             is_multi,
             default_state_name,
             &surface,
+            target,
         ));
         out.push('\n');
     }
@@ -1433,10 +1797,30 @@ fn render_handler_scaffold(
     // `proc_macro2::TokenStream::from_str` before hashing, so the
     // codegen-emitted `hash` agrees with the macro's compile-time
     // recomputation.
-    let spec_h = spec_hash::spec_hash_for_handler(spec_src, &handler.name).unwrap_or_default();
+    // Match-arm-derived handlers (`liquidate_case_0`, `..._case_1`,
+    // `..._otherwise`) don't appear in the source by their split name —
+    // look them up under the parent handler's name. Both the `handler`
+    // attribute and the `spec_hash` reference the parent so the qedgen
+    // macro can resolve the block at compile time and every arm shares
+    // the same drift-tracking key. (The split is purely a codegen
+    // artifact; the spec contract is one block.)
+    let parent_name: &str = if let Some(stripped) = handler.name.strip_suffix("_otherwise") {
+        stripped.strip_suffix('_').unwrap_or(stripped)
+    } else if let Some(idx) = handler.name.rfind("_case_") {
+        &handler.name[..idx]
+    } else {
+        handler.name.as_str()
+    };
+    let parent_exists = spec_hash::spec_hash_for_handler(spec_src, parent_name).is_some();
+    let attr_handler_name = if parent_exists {
+        parent_name
+    } else {
+        handler.name.as_str()
+    };
+    let spec_h = spec_hash::spec_hash_for_handler(spec_src, attr_handler_name).unwrap_or_default();
     out.push_str(&format!(
         "    #[qed(verified, spec = \"{}\", handler = \"{}\", hash = \"{}\", spec_hash = \"{}\")]\n",
-        spec_attr, handler.name, BODY_HASH_PLACEHOLDER, spec_h
+        spec_attr, attr_handler_name, BODY_HASH_PLACEHOLDER, spec_h
     ));
 
     out.push_str("    #[inline(always)]\n");
@@ -1484,7 +1868,8 @@ fn render_handler_scaffold(
     let state_acct = find_state_account(handler);
     let mut any_unmechanized = false;
     for effect in &handler.effects {
-        let mechanized = state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec));
+        let mechanized =
+            state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec, target));
         match mechanized {
             Some(line) => out.push_str(&line),
             None => {
@@ -1603,6 +1988,80 @@ fn precompute_body_hash(scaffold_source: &str) -> Option<String> {
     None
 }
 
+/// True if any rendered Rust expression in the spec references one of the
+/// fixed-point helpers in `src/math.rs`. Used to gate the `use crate::math::*;`
+/// import in `guards.rs` so legacy programs whose user-owned `lib.rs` doesn't
+/// declare `pub mod math;` keep compiling.
+fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
+    let mut any = false;
+    let probe = |s: &str| s.contains("mul_div_floor_u128") || s.contains("mul_div_ceil_u128");
+    for h in &spec.handlers {
+        if h.requires.iter().any(|r| probe(&r.rust_expr)) {
+            any = true;
+        }
+        if h.aborts_if.iter().any(|a| probe(&a.rust_expr)) {
+            any = true;
+        }
+        if h.ensures.iter().any(|e| probe(&e.rust_expr)) {
+            any = true;
+        }
+    }
+    for prop in &spec.properties {
+        if let Some(ref r) = prop.rust_expression {
+            if probe(r) {
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+/// Generate `src/math.rs` — small helper module with the fixed-point
+/// `mul_div_*` primitives that property guards / handler bodies emit when
+/// the spec uses `Expr::MulDivFloor` / `Expr::MulDivCeil`. Always emitted
+/// because any non-trivial DeFi spec eventually wants them and the cost is
+/// a few inlined functions; suppressing them would just create a
+/// "generated-vs-not" coupling between the parser and codegen.
+fn generate_math(fp: &SpecFingerprint, output_dir: &Path) -> Result<()> {
+    let src_dir = output_dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    let mut out = String::new();
+    out.push_str(&marker("DO NOT EDIT", fp, "src/math.rs"));
+    out.push_str("//! Fixed-point math helpers used by spec-derived guards and properties.\n\n");
+    out.push_str("#![allow(dead_code)]\n\n");
+    out.push_str(
+        "/// Floor of `(a * b) / d`. Returns `0` if `d == 0` (caller must guard).\n\
+/// Uses saturating multiplication as a safe approximation; specs that need\n\
+/// exact u256-width fixed-point math should pin a checked widening crate\n\
+/// once the spec language exposes one.\n\
+#[inline]\n\
+pub fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 {\n\
+        return 0;\n\
+    }\n\
+    a.saturating_mul(b) / d\n\
+}\n\n",
+    );
+    out.push_str(
+        "/// Ceiling of `(a * b) / d`. Same caveats as `mul_div_floor_u128`.\n\
+#[inline]\n\
+pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
+    if d == 0 {\n\
+        return 0;\n\
+    }\n\
+    let prod = a.saturating_mul(b);\n\
+    if prod % d == 0 {\n\
+        prod / d\n\
+    } else {\n\
+        (prod / d).saturating_add(1)\n\
+    }\n\
+}\n",
+    );
+    out.push_str("// ---- END GENERATED ----\n");
+    std::fs::write(src_dir.join("math.rs"), &out)?;
+    Ok(())
+}
+
 /// Generate src/guards.rs — one function per handler containing all the
 /// spec-declared guard checks. This file is always regenerated; any edit
 /// is clobbered on the next `qedgen codegen` (by design).
@@ -1646,6 +2105,18 @@ fn generate_guards(
     if !spec.error_codes.is_empty() {
         out.push_str("use crate::errors::*;\n");
     }
+    // R26: `<ADT>Status` / `Status` enums live in `crate::state`. Pull
+    // them in unconditionally — guards.rs always emits the enum-typed
+    // pre-check / post-write when lifecycle is present, and a
+    // never-used import is harmless under `#![allow(unused_imports)]`.
+    out.push_str("use crate::state::*;\n");
+    // `crate::math` carries `mul_div_floor_u128` / `mul_div_ceil_u128`.
+    // Only import when a spec expression actually uses them, otherwise
+    // existing `pub mod math;`-less lib.rs (user-owned, skip-if-exists)
+    // would fail to resolve the path.
+    if guards_use_math_helpers(spec) {
+        out.push_str("use crate::math::*;\n");
+    }
     // Pick up the per-handler `Accounts` structs. Anchor places them
     // at crate root (lib.rs); Quasar places them in
     // `instructions/<name>.rs` and re-exports via `instructions::*`.
@@ -1675,35 +2146,270 @@ fn generate_guards(
             surface.handler_result_type
         ));
 
-        if handler.requires.is_empty() && handler.aborts_if.is_empty() {
+        // R26: lifecycle pre-status check. The spec's `: State.Pre ->
+        // State.Post` expresses a state-machine transition; without a
+        // runtime guard, every handler is reachable in every state
+        // (which is how the multisig::propose proposal-erasure CRIT
+        // surfaced — calling `propose` again from `HasProposal` zeroes
+        // approval/rejection counts). The pre-check uses the `status:
+        // u8` field added by `generate_state` and the `<ADT>Status`
+        // enum's discriminator. We elide the check on init handlers
+        // (Quasar's `init` zeroes the account, so `status == 0` is the
+        // default; we just write the post variant). We also elide when
+        // the spec doesn't declare lifecycle states for the relevant
+        // ADT.
+        let lifecycle_pre_check = lifecycle_check_line(handler, spec, false);
+        let lifecycle_post_write = lifecycle_check_line(handler, spec, true);
+        if !lifecycle_pre_check.is_empty() {
+            out.push_str(&lifecycle_pre_check);
+        }
+
+        let err_enum_name_r28 = format!("{}Error", to_pascal_case(&spec.program_name));
+        let _ = &err_enum_name_r28;
+        // R28: per-handler PDA verification. R13 suppresses
+        // `seeds = [...]` on Quasar non-init handlers when seeds
+        // reference state fields (the macro's `Bumps::seeds()` method
+        // can't auto-capture `self.<state-field>`). Owner+discriminator
+        // protects against type confusion but not wrong-PDA passing —
+        // the audit's MED-tier finding. Emit a runtime
+        // `verify_program_address` check using the stored bump for
+        // every account whose `seeds = [...]` would have been
+        // suppressed. The cost is one syscall (~544 CU on first-try
+        // bump 255) per affected handler load.
+        for acct in &handler.accounts {
+            let Some(ref seeds) = acct.pda_seeds else {
+                continue;
+            };
+            let is_init_target = matches!(
+                handler.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            ) && match handler.on_account.as_deref() {
+                Some(adt) => {
+                    let lower = adt.to_lowercase();
+                    acct.name == lower || acct.name.starts_with(&lower)
+                }
+                None => true,
+            } && !acct.is_signer;
+            if is_init_target {
+                continue; // init flow already verifies via #[account(seeds=…, bump)]
+            }
+            // Was R13 going to suppress on this handler? Mirror the
+            // detection logic from `quasar_account_attr`.
+            let bound_account_names: std::collections::HashSet<&str> =
+                handler.accounts.iter().map(|a| a.name.as_str()).collect();
+            let needs_state_field_seed = seeds.iter().any(|seed| {
+                let is_literal = seed.starts_with('"') && seed.ends_with('"');
+                !is_literal && !bound_account_names.contains(seed.as_str())
+            });
+            if !matches!(target, Target::Quasar) || !needs_state_field_seed {
+                continue;
+            }
+
+            let mut seed_exprs: Vec<String> = Vec::with_capacity(seeds.len() + 1);
+            for seed in seeds {
+                if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                    seed_exprs.push(format!("b\"{}\"", inner));
+                } else if bound_account_names.contains(seed.as_str()) {
+                    // Handler-bound account: read its address.
+                    seed_exprs.push(format!("ctx.{}.to_account_view().address().as_ref()", seed));
+                } else {
+                    // State-field seed: read off the same PDA's stored
+                    // value (the field that R13 couldn't pass through
+                    // the macro's seeds method).
+                    seed_exprs.push(format!("ctx.{}.{}.as_ref()", acct.name, seed));
+                }
+            }
+            seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
+
+            out.push_str(&format!(
+                "    // R28 PDA check: ctx.{acct} matches its declared seeds\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.{acct}.to_account_view().address()).is_err() {{\n            return Err(ProgramError::from({err_enum}::InvalidPda));\n        }}\n    }}\n",
+                acct = acct.name,
+                seeds = seed_exprs.join(", "),
+                err_enum = err_enum_name_r28,
+            ));
+        }
+
+        // R27: token-vault authority binding. The spec declares
+        // `pool_vault : token, authority pool` — meaning the SPL token
+        // account's `owner` field (i.e. the entity that can sign
+        // transfers from it) must equal the `pool` PDA's address. R6
+        // dropped Quasar's `token::authority = X` constraint on
+        // non-init accounts (the macro rejects it without `init`), so
+        // the static check is gone for every load after init. Without
+        // a runtime equivalent the pool_vault parameter could be any
+        // SPL-Token-program-owned account, breaking the deposit/repay/
+        // liquidate transfer routing intent (audit HIGH 5).
+        //
+        // Emit a runtime owner check on every non-init token account
+        // that declares `authority X` — the token account's `owner()`
+        // accessor returns the authority address, compared against the
+        // bound account's address.
+        let err_enum_name = format!("{}Error", to_pascal_case(&spec.program_name));
+        for acct in &handler.accounts {
+            let is_init_target = matches!(
+                handler.pre_status.as_deref(),
+                Some("Uninitialized") | Some("Empty")
+            ) && match handler.on_account.as_deref() {
+                Some(adt) => {
+                    let lower = adt.to_lowercase();
+                    acct.name == lower || acct.name.starts_with(&lower)
+                }
+                None => true,
+            } && acct.pda_seeds.is_some()
+                && !acct.is_signer;
+            let is_token = acct.account_type.as_deref() == Some("token");
+            if !is_token || is_init_target {
+                continue;
+            }
+            let Some(ref auth_name) = acct.authority else {
+                continue;
+            };
+            let unauthorized = if spec.error_codes.iter().any(|c| c == "Unauthorized") {
+                "Unauthorized"
+            } else {
+                "InvalidLifecycle"
+            };
+            out.push_str(&format!(
+                "    // authority: ctx.{acct}.owner() == ctx.{auth}.address()\n    if *ctx.{acct}.owner() != *ctx.{auth}.to_account_view().address() {{ return Err(ProgramError::from({err_enum}::{var})); }}\n",
+                acct = acct.name,
+                auth = auth_name,
+                err_enum = err_enum_name,
+                var = unauthorized,
+            ));
+        }
+
+        if handler.requires.is_empty()
+            && handler.aborts_if.is_empty()
+            && lifecycle_pre_check.is_empty()
+            && lifecycle_post_write.is_empty()
+        {
             out.push_str("    // No guards declared in spec — nothing to check.\n");
         }
 
+        // `rust_expr` references state fields as `s.<field>` (lowered from
+        // `state.<field>` in the spec). Inside guards.rs the state-bearing
+        // account is reached via `ctx.<state_account>.<field>` (Anchor's
+        // `Account<T>` and Quasar's typed account both auto-deref to T).
+        // When we can identify a single state account, rewrite `s.` to that
+        // path so the guards compile. Multi-state handlers fall through with
+        // the raw `s.` form — caller must hand-edit. R12 fix.
+        let state_acct = find_state_account(handler);
+        // Bare handler-account idents in spec expressions (e.g. the
+        // `approver` in `state.members[i] == approver`) need to be
+        // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
+        // Without this, the spec's signer-binding compiles to `... ==
+        // approver` where `approver` resolves to nothing in scope.
+        let handler_account_names: Vec<String> =
+            handler.accounts.iter().map(|a| a.name.clone()).collect();
+        let bind_state = |expr: &str| -> String {
+            // Step 1: rewrite handler-account idents to address loads.
+            let mut after_accounts = String::with_capacity(expr.len() + 32);
+            let bytes = expr.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                let mut matched = false;
+                if prev_ok {
+                    for name in &handler_account_names {
+                        let nbytes = name.as_bytes();
+                        if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes
+                        {
+                            // Boundary check on the trailing edge: don't
+                            // match `approver_x` when looking for `approver`.
+                            let after = i + nbytes.len();
+                            if after >= bytes.len() || !is_ident_char(bytes[after]) {
+                                // Don't rewrite `name.` (field access on
+                                // the handler-account is a different
+                                // expression — keep the `.` access path).
+                                if after >= bytes.len() || bytes[after] != b'.' {
+                                    after_accounts.push_str(&format!(
+                                        "(*ctx.{}.to_account_view().address())",
+                                        name
+                                    ));
+                                    i = after;
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if !matched {
+                    after_accounts.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+
+            // Step 2: rewrite `s.` to `ctx.<state>.` if we have a state
+            // account. Word-bounded so `accounts[i].fee_credits.get()`
+            // doesn't get corrupted to `fee_creditctx.vault.get()`.
+            let Some(sa) = state_acct else {
+                return after_accounts;
+            };
+            let target = format!("ctx.{}.", sa.name);
+            let bytes = after_accounts.as_bytes();
+            let mut out = String::with_capacity(after_accounts.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+                if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
+                    out.push_str(&target);
+                    i += 2;
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+            out
+        };
+
+        // Pick the Pod-aware rust expression on Quasar so Pod field
+        // accesses carry `.get()` and mixed-kind binops add `as i128`
+        // casts — without it `state.foo.x + state.foo.y` fails when
+        // `x: PodU128` and `y: PodI128`.
+        let pod_target = matches!(target, Target::Quasar);
+
         for req in &handler.requires {
             // Emit as a comment for human readers + an executable check.
-            // The Rust expression comes directly from the spec; callers are
-            // expected to bring the identifiers in scope (typically via
-            // `ctx.<account>.<field>` style access).
             out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+            let raw = if pod_target {
+                req.rust_expr_pod.trim()
+            } else {
+                req.rust_expr.trim()
+            };
+            let rust = bind_state(raw);
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
                     "    if !({}) {{ return Err({}); }}\n",
-                    req.rust_expr.trim(),
+                    rust,
                     err_ctor(&err_enum, err),
                 ));
             } else {
-                out.push_str(&format!("    debug_assert!({});\n", req.rust_expr.trim()));
+                out.push_str(&format!("    debug_assert!({});\n", rust));
             }
         }
 
         let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
         for ab in &handler.aborts_if {
+            let raw = if pod_target {
+                ab.rust_expr_pod.trim()
+            } else {
+                ab.rust_expr.trim()
+            };
+            let rust = bind_state(raw);
             out.push_str(&format!(
                 "    if ({}) {{ return Err({}); }}\n",
-                ab.rust_expr.trim(),
+                rust,
                 err_ctor(&err_enum, &ab.error_name),
             ));
+        }
+
+        // R26: lifecycle post-status write — runs after all guards have
+        // passed so a failed guard doesn't half-transition. Only emitted
+        // when the post variant differs from the pre variant.
+        if !lifecycle_post_write.is_empty() {
+            out.push_str(&lifecycle_post_write);
         }
 
         out.push_str("    Ok(())\n");
@@ -1771,7 +2477,10 @@ fn generate_cargo_toml(
         Target::Quasar => {
             out.push_str("quasar-lang = { version = \"0.0.0\" }\n");
             if needs_spl {
-                out.push_str("# TODO: Quasar SPL helper crate (spec declares token transfers).\n");
+                // Token / Mint live in `quasar-spl`, not the core
+                // `quasar-lang` prelude. Pull it in whenever the spec
+                // declares token accounts or transfers.
+                out.push_str("quasar-spl = { version = \"0.0.0\" }\n");
             }
         }
         Target::Pinocchio => unreachable!("Pinocchio is rejected at the init dispatcher"),
@@ -1780,6 +2489,14 @@ fn generate_cargo_toml(
         "qedgen-macros = {{ git = \"https://github.com/qedgen/solana-skills\", tag = \"v{}\" }}\n",
         qedgen_version
     ));
+
+    // Stand the generated crate up as its own workspace root. Without this,
+    // when the spec lives inside a parent crate that has its own `[package]`
+    // (e.g. percolator's pure-no_std host library), cargo tries to read the
+    // parent as a workspace root and fails with "current package believes
+    // it's in a workspace when it's not". Empty `[workspace]` makes the
+    // generated crate self-contained.
+    out.push_str("\n[workspace]\n");
 
     std::fs::write(output_dir.join("Cargo.toml"), &out)?;
     Ok(())
@@ -1828,6 +2545,9 @@ pub fn generate(spec_path: &Path, output_dir: &Path, target: crate::Target) -> R
     generate_errors(&spec, &fp, output_dir, target)?;
     generate_instructions(&spec, &fp, spec_path, output_dir, target)?;
     generate_guards(&spec, &fp, output_dir, target)?;
+    if guards_use_math_helpers(&spec) {
+        generate_math(&fp, output_dir)?;
+    }
     generate_cargo_toml(&spec, &fp, output_dir, target)?;
 
     let file_count = 4
@@ -2227,7 +2947,8 @@ handler bump (n : U64) : State.Active -> State.Active {
         let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
         let state_acct = find_state_account(handler).expect("state account");
         let effect = handler.effects.first().unwrap();
-        let rendered = mechanize_effect(effect, state_acct, handler, &spec).expect("mechanized");
+        let rendered = mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor)
+            .expect("mechanized");
         // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
         // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
         // user's declared Error sum.
