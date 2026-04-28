@@ -953,8 +953,15 @@ fn rust_infer_kind(env: &TypeEnv, e: &Expr) -> Kind {
 
 /// Render both sides of a binary op, applying a `... as i128` cast on
 /// whichever side is `Nat` when the other is `Int`. Mirrors the Lean-side
-/// `render_binary_with_coercion`. Without this Quasar emits expressions
-/// like `u128 + i128` which Rust rejects (no built-in mixed-sign ops).
+/// `render_binary_with_coercion`.
+///
+/// The Nat→Int cast is target-independent: Rust rejects `u128 + i128` on
+/// any target (no implicit mixed-sign arithmetic). Pre-v2.11.1 this was
+/// gated on `opts.pod_aware`, which is only set for Quasar — the gate
+/// silently broke Anchor scaffolds whose specs mixed U128 + I128 (e.g.
+/// percolator's `state.accounts[i].capital + state.accounts[i].pnl`).
+/// The `pod_aware` flag stays for `.get()` lowering on Pod fields; it
+/// has no business gating signed/unsigned coercion.
 fn render_rust_binary_with_coercion(
     lhs: &Node<Expr>,
     rhs: &Node<Expr>,
@@ -966,9 +973,6 @@ fn render_rust_binary_with_coercion(
     let rk = rust_infer_kind(opts.env, &rhs.node);
     let l = expr_to_rust(&lhs.node, ctx, consts, opts);
     let r = expr_to_rust(&rhs.node, ctx, consts, opts);
-    if !opts.pod_aware {
-        return (l, r);
-    }
     match (lk, rk) {
         (Kind::Nat, Kind::Int) => (format!("(({}) as i128)", l), r),
         (Kind::Int, Kind::Nat) => (l, format!("(({}) as i128)", r)),
@@ -978,15 +982,17 @@ fn render_rust_binary_with_coercion(
 
 /// `mul_div_floor_u128` / `mul_div_ceil_u128` accept `u128` arguments.
 /// Spec operands may be U64 / I64 / I128 / native handler params — all of
-/// which fail the `u128` parameter check. Cast unconditionally on Quasar
-/// so the helper signature is honored uniformly. (The `as u128` from u64
-/// is widening; from i128 it's saturating-by-truncation, which matches
-/// the spec's Int → u128 lowering used by the Lean side.)
+/// which fail the `u128` parameter check. Cast unconditionally so the
+/// helper signature is honored uniformly on every target. (`as u128`
+/// from u64 is widening; from i128 it's saturating-by-truncation, which
+/// matches the spec's Int → u128 lowering used by the Lean side.)
+///
+/// Pre-v2.11.1 this was gated on `opts.pod_aware`, which is only set for
+/// Quasar — the gate silently broke Anchor scaffolds that called the
+/// helpers (e.g. percolator's `mul_div_floor_u128(size_q, exec_price,
+/// 1000000)` with mixed `i128`/`u64` args).
 fn render_helper_arg(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) -> String {
     let rendered = expr_to_rust(e, ctx, consts, opts);
-    if !opts.pod_aware {
-        return rendered;
-    }
     format!("(({}) as u128)", rendered)
 }
 

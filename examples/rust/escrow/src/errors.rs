@@ -6,5 +6,7 @@ pub enum EscrowError {
     InvalidAmount = 0,
     Unauthorized = 1,
     AlreadyClosed = 2,
+    InvalidLifecycle = 3,
+    InvalidPda = 4,
 }
 // ---- END GENERATED ----

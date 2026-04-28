@@ -340,6 +340,27 @@ pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
     fields.iter().filter(|(_, t)| t != "Pubkey").collect()
 }
 
+/// True when the named field's declared type is `Pubkey`. Looks in the
+/// handler's target account first (multi-account specs), then falls back
+/// to global `state_fields`. Returns `false` if the field isn't found
+/// (callers default to "not Pubkey" — emit normally) so unknown fields
+/// surface as compile errors at the right line, not as silent skips.
+pub fn field_type_is_pubkey(field: &str, op: &ParsedHandler, spec: &ParsedSpec) -> bool {
+    let base = effect_target_base(field);
+    if let Some(ref acct_name) = op.on_account {
+        if let Some(acct) = spec.account_types.iter().find(|a| a.name == *acct_name) {
+            if let Some((_, t)) = acct.fields.iter().find(|(n, _)| n == base) {
+                return t == "Pubkey";
+            }
+        }
+    }
+    spec.state_fields
+        .iter()
+        .find(|(n, _)| n == base)
+        .map(|(_, t)| t == "Pubkey")
+        .unwrap_or(false)
+}
+
 /// The base field name an effect targets. `accounts[i].active` → `accounts`;
 /// `foo.bar` → `foo`; `plain` → `plain`. Used by `check_effect_targets` to
 /// look up the target in the declared state schema.
@@ -610,7 +631,18 @@ pub fn emit_transition_fn(
     // "explore the full state space" mode — when set, default `+=` / `-=`
     // still use wrapping instead of checked. Explicit `+=!` / `+=?` always
     // honor their declared semantics regardless of the caller's mode.
+    //
+    // Skip effects targeting `Pubkey` fields: `mutable_fields` (the State
+    // struct's source of truth) filters them out, and the spec-level
+    // RHS (`maker.pubkey` etc.) doesn't have a value in proptest's pure
+    // model — accounts aren't carried into the predicate layer. Pubkey
+    // identity is validated by the Anchor accounts struct at handler
+    // entry, not in the random-state machine. Matches v2.11 brownfield
+    // findings on token-fundraiser.
     for (field, op_kind, value) in &op.effects {
+        if field_type_is_pubkey(field, op, spec) {
+            continue;
+        }
         let rust_value = resolve_value(value, op, spec);
         match op_kind.as_str() {
             "set" => {

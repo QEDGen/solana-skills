@@ -27,6 +27,7 @@ const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
 /// produces.
 #[derive(Clone, Copy)]
 struct FrameworkSurface {
+    target: Target,
     /// Crate-root attributes line, e.g. `"#![no_std]\n\n"`. Empty for
     /// targets that build against std.
     crate_attrs: &'static str,
@@ -63,7 +64,14 @@ impl FrameworkSurface {
     fn for_target(target: Target) -> Self {
         match target {
             Target::Anchor => FrameworkSurface {
-                crate_attrs: "",
+                target,
+                // Anchor's `#[program]` macro expands to references to
+                // unstable `cfg(feature = "anchor-debug")` etc. that
+                // aren't declared in the generated `Cargo.toml`. The
+                // warnings come from anchor itself, not qedgen, and
+                // they drown out actual diagnostics on the rendered
+                // scaffold. Suppress at the crate root.
+                crate_attrs: "#![allow(unexpected_cfgs)]\n\n",
                 prelude_import: "use anchor_lang::prelude::*;\n",
                 context_type: "Context",
                 handler_result_type: "Result<()>",
@@ -73,13 +81,23 @@ impl FrameworkSurface {
                 explicit_account_discriminator: false,
             },
             Target::Quasar => FrameworkSurface {
+                target,
                 // `no_std` only for the on-chain (Solana/BPF) build. Host
                 // builds (`cargo check`/`cargo test`) keep std so the host
                 // gets a panic_handler / global_allocator from the standard
                 // library. Quasar provides solana-target panic_handler /
                 // global_allocator below via `panic_handler!()` / `no_alloc!()`.
+                //
+                // The `unexpected_cfgs` allow suppresses cfg warnings
+                // from quasar's `no_alloc` / `panic_handler` macros,
+                // which gate on `target_os = "solana"` / `feature =
+                // "alloc"` — values that aren't declared in the
+                // generated Cargo.toml. Same shape as Anchor's
+                // anchor-debug noise; treat both as external framework
+                // diagnostics so genuine warnings on the rendered
+                // scaffold stay visible.
                 crate_attrs:
-                    "#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
+                    "#![allow(unexpected_cfgs)]\n#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import: "use quasar_lang::prelude::*;\n",
                 context_type: "Ctx",
                 handler_result_type: "Result<(), ProgramError>",
@@ -110,6 +128,173 @@ impl FrameworkSurface {
             format!("<{}>", self.accounts_lifetime)
         }
     }
+
+    fn is_quasar(&self) -> bool {
+        matches!(self.target, Target::Quasar)
+    }
+
+    /// Per-target import line for SPL token / mint types. Selects only
+    /// the names the caller has flagged as needed so unused-import
+    /// warnings don't pile up on the rendered scaffold:
+    ///
+    /// - `has_token`: any handler has a token account or a `token_program`
+    ///   account (needs `Token` for the program type; needs `TokenAccount`
+    ///   on Anchor for the typed account wrapper).
+    /// - `has_mint`: any handler has a mint account (needs `Mint`).
+    ///
+    /// Returns `String` rather than `&'static str` because the import
+    /// list is composed at call time. Empty when neither flag is set.
+    fn token_imports(&self, has_token: bool, has_mint: bool) -> String {
+        if !has_token && !has_mint {
+            return String::new();
+        }
+        match self.target {
+            Target::Anchor => {
+                let mut names: Vec<&str> = Vec::with_capacity(3);
+                if has_mint {
+                    names.push("Mint");
+                }
+                if has_token {
+                    names.push("Token");
+                    names.push("TokenAccount");
+                }
+                if names.len() == 1 {
+                    format!("use anchor_spl::token::{};\n", names[0])
+                } else {
+                    format!("use anchor_spl::token::{{{}}};\n", names.join(", "))
+                }
+            }
+            Target::Quasar => {
+                let mut names: Vec<&str> = Vec::with_capacity(2);
+                if has_token {
+                    names.push("Token");
+                }
+                if has_mint {
+                    names.push("Mint");
+                }
+                if names.len() == 1 {
+                    format!("use quasar_spl::{};\n", names[0])
+                } else {
+                    format!("use quasar_spl::{{{}}};\n", names.join(", "))
+                }
+            }
+            Target::Pinocchio => String::new(),
+        }
+    }
+
+    /// True when the per-handler scaffold needs to import the bumps
+    /// struct from the crate root. Anchor places the `<Pascal>Bumps`
+    /// struct alongside the `<Pascal>` accounts struct in `lib.rs`, so
+    /// handler files reach back into the crate root for both. Quasar
+    /// keeps the accounts struct (and bumps, when present) inside
+    /// `instructions/<name>.rs`, so no cross-module import is needed.
+    fn needs_bumps_import(&self, handler: &ParsedHandler) -> bool {
+        matches!(self.target, Target::Anchor) && handler.has_bumps()
+    }
+
+    fn signer_type(&self, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}Signer", lt, mut_prefix(mutable))
+        } else {
+            format!("Signer<{}>", lt)
+        }
+    }
+
+    fn program_type(&self, name: &str, account_type: Option<&str>, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}Program<System>", lt, mut_prefix(mutable))
+        } else if name == "token_program" || account_type == Some("token") {
+            format!("Program<{}, Token>", lt)
+        } else {
+            format!("Program<{}, System>", lt)
+        }
+    }
+
+    fn token_account_type(&self, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}Account<Token>", lt, mut_prefix(mutable))
+        } else {
+            format!("Account<{}, TokenAccount>", lt)
+        }
+    }
+
+    fn mint_account_type(&self, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}Account<Mint>", lt, mut_prefix(mutable))
+        } else {
+            format!("Account<{}, Mint>", lt)
+        }
+    }
+
+    fn state_account_type(&self, state_name: &str, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}Account<{}>", lt, mut_prefix(mutable), state_name)
+        } else {
+            format!("Account<{}, {}>", lt, state_name)
+        }
+    }
+
+    fn unchecked_account_type(&self, mutable: bool) -> String {
+        let lt = self.accounts_lifetime;
+        if self.is_quasar() {
+            format!("&{} {}UncheckedAccount", lt, mut_prefix(mutable))
+        } else {
+            format!("AccountInfo<{}>", lt)
+        }
+    }
+
+    fn error_expr(&self, enum_name: &str, variant: &str) -> String {
+        match self.target {
+            Target::Anchor => format!("{}::{}.into()", enum_name, variant),
+            Target::Quasar => format!("ProgramError::from({}::{})", enum_name, variant),
+            Target::Pinocchio => unreachable!(),
+        }
+    }
+
+    fn guard_accounts_import(&self) -> &'static str {
+        match self.target {
+            Target::Anchor => "use crate::*;\n\n",
+            Target::Quasar => "use crate::instructions::*;\n\n",
+            Target::Pinocchio => unreachable!(),
+        }
+    }
+
+    fn account_key_expr(&self, account_name: &str) -> String {
+        match self.target {
+            Target::Anchor => format!("ctx.{}.key()", account_name),
+            Target::Quasar => format!("(*ctx.{}.to_account_view().address())", account_name),
+            Target::Pinocchio => unreachable!(),
+        }
+    }
+
+    fn token_owner_expr(&self, token_account_name: &str) -> String {
+        match self.target {
+            Target::Anchor => format!("ctx.{}.owner", token_account_name),
+            Target::Quasar => format!("(*ctx.{}.owner())", token_account_name),
+            Target::Pinocchio => unreachable!(),
+        }
+    }
+
+    fn authority_check_expr(&self, token_account: &str, authority_account: &str) -> String {
+        format!(
+            "{} != {}",
+            self.token_owner_expr(token_account),
+            self.account_key_expr(authority_account)
+        )
+    }
+}
+
+fn mut_prefix(mutable: bool) -> &'static str {
+    if mutable {
+        "mut "
+    } else {
+        ""
+    }
 }
 
 /// Render the Rust type for a `#[derive(Accounts)]` field for the
@@ -130,46 +315,18 @@ fn render_account_field_type(
     is_state_account: bool,
     state_name: &str,
 ) -> String {
-    // Both Anchor and Quasar carry `'info` on field types; the divergence
-    // is just inner-shape (Quasar uses `&'info` references to the wrapper,
-    // Anchor uses bare typed wrappers parameterized by `'info`).
-    if surface.context_type == "Ctx" {
-        // Quasar branch — fields are references to wrappers.
-        // Pattern from `quasar_lang/tests/compile_fail/*.rs`:
-        //   `pub signer: &'info Signer` (read-only)
-        //   `pub vault:  &'info mut Account<MyState>` (writable)
-        // Writability mirrors the spec's `writable` flag.
-        let lt = surface.accounts_lifetime;
-        let mut_kw = if acct.is_writable { "mut " } else { "" };
-        if acct.is_signer {
-            format!("&{} {}Signer", lt, mut_kw)
-        } else if acct.is_program {
-            format!("&{} {}Program<System>", lt, mut_kw)
-        } else if acct.account_type.as_deref() == Some("token") {
-            format!("&{} {}Account<Token>", lt, mut_kw)
-        } else if acct.account_type.as_deref() == Some("mint") {
-            format!("&{} {}Account<Mint>", lt, mut_kw)
-        } else if is_state_account {
-            format!("&{} {}Account<{}>", lt, mut_kw, state_name)
-        } else {
-            format!("&{} {}UncheckedAccount", lt, mut_kw)
-        }
+    if acct.is_signer {
+        surface.signer_type(acct.is_writable)
+    } else if acct.is_program {
+        surface.program_type(&acct.name, acct.account_type.as_deref(), acct.is_writable)
+    } else if acct.account_type.as_deref() == Some("token") {
+        surface.token_account_type(acct.is_writable)
+    } else if acct.account_type.as_deref() == Some("mint") {
+        surface.mint_account_type(acct.is_writable)
+    } else if is_state_account {
+        surface.state_account_type(state_name, acct.is_writable)
     } else {
-        // Anchor branch — every type carries `'info`.
-        let lt = surface.accounts_lifetime;
-        if acct.is_signer {
-            format!("Signer<{}>", lt)
-        } else if acct.is_program {
-            format!("Program<{}, System>", lt)
-        } else if acct.account_type.as_deref() == Some("token") {
-            format!("Account<{}, TokenAccount>", lt)
-        } else if acct.account_type.as_deref() == Some("mint") {
-            format!("Account<{}, Mint>", lt)
-        } else if is_state_account {
-            format!("Account<{}, {}>", lt, state_name)
-        } else {
-            format!("AccountInfo<{}>", lt)
-        }
+        surface.unchecked_account_type(acct.is_writable)
     }
 }
 
@@ -211,7 +368,14 @@ fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
     }
 }
 
-/// Map a DSL type to its Rust equivalent.
+#[derive(Clone, Copy)]
+enum TypeMapContext {
+    Standalone,
+    Anchor,
+    Quasar,
+}
+
+/// Map a DSL type to its standalone Rust equivalent.
 ///
 /// Handles:
 ///   - primitives (U8..U128, I8..I128, Bool, Pubkey),
@@ -231,6 +395,34 @@ fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> String {
 /// bug class where types like `U16` or `Map[N] UserAccount` leaked verbatim
 /// into generated Rust (see docs/prds/PRD-v2.6.2.md G1).
 pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    map_type_standalone(dsl_type, spec)
+}
+
+pub fn map_type_standalone(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    map_type_with_context(dsl_type, spec, TypeMapContext::Standalone)
+}
+
+fn map_type_anchor(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    map_type_with_context(dsl_type, spec, TypeMapContext::Anchor)
+}
+
+fn map_type_quasar(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
+    map_type_with_context(dsl_type, spec, TypeMapContext::Quasar)
+}
+
+fn map_type_for_target(dsl_type: &str, spec: &ParsedSpec, target: Target) -> Result<String> {
+    match target {
+        Target::Anchor => map_type_anchor(dsl_type, spec),
+        Target::Quasar => map_type_quasar(dsl_type, spec),
+        Target::Pinocchio => unreachable!(),
+    }
+}
+
+fn map_type_with_context(
+    dsl_type: &str,
+    spec: &ParsedSpec,
+    context: TypeMapContext,
+) -> Result<String> {
     let dsl_type = dsl_type.trim();
 
     // Compound type: Map[BOUND] T → [T; N]
@@ -241,7 +433,7 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
                 let bound_src = rest[..close].trim();
                 let inner_src = rest[close + 1..].trim();
                 let n = resolve_map_bound(bound_src, &spec.constants)?;
-                let inner_rust = map_type(inner_src, spec)?;
+                let inner_rust = map_type_with_context(inner_src, spec, context)?;
                 return Ok(format!("[{inner_rust}; {n}]"));
             }
         }
@@ -261,13 +453,13 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     }
 
     // Primitive match — check first so `U8` etc. never hit the alias path.
-    if let Some(rust) = primitive_map(dsl_type) {
+    if let Some(rust) = primitive_map(dsl_type, context) {
         return Ok(rust.to_string());
     }
 
     // Type alias: `type Foo = Bar` — recurse on the RHS. Transitive.
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
-        return map_type(rhs, spec);
+        return map_type_with_context(rhs, spec, context);
     }
 
     // Record type declared in the spec — return the name as-is. The generator
@@ -306,7 +498,7 @@ pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     if let Some(pod) = primitive_pod_map(dsl_type) {
         return Ok(pod.to_string());
     }
-    if let Some(rust) = primitive_map(dsl_type) {
+    if let Some(rust) = primitive_map(dsl_type, TypeMapContext::Quasar) {
         return Ok(rust.to_string());
     }
     // Type alias: `type Foo = Bar` — recurse on the RHS so an alias like
@@ -316,7 +508,7 @@ pub fn map_type_pod(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     }
     // Fall back to map_type for compound / user-defined types — those
     // don't need (and can't take) the pod conversion.
-    map_type(dsl_type, spec)
+    map_type_quasar(dsl_type, spec)
 }
 
 fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
@@ -338,9 +530,12 @@ fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
 /// Map a DSL primitive name to its Rust equivalent, if one exists. Factored
 /// out of `map_type` so both the primitive fast-path and the alias-recursion
 /// base case can share it.
-fn primitive_map(dsl_type: &str) -> Option<&'static str> {
+fn primitive_map(dsl_type: &str, context: TypeMapContext) -> Option<&'static str> {
     Some(match dsl_type {
-        "Pubkey" => "Address",
+        "Pubkey" => match context {
+            TypeMapContext::Anchor => "Pubkey",
+            TypeMapContext::Standalone | TypeMapContext::Quasar => "Address",
+        },
         "U8" => "u8",
         "U16" => "u16",
         "U32" => "u32",
@@ -466,7 +661,14 @@ fn generate_lib(
     out.push_str(surface.crate_attrs);
     out.push_str(surface.prelude_import);
     out.push('\n');
-    out.push_str("mod instructions;\nuse instructions::*;\n");
+    out.push_str("mod instructions;\n");
+    // Quasar's Accounts structs live inside instructions/<name>.rs, so
+    // lib.rs needs the glob to reference them in `Context<X>`. Anchor
+    // defines the structs further down in this same file, so the glob
+    // would just produce an unused-import warning.
+    if matches!(target, Target::Quasar) {
+        out.push_str("use instructions::*;\n");
+    }
 
     if !spec.events.is_empty() {
         out.push_str("pub mod events;\n");
@@ -524,7 +726,7 @@ fn generate_lib(
             let rust_ty = if needs_fin_cast(ptype) {
                 "u32".to_string()
             } else {
-                map_type(ptype, spec)?
+                map_type_for_target(ptype, spec, target)?
             };
             params.push_str(&format!(", {}: {}", pname, rust_ty));
         }
@@ -580,6 +782,20 @@ fn generate_lib(
         out.push_str("// The handler impl blocks live next to the (always-regenerated)\n");
         out.push_str("// guard module in `instructions/<name>.rs`.\n");
         out.push_str("use crate::state::*;\n");
+        let has_token = spec.handlers.iter().any(|h| {
+            h.accounts
+                .iter()
+                .any(|a| a.account_type.as_deref() == Some("token") || a.name == "token_program")
+        });
+        let has_mint = spec.handlers.iter().any(|h| {
+            h.accounts
+                .iter()
+                .any(|a| a.account_type.as_deref() == Some("mint"))
+        });
+        let imports = surface.token_imports(has_token, has_mint);
+        if !imports.is_empty() {
+            out.push_str(&imports);
+        }
         for handler in &spec.handlers {
             out.push('\n');
             out.push_str(&render_handler_accounts_struct(
@@ -616,7 +832,6 @@ fn generate_state(
     out.push_str(&marker("DO NOT EDIT", fp, "src/state.rs"));
     out.push_str(surface.prelude_import);
     out.push('\n');
-
     // User-declared record types (`type T = { field : Type, ... }`) get
     // emitted as plain `#[repr(C)]` structs ahead of the account structs
     // that reference them. Without this, a state field like
@@ -629,12 +844,25 @@ fn generate_state(
     // PodU128, …) so the whole struct keeps alignment 1.
     for record in &spec.records {
         out.push_str("#[repr(C)]\n");
-        out.push_str("#[derive(Clone, Copy)]\n");
+        // Anchor: when a record is nested inside an `#[account]` struct
+        // (e.g. `accounts: Map[N] Account` lowers to `[Account; N]`),
+        // the `#[account]` macro derives AnchorSerialize/Deserialize
+        // for the outer struct and recursively requires every field
+        // type to implement them. Add the derives here so the inner
+        // record satisfies that bound. Quasar nests records inside
+        // zero-copy structs whose serialization comes from `#[repr(C)]`
+        // alignment, not from Borsh, so the extra derives only fire
+        // for the Anchor target.
+        let derives = match target {
+            Target::Anchor => "#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]\n",
+            _ => "#[derive(Clone, Copy)]\n",
+        };
+        out.push_str(derives);
         out.push_str(&format!("pub struct {} {{\n", record.name));
         for (fname, ftype) in &record.fields {
             let rust_ty = match target {
                 Target::Quasar => map_type_pod(ftype, spec)?,
-                _ => map_type(ftype, spec)?,
+                _ => map_type_for_target(ftype, spec, target)?,
             };
             out.push_str(&format!("    pub {}: {},\n", fname, rust_ty));
         }
@@ -659,7 +887,11 @@ fn generate_state(
             out.push_str(&format!("{}pub struct {} {{\n", account_attr, struct_name));
 
             for (fname, ftype) in &acct.fields {
-                out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
+                out.push_str(&format!(
+                    "    pub {}: {},\n",
+                    fname,
+                    map_type_for_target(ftype, spec, target)?
+                ));
             }
 
             if acct.pda_ref.is_some() && !acct.fields.iter().any(|(n, _)| n == "bump") {
@@ -705,7 +937,11 @@ fn generate_state(
         out.push_str(&format!("{}pub struct {} {{\n", account_attr, state_name));
 
         for (fname, ftype) in &spec.state_fields {
-            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
+            out.push_str(&format!(
+                "    pub {}: {},\n",
+                fname,
+                map_type_for_target(ftype, spec, target)?
+            ));
         }
 
         if !spec.pdas.is_empty() && !spec.state_fields.iter().any(|(n, _)| n == "bump") {
@@ -758,7 +994,6 @@ fn generate_events(
     out.push_str(&marker("DO NOT EDIT", fp, "src/events.rs"));
     out.push_str(surface.prelude_import);
     out.push('\n');
-
     for (i, event) in spec.events.iter().enumerate() {
         if surface.explicit_account_discriminator {
             // Quasar uses the same explicit-discriminator convention
@@ -769,7 +1004,11 @@ fn generate_events(
         }
         out.push_str(&format!("pub struct {} {{\n", event.name));
         for (fname, ftype) in &event.fields {
-            out.push_str(&format!("    pub {}: {},\n", fname, map_type(ftype, spec)?));
+            out.push_str(&format!(
+                "    pub {}: {},\n",
+                fname,
+                map_type_for_target(ftype, spec, target)?
+            ));
         }
         out.push_str("}\n\n");
     }
@@ -1001,7 +1240,12 @@ fn rewrite_index_to_usize(field: &str) -> String {
 /// empty string when the lifecycle clause doesn't require a runtime
 /// emission (init handlers skip the pre-check; pre==post handlers skip
 /// the post-write; specs without lifecycle declarations skip everything).
-fn lifecycle_check_line(handler: &ParsedHandler, spec: &ParsedSpec, write: bool) -> String {
+fn lifecycle_check_line(
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    write: bool,
+    surface: &FrameworkSurface,
+) -> String {
     // Find the state-bearing account name and its `<ADT>Status` enum.
     let state_acct = find_state_account(handler);
     let Some(sa) = state_acct else {
@@ -1051,7 +1295,7 @@ fn lifecycle_check_line(handler: &ParsedHandler, spec: &ParsedSpec, write: bool)
 
     let is_init_pre = matches!(pre, "Uninitialized" | "Empty");
 
-    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+    let err_enum = format!("crate::errors::{}Error", to_pascal_case(&spec.program_name));
 
     if write {
         // Post-status write: only when post is set and differs from pre.
@@ -1076,7 +1320,7 @@ fn lifecycle_check_line(handler: &ParsedHandler, spec: &ParsedSpec, write: bool)
         if !lifecycle.iter().any(|s| s == pre) {
             return String::new();
         }
-        let err_ctor = format!("ProgramError::from({}::InvalidLifecycle)", err_enum);
+        let err_ctor = surface.error_expr(&err_enum, "InvalidLifecycle");
         format!(
             "    // lifecycle: require status == {pre}\n    if ctx.{acct}.status != {enum_name}::{pre} as u8 {{ return Err({err_ctor}); }}\n",
             pre = pre,
@@ -1742,29 +1986,55 @@ fn render_handler_scaffold(
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
     out.push_str(surface.prelude_import);
-    // Token / Mint live in a separate crate per framework; only pull
-    // them in when the spec actually declares token accounts.
-    let needs_spl = handler.has_token_accounts();
-    if needs_spl {
-        match target {
-            Target::Anchor => out.push_str("use anchor_spl::token::{Token, Mint, TokenAccount};\n"),
-            Target::Quasar => out.push_str("use quasar_spl::{Token, Mint};\n"),
-            Target::Pinocchio => unreachable!(),
+    // Token / Mint live in a separate crate per framework. Only Quasar
+    // handler files need a per-handler SPL import — the local Accounts
+    // struct references `Account<Token>` / `Account<Mint>` directly.
+    // Anchor handler files re-export the struct from lib.rs, which
+    // already imports SPL types at crate root.
+    if matches!(target, Target::Quasar) {
+        let has_token = handler
+            .accounts
+            .iter()
+            .any(|a| a.account_type.as_deref() == Some("token") || a.name == "token_program");
+        let has_mint = handler
+            .accounts
+            .iter()
+            .any(|a| a.account_type.as_deref() == Some("mint"));
+        let imports = surface.token_imports(has_token, has_mint);
+        if !imports.is_empty() {
+            out.push_str(&imports);
         }
     }
-    out.push_str("use crate::state::*;\n");
+    // Quasar's Accounts struct is defined locally in this file, so its
+    // fields (`Account<MyState>`) need state types in scope. Anchor's
+    // struct lives in lib.rs (already imports state); the handler
+    // scaffold body only references guards + bumps, so the import would
+    // be flagged unused until the agent fills the body.
+    if render_struct {
+        out.push_str("use crate::state::*;\n");
+    }
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
+    // Checked-arith effects (`+=` / `-=`) lower to
+    // `<Pascal>Error::MathOverflow`. Bring the error enum into scope so
+    // the rendered scaffold body compiles. Saturating / wrapping
+    // (`+=!` / `+=?`) don't reference the enum.
+    let body_uses_error_enum = !spec.error_codes.is_empty()
+        && handler
+            .effects
+            .iter()
+            .any(|(_, op_kind, _)| op_kind == "add" || op_kind == "sub");
+    if body_uses_error_enum {
+        out.push_str("use crate::errors::*;\n");
+    }
     if !render_struct {
         // Anchor: bring the Accounts struct (defined in lib.rs) into
         // scope so the impl block can reference it bare.
-        out.push_str(&format!("use crate::{};\n", pascal));
-    }
-    if !spec.events.is_empty() && !handler.emits.is_empty() {
-        out.push_str("use crate::events::*;\n");
-    }
-    if !spec.error_codes.is_empty() {
-        out.push_str("use crate::errors::*;\n");
+        if surface.needs_bumps_import(handler) {
+            out.push_str(&format!("use crate::{{{}, {}}};\n", pascal, bumps_name));
+        } else {
+            out.push_str(&format!("use crate::{};\n", pascal));
+        }
     }
     out.push('\n');
 
@@ -1829,7 +2099,11 @@ fn render_handler_scaffold(
     let mut handler_params = vec![self_ref.to_string()];
     let mut param_names: Vec<String> = Vec::new();
     for (pname, ptype) in &handler.takes_params {
-        handler_params.push(format!("{}: {}", pname, map_type(ptype, spec)?));
+        handler_params.push(format!(
+            "{}: {}",
+            pname,
+            map_type_for_target(ptype, spec, target)?
+        ));
         param_names.push(pname.clone());
     }
     if handler.has_bumps() {
@@ -1853,6 +2127,9 @@ fn render_handler_scaffold(
         "        guards::{}({})?;\n",
         handler.name, guard_args
     ));
+    if handler.has_bumps() {
+        out.push_str("        let _ = bumps;\n");
+    }
 
     // Spec-level `let` bindings (e.g. `let total_fee = amount * 125 / 10000`)
     // must be emitted BEFORE the effect block — effect RHSs reference them.
@@ -2073,19 +2350,6 @@ fn generate_guards(
 ) -> Result<()> {
     let surface = FrameworkSurface::for_target(target);
     let lifetime_params = surface.lifetime_params();
-    // Anchor errors flow through `Result<()>` (the `Result` alias from
-    // `anchor_lang::prelude` defaults the error to
-    // `anchor_lang::error::Error`); Anchor error enums implement
-    // `Into<anchor_lang::error::Error>`, so `Err(MyError::Foo.into())`
-    // is the idiomatic return. Quasar uses `ProgramError::from(...)`
-    // because its error enums implement `Into<ProgramError>` instead.
-    let err_ctor: fn(&str, &str) -> String = match target {
-        Target::Anchor => |enum_name, variant| format!("{}::{}.into()", enum_name, variant),
-        Target::Quasar => {
-            |enum_name, variant| format!("ProgramError::from({}::{})", enum_name, variant)
-        }
-        Target::Pinocchio => unreachable!(),
-    };
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -2120,11 +2384,7 @@ fn generate_guards(
     // Pick up the per-handler `Accounts` structs. Anchor places them
     // at crate root (lib.rs); Quasar places them in
     // `instructions/<name>.rs` and re-exports via `instructions::*`.
-    match target {
-        Target::Anchor => out.push_str("use crate::*;\n\n"),
-        Target::Quasar => out.push_str("use crate::instructions::*;\n\n"),
-        Target::Pinocchio => unreachable!(),
-    }
+    out.push_str(surface.guard_accounts_import());
 
     for handler in &spec.handlers {
         let pascal = to_pascal_case(&handler.name);
@@ -2132,7 +2392,11 @@ fn generate_guards(
         let self_ref = if any_mut { "&mut " } else { "&" };
         let mut params = vec![format!("ctx: {}{}{}", self_ref, pascal, lifetime_params)];
         for (pname, ptype) in &handler.takes_params {
-            params.push(format!("{}: {}", pname, map_type(ptype, spec)?));
+            params.push(format!(
+                "{}: {}",
+                pname,
+                map_type_for_target(ptype, spec, target)?
+            ));
         }
         out.push_str(&format!(
             "/// Guards for `{}`.  \n/// Generated from the `requires` clauses of the spec handler block.\n",
@@ -2158,8 +2422,8 @@ fn generate_guards(
         // default; we just write the post variant). We also elide when
         // the spec doesn't declare lifecycle states for the relevant
         // ADT.
-        let lifecycle_pre_check = lifecycle_check_line(handler, spec, false);
-        let lifecycle_post_write = lifecycle_check_line(handler, spec, true);
+        let lifecycle_pre_check = lifecycle_check_line(handler, spec, false, &surface);
+        let lifecycle_post_write = lifecycle_check_line(handler, spec, true, &surface);
         if !lifecycle_pre_check.is_empty() {
             out.push_str(&lifecycle_pre_check);
         }
@@ -2269,12 +2533,11 @@ fn generate_guards(
             } else {
                 "InvalidLifecycle"
             };
+            let err_expr = surface.error_expr(&err_enum_name, unauthorized);
+            let check_expr = surface.authority_check_expr(&acct.name, auth_name);
             out.push_str(&format!(
-                "    // authority: ctx.{acct}.owner() == ctx.{auth}.address()\n    if *ctx.{acct}.owner() != *ctx.{auth}.to_account_view().address() {{ return Err(ProgramError::from({err_enum}::{var})); }}\n",
-                acct = acct.name,
-                auth = auth_name,
-                err_enum = err_enum_name,
-                var = unauthorized,
+                "    // authority: {}\n    if {} {{ return Err({}); }}\n",
+                check_expr, check_expr, err_expr,
             ));
         }
 
@@ -2322,10 +2585,7 @@ fn generate_guards(
                                 // the handler-account is a different
                                 // expression — keep the `.` access path).
                                 if after >= bytes.len() || bytes[after] != b'.' {
-                                    after_accounts.push_str(&format!(
-                                        "(*ctx.{}.to_account_view().address())",
-                                        name
-                                    ));
+                                    after_accounts.push_str(&surface.account_key_expr(name));
                                     i = after;
                                     matched = true;
                                     break;
@@ -2383,7 +2643,7 @@ fn generate_guards(
                 out.push_str(&format!(
                     "    if !({}) {{ return Err({}); }}\n",
                     rust,
-                    err_ctor(&err_enum, err),
+                    surface.error_expr(&err_enum, err),
                 ));
             } else {
                 out.push_str(&format!("    debug_assert!({});\n", rust));
@@ -2401,7 +2661,7 @@ fn generate_guards(
             out.push_str(&format!(
                 "    if ({}) {{ return Err({}); }}\n",
                 rust,
-                err_ctor(&err_enum, &ab.error_name),
+                surface.error_expr(&err_enum, &ab.error_name),
             ));
         }
 
@@ -2600,6 +2860,53 @@ mod tests {
     }
 
     #[test]
+    fn map_type_anchor_uses_native_pubkey() {
+        let spec = empty_spec();
+
+        assert_eq!(map_type_anchor("Pubkey", &spec).unwrap(), "Pubkey");
+        assert_eq!(
+            map_type_anchor("Map[2] Pubkey", &spec).unwrap(),
+            "[Pubkey; 2]"
+        );
+    }
+
+    #[test]
+    fn framework_surface_centralizes_target_snippets() {
+        let anchor = FrameworkSurface::for_target(Target::Anchor);
+        assert_eq!(
+            anchor.token_account_type(true),
+            "Account<'info, TokenAccount>"
+        );
+        assert_eq!(
+            anchor.program_type("token_program", None, false),
+            "Program<'info, Token>"
+        );
+        assert_eq!(
+            anchor.error_expr("EscrowError", "Unauthorized"),
+            "EscrowError::Unauthorized.into()"
+        );
+        assert_eq!(
+            anchor.authority_check_expr("escrow_ta", "escrow"),
+            "ctx.escrow_ta.owner != ctx.escrow.key()"
+        );
+
+        let quasar = FrameworkSurface::for_target(Target::Quasar);
+        assert_eq!(quasar.token_account_type(true), "&'info mut Account<Token>");
+        assert_eq!(
+            quasar.program_type("token_program", None, false),
+            "&'info Program<System>"
+        );
+        assert_eq!(
+            quasar.error_expr("EscrowError", "Unauthorized"),
+            "ProgramError::from(EscrowError::Unauthorized)"
+        );
+        assert_eq!(
+            quasar.authority_check_expr("escrow_ta", "escrow"),
+            "(*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())"
+        );
+    }
+
+    #[test]
     fn map_type_errors_on_unknown_type() {
         // v2.6.1 bug: DSL types not in the four-item allowlist (U8/U64/U128/I128)
         // fell through as-is, leaking `U16` verbatim into Rust. v2.6.2: unknown
@@ -2710,6 +3017,275 @@ mod tests {
         assert_eq!(sanitize_ident("[i]"), "_i");
         // Trailing non-ident chars drop cleanly.
         assert_eq!(sanitize_ident("foo."), "foo");
+    }
+
+    #[test]
+    fn anchor_scaffold_imports_compile_support_for_tokens_bumps_and_guards() {
+        let src = r#"spec Escrow
+
+type State
+  | Uninitialized
+  | Open of {
+      initializer : Pubkey,
+    }
+  | Closed
+
+pda escrow ["escrow", initializer]
+
+type Error
+  | Unauthorized
+
+handler initialize (amount : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+  accounts {
+    initializer   : signer, writable
+    escrow        : writable, pda ["escrow", initializer]
+    escrow_ta     : writable, type token, authority escrow
+    token_program : program
+  }
+  requires amount > 0 else Unauthorized
+  effect {
+    initializer := initializer.pubkey
+  }
+}
+
+handler cancel : State.Open -> State.Closed {
+  auth initializer
+  accounts {
+    initializer   : signer, writable
+    escrow        : writable, pda ["escrow", initializer]
+    escrow_ta     : writable, type token, authority escrow
+    token_program : program
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("escrow.qedspec");
+        let out_dir = dir.path().join("programs");
+        std::fs::write(&spec_path, src).unwrap();
+
+        generate_lib(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+        generate_state(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+        generate_errors(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+        generate_instructions(&spec, &fp, &spec_path, &out_dir, Target::Anchor).unwrap();
+        generate_guards(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+
+        let lib = std::fs::read_to_string(out_dir.join("src/lib.rs")).unwrap();
+        // No mint accounts in this spec, so `Mint` should be omitted to
+        // keep the rendered scaffold warning-clean. See Workstream F in
+        // `docs/prds/PRD-v2.11-codegen-simplification.md`.
+        assert!(lib.contains("use anchor_spl::token::{Token, TokenAccount};"));
+        assert!(!lib.contains("Mint, Token, TokenAccount"));
+        assert!(lib.contains("pub token_program: Program<'info, Token>"));
+
+        let state = std::fs::read_to_string(out_dir.join("src/state.rs")).unwrap();
+        assert!(state.contains("initializer: Pubkey"));
+        assert!(!state.contains("pub type Address = Pubkey;"));
+
+        let init = std::fs::read_to_string(out_dir.join("src/instructions/initialize.rs")).unwrap();
+        assert!(init.contains("use crate::{Initialize, InitializeBumps};"));
+
+        let guards = std::fs::read_to_string(out_dir.join("src/guards.rs")).unwrap();
+        assert!(guards.contains("ctx.escrow_ta.owner != ctx.escrow.key()"));
+        assert!(guards.contains("EscrowError::Unauthorized.into()"));
+        assert!(guards.contains("EscrowError::InvalidLifecycle.into()"));
+        assert!(!guards.contains("to_account_view"));
+    }
+
+    /// Quasar twin of the Anchor scaffold-imports test. Workstreams A + B
+    /// (target-aware type mappers + `FrameworkSurface` boundary) and F
+    /// (conditional imports + warning gating) reshaped both targets'
+    /// emission. The Anchor side is covered above; this test pins the
+    /// Quasar side so a regression in the shared `FrameworkSurface`
+    /// surface fails fast at the unit level — without depending on the
+    /// drift gate (which can hide changes if bundled examples are
+    /// regenerated in the same commit) or on a `cargo check` smoke (slow
+    /// and pulls quasar-lang at build time).
+    #[test]
+    fn quasar_scaffold_emits_target_specific_surface() {
+        let src = r#"spec Escrow
+
+type State
+  | Uninitialized
+  | Open of {
+      initializer : Pubkey,
+    }
+  | Closed
+
+pda escrow ["escrow", initializer]
+
+type Error
+  | Unauthorized
+
+handler initialize (amount : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+  accounts {
+    initializer   : signer, writable
+    escrow        : writable, pda ["escrow", initializer]
+    escrow_ta     : writable, type token, authority escrow
+    token_program : program
+  }
+  requires amount > 0 else Unauthorized
+  effect {
+    initializer := initializer.pubkey
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("escrow.qedspec");
+        let out_dir = dir.path().join("programs");
+        std::fs::write(&spec_path, src).unwrap();
+
+        generate_lib(&spec, &fp, &out_dir, Target::Quasar).unwrap();
+        generate_state(&spec, &fp, &out_dir, Target::Quasar).unwrap();
+        generate_errors(&spec, &fp, &out_dir, Target::Quasar).unwrap();
+        generate_instructions(&spec, &fp, &spec_path, &out_dir, Target::Quasar).unwrap();
+        generate_guards(&spec, &fp, &out_dir, Target::Quasar).unwrap();
+
+        let lib = std::fs::read_to_string(out_dir.join("src/lib.rs")).unwrap();
+        // Quasar's `#[program]` mod uses `Ctx<X>` — Anchor uses
+        // `Context<X>`. Pin the difference so a target-flip in
+        // `FrameworkSurface::context_type` fails the test.
+        assert!(
+            lib.contains("Ctx<Initialize>"),
+            "Quasar uses Ctx, not Context"
+        );
+        // Quasar lib.rs needs `use instructions::*;` because the Accounts
+        // struct lives in `instructions/<name>.rs`. Anchor doesn't need
+        // it; Workstream F made this conditional.
+        assert!(lib.contains("use instructions::*;"));
+        // Quasar emits `#![cfg_attr(... no_std)]` at the crate root so
+        // the on-chain build has no_std but the host build keeps std.
+        assert!(lib.contains("#![cfg_attr"));
+        // Day-2 sidecar: Quasar's `no_alloc` / `panic_handler` macros
+        // emit `cfg(target_os = "solana")` / `feature = "alloc"`
+        // references that aren't declared, same shape as Anchor's
+        // anchor-debug noise. The cfg-allow is now target-agnostic so
+        // both scaffolds compile warning-clean.
+        assert!(lib.contains("#![allow(unexpected_cfgs)]"));
+
+        let init = std::fs::read_to_string(out_dir.join("src/instructions/initialize.rs")).unwrap();
+        // Quasar handler files import quasar_spl, not anchor_spl.
+        // Workstream B's `token_imports(has_token, has_mint)` filters
+        // to actually-used names — escrow has tokens but no mint, so
+        // emit `quasar_spl::Token` only.
+        assert!(init.contains("use quasar_spl::Token;"));
+        assert!(!init.contains("Mint"));
+        // Quasar handlers define the Accounts struct locally, not from
+        // crate root, so they need `use crate::state::*;`.
+        assert!(init.contains("use crate::state::*;"));
+
+        let guards = std::fs::read_to_string(out_dir.join("src/guards.rs")).unwrap();
+        // Quasar uses `ProgramError::from(EscrowError::*)` for error
+        // exprs — Anchor uses `EscrowError::*.into()`. Workstream B's
+        // `error_expr` centralizes the difference.
+        assert!(guards.contains("ProgramError::from(EscrowError::"));
+        assert!(!guards.contains("EscrowError::Unauthorized.into()"));
+        // Quasar's account-key expression: `(*ctx.X.to_account_view().address())`.
+        // Anchor's is `ctx.X.key()`. Pin the difference.
+        assert!(guards.contains(".to_account_view().address()"));
+        assert!(!guards.contains("ctx.escrow.key()"));
+    }
+
+    /// Records nested inside `#[account]` Anchor structs need
+    /// `AnchorSerialize` + `AnchorDeserialize` derives or the outer
+    /// struct fails its trait bound (see Workstream 9 Borsh fix on
+    /// percolator). Lock the derive emission for record types with
+    /// mixed-Borshable field types — Pubkey, integers, signed ints —
+    /// so a future regression in `generate_state` fails fast at the
+    /// unit level. Day-2 sidecar test.
+    #[test]
+    fn anchor_records_with_mixed_field_types_get_borsh_derives() {
+        let src = r#"spec MixedRecord
+
+type Holding = {
+  owner       : Pubkey,
+  capital     : U128,
+  pnl         : I128,
+  active      : U8,
+  duration    : U16,
+}
+
+type State
+  | Uninitialized
+  | Active of {
+      authority : Pubkey,
+      holdings  : Holding,
+    }
+  | Closed
+
+type Error
+  | Unauthorized
+
+handler initialize : State.Uninitialized -> State.Active {
+  auth authority
+  accounts {
+    authority : signer, writable
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("programs");
+        generate_state(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+
+        let state = std::fs::read_to_string(out_dir.join("src/state.rs")).unwrap();
+        assert!(
+            state.contains("#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]\npub struct Holding"),
+            "Holding record should carry AnchorSerialize/AnchorDeserialize derives so the outer #[account] struct's recursive Borsh bound is satisfied; got:\n{state}"
+        );
+        // Field types should be the native Anchor mappings, not the
+        // standalone harness aliases (Address, etc.).
+        assert!(state.contains("pub owner: Pubkey,"));
+        assert!(state.contains("pub capital: u128,"));
+        assert!(state.contains("pub pnl: i128,"));
+        assert!(state.contains("pub active: u8,"));
+        assert!(state.contains("pub duration: u16,"));
+    }
+
+    /// Quasar nests records inside `#[repr(C)]` zero-copy structs whose
+    /// serialization comes from layout, not from Borsh. Confirm we
+    /// don't accidentally drop AnchorSerialize/AnchorDeserialize on
+    /// the Quasar path (where it would pull in unwanted deps).
+    #[test]
+    fn quasar_records_skip_anchor_borsh_derives() {
+        let src = r#"spec QuasarRecord
+
+type Holding = {
+  active  : U8,
+  capital : U128,
+}
+
+type State
+  | Active of {
+      holdings : Holding,
+    }
+
+type Error
+  | Unauthorized
+
+handler initialize : State.Active -> State.Active {
+  auth authority
+  accounts {
+    authority : signer, writable
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("programs");
+        generate_state(&spec, &fp, &out_dir, Target::Quasar).unwrap();
+
+        let state = std::fs::read_to_string(out_dir.join("src/state.rs")).unwrap();
+        assert!(state.contains("#[derive(Clone, Copy)]\npub struct Holding"));
+        assert!(!state.contains("AnchorSerialize"));
+        assert!(!state.contains("AnchorDeserialize"));
     }
 
     #[test]

@@ -208,6 +208,10 @@ $QEDGEN check --spec my_program.qedspec --anchor-project programs/my_program/
 # CI freeze gate: refuse to update qed.lock and refuse network fetches
 $QEDGEN check --spec my_program.qedspec --frozen
 $QEDGEN check --spec my_program.qedspec --frozen --no-cache
+
+# Bundled example drift gate
+$QEDGEN check --regen-drift
+$QEDGEN check --regen-drift --examples-root examples/rust
 ```
 
 | Flag | Type | Default | Description |
@@ -226,6 +230,8 @@ $QEDGEN check --spec my_program.qedspec --frozen --no-cache
 | `--anchor-project` | Path | - | Anchor program crate (`Cargo.toml` + `src/lib.rs`). Cross-checks the spec's `handler` set against the `#[program]` mod's instruction set, plus an effect-coverage lint per resolved handler body. CI gate. |
 | `--frozen` | bool | false | Refuse to update `qed.lock`; error if the on-disk lock is stale or missing. Used in CI to detect un-bumped imports. |
 | `--no-cache` | bool | false | Force-refresh the github source cache for every imported dep. Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and re-clones. |
+| `--regen-drift` | bool | false | Regenerate bundled examples into temporary directories and fail if committed generated support code, harnesses, or `Spec.lean` drift. Also fails when an example has `.qed/` state or generated artifacts but no `qed.toml`. |
+| `--examples-root` | Path | `examples/rust` | Example root scanned by `--regen-drift` |
 | `--json` | bool | false | Machine-readable output |
 
 Lints fired by `check` include `[shape_only_cpi]` for `call

@@ -599,6 +599,45 @@ mod tests {
     use super::*;
     use crate::qed_manifest::Manifest;
     use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set<V: AsRef<std::ffi::OsStr>>(key: &'static str, value: V) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     fn manifest_with(deps: Vec<(&str, Dependency)>) -> Manifest {
         let mut m = BTreeMap::new();
@@ -1038,12 +1077,12 @@ b = { path = "b/spec.qedspec" }
         // QEDGEN_CACHE_TTL=0 disables the time-based staleness check —
         // useful when users want to defer cache invalidation entirely
         // to --no-cache.
+        let _env_lock = lock_env();
+        let _ttl = EnvVarGuard::set("QEDGEN_CACHE_TTL", "0");
         let tmp = tempfile::tempdir().unwrap();
         let marker = tmp.path().join(".qedgen-commit");
         std::fs::write(&marker, "abc123").unwrap();
-        std::env::set_var("QEDGEN_CACHE_TTL", "0");
         assert!(!marker_is_stale(&marker));
-        std::env::remove_var("QEDGEN_CACHE_TTL");
     }
 
     // Note: the "TTL exceeded → stale" path is genuinely time-and-env-
@@ -1063,29 +1102,24 @@ b = { path = "b/spec.qedspec" }
 
     #[test]
     fn cache_ttl_secs_defaults_to_one_week() {
-        std::env::remove_var("QEDGEN_CACHE_TTL");
+        let _env_lock = lock_env();
+        let _ttl = EnvVarGuard::remove("QEDGEN_CACHE_TTL");
         assert_eq!(cache_ttl_secs(), 7 * 24 * 60 * 60);
     }
 
     #[test]
     fn cache_ttl_secs_honors_env_override() {
-        std::env::set_var("QEDGEN_CACHE_TTL", "3600");
+        let _env_lock = lock_env();
+        let _ttl = EnvVarGuard::set("QEDGEN_CACHE_TTL", "3600");
         assert_eq!(cache_ttl_secs(), 3600);
-        std::env::remove_var("QEDGEN_CACHE_TTL");
     }
 
     #[test]
     fn cache_root_honors_env_override() {
-        // Capture and restore so other tests aren't disturbed.
-        let prev = std::env::var("QEDGEN_CACHE_DIR").ok();
-        std::env::set_var("QEDGEN_CACHE_DIR", "/tmp/qedgen-test-cache");
+        let _env_lock = lock_env();
+        let _cache_dir = EnvVarGuard::set("QEDGEN_CACHE_DIR", "/tmp/qedgen-test-cache");
         let root = cache_root();
         assert_eq!(root, PathBuf::from("/tmp/qedgen-test-cache"));
-        if let Some(p) = prev {
-            std::env::set_var("QEDGEN_CACHE_DIR", p);
-        } else {
-            std::env::remove_var("QEDGEN_CACHE_DIR");
-        }
     }
 
     /// GitHub fetch via shell-out — only runs when explicitly opted in.
@@ -1097,8 +1131,9 @@ b = { path = "b/spec.qedspec" }
         if std::env::var("QEDGEN_TEST_NETWORK").is_err() {
             return; // skipped silently
         }
+        let _env_lock = lock_env();
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("QEDGEN_CACHE_DIR", tmp.path());
+        let _cache_dir = EnvVarGuard::set("QEDGEN_CACHE_DIR", tmp.path());
 
         let manifest = manifest_with(vec![(
             "skills",
