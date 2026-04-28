@@ -119,6 +119,16 @@ pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), Pro
     Ok(())
 }
 
+/// Guards for `add_member`.  
+/// Generated from the `requires` clauses of the spec handler block.
+pub fn add_member<'info>(ctx: &mut AddMember<'info>, member_index: u8, member_pubkey: Address) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    // requires: member_index < s.member_count
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    Ok(())
+}
+
 /// Guards for `remove_member`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), ProgramError> {

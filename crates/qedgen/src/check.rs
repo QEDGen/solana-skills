@@ -3011,6 +3011,15 @@ fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<CompletenessWarnin
         if has_binding {
             continue;
         }
+        // R25 has_one binding counts as a gate too. When the auth name
+        // matches a state field, only that pubkey can drive the
+        // handler — so the indexed mutation IS gated, just by signer
+        // identity rather than by the index itself. Multisig::add_member
+        // is the canonical shape: the creator sets `members[i]`,
+        // `auth creator` + `has_one = creator` binds the writer.
+        if r25_will_bind_auth(handler, spec) {
+            continue;
+        }
         warnings.push(CompletenessWarning {
             rule: "unguarded_indexed_mutation".to_string(),
             severity: Severity::Warning,
@@ -4799,7 +4808,9 @@ handler liquidate : State.Active -> State.Liquidated {
         let matrix = coverage_matrix(&spec);
         assert_eq!(matrix.coverage_pct, 100.0);
         assert!(matrix.gaps.is_empty());
-        assert_eq!(matrix.operations.len(), 7);
+        // 8 handlers: create_vault, propose, approve, reject, execute,
+        // cancel_proposal, add_member (post-v2.10 audit fix), remove_member.
+        assert_eq!(matrix.operations.len(), 8);
         assert_eq!(matrix.properties.len(), 2);
     }
 
