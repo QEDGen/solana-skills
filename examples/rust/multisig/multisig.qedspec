@@ -201,6 +201,26 @@ handler cancel_proposal : State.HasProposal -> State.Active {
   emits ProposalCancelled
 }
 
+/// Register a member's pubkey at a slot in the members list — creator
+/// only. Must be called once per slot before that member can vote.
+/// `members[i]` defaults to all-zeros at vault creation; setting it
+/// here is what binds `member_index = i` to the real signer at
+/// approve/reject time.
+handler add_member (member_index : U8) (member_pubkey : Pubkey) : State.Active -> State.Active {
+  auth creator
+
+  accounts {
+    creator : signer
+    vault   : writable, pda ["vault", creator]
+  }
+
+  requires member_index < state.member_count else NotAMember
+
+  effect {
+    members[member_index] := member_pubkey
+  }
+}
+
 /// Remove a member from the vault — creator only, no active proposal
 handler remove_member : State.Active -> State.Active {
   auth creator

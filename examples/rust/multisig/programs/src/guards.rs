@@ -26,7 +26,7 @@ pub fn create_vault<'info>(ctx: &mut CreateVault<'info>, threshold: u8, member_c
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn propose<'info>(ctx: &mut Propose<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
-    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // R28 PDA check: ctx.vault matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
@@ -43,7 +43,7 @@ pub fn propose<'info>(ctx: &mut Propose<'info>) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), ProgramError> {
     // lifecycle: require status == HasProposal
-    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // R28 PDA check: ctx.vault matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
@@ -64,7 +64,7 @@ pub fn approve<'info>(ctx: &mut Approve<'info>, member_index: u8) -> Result<(), 
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), ProgramError> {
     // lifecycle: require status == HasProposal
-    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // R28 PDA check: ctx.vault matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
@@ -85,7 +85,7 @@ pub fn reject<'info>(ctx: &mut Reject<'info>, member_index: u8) -> Result<(), Pr
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn execute<'info>(ctx: &mut Execute<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == HasProposal
-    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // R28 PDA check: ctx.vault matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
@@ -104,7 +104,7 @@ pub fn execute<'info>(ctx: &mut Execute<'info>) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == HasProposal
-    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::HasProposal as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // R28 PDA check: ctx.vault matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"vault", ctx.vault.creator.as_ref(), &[ctx.vault.bump]];
@@ -119,11 +119,21 @@ pub fn cancel_proposal<'info>(ctx: &mut CancelProposal<'info>) -> Result<(), Pro
     Ok(())
 }
 
+/// Guards for `add_member`.  
+/// Generated from the `requires` clauses of the spec handler block.
+pub fn add_member<'info>(ctx: &mut AddMember<'info>, member_index: u8, member_pubkey: Address) -> Result<(), ProgramError> {
+    // lifecycle: require status == Active
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
+    // requires: member_index < s.member_count
+    if !(member_index < ctx.vault.member_count) { return Err(ProgramError::from(MultisigError::NotAMember)); }
+    Ok(())
+}
+
 /// Guards for `remove_member`.  
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
-    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(MultisigError::InvalidLifecycle)); }
+    if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // requires: s.member_count > s.threshold
     debug_assert!(ctx.vault.member_count > ctx.vault.threshold);
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0

@@ -32,6 +32,7 @@ mod qed_lock;
 mod qed_manifest;
 mod ratchet;
 mod reconcile;
+mod regen_drift;
 mod rust_codegen_util;
 mod sbpf_verify;
 mod spec_hash;
@@ -395,6 +396,15 @@ enum Commands {
         /// you know the upstream changed.
         #[arg(long)]
         no_cache: bool,
+
+        /// Regenerate bundled examples into temporary directories and fail
+        /// if committed generated artifacts have drifted.
+        #[arg(long)]
+        regen_drift: bool,
+
+        /// Root containing bundled Rust examples for --regen-drift.
+        #[arg(long, default_value = "examples/rust", requires = "regen_drift")]
+        examples_root: PathBuf,
     },
 
     /// Run the generated harnesses against the generated implementation.
@@ -1210,9 +1220,26 @@ async fn main() -> Result<()> {
             json,
             frozen,
             no_cache,
+            regen_drift,
+            examples_root,
         } => {
             require_git_repo()?;
             let cwd = std::env::current_dir()?;
+
+            if regen_drift {
+                let examples_root = if examples_root.is_absolute() {
+                    examples_root
+                } else {
+                    cwd.join(examples_root)
+                };
+                let report = regen_drift::check_examples(&examples_root)?;
+                regen_drift::print_report(&report);
+                if report.has_issues() {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             let spec_name = spec
                 .file_stem()

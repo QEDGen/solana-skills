@@ -212,7 +212,7 @@ dependencies = [
 [[package]]
 name = "qedgen-macros"
 version = "0.1.0"
-source = "git+https://github.com/qedgen/solana-skills?tag=v2.9.0#559969c55b2738ff61e66e52f7d3e05ad8667246"
+source = "git+https://github.com/qedgen/solana-skills?tag=v2.10.0#54ff846c5083e9b79cb8405a1d4b9d2662044417"
 dependencies = [
  "proc-macro2",
  "quote",

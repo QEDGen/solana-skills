@@ -24,7 +24,7 @@ pub fn init_pool<'info>(ctx: &mut InitPool<'info>, rate: u64) -> Result<(), Prog
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
-    if ctx.pool.status != PoolStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
+    if ctx.pool.status != PoolStatus::Active as u8 { return Err(ProgramError::from(crate::errors::LendingError::InvalidLifecycle)); }
     // R28 PDA check: ctx.pool matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
@@ -32,8 +32,8 @@ pub fn deposit<'info>(ctx: &mut Deposit<'info>, amount: u64) -> Result<(), Progr
             return Err(ProgramError::from(LendingError::InvalidPda));
         }
     }
-    // authority: ctx.pool_vault.owner() == ctx.pool.address()
-    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
+    // authority: (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address())
+    if (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address()) { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0
     if !(amount > 0) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     Ok(())
@@ -49,8 +49,8 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
             return Err(ProgramError::from(LendingError::InvalidPda));
         }
     }
-    // authority: ctx.pool_vault.owner() == ctx.pool.address()
-    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
+    // authority: (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address())
+    if (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address()) { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: amount > 0 ∧ collateral > 0
     if !((amount > 0) && (collateral > 0)) { return Err(ProgramError::from(LendingError::InvalidAmount)); }
     // lifecycle: status := Active
@@ -62,7 +62,7 @@ pub fn borrow<'info>(ctx: &mut Borrow<'info>, amount: u64, collateral: u64) -> R
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
-    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
+    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(crate::errors::LendingError::InvalidLifecycle)); }
     // R28 PDA check: ctx.pool matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"pool", ctx.pool.authority.as_ref(), &[ctx.pool.bump]];
@@ -70,8 +70,8 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
             return Err(ProgramError::from(LendingError::InvalidPda));
         }
     }
-    // authority: ctx.pool_vault.owner() == ctx.pool.address()
-    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
+    // authority: (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address())
+    if (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address()) { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // lifecycle: status := Empty
     ctx.loan.status = LoanStatus::Empty as u8;
     Ok(())
@@ -81,7 +81,7 @@ pub fn repay<'info>(ctx: &mut Repay<'info>) -> Result<(), ProgramError> {
 /// Generated from the `requires` clauses of the spec handler block.
 pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> {
     // lifecycle: require status == Active
-    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(LendingError::InvalidLifecycle)); }
+    if ctx.loan.status != LoanStatus::Active as u8 { return Err(ProgramError::from(crate::errors::LendingError::InvalidLifecycle)); }
     // R28 PDA check: ctx.loan matches its declared seeds
     {
         let __seeds: &[&[u8]] = &[b"loan", ctx.pool.to_account_view().address().as_ref(), ctx.loan.borrower.as_ref(), &[ctx.loan.bump]];
@@ -96,8 +96,8 @@ pub fn liquidate<'info>(ctx: &mut Liquidate<'info>) -> Result<(), ProgramError> 
             return Err(ProgramError::from(LendingError::InvalidPda));
         }
     }
-    // authority: ctx.pool_vault.owner() == ctx.pool.address()
-    if *ctx.pool_vault.owner() != *ctx.pool.to_account_view().address() { return Err(ProgramError::from(LendingError::Unauthorized)); }
+    // authority: (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address())
+    if (*ctx.pool_vault.owner()) != (*ctx.pool.to_account_view().address()) { return Err(ProgramError::from(LendingError::Unauthorized)); }
     // requires: s.amount > s.collateral
     if !(ctx.loan.amount.get() > ctx.loan.collateral.get()) { return Err(ProgramError::from(LendingError::AccountHealthy)); }
     // lifecycle: status := Liquidated
