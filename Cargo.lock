@@ -907,6 +907,7 @@ dependencies = [
  "sha2",
  "solana-ratchet-anchor",
  "solana-ratchet-core",
+ "solana-ratchet-quasar",
  "syn",
  "tar",
  "tempfile",
@@ -1324,9 +1325,9 @@ dependencies = [
 
 [[package]]
 name = "solana-ratchet-anchor"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a44935f2f286a4e5b9a02e7bf5123ca402116a25cce6ed564224f2e32f843f3"
+checksum = "4e6fb8559047050995c876d661a55090415d15c64b3a2f48dd130d502ebed545"
 dependencies = [
  "anyhow",
  "base64",
@@ -1340,13 +1341,25 @@ dependencies = [
 
 [[package]]
 name = "solana-ratchet-core"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6915975b819408bfee35ff2257079db3a31c03831942610242b1b6944cbc54b1"
+checksum = "45230590839930db9c2a073aa871b4d310292ba8c0d40438de857965deb8f4e1"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "solana-ratchet-quasar"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1ee265b95d491029144c3a34c4580925eebdfa82e07b1e759d1bae1498a9301"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "solana-ratchet-core",
 ]
 
 [[package]]

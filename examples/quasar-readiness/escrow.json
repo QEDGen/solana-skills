@@ -1,0 +1,86 @@
+{
+  "address": "22222222222222222222222222222222222222222222",
+  "metadata": {
+    "name": "escrow",
+    "version": "0.1.0",
+    "spec": "0.1.0"
+  },
+  "instructions": [
+    {
+      "name": "make",
+      "discriminator": [0],
+      "accounts": [
+        { "name": "maker", "writable": true, "signer": true },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              { "kind": "const", "value": [101, 115, 99, 114, 111, 119] },
+              { "kind": "account", "path": "maker" }
+            ]
+          }
+        },
+        { "name": "mint_a" },
+        { "name": "mint_b" },
+        { "name": "vault", "writable": true },
+        { "name": "token_program" },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "deposit", "type": "u64" },
+        { "name": "receive", "type": "u64" }
+      ]
+    },
+    {
+      "name": "take",
+      "discriminator": [1],
+      "accounts": [
+        { "name": "taker", "writable": true, "signer": true },
+        { "name": "maker", "writable": true },
+        { "name": "escrow", "writable": true },
+        { "name": "vault", "writable": true },
+        { "name": "token_program" }
+      ],
+      "args": []
+    },
+    {
+      "name": "refund",
+      "discriminator": [2],
+      "accounts": [
+        { "name": "maker", "writable": true, "signer": true },
+        { "name": "escrow", "writable": true },
+        { "name": "vault", "writable": true },
+        { "name": "token_program" }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [
+    { "name": "Escrow", "discriminator": [42] }
+  ],
+  "events": [
+    { "name": "EscrowMade", "discriminator": [0] },
+    { "name": "EscrowTaken", "discriminator": [1] }
+  ],
+  "types": [
+    {
+      "name": "Escrow",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "maker", "type": "pubkey" },
+          { "name": "mint_a", "type": "pubkey" },
+          { "name": "mint_b", "type": "pubkey" },
+          { "name": "deposit", "type": "u64" },
+          { "name": "receive", "type": "u64" },
+          { "name": "bump", "type": "u8" }
+        ]
+      }
+    }
+  ],
+  "errors": [
+    { "code": 6000, "name": "InvalidMint", "msg": "Mint mismatch" },
+    { "code": 6001, "name": "InvalidAuthority", "msg": "Caller not the escrow maker" }
+  ]
+}

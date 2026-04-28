@@ -58,7 +58,7 @@ npx skills add qedgen/solana-skills
 | **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |
 | **PDA integrity** | Program-derived address derivation and 4-chunk comparison (sBPF) |
-| **Deploy safety** | On-chain shape for Anchor programs — version fields, reserved padding, pinned discriminators, signer coverage, PDA seed continuity — via `qedgen readiness` and `qedgen check-upgrade` (ratchet). |
+| **Deploy safety** | On-chain shape for Anchor **and Quasar** programs — version fields, reserved padding, pinned discriminators, signer coverage, PDA seed continuity — via `qedgen readiness` and `qedgen check-upgrade` (ratchet). |
 
 CPI calls are axiomatic — we verify the program passes correct parameters. SPL Token internals and the Solana runtime are trusted.
 
@@ -340,12 +340,13 @@ imports can use an empty `[dependencies]` table.
 
 ### Deploy-safety lint (ratchet)
 
-`qedgen readiness` runs before the first deploy: one Anchor IDL in, a verdict out (`READY`, `UNSAFE`, or `BREAKING`) plus every specific future-upgrade landmine it finds. `qedgen check-upgrade` runs on every subsequent release: diff the deployed IDL against the candidate and fail the build on any change that would silently corrupt on-chain state, break existing clients, or orphan PDAs.
+`qedgen readiness` runs before the first deploy: one IDL in, a verdict out (`READY`, `UNSAFE`, or `BREAKING`) plus every specific future-upgrade landmine it finds. `qedgen check-upgrade` runs on every subsequent release: diff the deployed IDL against the candidate and fail the build on any change that would silently corrupt on-chain state, break existing clients, or orphan PDAs. Both work against Anchor IDLs (`anchor build`) and Quasar IDLs (`quasar build`) — the framework is autodetected from `Anchor.toml` / `Quasar.toml` in the working directory, or you can force it with `--quasar`.
 
 ```bash
 # Pre-deploy — lint one IDL for mainnet-readiness
 qedgen readiness --idl target/idl/my_program.json
 qedgen readiness --idl target/idl/my_program.json --json          # machine-readable
+qedgen readiness --idl target/idl/my_program.json --quasar        # Quasar IDL
 
 # Post-deploy — diff old vs new and block breaking upgrades
 qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json
@@ -355,7 +356,7 @@ qedgen check-upgrade --old ratchet.lock --new target/idl/my_program.json \
   --unsafe allow-field-append --migrated-account EscrowState
 ```
 
-Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set (22 rules at the time of writing). Pair with `--json` for a machine-readable dump.
+Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`, `2 = unsafe`. Under the hood qedgen embeds [ratchet](https://github.com/saicharanpogul/ratchet) as a library, so the rule catalog stays in sync with upstream — run `qedgen readiness --list-rules` (P-rules) or `qedgen check-upgrade --list-rules` (R-rules) to see the full set. Pair with `--json` for a machine-readable dump. A worked Quasar example lives at [`examples/quasar-readiness/`](examples/quasar-readiness/).
 
 **Why both.** qedgen's `#[qed(verified)]` hash-stamps the *function body*, so a rename of an `#[account]` struct compiles with a stale-but-valid proof even though the on-chain discriminator is now different and every existing account of that type is orphaned. `qedgen check-upgrade`'s `R006 account-discriminator-change` catches that class of failure; the proof layer alone doesn't look at it.
 
