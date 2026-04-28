@@ -1,0 +1,7 @@
+# QEDGen manifest for the escrow example.
+#
+# This spec has no external interface imports today. Keep the manifest present
+# so example discovery and codegen-drift checks can treat all examples
+# uniformly.
+
+[dependencies]

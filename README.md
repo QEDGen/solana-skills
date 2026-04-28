@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates everything needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **program code**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield codegen via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.11+.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates the verification artifacts and implementation scaffold needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **agent-fill program scaffolds**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield scaffold via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.11+.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -33,17 +33,17 @@ npx skills add qedgen/solana-skills
 ## How it works
 
 ```
-.qedspec ──► check (validate spec) ──► codegen --all ──► lake build ──► ∎
-                │                          │                  ▲       │
-                ├── lint (instant)          ├── Rust skeleton  │       ├─► Leanstral (fast)
-                ├── proptest (~100ms)       ├── Lean proofs    │       └─► Aristotle (deep)
-                └── lean-gen (seconds)      ├── Kani harnesses └── iterate
-                                            └── tests
+.qedspec ──► check (lint/report) ──► codegen --all ──► agent fill ──► verify ──► ∎
+                │                         │                 │          ▲       │
+                ├── lint (instant)        ├── Rust scaffold  │          ├─► Leanstral (fast)
+                ├── coverage matrix       ├── Lean stubs     │          └─► Aristotle (deep)
+                └── drift reports         ├── Kani harnesses └── cargo/lake/proptest
+                                          └── tests + CI
 ```
 
 1. **Define guarantees** — write a `.qedspec` describing what your program must guarantee, or let your agent generate one from the code or IDL
-2. **Validate** — `qedgen check` runs the verification waterfall: lint catches structural issues, property tests find counterexamples in milliseconds, Lean catches what tests can't
-3. **Generate** — `qedgen codegen --all` produces program code, test harnesses, Lean proofs, and CI workflows from the single spec
+2. **Validate** — `qedgen check` runs spec lint, coverage, drift checks, and reports; run generated proptest/Kani/Lean backends with `qedgen verify`
+3. **Generate** — `qedgen codegen --all` produces test harnesses, Lean stubs, CI workflows, and an agent-fill Rust scaffold from the single spec
 4. **Prove** — your agent fills proof obligations; Leanstral handles routine sub-goals (seconds), Aristotle handles the hardest ones (minutes–hours)
 
 ## What it verifies
@@ -77,7 +77,10 @@ qedgen init --name my_program --spec my_program.qedspec --target anchor
 qedgen check
 qedgen codegen --all
 
-# 4. Audit a brownfield project before adopting a spec — emits the
+# 4. Fill generated Rust handler TODOs, then run backend verification
+qedgen verify
+
+# 5. Audit a brownfield project before adopting a spec — emits the
 #    auditor work list (per-handler categories) consumed by the
 #    `qedgen-auditor` agent skill, or run spec-aware against an
 #    existing .qedspec for category-coverage findings.
@@ -144,10 +147,13 @@ qedgen check --spec my_program.qedspec
 qedgen check --spec my_program.qedspec --json           # machine-readable output
 
 # Generate all committed artifacts from .qedspec
-qedgen codegen --spec my_program.qedspec --all          # everything: Rust, Lean, Kani, tests
+qedgen codegen --spec my_program.qedspec --all          # scaffolds Rust, Lean, Kani, tests, CI
+
+# If Rust scaffolds were generated, the agent fills TODO business logic,
+# then runs cargo check / cargo test until the scaffold is compile-clean.
 
 # Or generate selectively
-qedgen codegen --spec my_program.qedspec                # Rust handler skeleton only (Anchor-compatible)
+qedgen codegen --spec my_program.qedspec                # Rust handler scaffold only (agent-filled)
 qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
 qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
@@ -158,6 +164,9 @@ qedgen codegen --spec my_program.qedspec --integration  # + in-process SVM integ
 qedgen check --spec my_program.qedspec --coverage       # operation × property matrix
 qedgen check --spec my_program.qedspec --explain        # Markdown verification report
 qedgen check --spec my_program.qedspec --code ./programs --kani ./programs/tests/kani.rs  # drift detection
+
+# Repo maintenance gate: bundled examples match current codegen
+qedgen check --regen-drift
 ```
 
 ### sBPF verification
@@ -314,6 +323,20 @@ qedgen codegen --spec my_program.qedspec --ci                    # Lean-only ver
 qedgen codegen --spec my_program.qedspec --ci --ci-asm src/program.s  # Add sBPF source hash check
 qedgen codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program.json  # + ratchet readiness lint on every build
 ```
+
+### Release gates
+
+```bash
+bash scripts/check-version-consistency.sh
+bash scripts/check-readme-drift.sh
+qedgen check --regen-drift
+```
+
+`qedgen check --regen-drift` regenerates bundled `examples/rust/*`
+artifacts in temporary directories and fails if committed generated
+support code, harnesses, or `Spec.lean` drift from the current generator.
+Every generated example root must include `qed.toml`; examples without
+imports can use an empty `[dependencies]` table.
 
 ### Deploy-safety lint (ratchet)
 

@@ -36,11 +36,10 @@ The classifier in `anchor_resolver` walks each handler's tail expression. Produc
 
 File-to-module mapping (`src/foo/bar.rs` → `["foo", "bar"]`) seeds the resolver so a forwarder like `instructions::buy::handler` resolves against `src/instructions/buy.rs` even when the file's items aren't syntactically wrapped in `pub mod instructions { pub mod buy { ... } }`.
 
-See the worked examples:
-- `examples/anchor-brownfield-demo/` — free-fn forwarders (full before+after walkthrough)
-- `examples/regressions/anchor-adapter-shapes/marinade-style/` — accounts-method forwarders (`ctx.accounts.<method>(...)`); adapter-output snapshot fixture
-- `examples/regressions/anchor-adapter-shapes/squads-style/` — type-associated forwarders (`<Type>::<method>(ctx, ...)`); adapter-output snapshot fixture
-- `examples/regressions/anchor-forwarder-multistmt/` — `<call>?; Ok(())` two-stmt forwarders + Inline
+See the worked examples under `examples/`:
+- `anchor-brownfield-demo/` — free-fn forwarders (full before+after walkthrough)
+- `regressions/anchor-adapter-shapes/` — accounts-method forwarders (`ctx.accounts.<method>(...)`) and type-associated forwarders (`<Type>::<method>(ctx, ...)`); adapter-output snapshot fixtures
+- `regressions/anchor-forwarder-multistmt/` — `<call>?; Ok(())` two-stmt forwarders + Inline
 
 ## `#[qed]` drift loop
 

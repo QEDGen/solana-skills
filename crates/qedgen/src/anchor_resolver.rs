@@ -565,12 +565,29 @@ fn find_pub_fn_in_items(
     fn_name: &str,
     current_path: &[String],
 ) -> Option<syn::ItemFn> {
+    // The forwarder named `<target_path>::<fn_name>`. The handler can be
+    // defined either:
+    //   (a) directly at `<target_path>` — `current_path == target_path`.
+    //       e.g. `instructions::buy` defined in `instructions/mod.rs`
+    //       or `instructions.rs`.
+    //   (b) at `<target_path>/<fn_name>.rs` and re-exported through
+    //       `pub use <fn_name>::*;` in the parent's `mod.rs` —
+    //       `current_path == target_path + [fn_name]`. This is the
+    //       file-named-after-the-fn convention used by most modern
+    //       Anchor scaffolds (token-fundraiser uses it via
+    //       `Initialize::handler` methods; token-swap uses it via
+    //       free-fn forwarders like `instructions::create_amm`).
+    let path_matches = target_path.is_empty()
+        || target_path == current_path
+        || (current_path.len() == target_path.len() + 1
+            && current_path.starts_with(target_path)
+            && current_path.last().map(|s| s.as_str()) == Some(fn_name));
     for item in items {
         match item {
             syn::Item::Fn(item_fn)
                 if matches!(item_fn.vis, syn::Visibility::Public(_))
                     && item_fn.sig.ident == fn_name
-                    && (target_path.is_empty() || target_path == current_path) =>
+                    && path_matches =>
             {
                 return Some(item_fn.clone());
             }

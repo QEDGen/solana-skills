@@ -16,6 +16,22 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Cache the cargo registry + workspace target dir between runs.
+      # Without this, the `Codegen scaffold compile smoke` step fetches
+      # anchor-lang / anchor-spl / solana-program from cold every run
+      # (~2 min). With the cache, ~30s.
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -25,5 +41,14 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Check version metadata
+        run: bash scripts/check-version-consistency.sh
+
       - name: Check README drift
         run: bash scripts/check-readme-drift.sh
+
+      - name: Check example codegen drift
+        run: cargo run -p qedgen-solana-skills -- check --regen-drift
+
+      - name: Codegen scaffold compile smoke
+        run: cargo test -p qedgen-solana-skills --test codegen_smoke -- --ignored

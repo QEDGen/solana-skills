@@ -15,6 +15,7 @@ inductive Status where
 
 structure State where
   initializer : Pubkey
+  initializer_token_account : Pubkey
   taker : Pubkey
   initializer_amount : Nat
   taker_amount : Nat
@@ -24,7 +25,7 @@ structure State where
 
 def initializeTransition (s : State) (signer : Pubkey) (deposit_amount : Nat) (receive_amount : Nat) : Option State :=
   if signer = s.initializer ∧ s.status = .Uninitialized ∧ deposit_amount > 0 ∧ receive_amount > 0 then
-    some { s with initializer_amount := deposit_amount, taker_amount := receive_amount, status := .Open }
+    some { s with initializer_amount := deposit_amount, taker_amount := receive_amount, initializer_token_account := initializer_ta.pubkey, status := .Open }
   else none
 
 def exchangeTransition (s : State) (signer : Pubkey) : Option State :=
@@ -81,8 +82,8 @@ theorem cover_happy_path : ∃ (s0 : State) (signer : Pubkey),
     ∃ (v0_0 : Nat) (v0_1 : Nat), ∃ (s1 : State), initializeTransition s0 signer v0_0 v0_1 = some s1 ∧
 exchangeTransition s1 signer ≠ none := by
   let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  let s0 : State := ⟨pk, pk, 0, 0, pk, .Uninitialized⟩
-  let s1 : State := ⟨pk, pk, 1, 1, pk, .Open⟩
+  let s0 : State := ⟨pk, pk, pk, 0, 0, pk, .Uninitialized⟩
+  let s1 : State := ⟨pk, 1, pk, 1, 1, pk, .Open⟩
   exact ⟨s0, pk, 1, 1, s1, by decide, by decide⟩
 
 /-- cancel_path — trace [initialize, cancel] is reachable. -/
@@ -90,8 +91,8 @@ theorem cover_cancel_path : ∃ (s0 : State) (signer : Pubkey),
     ∃ (v0_0 : Nat) (v0_1 : Nat), ∃ (s1 : State), initializeTransition s0 signer v0_0 v0_1 = some s1 ∧
 cancelTransition s1 signer ≠ none := by
   let pk : Pubkey := ⟨0, 0, 0, 0⟩
-  let s0 : State := ⟨pk, pk, 0, 0, pk, .Uninitialized⟩
-  let s1 : State := ⟨pk, pk, 1, 1, pk, .Open⟩
+  let s0 : State := ⟨pk, pk, pk, 0, 0, pk, .Uninitialized⟩
+  let s1 : State := ⟨pk, 1, pk, 1, 1, pk, .Open⟩
   exact ⟨s0, pk, 1, 1, s1, by decide, by decide⟩
 
 -- ============================================================================

@@ -33,7 +33,7 @@ def create_vaultTransition (s : State) (signer : Pubkey) (threshold : Nat) (memb
   else none
 
 def proposeTransition (s : State) (signer : Pubkey) : Option State :=
-  if signer = s.proposer ∧ s.status = .Active then
+  if s.status = .Active then
     some { s with approval_count := 0, rejection_count := 0, status := .HasProposal }
   else none
 
@@ -48,13 +48,18 @@ def rejectTransition (s : State) (signer : Pubkey) (member_index : Nat) : Option
   else none
 
 def executeTransition (s : State) (signer : Pubkey) : Option State :=
-  if signer = s.executor ∧ s.status = .HasProposal ∧ (s.approval_count ≥ s.threshold) then
+  if s.status = .HasProposal ∧ (s.approval_count ≥ s.threshold) then
     some { s with approval_count := 0, rejection_count := 0, status := .Active }
   else none
 
 def cancel_proposalTransition (s : State) (signer : Pubkey) : Option State :=
-  if signer = s.canceller ∧ s.status = .HasProposal ∧ (s.member_count - s.rejection_count < s.threshold) then
+  if s.status = .HasProposal ∧ (s.member_count - s.rejection_count < s.threshold) then
     some { s with approval_count := 0, rejection_count := 0, status := .Active }
+  else none
+
+def add_memberTransition (s : State) (signer : Pubkey) (member_index : Nat) (member_pubkey : Pubkey) : Option State :=
+  if signer = s.creator ∧ s.status = .Active ∧ (member_index < s.member_count) then
+    some { s with members := Function.update s.members member_index (member_pubkey), status := .Active }
   else none
 
 def remove_memberTransition (s : State) (signer : Pubkey) : Option State :=
@@ -69,6 +74,7 @@ inductive Operation where
   | reject (member_index : Nat)
   | execute
   | cancel_proposal
+  | add_member (member_index : Nat) (member_pubkey : Pubkey)
   | remove_member
 
 def applyOp (s : State) (signer : Pubkey) : Operation → Option State
@@ -78,6 +84,7 @@ def applyOp (s : State) (signer : Pubkey) : Operation → Option State
   | .reject member_index => rejectTransition s signer member_index
   | .execute => executeTransition s signer
   | .cancel_proposal => cancel_proposalTransition s signer
+  | .add_member member_index member_pubkey => add_memberTransition s signer member_index member_pubkey
   | .remove_member => remove_memberTransition s signer
 
 /-- Property: threshold_bounded. -/
