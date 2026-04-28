@@ -38,22 +38,31 @@ pub enum Framework {
 }
 
 impl Framework {
-    /// Walk the current working directory's parents looking for a
-    /// project marker — `Anchor.toml` or `Quasar.toml`. Returns
-    /// `Quasar` only when a `Quasar.toml` is found *without* an
-    /// Anchor.toml shadowing it (mixed projects pick Anchor by
-    /// default to preserve the historical behaviour).
+    /// Walk the current working directory and its ancestors looking for
+    /// a project marker — `Anchor.toml` or `Quasar.toml` — and pick the
+    /// framework matching the first level that has either. Mirrors the
+    /// way Cargo locates a workspace root, so devs running `qedgen` from
+    /// a nested subdirectory still get the right autodetect. Mixed
+    /// directories (both markers at the same level) pick Anchor to
+    /// preserve historical behaviour.
     ///
-    /// Used as a default when the CLI flag isn't passed; explicit
-    /// `--quasar` always wins.
+    /// Falls back to Anchor when no marker is found anywhere up the
+    /// chain (or when `current_dir()` itself fails). Used only as a
+    /// default — explicit `--quasar` always wins.
     pub fn detect_from_cwd() -> Self {
-        if std::path::Path::new("Quasar.toml").exists()
-            && !std::path::Path::new("Anchor.toml").exists()
-        {
-            Framework::Quasar
-        } else {
-            Framework::Anchor
+        let Ok(start) = std::env::current_dir() else {
+            return Framework::Anchor;
+        };
+        for dir in start.ancestors() {
+            let has_quasar = dir.join("Quasar.toml").exists();
+            let has_anchor = dir.join("Anchor.toml").exists();
+            match (has_quasar, has_anchor) {
+                (true, false) => return Framework::Quasar,
+                (_, true) => return Framework::Anchor,
+                _ => continue,
+            }
         }
+        Framework::Anchor
     }
 }
 
@@ -494,10 +503,14 @@ mod tests {
 
     #[test]
     fn quasar_anchor_idl_under_quasar_mode_is_a_parse_error() {
-        // Anchor IDLs use a `type: { kind: "struct", fields: ... }` shape
-        // for typedefs; Quasar's loader rejects that. Confirms the
-        // dispatch is wired to the Quasar parser, not silently falling
-        // back to Anchor.
+        // Anchor and Quasar both wrap struct typedefs in
+        // `type: { kind: "struct", fields: ... }`, but the top-level
+        // shape diverges: Quasar requires a top-level `address` field
+        // (Anchor's program id lives under `metadata` instead). Feeding
+        // `BARE_V1_IDL` (Anchor-shaped, no top-level `address`) through
+        // `Framework::Quasar` therefore fails serde with `missing field
+        // \`address\``. Confirms the dispatch is wired to the Quasar
+        // parser rather than silently falling back to Anchor.
         let tmp = TempDir::new().unwrap();
         let idl = write(tmp.path(), "t.json", BARE_V1_IDL);
         let err = run_readiness(&ReadinessOpts {
