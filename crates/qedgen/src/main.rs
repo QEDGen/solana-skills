@@ -413,9 +413,11 @@ enum Commands {
     /// produced. Default (no flags) runs every backend whose artifact is
     /// present on disk. Use --proptest/--kani/--lean to target one backend.
     Verify {
-        /// Path to the spec file (.qedspec)
+        /// Path to the spec file (.qedspec). Optional — falls back to the
+        /// `spec` field in the nearest `.qed/config.json` discovered by
+        /// walking up from cwd, mirroring `check` and `codegen`.
         #[arg(long)]
-        spec: PathBuf,
+        spec: Option<PathBuf>,
 
         /// Run proptest harnesses (cargo test --release)
         #[arg(long)]
@@ -425,7 +427,7 @@ enum Commands {
         #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_path: PathBuf,
 
-        /// Run Kani BMC harnesses (cargo kani) — lands in v2.4-M2
+        /// Run Kani BMC harnesses (cargo kani)
         #[arg(long)]
         kani: bool,
 
@@ -1513,6 +1515,13 @@ async fn main() -> Result<()> {
             offline,
         } => {
             require_git_repo()?;
+
+            // Resolve --spec the same way `check` and `codegen` do: fall
+            // back to .qed/config.json's `spec` field when omitted, so the
+            // README's quick-start `qedgen verify` (no flags after init)
+            // works as documented.
+            let cwd = std::env::current_dir()?;
+            let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
 
             // v2.8 G5: --check-upstream is a separate verification stage
             // from the proptest/kani/lean backends — it diffs each
