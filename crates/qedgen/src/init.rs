@@ -350,10 +350,14 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
         ));
     }
 
-    // Spec library (definitions + proofs in one file)
+    // Spec library: regenerated definitions in Spec.lean, durable
+    // user-owned proofs in Proofs.lean (bootstrapped once by
+    // `qedgen codegen`). Both roots so lake type-checks the proofs
+    // alongside the spec — without `Proofs` here, broken or stale
+    // theorems sit silently undetected (the v2.11.2 multisig miss).
     s.push_str("@[default_target]\n");
     s.push_str(&format!(
-        "lean_lib {}Spec where\n  roots := #[`Spec]\n",
+        "lean_lib {}Spec where\n  roots := #[`Spec, `Proofs]\n",
         capitalize(name)
     ));
 

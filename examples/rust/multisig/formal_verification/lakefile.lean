@@ -11,4 +11,4 @@ require qedgenSupportMathlib from
 
 @[default_target]
 lean_lib MultisigSpec where
-  roots := #[`Spec]
+  roots := #[`Spec, `Proofs]

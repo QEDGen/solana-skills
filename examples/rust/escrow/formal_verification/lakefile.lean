@@ -8,4 +8,4 @@ require qedgenSupport from
 
 @[default_target]
 lean_lib EscrowSpec where
-  roots := #[`Spec]
+  roots := #[`Spec, `Proofs]
