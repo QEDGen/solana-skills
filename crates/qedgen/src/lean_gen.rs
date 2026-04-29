@@ -601,6 +601,11 @@ fn render_transitions(
         // Build state update
         let mut with_parts: Vec<String> = Vec::new();
         for (field, op_kind, value) in &op.effects {
+            // Drop `<field> := <account_binding>.pubkey` — no Lean scope; see
+            // is_account_binding_pubkey_ref. Field stays at its default.
+            if op_kind == "set" && is_account_binding_pubkey_ref(value, &op.accounts) {
+                continue;
+            }
             let sf = safe_name(field);
             match op_kind.as_str() {
                 "add" => with_parts.push(format!("{} := s.{} + {}", sf, sf, value)),
@@ -1291,6 +1296,14 @@ impl WitnessState {
     ) {
         // Apply effects
         for (field, op_kind, value) in &handler.effects {
+            // Account-binding pubkey assignments are dropped from Lean
+            // codegen (see is_account_binding_pubkey_ref). Mirror that here
+            // so cover-witness state evolution stays consistent with the
+            // Lean transition body — otherwise resolve_value's "1" fallback
+            // poisons Pubkey-typed fields and cover proofs fail to elaborate.
+            if op_kind == "set" && is_account_binding_pubkey_ref(value, &handler.accounts) {
+                continue;
+            }
             let resolved = self.resolve_value(value, param_values, constants);
             match op_kind.as_str() {
                 "set" => {
@@ -3326,6 +3339,33 @@ fn default_value_for(t: &str) -> &'static str {
     }
 }
 
+/// True when an effect RHS reads a `.pubkey` (qedspec) or `.key()` (Rust)
+/// projection off a handler account binding — e.g. the spec line
+/// `initializer_token_account := initializer_ta.pubkey`.
+///
+/// Such assignments record an account's pubkey into State for downstream
+/// authorization checks. The Rust side lowers them to
+/// `ctx.accounts.<binding>.key()`, but on the Lean side there's no account
+/// graph: the binding name has no scope. Dropping the assignment keeps the
+/// field at its initial default (`pk` for Pubkey-typed fields), which is
+/// sound because the Lean model verifies pubkey-equality logic, not the
+/// runtime account-resolution itself.
+fn is_account_binding_pubkey_ref(
+    value: &str,
+    accounts: &[crate::check::ParsedHandlerAccount],
+) -> bool {
+    let trimmed = value.trim();
+    accounts.iter().any(|a| {
+        let prefix_dot = format!("{}.", a.name);
+        if let Some(rest) = trimmed.strip_prefix(&prefix_dot) {
+            // `.pubkey` (qedspec form) or `.key()` (Rust-mirror form).
+            rest == "pubkey" || rest == "key()"
+        } else {
+            false
+        }
+    })
+}
+
 /// Rewrite a parsed effect value string so it refers to pre-state `s.` and
 /// subscripts are in Lean form.
 ///   - integer literals → leave alone (strip underscores)
@@ -3716,6 +3756,10 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
         // (root_field, idx) → Vec<(inner_field, op_kind, value)>
         let mut indexed_by_root: IndexedEffectsByRoot = std::collections::BTreeMap::new();
         for (field, op_kind, value) in &op.effects {
+            // Drop `<field> := <account_binding>.pubkey` (see render_transitions).
+            if op_kind == "set" && is_account_binding_pubkey_ref(value, &op.accounts) {
+                continue;
+            }
             if let Some((root, idx, inner_field)) = parse_indexed_lhs(field) {
                 if map_fields.contains_key(root) {
                     indexed_by_root
@@ -4206,6 +4250,46 @@ liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, can
         // remove_member has effect: member_count -= 1
         // Should auto-generate underflow guard: 1 ≤ s.member_count
         assert!(lean.contains("1 \u{2264} s.member_count"));
+    }
+
+    // ========================================================================
+    // Account-binding `.pubkey` effect handling (B + D)
+    // ========================================================================
+
+    const ESCROW_SPEC: &str = include_str!("../../../examples/rust/escrow/escrow.qedspec");
+
+    #[test]
+    fn lean_gen_drops_account_binding_pubkey_effect() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let lean = render(&spec);
+        // Effect `initializer_token_account := initializer_ta.pubkey` references
+        // an account binding (no Lean scope) — must not appear in the
+        // initializeTransition body.
+        assert!(
+            !lean.contains("initializer_ta.pubkey"),
+            "account-binding pubkey should be dropped from Lean output, got:\n{}",
+            lean
+        );
+        // The transition body should still emit the other (well-formed) effects.
+        assert!(lean.contains("initializer_amount := deposit_amount"));
+        assert!(lean.contains("taker_amount := receive_amount"));
+    }
+
+    #[test]
+    fn lean_gen_cover_witness_pubkey_field_stays_pk() {
+        let spec = chumsky_adapter::parse_str(ESCROW_SPEC).unwrap();
+        let lean = render(&spec);
+        // After dropping the account-binding pubkey effect, the cover-witness
+        // for the post-state of `initialize` should keep all Pubkey-typed
+        // fields at `pk` (their default). The numeric `1`s are for amount
+        // fields only — never for Pubkey slots like initializer_token_account.
+        // Pre-fix: `⟨pk, 1, pk, 1, 1, pk, .Open⟩` (1 in the Pubkey slot 2).
+        // Post-fix: `⟨pk, pk, pk, 1, 1, pk, .Open⟩`.
+        assert!(
+            lean.contains("⟨pk, pk, pk, 1, 1, pk, .Open⟩"),
+            "cover witness should keep initializer_token_account at pk, got:\n{}",
+            lean
+        );
     }
 
     // ========================================================================
