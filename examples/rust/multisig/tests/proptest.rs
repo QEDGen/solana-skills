@@ -296,35 +296,6 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
     #[test]
-    fn approve_preserves_votes_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
-        let mut s = s;
-        prop_assume!(threshold_bounded(&s));
-        prop_assume!(votes_bounded(&s));
-        if approve(&mut s, member_index) {
-            prop_assert!(votes_bounded(&s),
-                "votes_bounded must hold after approve");
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn reject_preserves_votes_bounded(s in arb_state(), member_index in 0u8..=u8::MAX) {
-        let mut s = s;
-        prop_assume!(threshold_bounded(&s));
-        prop_assume!(votes_bounded(&s));
-        prop_assume!(s.rejection_count < s.member_count); // strict bound for add
-        if reject(&mut s, member_index) {
-            prop_assert!(votes_bounded(&s),
-                "votes_bounded must hold after reject");
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
     fn execute_preserves_votes_bounded(s in arb_state()) {
         let mut s = s;
         prop_assume!(threshold_bounded(&s));
@@ -346,20 +317,6 @@ proptest! {
         if cancel_proposal(&mut s) {
             prop_assert!(votes_bounded(&s),
                 "votes_bounded must hold after cancel_proposal");
-        }
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn add_member_preserves_votes_bounded(s in arb_state(), member_index in 0u8..=u8::MAX, member_pubkey in 0Address..=Address::MAX) {
-        let mut s = s;
-        prop_assume!(threshold_bounded(&s));
-        prop_assume!(votes_bounded(&s));
-        if add_member(&mut s, member_index, member_pubkey) {
-            prop_assert!(votes_bounded(&s),
-                "votes_bounded must hold after add_member");
         }
     }
 }

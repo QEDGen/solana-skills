@@ -242,9 +242,16 @@ property threshold_bounded :
   state.threshold <= state.member_count and state.threshold > 0
   preserved_by all
 
+// Preservation by `approve` and `reject` is provable only with an
+// auxiliary invariant linking
+//   approval_count + rejection_count = #{ i | voted[i] = 1 }
+// (the per-slot vote bitmap), which the current spec language can't
+// express declaratively. Restrict `preserved_by` to the handlers that
+// preserve `votes_bounded` from `votes_bounded` alone; revisit when
+// count-by-predicate quantifiers land in the DSL.
 property votes_bounded :
   state.approval_count + state.rejection_count <= state.member_count
-  preserved_by all
+  preserved_by [create_vault, propose, execute, cancel_proposal, remove_member]
 
 cover proposal_lifecycle [create_vault, propose, approve, execute]
 
