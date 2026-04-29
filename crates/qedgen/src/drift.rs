@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use quote::ToTokens;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use syn::ItemFn;
+
+use crate::spec_hash;
 
 /// Status of a verified function's hash.
 #[derive(Debug, PartialEq)]
@@ -24,17 +25,16 @@ pub struct VerifiedEntry {
     pub status: DriftStatus,
 }
 
-/// Compute content hash for a function (same algorithm as the proc macro).
-///
-/// Strips all attributes, normalizes via syn round-trip, SHA-256, truncate to 16 hex.
+/// Compute content hash for a function. MUST match the proc-macro's
+/// recomputation byte-for-byte — pre-v2.11.3 this used
+/// `to_token_stream().to_string()` directly, which subtly diverges from
+/// the macro's `canonical_token_string` walker (rustc-vs-`from_str`
+/// spacing). The result was that `qedgen check --update-hashes` wrote
+/// hashes that the proc-macro then immediately rejected as drifted.
+/// Delegate to the shared `spec_hash::body_hash_for_fn` so both sides
+/// agree by construction.
 fn content_hash(func: &ItemFn) -> String {
-    let mut stripped = func.clone();
-    stripped.attrs.clear();
-    let canonical = stripped.to_token_stream().to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    let full = format!("{:x}", hasher.finalize());
-    full[..16].to_string()
+    spec_hash::body_hash_for_fn(func)
 }
 
 /// Extract `hash = "..."` value from a `#[qed(verified, hash = "...")]` attribute.
@@ -754,5 +754,30 @@ mod tests {
         let hash = content_hash(&func);
         assert_eq!(hash.len(), 16);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn content_hash_equals_spec_hash_body_hash() {
+        // drift.rs's content_hash MUST agree with spec_hash::body_hash_for_fn,
+        // which in turn agrees with qedgen-macros::verified::content_hash.
+        // Pre-v2.11.3 these diverged (drift used to_token_stream().to_string,
+        // spec_hash uses canonical_token_string), causing
+        // `qedgen check --update-hashes` to write hashes the proc-macro
+        // immediately rejected. Lock the alignment as a regression test.
+        use quote::quote;
+        for tokens in [
+            quote! { pub fn deposit(amount: u64) -> u64 { amount + 1 } },
+            quote! { pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> { Ok(()) } },
+            quote! { pub fn no_args() -> u8 { 42 } },
+        ] {
+            let func: ItemFn = syn::parse2(tokens).unwrap();
+            assert_eq!(
+                content_hash(&func),
+                spec_hash::body_hash_for_fn(&func),
+                "drift::content_hash diverged from spec_hash::body_hash_for_fn — \
+                 the proc-macro will reject the written hash. See drift.rs's \
+                 content_hash docstring for the alignment requirement."
+            );
+        }
     }
 }
