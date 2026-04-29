@@ -348,6 +348,22 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
 /// Returns the list of conjuncts that form the `if` condition. Each entry is a
 /// single proposition string; entries may contain internal `∧` (e.g., from a
 /// compound `requires` expression). The caller joins them with ` ∧ `.
+/// True when `who` names an actual State field — i.e. an `auth creator`
+/// clause where `State` has a `creator : Pubkey` field. In that case the
+/// guard `signer = s.<who>` is well-typed and meaningful.
+///
+/// When `who` does NOT name a State field, `auth <who>` is just a parameter
+/// alias for the signer (e.g. `auth approver` so user-written predicates can
+/// say `state.members[i] == approver`). The guard `signer = s.<who>` would
+/// be ill-typed; render_transitions emits `let <who> := signer` instead.
+fn auth_who_is_state_field(
+    who: &str,
+    fields: &[(String, String)],
+    fallback_fields: &[(String, String)],
+) -> bool {
+    fields.iter().any(|(n, _)| n == who) || fallback_fields.iter().any(|(n, _)| n == who)
+}
+
 fn build_guard_cond_parts(
     op: &crate::check::ParsedHandler,
     fields: &[(String, String)],
@@ -355,7 +371,10 @@ fn build_guard_cond_parts(
 ) -> Vec<String> {
     let mut cond_parts: Vec<String> = Vec::new();
     if let Some(ref who) = op.who {
-        cond_parts.push(format!("signer = s.{}", safe_name(who)));
+        if auth_who_is_state_field(who, fields, fallback_fields) {
+            cond_parts.push(format!("signer = s.{}", safe_name(who)));
+        }
+        // else: alias-only auth; let-binding emitted by the caller.
     }
     if let Some(ref pre) = op.pre_status {
         cond_parts.push(format!("s.status = .{}", pre));
@@ -604,6 +623,15 @@ fn render_transitions(
             "def {} (s : {}) (signer : Pubkey){} : Option {} :=\n",
             trans_name, state_type, param_sig, state_type
         ));
+
+        // Alias-let for `auth <who>` when <who> is not a State field. Lets
+        // user-written `requires` predicates reference the auth-var directly
+        // (`state.members[i] == approver` → `(s.members i) = approver`).
+        if let Some(ref who) = op.who {
+            if !auth_who_is_state_field(who, fields, &spec.state_fields) {
+                out.push_str(&format!("  let {} := signer\n", safe_name(who)));
+            }
+        }
 
         // Emit let bindings before the if condition
         for (binding_name, lean_expr, _rust_expr) in &op.let_bindings {
@@ -3365,6 +3393,110 @@ fn parse_indexed_lhs(lhs: &str) -> Option<(&str, &str, &str)> {
     Some((root, idx, inner_field))
 }
 
+/// Infer Fin-bound promotions for a handler's index params.
+///
+/// When a Nat/U-typed parameter is used as a Map index (e.g.
+/// `voted[member_index] := 1` or `state.members[member_index] == approver`
+/// where `members : Map[MAX_MEMBERS] Pubkey`), Lean needs the index typed
+/// as `Fin MAX_MEMBERS`, not `Nat`. We promote the parameter's Lean type
+/// (Rust side stays as the underlying scalar).
+///
+/// Returns `param_name → bound_const` for params that should be promoted.
+/// Params already typed as a Fin alias (e.g. `AccountIdx = Fin[MAX_ACCOUNTS]`)
+/// are not in the map — they're already correctly typed.
+fn infer_idx_promotions(
+    handler: &crate::check::ParsedHandler,
+    map_fields: &std::collections::BTreeMap<String, (String, String)>,
+) -> std::collections::HashMap<String, String> {
+    use std::collections::{HashMap, HashSet};
+
+    let scalar_param_names: HashSet<&str> = handler
+        .takes_params
+        .iter()
+        .filter(|(_, t)| matches!(t.as_str(), "U8" | "U16" | "U32" | "U64" | "U128"))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let mut result: HashMap<String, String> = HashMap::new();
+
+    let mut record = |idx_str: &str, root: &str| {
+        if !scalar_param_names.contains(idx_str) {
+            return;
+        }
+        if let Some((bound, _)) = map_fields.get(root) {
+            result
+                .entry(idx_str.to_string())
+                .or_insert_with(|| bound.clone());
+        }
+    };
+
+    // Effect LHS (`voted[member_index]`, `members[i].field`).
+    for (field, _, _) in &handler.effects {
+        if let Some((root, idx, _inner)) = parse_indexed_lhs(field) {
+            record(idx, root);
+        }
+    }
+    // Requires expressions, raw form (`s.members[member_index] = approver`).
+    for req in &handler.requires {
+        scan_indexed_in_expr(&req.lean_expr, &mut record);
+    }
+    result
+}
+
+/// Walk `expr` for `<root>[<idx>]` patterns. The `record` callback is invoked
+/// once per match with the bare root identifier (last `.` segment) and the
+/// trimmed index expression.
+fn scan_indexed_in_expr(expr: &str, record: &mut dyn FnMut(&str, &str)) {
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        // Walk back to capture `<a>.<b>...` path before `[`.
+        let mut k = i;
+        while k > 0 {
+            let c = bytes[k - 1] as char;
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                k -= 1;
+            } else {
+                break;
+            }
+        }
+        let path = &expr[k..i];
+        let root = path.rsplit('.').next().unwrap_or(path);
+        // Find matching `]`.
+        if let Some(close_rel) = expr[i + 1..].find(']') {
+            let idx = expr[i + 1..i + 1 + close_rel].trim();
+            if !idx.is_empty() && !root.is_empty() {
+                record(idx, root);
+            }
+            i += close_rel + 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Apply `infer_idx_promotions`'s promotion map to a handler's param list,
+/// returning a new param list where promoted params carry `Fin <bound>` as
+/// their Lean type. Non-promoted params are unchanged.
+fn promoted_lean_params(
+    params: &[(String, String)],
+    promotions: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    params
+        .iter()
+        .map(|(n, t)| {
+            if let Some(bound) = promotions.get(n) {
+                (n.clone(), format!("Fin {}", bound))
+            } else {
+                (n.clone(), t.clone())
+            }
+        })
+        .collect()
+}
+
 /// Render a full Spec.lean for an indexed-state spec.
 fn render_indexed_state(spec: &ParsedSpec) -> String {
     let mut out = String::new();
@@ -3551,15 +3683,21 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     out.push('\n');
 
     // -- Transitions --
+    let active_fields: &[(String, String)] =
+        active_acct.map(|a| a.fields.as_slice()).unwrap_or(&[]);
     for op in &spec.handlers {
         let trans_name = safe_name(&format!("{}Transition", op.name));
-        let param_sig = param_sig_str(&op.takes_params);
+        let idx_promotions = infer_idx_promotions(op, &map_fields);
+        let promoted_params = promoted_lean_params(&op.takes_params, &idx_promotions);
+        let param_sig = param_sig_str(&promoted_params);
 
         // Guard conjuncts
         let mut conds: Vec<String> = Vec::new();
         if let Some(ref who) = op.who {
-            // Heuristic: who refers to a state field (e.g. `authority`).
-            conds.push(format!("signer = s.{}", safe_name(who)));
+            if auth_who_is_state_field(who, active_fields, &spec.state_fields) {
+                conds.push(format!("signer = s.{}", safe_name(who)));
+            }
+            // else: alias-only auth; let-binding emitted before the `if`.
         }
         if let Some(ref pre) = op.pre_status {
             conds.push(format!("s.status = .{}", pre));
@@ -3663,6 +3801,14 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
             trans_name, param_sig
         ));
 
+        // Alias-let for `auth <who>` when <who> is not a State field. See
+        // the matching emission in render_transitions for the rationale.
+        if let Some(ref who) = op.who {
+            if !auth_who_is_state_field(who, active_fields, &spec.state_fields) {
+                out.push_str(&format!("  let {} := signer\n", safe_name(who)));
+            }
+        }
+
         if conds.is_empty() {
             out.push_str(&format!("  {}\n\n", then_body));
         } else {
@@ -3676,10 +3822,18 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     if !spec.handlers.is_empty() {
         out.push_str("inductive Operation where\n");
         for op in &spec.handlers {
+            let idx_promotions = infer_idx_promotions(op, &map_fields);
             let args: String = op
                 .takes_params
                 .iter()
-                .map(|(n, t)| format!(" ({} : {})", n, map_scalar_type(t)))
+                .map(|(n, t)| {
+                    let lean_ty = if let Some(bound) = idx_promotions.get(n) {
+                        format!("Fin {}", bound)
+                    } else {
+                        map_scalar_type(t)
+                    };
+                    format!(" ({} : {})", n, lean_ty)
+                })
                 .collect();
             out.push_str(&format!("  | {}{}\n", safe_name(&op.name), args));
         }
@@ -3988,7 +4142,36 @@ liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, can
         assert!(lean.contains("inductive Operation where"));
         assert!(lean.contains("| create_vault (threshold : Nat) (member_count : Nat)"));
         assert!(lean.contains("| propose"));
-        assert!(lean.contains("| approve (member_index : Nat)"));
+        // `approve` indexes into `voted : Map[MAX_MEMBERS] U8` and
+        // `members : Map[MAX_MEMBERS] Pubkey`, so the U8 param is promoted
+        // to `Fin MAX_MEMBERS` for Lean (matches Map's `Fin n → α` shape).
+        assert!(lean.contains("| approve (member_index : Fin MAX_MEMBERS)"));
+    }
+
+    #[test]
+    fn lean_gen_promotes_map_index_param_in_transition() {
+        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        // Transition signature carries Fin-typed index, not raw Nat.
+        assert!(
+            lean.contains("def approveTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)"),
+            "approveTransition should take member_index : Fin MAX_MEMBERS, got:\n{}",
+            lean
+        );
+    }
+
+    #[test]
+    fn lean_gen_alias_let_for_non_state_auth_var() {
+        let spec = chumsky_adapter::parse_str(MULTISIG_SPEC).unwrap();
+        let lean = render(&spec);
+        // `auth approver` does not name a State field — emit a `let` alias and
+        // skip the meaningless `signer = s.approver` guard.
+        assert!(lean.contains("let approver := signer"));
+        assert!(!lean.contains("signer = s.approver"));
+        assert!(lean.contains("let rejecter := signer"));
+        assert!(!lean.contains("signer = s.rejecter"));
+        // `auth creator` DOES name a State field — guard stays.
+        assert!(lean.contains("signer = s.creator"));
     }
 
     #[test]

@@ -37,13 +37,15 @@ def proposeTransition (s : State) (signer : Pubkey) : Option State :=
     some { s with approval_count := 0, rejection_count := 0, status := .HasProposal }
   else none
 
-def approveTransition (s : State) (signer : Pubkey) (member_index : Nat) : Option State :=
-  if signer = s.approver ∧ s.status = .HasProposal ∧ (member_index < s.member_count) ∧ ((s.members member_index) = approver) ∧ ((s.voted member_index) = 0) then
+def approveTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS) : Option State :=
+  let approver := signer
+  if s.status = .HasProposal ∧ (member_index < s.member_count) ∧ ((s.members member_index) = approver) ∧ ((s.voted member_index) = 0) then
     some { s with approval_count := s.approval_count + 1, voted := Function.update s.voted member_index (1), status := .HasProposal }
   else none
 
-def rejectTransition (s : State) (signer : Pubkey) (member_index : Nat) : Option State :=
-  if signer = s.rejecter ∧ s.status = .HasProposal ∧ (member_index < s.member_count) ∧ ((s.members member_index) = rejecter) ∧ ((s.voted member_index) = 0) then
+def rejectTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS) : Option State :=
+  let rejecter := signer
+  if s.status = .HasProposal ∧ (member_index < s.member_count) ∧ ((s.members member_index) = rejecter) ∧ ((s.voted member_index) = 0) then
     some { s with rejection_count := s.rejection_count + 1, voted := Function.update s.voted member_index (1), status := .HasProposal }
   else none
 
@@ -57,7 +59,7 @@ def cancel_proposalTransition (s : State) (signer : Pubkey) : Option State :=
     some { s with approval_count := 0, rejection_count := 0, status := .Active }
   else none
 
-def add_memberTransition (s : State) (signer : Pubkey) (member_index : Nat) (member_pubkey : Pubkey) : Option State :=
+def add_memberTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS) (member_pubkey : Pubkey) : Option State :=
   if signer = s.creator ∧ s.status = .Active ∧ (member_index < s.member_count) then
     some { s with members := Function.update s.members member_index (member_pubkey), status := .Active }
   else none
@@ -70,11 +72,11 @@ def remove_memberTransition (s : State) (signer : Pubkey) : Option State :=
 inductive Operation where
   | create_vault (threshold : Nat) (member_count : Nat)
   | propose
-  | approve (member_index : Nat)
-  | reject (member_index : Nat)
+  | approve (member_index : Fin MAX_MEMBERS)
+  | reject (member_index : Fin MAX_MEMBERS)
   | execute
   | cancel_proposal
-  | add_member (member_index : Nat) (member_pubkey : Pubkey)
+  | add_member (member_index : Fin MAX_MEMBERS) (member_pubkey : Pubkey)
   | remove_member
 
 def applyOp (s : State) (signer : Pubkey) : Operation → Option State
