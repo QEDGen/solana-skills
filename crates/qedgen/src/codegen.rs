@@ -1383,20 +1383,20 @@ fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHa
 
 /// Canonical SPL Token program ID. Calls into an interface whose
 /// `program_id "..."` matches this constant get the `anchor_spl::token::*`
-/// CPI shape (v2.8 G4). Other program IDs fall through to the
-/// agent-fill comment for now — generic `invoke` codegen lands in v2.9.
+/// CPI shape; other program IDs route through the generic
+/// `solana_program::program::invoke` builder.
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 /// Try to emit a real Anchor CPI invocation for one `call Interface.handler(...)`
 /// site. Returns `None` when the interface isn't recognized (caller falls
 /// back to a comment + `todo!()` so the user / an LLM fills the body).
 ///
-/// v2.8 covers all five SPL Token handlers — `transfer`, `mint_to`,
-/// `burn`, `initialize_account`, `close_account` — via `anchor_spl::token::*`.
-/// Non-SPL-Token interfaces ship a generic `solana_program::program::invoke`
-/// shape in v2.9. The canonical SPL handlers are the bulk of CPI traffic
-/// in deployed programs, so this scope is enough to remove `todo!()` from
-/// the typical escrow / lending / vault shape.
+/// All five SPL Token handlers — `transfer`, `mint_to`, `burn`,
+/// `initialize_account`, `close_account` — get an `anchor_spl::token::*`
+/// shape; non-SPL-Token interfaces ship a generic
+/// `solana_program::program::invoke` shape. The canonical SPL handlers
+/// cover the bulk of CPI traffic in deployed programs, which is what
+/// keeps `todo!()` out of the typical escrow / lending / vault shape.
 fn try_emit_anchor_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2188,11 +2188,12 @@ fn render_handler_scaffold(
     }
 
     // `call Interface.handler(name = expr, ...)` sites — the uniform CPI
-    // surface introduced in v2.5 (slice 2). v2.8 G4 lands real Anchor CPI
-    // codegen for the canonical SPL Token transfer; other interfaces and
-    // handlers still emit a structured comment + todo!() so an LLM /
-    // human fills the body. The boolean tracks whether any call site
-    // remained unmechanized so the tail `todo!()` only fires for those.
+    // surface. SPL Token calls get a real `anchor_spl::token::*` builder;
+    // other interfaces fall through to a generic `invoke` shape, with
+    // unmechanized cases emitting a structured comment + `todo!()` so an
+    // LLM / human fills the body. The boolean tracks whether any call
+    // site remained unmechanized so the tail `todo!()` only fires for
+    // those.
     let mut any_unmechanized_call = false;
     for c in &handler.calls {
         match try_emit_anchor_cpi(c, handler, spec) {
@@ -2780,8 +2781,8 @@ fn generate_cargo_toml(
 /// `Result<()>`, auto-derived discriminators; `Target::Quasar` →
 /// `quasar_lang::prelude::*`, `#![no_std]`, `Ctx<X>`, `Result<(),
 /// ProgramError>`, explicit `#[instruction(discriminator = N)]`).
-/// `Target::Pinocchio` is rejected at the `init` dispatcher and won't
-/// reach this function in v2.9.
+/// `Target::Pinocchio` is rejected at the `init` dispatcher and never
+/// reaches this function.
 pub fn generate(spec_path: &Path, output_dir: &Path, target: crate::Target) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
@@ -3492,7 +3493,7 @@ handler send : State.Active -> State.Active {
             .expect("send handler");
         let call = handler.calls.first().expect("call site");
         let rendered = try_emit_anchor_cpi(call, handler, &spec)
-            .expect("v2.9 must emit a generic CPI shape for non-SPL Anchor programs");
+            .expect("must emit a generic CPI shape for non-SPL Anchor programs");
 
         // Sanity-check the emitted shape:
         assert!(rendered.contains("solana_program::program::invoke"));

@@ -1,0 +1,65 @@
+name: Lake build (Lean side)
+
+# Runs `bash scripts/check-lake-build.sh --strict` over every bundled
+# `examples/*/formal_verification/` project. Heavier than the Rust-side
+# gates because it provisions elan + Mathlib (cache-miss can take 15–45
+# min). Runs on push-to-main and manual dispatch only — PRs that touch
+# Lean codegen should request this workflow via a comment trigger or a
+# follow-up commit, not block on every PR.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lake-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      # Cache elan's toolchain store. Keyed on every `lean-toolchain`
+      # file in the repo so a Lean version bump invalidates cleanly.
+      - name: Cache elan toolchains
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan/toolchains
+          key: ${{ runner.os }}-elan-${{ hashFiles('**/lean-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-elan-
+
+      # Cache per-example `.lake/` (built oleans + downloaded Mathlib).
+      # Keyed on the lakefiles + manifests so dependency or toolchain
+      # bumps invalidate the right examples.
+      - name: Cache example .lake directories
+        uses: actions/cache@v4
+        with:
+          path: examples/**/formal_verification/.lake
+          key: ${{ runner.os }}-lake-${{ hashFiles('examples/**/lakefile.lean', 'examples/**/lake-manifest.json', '**/lean-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-lake-
+
+      # Populate `.lake/` for any example whose cache missed. `lake update`
+      # is a no-op when the manifest matches; otherwise it fetches Mathlib.
+      - name: Bootstrap missing .lake directories
+        run: |
+          set -euo pipefail
+          shopt -s globstar
+          for lakefile in examples/**/formal_verification/lakefile.lean; do
+            dir="$(dirname "$lakefile")"
+            if [ ! -d "$dir/.lake" ] || [ ! -f "$dir/lake-manifest.json" ]; then
+              echo "==> lake update in $dir"
+              ( cd "$dir" && lake update )
+            fi
+          done
+
+      - name: Run lake-build sweep
+        run: bash scripts/check-lake-build.sh --strict

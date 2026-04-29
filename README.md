@@ -88,9 +88,9 @@ qedgen probe --json --spec my_program.qedspec
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need
-`--spec <path>` — they walk up from the current directory, find the nearest
-`.qed/`, and resolve. Explicit `--spec` still works when you want to point
-at something specific.
+`--spec <path>` — `qedgen check`, `codegen`, `verify`, and `reconcile` all
+walk up from the current directory, find the nearest `.qed/`, and resolve.
+Explicit `--spec` still works when you want to point at something specific.
 
 Lean and Kani toolchains are installed automatically the first time
 they're needed. API keys are not — sign up at the providers below and
@@ -302,6 +302,31 @@ qedgen aristotle list
 qedgen aristotle cancel <project-id>
 ```
 
+### Upstream binary pinning
+
+When a `.qedspec` `import`s another program's interface (e.g. SPL Token),
+the import can pin an `upstream_binary_hash` — the SHA-256 of the on-chain
+`.so`. `qedgen verify --check-upstream` diffs each pinned hash against
+what's actually deployed via `solana program dump`, so a callee program
+upgraded out from under your proofs surfaces as a verification failure
+instead of a silent risk.
+
+```bash
+# Compare every pinned upstream hash to the on-chain bytes
+qedgen verify --check-upstream
+
+# Override the cluster (defaults to the one in ~/.config/solana/cli/config.yml)
+qedgen verify --check-upstream --rpc-url https://api.mainnet-beta.solana.com
+
+# CI gate — refuse to reach the network. Pinned-but-no-fetch reports as Error.
+qedgen verify --check-upstream --offline
+```
+
+Requires the [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
+on `PATH` (qedgen shells out to `solana program dump`). Combine with
+`--proptest` / `--kani` / `--lean` to run the binary check alongside
+the harness backends in one invocation.
+
 ### Verification drift detection
 
 After verifying a function, stamp it with `#[qed(verified)]` to detect future changes — either to the function body *or* to its spec contract:
@@ -430,6 +455,7 @@ keys must be obtained from the providers and exported by the user
 before running the corresponding commands:
 
 - Lean 4 / elan — for `lake build` and formal proofs (auto-installed)
+- [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools) — only for `qedgen verify --check-upstream` (shells out to `solana program dump`). Install yourself.
 - `MISTRAL_API_KEY` — for `fill-sorry` and `generate`. Sign up at [console.mistral.ai](https://console.mistral.ai) (free tier available).
 - `ARISTOTLE_API_KEY` — for `aristotle` deep proof search. Sign up at [aristotle.harmonic.fun](https://aristotle.harmonic.fun).
 

@@ -57,8 +57,9 @@ bin/
 *.olean.trace
 *.old
 
-# PRDs (internal planning docs)
-docs/prds/
+# PRDs (internal planning docs) stay local; release notes track in-repo.
+docs/prds/*
+!docs/prds/RELEASE-*.md
 
 # Internal learnings / reconnaissance — source material for probes and
 # lints, never committed to the public repo (see feedback memory: no

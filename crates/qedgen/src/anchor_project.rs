@@ -104,9 +104,8 @@ pub fn parse_lib_rs(lib_rs_path: &Path, source: &str) -> Result<AnchorProject> {
     let program_mod = find_program_mod(&file).ok_or_else(|| {
         anyhow!(
             "no `#[program] pub mod <name>` block in {}.\n\
-             qedgen's brownfield adapter requires an Anchor-style program. \
-             If this is a non-Anchor (raw / native) Solana program, support \
-             lands in v2.10+.",
+             qedgen's brownfield adapter (`qedgen adapt`) is Anchor-only — \
+             non-Anchor (raw / native) Solana programs are not supported.",
             lib_rs_path.display(),
         )
     })?;
@@ -232,8 +231,8 @@ mod tests {
         let err = parse(src).unwrap_err().to_string();
         assert!(err.contains("no `#[program] pub mod"), "got: {err}");
         assert!(
-            err.contains("v2.10+"),
-            "should mention non-Anchor support roadmap; got: {err}"
+            err.contains("Anchor-only"),
+            "should explain that adapt is Anchor-only; got: {err}"
         );
     }
 

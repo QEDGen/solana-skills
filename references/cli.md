@@ -371,11 +371,11 @@ $QEDGEN codegen --ci
 | `--lean` | bool | false | Generate Lean 4 proofs |
 | `--lean-output` | Path | `./formal_verification/Spec.lean` | Lean output path |
 | `--kani` | bool | false | Generate Kani proof harnesses |
-| `--kani-output` | Path | `./programs/tests/kani.rs` | Kani output path. Lives **inside the program package** so `cargo kani --tests` resolves `programs/Cargo.toml` without a hand-authored root shim. Changed from `./tests/kani.rs` in v2.6. |
+| `--kani-output` | Path | `./programs/tests/kani.rs` | Kani output path. Lives **inside the program package** so `cargo kani --tests` resolves `programs/Cargo.toml` without a hand-authored root shim. |
 | `--test` | bool | false | Generate unit tests |
 | `--test-output` | Path | `./programs/src/tests.rs` | Unit test output path |
 | `--proptest` | bool | false | Generate proptest harnesses |
-| `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). Changed from `./tests/proptest.rs` in v2.6. |
+| `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). |
 | `--integration` | bool | false | Generate in-process SVM integration tests |
 | `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
 | `--ci` | bool | false | Generate GitHub Actions CI workflow |

@@ -681,9 +681,11 @@ enum Commands {
     /// Report-only; never modifies files. Exits 0 on no drift, 1 on drift.
     /// Pair with `--json` for machine-readable output consumable by agents.
     Reconcile {
-        /// Path to the spec file (.qedspec)
+        /// Path to the spec file (.qedspec). Optional — falls back to the
+        /// `spec` field in the nearest `.qed/config.json` discovered by
+        /// walking up from cwd, mirroring `check`, `codegen`, and `verify`.
         #[arg(long)]
-        spec: PathBuf,
+        spec: Option<PathBuf>,
 
         /// Root directory to scan for Rust handlers (recursive)
         #[arg(long, default_value = "programs/")]
@@ -1904,6 +1906,8 @@ async fn main() -> Result<()> {
             json,
         } => {
             require_git_repo()?;
+            let cwd = std::env::current_dir()?;
+            let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
             let report = reconcile::reconcile(&spec, &code, &proofs)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
