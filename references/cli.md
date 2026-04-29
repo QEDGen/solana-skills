@@ -504,25 +504,58 @@ $QEDGEN aristotle submit --project-dir formal_verification --wait
 | `--prompt` | String | "Fill in all sorry..." | Custom prompt |
 | `--output-dir` | Path | same as project-dir | Output directory |
 | `--wait` | bool | false | Block until completion |
-| `--poll-interval` | int (sec) | 30 | Polling interval |
+| `--poll-interval` | int (sec) | 30 | Polling interval; clamped to [5, 3600] |
 
 ### `aristotle status`
-Check or poll project status.
+Check project status; with `--wait`, poll until terminal and download the result.
 
 ```bash
 $QEDGEN aristotle status <project-id>
 $QEDGEN aristotle status <project-id> --wait --output-dir formal_verification
 ```
 
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `<project-id>` | String | required | Project ID returned by `aristotle submit` |
+| `--wait` | bool | false | Poll until terminal status, then download |
+| `--poll-interval` | int (sec) | 30 | Polling interval; clamped to [5, 3600]. Requires `--wait` |
+| `--output-dir` | Path | `.` | Where to extract the result. Requires `--wait` |
+
 ### `aristotle result`
-Download completed result.
+Download a completed project's solution archive.
 
 ```bash
 $QEDGEN aristotle result <project-id> --output-dir formal_verification
 ```
 
-### `aristotle cancel` / `aristotle list`
-Cancel a running project or list recent projects.
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `<project-id>` | String | required | Project ID |
+| `--output-dir` | Path | `.` | Where to extract the result |
+
+### `aristotle cancel`
+Cancel a running project.
+
+```bash
+$QEDGEN aristotle cancel <project-id>
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `<project-id>` | String | required | Project ID to cancel |
+
+### `aristotle list`
+List recent projects.
+
+```bash
+$QEDGEN aristotle list
+$QEDGEN aristotle list --limit 25 --status IN_PROGRESS
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--limit` | int | 10 | Maximum number of projects to show |
+| `--status` | String | none | Filter by status (e.g. `IN_PROGRESS`, `COMPLETE`, `FAILED`) |
 
 ## Mainnet readiness
 

@@ -80,7 +80,9 @@ fn client() -> Client {
 }
 
 /// Create a tar.gz archive of a Lean project directory, filtering out
-/// build artifacts and large dependencies (same rules as aristotlelib).
+/// VCS metadata (`.git`), Lake build output (`.lake`), and Lean
+/// build artifacts (`.olean`/`.ilean`/`.ir`/native objects). Matches
+/// the packaging shape Aristotle expects on the upload side.
 fn tar_project_dir(dir: &Path) -> Result<Vec<u8>> {
     use std::io::Write;
 
