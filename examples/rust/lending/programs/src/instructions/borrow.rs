@@ -5,12 +5,11 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
-use quasar_spl::{Token, Mint};
+use quasar_spl::{Token, TokenCpi};
 use crate::state::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::events::*;
-use crate::errors::*;
+use qedgen_macros::qed;
 
 #[derive(Accounts)]
 pub struct Borrow<'info> {
@@ -24,19 +23,32 @@ pub struct Borrow<'info> {
     pub pool_vault: &'info mut Account<Token>,
     #[account(mut)]
     pub borrower_ta: &'info mut Account<Token>,
-    pub token_program: &'info Program<System>,
+    pub token_program: &'info Program<Token>,
     pub system_program: &'info Program<System>,
 }
 
 impl<'info> Borrow<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "68a6f572d6d6f6ca", spec_hash = "6a1c2376f61d1679")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "f6629bf8fef984fe", spec_hash = "6a1c2376f61d1679")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, collateral: u64, bumps: &BorrowBumps) -> Result<(), ProgramError> {
         guards::borrow(self, amount, collateral)?;
+        let _ = bumps;
         self.loan.amount = (amount).into();
         self.loan.collateral = (collateral).into();
-        // Spec: emit!(Borrowed)
-        // Spec transfer: pool_vault -> borrower_ta amount=amount
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        let pool_authority = self.pool.authority;
+        let pool_bump = [self.pool.bump];
+        let pool_seeds = [
+            Seed::from(b"pool" as &[u8]),
+            Seed::from(pool_authority.as_ref()),
+            Seed::from(&pool_bump as &[u8]),
+        ];
+        self.token_program
+            .transfer(&*self.pool_vault, &*self.borrower_ta, &*self.pool, amount)
+            .invoke_signed(&pool_seeds)?;
+        emit!(Borrowed {
+            borrower: *self.borrower.address(),
+            amount,
+        });
+        Ok(())
     }
 }

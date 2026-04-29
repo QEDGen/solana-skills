@@ -19,13 +19,16 @@ pub struct Execute<'info> {
 }
 
 impl<'info> Execute<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "855f4999905f6418", spec_hash = "84fd7f21daf375f3")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "74f274605ace77f8", spec_hash = "84fd7f21daf375f3")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
         guards::execute(self)?;
+        let _ = bumps;
         self.vault.approval_count = (0).into();
         self.vault.rejection_count = (0).into();
-        // Spec: emit!(ProposalExecuted)
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        emit!(ProposalExecuted {
+            executor: *self.executor.address(),
+        });
+        Ok(())
     }
 }

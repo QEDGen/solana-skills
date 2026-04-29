@@ -7,9 +7,8 @@
 use quasar_lang::prelude::*;
 use crate::state::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::events::*;
-use crate::errors::*;
+use qedgen_macros::qed;
 
 #[derive(Accounts)]
 pub struct InitPool<'info> {
@@ -21,14 +20,18 @@ pub struct InitPool<'info> {
 }
 
 impl<'info> InitPool<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "d909751a1b86b238", spec_hash = "b5d51ab2e00d8e0e")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "8e67e51c9c857651", spec_hash = "b5d51ab2e00d8e0e")]
     #[inline(always)]
     pub fn handler(&mut self, rate: u64, bumps: &InitPoolBumps) -> Result<(), ProgramError> {
         guards::init_pool(self, rate)?;
+        let _ = bumps;
         self.pool.interest_rate = (rate).into();
         self.pool.total_deposits = (0).into();
         self.pool.total_borrows = (0).into();
-        // Spec: emit!(PoolInitialized)
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        emit!(PoolInitialized {
+            authority: *self.authority.address(),
+            rate,
+        });
+        Ok(())
     }
 }

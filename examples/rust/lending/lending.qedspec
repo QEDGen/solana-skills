@@ -184,7 +184,7 @@ handler liquidate : Loan.Active -> Loan.Liquidated {
 // Properties
 
 property pool_solvency :
-  forall s : Pool.Active, s.total_deposits >= s.total_borrows
+  state.total_deposits >= state.total_borrows
   preserved_by all
 
 invariant collateral_backing :

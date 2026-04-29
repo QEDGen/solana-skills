@@ -21,15 +21,20 @@ pub struct CreateVault<'info> {
 }
 
 impl<'info> CreateVault<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "e411681e3bddfed7", spec_hash = "17cb8535550bbe69")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "create_vault", hash = "aea4af508fd00d17", spec_hash = "17cb8535550bbe69")]
     #[inline(always)]
     pub fn handler(&mut self, threshold: u8, member_count: u8, bumps: &CreateVaultBumps) -> Result<(), ProgramError> {
         guards::create_vault(self, threshold, member_count)?;
+        let _ = bumps;
         self.vault.threshold = (threshold).into();
         self.vault.member_count = (member_count).into();
         self.vault.approval_count = (0).into();
         self.vault.rejection_count = (0).into();
-        // Spec: emit!(VaultCreated)
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        emit!(VaultCreated {
+            creator: *self.creator.address(),
+            threshold,
+            member_count,
+        });
+        Ok(())
     }
 }

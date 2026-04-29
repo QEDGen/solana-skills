@@ -18,10 +18,11 @@ pub struct RemoveMember<'info> {
 }
 
 impl<'info> RemoveMember<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "eea3ddaf89ccbad2", spec_hash = "30f1786f10a626f5")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "30f1786f10a626f5")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RemoveMemberBumps) -> Result<(), ProgramError> {
         guards::remove_member(self)?;
+        let _ = bumps;
         self.vault.member_count = self.vault.member_count.checked_sub(1).ok_or(MultisigError::MathOverflow)?;
         Ok(())
     }

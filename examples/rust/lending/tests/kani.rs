@@ -29,10 +29,9 @@ struct State {
 // Property predicates (from qedspec `property` declarations)
 // ============================================================================
 
-/// pool_solvency: ∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows
-fn pool_solvency(_s: &State) -> bool {
-    // /* QEDGEN_UNSUPPORTED_QUANTIFIER: forall s : Pool.Active — lower at harness level */ — property uses a quantifier; lower at the harness level.
-    true
+/// pool_solvency: s.total_deposits ≥ s.total_borrows
+fn pool_solvency(s: &State) -> bool {
+    s.total_deposits >= s.total_borrows
 }
 
 // ============================================================================

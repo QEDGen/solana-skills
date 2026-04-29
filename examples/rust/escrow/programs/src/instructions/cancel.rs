@@ -5,32 +5,45 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
+use quasar_spl::{Token, TokenCpi};
 use crate::state::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::events::*;
-use crate::errors::*;
+use qedgen_macros::qed;
 
 #[derive(Accounts)]
-pub struct Cancel {
+pub struct Cancel<'info> {
     #[account(mut)]
-    pub initializer: Signer,
-    #[account(mut, seeds = EscrowAccount::seeds(escrow), bump)]
-    pub escrow: Account<()>,
-    #[account(mut, token::authority = escrow)]
-    pub escrow_ta: Account<Token>,
+    pub initializer: &'info mut Signer,
+    #[account(mut, seeds = [b"escrow", initializer], bump, has_one = initializer)]
+    pub escrow: &'info mut Account<EscrowAccount>,
     #[account(mut)]
-    pub initializer_ta: Account<Token>,
-    pub token_program: Program<()>,
+    pub escrow_ta: &'info mut Account<Token>,
+    #[account(mut)]
+    pub initializer_ta: &'info mut Account<Token>,
+    pub token_program: &'info Program<Token>,
 }
 
-impl Cancel {
-    #[qed(verified, spec = "../escrow.qedspec", handler = "cancel", spec_hash = "2944975cff8d97d5")]
+impl<'info> Cancel<'info> {
+    #[qed(verified, spec = "../escrow.qedspec", handler = "cancel", hash = "ddff71e2acaaf308", spec_hash = "3f4361ea49ef7992")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelBumps) -> Result<(), ProgramError> {
         guards::cancel(self)?;
-        // Spec: emit!(EscrowCancelled)
-        // Spec transfer: escrow_ta -> initializer_ta amount=initializer_amount
-        todo!("fill non-mechanical effects, events, transfers")
+        let _ = bumps;
+        let initializer_amount: u64 = self.escrow.initializer_amount.into();
+        let escrow_initializer = self.escrow.initializer;
+        let escrow_bump = [self.escrow.bump];
+        let escrow_seeds = [
+            Seed::from(b"escrow" as &[u8]),
+            Seed::from(escrow_initializer.as_ref()),
+            Seed::from(&escrow_bump as &[u8]),
+        ];
+        self.token_program
+            .transfer(&*self.escrow_ta, &*self.initializer_ta, &*self.escrow, initializer_amount)
+            .invoke_signed(&escrow_seeds)?;
+        emit!(EscrowCancelled {
+            initializer: *self.initializer.address(),
+        });
+        Ok(())
     }
 }

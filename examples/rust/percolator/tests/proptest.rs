@@ -93,6 +93,11 @@ fn account_solvent(_s: &State) -> bool {
     true
 }
 
+/// account_solvent: per-slot check at `i: AccountIdx`
+fn account_solvent_at(s: &State, i: usize) -> bool {
+    (!(s.accounts[(i) as usize].active == 1)) || (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))
+}
+
 fn add_user(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128)) {
         return false;
@@ -530,7 +535,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if add_user(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after add_user");
         }
     }
@@ -545,7 +550,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if add_lp(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after add_lp");
         }
     }
@@ -560,7 +565,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if reclaim_empty_account(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after reclaim_empty_account");
         }
     }
@@ -575,7 +580,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if close_account(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after close_account");
         }
     }
@@ -590,7 +595,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if deposit(&mut s, i, amount) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after deposit");
         }
     }
@@ -605,7 +610,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if withdraw(&mut s, i, amount) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after withdraw");
         }
     }
@@ -635,7 +640,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if deposit_fee_credits(&mut s, i, amount) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after deposit_fee_credits");
         }
     }
@@ -650,7 +655,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if convert_released_pnl(&mut s, i, x) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after convert_released_pnl");
         }
     }
@@ -680,7 +685,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if liquidate_case_0(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after liquidate_case_0");
         }
     }
@@ -695,7 +700,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if liquidate_case_1(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after liquidate_case_1");
         }
     }
@@ -710,7 +715,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if liquidate_otherwise(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after liquidate_otherwise");
         }
     }
@@ -725,7 +730,7 @@ proptest! {
         prop_assume!(vault_bounded(&s));
         prop_assume!(account_solvent(&s));
         if settle_account(&mut s, i) {
-            prop_assert!(account_solvent(&s),
+            prop_assert!(account_solvent_at(&s, i),
                 "account_solvent must hold after settle_account");
         }
     }

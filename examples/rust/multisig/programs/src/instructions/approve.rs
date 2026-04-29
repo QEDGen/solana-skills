@@ -19,13 +19,17 @@ pub struct Approve<'info> {
 }
 
 impl<'info> Approve<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "db900f591cb3172d", spec_hash = "a2474552f74b6625")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "659801016cb87703", spec_hash = "a2474552f74b6625")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &ApproveBumps) -> Result<(), ProgramError> {
         guards::approve(self, member_index)?;
+        let _ = bumps;
         self.vault.approval_count = self.vault.approval_count.checked_add(1).ok_or(MultisigError::MathOverflow)?;
         self.vault.voted[(member_index) as usize] = (1).into();
-        // Spec: emit!(ProposalApproved)
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        emit!(ProposalApproved {
+            approver: *self.approver.address(),
+            approval_count: self.vault.approval_count,
+        });
+        Ok(())
     }
 }

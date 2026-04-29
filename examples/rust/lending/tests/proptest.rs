@@ -49,10 +49,9 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
     })
 }
 
-/// pool_solvency: ∀ s : Pool.Active, s.total_deposits ≥ s.total_borrows
-fn pool_solvency(_s: &State) -> bool {
-    // /* QEDGEN_UNSUPPORTED_QUANTIFIER: forall s : Pool.Active — lower at harness level */ — property uses a quantifier; not lowerable to a predicate.
-    true
+/// pool_solvency: s.total_deposits ≥ s.total_borrows
+fn pool_solvency(s: &State) -> bool {
+    s.total_deposits >= s.total_borrows
 }
 
 fn init_pool(s: &mut State, rate: u64) -> bool {

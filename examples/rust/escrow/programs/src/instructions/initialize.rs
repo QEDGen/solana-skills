@@ -5,36 +5,43 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
+use quasar_spl::{Token, TokenCpi};
 use crate::state::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::events::*;
-use crate::errors::*;
+use qedgen_macros::qed;
 
 #[derive(Accounts)]
-pub struct Initialize {
+pub struct Initialize<'info> {
     #[account(mut)]
-    pub initializer: Signer,
-    #[account(mut, init, payer = initializer, seeds = EscrowAccount::seeds(escrow), bump)]
-    pub escrow: Account<()>,
-    pub mint: Account<()>,
+    pub initializer: &'info mut Signer,
+    #[account(mut, seeds = [b"escrow", initializer], bump, has_one = initializer)]
+    pub escrow: &'info mut Account<EscrowAccount>,
+    pub mint: &'info UncheckedAccount,
     #[account(mut)]
-    pub initializer_ta: Account<Token>,
-    #[account(mut, token::authority = escrow)]
-    pub escrow_ta: Account<Token>,
-    pub token_program: Program<()>,
-    pub system_program: Program<()>,
+    pub initializer_ta: &'info mut Account<Token>,
+    #[account(mut)]
+    pub escrow_ta: &'info mut Account<Token>,
+    pub token_program: &'info Program<Token>,
+    pub system_program: &'info Program<System>,
 }
 
-impl Initialize {
-    #[qed(verified, spec = "../escrow.qedspec", handler = "initialize", spec_hash = "579d73a84cc6b6f0")]
+impl<'info> Initialize<'info> {
+    #[qed(verified, spec = "../escrow.qedspec", handler = "initialize", hash = "1de528c0f3938362", spec_hash = "804b5ee68ad1d84b")]
     #[inline(always)]
     pub fn handler(&mut self, deposit_amount: u64, receive_amount: u64, bumps: &InitializeBumps) -> Result<(), ProgramError> {
         guards::initialize(self, deposit_amount, receive_amount)?;
-        self.escrow.initializer_amount = deposit_amount;
-        self.escrow.taker_amount = receive_amount;
-        // Spec: emit!(EscrowInitialized)
-        // Spec transfer: initializer_ta -> escrow_ta amount=deposit_amount
-        todo!("fill non-mechanical effects, events, transfers")
+        let _ = bumps;
+        self.escrow.initializer_amount = (deposit_amount).into();
+        self.escrow.taker_amount = (receive_amount).into();
+        self.escrow.initializer_token_account = *self.initializer_ta.address();
+        self.token_program
+            .transfer(&*self.initializer_ta, &*self.escrow_ta, &*self.initializer, deposit_amount)
+            .invoke()?;
+        emit!(EscrowInitialized {
+            initializer: *self.initializer.address(),
+            amount: deposit_amount,
+        });
+        Ok(())
     }
 }

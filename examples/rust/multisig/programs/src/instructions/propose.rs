@@ -19,13 +19,16 @@ pub struct Propose<'info> {
 }
 
 impl<'info> Propose<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "propose", hash = "0a6f5e84569aa941", spec_hash = "dc269390a1326593")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "propose", hash = "d8710d638614d27b", spec_hash = "dc269390a1326593")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ProposeBumps) -> Result<(), ProgramError> {
         guards::propose(self)?;
+        let _ = bumps;
         self.vault.approval_count = (0).into();
         self.vault.rejection_count = (0).into();
-        // Spec: emit!(ProposalCreated)
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        emit!(ProposalCreated {
+            proposer: *self.proposer.address(),
+        });
+        Ok(())
     }
 }

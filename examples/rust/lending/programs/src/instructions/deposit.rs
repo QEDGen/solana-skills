@@ -5,11 +5,11 @@
 // via the `#[qed(verified, ...)]` macro.
 
 use quasar_lang::prelude::*;
-use quasar_spl::{Token, Mint};
+use quasar_spl::{Token, TokenCpi};
 use crate::state::*;
 use crate::guards;
-use qedgen_macros::qed;
 use crate::events::*;
+use qedgen_macros::qed;
 use crate::errors::*;
 
 #[derive(Accounts)]
@@ -22,17 +22,23 @@ pub struct Deposit<'info> {
     pub pool_vault: &'info mut Account<Token>,
     #[account(mut)]
     pub depositor_ta: &'info mut Account<Token>,
-    pub token_program: &'info Program<System>,
+    pub token_program: &'info Program<Token>,
 }
 
 impl<'info> Deposit<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "deposit", hash = "13df0b620c042001", spec_hash = "85eff0394c972250")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "deposit", hash = "b49d048d05464eac", spec_hash = "85eff0394c972250")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, bumps: &DepositBumps) -> Result<(), ProgramError> {
         guards::deposit(self, amount)?;
+        let _ = bumps;
         self.pool.total_deposits = self.pool.total_deposits.checked_add(amount).ok_or(LendingError::MathOverflow)?;
-        // Spec: emit!(Deposited)
-        // Spec transfer: depositor_ta -> pool_vault amount=amount
-        todo!("fill non-mechanical effects, events, transfers, calls")
+        self.token_program
+            .transfer(&*self.depositor_ta, &*self.pool_vault, &*self.depositor, amount)
+            .invoke()?;
+        emit!(Deposited {
+            depositor: *self.depositor.address(),
+            amount,
+        });
+        Ok(())
     }
 }
