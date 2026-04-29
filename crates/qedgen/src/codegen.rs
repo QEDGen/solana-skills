@@ -203,9 +203,16 @@ impl FrameworkSurface {
 
     fn program_type(&self, name: &str, account_type: Option<&str>, mutable: bool) -> String {
         let lt = self.accounts_lifetime;
+        // Token-program detection is shared between targets: a `program`
+        // account named `token_program` (the convention) or carrying the
+        // `type token` annotation (explicit) needs `Program<Token>` so the
+        // generated handler can call `.transfer()` / `.mint_to()` etc.
+        // Anything else stays `Program<System>`.
+        let is_token = name == "token_program" || account_type == Some("token");
         if self.is_quasar() {
-            format!("&{} {}Program<System>", lt, mut_prefix(mutable))
-        } else if name == "token_program" || account_type == Some("token") {
+            let inner = if is_token { "Token" } else { "System" };
+            format!("&{} {}Program<{}>", lt, mut_prefix(mutable), inner)
+        } else if is_token {
             format!("Program<{}, Token>", lt)
         } else {
             format!("Program<{}, System>", lt)
@@ -2894,6 +2901,10 @@ mod tests {
         assert_eq!(quasar.token_account_type(true), "&'info mut Account<Token>");
         assert_eq!(
             quasar.program_type("token_program", None, false),
+            "&'info Program<Token>"
+        );
+        assert_eq!(
+            quasar.program_type("system_program", None, false),
             "&'info Program<System>"
         );
         assert_eq!(

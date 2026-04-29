@@ -484,6 +484,29 @@ fn emit_account_section(
                 out.push_str(&format!("    {}\n", rust_expr));
                 out.push_str("}\n\n");
             }
+            // Per-slot form: when the property is `forall <binder> : <T>, body`
+            // and the binder is too wide for proptest exhaustion, emit a
+            // `_at` variant that takes the binder as a Rust param and checks
+            // the body at one slot. Used by preservation tests for handlers
+            // that take that same binder as a handler param — checking at
+            // the modified slot is sufficient for inductive preservation
+            // since handlers only mutate state.<arr>[binder] and the rest
+            // is held fixed by frame condition.
+            if let Some(slot) = &prop.per_slot {
+                let rust_ty = map_type(&slot.binder_type, spec)
+                    .ok()
+                    .unwrap_or_else(|| slot.binder_type.clone());
+                out.push_str(&format!(
+                    "/// {}: per-slot check at `{}: {}`\n",
+                    prop.name, slot.binder_name, slot.binder_type
+                ));
+                out.push_str(&format!(
+                    "fn {}_at(s: &State, {}: {}) -> bool {{\n",
+                    prop.name, slot.binder_name, rust_ty
+                ));
+                out.push_str(&format!("    {}\n", slot.rust_body));
+                out.push_str("}\n\n");
+            }
         }
     }
 
@@ -735,7 +758,24 @@ fn emit_preservation_tests_for(
                 })
                 .unwrap_or_default();
             out.push_str(&format!("        if {}(&mut s{}) {{\n", op_name, args));
-            out.push_str(&format!("            prop_assert!({}(&s),\n", prop.name));
+            // Pick the property predicate to assert. When the property has a
+            // per-slot form and this handler takes the matching binder as a
+            // param, call `{prop}_at(&s, <binder>)` to check at the modified
+            // slot — proptest can't exhaust the wide binder type, but the
+            // local check at the touched slot is what inductive preservation
+            // actually needs (frame condition handles other slots).
+            let assert_call = match (&prop.per_slot, op) {
+                (Some(slot), Some(op))
+                    if op
+                        .takes_params
+                        .iter()
+                        .any(|(n, t)| n == &slot.binder_name && t == &slot.binder_type) =>
+                {
+                    format!("{}_at(&s, {})", prop.name, slot.binder_name)
+                }
+                _ => format!("{}(&s)", prop.name),
+            };
+            out.push_str(&format!("            prop_assert!({},\n", assert_call));
             out.push_str(&format!(
                 "                \"{} must hold after {}\");\n",
                 prop.name, op_name

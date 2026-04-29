@@ -2072,12 +2072,44 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     a::PreservedBy::All => vec!["all".to_string()],
                     a::PreservedBy::Some(xs) => xs.clone(),
                 };
+                // When the body is a single `forall <binder> : <T>, inner`
+                // with a binder type wider than U8/I8 (so the standard
+                // proptest lowering would emit the unsupported sentinel),
+                // also render the inner body keeping the binder as a free
+                // Rust variable. proptest_gen uses this to emit per-slot
+                // `_at` predicates and have preservation tests for handlers
+                // taking the binder as a param check at that slot.
+                let per_slot = match &p.body.node {
+                    Expr::Quant {
+                        kind: a::Quantifier::Forall,
+                        binder,
+                        binder_ty,
+                        body,
+                    } if !matches!(binder_ty.as_str(), "U8" | "I8") => {
+                        let body_rust =
+                            expr_to_rust(&body.node, Ctx::Guard, consts, opts_native(&env));
+                        // Only useful if the body itself rendered without any
+                        // further unsupported quantifier — nested wide forall
+                        // can't be flattened to a single per-slot param.
+                        if !crate::check::rust_expr_is_unsupported(&body_rust) {
+                            Some(crate::check::PerSlotForm {
+                                binder_name: binder.clone(),
+                                binder_type: binder_ty.clone(),
+                                rust_body: body_rust,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
                 out.properties.push(ParsedProperty {
                     name: p.name.clone(),
                     expression: Some(lean),
                     rust_expression: Some(rust),
                     rust_expression_pod: Some(rust_pod),
                     preserved_by: preserved,
+                    per_slot,
                 });
             }
             TopItem::Cover(c) => {

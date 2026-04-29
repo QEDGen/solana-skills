@@ -912,6 +912,7 @@ fn render_properties_multi(out: &mut String, spec: &ParsedSpec) {
                 rust_expression: p.rust_expression.clone(),
                 rust_expression_pod: p.rust_expression_pod.clone(),
                 preserved_by: p.preserved_by.clone(),
+                per_slot: p.per_slot.clone(),
             })
             .collect();
 

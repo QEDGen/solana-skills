@@ -1458,7 +1458,14 @@ async fn main() -> Result<()> {
 
             // Lint — always runs (core of spec validation)
             {
-                let warnings = check::lint_with_opts(&spec, lock_mode, cache_opts)?;
+                let mut warnings = check::lint_with_opts(&spec, lock_mode, cache_opts)?;
+                // Code-aware lints (residual `todo!()` placeholders in
+                // user-owned handler bodies) only fire when --code is set.
+                // Merge them in here so JSON consumers see one combined list.
+                if let Some(ref code_dir) = code {
+                    let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
+                    warnings.extend(check::check_handler_todos(&parsed, code_dir)?);
+                }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&warnings)?);
                 } else if warnings.is_empty() {

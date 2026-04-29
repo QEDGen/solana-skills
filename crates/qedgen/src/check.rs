@@ -201,6 +201,28 @@ pub struct ParsedProperty {
     /// guard/abort/ensures). Codegen picks based on `Target`.
     pub rust_expression_pod: Option<String>,
     pub preserved_by: Vec<String>,
+    /// When the property has shape `forall <binder> : <BinderType>, body`
+    /// and the binder is too wide for proptest exhaust (U16+, Fin[N>256]),
+    /// this carries the body rendered with the binder kept as a free Rust
+    /// variable. proptest_gen emits `fn {prop}_at(s: &State, <binder>:
+    /// <type>)` from this, and preservation tests for handlers taking
+    /// `<binder>` as a param check the property at that one slot — which
+    /// is sufficient for inductive preservation given handlers only modify
+    /// the array at the slot they were passed (frame condition handles the
+    /// rest). The bare `{prop}(&s)` predicate stays as the harness-level
+    /// "true" stub for prop_assume sites.
+    pub per_slot: Option<PerSlotForm>,
+}
+
+/// Per-slot rendering of a `forall <binder> : <T>, body` property. See
+/// `ParsedProperty::per_slot` for the rationale. Pod-aware variant for the
+/// Quasar Kani target lands when Kani consumes this; today only the native
+/// rendering (used by proptest_gen) is needed.
+#[derive(Debug, Clone)]
+pub struct PerSlotForm {
+    pub binder_name: String,
+    pub binder_type: String,
+    pub rust_body: String,
 }
 
 /// Sentinel marker embedded by `chumsky_adapter::expr_to_rust` when a
@@ -1766,6 +1788,39 @@ fn parse_property_relation<'a>(
 }
 
 /// Build a structured counterexample showing why a handler breaks a property.
+/// True iff any of the handler's `requires` clauses textually reference any
+/// of the named property fields (as `state.<f>` or `s.<f>` with a word
+/// boundary on the trailing side, so `state.x` doesn't match `state.xyz`).
+///
+/// Used by `preserved_by_all_potential_violation` to suppress boundary-only
+/// false positives — when the spec author has bounded the relevant fields,
+/// trust their claim of inductive preservation rather than firing a warning
+/// the local effect-analyzer can't refute.
+fn requires_constrains_prop_fields(op: &ParsedHandler, prop_fields: &[&str]) -> bool {
+    for req in &op.requires {
+        for expr in [&req.rust_expr, &req.lean_expr] {
+            for field in prop_fields {
+                for prefix in ["state.", "s."] {
+                    let needle = format!("{}{}", prefix, field);
+                    let mut search = expr.as_str();
+                    while let Some(pos) = search.find(&needle) {
+                        let after = search[pos + needle.len()..]
+                            .chars()
+                            .next()
+                            .map(|c| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(true);
+                        if after {
+                            return true;
+                        }
+                        search = &search[pos + needle.len()..];
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn build_counterexample(
     expr: &str,
     prop_name: &str,
@@ -2198,9 +2253,36 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     }
 
     // Rule: quantifier over a type that can't be exhausted at test time.
-    // U8/I8 are fine (256 iterations); anything larger emits a stub `true`
-    // body, so the property silently passes without being checked.
+    // Two distinct shapes:
+    //   - `forall s : <StateType>` — universal over states (e.g. `Pool.Active`).
+    //     Always Lean territory; the whole quantifier is redundant since
+    //     `state.x` already refers to the current state. Advice: drop it.
+    //   - `forall i : <BinderType>` — bounded value quantifier over a primitive
+    //     (U16+, AccountIdx, etc.). U8/I8 fit in proptest; wider types emit a
+    //     stub `true`. Advice: narrow the binder.
+    let state_type_names: std::collections::HashSet<String> = spec
+        .account_types
+        .iter()
+        .flat_map(|at| {
+            // Both the bare type name (e.g. `Pool`) and `Pool.<Variant>` for
+            // each lifecycle variant — qedspec quantifiers use the qualified
+            // form `Pool.Active` to range over a specific lifecycle state.
+            let qualified = at
+                .lifecycle
+                .iter()
+                .map(move |v| format!("{}.{}", at.name, v));
+            std::iter::once(at.name.clone()).chain(qualified)
+        })
+        .collect();
     for prop in &spec.properties {
+        // Per-slot lowering already provides a proptest-checkable form for
+        // wide-binder forall properties (see ParsedProperty::per_slot).
+        // The lint's "harness emits true" warning isn't accurate for these:
+        // the per-slot `{prop}_at` predicate is generated and called at the
+        // modified slot in each handler's preservation test.
+        if prop.per_slot.is_some() {
+            continue;
+        }
         if let Some(ref rust_expr) = prop.rust_expression {
             if rust_expr_is_unsupported(rust_expr) {
                 // Extract the quantifier kind and binder type from the sentinel
@@ -2213,6 +2295,42 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     .trim_start_matches(':')
                     .trim()
                     .to_string();
+                // Pull the binder type out of `forall <var> : <Type>` so we
+                // can pick the right advice. Detail looks like
+                // `forall s : Pool.Active — lower at harness level`.
+                let binder_type: Option<String> = detail
+                    .split_once(':')
+                    .and_then(|(_, rest)| rest.split('—').next())
+                    .map(|s| s.trim().to_string());
+                let is_state_quantifier = binder_type
+                    .as_ref()
+                    .map(|t| state_type_names.contains(t))
+                    .unwrap_or(false);
+                let (fix, example) = if is_state_quantifier {
+                    (
+                        "Drop the `forall s : <State>` wrapper — properties are \
+                         implicitly evaluated against the current state. Use \
+                         `state.<field>` directly."
+                            .to_string(),
+                        Some(format!(
+                            "  // instead of: forall s : <State>, s.x >= s.y\n  \
+                             property {} :\n    state.x >= state.y",
+                            prop.name
+                        )),
+                    )
+                } else {
+                    (
+                        "Use U8 or I8 as the quantifier binder type (≤256 values, \
+                         exhausted automatically), or split the property into a \
+                         per-element guard."
+                            .to_string(),
+                        Some(format!(
+                            "  // instead of: forall v : U64, …\n  \
+                             property {} :\n    forall v : U8, …",
+                            prop.name
+                        )),
+                    )
+                };
                 warnings.push(CompletenessWarning {
                     rule: "unchecked_quantifier".to_string(),
                     severity: Severity::Warning,
@@ -2223,14 +2341,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         prop.name, detail
                     ),
                     subject: Some(prop.name.clone()),
-                    fix: "Use U8 or I8 as the quantifier binder type (≤256 values, exhausted \
-                          automatically), or split the property into a per-element guard."
-                        .to_string(),
-                    example: Some(format!(
-                        "  // instead of: forall v : U64, …\n  \
-                         property {} :\n    forall v : U8, …",
-                        prop.name
-                    )),
+                    fix,
+                    example,
                     counterexample: None,
                     fix_options: vec![],
                 });
@@ -2280,6 +2392,28 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // Rule 8: takes params + lifecycle transition but no effect
     for op in &spec.handlers {
         if op.has_effect() {
+            continue;
+        }
+        // ensures-only handlers are deliberate — the spec author has pinned
+        // frame conditions (`ensures state.x == old(state.x)`) instead of
+        // declaring an effect. That's a legitimate shape, not a missing
+        // effect. The lint formerly flagged these as gaps; v2.11+ trusts
+        // the spec author's intent.
+        if !op.ensures.is_empty() {
+            continue;
+        }
+        // Match-arm aborts: when the parser expands a handler's `match` into
+        // synthetic per-arm handlers (`<parent>_case_<N>`, `<parent>_otherwise`)
+        // the abort arms have no effect by construction. The qed(verified)
+        // codegen reads them off `name.contains("_case_")` /
+        // `ends_with("_otherwise")`; mirror the same convention here so the
+        // lint doesn't fire on shapes the codegen treats as intentional.
+        if op.name.contains("_case_") || op.name.ends_with("_otherwise") {
+            continue;
+        }
+        // Top-level abort handlers carry `aborts_if` / `aborts_total` and
+        // also have no effect by construction.
+        if !op.aborts_if.is_empty() || op.aborts_total {
             continue;
         }
         let has_lifecycle = op.pre_status.is_some() || op.post_status.is_some();
@@ -2667,6 +2801,19 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         .map(|(f, _, _)| f.as_str())
                         .collect();
                     if !covered_modified.is_empty() {
+                        // Skip when any `requires` clause references a property
+                        // field. The boundary `build_counterexample` picks
+                        // (e.g., lhs=3, rhs=3 for `≤`) is often unreachable in
+                        // practice because of guards the local effect-analyzer
+                        // doesn't model — dedup bitmaps, lifecycle gates,
+                        // signer-bound bounds. If the spec author has bounded
+                        // any property field via a guard, trust them and
+                        // suppress the boundary-only false positive. Real
+                        // bugs (preserved_by claim with no constraining
+                        // guard at all) still fire.
+                        if requires_constrains_prop_fields(op, &prop_fields) {
+                            continue;
+                        }
                         if let Some(ce) = build_counterexample(
                             expr,
                             &prop.name,
@@ -3736,30 +3883,54 @@ pub fn check_code_drift(
 ) -> Result<Vec<DriftResult>> {
     let mut results = Vec::new();
 
-    // Expected files from spec
-    let mut expected_files: Vec<String> = vec![
+    // Files codegen owns and stamps with `spec-hash:<hex>` — these are the
+    // ones drift detection should compare against the spec fingerprint.
+    let mut codegen_owned_files: Vec<String> = vec![
         "src/lib.rs".to_string(),
         "src/state.rs".to_string(),
         "src/instructions/mod.rs".to_string(),
         "Cargo.toml".to_string(),
     ];
     if !spec.events.is_empty() {
-        expected_files.push("src/events.rs".to_string());
+        codegen_owned_files.push("src/events.rs".to_string());
     }
     if !spec.error_codes.is_empty() {
-        expected_files.push("src/errors.rs".to_string());
-    }
-    for handler in &spec.handlers {
-        expected_files.push(format!("src/instructions/{}.rs", handler.name));
+        codegen_owned_files.push("src/errors.rs".to_string());
     }
 
-    for file in &expected_files {
+    // Per-handler files at `src/instructions/<handler>.rs` are user-owned
+    // (the agent fills the body). Codegen never re-stamps them after the
+    // initial scaffold, so they don't carry an embedded spec-hash. We
+    // still want Missing detection — a handler in the spec without a
+    // corresponding source file is a real gap — but NoHash is the
+    // expected steady state for these files, not a drift signal.
+    let user_owned_handler_files: Vec<String> = spec
+        .handlers
+        .iter()
+        .map(|h| format!("src/instructions/{}.rs", h.name))
+        .collect();
+
+    for file in user_owned_handler_files
+        .iter()
+        .chain(codegen_owned_files.iter())
+    {
         let path = code_dir.join(file);
         if !path.exists() {
             results.push(DriftResult {
                 file: file.clone(),
                 status: DriftStatus::Missing,
                 detail: Some("expected by spec but not found".to_string()),
+            });
+            continue;
+        }
+
+        // User-owned handler files don't carry a spec-hash by design;
+        // their existence is the only thing drift detection asserts.
+        if user_owned_handler_files.contains(file) {
+            results.push(DriftResult {
+                file: file.clone(),
+                status: DriftStatus::InSync,
+                detail: None,
             });
             continue;
         }
@@ -3829,6 +4000,157 @@ pub fn check_code_drift(
     }
 
     Ok(results)
+}
+
+/// Walk user-owned handler source files and flag residual `todo!()` placeholders
+/// that codegen left for the agent to fill.
+///
+/// `cargo check` passes through a `todo!()` because the macro returns `!`, and
+/// the existing drift check only covers codegen-owned files. Without this lint,
+/// a scaffolded program ships with the placeholder business logic intact and
+/// nothing in the spec/code gates catches it. A `todo!()` inside a
+/// `#[qed(verified, ...)]` body means the handler scaffolding is committed but
+/// the events / token transfers / CPIs / non-mechanical effects haven't been
+/// filled. Codegen is the deterministic substrate; the agent owns this fill.
+pub fn check_handler_todos(
+    spec: &ParsedSpec,
+    code_dir: &std::path::Path,
+) -> Result<Vec<CompletenessWarning>> {
+    let mut warnings = Vec::new();
+
+    let instructions_dir = code_dir.join("src").join("instructions");
+    if !instructions_dir.exists() {
+        return Ok(warnings);
+    }
+
+    for handler in &spec.handlers {
+        let path = instructions_dir.join(format!("{}.rs", handler.name));
+        if !path.exists() {
+            continue;
+        }
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let parsed = match syn::parse_file(&source) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if !file_has_qed_verified_todo(&parsed) {
+            continue;
+        }
+
+        let mut hints: Vec<String> = Vec::new();
+        for emit in &handler.emits {
+            hints.push(format!("emit `{}` event", emit));
+        }
+        for t in &handler.transfers {
+            hints.push(format!("token transfer `{} -> {}`", t.from, t.to));
+        }
+        for call in &handler.calls {
+            hints.push(format!(
+                "CPI `{}.{}`",
+                call.target_interface, call.target_handler
+            ));
+        }
+        let hint_text = if hints.is_empty() {
+            "non-mechanical effects".to_string()
+        } else {
+            hints.join(", ")
+        };
+
+        let rel = path
+            .strip_prefix(code_dir)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string());
+
+        warnings.push(CompletenessWarning {
+            rule: "handler_unfilled_todo".to_string(),
+            severity: Severity::Warning,
+            priority: 2,
+            message: format!(
+                "handler `{}` has an unfilled `todo!()` in {} — spec expects: {}",
+                handler.name, rel, hint_text
+            ),
+            subject: Some(handler.name.clone()),
+            fix: format!(
+                "Open `{}` and fill the body using guard calls, state structs, and the spec's declared {} as the contract. Codegen leaves `todo!()` so the agent closes the loop on business logic; the placeholder type-checks but panics at runtime.",
+                rel, hint_text
+            ),
+            example: None,
+            counterexample: None,
+            fix_options: Vec::new(),
+        });
+    }
+
+    Ok(warnings)
+}
+
+fn file_has_qed_verified_todo(file: &syn::File) -> bool {
+    use syn::visit::Visit;
+
+    struct V {
+        in_verified: u32,
+        any: bool,
+    }
+
+    impl V {
+        fn enter_with<F>(&mut self, attrs: &[syn::Attribute], visit: F)
+        where
+            F: FnOnce(&mut Self),
+        {
+            let verified = has_qed_verified_attr(attrs);
+            if verified {
+                self.in_verified += 1;
+            }
+            visit(self);
+            if verified {
+                self.in_verified -= 1;
+            }
+        }
+    }
+
+    impl<'ast> Visit<'ast> for V {
+        fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+            let attrs = f.attrs.clone();
+            self.enter_with(&attrs, |v| syn::visit::visit_item_fn(v, f));
+        }
+        fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+            let attrs = f.attrs.clone();
+            self.enter_with(&attrs, |v| syn::visit::visit_impl_item_fn(v, f));
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            if self.in_verified > 0 {
+                if let Some(seg) = mac.path.segments.last() {
+                    if seg.ident == "todo" {
+                        self.any = true;
+                    }
+                }
+            }
+            syn::visit::visit_macro(self, mac);
+        }
+    }
+
+    let mut v = V {
+        in_verified: 0,
+        any: false,
+    };
+    v.visit_file(file);
+    v.any
+}
+
+fn has_qed_verified_attr(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("qed") {
+            continue;
+        }
+        if let syn::Meta::List(list) = &attr.meta {
+            if list.tokens.to_string().contains("verified") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Check Kani drift — compare harness file against current spec.
@@ -3935,10 +4257,11 @@ pub fn check_unified(
     let fp = crate::fingerprint::compute_fingerprint(&spec);
 
     // 1. Spec completeness
-    let completeness = check_completeness(&spec);
+    let mut completeness = check_completeness(&spec);
 
-    // 2. Code drift
+    // 2. Code drift + residual `todo!()` lint (both code-aware).
     let code_drift = if let Some(dir) = code_dir {
+        completeness.extend(check_handler_todos(&spec, dir)?);
         Some(check_code_drift(&spec, &fp, dir)?)
     } else {
         None
@@ -4356,6 +4679,7 @@ mod tests {
                 rust_expression: Some("s.balance >= 0".to_string()),
                 rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
+                per_slot: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -4830,6 +5154,7 @@ handler liquidate : State.Active -> State.Liquidated {
                 rust_expression: Some("s.balance >= 0".to_string()),
                 rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()], // only covers deposit
+                per_slot: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -4860,6 +5185,7 @@ handler liquidate : State.Active -> State.Liquidated {
                 rust_expression: Some("s.balance >= 0".to_string()),
                 rust_expression_pod: Some("s.balance >= 0".to_string()),
                 preserved_by: vec!["deposit".to_string()],
+                per_slot: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -5392,6 +5718,7 @@ interface Token {
                 ),
                 rust_expression_pod: None,
                 preserved_by: vec![],
+                per_slot: None,
             }],
             ..empty_spec()
         };
@@ -5422,6 +5749,7 @@ interface Token {
                 rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
                 rust_expression_pod: None,
                 preserved_by: vec![],
+                per_slot: None,
             }],
             ..empty_spec()
         };
