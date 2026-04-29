@@ -25,5 +25,6 @@ applicable.
 - v2.9 added brownfield Anchor adaptation and `#[qed]` drift stamps.
 - v2.10 removed stale `SPEC.md` generation paths and strengthened probe and codegen behavior.
 - v2.11 cleanup work focuses on simplifying codegen contracts, target-specific surfaces, generated scaffold smoke tests, and example drift gates.
+- v2.11.2 closes the harness loop on bundled examples: ships the `handler_unfilled_todo` lint, fixes Quasar `Program<Token>` codegen for token transfers, refines spec-completeness lints to eliminate boundary-only false positives, and adds per-slot proptest lowering for wide-binder forall properties.
 
 Use PRDs and release notes in `docs/prds/` for detailed historical context.
