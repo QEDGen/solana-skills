@@ -22,7 +22,7 @@
 
 ---
 
-Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates the verification artifacts and implementation scaffold needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **agent-fill program scaffolds**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield scaffold via `qedgen init --target ...`), plus **sBPF assembly**. **Pinocchio** lands in v2.11+.
+Write what your Solana program must guarantee in a `.qedspec` file. QEDGen validates the spec, finds bugs your tests miss, then generates the verification artifacts and implementation scaffold needed to keep them fixed: **property tests**, **Kani harnesses**, **Lean 4 proofs**, **agent-fill program scaffolds**, and **CI workflows** — all from a single source of truth. Frameworks: **Anchor** and **Quasar** (greenfield scaffold via `qedgen init --target ...`), plus **sBPF assembly**.
 
 ```bash
 npx skills add qedgen/solana-skills
@@ -92,20 +92,26 @@ qedgen probe --json --spec my_program.qedspec
 `.qed/`, and resolve. Explicit `--spec` still works when you want to point
 at something specific.
 
-Lean proofs, Kani harnesses, and API keys are set up automatically when first needed. To configure them manually:
+Lean and Kani toolchains are installed automatically the first time
+they're needed. API keys are not — sign up at the providers below and
+export them yourself before running `fill-sorry` or `aristotle`:
 
 ```bash
 # Lean + Mathlib (only needed for formal proofs)
 qedgen setup --mathlib
 
 # API keys (only needed for sorry-filling and deep proof search)
-export MISTRAL_API_KEY=your_key_here                    # https://console.mistral.ai (free tier available)
-export ARISTOTLE_API_KEY=your_key_here                  # https://aristotle.harmonic.fun
+export MISTRAL_API_KEY=your_key_here                    # sign up at https://console.mistral.ai (free tier available)
+export ARISTOTLE_API_KEY=your_key_here                  # sign up at https://aristotle.harmonic.fun
 ```
 
 ## Usage
 
-### Existing programs (brownfield)
+### Existing Anchor programs (brownfield)
+
+`qedgen adapt` and `qedgen spec --idl` both target Anchor today;
+brownfield ingest for Quasar isn't yet wired (Quasar greenfield via
+`qedgen init --target quasar` is fully supported — see below).
 
 ```bash
 # Option A — from an Anchor IDL (program ABI only)
@@ -135,6 +141,30 @@ Once the spec is filled in, gate CI on it staying in sync with the program:
 # (uncovered handler). Pure read; no codegen, no writes.
 qedgen check --spec my_program.qedspec --anchor-project ./programs/my_program
 ```
+
+### Greenfield — Anchor or Quasar
+
+The same `.qedspec` codegens to either framework via `--target`. Anchor
+is the default; pass `--target quasar` for a Blueshift Quasar
+(`#![no_std]` + `quasar_lang`) program crate with explicit
+discriminators and `Ctx<X>` instead of `Context<X>`.
+
+```bash
+# Anchor (default)
+qedgen init --name my_program --spec my_program.qedspec
+qedgen codegen --spec my_program.qedspec --all
+
+# Quasar
+qedgen init --name my_program --spec my_program.qedspec --target quasar
+qedgen codegen --spec my_program.qedspec --target quasar --all
+```
+
+Lean proofs, Kani harnesses, proptest harnesses, and CI workflows are
+target-agnostic — they're driven by the spec, not the framework, so
+the verification artifacts are identical across `--target` choices.
+The deploy-safety lint (`qedgen readiness` / `qedgen check-upgrade`)
+also speaks both Anchor and Quasar IDLs; see the *Deploy-safety lint*
+section below.
 
 ### Spec-driven pipeline
 
@@ -329,6 +359,7 @@ qedgen codegen --spec my_program.qedspec --ci --ci-ratchet target/idl/my_program
 ```bash
 bash scripts/check-version-consistency.sh
 bash scripts/check-readme-drift.sh
+bash scripts/check-lake-build.sh --strict
 qedgen check --regen-drift
 ```
 
@@ -337,6 +368,14 @@ artifacts in temporary directories and fails if committed generated
 support code, harnesses, or `Spec.lean` drift from the current generator.
 Every generated example root must include `qed.toml`; examples without
 imports can use an empty `[dependencies]` table.
+
+`scripts/check-lake-build.sh` runs `lake build` in every bundled
+`examples/*/formal_verification/` (rust + sBPF), surfacing
+`Spec.lean` and `Proofs.lean` failures that the Rust-side gates
+above don't catch. `--strict` fails on missing `.lake/`/manifests
+(cold checkout — run `lake update` once first); drop `--strict` for
+a non-release sanity check. Add `--only <pattern>` to scope to a
+single example.
 
 ### Deploy-safety lint (ratchet)
 
@@ -365,6 +404,7 @@ Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`
 ### Rust / Anchor
 
 - **[Escrow](examples/rust/escrow/)** — Token escrow with lifecycle proofs
+- **[Escrow (split)](examples/rust/escrow-split/)** — Escrow with handlers split across instruction files (multi-file `qed.toml` layout)
 - **[Lending](examples/rust/lending/)** — Lending pool with multi-account state
 - **[Multisig](examples/rust/multisig/)** — Multi-signature vault with voting
 - **[Percolator](examples/rust/percolator/)** — Perpetual DEX risk engine
@@ -377,15 +417,21 @@ Exit codes mirror ratchet's CLI conventions: `0 = additive/safe`, `1 = breaking`
 - **[Transfer](examples/sbpf/transfer/)** — SOL transfer via System Program CPI
 - **[Slippage](examples/sbpf/slippage/)** — AMM slippage guard
 
+### Ratchet (Quasar IDL)
+
+- **[Quasar readiness](examples/quasar-readiness/)** — `qedgen readiness` and `qedgen check-upgrade` against a Blueshift Quasar IDL, plus a v1 → v2 diff that exercises the breaking-change rules
+
 ## Requirements
 
 - Rust toolchain (auto-installed if missing)
 
-The following are only needed when working with Lean proofs and are set up automatically on first use:
+Lean toolchain installs automatically the first time it's needed; API
+keys must be obtained from the providers and exported by the user
+before running the corresponding commands:
 
-- Lean 4 / elan — for `lake build` and formal proofs
-- `MISTRAL_API_KEY` — for `fill-sorry` and `generate` ([console.mistral.ai](https://console.mistral.ai), free tier available)
-- `ARISTOTLE_API_KEY` — for `aristotle` deep proof search ([aristotle.harmonic.fun](https://aristotle.harmonic.fun))
+- Lean 4 / elan — for `lake build` and formal proofs (auto-installed)
+- `MISTRAL_API_KEY` — for `fill-sorry` and `generate`. Sign up at [console.mistral.ai](https://console.mistral.ai) (free tier available).
+- `ARISTOTLE_API_KEY` — for `aristotle` deep proof search. Sign up at [aristotle.harmonic.fun](https://aristotle.harmonic.fun).
 
 ### Environment variables
 

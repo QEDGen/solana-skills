@@ -55,9 +55,9 @@ struct Cli {
 }
 
 /// Solana program framework target for greenfield codegen
-/// (`qedgen init --target ...`). v2.9 wires `anchor` and `quasar`
-/// end-to-end; `pinocchio` reserves the CLI surface and selecting
-/// it today errors with a v2.10+ pointer.
+/// (`qedgen init --target ...`). `anchor` and `quasar` are wired
+/// end-to-end; `pinocchio` reserves the CLI surface but is not yet
+/// implemented — selecting it errors at the init dispatcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum Target {
     /// Anchor-compatible Rust program. `use anchor_lang::prelude::*`,
@@ -70,8 +70,8 @@ pub(crate) enum Target {
     /// ProgramError>`, `#[program] mod`, explicit
     /// `#[instruction(discriminator = N)]` on each handler.
     Quasar,
-    /// Pinocchio (no_std) Rust program. Codegen branch ships in
-    /// v2.10+ — selecting today errors.
+    /// Pinocchio (no_std) Rust program. Reserved CLI surface; codegen
+    /// is not yet implemented and selecting it errors.
     Pinocchio,
 }
 
@@ -309,10 +309,10 @@ enum Commands {
         mathlib: bool,
 
         /// Also generate the program crate + Kani harnesses for the
-        /// named framework target. `anchor` is fully implemented today;
-        /// `quasar` and `pinocchio` reserve the CLI surface for v2.10+
-        /// codegen branches and error cleanly when selected. Omit to
-        /// skip program scaffolding entirely.
+        /// named framework target. `anchor` and `quasar` are fully
+        /// implemented; `pinocchio` reserves the CLI surface but its
+        /// codegen branch is not yet implemented and errors cleanly
+        /// when selected. Omit to skip program scaffolding entirely.
         #[arg(long, value_enum)]
         target: Option<Target>,
 
@@ -575,7 +575,7 @@ enum Commands {
         /// Framework target for the Rust program crate. `anchor` is
         /// fully implemented (default); `quasar` is fully implemented
         /// (Blueshift's `quasar_lang`); `pinocchio` reserves the CLI
-        /// surface and ships in v2.10+.
+        /// surface but its codegen branch is not yet implemented.
         #[arg(long, value_enum, default_value_t = Target::Anchor)]
         target: Target,
 
@@ -1131,13 +1131,14 @@ async fn main() -> Result<()> {
             target,
             output_dir,
         } => {
-            // Pinocchio reserves the CLI surface for v2.10+. Anchor and
-            // Quasar branches are wired end-to-end below.
+            // Pinocchio reserves the CLI surface but is not yet
+            // implemented. Anchor and Quasar branches are wired
+            // end-to-end below.
             if matches!(target, Some(Target::Pinocchio)) {
                 anyhow::bail!(
-                    "`--target pinocchio` codegen ships in v2.10+. \
-                     Today `--target anchor` and `--target quasar` are \
-                     implemented; omit `--target` to skip program \
+                    "`--target pinocchio` is not yet implemented. \
+                     `--target anchor` and `--target quasar` are \
+                     supported; omit `--target` to skip program \
                      scaffolding entirely."
                 );
             }
@@ -1692,9 +1693,9 @@ async fn main() -> Result<()> {
             require_git_repo()?;
             if matches!(target, Target::Pinocchio) {
                 anyhow::bail!(
-                    "`--target pinocchio` codegen ships in v2.10+. \
-                     Today `--target anchor` and `--target quasar` are \
-                     implemented."
+                    "`--target pinocchio` is not yet implemented. \
+                     `--target anchor` and `--target quasar` are \
+                     supported."
                 );
             }
             let cwd = std::env::current_dir()?;

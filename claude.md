@@ -139,7 +139,7 @@ qedgen asm2lean \
 - `chumsky_parser.rs` - chumsky parser for `.qedspec` files (produces typed AST via `chumsky_adapter.rs`)
 - `check.rs` - Spec validation: lint, coverage matrix, drift detection
 - `lean_gen.rs` - Lean 4 code generation from parsed spec (Rust + sBPF renderers)
-- `codegen.rs` - Rust program skeleton generation from spec (Anchor and Quasar targets fully supported as of v2.10; `--target pinocchio` reserves CLI surface and lands in v2.11+)
+- `codegen.rs` - Rust program skeleton generation from spec (Anchor and Quasar targets fully supported; `--target pinocchio` reserves the CLI surface but is not yet implemented and errors at the init dispatcher)
 - `kani.rs` - Kani BMC harness generation
 - `proptest_gen.rs` - Proptest harness generation
 - `unit_test.rs` - Unit test generation
