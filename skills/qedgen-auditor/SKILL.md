@@ -267,15 +267,49 @@ shape; downstream reads trust the spoof.
 
 ### `missing_owner_check` — CRITICAL
 Spec-less only — handler reads or trusts data from an account
-whose `owner` field is not validated against the expected program.
-A token account from program X is interchangeable with one from
-program Y until the owner is checked.
+whose **runtime `owner` field** (the program that owns the account
+on Solana) is not validated against the expected program. A token
+account from program X is interchangeable with one from program Y
+until the owner is checked.
 - **Anchor:** raw `AccountInfo<'info>` field used as a token account
   source/destination without an owner=Token-Program constraint. Anchor
   `Account<TokenAccount>` enforces this; raw AccountInfo doesn't.
 - **Native:** any `account.data.borrow()` or struct deserialize
   without first verifying `account.owner == &expected_program_id`.
-- Corpus: Cashio fake-account chain.
+- Corpus: typed-account-with-untyped-owner pattern (Neodyme).
+
+### `field_chain_missing_root_anchor` — CRITICAL (Cashio shape)
+Spec-less only. **Distinct from `missing_owner_check`** — Anchor's
+typed wrappers (`Account<T>`) close the runtime-owner question for
+an incoming account, but **the *fields* on that typed account
+remain untrusted at the field level**. A `Pubkey` field stored on
+`Account<Bank>` was written by the program, but a key passed in
+the handler's accounts struct claiming "I am that bank's
+crate_token" is just bytes the caller supplied, unless the
+validator pins it back to the bank's stored value.
+
+A fresh auditor walking the catalog from `missing_owner_check`
+will see "Anchor types this account, owner check enforced — no
+finding" and move on. That's correct for the owner check, wrong
+for field-level forgery. The Cashio exploit is exactly this gap.
+
+- **Anchor:** for every `Validate::validate()` (or per-handler
+  validation block) and for each passed-in account A and field F
+  on a stored state account S: trust is *anchored* iff F is
+  referenced (`A.key() == s.f`, `S.f == A.something`). If A is
+  only checked against another passed-in account B
+  (`A.key() == B.field`), the chain is *internally consistent*
+  but **not anchored** — attacker forges A and B together.
+  Pattern to grep for: chains of `assert_keys_eq!` /
+  `==` / `has_one` that thread through passed-in accounts without
+  ever touching a stored-state field on a PDA-owned `Account<T>`.
+- **Native:** same shape; walk every `key()` / `pubkey ==`
+  comparison. If neither side is `<trusted-state>.<field>`, the
+  comparison only proves consistency, not anchoring.
+- Corpus: Cashio fake-account chain — the canonical example
+  (`crate_token` / `crate_mint` / `crate_collateral_tokens` form
+  an internally-consistent chain that's never anchored to
+  `bank.crate_token` / `bank.crate_mint`). $52.8M in 2022.
 
 ### `close_account_redirection` — HIGH
 Anchor `close = <destination>` field, or manual close via lamport
@@ -408,6 +442,8 @@ exhaustive; use as a thinking primer, not a checklist.
 | discriminator_collision | + | shared deserializer between handlers | = | cross-type spoof → privileged action (HIGH) |
 | transfer_hook_reentrancy | + | mid-transfer state read | = | classic reentrancy (Solana-native, HIGH→CRIT) |
 | permissionless marker | + | unbounded amount param | = | griefing / draining via repeated calls (HIGH) |
+| permissionless init | + | unchecked authority field on init | = | attacker bakes their own pubkey as `mint_authority` / `withdraw_authority` / `admin` at init time → privileged CPI authority on every later operation (CRIT) |
+| field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, Cashio shape) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
 
