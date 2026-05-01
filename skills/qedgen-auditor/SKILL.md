@@ -410,6 +410,90 @@ the runtime would otherwise enforce.
   `*account.lamports.borrow_mut()` outside a close path.
 - Corpus: OtterSec "King of the SOL" post.
 
+### `init_config_field_unanchored` — CRITICAL (DAMM-v2 shape)
+Spec-less only. The **write-side companion** to
+`field_chain_missing_root_anchor`. An init handler accepts a
+`Pubkey` (or address-shaped arg) and stores it directly into the
+config / state account that downstream handlers later trust as a
+"stored authority field." Because the stored value originated
+from caller-supplied bytes — not from a canonical PDA derivation
+or an authenticated signer — every later handler that trusts the
+field is trusting attacker input.
+
+The classic chain: `initialize` is permissionless (or the signer
+isn't the canonical authority), attacker frontruns the legitimate
+init with their own ATA / pubkey, the program persists it, and
+subsequent fee / yield / withdraw handlers send funds to the
+attacker-controlled address.
+
+- **Anchor:** look at every `init` (or `init_if_needed`) handler.
+  For each `Pubkey` / address parameter and each `vault_config.X =
+  caller_supplied_X` assignment in the body: is `caller_supplied_X`
+  bound to a `Signer<'info>` (the caller authenticated as that
+  authority)? Is it the result of a `find_program_address` call
+  with canonical seeds? If neither, the field is unanchored on the
+  write side. Pair with permissionless init (no `Signer` constraint
+  matched against pre-existing trusted state) for the full
+  frontrun chain.
+- **Native:** same pattern; trace each `state.field = <input>`
+  back to the handler's account list. If the input is from
+  `accounts[i].key()` without a signer check or PDA-derivation
+  proof, the write is unanchored.
+- Companion to `field_chain_missing_root_anchor`: that category
+  catches *read-side* trust of unanchored fields; this one catches
+  the *write* that planted the unanchored value to begin with.
+  Both can ship in the same program (DAMM-v2 OOD eval found
+  exactly this pair).
+- Corpus: `damm-v2-fee-routing` Apr 2026 OOD eval — `creator_quote_ata`
+  taken as init param, stored in `vault_config`, later trusted in
+  `route_fees` as the canonical fee destination.
+
+### `bounty_intent_drift` — varies (HIGH when intent is a security invariant)
+Spec-less only. The handler / program ships with stated intent
+(bounty description, README, docstring, comment, mode flag) that
+the implementation **doesn't enforce**. Not a structural primitive
+— a *gap between declared and implemented behavior*. Severity
+follows whether the stated invariant was a security claim or a
+UX nicety.
+
+Three common shapes:
+
+1. **Constant defined, never read.** `MIN_PAYOUT_LAMPORTS_DEFAULT
+   = 1_000`, but no handler references it. The minimum-payout
+   guarantee exists in the constants module and nowhere else.
+2. **Stored field written at init, never read in handlers.**
+   `vault_config.y0_total_allocation` set in `initialize`, never
+   referenced in `route_fees` / `claim_fee`. The locked/unlocked
+   scaling logic is stubbed.
+3. **Mode/discriminator param accepted but downstream-equivalent.**
+   Bounty says "quote-only fees"; `initialize` accepts
+   `collect_fee_mode: u8` and persists it; `route_fees` doesn't
+   branch on the value. `BothToken` (mode 0) silently passes,
+   despite the bounty's quote-only claim.
+
+The auditor walks:
+- The bounty description / README / handler docstrings for
+  stated invariants (text-search for "must", "always", "only",
+  rate / window / cap claims).
+- `cargo check --message-format=json` for `dead_code` warnings on
+  constants / fields.
+- Stored config fields' read-side: `grep` for the field name
+  across all handlers; if zero readers, flag it.
+- Mode parameters: trace the param into the body; if no `match` /
+  `if` branches on the value, the mode is decorative.
+
+Severity:
+- **HIGH** when the stated invariant is a security claim (slippage
+  bound, quote-only, rate cap, time window).
+- **MEDIUM** when it's an economic claim that doesn't immediately
+  translate to fund loss but could (rounding direction, fee
+  discount).
+- **LOW** when it's UX (event payloads with stale fields, etc.).
+
+Corpus: `damm-v2-fee-routing` Apr 2026 — quote-only intent
+unenforced, 24h crank entirely absent, `y0_total_allocation`
+stored-and-never-read.
+
 ### `transfer_hook_reentrancy` — HIGH (Token-2022 only)
 Token-2022 transfer hooks can call back into the calling program
 during a transfer. Handler that updates state across a transfer
@@ -444,6 +528,8 @@ exhaustive; use as a thinking primer, not a checklist.
 | permissionless marker | + | unbounded amount param | = | griefing / draining via repeated calls (HIGH) |
 | permissionless init | + | unchecked authority field on init | = | attacker bakes their own pubkey as `mint_authority` / `withdraw_authority` / `admin` at init time → privileged CPI authority on every later operation (CRIT) |
 | field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, Cashio shape) |
+| init_config_field_unanchored | + | permissionless_state_writer init | = | frontrun legitimate init, bake attacker pubkey as stored "creator" / "authority" field, capture every fee/yield/withdraw routed through it (CRIT, DAMM-v2 OOD shape) |
+| bounty_intent_drift (mode flag accepted but unbranched) | + | permissionless caller | = | invoke the "forbidden" mode the bounty claimed it didn't allow, every time (HIGH→CRIT depending on what the mode controls) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
 
