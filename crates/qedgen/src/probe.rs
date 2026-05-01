@@ -8,12 +8,16 @@
 //! (operate on the spec) by design; per-runtime spec-less predicates
 //! live in the auditor SKILL.md.
 //!
-//! v2.10 initial cut: `missing_signer`, `arbitrary_cpi`,
-//! `arithmetic_overflow_wrapping`, and `lifecycle_one_shot_violation`.
-//! Remaining categories (`cpi_param_swap`, `pda_canonical_bump`) lean
-//! more heavily on spec-less / impl-side analysis (per the manual-audit
-//! calibration); their spec-aware predicates are weak. Land alongside
-//! the auditor SKILL.md per-runtime predicates rather than here.
+//! Spec-aware categories: `missing_signer`, `arbitrary_cpi`,
+//! `arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
+//! `unbounded_amount_param`, `permissionless_state_writer`,
+//! `init_without_pda`. Each is a *compose-able primitive* — the
+//! auditor subagent chains them into kill-chains (see SKILL.md
+//! "Compose-with-what cookbook"). Spec-less / impl-side categories
+//! (`cpi_param_swap`, `pda_canonical_bump`, `account_type_confusion`,
+//! `close_account_redirection`, `oracle_staleness`, etc.) live in
+//! the auditor SKILL.md per-runtime predicates — they need source
+//! reading the CLI doesn't do.
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -34,6 +38,19 @@ pub enum Category {
     ArbitraryCpi,
     ArithmeticOverflowWrapping,
     LifecycleOneShotViolation,
+    /// Handler accepts an integer-shaped param used in `transfers.amount` or
+    /// in an `effects` RHS, with no `requires` clause that bounds it. Pair
+    /// with `permissionless` or `missing_signer` → drain.
+    UnboundedAmountParam,
+    /// Handler is marked `permissionless` AND mutates shared state. Anyone
+    /// can grief, fill, or contend the resource. Composes with
+    /// `unbounded_amount_param` and `arithmetic_overflow_wrapping` to amplify.
+    PermissionlessStateWriter,
+    /// Init-shape handler (transitions from initial lifecycle state) but no
+    /// writable account with `pda` seeds. Default-address state collision —
+    /// two callers can both target the same canonical address. Pair with
+    /// `missing_signer` → spoof another user's init.
+    InitWithoutPda,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +141,7 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     let spec = parse_spec_file(spec_path)?;
     let spec_models_lifecycle = !spec.lifecycle_states.is_empty()
         || spec.account_types.iter().any(|a| !a.lifecycle.is_empty());
+    let initial_state = spec.lifecycle_states.first().cloned();
     let mut findings = Vec::new();
 
     for handler in &spec.handlers {
@@ -135,6 +153,13 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
         }
         findings.extend(predicate_arithmetic_overflow_wrapping(handler));
         if let Some(f) = predicate_lifecycle_one_shot_violation(handler, spec_models_lifecycle) {
+            findings.push(f);
+        }
+        findings.extend(predicate_unbounded_amount_param(handler));
+        if let Some(f) = predicate_permissionless_state_writer(handler) {
+            findings.push(f);
+        }
+        if let Some(f) = predicate_init_without_pda(handler, initial_state.as_deref()) {
             findings.push(f);
         }
     }
@@ -513,6 +538,281 @@ fn predicate_lifecycle_one_shot_violation(
     })
 }
 
+/// Spec-aware predicate: handler takes an integer-shaped parameter that
+/// flows into a `transfers.amount` slot or an `effects` value RHS, but no
+/// `requires` clause bounds the parameter. The agent should compose this
+/// finding with the rest of the handler shape:
+///
+/// - `+ permissionless` → any caller can pass `u64::MAX`, draining /
+///   bricking the system depending on what the param controls.
+/// - `+ missing_signer` → any caller can do the above + spoof identity.
+/// - `+ arithmetic_overflow_wrapping` on the same field → silent overflow
+///   to a wrong post-state (the wrap finding tells you the math is fragile;
+///   this one tells you the input is unbounded; together = exploit).
+///
+/// Detection is intentionally surface-level (substring match on the
+/// param name). False positives are acceptable — the auditor reads the
+/// impl to confirm. False negatives (missing a bounded param) are worse.
+fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for (pname, ptype) in &handler.takes_params {
+        if !is_integer_type(ptype) {
+            continue;
+        }
+
+        let used_in_transfer = handler
+            .transfers
+            .iter()
+            .any(|t| t.amount.as_deref() == Some(pname.as_str()));
+        let used_in_effect = handler
+            .effects
+            .iter()
+            .any(|(_, _, value)| param_referenced(value, pname));
+        if !used_in_transfer && !used_in_effect {
+            continue;
+        }
+
+        let bounded = handler
+            .requires
+            .iter()
+            .any(|r| requires_bounds_param(&r.lean_expr, pname));
+        if bounded {
+            continue;
+        }
+
+        out.push(Finding {
+            id: stable_id(
+                &format!("{}::{}", handler.name, pname),
+                "unbounded_amount_param",
+            ),
+            category: Category::UnboundedAmountParam,
+            severity: Severity::High,
+            handler: handler.name.clone(),
+            spec_silent_on: format!(
+                "handler `{}` accepts param `{}: {}` used in transfer/effect, \
+                 but no `requires` clause bounds it",
+                handler.name, pname, ptype
+            ),
+            suppression_hint: format!(
+                "Add a bound: `requires {pname} <= <max> else <ErrorCode>` (or `> 0`, \
+                 `< state.<bound>`). If the param is intentionally unbounded \
+                 (e.g., admin governance setpoint), suppress with rationale."
+            ),
+            investigation_hint: format!(
+                "Open the impl for handler `{}`. Check whether `{}` flows into \
+                 a transfer amount, balance update, or PDA seed. Compose with \
+                 `permissionless` and `missing_signer` findings on this same \
+                 handler — the combined chain is usually the real vulnerability.",
+                handler.name, pname
+            ),
+            category_tag: "unbounded_amount_param".to_string(),
+        });
+    }
+    out
+}
+
+/// Spec-aware predicate: handler is marked `permissionless` AND has at
+/// least one `effects` clause. Permissionless writes to shared state are
+/// griefing surface — anyone can call repeatedly, fill the field, contend
+/// with the legitimate caller, or chain with another finding to escalate.
+///
+/// Composes with:
+/// - `unbounded_amount_param` → any value griefing
+/// - `arithmetic_overflow_wrapping` → cheap overflow trigger
+/// - `lifecycle_one_shot_violation` (suppressed by `permissionless` itself,
+///   but the chain still applies if the agent finds an undeclared state
+///   transition during impl review)
+fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Finding> {
+    if !handler.permissionless {
+        return None;
+    }
+    if handler.effects.is_empty() {
+        return None;
+    }
+
+    let mutated_fields: Vec<&str> = handler.effects.iter().map(|(f, _, _)| f.as_str()).collect();
+
+    Some(Finding {
+        id: stable_id(&handler.name, "permissionless_state_writer"),
+        category: Category::PermissionlessStateWriter,
+        severity: Severity::High,
+        handler: handler.name.clone(),
+        spec_silent_on: format!(
+            "handler `{}` is marked `permissionless` AND mutates state fields: {}",
+            handler.name,
+            mutated_fields.join(", ")
+        ),
+        suppression_hint: "Either (a) drop `permissionless` and add `auth <actor>`, or (b) ensure \
+             the mutated fields cannot be griefed: per-actor PDAs, rate-limited \
+             via cooldown / lifecycle, or bounded by `requires`. If the design is \
+             intentional (truly public-callable like a crank), document the \
+             griefing-acceptable rationale inline in the spec."
+            .to_string(),
+        investigation_hint: format!(
+            "Open the impl for handler `{}`. The shared fields ({}) are writable \
+             by any caller. Look for: missing rate limits, missing cooldowns, \
+             unbounded amount params (compose with `unbounded_amount_param`), \
+             missing per-actor PDA derivation. The corpus entry \
+             `Frontrun the permissionless claim / crank` and Token-2022 \
+             `transfer_hook_reentrancy` are common amplifiers.",
+            handler.name,
+            mutated_fields.join(", ")
+        ),
+        category_tag: "permissionless_state_writer".to_string(),
+    })
+}
+
+/// Spec-aware predicate: init-shape handler (matches one of the canonical
+/// init-state names) but no writable account in the handler's `accounts`
+/// block declares `pda` seeds. Without a PDA, two distinct callers can
+/// both target the same canonical address; the second call either fails
+/// noisily or — worse — overwrites the first's state.
+///
+/// Composes with:
+/// - `missing_signer` → spoof another user's init by racing them or
+///   front-running with attacker-controlled signer/payer
+/// - `init_without_is_initialized` (per-runtime auditor predicate) → re-init
+///   replay if the impl doesn't guard
+///
+/// "Init-shape" is matched by `pre_status` ∈ {Uninitialized, Empty,
+/// Inactive} — the same convention `predicate_arbitrary_cpi` uses to
+/// recognize the init pattern. Specs without those states (e.g., a
+/// lifecycle that starts in `Active` because the program runs as a
+/// singleton or always-on engine) are out of scope for this probe;
+/// init-collision risk only applies to multi-instance programs.
+fn predicate_init_without_pda(
+    handler: &ParsedHandler,
+    _initial_state: Option<&str>,
+) -> Option<Finding> {
+    let pre = handler.pre_status.as_deref()?;
+    if !matches!(pre, "Uninitialized" | "Empty" | "Inactive") {
+        return None;
+    }
+
+    let writable_pda_present = handler
+        .accounts
+        .iter()
+        .any(|a| a.is_writable && a.pda_seeds.is_some());
+    if writable_pda_present {
+        return None;
+    }
+
+    Some(Finding {
+        id: stable_id(&handler.name, "init_without_pda"),
+        category: Category::InitWithoutPda,
+        severity: Severity::High,
+        handler: handler.name.clone(),
+        spec_silent_on: format!(
+            "init-shape handler `{}` (pre_status `{}`) declares no writable PDA — \
+             two callers may target the same canonical address",
+            handler.name, pre
+        ),
+        suppression_hint:
+            "Add a `pda` seed declaration to the writable account being initialized, \
+             scoped to the caller's identity (e.g., `pda [\"<resource>\", payer]`) \
+             or the resource's identity (e.g., `pda [\"<resource>\", <id>]`). \
+             Without per-caller / per-resource scoping, `init_without_is_initialized` \
+             becomes reachable across callers."
+                .to_string(),
+        investigation_hint: format!(
+            "Open the impl for handler `{}`. Check Anchor `#[account(init, ..., \
+             seeds = [...])]` on the writable account. If `seeds` is missing or \
+             doesn't include the caller pubkey / resource id, this is a real \
+             account-collision vulnerability. Compose with `missing_signer` for \
+             the full takeover chain.",
+            handler.name
+        ),
+        category_tag: "init_without_pda".to_string(),
+    })
+}
+
+/// True for the integer-typed DSL types `qedgen probe` reasons about.
+/// Matches what `unbounded_amount_param` cares about: scalar quantities
+/// that flow into transfer amounts or arithmetic effects.
+fn is_integer_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128" | "Nat"
+    )
+}
+
+/// Substring match on word-boundary references to `param` in `value`.
+/// Surface-level: catches `param`, `state.x + param`, `wrapping_add(param)`,
+/// `param * 2`. Misses obfuscated forms — that's OK; the auditor is the
+/// real backstop.
+fn param_referenced(value: &str, param: &str) -> bool {
+    let bytes = value.as_bytes();
+    let pbytes = param.as_bytes();
+    let plen = pbytes.len();
+    if plen == 0 || bytes.len() < plen {
+        return false;
+    }
+    let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for i in 0..=bytes.len().saturating_sub(plen) {
+        if &bytes[i..i + plen] != pbytes {
+            continue;
+        }
+        let prev_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+        let next_ok = i + plen == bytes.len() || !is_ident_byte(bytes[i + plen]);
+        if prev_ok && next_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when `expr` looks like an *upper* bound on `param`. Lower-only
+/// bounds (`amount > 0`) don't suppress the finding — those don't
+/// constrain the dangerous side (`u64::MAX`) of an amount param flowing
+/// into a transfer. We accept either form:
+///
+/// - LHS-bounded: `param < X`, `param <= X`, `param ≤ X`
+/// - RHS-bounded: `X > param`, `X >= param`, `X ≥ param`
+///
+/// Equality (`param == X`) also suppresses — fixed value, no overflow
+/// surface. Lower-only forms (`param > 0`, `param >= 1`) do NOT suppress.
+fn requires_bounds_param(expr: &str, param: &str) -> bool {
+    if !param_referenced(expr, param) {
+        return false;
+    }
+
+    // Equality / inequality fix the param exactly or constrain it from
+    // above implicitly. Cheap escape hatch.
+    if expr.contains("==") || expr.contains("!=") || expr.contains('\u{2260}') {
+        return true;
+    }
+
+    // Tokenize-ish: split on whitespace and look for a (lhs, op, rhs)
+    // triple where the param is on the bounded side of an inequality.
+    // Multi-conjunct expressions (`a > 0 && a < MAX`) are scanned for
+    // any bound that satisfies the upper-bound shape.
+    let normalized = expr
+        .replace('\u{2264}', "<=")
+        .replace('\u{2265}', ">=")
+        .replace("&&", " ")
+        .replace("||", " ")
+        .replace(" and ", " ")
+        .replace(" or ", " ");
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+
+    let upper_ops = ["<", "<="];
+    let lower_ops = [">", ">="];
+
+    // Sliding window of length 3.
+    for w in tokens.windows(3) {
+        let (lhs, op, rhs) = (w[0], w[1], w[2]);
+        // LHS-bounded upper: `param <[=] _`
+        if lhs == param && upper_ops.contains(&op) {
+            return true;
+        }
+        // RHS-bounded upper: `_ >[=] param`
+        if rhs == param && lower_ops.contains(&op) {
+            return true;
+        }
+    }
+    false
+}
+
 fn stable_id(handler: &str, category: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(handler.as_bytes());
@@ -525,6 +825,7 @@ fn stable_id(handler: &str, category: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chumsky_adapter::parse_str;
 
     fn make_handler(name: &str, who: Option<&str>, permissionless: bool) -> ParsedHandler {
         ParsedHandler {
@@ -739,5 +1040,174 @@ mod tests {
         assert_eq!(a.len(), 8);
         let c = stable_id("withdraw", "arbitrary_cpi");
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn unbounded_amount_param_fires_on_lower_only_bound() {
+        // `requires amount > 0` is a lower bound; doesn't constrain the
+        // u64::MAX side. Probe must fire so the auditor escalates.
+        let src = r#"spec T
+state { pool : U64 }
+handler deposit (amount : U64) {
+  permissionless
+  requires amount > 0 else InvalidAmount
+  effect { pool += amount }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        let findings = predicate_unbounded_amount_param(h);
+        assert_eq!(findings.len(), 1, "expected one finding: {findings:#?}");
+        assert_eq!(findings[0].category_tag, "unbounded_amount_param");
+    }
+
+    #[test]
+    fn unbounded_amount_param_suppressed_by_upper_bound() {
+        // `requires amount <= state.cap` is a real upper bound — suppress.
+        let src = r#"spec T
+state { pool : U64, cap : U64 }
+handler deposit (amount : U64) {
+  permissionless
+  requires amount <= state.cap else CapExceeded
+  effect { pool += amount }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        let findings = predicate_unbounded_amount_param(h);
+        assert!(
+            findings.is_empty(),
+            "upper bound should suppress: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn unbounded_amount_param_suppressed_by_rhs_form() {
+        // `requires state.cap >= amount` — RHS-bounded upper bound.
+        let src = r#"spec T
+state { pool : U64, cap : U64 }
+handler deposit (amount : U64) {
+  permissionless
+  requires state.cap >= amount else CapExceeded
+  effect { pool += amount }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        let findings = predicate_unbounded_amount_param(h);
+        assert!(
+            findings.is_empty(),
+            "RHS-bounded upper should suppress: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_state_writer_fires_on_permissionless_with_effect() {
+        let src = r#"spec T
+state { counter : U64 }
+handler crank {
+  permissionless
+  effect { counter += 1 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        let f = predicate_permissionless_state_writer(h).expect("expected finding");
+        assert_eq!(f.category_tag, "permissionless_state_writer");
+    }
+
+    #[test]
+    fn permissionless_state_writer_suppressed_when_authd() {
+        // Has auth — no permissionless flag — no finding.
+        let src = r#"spec T
+state { counter : U64 }
+handler crank {
+  auth admin
+  accounts { admin : signer }
+  effect { counter += 1 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        assert!(predicate_permissionless_state_writer(h).is_none());
+    }
+
+    #[test]
+    fn permissionless_state_writer_suppressed_when_no_effects() {
+        // Permissionless read-only handler — no shared state to grief.
+        let src = r#"spec T
+state { counter : U64 }
+handler ping {
+  permissionless
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        assert!(predicate_permissionless_state_writer(h).is_none());
+    }
+
+    #[test]
+    fn init_without_pda_fires_on_init_handler_no_pda() {
+        // pre_status `Uninitialized` matches the init shape; the
+        // writable account has no pda seeds — collision risk.
+        let src = r#"spec T
+type State
+  | Uninitialized
+  | Active of { owner : Pubkey, balance : U64 }
+
+handler initialize : State.Uninitialized -> State.Active {
+  auth payer
+  accounts {
+    payer : signer, writable
+    target : writable
+  }
+  effect { balance := 0 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        let f = predicate_init_without_pda(h, Some("Uninitialized")).expect("expected finding");
+        assert_eq!(f.category_tag, "init_without_pda");
+    }
+
+    #[test]
+    fn init_without_pda_suppressed_when_pda_present() {
+        let src = r#"spec T
+type State
+  | Uninitialized
+  | Active of { owner : Pubkey, balance : U64 }
+
+handler initialize : State.Uninitialized -> State.Active {
+  auth payer
+  accounts {
+    payer : signer, writable
+    target : writable, pda ["target", payer]
+  }
+  effect { balance := 0 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        assert!(predicate_init_without_pda(h, Some("Uninitialized")).is_none());
+    }
+
+    #[test]
+    fn init_without_pda_suppressed_when_lifecycle_starts_in_active() {
+        // Spec doesn't have an Uninitialized / Empty / Inactive state —
+        // not init-shape, no collision risk to flag.
+        let src = r#"spec T
+type State
+  | Active of { owner : Pubkey, count : U64 }
+  | Frozen
+
+handler add (i : U8) : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer }
+  effect { count += 1 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+        assert!(predicate_init_without_pda(h, Some("Active")).is_none());
     }
 }
