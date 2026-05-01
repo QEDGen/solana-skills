@@ -16,11 +16,19 @@ use proptest::prelude::*;
 mod pool {
     use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Uninitialized,
+    Active,
+    Paused,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct State {
     total_deposits: u64,
     total_borrows: u64,
     interest_rate: u64,
+    status: Status,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -29,10 +37,12 @@ fn arb_state() -> impl Strategy<Value = State> {
         0u64..=u64::MAX,
         0u64..=u64::MAX,
         0u64..=u64::MAX,
-    ).prop_map(|(total_deposits, total_borrows, interest_rate)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ).prop_map(|(total_deposits, total_borrows, interest_rate, status)| State {
         total_deposits,
         total_borrows,
         interest_rate,
+        status,
     })
 }
 
@@ -42,10 +52,12 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-    ).prop_map(|(total_deposits, total_borrows, interest_rate)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ).prop_map(|(total_deposits, total_borrows, interest_rate, status)| State {
         total_deposits,
         total_borrows,
         interest_rate,
+        status,
     })
 }
 
@@ -58,9 +70,13 @@ fn init_pool(s: &mut State, rate: u64) -> bool {
     if !(rate > 0) {
         return false;
     }
+    if s.status != Status::Uninitialized {
+        return false;
+    }
     s.interest_rate = rate;
     s.total_deposits = 0;
     s.total_borrows = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -68,7 +84,11 @@ fn deposit(s: &mut State, amount: u64) -> bool {
     if !(amount > 0) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.total_deposits = s.total_deposits.wrapping_add(amount);
+    s.status = Status::Active;
     true
 }
 
@@ -213,10 +233,18 @@ proptest! {
 mod loan {
     use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Uninitialized,
+    Active,
+    Paused,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct State {
     amount: u64,
     collateral: u64,
+    status: Status,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -224,9 +252,11 @@ fn arb_state() -> impl Strategy<Value = State> {
     (
         0u64..=u64::MAX,
         0u64..=u64::MAX,
-    ).prop_map(|(amount, collateral)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ).prop_map(|(amount, collateral, status)| State {
         amount,
         collateral,
+        status,
     })
 }
 
@@ -235,9 +265,11 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
     (
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-    ).prop_map(|(amount, collateral)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ).prop_map(|(amount, collateral, status)| State {
         amount,
         collateral,
+        status,
     })
 }
 
@@ -245,14 +277,22 @@ fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
     if !((amount > 0) && (collateral > 0)) {
         return false;
     }
+    if s.status != Status::Empty {
+        return false;
+    }
     s.amount = amount;
     s.collateral = collateral;
+    s.status = Status::Active;
     true
 }
 
 fn repay(s: &mut State) -> bool {
+    if s.status != Status::Active {
+        return false;
+    }
     s.amount = 0;
     s.collateral = 0;
+    s.status = Status::Empty;
     true
 }
 
@@ -260,7 +300,11 @@ fn liquidate(s: &mut State) -> bool {
     if !(s.amount > s.collateral) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.amount = 0;
+    s.status = Status::Liquidated;
     true
 }
 

@@ -422,16 +422,20 @@ fn emit_account_section(
     // fields. emit_record_prop_composes + strategy_for_field below fix that.
     rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy", |t| map_type(t, spec))?;
     rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
+    rust_codegen_util::emit_lifecycle_status_enum(out, spec, "Debug, Clone, Copy, PartialEq, Eq");
     emit_record_prop_composes(out, spec)?;
     emit_unit_sum_prop_oneofs(out, spec)?;
 
-    // State struct
-    out.push_str("#[derive(Debug, Clone, Copy)]\n");
-    out.push_str("struct State {\n");
-    for (fname, ftype) in mutable_fields {
-        out.push_str(&format!("    {}: {},\n", fname, map_type(ftype, spec)?));
-    }
-    out.push_str("}\n\n");
+    // State struct (with synthetic `status: Status` when the spec has a
+    // multi-state lifecycle). emit_state_struct adds the discriminator
+    // unless `mutable_fields` already contains a user-declared `status`.
+    rust_codegen_util::emit_state_struct(
+        out,
+        mutable_fields,
+        "Debug, Clone, Copy",
+        |t| map_type(t, spec),
+        spec,
+    )?;
 
     // Extract constant upper bounds from properties to cap arb_state() ranges.
     // E.g., `state.V <= MAX_VAULT_TVL` caps V to 10^16 instead of u128::MAX.
@@ -636,6 +640,20 @@ fn emit_state_strategy_inner(
         }
         out.push_str(&format!("        {}", strategy));
     }
+    let emit_status = rust_codegen_util::has_lifecycle(spec)
+        && !mutable_fields.iter().any(|(n, _)| n == "status");
+    if emit_status {
+        if !mutable_fields.is_empty() {
+            out.push_str(",\n");
+        }
+        let variants = spec
+            .lifecycle_states
+            .iter()
+            .map(|s| format!("Just(Status::{})", s))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("        prop_oneof![{}]", variants));
+    }
     out.push_str(",\n    ).prop_map(|(");
     for (i, (fname, _)) in mutable_fields.iter().enumerate() {
         if i > 0 {
@@ -643,9 +661,18 @@ fn emit_state_strategy_inner(
         }
         out.push_str(fname);
     }
+    if emit_status {
+        if !mutable_fields.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str("status");
+    }
     out.push_str(")| State {\n");
     for (fname, _) in mutable_fields {
         out.push_str(&format!("        {},\n", fname));
+    }
+    if emit_status {
+        out.push_str("        status,\n");
     }
     out.push_str("    })\n");
     out.push_str("}\n\n");

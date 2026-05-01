@@ -15,6 +15,13 @@ use proptest::prelude::*;
 
 const MAX_MEMBERS: u8 = 32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Uninitialized,
+    Active,
+    HasProposal,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct State {
     threshold: u8,
@@ -23,6 +30,7 @@ struct State {
     voted: [u8; 32],
     approval_count: u8,
     rejection_count: u8,
+    status: Status,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -34,13 +42,15 @@ fn arb_state() -> impl Strategy<Value = State> {
         prop::collection::vec(0u8..=255u8, 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
         0u8..=255u8,
         0u8..=255u8,
-    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
+    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count, status)| State {
         threshold,
         member_count,
         members,
         voted,
         approval_count,
         rejection_count,
+        status,
     })
 }
 
@@ -53,13 +63,15 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
         prop::collection::vec(prop_oneof![0u8..=3u8, 252u8..=255u8], 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
         prop_oneof![0u8..=3u8, 252u8..=255u8],
         prop_oneof![0u8..=3u8, 252u8..=255u8],
-    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
+    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count, status)| State {
         threshold,
         member_count,
         members,
         voted,
         approval_count,
         rejection_count,
+        status,
     })
 }
 
@@ -77,16 +89,24 @@ fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
     if !((threshold > 0) && (threshold <= member_count) && member_count <= 32) {
         return false;
     }
+    if s.status != Status::Uninitialized {
+        return false;
+    }
     s.threshold = threshold;
     s.member_count = member_count;
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
 fn propose(s: &mut State) -> bool {
+    if s.status != Status::Active {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -94,8 +114,12 @@ fn approve(s: &mut State, member_index: u8) -> bool {
     if !(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.approval_count = s.approval_count.wrapping_add(1);
     s.voted[member_index] = 1;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -103,8 +127,12 @@ fn reject(s: &mut State, member_index: u8) -> bool {
     if !(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.rejection_count = s.rejection_count.wrapping_add(1);
     s.voted[member_index] = 1;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -112,8 +140,12 @@ fn execute(s: &mut State) -> bool {
     if !(s.approval_count >= s.threshold) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -121,8 +153,12 @@ fn cancel_proposal(s: &mut State) -> bool {
     if !(s.member_count.wrapping_sub(s.rejection_count) < s.threshold) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -130,7 +166,11 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
     if !(member_index < s.member_count) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.members[member_index] = member_pubkey;
+    s.status = Status::Active;
     true
 }
 
@@ -138,7 +178,11 @@ fn remove_member(s: &mut State) -> bool {
     if !(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.member_count = s.member_count.wrapping_sub(1);
+    s.status = Status::Active;
     true
 }
 

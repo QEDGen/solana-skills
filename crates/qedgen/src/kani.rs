@@ -1,9 +1,62 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedHandler};
+use crate::check::{self, ParsedHandler, ParsedSpec};
 use crate::codegen::map_type;
 use crate::rust_codegen_util;
+
+/// Emit `let mut s = State { ... };` with every mutable field bound to
+/// `kani::any()`. When the spec has a lifecycle, the synthetic `status`
+/// field is also `kani::any()` so callers can layer
+/// `kani::assume(s.status == Status::<X>)` on top.
+fn emit_state_init_symbolic(
+    out: &mut String,
+    mutable_fields: &[&(String, String)],
+    spec: &ParsedSpec,
+) {
+    out.push_str("    let mut s = State {\n");
+    for (fname, _) in mutable_fields {
+        out.push_str(&format!("        {}: kani::any(),\n", fname));
+    }
+    if rust_codegen_util::has_lifecycle(spec) {
+        out.push_str("        status: kani::any(),\n");
+    }
+    out.push_str("    };\n");
+}
+
+/// Emit `let mut s = State { ... };` with every mutable field zeroed and the
+/// `status` field set to the spec's initial lifecycle state. Used by init-
+/// handler harnesses (effect/preservation), where the pre-state is the
+/// canonical "before initialization" state.
+fn emit_state_init_zeroed(
+    out: &mut String,
+    mutable_fields: &[&(String, String)],
+    spec: &ParsedSpec,
+) {
+    out.push_str("    let mut s = State {\n");
+    for (fname, _) in mutable_fields {
+        out.push_str(&format!("        {}: 0,\n", fname));
+    }
+    if let Some(initial) = rust_codegen_util::initial_lifecycle_state(spec) {
+        out.push_str(&format!("        status: Status::{},\n", initial));
+    }
+    out.push_str("    };\n");
+}
+
+/// Append `kani::assume(s.status == Status::<pre>);` when the handler has a
+/// pre-status declaration AND the spec has a lifecycle. No-op otherwise.
+/// Without this, guard-rejection / abort harnesses for lifecycle-gated
+/// handlers can pass for the wrong reason — the handler rejects because the
+/// symbolic status didn't match the pre-state, not because the requires/
+/// guard fired.
+fn emit_pre_status_assume(out: &mut String, op: &ParsedHandler, spec: &ParsedSpec) {
+    if !rust_codegen_util::has_lifecycle(spec) {
+        return;
+    }
+    if let Some(ref pre) = op.pre_status {
+        out.push_str(&format!("    kani::assume(s.status == Status::{});\n", pre));
+    }
+}
 
 /// Generate Kani proof harnesses from a spec file (.lean or .qedspec).
 ///
@@ -82,10 +135,19 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         &spec,
         "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
     )?;
+    rust_codegen_util::emit_lifecycle_status_enum(
+        &mut out,
+        &spec,
+        "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
+    );
 
-    rust_codegen_util::emit_state_struct(&mut out, &mutable_fields, "Clone, Copy", |t| {
-        map_type(t, &spec)
-    })?;
+    rust_codegen_util::emit_state_struct(
+        &mut out,
+        &mutable_fields,
+        "Clone, Copy",
+        |t| map_type(t, &spec),
+        &spec,
+    )?;
 
     // ── Property predicates ──────────────────────────────────────────────
     if !spec.properties.is_empty() {
@@ -145,12 +207,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             out.push_str("#[kani::solver(cadical)]\n");
             out.push_str(&format!("fn verify_{}_rejects_invalid() {{\n", op.name));
 
-            // Symbolic state
-            out.push_str("    let mut s = State {\n");
-            for (fname, _) in &mutable_fields {
-                out.push_str(&format!("        {}: kani::any(),\n", fname));
-            }
-            out.push_str("    };\n");
+            emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+            emit_pre_status_assume(&mut out, op, &spec);
 
             // Symbolic params
             for (pname, ptype) in &op.takes_params {
@@ -207,12 +265,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     op.name, abort.error_name
                 ));
 
-                // Symbolic state
-                out.push_str("    let mut s = State {\n");
-                for (fname, _) in &mutable_fields {
-                    out.push_str(&format!("        {}: kani::any(),\n", fname));
-                }
-                out.push_str("    };\n");
+                emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+                emit_pre_status_assume(&mut out, op, &spec);
 
                 // Symbolic params
                 for (pname, ptype) in &op.takes_params {
@@ -274,19 +328,12 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     .unwrap_or(false);
 
                 if is_init {
-                    // For init operations, start with zeroed state
-                    out.push_str("    let mut s = State {\n");
-                    for (fname, _) in &mutable_fields {
-                        out.push_str(&format!("        {}: 0,\n", fname));
-                    }
-                    out.push_str("    };\n");
+                    emit_state_init_zeroed(&mut out, &mutable_fields, &spec);
                 } else {
-                    // Symbolic state with invariant assumptions
-                    out.push_str("    let mut s = State {\n");
-                    for (fname, _) in &mutable_fields {
-                        out.push_str(&format!("        {}: kani::any(),\n", fname));
+                    emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+                    if let Some(op) = op {
+                        emit_pre_status_assume(&mut out, op, &spec);
                     }
-                    out.push_str("    };\n");
 
                     // Assume all declared properties hold before transition
                     for pre_prop in &spec.properties {
@@ -391,6 +438,19 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
             for (field, op_kind, value) in &op.effects {
+                // Skip effects targeting fields that aren't in the Kani State
+                // model. `mutable_fields` filters out Pubkey-typed fields
+                // (identity, not mutable scalar state), so an effect like
+                // `initializer_token_account := initializer_ta.pubkey`
+                // can't be asserted against — the field doesn't exist on
+                // State, and the RHS references an unbound account binding.
+                // Pre-fix this emitted a harness that wouldn't compile and
+                // would have been vacuous if it did.
+                let base = rust_codegen_util::effect_target_base(field);
+                if !field_type_lookup.contains_key(base) {
+                    continue;
+                }
+
                 let field_type = field_type_lookup.get(field.as_str()).copied().unwrap_or("");
                 let solver = rust_codegen_util::pick_kani_solver_for_effect(field_type, value, op);
 
@@ -405,17 +465,10 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
                 // Symbolic state
                 if is_init {
-                    out.push_str("    let mut s = State {\n");
-                    for (fname, _) in &mutable_fields {
-                        out.push_str(&format!("        {}: 0,\n", fname));
-                    }
-                    out.push_str("    };\n");
+                    emit_state_init_zeroed(&mut out, &mutable_fields, &spec);
                 } else {
-                    out.push_str("    let mut s = State {\n");
-                    for (fname, _) in &mutable_fields {
-                        out.push_str(&format!("        {}: kani::any(),\n", fname));
-                    }
-                    out.push_str("    };\n");
+                    emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+                    emit_pre_status_assume(&mut out, op, &spec);
                 }
 
                 // Symbolic params
@@ -544,12 +597,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str("#[kani::solver(cadical)]\n");
                 out.push_str(&format!("fn cover_{}{}() {{\n", cover.name, suffix));
 
-                // Start with symbolic state
-                out.push_str("    let mut s = State {\n");
-                for (fname, _) in &mutable_fields {
-                    out.push_str(&format!("        {}: kani::any(),\n", fname));
-                }
-                out.push_str("    };\n");
+                emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
 
                 // Chain operations with nested ifs
                 let mut indent = "    ".to_string();
@@ -608,17 +656,35 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
         for liveness in &spec.liveness_props {
             let bound = liveness.within_steps.unwrap_or(10) as usize;
+
+            // Without a lifecycle in the State model, the target predicate
+            // (`s.status == Status::<leads_to_state>`) has nothing to bind
+            // to. Skip emission rather than ship a harness that runs random
+            // ops and ends with no assertion — silent vacuous "verification"
+            // is worse than no verification.
+            if !rust_codegen_util::has_lifecycle(&spec) {
+                out.push_str(&format!(
+                    "// liveness {}: skipped — spec has no lifecycle, no target predicate to cover\n\n",
+                    liveness.name
+                ));
+                continue;
+            }
+
             out.push_str("#[kani::proof]\n");
             out.push_str(&format!("#[kani::unwind({})]\n", bound + 1));
             out.push_str("#[kani::solver(cadical)]\n");
             out.push_str(&format!("fn verify_liveness_{}() {{\n", liveness.name));
 
-            // Symbolic state
-            out.push_str("    let mut s = State {\n");
-            for (fname, _) in &mutable_fields {
-                out.push_str(&format!("        {}: kani::any(),\n", fname));
-            }
-            out.push_str("    };\n");
+            emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+
+            // Pre-state: assume the from-state. Without this, the harness
+            // would explore symbolic-status executions where the via-ops
+            // never fire (status mismatch on every step), and the cover
+            // would only succeed by accident — a vacuous pass mode.
+            out.push_str(&format!(
+                "    kani::assume(s.status == Status::{});\n",
+                liveness.from_state
+            ));
 
             // Build via ops match
             let via_ops = &liveness.via_ops;
@@ -656,11 +722,12 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             out.push_str("        }\n");
             out.push_str("    }\n");
 
-            // Note: kani::cover! doesn't take a state check directly,
-            // so we use assert-like pattern for the target condition
+            // Post-state: cover the leads-to state. `kani::cover!` succeeds
+            // when at least one execution path satisfies the predicate —
+            // exactly the semantics of bounded reachability.
             out.push_str(&format!(
-                "    // Target: from {} to {} within {} steps\n",
-                liveness.from_state, liveness.leads_to_state, bound
+                "    kani::cover!(s.status == Status::{}, \"{} reaches {} within {} steps\");\n",
+                liveness.leads_to_state, liveness.name, liveness.leads_to_state, bound
             ));
             out.push_str("}\n\n");
         }
@@ -692,12 +759,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                     prop.name, env.name
                 ));
 
-                // Symbolic state
-                out.push_str("    let mut s = State {\n");
-                for (fname, _) in &mutable_fields {
-                    out.push_str(&format!("        {}: kani::any(),\n", fname));
-                }
-                out.push_str("    };\n");
+                emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
                 out.push_str(&format!("    kani::assume({}(&s));\n", prop.name));
 
                 // Apply environment mutation
@@ -743,12 +805,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             out.push_str("#[kani::solver(cadical)]\n");
             out.push_str(&format!("fn verify_{}_no_overflow() {{\n", op.name));
 
-            // Symbolic state
-            out.push_str("    let mut s = State {\n");
-            for (fname, _) in &mutable_fields {
-                out.push_str(&format!("        {}: kani::any(),\n", fname));
-            }
-            out.push_str("    };\n");
+            emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+            emit_pre_status_assume(&mut out, op, &spec);
 
             // Symbolic params
             for (pname, ptype) in &op.takes_params {

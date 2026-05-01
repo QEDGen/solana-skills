@@ -20,6 +20,13 @@
 
 const MAX_MEMBERS: u8 = 32;
 
+#[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
+enum Status {
+    Uninitialized,
+    Active,
+    HasProposal,
+}
+
 #[derive(Clone, Copy)]
 struct State {
     threshold: u8,
@@ -28,6 +35,7 @@ struct State {
     voted: [u8; 32],
     approval_count: u8,
     rejection_count: u8,
+    status: Status,
 }
 
 // ============================================================================
@@ -55,16 +63,24 @@ fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
     if !((threshold > 0) && (threshold <= member_count) && member_count <= 32) {
         return false;
     }
+    if s.status != Status::Uninitialized {
+        return false;
+    }
     s.threshold = threshold;
     s.member_count = member_count;
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
 fn propose(s: &mut State) -> bool {
+    if s.status != Status::Active {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -72,11 +88,15 @@ fn approve(s: &mut State, member_index: u8) -> bool {
     if !(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     match s.approval_count.checked_add(1) {
         Some(__v) => s.approval_count = __v,
         None => return false,
     }
     s.voted[member_index] = 1;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -84,11 +104,15 @@ fn reject(s: &mut State, member_index: u8) -> bool {
     if !(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     match s.rejection_count.checked_add(1) {
         Some(__v) => s.rejection_count = __v,
         None => return false,
     }
     s.voted[member_index] = 1;
+    s.status = Status::HasProposal;
     true
 }
 
@@ -96,8 +120,12 @@ fn execute(s: &mut State) -> bool {
     if !(s.approval_count >= s.threshold) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -105,8 +133,12 @@ fn cancel_proposal(s: &mut State) -> bool {
     if !(s.member_count - s.rejection_count < s.threshold) {
         return false;
     }
+    if s.status != Status::HasProposal {
+        return false;
+    }
     s.approval_count = 0;
     s.rejection_count = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -114,7 +146,11 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
     if !(member_index < s.member_count) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.members[member_index] = member_pubkey;
+    s.status = Status::Active;
     true
 }
 
@@ -122,10 +158,14 @@ fn remove_member(s: &mut State) -> bool {
     if !(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     match s.member_count.checked_sub(1) {
         Some(__v) => s.member_count = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
@@ -144,7 +184,9 @@ fn verify_create_vault_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Uninitialized);
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
     kani::assume(!((threshold > 0) && (threshold <= member_count) && member_count <= 32));
@@ -163,7 +205,9 @@ fn verify_approve_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(!(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0));
     assert!(!approve(&mut s, member_index),
@@ -181,7 +225,9 @@ fn verify_reject_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(!(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0));
     assert!(!reject(&mut s, member_index),
@@ -199,7 +245,9 @@ fn verify_execute_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(!(s.approval_count >= s.threshold));
     assert!(!execute(&mut s),
         "execute must reject when guard is violated");
@@ -216,7 +264,9 @@ fn verify_cancel_proposal_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(!(s.member_count - s.rejection_count < s.threshold));
     assert!(!cancel_proposal(&mut s),
         "cancel_proposal must reject when guard is violated");
@@ -233,7 +283,9 @@ fn verify_add_member_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let member_index: u8 = kani::any();
     let member_pubkey: Address = kani::any();
     kani::assume(!(member_index < s.member_count));
@@ -252,7 +304,9 @@ fn verify_remove_member_rejects_invalid() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(!(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)));
     assert!(!remove_member(&mut s),
         "remove_member must reject when guard is violated");
@@ -273,6 +327,7 @@ fn verify_create_vault_preserves_threshold_bounded() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -293,7 +348,9 @@ fn verify_propose_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -314,7 +371,9 @@ fn verify_approve_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -336,7 +395,9 @@ fn verify_reject_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -359,7 +420,9 @@ fn verify_execute_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -380,7 +443,9 @@ fn verify_cancel_proposal_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -401,7 +466,9 @@ fn verify_add_member_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -424,7 +491,9 @@ fn verify_remove_member_preserves_threshold_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -445,6 +514,7 @@ fn verify_create_vault_preserves_votes_bounded() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -465,7 +535,9 @@ fn verify_propose_preserves_votes_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -486,7 +558,9 @@ fn verify_execute_preserves_votes_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -507,7 +581,9 @@ fn verify_cancel_proposal_preserves_votes_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -528,7 +604,9 @@ fn verify_remove_member_preserves_votes_bounded() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(threshold_bounded(&s));
     kani::assume(votes_bounded(&s));
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -556,6 +634,7 @@ fn verify_create_vault_effect_threshold() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -582,6 +661,7 @@ fn verify_create_vault_effect_member_count() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -608,6 +688,7 @@ fn verify_create_vault_effect_approval_count() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -634,6 +715,7 @@ fn verify_create_vault_effect_rejection_count() {
         voted: 0,
         approval_count: 0,
         rejection_count: 0,
+        status: Status::Uninitialized,
     };
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
@@ -660,7 +742,9 @@ fn verify_propose_effect_approval_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -687,7 +771,9 @@ fn verify_propose_effect_rejection_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -714,7 +800,9 @@ fn verify_approve_effect_approval_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
@@ -744,7 +832,9 @@ fn verify_approve_effect_voted_member_index() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
@@ -774,7 +864,9 @@ fn verify_reject_effect_rejection_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(s.member_count <= MAX_MEMBERS);
     kani::assume(s.rejection_count < s.member_count); // strict bound: rejection_count increments
@@ -805,7 +897,9 @@ fn verify_reject_effect_voted_member_index() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     kani::assume(s.member_count <= MAX_MEMBERS);
     kani::assume(s.rejection_count < s.member_count); // strict bound: rejection_count increments
@@ -836,7 +930,9 @@ fn verify_execute_effect_approval_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -863,7 +959,9 @@ fn verify_execute_effect_rejection_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -890,7 +988,9 @@ fn verify_cancel_proposal_effect_approval_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -917,7 +1017,9 @@ fn verify_cancel_proposal_effect_rejection_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -944,7 +1046,9 @@ fn verify_add_member_effect_members_member_index() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let member_index: u8 = kani::any();
     let member_pubkey: Address = kani::any();
     kani::assume(s.member_count <= MAX_MEMBERS);
@@ -976,7 +1080,9 @@ fn verify_remove_member_effect_member_count() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(s.member_count <= MAX_MEMBERS);
     let pre_threshold = s.threshold;
     let pre_member_count = s.member_count;
@@ -1009,6 +1115,7 @@ fn cover_proposal_lifecycle() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
     let threshold_0: u8 = kani::any();
     let member_count_0: u8 = kani::any();
@@ -1033,6 +1140,7 @@ fn cover_rejection_flow() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
     let threshold_0: u8 = kani::any();
     let member_count_0: u8 = kani::any();
@@ -1061,7 +1169,9 @@ fn verify_liveness_proposal_resolves() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     for _ in 0..1 {
         let op: u8 = kani::any();
         match op {
@@ -1074,7 +1184,7 @@ fn verify_liveness_proposal_resolves() {
             _ => {}
         }
     }
-    // Target: from HasProposal to Active within 1 steps
+    kani::cover!(s.status == Status::Active, "proposal_resolves reaches Active within 1 steps");
 }
 
 // ============================================================================
@@ -1092,7 +1202,9 @@ fn verify_approve_no_overflow() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     approve(&mut s, member_index);  // Kani detects overflow on += internally
 }
@@ -1108,7 +1220,9 @@ fn verify_reject_no_overflow() {
         voted: kani::any(),
         approval_count: kani::any(),
         rejection_count: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
     reject(&mut s, member_index);  // Kani detects overflow on += internally
 }

@@ -59,17 +59,12 @@ fn smoke_anchor_scaffold(example: &str) {
         .arg(&output_dir)
         .current_dir(temp.path()));
 
-    let cargo_config_dir = output_dir.join(".cargo");
-    std::fs::create_dir_all(&cargo_config_dir).expect("create cargo config dir");
-    let macros_path = repo_root().join("crates/qedgen-macros");
-    std::fs::write(
-        cargo_config_dir.join("config.toml"),
-        format!(
-            "[patch.\"https://github.com/qedgen/solana-skills\"]\nqedgen-macros = {{ path = {:?} }}\n",
-            macros_path
-        ),
-    )
-    .expect("write cargo patch config");
+    // The generated Cargo.toml stamps `qedgen-macros = { git = ..., tag =
+    // "v<current>" }`, but the tag for the in-progress version doesn't
+    // exist on GitHub until release time. Rewrite the git dep to a path
+    // dep before the smoke compile — cargo's `[patch]` mechanism didn't
+    // reliably override a tagged git source even with the right config.
+    redirect_macros_to_path(&output_dir.join("Cargo.toml"));
 
     run(Command::new("cargo")
         .arg("check")
@@ -122,22 +117,13 @@ fn smoke_anchor_scaffold_with_proptest(example: &str) {
         .arg(output_dir.join("tests/proptest.rs"))
         .current_dir(temp.path()));
 
-    let cargo_config_dir = output_dir.join(".cargo");
-    std::fs::create_dir_all(&cargo_config_dir).expect("create cargo config dir");
-    let macros_path = repo_root().join("crates/qedgen-macros");
-    std::fs::write(
-        cargo_config_dir.join("config.toml"),
-        format!(
-            "[patch.\"https://github.com/qedgen/solana-skills\"]\nqedgen-macros = {{ path = {:?} }}\n",
-            macros_path
-        ),
-    )
-    .expect("write cargo patch config");
-
     // proptest is a dev-dependency on the test crate; the generator
     // emits Cargo.toml without dev-deps because production Anchor
-    // builds don't need it. Append it for the smoke run.
+    // builds don't need it. Append it for the smoke run, and (see
+    // `smoke_anchor_scaffold`) rewrite the qedgen-macros git dep to a
+    // path dep so the unreleased tag doesn't fail to resolve.
     let cargo_toml = output_dir.join("Cargo.toml");
+    redirect_macros_to_path(&cargo_toml);
     let mut manifest = std::fs::read_to_string(&cargo_toml).expect("read Cargo.toml");
     manifest.push_str("\n[dev-dependencies]\nproptest = \"1\"\n");
     std::fs::write(&cargo_toml, manifest).expect("rewrite Cargo.toml");
@@ -148,6 +134,36 @@ fn smoke_anchor_scaffold_with_proptest(example: &str) {
         .arg(&cargo_toml)
         .arg("--test")
         .arg("proptest"));
+}
+
+/// Rewrite the `qedgen-macros` line in a generated Cargo.toml from a git
+/// dep tagged at the current crate version (which doesn't exist on GitHub
+/// until release time) to a `path` dep pointing at the in-repo crate.
+fn redirect_macros_to_path(cargo_toml: &std::path::Path) {
+    let manifest = std::fs::read_to_string(cargo_toml).expect("read Cargo.toml");
+    let macros_path = repo_root().join("crates/qedgen-macros");
+    let replacement = format!("qedgen-macros = {{ path = {:?} }}", macros_path);
+    let mut found = false;
+    let rewritten: String = manifest
+        .lines()
+        .map(|line| {
+            if line.starts_with("qedgen-macros = {")
+                && line.contains("git = \"https://github.com/qedgen/solana-skills\"")
+            {
+                found = true;
+                replacement.clone()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        found,
+        "expected qedgen-macros git line in {}",
+        cargo_toml.display()
+    );
+    std::fs::write(cargo_toml, format!("{rewritten}\n")).expect("rewrite Cargo.toml");
 }
 
 #[test]

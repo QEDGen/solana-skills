@@ -661,8 +661,17 @@ fn render_transitions(
 ///
 /// Two flavors are emitted:
 ///
-/// 1. **Transfer-block theorems** (legacy `transfers { ... }` syntax). Kept as
-///    `: True := trivial` for backward compatibility with v2.7-era specs.
+/// 1. **Transfer-block theorems** (`transfers { ... }` syntax). For each
+///    transfer with an authority, emits a `build_<handler>_transfer<suffix>`
+///    helper that constructs the SPL Token Transfer CPI envelope and a
+///    `<handler>_transfer<suffix>_correct` theorem proving the envelope
+///    has the correct program ID, account list, and discriminator. The
+///    proof closes by `unfold ...; exact ⟨rfl, ...⟩` — pure mechanical
+///    rfl, no sorry. Verifies the CPI shape only; amount serialization
+///    and SPL Token execution remain SDK/runtime trust per
+///    VERIFICATION_SCOPE.md. Authorityless transfers (rare) emit a
+///    structured comment without a theorem since the 3-account envelope
+///    shape doesn't apply.
 /// 2. **Call-site ensures-as-axiom theorems** (v2.8 G3). For each
 ///    `call Interface.handler(...)` site, look up the interface in
 ///    `spec.interfaces` (populated by the M1 import resolver), substitute
@@ -690,17 +699,26 @@ fn render_cpi_theorems(
             continue;
         }
 
-        // (1) Legacy transfer-block theorems.
+        // (1) Transfer-block CPI envelope theorems. For each transfer we
+        // emit a `build_<handler>_transfer<suffix>` constructor over the SPL
+        // Token Transfer CPI envelope (program ID, [from/to/authority]
+        // account metas, discriminator) and a `<handler>_transfer<suffix>_correct`
+        // theorem proving each component matches by `rfl`. Trust boundary
+        // is the SPL Token execution semantics — we verify the envelope
+        // shape, not the amount serialization or token balance changes.
         for (i, transfer) in op.transfers.iter().enumerate() {
             let suffix = if op.transfers.len() > 1 {
                 format!("_{}", i)
             } else {
                 String::new()
             };
+            let build_name = safe_name(&format!("build_{}_transfer{}", op.name, suffix));
             let theorem_name = safe_name(&format!("{}_transfer{}_correct", op.name, suffix));
 
+            // Doc comment naming the transfer's source bindings — keeps the
+            // declared spec-level intent visible alongside the proof.
             out.push_str(&format!(
-                "/-- {} transfer: {} → {}",
+                "/-- {} transfer envelope: {} → {}",
                 op.name, transfer.from, transfer.to
             ));
             if let Some(ref amt) = transfer.amount {
@@ -709,8 +727,53 @@ fn render_cpi_theorems(
             if let Some(ref auth) = transfer.authority {
                 out.push_str(&format!(" authority {}", auth));
             }
-            out.push_str(". -/\n");
-            out.push_str(&format!("theorem {} : True := trivial\n\n", theorem_name));
+            out.push_str(".\n");
+            out.push_str("    Verifies CPI shape (program ID, account list, discriminator).\n");
+            out.push_str("    Amount serialization and SPL Token execution are SDK/runtime\n");
+            out.push_str("    trust per VERIFICATION_SCOPE.md. -/\n");
+
+            // Authorityless transfers don't fit the 3-account SPL Token
+            // envelope. Emit a structured comment instead of a theorem so
+            // the obligation is tracked without inventing a proof shape
+            // that doesn't match.
+            if transfer.authority.is_none() {
+                out.push_str(&format!(
+                    "-- {} transfer{}: no authority declared; envelope theorem skipped.\n\n",
+                    op.name, suffix
+                ));
+                continue;
+            }
+
+            out.push_str(&format!(
+                "def {} (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=\n",
+                build_name
+            ));
+            out.push_str("  { programId := TOKEN_PROGRAM_ID\n");
+            out.push_str("  , accounts :=\n");
+            out.push_str("      [ \u{27e8}from_pk, false, true\u{27e9}\n");
+            out.push_str("      , \u{27e8}to_pk, false, true\u{27e9}\n");
+            out.push_str("      , \u{27e8}authority_pk, true, false\u{27e9}\n");
+            out.push_str("      ]\n");
+            out.push_str("  , data := DISC_TRANSFER }\n\n");
+
+            out.push_str(&format!(
+                "theorem {} (from_pk to_pk authority_pk : Pubkey) :\n",
+                theorem_name
+            ));
+            out.push_str(&format!(
+                "    let cpi := {} from_pk to_pk authority_pk\n",
+                build_name
+            ));
+            out.push_str("    targetsProgram cpi TOKEN_PROGRAM_ID \u{2227}\n");
+            out.push_str("    accountAt cpi 0 from_pk false true \u{2227}\n");
+            out.push_str("    accountAt cpi 1 to_pk false true \u{2227}\n");
+            out.push_str("    accountAt cpi 2 authority_pk true false \u{2227}\n");
+            out.push_str("    hasDiscriminator cpi DISC_TRANSFER := by\n");
+            out.push_str(&format!(
+                "  unfold {} targetsProgram accountAt hasDiscriminator\n",
+                build_name
+            ));
+            out.push_str("  exact \u{27e8}rfl, rfl, rfl, rfl, rfl\u{27e9}\n\n");
         }
 
         // (2) Call-site ensures-as-axiom theorems (v2.8 G3, stance 1).

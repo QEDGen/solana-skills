@@ -38,17 +38,97 @@ def cancelTransition (s : State) (signer : Pubkey) : Option State :=
     some { s with status := .Closed }
   else none
 
-/-- initialize transfer: initializer_ta → escrow_ta amount deposit_amount authority initializer. -/
-theorem initialize_transfer_correct : True := trivial
+/-- initialize transfer envelope: initializer_ta → escrow_ta amount deposit_amount authority initializer.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_initialize_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
 
-/-- exchange transfer: taker_ta → initializer_ta amount taker_amount authority taker. -/
-theorem exchange_transfer_0_correct : True := trivial
+theorem initialize_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_initialize_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_initialize_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
-/-- exchange transfer: escrow_ta → taker_ta amount initializer_amount authority escrow. -/
-theorem exchange_transfer_1_correct : True := trivial
+/-- exchange transfer envelope: taker_ta → initializer_ta amount taker_amount authority taker.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_exchange_transfer_0 (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
 
-/-- cancel transfer: escrow_ta → initializer_ta amount initializer_amount authority escrow. -/
-theorem cancel_transfer_correct : True := trivial
+theorem exchange_transfer_0_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_exchange_transfer_0 from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_exchange_transfer_0 targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- exchange transfer envelope: escrow_ta → taker_ta amount initializer_amount authority escrow.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_exchange_transfer_1 (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
+
+theorem exchange_transfer_1_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_exchange_transfer_1 from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_exchange_transfer_1 targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- cancel transfer envelope: escrow_ta → initializer_ta amount initializer_amount authority escrow.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_cancel_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
+
+theorem cancel_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_cancel_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_cancel_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 /-- Invariant: conservation. -/
 theorem conservation : True := trivial

@@ -516,20 +516,67 @@ pub fn emit_unit_enum_sums(
     Ok(())
 }
 
+/// True when the spec declares a multi-state lifecycle that the harness layer
+/// should model as a `Status` enum + `status: Status` field on the State
+/// struct. A single-state lifecycle (or no lifecycle at all) doesn't need a
+/// discriminator — the State struct's user fields are the entire model.
+pub fn has_lifecycle(spec: &crate::check::ParsedSpec) -> bool {
+    spec.lifecycle_states.len() >= 2
+}
+
+/// Emit the synthetic `Status` enum derived from `spec.lifecycle_states`.
+/// Idempotent: no-op when the spec lacks a multi-state lifecycle.
+///
+/// The enum is *synthetic* — it isn't declared by the user as `type Status |
+/// ...`; it's derived from the variants of the State sum-type (via
+/// `lifecycle_states`). This is what lets cover/liveness/effect harnesses
+/// actually constrain reachable behavior: without a status field, a
+/// lifecycle-only handler's transition function has nothing to write, so
+/// every harness against it is vacuous.
+pub fn emit_lifecycle_status_enum(
+    out: &mut String,
+    spec: &crate::check::ParsedSpec,
+    derives: &str,
+) {
+    if !has_lifecycle(spec) {
+        return;
+    }
+    out.push_str(&format!("#[derive({})]\n", derives));
+    out.push_str("enum Status {\n");
+    for state in &spec.lifecycle_states {
+        out.push_str(&format!("    {},\n", state));
+    }
+    out.push_str("}\n\n");
+}
+
+/// Initial lifecycle state — first entry in `lifecycle_states`. Returns
+/// `None` when the spec has no lifecycle.
+pub fn initial_lifecycle_state(spec: &crate::check::ParsedSpec) -> Option<&str> {
+    spec.lifecycle_states.first().map(|s| s.as_str())
+}
+
 /// Emit a State struct with configurable `#[derive(...)]` attributes.
 /// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types; it
 /// returns an error on unrecognized types so codegen fails loudly rather
 /// than emitting broken Rust.
+///
+/// When the spec has a multi-state lifecycle (`has_lifecycle(spec)`), this
+/// also appends a synthetic `status: Status` field. Callers must have
+/// already emitted the `Status` enum via `emit_lifecycle_status_enum`.
 pub fn emit_state_struct(
     out: &mut String,
     fields: &[&(String, String)],
     derives: &str,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
+    spec: &crate::check::ParsedSpec,
 ) -> anyhow::Result<()> {
     out.push_str(&format!("#[derive({})]\n", derives));
     out.push_str("struct State {\n");
     for (fname, ftype) in fields {
         out.push_str(&format!("    {}: {},\n", fname, map_type_fn(ftype)?));
+    }
+    if has_lifecycle(spec) && !fields.iter().any(|(n, _)| n == "status") {
+        out.push_str("    status: Status,\n");
     }
     out.push_str("}\n\n");
     Ok(())
@@ -607,6 +654,19 @@ pub fn emit_transition_fn(
         out.push_str(&format!("    if !({}) {{\n", guard_expr));
         out.push_str("        return false;\n");
         out.push_str("    }\n");
+    }
+
+    // Pre-status check — handlers declared `State.X -> State.Y` must reject
+    // when the current lifecycle state isn't `X`. Without this, lifecycle-
+    // only handlers (whose effects don't touch user fields) would have
+    // empty bodies and every cover/liveness harness against them would
+    // pass tautologically.
+    if has_lifecycle(spec) {
+        if let Some(ref pre) = op.pre_status {
+            out.push_str(&format!("    if s.status != Status::{} {{\n", pre));
+            out.push_str("        return false;\n");
+            out.push_str("    }\n");
+        }
     }
 
     // Spec-level `let` bindings (`let total_fee = amount * 125 / 10000`)
@@ -704,6 +764,16 @@ pub fn emit_transition_fn(
                     field, op_kind, value
                 ));
             }
+        }
+    }
+
+    // Post-status assignment — drives the lifecycle transition declared in
+    // the handler signature (`State.X -> State.Y`). Combined with the pre-
+    // status check above, this turns lifecycle-only handlers into real
+    // state machines instead of `fn h() -> bool { true }` stubs.
+    if has_lifecycle(spec) {
+        if let Some(ref post) = op.post_status {
+            out.push_str(&format!("    s.status = Status::{};\n", post));
         }
     }
 
@@ -825,6 +895,84 @@ handler buy (amount : U64) { effect { pool +=? amount } }
                 "`{op_str}` should emit {expected}:\n{out}"
             );
         }
+    }
+
+    #[test]
+    fn emit_transition_fn_lifecycle_emits_status_guard_and_assignment() {
+        // Spec with a multi-state lifecycle. `transition` declares `Open ->
+        // Closed`, so the generated transition fn must (1) reject when the
+        // current status isn't `Open`, and (2) write `Status::Closed` on
+        // success. Without these, lifecycle-only handlers compile to
+        // `fn h() -> bool { true }` and every cover/liveness harness
+        // against them passes vacuously.
+        let src = r#"spec T
+type State
+  | Open of { x : U64 }
+  | Closed
+handler close : State.Open -> State.Closed { effect { x := 0 } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        emit_transition_fn(&mut out, op, &spec, false, |t| {
+            crate::codegen::map_type(t, &spec)
+        })
+        .expect("emit");
+        assert!(
+            out.contains("if s.status != Status::Open"),
+            "lifecycle handler must reject when status mismatches pre_status:\n{out}"
+        );
+        assert!(
+            out.contains("s.status = Status::Closed;"),
+            "lifecycle handler must drive post_status assignment:\n{out}"
+        );
+    }
+
+    #[test]
+    fn emit_transition_fn_no_lifecycle_skips_status_lines() {
+        // Spec without a multi-state lifecycle (single State variant or
+        // flat record). emit_transition_fn must NOT emit any status guard
+        // or assignment — there's no Status enum to reference.
+        let src = r#"spec T
+state { balance : U64 }
+handler deposit (amount : U64) { effect { balance += amount } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let mut out = String::new();
+        emit_transition_fn(&mut out, op, &spec, false, |t| {
+            crate::codegen::map_type(t, &spec)
+        })
+        .expect("emit");
+        assert!(
+            !out.contains("Status::"),
+            "lifecycle-free spec must not reference Status:\n{out}"
+        );
+    }
+
+    #[test]
+    fn emit_state_struct_appends_status_when_lifecycle_present() {
+        let src = r#"spec T
+type State
+  | Open of { x : U64 }
+  | Closed
+handler close : State.Open -> State.Closed { effect { x := 0 } }
+"#;
+        let spec = parse_str(src).expect("parse");
+        let mutable = mutable_fields(&spec.state_fields);
+        let mut out = String::new();
+        emit_state_struct(
+            &mut out,
+            &mutable,
+            "Clone, Copy",
+            |t| Ok(t.to_string()),
+            &spec,
+        )
+        .expect("emit");
+        assert!(
+            out.contains("status: Status,"),
+            "lifecycle spec must inject `status: Status` field:\n{out}"
+        );
     }
 
     #[test]

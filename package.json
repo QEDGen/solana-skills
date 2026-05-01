@@ -1,6 +1,6 @@
 {
   "name": "qedgen-solana-skills",
-  "version": "2.11.4",
+  "version": "2.12.0",
   "description": "Agent skill for spec-driven verification of Solana programs — .qedspec specs generate proptest harnesses, Kani BMC harnesses, Lean 4 proofs, Anchor and Quasar agent-fill scaffolds, deploy-safety ratchets, and CI workflows.",
   "keywords": [
     "agent-skill",
