@@ -263,6 +263,19 @@ impl FrameworkSurface {
         }
     }
 
+    /// Generic "predicate violated, no specific error code" expression for
+    /// bare `requires` clauses (no `else <Error>`). Pre-v2.14 emitted
+    /// `debug_assert!` (silent no-op in release); v2.14+ emits a real
+    /// runtime check that returns this error. Each surface needs the
+    /// type-correct form for its `Result<(), _>` return shape.
+    fn generic_error_expr(&self) -> &'static str {
+        match self.target {
+            Target::Anchor => "anchor_lang::error::Error::from(ProgramError::Custom(0xFF))",
+            Target::Quasar => "ProgramError::Custom(0xFF)",
+            Target::Pinocchio => unreachable!(),
+        }
+    }
+
     fn guard_accounts_import(&self) -> &'static str {
         match self.target {
             Target::Anchor => "use crate::*;\n\n",
@@ -2664,8 +2677,9 @@ fn generate_guards(
                 // `else <Error>` for diagnostic clarity, but the check now
                 // runs either way.
                 out.push_str(&format!(
-                    "    if !({}) {{ return Err(solana_program::program_error::ProgramError::Custom(0xFF).into()); }}\n",
-                    rust
+                    "    if !({}) {{ return Err({}); }}\n",
+                    rust,
+                    surface.generic_error_expr()
                 ));
             }
         }
