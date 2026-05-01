@@ -172,8 +172,11 @@ def applyLoanOp (s : LoanState) (signer : Pubkey) : LoanOperation → Option Loa
   | .repay => repayTransition s signer
   | .liquidate => liquidateTransition s signer
 
-/-- Invariant: collateral_backing. -/
-theorem collateral_backing : True := trivial
+-- INVARIANT OBLIGATION (declared, multi-account translation deferred): collateral_backing
+--   predicate body: ∀ l : Loan.Active, l.collateral > 0
+-- v2.14 emits this as a comment; multi-account invariant
+-- bodies (e.g. `forall l : Loan.Active, ...`) need lowering
+-- to typed-state-with-status-filter form. v2.15 picks it up.
 
 def pool_solvency (s : PoolState) : Prop := s.total_deposits ≥ s.total_borrows
 

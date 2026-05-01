@@ -141,6 +141,32 @@ pub struct ParsedLiveness {
     pub within_steps: Option<u64>,
 }
 
+/// Top-level invariant declaration.
+///
+/// Two forms:
+/// - **Expression body** (`invariant <name> : <expr>`): the predicate is
+///   real and codegen emits a real theorem / harness over it. `lean_expr`
+///   and `rust_expr` are populated.
+/// - **Description-only** (`invariant <name> "<doc>"`): a stub from the
+///   pre-v2.14 era. No predicate body, codegen emits a structured comment
+///   instead of `theorem foo : True := trivial`. `doc` is populated;
+///   `lean_expr` / `rust_expr` are `None`. The `bare_invariant` lint
+///   flags these as P3 — users should give them a body.
+#[derive(Debug, Clone)]
+pub struct ParsedInvariant {
+    pub name: String,
+    /// Description string when present (non-empty for description-only form;
+    /// may be empty when only an expression body was declared).
+    pub doc: String,
+    /// Lean form of the predicate expression. `None` for description-only.
+    pub lean_expr: Option<String>,
+    /// Rust form of the predicate expression. `None` for description-only.
+    /// v2.15 wires this into Kani / proptest invariant-checking harnesses;
+    /// v2.14 ships only the Lean theorem path.
+    #[allow(dead_code)]
+    pub rust_expr: Option<String>,
+}
+
 /// Parsed environment block (external state).
 #[derive(Debug, Clone)]
 pub struct ParsedEnvironment {
@@ -768,7 +794,7 @@ pub struct ParsedSpec {
     // Legacy fields — populated by forward bridge for backward compat.
     #[allow(dead_code)]
     pub operations: Vec<ParsedOperation>,
-    pub invariants: Vec<(String, String)>, // (name, description)
+    pub invariants: Vec<ParsedInvariant>,
     pub properties: Vec<ParsedProperty>,
     #[allow(dead_code)]
     pub has_u64_fields: bool,
@@ -1390,8 +1416,13 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
 
     // ── Top-level invariants ──
 
-    for (name, desc) in &spec.invariants {
-        let intent = format!("Invariant: {}", desc);
+    for inv in &spec.invariants {
+        let name = &inv.name;
+        let intent = match (&inv.lean_expr, inv.doc.is_empty()) {
+            (Some(expr), _) => format!("Invariant: {}", expr),
+            (None, false) => format!("Invariant: {}", inv.doc),
+            (None, true) => format!("Invariant: {}", name),
+        };
         let suggestion = Some(
             "This invariant stub is generated as `True` by the DSL. \
              For a meaningful conservation proof, define the predicate and prove it \

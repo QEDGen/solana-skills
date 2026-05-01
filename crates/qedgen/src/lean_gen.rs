@@ -158,12 +158,9 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, "State", spec);
 
     // Invariants
-    for (inv_name, _desc) in &spec.invariants {
-        out.push_str(&format!(
-            "/-- Invariant: {}. -/\ntheorem {} : True := trivial\n\n",
-            inv_name, inv_name
-        ));
-    }
+    let state_field_set: std::collections::HashSet<&str> =
+        spec.state_fields.iter().map(|(n, _)| n.as_str()).collect();
+    render_invariants_theorem_form(&mut out, &spec.invariants, &state_field_set, "State");
 
     // Operation inductive + applyOp
     render_operation_inductive(&mut out, &ops_refs, "State");
@@ -288,13 +285,14 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         render_operation_inductive(&mut out, &ops, &state_name);
     }
 
-    // Invariants
-    for (inv_name, _desc) in &spec.invariants {
-        out.push_str(&format!(
-            "/-- Invariant: {}. -/\ntheorem {} : True := trivial\n\n",
-            inv_name, inv_name
-        ));
-    }
+    // Invariants — multi-account specs need richer translation than v2.14
+    // ships (the body may reference per-account variant types like
+    // `Loan.Active` that need lowering to `LoanState` + status filter).
+    // Emit structured comments for now; v2.15 picks up multi-account
+    // invariant lowering.
+    let dummy: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    render_invariants_as_comments(&mut out, &spec.invariants);
+    let _ = dummy;
 
     // Properties — for multi-account, reference the state type from the first account
     // that has matching fields. Properties using `state.X` bind to the account whose
@@ -826,6 +824,93 @@ fn render_cpi_theorems(
                 ));
             }
         }
+    }
+}
+
+/// Render `theorem <name> ...` for each declared invariant — single-account
+/// path. For multi-account specs, use `render_invariants_as_comments`
+/// (v2.14 doesn't yet lower variant-typed binders like `Loan.Active`).
+///
+/// Two paths inside this function:
+///
+/// - **Expression body** (`invariant <name> : <expr>`): the parsed
+///   `lean_expr` is the predicate. Emit a real theorem statement,
+///   prefix bare state-field references with `s.`, and close with
+///   `:= by sorry` (the user is expected to supply or fill the proof,
+///   matching the v2.8 G3 ensures-as-axiom precedent — `sorry` here
+///   is a tracked obligation, not a tautology).
+/// - **Description-only**: the spec declared the name but no body.
+///   Emit a structured comment describing the obligation; do not emit
+///   a theorem. Pre-v2.14 emitted `theorem <name> : True := trivial`,
+///   which was tautological by design (no goal to prove). The
+///   structured comment is the honest replacement; `bare_invariant`
+///   lint flags these for the spec author to fix.
+fn render_invariants_theorem_form(
+    out: &mut String,
+    invariants: &[crate::check::ParsedInvariant],
+    field_set: &std::collections::HashSet<&str>,
+    state_type: &str,
+) {
+    for inv in invariants {
+        match &inv.lean_expr {
+            Some(lean) => {
+                let prefixed = prefix_state_fields(lean, field_set);
+                out.push_str(&format!(
+                    "/-- Invariant: {}{} -/\n",
+                    inv.name,
+                    if inv.doc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", inv.doc)
+                    }
+                ));
+                out.push_str(&format!(
+                    "theorem {} (s : {}) : {} := by sorry\n\n",
+                    inv.name, state_type, prefixed
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "-- INVARIANT OBLIGATION (declared, no predicate body): {}\n",
+                    inv.name
+                ));
+                if !inv.doc.is_empty() {
+                    out.push_str(&format!("--   description: {}\n", inv.doc));
+                }
+                out.push_str("-- The spec declared this name but didn't supply a predicate body\n");
+                out.push_str(
+                    "-- (`invariant <name> : <expr>`). The codegen has no goal to lower —\n",
+                );
+                out.push_str("-- pre-v2.14 emitted `theorem <name> : True := trivial`, which\n");
+                out.push_str("-- was tautological. To verify this invariant, give it a body in\n");
+                out.push_str("-- the spec.\n\n");
+            }
+        }
+    }
+}
+
+/// Render invariants as structured comments only (no theorems). Used for
+/// multi-account specs in v2.14 — the body translation needs to lower
+/// variant-typed binders (`Loan.Active`) into Lean's typed-state +
+/// status-filter form, which v2.14 doesn't yet implement. Pre-v2.14
+/// emitted `theorem <name> : True := trivial` (tautological); structured
+/// comments are the honest stop-gap until v2.15 picks up the richer
+/// translation.
+fn render_invariants_as_comments(out: &mut String, invariants: &[crate::check::ParsedInvariant]) {
+    for inv in invariants {
+        out.push_str(&format!(
+            "-- INVARIANT OBLIGATION (declared, multi-account translation deferred): {}\n",
+            inv.name
+        ));
+        if let Some(lean) = &inv.lean_expr {
+            out.push_str(&format!("--   predicate body: {}\n", lean));
+        }
+        if !inv.doc.is_empty() {
+            out.push_str(&format!("--   description: {}\n", inv.doc));
+        }
+        out.push_str("-- v2.14 emits this as a comment; multi-account invariant\n");
+        out.push_str("-- bodies (e.g. `forall l : Loan.Active, ...`) need lowering\n");
+        out.push_str("-- to typed-state-with-status-filter form. v2.15 picks it up.\n\n");
     }
 }
 
