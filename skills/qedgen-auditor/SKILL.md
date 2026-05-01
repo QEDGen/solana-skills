@@ -505,6 +505,126 @@ vulnerable.
 - Corpus: "Reentrancy via Token-2022 transfer hook" — first
   Solana-native reentrancy class.
 
+## Quasar / qedgen-codegen runtime
+
+When the runtime is **qedgen-codegen** (detected by `quasar-lang`
+dep or `#[qed(verified)]` markers), the program is split into
+codegen-owned and user-owned files. This changes how the catalog
+applies:
+
+- **Codegen-owned** (`Cargo.toml`, `state.rs`, `errors.rs`,
+  `events.rs`, `instructions/<h>/guards.rs`, the `lib.rs` Anchor
+  wrapping, `formal_verification/Spec.lean`,
+  `tests/{kani,proptest}.rs`): auditing these is auditing the
+  codegen, not the program. Bugs here are spec-gap or
+  qedgen-bug, not user-vulnerability.
+- **User-owned handler bodies** (`instructions/<handler>/<handler>.rs`,
+  the files qedgen prints "already exists — skipping (user-owned)"):
+  this is the real attack surface. Hand-written Rust that may or
+  may not honor the spec.
+
+Most existing categories collapse on qedgen-codegen because the
+codegen mechanizes them by construction:
+
+- `missing_signer`, `missing_owner_check`, `account_type_confusion`,
+  `field_chain_missing_root_anchor`, `pda_canonical_bump`,
+  `pda_seed_collision`, `discriminator_collision`,
+  `init_without_is_initialized`: codegen mechanizes these from
+  the spec's `auth` / `accounts` / `pda` / lifecycle declarations.
+  Apply at the spec-aware probe level only; per-handler-body
+  re-check is rarely productive unless the user added hand-written
+  divergence.
+- `arbitrary_cpi`, `cpi_param_swap`, `account_not_reloaded_after_cpi`,
+  `transfer_hook_reentrancy`: codegen owns the CPI block (driven
+  by `transfers { }` or `call Interface.handler(...)`); user-owned
+  bodies typically don't write `invoke` / `invoke_signed`. If the
+  user *adds* hand-written CPI to a body, that's
+  `spec_impl_drift_user_owned` (below).
+
+Categories that **still apply** at the user-owned handler-body
+level: `arithmetic_overflow_wrapping`,
+`lifecycle_one_shot_violation`, `bounty_intent_drift`,
+`frontrunnable_no_slippage`, `oracle_staleness` — bodies write
+math, mutate state, accept params, and read external data, all
+of which can drift from the spec.
+
+Plus four qedgen-codegen-specific categories below.
+
+### `spec_impl_drift_user_owned` — HIGH (Quasar)
+User-owned handler body deviates from the spec's `effect` block.
+Three flavors:
+
+1. **Body does *more*:** writes a state field the spec doesn't
+   model. The Lean / Kani / proptest artifacts are blind to the
+   extra write — formal verification stays "green" while the
+   actual state machine has an unmodeled side-channel.
+2. **Body does *less*:** omits a field-write the spec declares.
+   Codegen, Lean, Kani all honor the spec's broken view; the
+   program runs with a stale field that callers trust.
+3. **Body does *differently*:** uses unchecked arithmetic where
+   spec says `+=` (checked), or saturating where spec says
+   wrapping. Semantics drift.
+
+Detection: cross-reference each spec `effect` field against the
+user-owned handler body's assignments. Look for `s.field = ...` /
+`*field += ...` / `state.field = ...` patterns that aren't in the
+spec's effect block (extra), or spec effects that have no
+corresponding body assignment (missing).
+
+Severity: HIGH because the formal-verification artifacts become
+stale silently — `lake build` green ≠ "program correct."
+
+### `generated_guard_bypass` — CRITICAL (Quasar)
+User-owned handler body skips the codegen-emitted
+`guards::<handler>(self, ...)?;` call (or comments it out, or
+narrows it to a subset). The codegen ships with the guard call
+at the top of the user-owned scaffold; an agent or human can
+drop it.
+
+- **Detect:** `grep -L "guards::<handler-name>"
+  programs/*/src/instructions/<handler>/<handler>.rs`. Every
+  user-owned body must invoke its corresponding generated guard.
+- Pair with `arbitrary_cpi` or `arithmetic_overflow_wrapping` →
+  the body now does whatever, with no spec-derived
+  authorization.
+
+### `stored_field_never_written` — CRITICAL (Quasar)
+The spec's state struct (or sum-type variant) declares a field
+that **no handler `effect` block writes**, but other handler
+guards or effect RHSes read it. Distinct from
+`init_config_field_unanchored` (which is *written from
+unauthenticated input*) — this field is *not written at all*,
+so reads always return the type's zero / default.
+
+- **Detect:** for each field F in `type State | ... of { F : T,
+  ... }`, walk every handler's `effect` block and check whether
+  any `F := ...` / `F += ...` assignment exists. If zero, but F
+  is read in any guard / effect RHS / property, flag as
+  CRIT/HIGH.
+- Severity: CRIT if the read controls authorization (an unwritten
+  `creator` / `authority` Pubkey defaults to `0x00` — anyone
+  signing as the zero address would pass, depending on guard
+  shape). HIGH if it's economic but not authorization. MEDIUM if
+  it's only event payload / read-only.
+- Surfaced by Quasar OOD eval — multisig's `create_vault` doesn't
+  write `vault.creator` despite the spec declaring it; downstream
+  guards read it.
+
+### `qed_hash_drift_or_forgery` — HIGH (Quasar)
+The `#[qed(verified, hash = "...", spec_hash = "...")]` proc-macro
+content-pin can drift (the body changed, the hash didn't update —
+`qedgen check --frozen` catches it) or be forged (a malicious
+rebuilder edits the hash to match a tampered body). Auditor must
+run `qedgen check --frozen --spec <spec>` before trusting the
+verification claim.
+
+- **Detect:** `qedgen check --frozen` on the spec — if the
+  proc-macro hash doesn't match the canonical token-string of
+  the body, drift. If the build pipeline doesn't include the
+  frozen check, forgery is undetectable to downstream consumers.
+- Severity: HIGH if forged (verification claim is a lie); MED if
+  drift (out-of-date but caught at the next CI run).
+
 ## Compose-with-what cookbook
 
 The bear-hug lives in chains. Walk this cookbook when a finding
@@ -530,6 +650,8 @@ exhaustive; use as a thinking primer, not a checklist.
 | field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, Cashio shape) |
 | init_config_field_unanchored | + | permissionless_state_writer init | = | frontrun legitimate init, bake attacker pubkey as stored "creator" / "authority" field, capture every fee/yield/withdraw routed through it (CRIT, DAMM-v2 OOD shape) |
 | bounty_intent_drift (mode flag accepted but unbranched) | + | permissionless caller | = | invoke the "forbidden" mode the bounty claimed it didn't allow, every time (HIGH→CRIT depending on what the mode controls) |
+| bounty_intent_drift (spec docstring claims behavior the spec body doesn't enforce) | + | qedgen-codegen mechanization | = | formal-verification artifacts (Lean / Kani / proptest) faithfully translate the broken spec — `lake build` green proves the broken behavior, **giving false confidence that the program is correct** (HIGH-CRIT depending on what the docstring claimed) |
+| spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
 
