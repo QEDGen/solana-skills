@@ -2654,7 +2654,19 @@ fn generate_guards(
                     surface.error_expr(&err_enum, err),
                 ));
             } else {
-                out.push_str(&format!("    debug_assert!({});\n", rust));
+                // Bare `requires` (no `else <ErrorCode>`). Pre-v2.14 emitted
+                // `debug_assert!`, which silently no-ops in release builds —
+                // every bare requires would skip its check in production.
+                // Emit a real runtime check with `ProgramError::Custom(0xFF)`
+                // (sentinel "predicate violated, no specific error code").
+                // The auditor's `bounty_intent_drift` predicate flags
+                // bare requires as P3 — users should still add an explicit
+                // `else <Error>` for diagnostic clarity, but the check now
+                // runs either way.
+                out.push_str(&format!(
+                    "    if !({}) {{ return Err(solana_program::program_error::ProgramError::Custom(0xFF).into()); }}\n",
+                    rust
+                ));
             }
         }
 

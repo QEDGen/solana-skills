@@ -135,9 +135,9 @@ pub fn remove_member<'info>(ctx: &mut RemoveMember<'info>) -> Result<(), Program
     // lifecycle: require status == Active
     if ctx.vault.status != Status::Active as u8 { return Err(ProgramError::from(crate::errors::MultisigError::InvalidLifecycle)); }
     // requires: s.member_count > s.threshold
-    debug_assert!(ctx.vault.member_count > ctx.vault.threshold);
+    if !(ctx.vault.member_count > ctx.vault.threshold) { return Err(solana_program::program_error::ProgramError::Custom(0xFF).into()); }
     // requires: s.approval_count = 0 ∧ s.rejection_count = 0
-    debug_assert!((ctx.vault.approval_count == 0) && (ctx.vault.rejection_count == 0));
+    if !((ctx.vault.approval_count == 0) && (ctx.vault.rejection_count == 0)) { return Err(solana_program::program_error::ProgramError::Custom(0xFF).into()); }
     Ok(())
 }
 
