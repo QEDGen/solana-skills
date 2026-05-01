@@ -27,6 +27,13 @@ struct Account {
     fee_credits: u128,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Active,
+    Draining,
+    Resetting,
+}
+
 prop_compose! {
     fn arb_Account()(active in 0u8..=255u8, capital in 0u128..=u128::MAX, reserved_pnl in 0u128..=u128::MAX, pnl in any::<i128>(), fee_credits in 0u128..=u128::MAX) -> Account {
         Account {
@@ -45,6 +52,7 @@ struct State {
     I: u128,
     F: u128,
     accounts: [Account; 1024],
+    status: Status,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -54,11 +62,13 @@ fn arb_state() -> impl Strategy<Value = State> {
         0u128..=10000000000000000u128,
         0u128..=10000000000000000u128,
         prop::collection::vec(arb_Account(), 1024..=1024).prop_map(|v| v.try_into().ok().unwrap()),
-    ).prop_map(|(V, I, F, accounts)| State {
+        prop_oneof![Just(Status::Active), Just(Status::Draining), Just(Status::Resetting)],
+    ).prop_map(|(V, I, F, accounts, status)| State {
         V,
         I,
         F,
         accounts,
+        status,
     })
 }
 
@@ -69,11 +79,13 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
         prop_oneof![0u128..=3u128, (10000000000000000 - 3)..=10000000000000000u128],
         prop_oneof![0u128..=3u128, (10000000000000000 - 3)..=10000000000000000u128],
         prop::collection::vec(arb_Account(), 1024..=1024).prop_map(|v| v.try_into().ok().unwrap()),
-    ).prop_map(|(V, I, F, accounts)| State {
+        prop_oneof![Just(Status::Active), Just(Status::Draining), Just(Status::Resetting)],
+    ).prop_map(|(V, I, F, accounts, status)| State {
         V,
         I,
         F,
         accounts,
+        status,
     })
 }
 
@@ -102,7 +114,11 @@ fn add_user(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 1;
+    s.status = Status::Active;
     true
 }
 
@@ -110,7 +126,11 @@ fn add_lp(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 1;
+    s.status = Status::Active;
     true
 }
 
@@ -118,7 +138,11 @@ fn reclaim_empty_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital == 0 && s.accounts[(i) as usize].reserved_pnl == 0 && s.accounts[(i) as usize].fee_credits == 0) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -126,9 +150,13 @@ fn close_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V >= s.accounts[(i) as usize].capital) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_sub(accounts[i].capital);
     s.accounts[i].capital = 0;
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -136,8 +164,12 @@ fn deposit(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V.wrapping_add(amount) <= 10000000000000000) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_add(amount);
     s.accounts[i].capital = s.accounts[i].capital.wrapping_add(amount);
+    s.status = Status::Active;
     true
 }
 
@@ -145,8 +177,12 @@ fn withdraw(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital >= amount && ((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((amount) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_sub(amount);
     s.accounts[i].capital = s.accounts[i].capital.wrapping_sub(amount);
+    s.status = Status::Active;
     true
 }
 
@@ -154,8 +190,12 @@ fn top_up_insurance(s: &mut State, amount: u128) -> bool {
     if !(s.V.wrapping_add(amount) <= 10000000000000000) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_add(amount);
     s.I = s.I.wrapping_add(amount);
+    s.status = Status::Active;
     true
 }
 
@@ -163,9 +203,13 @@ fn deposit_fee_credits(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V.wrapping_add(amount) <= 10000000000000000) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_add(amount);
     s.F = s.F.wrapping_add(amount);
     s.accounts[i].fee_credits = s.accounts[i].fee_credits.wrapping_add(amount);
+    s.status = Status::Active;
     true
 }
 
@@ -173,8 +217,12 @@ fn convert_released_pnl(s: &mut State, i: usize, x: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].reserved_pnl >= x && s.V >= x) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.V = s.V.wrapping_sub(x);
     s.accounts[i].reserved_pnl = s.accounts[i].reserved_pnl.wrapping_sub(x);
+    s.status = Status::Active;
     true
 }
 
@@ -182,6 +230,10 @@ fn execute_trade(s: &mut State, a: usize, b: usize, size_q: i128, exec_price: u6
     if !(s.accounts[(a) as usize].active == 1 && s.accounts[(b) as usize].active == 1 && a != b && mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -189,6 +241,10 @@ fn liquidate_case_0(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && ((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128) && false) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -196,7 +252,11 @@ fn liquidate_case_1(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128)) && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl.wrapping_add(((s.I) as i128)) >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -204,6 +264,10 @@ fn liquidate_otherwise(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128).wrapping_add(s.accounts[(i) as usize].pnl) >= ((0) as i128)) && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl.wrapping_add(((s.I) as i128)) >= ((0) as i128)) && false) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -211,18 +275,34 @@ fn settle_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
 fn trigger_adl(s: &mut State) -> bool {
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Draining;
     true
 }
 
 fn complete_drain(s: &mut State) -> bool {
+    if s.status != Status::Draining {
+        return false;
+    }
+    s.status = Status::Resetting;
     true
 }
 
 fn reset(s: &mut State) -> bool {
+    if s.status != Status::Resetting {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 

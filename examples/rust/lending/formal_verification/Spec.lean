@@ -31,8 +31,28 @@ def depositTransition (s : PoolState) (signer : Pubkey) (amount : Nat) : Option 
     some { s with total_deposits := s.total_deposits + amount, status := .Active }
   else none
 
-/-- deposit transfer: depositor_ta → pool_vault amount amount authority depositor. -/
-theorem deposit_transfer_correct : True := trivial
+/-- deposit transfer envelope: depositor_ta → pool_vault amount amount authority depositor.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_deposit_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
+
+theorem deposit_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_deposit_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_deposit_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 inductive PoolOperation where
   | init_pool (rate : Nat)
@@ -72,14 +92,74 @@ def liquidateTransition (s : LoanState) (signer : Pubkey) : Option LoanState :=
     some { s with amount := 0, status := .Liquidated }
   else none
 
-/-- borrow transfer: pool_vault → borrower_ta amount amount authority pool. -/
-theorem borrow_transfer_correct : True := trivial
+/-- borrow transfer envelope: pool_vault → borrower_ta amount amount authority pool.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_borrow_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
 
-/-- repay transfer: borrower_ta → pool_vault amount amount authority borrower. -/
-theorem repay_transfer_correct : True := trivial
+theorem borrow_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_borrow_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_borrow_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
-/-- liquidate transfer: pool_vault → liquidator_ta amount amount authority pool. -/
-theorem liquidate_transfer_correct : True := trivial
+/-- repay transfer envelope: borrower_ta → pool_vault amount amount authority borrower.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_repay_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
+
+theorem repay_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_repay_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_repay_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
+
+/-- liquidate transfer envelope: pool_vault → liquidator_ta amount amount authority pool.
+    Verifies CPI shape (program ID, account list, discriminator).
+    Amount serialization and SPL Token execution are SDK/runtime
+    trust per VERIFICATION_SCOPE.md. -/
+def build_liquidate_transfer (from_pk to_pk authority_pk : Pubkey) : CpiInstruction :=
+  { programId := TOKEN_PROGRAM_ID
+  , accounts :=
+      [ ⟨from_pk, false, true⟩
+      , ⟨to_pk, false, true⟩
+      , ⟨authority_pk, true, false⟩
+      ]
+  , data := DISC_TRANSFER }
+
+theorem liquidate_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
+    let cpi := build_liquidate_transfer from_pk to_pk authority_pk
+    targetsProgram cpi TOKEN_PROGRAM_ID ∧
+    accountAt cpi 0 from_pk false true ∧
+    accountAt cpi 1 to_pk false true ∧
+    accountAt cpi 2 authority_pk true false ∧
+    hasDiscriminator cpi DISC_TRANSFER := by
+  unfold build_liquidate_transfer targetsProgram accountAt hasDiscriminator
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 inductive LoanOperation where
   | borrow (amount : Nat) (collateral : Nat)
@@ -100,27 +180,15 @@ def pool_solvency (s : PoolState) : Prop := s.total_deposits ≥ s.total_borrows
 theorem pool_solvency_preserved_by_init_pool (s s' : PoolState) (signer : Pubkey) (rate : Nat)
     (h_inv : pool_solvency s) (h : init_poolTransition s signer rate = some s') :
     pool_solvency s' := by
-  unfold init_poolTransition at h
-  -- init_pool sets total_deposits := 0 and total_borrows := 0, so the
-  -- post-state satisfies `0 ≥ 0` regardless of `h_inv` on the pre-state.
-  split at h
-  · injection h with heq
-    rw [← heq]
-    unfold pool_solvency
-    simp
+  unfold init_poolTransition at h; split at h
+  · next hg => cases h; unfold pool_solvency at h_inv ⊢; dsimp; omega
   · contradiction
 
 theorem pool_solvency_preserved_by_deposit (s s' : PoolState) (signer : Pubkey) (amount : Nat)
     (h_inv : pool_solvency s) (h : depositTransition s signer amount = some s') :
     pool_solvency s' := by
-  unfold depositTransition at h
-  -- deposit only adds to total_deposits, leaves total_borrows unchanged.
-  -- s'.total_deposits = s.total_deposits + amount ≥ s.total_deposits ≥ s.total_borrows = s'.total_borrows.
-  split at h
-  · injection h with heq
-    rw [← heq]
-    unfold pool_solvency at h_inv ⊢
-    exact Nat.le_trans h_inv (Nat.le_add_right _ _)
+  unfold depositTransition at h; split at h
+  · next hg => cases h; unfold pool_solvency at h_inv ⊢; dsimp; omega
   · contradiction
 
 /-- pool_solvency is preserved by every operation. Auto-proven by case split. -/

@@ -32,12 +32,20 @@ struct Account {
     fee_credits: u128,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, kani::Arbitrary)]
+enum Status {
+    Active,
+    Draining,
+    Resetting,
+}
+
 #[derive(Clone, Copy)]
 struct State {
     V: u128,
     I: u128,
     F: u128,
     accounts: [Account; 1024],
+    status: Status,
 }
 
 // ============================================================================
@@ -71,7 +79,11 @@ fn add_user(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 1;
+    s.status = Status::Active;
     true
 }
 
@@ -79,7 +91,11 @@ fn add_lp(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 1;
+    s.status = Status::Active;
     true
 }
 
@@ -87,12 +103,19 @@ fn reclaim_empty_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital == 0 && s.accounts[(i) as usize].reserved_pnl == 0 && s.accounts[(i) as usize].fee_credits == 0) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
 fn close_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V >= s.accounts[(i) as usize].capital) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_sub(accounts[i].capital) {
@@ -101,11 +124,15 @@ fn close_account(s: &mut State, i: usize) -> bool {
     }
     s.accounts[i].capital = 0;
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
 fn deposit(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V + amount <= 10000000000000000) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_add(amount) {
@@ -116,11 +143,15 @@ fn deposit(s: &mut State, i: usize, amount: u128) -> bool {
         Some(__v) => s.accounts[i].capital = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
 fn withdraw(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital >= amount && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((amount) as i128)) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_sub(amount) {
@@ -131,11 +162,15 @@ fn withdraw(s: &mut State, i: usize, amount: u128) -> bool {
         Some(__v) => s.accounts[i].capital = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
 fn top_up_insurance(s: &mut State, amount: u128) -> bool {
     if !(s.V + amount <= 10000000000000000) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_add(amount) {
@@ -146,11 +181,15 @@ fn top_up_insurance(s: &mut State, amount: u128) -> bool {
         Some(__v) => s.I = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
 fn deposit_fee_credits(s: &mut State, i: usize, amount: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.V + amount <= 10000000000000000) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_add(amount) {
@@ -165,11 +204,15 @@ fn deposit_fee_credits(s: &mut State, i: usize, amount: u128) -> bool {
         Some(__v) => s.accounts[i].fee_credits = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
 fn convert_released_pnl(s: &mut State, i: usize, x: u128) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].reserved_pnl >= x && s.V >= x) {
+        return false;
+    }
+    if s.status != Status::Active {
         return false;
     }
     match s.V.checked_sub(x) {
@@ -180,6 +223,7 @@ fn convert_released_pnl(s: &mut State, i: usize, x: u128) -> bool {
         Some(__v) => s.accounts[i].reserved_pnl = __v,
         None => return false,
     }
+    s.status = Status::Active;
     true
 }
 
@@ -187,6 +231,10 @@ fn execute_trade(s: &mut State, a: usize, b: usize, size_q: i128, exec_price: u6
     if !(s.accounts[(a) as usize].active == 1 && s.accounts[(b) as usize].active == 1 && a != b && mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -194,6 +242,10 @@ fn liquidate_case_0(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128) && false) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -201,7 +253,11 @@ fn liquidate_case_1(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128)) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
     s.accounts[i].active = 0;
+    s.status = Status::Active;
     true
 }
 
@@ -209,6 +265,10 @@ fn liquidate_otherwise(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128)) && false) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -216,18 +276,34 @@ fn settle_account(s: &mut State, i: usize) -> bool {
     if !(s.accounts[(i) as usize].active == 1) {
         return false;
     }
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
 fn trigger_adl(s: &mut State) -> bool {
+    if s.status != Status::Active {
+        return false;
+    }
+    s.status = Status::Draining;
     true
 }
 
 fn complete_drain(s: &mut State) -> bool {
+    if s.status != Status::Draining {
+        return false;
+    }
+    s.status = Status::Resetting;
     true
 }
 
 fn reset(s: &mut State) -> bool {
+    if s.status != Status::Resetting {
+        return false;
+    }
+    s.status = Status::Active;
     true
 }
 
@@ -244,7 +320,9 @@ fn verify_add_user_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)));
     assert!(!add_user(&mut s, i),
@@ -260,7 +338,9 @@ fn verify_add_lp_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 0 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)));
     assert!(!add_lp(&mut s, i),
@@ -276,7 +356,9 @@ fn verify_reclaim_empty_account_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital == 0 && s.accounts[(i) as usize].reserved_pnl == 0 && s.accounts[(i) as usize].fee_credits == 0));
     assert!(!reclaim_empty_account(&mut s, i),
@@ -292,7 +374,9 @@ fn verify_close_account_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.V >= s.accounts[(i) as usize].capital));
     assert!(!close_account(&mut s, i),
@@ -308,7 +392,9 @@ fn verify_deposit_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.V + amount <= 10000000000000000));
@@ -325,7 +411,9 @@ fn verify_withdraw_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].capital >= amount && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((amount) as i128)));
@@ -342,7 +430,9 @@ fn verify_top_up_insurance_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let amount: u128 = kani::any();
     kani::assume(!(s.V + amount <= 10000000000000000));
     assert!(!top_up_insurance(&mut s, amount),
@@ -358,7 +448,9 @@ fn verify_deposit_fee_credits_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.V + amount <= 10000000000000000));
@@ -375,7 +467,9 @@ fn verify_convert_released_pnl_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let x: u128 = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && s.accounts[(i) as usize].reserved_pnl >= x && s.V >= x));
@@ -392,7 +486,9 @@ fn verify_execute_trade_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let a: usize = kani::any();
     let b: usize = kani::any();
     let size_q: i128 = kani::any();
@@ -411,7 +507,9 @@ fn verify_liquidate_case_0_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128) && false));
     assert!(!liquidate_case_0(&mut s, i),
@@ -427,7 +525,9 @@ fn verify_liquidate_case_1_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && ((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128)));
     assert!(!liquidate_case_1(&mut s, i),
@@ -443,7 +543,9 @@ fn verify_liquidate_otherwise_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1 && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && !(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128)) && false));
     assert!(!liquidate_otherwise(&mut s, i),
@@ -459,7 +561,9 @@ fn verify_settle_account_rejects_invalid() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     kani::assume(!(s.accounts[(i) as usize].active == 1));
     assert!(!settle_account(&mut s, i),
@@ -479,7 +583,9 @@ fn verify_add_user_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -499,7 +605,9 @@ fn verify_add_lp_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -519,7 +627,9 @@ fn verify_reclaim_empty_account_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -539,7 +649,9 @@ fn verify_close_account_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -559,7 +671,9 @@ fn verify_deposit_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -580,7 +694,9 @@ fn verify_withdraw_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -601,7 +717,9 @@ fn verify_top_up_insurance_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -621,7 +739,9 @@ fn verify_deposit_fee_credits_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -642,7 +762,9 @@ fn verify_convert_released_pnl_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -663,7 +785,9 @@ fn verify_execute_trade_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -686,7 +810,9 @@ fn verify_liquidate_case_0_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -706,7 +832,9 @@ fn verify_liquidate_case_1_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -726,7 +854,9 @@ fn verify_liquidate_otherwise_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -746,7 +876,9 @@ fn verify_settle_account_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -766,7 +898,9 @@ fn verify_trigger_adl_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -785,7 +919,9 @@ fn verify_complete_drain_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Draining);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -804,7 +940,9 @@ fn verify_reset_preserves_conservation() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Resetting);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -823,7 +961,9 @@ fn verify_deposit_preserves_vault_bounded() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -844,7 +984,9 @@ fn verify_top_up_insurance_preserves_vault_bounded() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -864,7 +1006,9 @@ fn verify_deposit_fee_credits_preserves_vault_bounded() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -885,7 +1029,9 @@ fn verify_add_user_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -905,7 +1051,9 @@ fn verify_add_lp_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -925,7 +1073,9 @@ fn verify_reclaim_empty_account_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -945,7 +1095,9 @@ fn verify_close_account_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -965,7 +1117,9 @@ fn verify_deposit_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -986,7 +1140,9 @@ fn verify_withdraw_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1007,7 +1163,9 @@ fn verify_top_up_insurance_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1027,7 +1185,9 @@ fn verify_deposit_fee_credits_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1048,7 +1208,9 @@ fn verify_convert_released_pnl_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1069,7 +1231,9 @@ fn verify_execute_trade_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1092,7 +1256,9 @@ fn verify_liquidate_case_0_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1112,7 +1278,9 @@ fn verify_liquidate_case_1_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1132,7 +1300,9 @@ fn verify_liquidate_otherwise_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1152,7 +1322,9 @@ fn verify_settle_account_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1172,7 +1344,9 @@ fn verify_trigger_adl_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1191,7 +1365,9 @@ fn verify_complete_drain_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Draining);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1210,7 +1386,9 @@ fn verify_reset_preserves_account_solvent() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Resetting);
     kani::assume(conservation(&s));
     kani::assume(vault_bounded(&s));
     kani::assume(account_solvent(&s));
@@ -1236,7 +1414,9 @@ fn verify_add_user_effect_accounts_i_active() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1260,7 +1440,9 @@ fn verify_add_lp_effect_accounts_i_active() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1284,7 +1466,9 @@ fn verify_reclaim_empty_account_effect_accounts_i_active() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1308,7 +1492,9 @@ fn verify_close_account_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1331,7 +1517,9 @@ fn verify_close_account_effect_accounts_i_capital() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1354,7 +1542,9 @@ fn verify_close_account_effect_accounts_i_active() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1377,7 +1567,9 @@ fn verify_deposit_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1401,7 +1593,9 @@ fn verify_deposit_effect_accounts_i_capital() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1425,7 +1619,9 @@ fn verify_withdraw_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1449,7 +1645,9 @@ fn verify_withdraw_effect_accounts_i_capital() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1473,7 +1671,9 @@ fn verify_top_up_insurance_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let amount: u128 = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1495,7 +1695,9 @@ fn verify_top_up_insurance_effect_I() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let amount: u128 = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1517,7 +1719,9 @@ fn verify_deposit_fee_credits_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1540,7 +1744,9 @@ fn verify_deposit_fee_credits_effect_F() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1563,7 +1769,9 @@ fn verify_deposit_fee_credits_effect_accounts_i_fee_credits() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     let pre_V = s.V;
@@ -1586,7 +1794,9 @@ fn verify_convert_released_pnl_effect_V() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let x: u128 = kani::any();
     let pre_V = s.V;
@@ -1610,7 +1820,9 @@ fn verify_convert_released_pnl_effect_accounts_i_reserved_pnl() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let x: u128 = kani::any();
     let pre_V = s.V;
@@ -1634,7 +1846,9 @@ fn verify_liquidate_case_1_effect_accounts_i_active() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let pre_V = s.V;
     let pre_I = s.I;
@@ -1662,6 +1876,7 @@ fn cover_happy_path() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
     let i_0: usize = kani::any();
     if add_user(&mut s, i_0) {
@@ -1687,6 +1902,7 @@ fn cover_trading() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
     let i_0: usize = kani::any();
     if add_user(&mut s, i_0) {
@@ -1718,7 +1934,9 @@ fn verify_liveness_drain_completes() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Draining);
     for _ in 0..2 {
         let op: u8 = kani::any();
         match op {
@@ -1731,7 +1949,7 @@ fn verify_liveness_drain_completes() {
             _ => {}
         }
     }
-    // Target: from Draining to Active within 2 steps
+    kani::cover!(s.status == Status::Active, "drain_completes reaches Active within 2 steps");
 }
 
 // ============================================================================
@@ -1747,7 +1965,9 @@ fn verify_deposit_no_overflow() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     deposit(&mut s, i, amount);  // Kani detects overflow on += internally
@@ -1762,7 +1982,9 @@ fn verify_top_up_insurance_no_overflow() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let amount: u128 = kani::any();
     top_up_insurance(&mut s, amount);  // Kani detects overflow on += internally
 }
@@ -1776,7 +1998,9 @@ fn verify_deposit_fee_credits_no_overflow() {
         I: kani::any(),
         F: kani::any(),
         accounts: kani::any(),
+        status: kani::any(),
     };
+    kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
     deposit_fee_credits(&mut s, i, amount);  // Kani detects overflow on += internally

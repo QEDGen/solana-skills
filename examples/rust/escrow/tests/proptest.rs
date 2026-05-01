@@ -13,10 +13,18 @@
 
 use proptest::prelude::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Status {
+    Uninitialized,
+    Open,
+    Closed,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct State {
     initializer_amount: u64,
     taker_amount: u64,
+    status: Status,
 }
 
 /// Proptest strategy for generating arbitrary State values.
@@ -24,9 +32,11 @@ fn arb_state() -> impl Strategy<Value = State> {
     (
         0u64..=u64::MAX,
         0u64..=u64::MAX,
-    ).prop_map(|(initializer_amount, taker_amount)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
+    ).prop_map(|(initializer_amount, taker_amount, status)| State {
         initializer_amount,
         taker_amount,
+        status,
     })
 }
 
@@ -35,9 +45,11 @@ fn arb_boundary_state() -> impl Strategy<Value = State> {
     (
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
         prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-    ).prop_map(|(initializer_amount, taker_amount)| State {
+        prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
+    ).prop_map(|(initializer_amount, taker_amount, status)| State {
         initializer_amount,
         taker_amount,
+        status,
     })
 }
 
@@ -45,16 +57,28 @@ fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
     if !((deposit_amount > 0) && (receive_amount > 0)) {
         return false;
     }
+    if s.status != Status::Uninitialized {
+        return false;
+    }
     s.initializer_amount = deposit_amount;
     s.taker_amount = receive_amount;
+    s.status = Status::Open;
     true
 }
 
 fn exchange(s: &mut State) -> bool {
+    if s.status != Status::Open {
+        return false;
+    }
+    s.status = Status::Closed;
     true
 }
 
 fn cancel(s: &mut State) -> bool {
+    if s.status != Status::Open {
+        return false;
+    }
+    s.status = Status::Closed;
     true
 }
 
