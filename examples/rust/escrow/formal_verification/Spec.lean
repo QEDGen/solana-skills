@@ -130,8 +130,13 @@ theorem cancel_transfer_correct (from_pk to_pk authority_pk : Pubkey) :
   unfold build_cancel_transfer targetsProgram accountAt hasDiscriminator
   exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
-/-- Invariant: conservation. -/
-theorem conservation : True := trivial
+-- INVARIANT OBLIGATION (declared, no predicate body): conservation
+--   description: total tokens preserved across initialize, exchange, cancel
+-- The spec declared this name but didn't supply a predicate body
+-- (`invariant <name> : <expr>`). The codegen has no goal to lower —
+-- pre-v2.14 emitted `theorem <name> : True := trivial`, which
+-- was tautological. To verify this invariant, give it a body in
+-- the spec.
 
 inductive Operation where
   | «initialize» (deposit_amount : Nat) (receive_amount : Nat)

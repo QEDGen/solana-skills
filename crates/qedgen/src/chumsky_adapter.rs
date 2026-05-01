@@ -2144,11 +2144,26 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 });
             }
             TopItem::Invariant(i) => {
-                let desc = match &i.body {
-                    a::InvariantBody::Expr(e) => expr_to_lean(&e.node, Ctx::Guard, consts, &env),
-                    a::InvariantBody::Description(s) => s.clone(),
+                let parsed = match &i.body {
+                    a::InvariantBody::Expr(e) => {
+                        let lean = expr_to_lean(&e.node, Ctx::Guard, consts, &env);
+                        let rust =
+                            crate::rust_codegen_util::translate_property_to_rust(&lean, false);
+                        crate::check::ParsedInvariant {
+                            name: i.name.clone(),
+                            doc: String::new(),
+                            lean_expr: Some(lean),
+                            rust_expr: Some(rust),
+                        }
+                    }
+                    a::InvariantBody::Description(s) => crate::check::ParsedInvariant {
+                        name: i.name.clone(),
+                        doc: s.clone(),
+                        lean_expr: None,
+                        rust_expr: None,
+                    },
                 };
-                out.invariants.push((i.name.clone(), desc));
+                out.invariants.push(parsed);
             }
             TopItem::Pda(p) => {
                 let seeds: Vec<String> = p
