@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use syn::ItemFn;
@@ -37,49 +36,102 @@ fn content_hash(func: &ItemFn) -> String {
     spec_hash::body_hash_for_fn(func)
 }
 
-/// Extract `hash = "..."` value from a `#[qed(verified, hash = "...")]` attribute.
-fn extract_hash_from_attr(attr: &syn::Attribute) -> Option<Option<String>> {
-    // Check if this is a `qed` attribute
+/// All key=value fields that may appear inside `#[qed(verified, ...)]`.
+/// Used by `--update-hashes` to know which hash legs to refresh.
+#[derive(Debug, Default, Clone)]
+struct VerifiedAttr {
+    pub spec: Option<String>,
+    pub handler: Option<String>,
+    pub hash: Option<String>,
+    pub spec_hash: Option<String>,
+    pub accounts: Option<String>,
+    pub accounts_file: Option<String>,
+    pub accounts_hash: Option<String>,
+}
+
+/// Extract every `key = "value"` pair inside a `#[qed(verified, ...)]`
+/// attribute. Returns `None` when the attribute is not `qed(verified,
+/// ...)` shaped. Returns `Some(VerifiedAttr::default())` when the
+/// attribute is `#[qed(verified)]` with no key/value pairs.
+fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
     let path = attr.path();
     if !path.is_ident("qed") {
         return None;
     }
-
-    // Parse the token stream inside the parens
     let tokens = match &attr.meta {
         syn::Meta::List(list) => &list.tokens,
         _ => return None,
     };
-
-    let token_vec: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
-
-    // Check first ident is "verified"
-    match token_vec.first() {
-        Some(proc_macro2::TokenTree::Ident(ident)) if ident == "verified" => {}
+    let tv: Vec<proc_macro2::TokenTree> = tokens.clone().into_iter().collect();
+    match tv.first() {
+        Some(proc_macro2::TokenTree::Ident(i)) if i == "verified" => {}
         _ => return None,
     }
 
-    // Find hash = "..." in the remaining tokens
+    let mut out = VerifiedAttr::default();
     let mut i = 0;
-    while i < token_vec.len() {
-        if let proc_macro2::TokenTree::Ident(ref ident) = token_vec[i] {
-            if ident == "hash" && i + 2 < token_vec.len() {
-                if let proc_macro2::TokenTree::Punct(ref p) = token_vec[i + 1] {
-                    if p.as_char() == '=' {
-                        if let proc_macro2::TokenTree::Literal(ref lit) = token_vec[i + 2] {
-                            let lit_str = lit.to_string();
-                            let hash = lit_str.trim_matches('"').to_string();
-                            return Some(Some(hash));
+    while i < tv.len() {
+        if let proc_macro2::TokenTree::Ident(id) = &tv[i] {
+            let name = id.to_string();
+            if matches!(
+                name.as_str(),
+                "spec"
+                    | "handler"
+                    | "hash"
+                    | "spec_hash"
+                    | "accounts"
+                    | "accounts_file"
+                    | "accounts_hash"
+            ) && i + 2 < tv.len()
+            {
+                let eq =
+                    matches!(&tv[i + 1], proc_macro2::TokenTree::Punct(p) if p.as_char() == '=');
+                if eq {
+                    if let proc_macro2::TokenTree::Literal(lit) = &tv[i + 2] {
+                        let v = lit.to_string().trim_matches('"').to_string();
+                        match name.as_str() {
+                            "spec" => out.spec = Some(v),
+                            "handler" => out.handler = Some(v),
+                            "hash" => out.hash = Some(v),
+                            "spec_hash" => out.spec_hash = Some(v),
+                            "accounts" => out.accounts = Some(v),
+                            "accounts_file" => out.accounts_file = Some(v),
+                            "accounts_hash" => out.accounts_hash = Some(v),
+                            _ => unreachable!(),
                         }
+                        i += 3;
+                        continue;
                     }
                 }
             }
         }
         i += 1;
     }
+    Some(out)
+}
 
-    // Found #[qed(verified)] but no hash
-    Some(None)
+/// Backward-compat wrapper used by `scan_file`. Returns `Some(Option)`
+/// matching the pre-v2.15 signature: outer Some = "this is a
+/// `#[qed(verified)]` attribute", inner Option = the body `hash` value.
+fn extract_hash_from_attr(attr: &syn::Attribute) -> Option<Option<String>> {
+    parse_verified_attr(attr).map(|a| a.hash)
+}
+
+/// Walk parents of `start` looking for the named file. Returns the
+/// absolute path of the first hit. Used by `--update-hashes` to resolve
+/// `spec = "X.qedspec"` relative paths the same way the proc-macro
+/// resolves them via `CARGO_MANIFEST_DIR` — the macro's resolution dir
+/// is whichever ancestor the spec lives in, matching this walk.
+fn find_relative_file(start: &Path, rel: &str) -> Option<PathBuf> {
+    let mut dir = start.parent();
+    while let Some(d) = dir {
+        let candidate = d.join(rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// Collected entry from scanning: function name, expected hash, parsed function.
@@ -297,7 +349,33 @@ fn collect_all_fns_from_items(items: &[syn::Item], map: &mut HashMap<String, Ite
     }
 }
 
-/// Scan a file for transitive drift: verified functions whose callees have changed.
+/// Scan a file for transitive drift: verified functions whose verified
+/// callees have themselves drifted directly. (GH issue #28.)
+///
+/// The pre-v2.15 implementation built a transitive hash from `(body +
+/// sorted(callee_name:callee_hash))` and compared it against the stored
+/// `hash = "..."` — which seals only the function body, not the
+/// transitive closure. The two hash semantics never match when any
+/// callee exists, producing a false drift on every function with
+/// non-trivial body. Without per-callee stored hashes (a new attribute
+/// shape that does not exist today), the only sound transitive signal
+/// available is "one of my verified callees is itself drifted."
+///
+/// Algorithm:
+/// 1. Gather every `#[qed(verified)]` function in the file with its
+///    expected hash.
+/// 2. Compute each function's current direct hash; a function is
+///    "directly drifted" when current ≠ expected.
+/// 3. For every function whose direct hash IS OK, walk its callees;
+///    surface a transitive entry naming the verified callees that are
+///    themselves directly drifted. Non-verified callees can't drift —
+///    they have no anchor.
+///
+/// Net effect: `--deep` becomes a directly-drifted aggregator showing
+/// the upward fan-out of a primitive drift event. No false positives;
+/// trade-off is non-verified callee changes do not surface (matches
+/// the existing v2.14 test `deep_no_false_positive_when_callee_unchanged`'s
+/// stated semantics).
 fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -308,63 +386,40 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let mut scanned = Vec::new();
     collect_from_items(&syntax.items, &mut scanned);
 
+    // Step 1: which `#[qed(verified)]` functions have drifted directly?
+    let mut directly_drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (fn_name, expected_hash, func) in &scanned {
+        let Some(expected) = expected_hash else {
+            continue;
+        };
+        let actual = content_hash(func);
+        if expected != &actual {
+            directly_drifted.insert(fn_name.clone());
+        }
+    }
+
+    // Step 2: for each function whose direct hash IS OK, find verified
+    // callees that drifted directly. Those callees are the transitive
+    // signal.
     let mut results = Vec::new();
     for (fn_name, expected_hash, func) in &scanned {
-        let expected_hash = match expected_hash {
-            Some(h) => h,
-            None => continue, // Skip functions without a hash
-        };
-
-        // Check if the direct hash is OK first
-        let direct_hash = content_hash(func);
-        if &direct_hash != expected_hash {
-            continue; // Direct drift is already caught by the normal check
-        }
-
-        // Function itself is OK — check if any of its callees changed
-        let callees = extract_callees(func);
-        let mut changed = Vec::new();
-        for callee_name in &callees {
-            if let Some(callee_fn) = all_fns.get(callee_name) {
-                // Compute callee hash — if it differs from what it was when
-                // the verified function was last stamped, the callee changed.
-                // Since we don't store per-callee hashes, we detect change by
-                // building a combined hash and comparing to the stored hash.
-                // Instead, just flag callees that are themselves drifted or modified.
-                // Simpler approach: any callee not marked #[qed(verified)] with OK
-                // status is potentially changed. But that's too noisy.
-                // Best approach: compute a transitive hash and compare.
-                let _ = callee_fn; // Used below
-                changed.push(callee_name.clone());
-            }
-        }
-
-        if changed.is_empty() {
+        let Some(expected) = expected_hash else {
             continue;
+        };
+        let actual = content_hash(func);
+        if expected != &actual {
+            continue; // direct drift handled by check(); don't double-report
         }
 
-        // Compute transitive hash: hash(fn_body + sorted(callee:hash))
-        let mut combined = content_hash(func);
-        let mut callee_hashes: Vec<String> = Vec::new();
-        for callee_name in &changed {
-            if let Some(callee_fn) = all_fns.get(callee_name) {
-                callee_hashes.push(format!("{}:{}", callee_name, content_hash(callee_fn)));
-            }
-        }
-        callee_hashes.sort();
-        for ch in &callee_hashes {
-            combined.push_str(ch);
-        }
+        let callees = extract_callees(func);
+        let mut changed: Vec<String> = callees
+            .into_iter()
+            .filter(|name| all_fns.contains_key(name) && directly_drifted.contains(name))
+            .collect();
+        changed.sort();
+        changed.dedup();
 
-        // Hash the combined string
-        let mut hasher = Sha256::new();
-        hasher.update(combined.as_bytes());
-        let transitive = format!("{:x}", hasher.finalize());
-        let transitive_hash = &transitive[..16];
-
-        // If the transitive hash differs from the stored (direct) hash,
-        // then callees have changed
-        if transitive_hash != expected_hash {
+        if !changed.is_empty() {
             results.push(TransitiveDriftEntry {
                 file: path.to_path_buf(),
                 fn_name: fn_name.clone(),
@@ -475,40 +530,70 @@ pub fn print_report(entries: &[VerifiedEntry]) {
     );
 }
 
-/// Update `#[qed(verified, hash = "...")]` in source files with computed hashes.
+/// Update `#[qed(verified, ...)]` in source files with computed hashes.
+///
+/// v2.15 (GH issue #27): refreshes all three hash legs — `hash`,
+/// `spec_hash`, and `accounts_hash` — not just `hash`. Pre-v2.15 only
+/// `hash` was updated; users who ran `--update-hashes` expecting drift
+/// to be fully fixed found the proc-macro still rejecting their build
+/// with a stale `spec_hash` or `accounts_hash`. This walks every
+/// `#[qed(verified, ...)]` attribute, recomputes whichever hash legs
+/// are present, and replaces stale values in-place.
+///
+/// Resolution: `spec` and `accounts_file` paths are resolved by walking
+/// parent directories from the source file (matching the proc-macro's
+/// `CARGO_MANIFEST_DIR`-relative behavior). When the referenced file
+/// can't be located, that hash leg is skipped with a warning rather
+/// than failing — users may run `--update-hashes` against a partial
+/// tree.
 pub fn update(input: &Path) -> Result<usize> {
     let files = collect_rs_files(input)?;
     let mut updated = 0;
 
     for file in &files {
-        let entries = match scan_file(file) {
-            Ok(e) => e,
+        let source = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let syntax = match syn::parse_file(&source) {
+            Ok(s) => s,
             Err(_) => continue,
         };
 
-        if entries.is_empty() {
+        let mut scanned = Vec::new();
+        collect_from_items(&syntax.items, &mut scanned);
+
+        // Re-extract the full attribute alongside each scanned function.
+        // The pre-v2.15 path stored only the body hash; we now need the
+        // full key/value set to know which legs to refresh.
+        let attrs = collect_verified_attrs(&syntax.items);
+
+        if scanned.is_empty() {
             continue;
         }
 
-        let mut source = std::fs::read_to_string(file)?;
+        let mut new_source = source.clone();
         let mut changed = false;
 
-        for entry in &entries {
-            match &entry.status {
-                DriftStatus::Ok => {} // already correct
-                DriftStatus::Drifted { expected, actual } => {
-                    // Replace the old hash with the new one
+        for ((_fn_name, _expected_body, func), attr) in scanned.iter().zip(attrs.iter()) {
+            // Body hash (hash = "..."): same logic as before, plus the
+            // `#[qed(verified)]` → stamped form.
+            let actual_body = content_hash(func);
+            match &attr.hash {
+                Some(expected) if expected != &actual_body => {
                     let old = format!("hash = \"{}\"", expected);
-                    let new = format!("hash = \"{}\"", actual);
-                    if source.contains(&old) {
-                        source = source.replacen(&old, &new, 1);
+                    let new = format!("hash = \"{}\"", actual_body);
+                    if new_source.contains(&old) {
+                        new_source = new_source.replacen(&old, &new, 1);
                         changed = true;
                         updated += 1;
                     }
                 }
-                DriftStatus::NoHash { computed } => {
-                    // Replace #[qed(verified)] with #[qed(verified, hash = "...")]
-                    // Handle both `#[qed(verified)]` and `#[qed( verified )]` etc.
+                Some(_) => {} // body hash already correct
+                None => {
+                    // `#[qed(verified)]` with no `hash` field at all —
+                    // stamp it with the computed hash. (Stays compatible
+                    // with the v2.14 NoHash → stamped flow.)
                     let patterns = [
                         "qed(verified)",
                         "qed( verified )",
@@ -516,9 +601,9 @@ pub fn update(input: &Path) -> Result<usize> {
                         "qed( verified)",
                     ];
                     for pat in &patterns {
-                        let replacement = format!("qed(verified, hash = \"{}\")", computed);
-                        if source.contains(pat) {
-                            source = source.replacen(pat, &replacement, 1);
+                        let replacement = format!("qed(verified, hash = \"{}\")", actual_body);
+                        if new_source.contains(pat) {
+                            new_source = new_source.replacen(pat, &replacement, 1);
                             changed = true;
                             updated += 1;
                             break;
@@ -526,14 +611,135 @@ pub fn update(input: &Path) -> Result<usize> {
                     }
                 }
             }
+
+            // spec_hash leg: present only when `spec` + `handler` are
+            // also set. Resolve the spec path, compute, replace if stale.
+            if let (Some(spec_path), Some(handler_name), Some(expected_spec)) =
+                (&attr.spec, &attr.handler, &attr.spec_hash)
+            {
+                if let Some(resolved) = find_relative_file(file, spec_path) {
+                    if let Ok(spec_src) = std::fs::read_to_string(&resolved) {
+                        if let Some(actual_spec) =
+                            spec_hash::spec_hash_for_handler(&spec_src, handler_name)
+                        {
+                            if &actual_spec != expected_spec {
+                                let old = format!("spec_hash = \"{}\"", expected_spec);
+                                let new = format!("spec_hash = \"{}\"", actual_spec);
+                                if new_source.contains(&old) {
+                                    new_source = new_source.replacen(&old, &new, 1);
+                                    changed = true;
+                                    updated += 1;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "warning: --update-hashes: could not resolve `spec = \"{}\"` from {} \
+                         (skipping spec_hash refresh for this entry)",
+                        spec_path,
+                        file.display()
+                    );
+                }
+            }
+
+            // accounts_hash leg: present only when `accounts` +
+            // `accounts_file` are also set. Issue #29 already enforces
+            // all-or-nothing at the macro side, so partial configs
+            // surface as compile errors rather than silently skipping
+            // here.
+            if let (Some(struct_name), Some(accounts_file), Some(expected_acct)) =
+                (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
+            {
+                if let Some(resolved) = find_relative_file(file, accounts_file) {
+                    if let Ok(acct_src) = std::fs::read_to_string(&resolved) {
+                        if let Some(actual_acct) =
+                            spec_hash::accounts_struct_hash(&acct_src, struct_name)
+                        {
+                            if &actual_acct != expected_acct {
+                                let old = format!("accounts_hash = \"{}\"", expected_acct);
+                                let new = format!("accounts_hash = \"{}\"", actual_acct);
+                                if new_source.contains(&old) {
+                                    new_source = new_source.replacen(&old, &new, 1);
+                                    changed = true;
+                                    updated += 1;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "warning: --update-hashes: could not resolve `accounts_file = \"{}\"` \
+                         from {} (skipping accounts_hash refresh for this entry)",
+                        accounts_file,
+                        file.display()
+                    );
+                }
+            }
         }
 
         if changed {
-            std::fs::write(file, &source)?;
+            std::fs::write(file, &new_source)?;
         }
     }
 
     Ok(updated)
+}
+
+/// Parallel collector to `collect_from_items` that captures the full
+/// attribute (not just the body hash) for each verified function.
+/// Indices match `collect_from_items` so callers can zip the two.
+fn collect_verified_attrs(items: &[syn::Item]) -> Vec<VerifiedAttr> {
+    let mut out = Vec::new();
+    walk_verified_attrs(items, &mut out);
+    out
+}
+
+fn walk_verified_attrs(items: &[syn::Item], out: &mut Vec<VerifiedAttr>) {
+    for item in items {
+        match item {
+            syn::Item::Fn(f) => {
+                for attr in &f.attrs {
+                    if let Some(parsed) = parse_verified_attr(attr) {
+                        out.push(parsed);
+                        break;
+                    }
+                }
+            }
+            syn::Item::Impl(i) => {
+                for impl_item in &i.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        for attr in &method.attrs {
+                            if let Some(parsed) = parse_verified_attr(attr) {
+                                out.push(parsed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Trait(t) => {
+                for trait_item in &t.items {
+                    if let syn::TraitItem::Fn(method) = trait_item {
+                        for attr in &method.attrs {
+                            if let Some(parsed) = parse_verified_attr(attr) {
+                                if method.default.is_some() {
+                                    out.push(parsed);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    walk_verified_attrs(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -661,9 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn deep_detects_callee_change() {
-        // Write a file where a verified function calls a helper
+    fn deep_detects_verified_callee_drift() {
+        // v2.15 fix for issue #28: --deep now flags transitive drift only
+        // when a *verified* callee has itself drifted directly. Without
+        // per-callee stored hashes (a new attribute shape that does not
+        // exist), this is the only sound transitive signal — comparing a
+        // body+callees transitive hash against the body-only stored hash
+        // produced false positives on every function with non-trivial
+        // body. Non-verified callees can't drift; they have no anchor.
         let source = r#"
+            #[qed(verified)]
             fn helper() -> u64 { 42 }
 
             #[qed(verified)]
@@ -672,29 +885,69 @@ mod tests {
             }
         "#;
 
-        // First get the direct hash
+        // Stamp both with their direct hashes.
         let f1 = write_temp_rs(source);
         let entries = scan_file(f1.path()).unwrap();
-        let computed = match &entries[0].status {
+        let helper_hash = match &entries
+            .iter()
+            .find(|e| e.fn_name == "helper")
+            .unwrap()
+            .status
+        {
             DriftStatus::NoHash { computed } => computed.clone(),
-            _ => panic!("expected NoHash"),
+            _ => panic!("expected NoHash for helper"),
+        };
+        let main_hash = match &entries
+            .iter()
+            .find(|e| e.fn_name == "main_fn")
+            .unwrap()
+            .status
+        {
+            DriftStatus::NoHash { computed } => computed.clone(),
+            _ => panic!("expected NoHash for main_fn"),
         };
 
-        // Now stamp it with the direct hash
-        let stamped = source.replace(
-            "qed(verified)",
-            &format!("qed(verified, hash = \"{}\")", computed),
-        );
+        let stamped = source
+            .replacen(
+                "#[qed(verified)]\n            fn helper",
+                &format!(
+                    "#[qed(verified, hash = \"{}\")]\n            fn helper",
+                    helper_hash
+                ),
+                1,
+            )
+            .replacen(
+                "#[qed(verified)]\n            pub fn main_fn",
+                &format!(
+                    "#[qed(verified, hash = \"{}\")]\n            pub fn main_fn",
+                    main_hash
+                ),
+                1,
+            );
 
-        // Modify the helper
+        // Drift the helper body (still stamped with the OLD hash → direct
+        // drift on helper itself).
         let modified = stamped.replace("{ 42 }", "{ 99 }");
         let f2 = write_temp_rs(&modified);
 
-        // Direct check should show OK (verified fn body hasn't changed)
+        // Direct check: helper Drifted, main_fn Ok.
         let entries = scan_file(f2.path()).unwrap();
-        assert_eq!(entries[0].status, DriftStatus::Ok);
+        let helper_status = &entries
+            .iter()
+            .find(|e| e.fn_name == "helper")
+            .unwrap()
+            .status;
+        assert!(matches!(helper_status, DriftStatus::Drifted { .. }));
+        assert_eq!(
+            entries
+                .iter()
+                .find(|e| e.fn_name == "main_fn")
+                .unwrap()
+                .status,
+            DriftStatus::Ok
+        );
 
-        // Deep check should detect the callee change
+        // Deep: main_fn surfaces because its verified callee (helper) drifted.
         let deep_entries = scan_file_deep(f2.path()).unwrap();
         assert_eq!(deep_entries.len(), 1);
         assert_eq!(deep_entries[0].fn_name, "main_fn");
@@ -704,7 +957,56 @@ mod tests {
     }
 
     #[test]
+    fn deep_silent_on_non_verified_callee_change() {
+        // The complement to issue #28: changes to *non-verified* callees
+        // do NOT surface as transitive drift. This is intentional —
+        // non-verified callees have no anchor to compare against. The
+        // pre-v2.15 code falsely reported every non-trivial function as
+        // drifted; v2.15 reports nothing here, which is the correct
+        // floor.
+        let source = r#"
+            fn helper() -> u64 { 42 }
+
+            #[qed(verified)]
+            pub fn main_fn() -> u64 {
+                helper()
+            }
+        "#;
+        let f1 = write_temp_rs(source);
+        let entries = scan_file(f1.path()).unwrap();
+        let computed = match &entries[0].status {
+            DriftStatus::NoHash { computed } => computed.clone(),
+            _ => panic!("expected NoHash"),
+        };
+        let stamped = source.replace(
+            "qed(verified)",
+            &format!("qed(verified, hash = \"{}\")", computed),
+        );
+        let modified = stamped.replace("{ 42 }", "{ 99 }");
+        let f2 = write_temp_rs(&modified);
+
+        // main_fn body is unchanged → OK.
+        let entries = scan_file(f2.path()).unwrap();
+        assert_eq!(entries[0].status, DriftStatus::Ok);
+
+        // helper is non-verified, so its drift is invisible to the
+        // transitive check. No false positive.
+        let deep_entries = scan_file_deep(f2.path()).unwrap();
+        assert!(
+            deep_entries.is_empty(),
+            "non-verified callee change must not surface: {deep_entries:#?}"
+        );
+    }
+
+    #[test]
     fn deep_no_false_positive_when_callee_unchanged() {
+        // v2.15 fix for #28: when nothing has drifted, --deep emits
+        // nothing. Pre-v2.15 the assertion was discarded (`let _ =
+        // deep_entries`) because the implementation always reported
+        // false drift on functions with non-trivial bodies — comparing
+        // a body+callee transitive hash against a body-only stored
+        // hash. The new implementation only flags verified-callee
+        // direct drift, so this case correctly returns empty.
         let source = r#"
             fn helper() -> u64 { 42 }
 
@@ -728,16 +1030,11 @@ mod tests {
         );
         let f2 = write_temp_rs(&stamped);
 
-        // Deep check should find no transitive drift
         let deep_entries = scan_file_deep(f2.path()).unwrap();
-        // The transitive hash will differ from direct hash (since it includes callee info),
-        // but this is expected — the key insight is we always detect drift when callees change.
-        // When callees haven't changed from the time the hash was computed, the deep check
-        // might still flag it because the stored hash is the *direct* hash.
-        // This is acceptable: --deep is advisory, and the first run after enabling it
-        // will show functions that have local callees.
-        // The real value is detecting *changes* between runs.
-        let _ = deep_entries;
+        assert!(
+            deep_entries.is_empty(),
+            "no callee change must produce no transitive drift: {deep_entries:#?}"
+        );
     }
 
     #[test]

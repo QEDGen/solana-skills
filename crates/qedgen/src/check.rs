@@ -3922,6 +3922,18 @@ pub fn check_code_drift(
         "src/instructions/mod.rs".to_string(),
         "Cargo.toml".to_string(),
     ];
+    // src/guards.rs is codegen-owned whenever any handler has a `requires`
+    // / `aborts_if` clause that lowers to runtime guard logic. The previous
+    // version of this list omitted it, so spec changes that should re-emit
+    // guards.rs slipped past `qedgen check --code` reporting "in sync"
+    // even after material guard drift. (GH issue #25.)
+    let any_handler_has_guards = spec
+        .handlers
+        .iter()
+        .any(|h| !h.requires.is_empty() || !h.aborts_if.is_empty() || h.guard_str.is_some());
+    if any_handler_has_guards {
+        codegen_owned_files.push("src/guards.rs".to_string());
+    }
     if !spec.events.is_empty() {
         codegen_owned_files.push("src/events.rs".to_string());
     }

@@ -116,7 +116,16 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
             syn::Item::Struct(s) if s.ident == struct_name => {
                 let mut stripped = s.clone();
                 stripped.attrs.clear();
-                let canonical = stripped.to_token_stream().to_string();
+                // v2.15: same canonicalization as `body_hash_for_fn` so
+                // the qedgen-side computation here agrees byte-for-byte
+                // with `qedgen-macros::spec_bind::accounts_struct_hash_in_items`
+                // regardless of how the file was tokenized
+                // (rustc-vs-from_str). Pre-v2.15 used raw
+                // `to_token_stream().to_string()` which carries
+                // per-`Punct` `Spacing` info reflecting source spacing —
+                // a hidden source of drift between the binary and the
+                // proc-macro on the same input file.
+                let canonical = canonical_token_string(&stripped.to_token_stream());
                 return Some(sha256_hex16(&canonical));
             }
             syn::Item::Mod(item_mod) => {
@@ -323,15 +332,162 @@ pub fn normalize_spec_block(block: &str) -> String {
     out.trim().to_string()
 }
 
+/// Build a digest of every top-level item in `source` *except* handler
+/// blocks. (GH issue #31.) Handler blocks are sealed individually by
+/// `spec_hash_for_handler`; everything else (`type`, `const`, `pda`,
+/// `event`, `errors`, `interface`, `import`, `invariant`, `property`,
+/// `environment`, top-level `spec` declaration) is shared context that
+/// changes the *effective contract* of every handler when it shifts.
+///
+/// Pre-v2.15 the spec_hash sealed only the handler's own braced block,
+/// so a `const FEE_BPS = 50` change at the top of the file would not
+/// invalidate any handler's spec_hash even when handler bodies
+/// referenced `FEE_BPS`. The fix is to fold a digest of "everything
+/// outside any handler block" into each handler's hash.
+///
+/// Algorithm: walk `source`; find each `handler <name> {...}` block
+/// via balanced-brace scanning (same logic as `extract_handler_block`,
+/// just collect ranges instead of returning the first match). Build a
+/// string of the source with those ranges removed. Normalize +
+/// sha256-hex16. The resulting digest is included as a suffix of every
+/// handler's spec_hash so any top-level change propagates.
+///
+/// Conservative-by-design: a change to a top-level item that NO
+/// handler references still invalidates every handler's hash. This
+/// over-invalidates compared to a precise dataflow analysis but is
+/// simple, deterministic, and matches the
+/// "treat-shared-context-as-load-bearing" stance the broader sealing
+/// model already takes elsewhere.
+///
+/// MUST mirror `qedgen-macros::spec_bind::spec_context_digest`.
+pub fn spec_context_digest(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut search_from = 0;
+    let mut last_emit = 0usize;
+    let needle = "handler";
+
+    while let Some(pos) = source[search_from..].find(needle) {
+        let abs = search_from + pos;
+        let prev_ok = abs == 0 || bytes[abs - 1].is_ascii_whitespace();
+        let after = abs + needle.len();
+        if !prev_ok || after >= bytes.len() || !bytes[after].is_ascii_whitespace() {
+            search_from = abs + 1;
+            continue;
+        }
+        // Skip past `handler <name>` to find the opening brace, if any.
+        let mut cursor = after;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        // Identifier
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        // Whitespace + optional `(...)` params + `:` + lifecycle clause —
+        // everything up to the first `{` that opens the body.
+        while cursor < bytes.len() && bytes[cursor] != b'{' {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            search_from = abs + 1;
+            continue;
+        }
+        let block_start = abs;
+        let body_start = cursor;
+        let mut depth = 0i32;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let mut in_str = false;
+        cursor = body_start;
+        while cursor < bytes.len() {
+            let b = bytes[cursor];
+            if in_line_comment {
+                if b == b'\n' {
+                    in_line_comment = false;
+                }
+                cursor += 1;
+                continue;
+            }
+            if in_block_comment {
+                if b == b'*' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' {
+                    in_block_comment = false;
+                    cursor += 2;
+                    continue;
+                }
+                cursor += 1;
+                continue;
+            }
+            if in_str {
+                if b == b'\\' && cursor + 1 < bytes.len() {
+                    cursor += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    in_str = false;
+                }
+                cursor += 1;
+                continue;
+            }
+            if b == b'/' && cursor + 1 < bytes.len() {
+                let nxt = bytes[cursor + 1];
+                if nxt == b'/' {
+                    in_line_comment = true;
+                    cursor += 2;
+                    continue;
+                }
+                if nxt == b'*' {
+                    in_block_comment = true;
+                    cursor += 2;
+                    continue;
+                }
+            }
+            if b == b'"' {
+                in_str = true;
+                cursor += 1;
+                continue;
+            }
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    let block_end = cursor + 1;
+                    out.push_str(&source[last_emit..block_start]);
+                    out.push(' ');
+                    last_emit = block_end;
+                    search_from = block_end;
+                    break;
+                }
+            }
+            cursor += 1;
+        }
+        if depth != 0 {
+            // Unterminated handler block — bail out, hash what we have.
+            break;
+        }
+    }
+    out.push_str(&source[last_emit..]);
+    sha256_hex16(&normalize_spec_block(&out))
+}
+
 /// Compute the spec hash for a handler. Returns `None` if the handler block
 /// is absent or a handler declared with no body (e.g. `handler foo : A -> B`
 /// with no braces — treated as an empty contract so codegen emits an empty
 /// placeholder hash that the macro side will also compute as `None`).
 ///
 /// The block is run through `normalize_spec_block` before hashing so
-/// cosmetic edits (whitespace, comments) don't fire drift.
+/// cosmetic edits (whitespace, comments) don't fire drift. v2.15 (GH
+/// issue #31): the hash also folds in `spec_context_digest(source)` so
+/// changes to top-level shared declarations (consts, types, imports,
+/// interfaces, etc.) propagate into every handler's hash.
 pub fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&normalize_spec_block(&s)))
+    let block = extract_handler_block(source, handler_name)?;
+    let normalized = normalize_spec_block(&block);
+    let context = spec_context_digest(source);
+    Some(sha256_hex16(&format!("{}:{}", normalized, context)))
 }
 
 #[cfg(test)]
@@ -373,6 +529,85 @@ handler bar : State.A -> State.B {
     #[test]
     fn missing_handler_is_none() {
         assert!(spec_hash_for_handler(SAMPLE, "nonexistent").is_none());
+    }
+
+    /// v2.15 (GH issue #31): top-level changes (consts, types, etc.)
+    /// outside any handler block must invalidate every handler's
+    /// spec_hash, even when the handler block itself is byte-identical.
+    /// Pre-v2.15 this slipped through and could leave handler contracts
+    /// effectively changed without drift detection firing.
+    #[test]
+    fn spec_hash_changes_when_top_level_const_edited() {
+        let v1 = r#"spec Demo
+const MAX = 100
+
+handler foo (x : U64) : State.A -> State.A {
+  requires state.count + x <= MAX
+  effect { count += x }
+}
+"#;
+        let v2 = r#"spec Demo
+const MAX = 200
+
+handler foo (x : U64) : State.A -> State.A {
+  requires state.count + x <= MAX
+  effect { count += x }
+}
+"#;
+        let h1 = spec_hash_for_handler(v1, "foo").unwrap();
+        let h2 = spec_hash_for_handler(v2, "foo").unwrap();
+        assert_ne!(
+            h1, h2,
+            "top-level const change must invalidate handler spec_hash"
+        );
+    }
+
+    /// Companion to the above: re-ordering or editing OTHER handlers
+    /// in the same file must NOT invalidate this handler's spec_hash.
+    /// Each handler is sealed against its own block + the shared
+    /// top-level context; sibling handler edits don't change either.
+    #[test]
+    fn spec_hash_stable_when_sibling_handler_edited() {
+        let v1 = r#"spec Demo
+
+handler foo : State.A -> State.A {
+  effect { count += 1 }
+}
+
+handler bar : State.A -> State.B {
+  effect { /* original */ }
+}
+"#;
+        let v2 = r#"spec Demo
+
+handler foo : State.A -> State.A {
+  effect { count += 1 }
+}
+
+handler bar : State.A -> State.B {
+  effect { count := 0; status := State.B }
+}
+"#;
+        let h1 = spec_hash_for_handler(v1, "foo").unwrap();
+        let h2 = spec_hash_for_handler(v2, "foo").unwrap();
+        assert_eq!(
+            h1, h2,
+            "sibling handler edit must not invalidate this handler's spec_hash"
+        );
+    }
+
+    /// `spec_context_digest` should be empty-string-stable: the digest
+    /// of an empty source is well-defined and reproducible.
+    #[test]
+    fn spec_context_digest_deterministic() {
+        let src = r#"spec Demo
+const X = 1
+type Account = | Active of { x : U64 }
+"#;
+        let d1 = spec_context_digest(src);
+        let d2 = spec_context_digest(src);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 16);
     }
 
     /// Mirrors `qedgen-macros::verified::tests::hash_deterministic`. If

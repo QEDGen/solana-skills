@@ -147,7 +147,11 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
             syn::Item::Struct(s) if s.ident == struct_name => {
                 let mut stripped = s.clone();
                 stripped.attrs.clear();
-                let canonical = stripped.to_token_stream().to_string();
+                // v2.15: canonical_token_string normalizes Spacing on
+                // every Punct so this computation agrees byte-for-byte
+                // with `qedgen::spec_hash::accounts_struct_hash_in_items`
+                // — see verified::canonical_token_string for rationale.
+                let canonical = crate::verified::canonical_token_string(stripped.to_token_stream());
                 return Some(sha256_hex16(&canonical));
             }
             syn::Item::Mod(item_mod) => {
@@ -358,10 +362,130 @@ pub(crate) fn normalize_spec_block(block: &str) -> String {
     out.trim().to_string()
 }
 
+/// Build a digest of every top-level item in `source` *except* handler
+/// blocks. (GH issue #31.) Folded into `spec_hash_for_handler` so
+/// changes to shared top-level declarations (`const`, `type`, `pda`,
+/// `event`, `errors`, `interface`, `import`, `invariant`, `property`,
+/// `environment`) invalidate every handler's spec_hash. MUST mirror
+/// `qedgen::spec_hash::spec_context_digest` byte-for-byte.
+pub(crate) fn spec_context_digest(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut search_from = 0;
+    let mut last_emit = 0usize;
+    let needle = "handler";
+
+    while let Some(pos) = source[search_from..].find(needle) {
+        let abs = search_from + pos;
+        let prev_ok = abs == 0 || bytes[abs - 1].is_ascii_whitespace();
+        let after = abs + needle.len();
+        if !prev_ok || after >= bytes.len() || !bytes[after].is_ascii_whitespace() {
+            search_from = abs + 1;
+            continue;
+        }
+        let mut cursor = after;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        while cursor < bytes.len()
+            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
+        {
+            cursor += 1;
+        }
+        while cursor < bytes.len() && bytes[cursor] != b'{' {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            search_from = abs + 1;
+            continue;
+        }
+        let block_start = abs;
+        let body_start = cursor;
+        let mut depth = 0i32;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+        let mut in_str = false;
+        cursor = body_start;
+        while cursor < bytes.len() {
+            let b = bytes[cursor];
+            if in_line_comment {
+                if b == b'\n' {
+                    in_line_comment = false;
+                }
+                cursor += 1;
+                continue;
+            }
+            if in_block_comment {
+                if b == b'*' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' {
+                    in_block_comment = false;
+                    cursor += 2;
+                    continue;
+                }
+                cursor += 1;
+                continue;
+            }
+            if in_str {
+                if b == b'\\' && cursor + 1 < bytes.len() {
+                    cursor += 2;
+                    continue;
+                }
+                if b == b'"' {
+                    in_str = false;
+                }
+                cursor += 1;
+                continue;
+            }
+            if b == b'/' && cursor + 1 < bytes.len() {
+                let nxt = bytes[cursor + 1];
+                if nxt == b'/' {
+                    in_line_comment = true;
+                    cursor += 2;
+                    continue;
+                }
+                if nxt == b'*' {
+                    in_block_comment = true;
+                    cursor += 2;
+                    continue;
+                }
+            }
+            if b == b'"' {
+                in_str = true;
+                cursor += 1;
+                continue;
+            }
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    let block_end = cursor + 1;
+                    out.push_str(&source[last_emit..block_start]);
+                    out.push(' ');
+                    last_emit = block_end;
+                    search_from = block_end;
+                    break;
+                }
+            }
+            cursor += 1;
+        }
+        if depth != 0 {
+            break;
+        }
+    }
+    out.push_str(&source[last_emit..]);
+    sha256_hex16(&normalize_spec_block(&out))
+}
+
 /// Compute the spec hash for a handler: extract the block text,
-/// normalize whitespace + comments, then sha256-hex16.
+/// normalize whitespace + comments, then sha256-hex16. v2.15 (GH issue
+/// #31): the hash also folds in `spec_context_digest(source)` so
+/// changes to top-level shared declarations propagate into every
+/// handler's hash.
 pub(crate) fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    extract_handler_block(source, handler_name).map(|s| sha256_hex16(&normalize_spec_block(&s)))
+    let block = extract_handler_block(source, handler_name)?;
+    let normalized = normalize_spec_block(&block);
+    let context = spec_context_digest(source);
+    Some(sha256_hex16(&format!("{}:{}", normalized, context)))
 }
 
 /// Main expansion for `#[qed(verified, spec=..., handler=..., hash=..., spec_hash=...)]`.
@@ -389,6 +513,38 @@ pub fn expand_bound(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(a) => a,
         Err(e) => return e.to_compile_error(),
     };
+
+    // Accounts metadata is all-or-nothing. Partial config (e.g.
+    // `accounts` + `accounts_file` without `accounts_hash`) used to
+    // silently disable accounts-struct sealing while looking like a
+    // proper config — teams believed accounts-level drift was enforced
+    // when it was not. (GH issue #29.) Either provide all three, or
+    // provide none.
+    let acct_provided = [
+        args.accounts.is_some(),
+        args.accounts_file.is_some(),
+        args.accounts_hash.is_some(),
+    ];
+    if acct_provided.iter().any(|p| *p) && !acct_provided.iter().all(|p| *p) {
+        let func_span = match FnLike::from_tokens(item.clone()) {
+            Ok(f) => f.name_span(),
+            Err(_) => proc_macro2::Span::call_site(),
+        };
+        let missing: Vec<&str> = ["accounts", "accounts_file", "accounts_hash"]
+            .iter()
+            .copied()
+            .zip(acct_provided.iter())
+            .filter_map(|(name, provided)| if *provided { None } else { Some(name) })
+            .collect();
+        let msg = format!(
+            "qed(verified): partial accounts metadata — missing `{}`. Either \
+             provide all of `accounts`, `accounts_file`, `accounts_hash` or \
+             omit all three. Partial configs silently disable accounts-struct \
+             sealing.",
+            missing.join("`, `")
+        );
+        return syn::Error::new(func_span, msg).to_compile_error();
+    }
 
     // If spec/handler not both present, fall back to the body-only path.
     let (spec_path, handler_name) = match (&args.spec, &args.handler) {
