@@ -2955,6 +2955,40 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
+    // Rule 17: invariant_no_body — `invariant <name> "..."` declared with
+    // only a doc-string and no `expr` body. Lean codegen lowers this to
+    // `theorem <name> : True := trivial` (vacuous), violating the
+    // `feedback_no_tautological_proofs` policy. Surface the gap at check
+    // time so the spec author closes it before codegen runs. Two of four
+    // shipping examples hit this in the v2.15 audit (escrow `conservation`,
+    // escrow-split `conservation`).
+    for inv in &spec.invariants {
+        if inv.lean_expr.is_none() {
+            warnings.push(CompletenessWarning {
+                rule: "invariant_no_body".to_string(),
+                severity: Severity::Error,
+                priority: 1,
+                message: format!(
+                    "invariant '{}' has only a description string, no `expr` body — \
+                     codegen would emit `theorem {} : True := trivial` (vacuous proof)",
+                    inv.name, inv.name
+                ),
+                subject: Some(inv.name.clone()),
+                fix: format!(
+                    "Add an `expr` body to invariant '{}': \
+                     `invariant {} {{ expr <predicate-over-state> preserved_by all }}`",
+                    inv.name, inv.name
+                ),
+                example: Some(format!(
+                    "  invariant {} {{\n    expr state.total_in == state.total_out\n    preserved_by all\n  }}",
+                    inv.name
+                )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
+
     // Validate new-DSL constructs: Map[N] T fields, subscripted effect LHS.
     warnings.extend(check_map_and_subscript(spec));
 
@@ -6472,5 +6506,62 @@ interface Token {
             parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
         );
         assert!(err.contains("spec_hash"), "got: {err}");
+    }
+
+    // ----- Rule 17: invariant_no_body -----
+
+    #[test]
+    fn invariant_no_body_fires_on_doc_only_invariant() {
+        // The escrow / escrow-split shape: invariant declared with only a
+        // description string, no `expr` body. Lean codegen would emit
+        // `theorem conservation : True := trivial`.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Demo
+type State | Active of { counter : U64 }
+
+invariant conservation "total tokens preserved across all handlers"
+
+handler bump : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer }
+  effect { counter += 1 }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "invariant_no_body")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {hits:#?}");
+        assert!(hits[0].message.contains("conservation"));
+    }
+
+    #[test]
+    fn invariant_no_body_silent_on_real_body() {
+        // An invariant with a proper expression body — no finding.
+        // The DSL form: `invariant <name> : <expr>` (one-liner, no
+        // preserved_by — the expression body alone is what matters
+        // for this lint).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Demo
+type State | Active of { counter : U64 }
+
+invariant counter_nonneg : state.counter >= 0
+
+handler bump : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer }
+  effect { counter += 1 }
+}
+"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "invariant_no_body"),
+            "real expr body should suppress: {warnings:#?}"
+        );
     }
 }
