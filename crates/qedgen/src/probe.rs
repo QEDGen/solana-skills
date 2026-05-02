@@ -30,7 +30,15 @@ use crate::check::{parse_spec_file, ParsedHandler, ParsedSpec};
 
 /// Probe output schema version. Bump on incompatible finding-shape changes;
 /// the auditor pins against this.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: spec-aware findings now carry a required `reproducer` (drop-on-fail
+/// pipeline). `Finding.reproducer` is still typed `Option<Reproducer>` as
+/// a transitional shim during the v2.16 per-category retrofit; the
+/// pipeline drops candidates whose reproducer cannot be constructed,
+/// so consumers will see `reproducer: <something>` on every emitted
+/// finding (or no finding at all). Spec-less / `--bootstrap` mode is
+/// unchanged — it never emitted findings.
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +80,89 @@ pub enum Severity {
     High,
     Medium,
     Low,
+}
+
+/// A concrete artifact the user can re-run deterministically to observe the
+/// finding. The probe pipeline contract: a `Finding` without a `Reproducer`
+/// is dropped, never emitted. There is no "advisory" / "possibly" tier —
+/// either the bug is reproducible or the probe is silent. The optionality
+/// in `Finding.reproducer` is a v2.16 transitional shim while categories
+/// retrofit one at a time; once all 7 categories construct reproducers,
+/// the field becomes required and `SCHEMA_VERSION` bumps to 2.
+///
+/// Reproducers live under `target/qedgen-repros/<finding_id>/` — ephemeral
+/// (regenerated every probe run; never committed). Per PLAN-v2.16 D3, the
+/// `.invocation` field is the claim that travels with the finding; the
+/// generated artifact under `target/` is what makes that claim re-runnable.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)] // Variants populated incrementally during v2.16 retrofit
+pub enum Reproducer {
+    /// Symbolic counterexample produced by Kani BMC.
+    Kani {
+        /// Path to the committed harness file (relative to project root).
+        harness_path: String,
+        /// Harness function name, e.g. `probe_overflow_transfer`.
+        harness_fn: String,
+        /// Exact `cargo kani` invocation that re-fails.
+        invocation: String,
+        /// Captured assignment of symbolic inputs that triggers the violation.
+        counterexample: KaniTrace,
+        /// Pinned Kani version the counterexample was captured with.
+        kani_version: String,
+    },
+    /// Concrete failing seed produced by proptest.
+    Proptest {
+        /// Path to the committed test file (relative to project root).
+        test_path: String,
+        /// Test function name.
+        test_fn: String,
+        /// Exact `cargo test` invocation that re-fails on `seed`.
+        invocation: String,
+        /// Canonical `PROPTEST_SEED` value.
+        seed: String,
+        /// JSON projection of the failing input for human inspection.
+        failing_input: serde_json::Value,
+    },
+    /// Mollusk-driven Rust integration test under
+    /// `<project_root>/target/qedgen-repros/tests/probe_<finding_id>.rs`
+    /// (PLAN-v2.16 D3 + D4). The test invokes the user's deployed
+    /// handler via `qedgen-sandbox` and asserts the bug fires. Run via
+    /// `qedgen verify --probe-repros` or `cargo test --manifest-path
+    /// target/qedgen-repros/Cargo.toml --test probe_<id>` directly.
+    Sandbox {
+        /// Path to the test file, relative to project root.
+        test_path: String,
+        /// Test function name (canonical form: `probe_<finding_id>`).
+        test_fn: String,
+        /// Exact invocation that runs just this test.
+        invocation: String,
+        /// True when the skeleton has agent-fill TODO markers (the test
+        /// panics at runtime, so the finding is dropped per the
+        /// reproducer-only contract). Flips to false once
+        /// `qedgen probe --fill-repros` (D3.2) walks the agent through
+        /// filling the TODOs.
+        needs_fill: bool,
+    },
+}
+
+/// Captured Kani counterexample. Keeps just enough to let the user
+/// understand the finding without re-running Kani; the `invocation` on the
+/// parent `Reproducer::Kani` is the source of truth for re-validation.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // Populated incrementally during v2.16 retrofit
+pub struct KaniTrace {
+    /// One-line summary of which assertion fired.
+    pub assertion: String,
+    /// Symbolic input → concrete value assignments Kani produced.
+    pub assignments: Vec<KaniAssignment>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // Populated incrementally during v2.16 retrofit
+pub struct KaniAssignment {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +221,13 @@ pub struct Finding {
     pub investigation_hint: String,
     /// Category identifier for documentation / grouping.
     pub category_tag: String,
+    /// Concrete artifact reproducing the bug. `None` is a transitional state
+    /// during the v2.16 per-category retrofit — once all predicates construct
+    /// reproducers, this becomes required and findings without one are
+    /// dropped at the pipeline level (no "advisory" tier). Serialized
+    /// `omitempty` so v1 schema consumers keep working.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reproducer: Option<Reproducer>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +280,19 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
         }
     }
     findings.extend(predicate_stored_field_never_written(&spec));
+
+    // v2.16 drop-on-fail: every candidate must acquire a concrete
+    // reproducer or be silently dropped. No advisory tier.
+    let ctx = crate::probe_repro::ReproducerContext::from_spec_path(&spec, spec_path);
+    findings.retain_mut(
+        |finding| match crate::probe_repro::construct_reproducer(finding, &ctx) {
+            Ok(repro) => {
+                finding.reproducer = Some(repro);
+                true
+            }
+            Err(_) => false,
+        },
+    );
 
     Ok(ProbeOutput {
         version: SCHEMA_VERSION,
@@ -470,6 +581,7 @@ fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
             handler.name
         ),
         category_tag: "missing_signer".to_string(),
+        reproducer: None,
     })
 }
 
@@ -529,6 +641,7 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
             handler.name
         ),
         category_tag: "arbitrary_cpi".to_string(),
+        reproducer: None,
     })
 }
 
@@ -548,6 +661,13 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
 /// Fires once per (field, op) pair on the handler. Auditor SKILL.md
 /// classification rules separate "intentional design" (suppress with
 /// rationale comment) from "real vulnerability" (change to default `+=`).
+///
+/// **Companion lint** (`qedgen check`): the same pattern surfaces as
+/// `wrapping_arithmetic` / `saturating_arithmetic` lints — those are
+/// instant structural advisories. This probe finding is the
+/// reproducer-bearing version: once Mollusk-backed repros land
+/// (PLAN-v2.16 D3/D4), the finding ships with a witness tx that
+/// demonstrates state corruption, not just operator opt-in.
 fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Finding> {
     let mut out = Vec::new();
     for (field, op, _value) in &handler.effects {
@@ -583,6 +703,7 @@ fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Findin
                 handler.name, kind
             ),
             category_tag: "arithmetic_overflow_wrapping".to_string(),
+            reproducer: None,
         });
     }
     out
@@ -644,6 +765,7 @@ fn predicate_lifecycle_one_shot_violation(
             handler.name
         ),
         category_tag: "lifecycle_one_shot_violation".to_string(),
+        reproducer: None,
     })
 }
 
@@ -715,6 +837,7 @@ fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
                 handler.name, pname
             ),
             category_tag: "unbounded_amount_param".to_string(),
+            reproducer: None,
         });
     }
     out
@@ -768,6 +891,7 @@ fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Find
             mutated_fields.join(", ")
         ),
         category_tag: "permissionless_state_writer".to_string(),
+        reproducer: None,
     })
 }
 
@@ -832,6 +956,7 @@ fn predicate_init_without_pda(
             handler.name
         ),
         category_tag: "init_without_pda".to_string(),
+        reproducer: None,
     })
 }
 
@@ -994,6 +1119,7 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
                     "Open the impl. On Quasar/Anchor, `auth {field}` lowers to `has_one = {field}` — if `state.{field}` is the zero pubkey (default), no signer can satisfy the constraint and the handler is unreachable (escrow `taker` / multisig `creator` shape). On counter-shaped fields read by a `preserved_by all` invariant, the invariant proves vacuously because the field is constant (lending `total_borrows` shape). Look for: pre-deploy state population from migrations, handlers that should write the field but don't, or hand-edits to codegen that diverge from the spec."
                 ),
                 category_tag: "stored_field_never_written".to_string(),
+                reproducer: None,
             });
         }
     }

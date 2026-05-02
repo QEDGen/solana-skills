@@ -333,6 +333,32 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
 | `--check-upstream` | bool | false | Diff each pinned `upstream_binary_hash` against the on-chain `.so` via `solana program dump`. Skips deps without a pinned hash. Non-zero exit on any mismatch. |
 | `--rpc-url` | String | Solana CLI default | Override RPC endpoint passed to `solana program dump --url <rpc>` |
 | `--offline` | bool | false | Refuse to reach the network. Any dep that would require an on-chain fetch reports as Error. CI-gate friendly. |
+| `--probe-repros` | bool | false | Run probe reproducers under `<project>/target/qedgen-repros/` (PLAN-v2.16 D4). Each repro is a Mollusk-driven Rust test asserting a probe finding's bug fires; the verb captures pass/fail per finding so the auditor / next probe invocation can drop findings whose repros didn't reproduce. Pre-populated repros (v3-pending) — emits `note: no repros found` placeholder until the agent-fill workflow lands. |
+
+### `probe`
+Probe a `.qedspec` for category-coverage gaps (spec-aware mode) or
+walk a brownfield project root and emit a per-handler work list
+(spec-less / `--bootstrap` mode). Output is JSON, consumed by the
+auditor subagent. Spec-aware emits `findings`; spec-less emits
+`runtime`, `handlers`, `applicable_categories`. v2.16 schema bumps
+to `version: 2` with the addition of an optional `reproducer` field
+on findings (drop-on-fail pipeline; findings without a confirmed
+reproducer are silently dropped — see
+`feedback_probes_reproducible_only.md`).
+
+```bash
+# Spec-aware
+$QEDGEN probe --spec my_program.qedspec
+
+# Spec-less / brownfield
+$QEDGEN probe --bootstrap --root programs/my_program
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | optional | Path to `.qedspec` (spec-aware mode) — conflicts with `--bootstrap` |
+| `--bootstrap` | bool | false | Spec-less mode — walk a project root and emit the auditor work list. Requires `--root`. |
+| `--root` | Path | optional | Project root for spec-less mode (the program crate dir) |
 
 ## Code generation
 

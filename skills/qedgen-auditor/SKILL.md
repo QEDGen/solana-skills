@@ -31,8 +31,10 @@ Works on Solana programs targeting any qedgen-supported runtime:
 **Required, available in every agent-skills harness (Claude Code, Codex,
 Cursor, Windsurf, etc.):**
 - **Read, Grep, Glob** — read source, find handlers, search for patterns
-- **Bash** — run `qedgen probe --json`, `qedgen spec --idl`,
-  `qedgen check`
+- **Bash** — run `qedgen probe`, `qedgen spec --idl`,
+  `qedgen check`, `qedgen verify --probe-repros --json` (for the
+  v2.16 D5 repro gating). `qedgen probe` always emits JSON; the
+  `--json` flag was removed in v2.16.
 - **Write** — write `.qedspec`, `.qed/findings/`, `.qed/probe-suppress.toml`
 
 The auditor is designed for Read+Grep+Bash+Write only. Anchor's
@@ -81,6 +83,36 @@ If you finish an audit and your worst finding is a generic
 "`AccountInfo` should be `Account`" without a kill-chain, you've
 auditied wrong. Go back to the corpus and compose.
 
+## Reproducer-only contract (v2.16)
+
+Every CRIT/HIGH finding you surface must ship with a Mollusk-driven
+reproducer that **fires** — i.e., a Rust integration test under
+`target/qedgen-repros/audit/<finding-id>.rs` whose assertion holds
+against the user's deployed program. If the repro doesn't fire, you
+**suppress the finding silently**: no warning, no informational
+message, no "we thought this might be a bug" line.
+
+This is `feedback_probes_reproducible_only.md` applied to the audit
+channel. The user has lived with auditor-grade noise (generic
+warnings, advisory tier, "consider reviewing X"); none of it gets
+acted on. A fired Mollusk repro is something they have to defend
+against — that's the bar.
+
+Three outcomes per CRIT/HIGH:
+- **Fired** → finding stays, repro path + assignments embedded in the
+  report.
+- **Silent** → finding dropped from the surfaced report. Counted in
+  the digest's `n silent-repro` field (signal to you: your kill-chain
+  was wrong, your inputs were wrong, or the structural pattern doesn't
+  exploit).
+- **Inconclusive** (build error / Mollusk can't simulate the shape)
+  → finding stays structural, marked as such. Examples: token-2022
+  hooks, certain native-loader behaviors, cross-program account
+  aliasing under the agave loader. Don't pretend the repro confirmed
+  what it didn't.
+
+MEDIUM and below: a repro is encouraged but not required.
+
 ## How it works
 
 1. **Detect mode and runtime.**
@@ -89,8 +121,8 @@ auditied wrong. Go back to the corpus and compose.
 
 2. **Get the work list.** Run:
    ```bash
-   qedgen probe --json --spec <path>            # spec-aware
-   qedgen probe --json --bootstrap --root <p>   # spec-less
+   qedgen probe --spec <path>            # spec-aware
+   qedgen probe --bootstrap --root <p>   # spec-less
    ```
 
    Spec-aware emits `findings` directly. Spec-less emits `runtime`,
@@ -136,7 +168,47 @@ auditied wrong. Go back to the corpus and compose.
    codebase, write that down: "stand-alone, no chain identified,
    severity X." Don't stop at category; the user pays for kill-chains.
 
-5. **Scaffold silently** (per the tactile-tooling principle — no consent
+5. **Write a reproducer for every CRIT/HIGH finding (v2.16 D5).** Per
+   `feedback_probes_reproducible_only.md`, the audit channel ships
+   reproducible bugs only — no advisory tier. For each CRIT/HIGH
+   classification:
+
+   a) Write a Mollusk-driven Rust integration test to
+      `target/qedgen-repros/audit/<finding-id>.rs` (ephemeral path —
+      it's under `target/`, never committed). The test depends on
+      `qedgen-sandbox` (PLAN-v2.16 D4) and:
+      - Loads the user's program via
+        `Sandbox::for_program("<crate_name>", PROGRAM_ID)`.
+      - Builds the attack instruction (handler discriminator + the
+        attacker-controlled inputs your kill-chain relies on).
+      - Constructs the pre-state accounts that satisfy any guards the
+        attack assumes (e.g. funded vault, active lifecycle status).
+      - Calls `sandbox.invoke(&ix, &pre_state)`.
+      - Asserts the bug is observable. Examples:
+        - `assert!(result.program_result.is_err(), "expected MathOverflow")`
+        - `assert_eq!(post_state.balance, 0, "expected wrap to drain balance")`
+        - `assert!(result.logs.iter().any(|l| l.contains("InvalidAccountData")), "...")`
+
+   b) Run the repro via `qedgen verify --probe-repros --json` and
+      check the per-finding `status`:
+      - `Fired` → finding **stays** in the report; embed the test name
+        + relevant `assignments` from the JSON in the "Reproducer"
+        subsection.
+      - `Silent` → **suppress the finding silently**. Don't write
+        "we thought this might be a bug." Don't add an advisory note.
+        Move on. The auditor's job is real bugs; if your repro can't
+        demonstrate it, you don't surface it.
+      - `BuildError` → record as inconclusive; the finding stays
+        structural (we have no evidence either way). Note this in the
+        Reproducer subsection so the user knows the verdict isn't
+        confirmed.
+
+   c) MEDIUM and below: a repro is **encouraged** but not required.
+      Many MEDIUM categories (saturating-by-design, lifecycle hints,
+      style nits) don't have a clean state-corruption witness; ship
+      them with the structural narrative.
+
+6. **Scaffold silently** (per the tactile-tooling principle — no consent
    prompts in the middle of the named operation):
    - In spec-less mode, sketch a `.qedspec` from observed handlers via
      `qedgen spec --idl <path>` (Anchor with IDL) or by writing a
@@ -144,21 +216,24 @@ auditied wrong. Go back to the corpus and compose.
      `<program-name>.qedspec` at project root.
    - Write the full audit report to `.qed/findings/audit-<timestamp>.md`.
    - Write `.qed/probe-suppress.toml` for auto-detected false-positives.
+   - Reproducers live under `target/qedgen-repros/audit/<finding-id>.rs`
+     (ephemeral). Don't commit them.
    - **Don't** silently generate Lean / Kani / proptest. Those are
      opt-in heavy artifacts that the user invokes explicitly via
      `qedgen codegen`.
 
-6. **Return a vulnerability-first digest.** Real findings first
+7. **Return a vulnerability-first digest.** Real findings first
    (CRIT → HIGH → MED), then spec-gap suggestions, then suppressed
-   items. Each entry shows kill-chain (or stand-alone tag) and
-   composes-with hint so the user can verify the chain reasoning.
-   Footer lists scaffolded artifacts so the user can see what was
-   created.
+   items. Each entry shows kill-chain (or stand-alone tag),
+   composes-with hint, and **repro status** (`fired` / `inconclusive`
+   for CRIT/HIGH; omit for MED and below) so the user can verify the
+   chain reasoning. Footer lists scaffolded artifacts so the user can
+   see what was created.
 
 ## Category catalog
 
 Each category has a **spec-aware predicate** (CLI-emitted via
-`qedgen probe --json --spec`) and **per-runtime spec-less predicates**
+`qedgen probe --spec`) and **per-runtime spec-less predicates**
 (your job to apply via Read+Grep on the impl).
 
 ### `missing_signer` — CRITICAL
@@ -505,326 +580,6 @@ vulnerable.
 - Corpus: "Reentrancy via Token-2022 transfer hook" — first
   Solana-native reentrancy class.
 
-### `runtime_transfer_program_unconstrained` — HIGH (Token-2022 shape)
-Handler accepts the legacy SPL Token program (`Program<Token>` /
-`Program<TokenProgram>`) alongside `Account<Mint>` accounts, but the
-spec / impl gives no guarantee that the mints in the handler are
-*also* legacy-SPL mints. A maintainer who later expands the program
-to accept Token-2022 mints (transfer-fee, transfer-hook,
-confidential-transfers) finds that prior implicit-SPL-rejection
-assumptions no longer hold.
-- **Detect:** `Program<Token>` / `Program<TokenProgram>` AND any
-  `Account<Mint>` in the same handler accepted without an explicit
-  is-legacy-SPL guard (`mint.to_account_info().owner ==
-  &spl_token::ID` or equivalent).
-- Severity: HIGH for protocols that hold value across handlers
-  (deposit/withdraw, escrow). MED for one-shot transfers.
-- Composes with: `partial_has_one_chain` (mint not pinned + Token-2022
-  mint accepted = silent fee-on-transfer accounting drift),
-  `transfer_hook_reentrancy`.
-
-### `partial_has_one_chain` — HIGH
-Handler chains identity through `has_one(<role>)` constraints but
-omits one or more value-ledger fields (mint, vault, treasury,
-authority) that the stored state declares. The omitted field then
-seeds a downstream CPI / `init` / `address =` constraint, where the
-runtime's downstream check is the only thing protecting it. Distinct
-from `field_chain_missing_root_anchor` (no anchor at all) — this is a
-*partial* anchor, missing value-bearing fields.
-- **Detect (Anchor / Quasar):** for each handler, collect the set
-  S = {f | `has_one(f)` appears on any constraint in this handler's
-  accounts struct} and the stored state's value-ledger fields F. For
-  each handler that constrains an account of type T: if `F \ S` is
-  non-empty AND any field in `F \ S` appears as a parameter to
-  `init(...)`, `transfer(...)`, `invoke_signed(...)`, or `address =
-  ...`, flag.
-- Severity: MED standalone (the runtime-side mint check usually
-  rescues), HIGH→CRIT when paired with
-  `runtime_transfer_program_unconstrained` or
-  `field_chain_missing_root_anchor`.
-
-### `idempotent_init_on_state_account` — CRITICAL
-`init(idempotent)` (Quasar) / `init_if_needed` (Anchor) is canonical
-for ATAs (deterministic address, safe re-entry). On a *non-ATA*
-state-bearing PDA, idempotent init means re-running the handler on
-the same PDA with different parameters silently no-ops the init body
-— no error returned. If the second-call init was supposed to update
-fields, the update never happens.
-- **Detect (Anchor / Quasar):** `init(idempotent)` / `init_if_needed`
-  on `Account<T>` where T is user-defined (not `Token` / `Mint` /
-  system-known type), AND the handler's body writes the account via
-  `set_inner(...)` or field assignments that depend on instruction
-  parameters.
-- Severity: CRIT when the second-call params would have transferred
-  authority / changed value; HIGH when informational; MED otherwise.
-- Adjacent: `init_without_is_initialized` (no init guard at all). This
-  is the inverse — init guard so loose it never fires.
-
-### `passive_field_anchored_authority` — MED→HIGH
-A handler trusts the identity of an unsigned account because it's
-anchored via `has_one(<role>)` against trusted state, then uses the
-role's pubkey as a CPI-side authority parameter (`authority = role`
-in an `init` or `transfer`). The role does NOT sign the current
-transaction. This is *intentional* in escrow-shape protocols (maker
-pre-authorized at make-time by funding the vault) but becomes a
-vulnerability when (a) no make-time pre-authorization exists, or
-(b) the action exceeds the original pre-authorization's scope.
-- **Detect (Anchor / Quasar):** `<role>: UncheckedAccount` /
-  `AccountInfo` AND `has_one(<role>)` on a state account AND `<role>`
-  appears as `authority = <role>` in any `init(...)` / `token(...)`
-  constraint within the same handler AND the handler does NOT carry
-  `<role>: Signer` AND the state account read has no
-  consumed/settled/used flag flipping at write-time.
-- Severity gate: HIGH if the action transfers value out of the
-  protocol; MED if it only mints / records ATAs.
-- Composes with: `bounty_intent_drift` (docstring claims "only
-  `<role>` can do X"; impl lets anyone trigger X as long as the field
-  anchors).
-
-### `unpinned_authority_owned_token_account` — MEDIUM
-A token account in a handler's accounts struct is `mut` and consumed
-by a CPI as source / dest, but carries no constraint pinning its
-mint, owner, or authority. The caller's signature on the token
-transfer is the only protection. Standalone bounded by the calling
-authority; HIGH when paired with `arbitrary_cpi` or with delegate-
-authority changes that broaden who-can-spend.
-- **Detect (Anchor / Quasar):** `pub <field>: Account<Token>` /
-  `Account<TokenAccount>` with `#[account(mut)]` and no `token(...)`,
-  no `associated_token(...)`, no `has_one(<field>)`. Cross-reference:
-  field is passed to `transfer(src, dst, auth, ...)` as src or dst.
-
-### `cpi_authority_pda_implicit_pinning` — LOW (today) / HIGH (under refactor)
-A token account that should be `(mint, authority)`-pinned to an
-in-program PDA is left unconstrained at the spec level. Today the
-`invoke_signed` seeds happen to match only the canonical PDA, so the
-program self-protects; tomorrow a refactor that swaps `invoke_signed`
-for `invoke`, or adds a delegated-authority path, silently lifts the
-protection.
-- **Detect:** `Account<Token>` with `#[account(mut)]`, no
-  `token(authority = <X>)` constraint, consumed as `source` of an
-  `invoke_signed` whose seeds derive a PDA that *should* be the
-  account's authority.
-- Severity: LOW if `invoke_signed` is the only consumer (self-
-  protecting); HIGH if any `invoke` (no signer seeds) consumes it.
-  Surface as informational with a "next-refactor risk" tag.
-
-### `close_destination_role_pinned_no_signer_role` — HIGH
-`close = <role>` (or `close_program(dest = <role>)`) where `<role>`
-is anchored by `has_one` but is NOT a `Signer` of the current
-handler. The close lamports flow to a passive party that didn't
-authorize the close — a griefing-via-rent-extraction vector.
-- **Detect (Anchor / Quasar):** `close = <X>` /
-  `close_program(dest = <X>)` AND `<X>` does not appear as
-  `Signer<'info>` in the handler's accounts struct.
-- Severity: HIGH (passive-rent-extraction). LOW when the close is
-  paired with `<X>: Signer` (the legitimate escrow pattern).
-
-### `event_omits_principal_actor` — LOW (compliance / monitoring)
-Event emitted at the end of a handler omits the principal actor
-(caller / signer) of the action, leaving off-chain indexers to
-reconstruct who-did-what from tx introspection. Not a direct security
-issue; blocks downstream monitoring / fraud detection.
-- **Detect:** handler has `<X>: Signer` AND emits an event whose
-  payload does not include `<X>`'s pubkey.
-
-### `external_lamport_write_unowned` (a.k.a. `mixed_lamport_ownership`) — CRITICAL
-Direct mutation of an account's lamports field via raw pointer
-(`set_lamports`, `**lamports.borrow_mut()`, `account.lamports = ...`)
-when the account's runtime owner is **not** the executing program.
-Solana runtime forbids debiting lamports of an account you don't
-own. Distinct from `lamport_write_demotion` (about destination
-nature changing); this is about *source* owner not matching executor
-— guaranteed runtime rejection.
-- **Detect (Anchor):** `try_borrow_mut_lamports` on a field whose
-  Anchor account type does not constrain `owner = crate::ID` (i.e.
-  `UncheckedAccount`, `AccountInfo`, `SystemAccount`).
-- **Detect (Native / Quasar):** `set_lamports` / lamport pointer
-  writes on an AccountView for a PDA created by
-  `system_program::transfer` (or any path that didn't
-  `assign(&program_id)`).
-- Severity: CRIT-by-functionality — the program *cannot* withdraw on
-  real Solana; users lose funds permanently in the deposit-trap
-  shape.
-- Composes with: permissionless deposit + permissionless withdraw =
-  deposit-trap (CRIT).
-
-### `pda_owner_drift_across_handlers` — HIGH
-Cross-handler invariant: any PDA the program reads/writes should
-have a single, declared, verified owner across its lifetime. If
-handler 1 creates the PDA via `system::transfer` (system-owned),
-handler 2 mutates it via direct lamport write (program-owned
-required), and no handler does an `assign` in between, handler 2
-fails on mainnet.
-- **Detect:** walk every `system_program::transfer(_, vault, ...)` /
-  `Transfer { to: vault }` and verify some other handler `assign`s
-  the same PDA before the first program-side write.
-
-### `lamport_underflow_at_withdraw` — HIGH
-`set_lamports(view, view.lamports() OP rhs)` where OP ∈ {+, -, *}
-and rhs is not a guard-constrained literal. Subset of
-`arithmetic_overflow_wrapping` but high-incidence enough on the
-withdraw shape to deserve a named subcategory. Fix is a one-liner
-(`checked_sub`); pattern is highly recognizable across runtimes.
-- **Detect:** `account.lamports() OP rhs` consumed by `set_lamports`
-  / `**lamports.borrow_mut()` without a preceding `>= rhs` guard.
-
-### `rent_floor_unenforced_on_withdraw` — HIGH
-Withdraw / decrement-balance handlers allow the post-state lamport
-balance to drop below `Rent::minimum_balance(account.data_len())`
-without explicitly closing the account (zeroing data + reassigning
-to system program). The PDA becomes dust-eligible at the next epoch;
-sandwich-the-init replay surface opens up.
-- **Detect:** `set_lamports(view, new)` or `transfer(from = vault,
-  ...)` where `new` is not constrained `>= rent_exempt_minimum(
-  view.data().len())`.
-- Composes with: `init_without_is_initialized` (re-deposit replays
-  state); sandwich-the-init (attacker pre-touches the dust PDA
-  address).
-
-### `unchecked_account_no_owner_check` — HIGH
-`UncheckedAccount` with an `address = ...` constraint but no
-`owner = ...` constraint, then mutated via `set_lamports` /
-`borrow_data_mut` downstream. Address-pinning pins the *pubkey*, not
-the *ownership / data shape*. If an attacker can pre-create the
-address with any data, the seeds check passes but downstream
-mutations either fail (best case) or — with loader-side ownership
-change — rebind.
-- **Detect (Quasar / Anchor):** `<field>: UncheckedAccount` with
-  `address = X` AND no `owner = Y` AND any `set_lamports` /
-  `borrow_data_mut` / `realloc` on `<field>`.
-
-### `vault_seed_purpose_discriminator_missing` — MEDIUM
-PDA seed lacks a purpose discriminator (`["vault", user.key()]`
-fine for one vault category; collides if a sibling category is
-added later — SOL vault + token vault, or vault-v1 + vault-v2
-migration). Audit-checklist primitive — not currently exploited but
-a maintenance cliff.
-
-## Multi-actor / quorum primitives
-
-This entire family was missing from the v2.13 catalog. Multisigs,
-governance configs, committee-controlled state objects introduce
-hazards single-account / single-signer programs don't have:
-approval-counting predicates, signer-set lifecycle distinct from
-state lifecycle, proposal-object replay protection, authority-
-transfer races against in-flight proposals.
-
-**Escalation rule (category-zero finding):** if the program self-
-describes as multisig / governance / committee / quorum AND has no
-on-chain proposal object / nonce / executed-set, that is a
-category-zero finding regardless of catalog hits below. Authorization
-is a stateless function of (signers, params); replay across slots is
-bounded only by tx-level signature replay protection (recent
-blockhash) — and bundle-internal replay is unbounded.
-
-### `quorum_dup_inflation` — CRITICAL
-M-of-N approval logic that iterates a caller-supplied list and
-credits per-match without dedup against either (a) the same caller
-account appearing twice, or (b) the same stored-signer index already
-credited. Solana's runtime accepts the same signer pubkey listed
-multiple times in a tx's account vector — with threshold = 2 in a
-3-signer multisig, signer1 alone can drain.
-- **Detect (per-runtime):**
-  - spec-aware: `permissionless` handler with `requires
-    count(approvers, fn a => a ∈ stored_signers) >= threshold`
-    lowering — flag if no `unique` qualifier.
-  - Quasar / Anchor / Native: any `for x in remaining_accounts { if
-    x in stored { approvals += 1 } }` shape without a `seen[]`
-    bitmap or stored-index dedup.
-- Composes with: `permissionless execute` (1-of-N collapse, CRIT).
-
-### `quorum_set_dup_at_init` — HIGH
-Init handler for an M-of-N actor populates the signer set from
-caller-supplied accounts without dedup. Companion to
-`quorum_dup_inflation` on the *write* side. A creator can register
-a "5-of-5" multisig where all 5 entries are the same address —
-useful for laundering through a "credible-looking" quorum or
-combining with `quorum_dup_inflation` for a 1-of-1-masquerading-as-
-M-of-N.
-- **Detect:** init handler whose `state.signers =
-  remaining_accounts.collect()` (or equivalent) doesn't run
-  `signers.dedup()` / `assert!(unique(signers))` before persisting.
-
-### `nonce_absent_action_replay` — HIGH
-Action handler that takes (authority-set, params) and performs an
-external effect (CPI / state mutation) with no per-action nonce or
-proposal object on-chain. Distinct from `init_without_is_initialized`
-(replay against a stored bool); this is replay against a stateless
-authorization function. Particularly dangerous when the handler is
-permissionless w.r.t. who submits the tx.
-- **Detect:** handler whose effect is a CPI (`system::transfer`,
-  `token::transfer`, `spl_token::burn`, `set_authority`) and whose
-  state read does NOT include a `*_seq | nonce | last_action_slot`
-  field that the same handler also writes.
-- Composes with: bundle-mode submission → K × replay in one tx
-  (HIGH→CRIT).
-
-### `creator_admin_outside_quorum` — MED→HIGH (latent)
-A multi-party-controlled state object exposes a privileged role
-(`creator`, `admin`, `owner`) that is NOT required to be in the
-quorum set the object models, and the program has at least one
-handler gated on that role alone. Today's bug surface may be small
-(label edits / cosmetic ops); the category catches the shape before
-the inevitable `update_threshold(creator-only)` / `add_signer` /
-`rotate_creator` lands.
-- **Detect:** state struct has BOTH `signers: Vec<Pubkey>` (or
-  `members`, `committee`) AND a separate `creator` / `admin` /
-  `owner: Pubkey`; at least one handler asserts `has_one(creator)`
-  or signer-equals-`state.creator`.
-- Composes with: any future handler that gates a
-  threshold-modifying op on the singleton role = governance
-  collapses to single-key custody (CRIT, latent).
-
-### `signer_set_pinned_to_creator_pda_only` — LOW
-Multisig / committee config seeded only by creator address,
-allowing one config per creator. Not a vuln per se; flag as a
-design constraint that becomes a vuln if a future `config_id`
-parameter lands without updated seeds.
-
-## Probe-meta / runtime detection
-
-These categories surface gaps in the auditor's own bootstrap, not
-the target program. Until D1–D3 land in `crates/qedgen/src/probe.rs`,
-the auditor must apply these as guardrails:
-
-### `qedgen_codegen_runtime_yields_zero_categories` — CRITICAL (META)
-`probe.rs::applicable_categories(Runtime::QedgenCodegen) = vec![]`
-historically returned an empty set. A Quasar program that has not
-yet been spec'd would receive *no probe coverage at all* —
-universal categories (overflow, lifecycle, missing-signer) AND
-Quasar-specific ones all suppressed. **Fixed in v2.15** (D1); the
-auditor must still treat any future runtime-classification with an
-empty `applicable_categories` list as a probe-side bug, not a clean
-program.
-
-### `bootstrap_walker_misses_program_macro_form` — HIGH (META)
-The bootstrap handler discoverer was historically Anchor-shaped only,
-returning 0 handlers for Quasar's `#[program] mod X { #[instruction(
-discriminator = N)] pub fn h(...) }` form. **Fixed in v2.15** (D3);
-the Anchor parser handles Quasar's form natively because
-`#[instruction(...)]` is just an extra attribute on a `pub fn`. If a
-future runtime presents a structurally different handler form,
-guardrail: a non-empty crate that returns 0 handlers is a probe
-failure, not an empty program.
-
-## Cross-runtime sibling-diff (methodology)
-
-When the target program ships across multiple runtimes (Anchor +
-Quasar variants of the same primitive), the *diff* between sibling
-runtimes is a high-signal audit input. A guard the Pinocchio version
-has but the Quasar version lacks (or vice versa) is almost always a
-real bug — the primitive is portable, the defenses should be too.
-
-Use as a deliberate audit step when:
-- The program is published in multiple runtimes within the same
-  source tree.
-- A primitive (vault deposit/withdraw, signature aggregation, oracle
-  read) has a known canonical defense set.
-- A finding looks single-runtime-specific — diff against the
-  sibling runtime's source to either confirm (sibling has the same
-  bug → portable primitive) or clarify (sibling defends → spec gap
-  in the target).
-
 ## Quasar / qedgen-codegen runtime
 
 When the runtime is **qedgen-codegen** (detected by `quasar-lang`
@@ -914,16 +669,13 @@ that **no handler `effect` block writes**, but other handler
 guards or effect RHSes read it. Distinct from
 `init_config_field_unanchored` (which is *written from
 unauthenticated input*) — this field is *not written at all*,
-so reads always return the type's zero / default. **Implemented
-in `qedgen probe` v2.15** as a spec-aware predicate that flags
-read-without-write fields, with PDA-seed fields suppressed
-(codegen binds them implicitly at init).
+so reads always return the type's zero / default.
 
 - **Detect:** for each field F in `type State | ... of { F : T,
   ... }`, walk every handler's `effect` block and check whether
   any `F := ...` / `F += ...` assignment exists. If zero, but F
-  is read in any guard / effect RHS / property / `auth F` clause
-  (codegen lowers `auth F` to `has_one = F`), flag as CRIT/HIGH.
+  is read in any guard / effect RHS / property, flag as
+  CRIT/HIGH.
 - Severity: CRIT if the read controls authorization (an unwritten
   `creator` / `authority` Pubkey defaults to `0x00` — anyone
   signing as the zero address would pass, depending on guard
@@ -977,23 +729,6 @@ exhaustive; use as a thinking primer, not a checklist.
 | spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
-| quorum_dup_inflation | + | permissionless execute | = | one signer drains the vault as 1-of-N (CRIT) |
-| quorum_set_dup_at_init | + | quorum_dup_inflation | = | griefing-grade fake-quorum laundering surface (HIGH→CRIT) |
-| nonce_absent_action_replay | + | bundle-mode submission | = | K × replay in one tx of a single authorized action (HIGH→CRIT) |
-| creator_admin_outside_quorum | + | future "update_threshold" handler | = | governance multisig collapses to 1-of-1 single-key (CRIT, latent) |
-| permissionless init + creator_admin_outside_quorum + quorum_set_dup_at_init | + | UX trust-by-name | = | attacker stands up a "5-of-5 council" they alone control, social-engineers deposits (HIGH) |
-| partial_has_one_chain | + | runtime_transfer_program_unconstrained | = | silent fee-on-transfer / transfer-hook drift on a Token-2022 mint substituted post-deploy (HIGH→CRIT) |
-| partial_has_one_chain | + | transfer_hook_reentrancy | = | hooked-mint receives token, re-enters program mid-transfer, drains vault before close runs (CRIT) |
-| passive_field_anchored_authority | + | bounty_intent_drift | = | anchored-but-unauthorized action triggered on the role's behalf, while docstring claims only `<role>` can trigger (HIGH→CRIT depending on action scope) |
-| cpi_authority_pda_implicit_pinning | + | invoke → invoke_signed refactor regression | = | vault forgery on next refactor (LOW today, CRIT post-refactor) |
-| idempotent_init_on_state_account | + | set_authority-shaped init body | = | second call silently keeps original authority; caller assumes authority change took effect (CRIT) |
-| close_destination_role_pinned_no_signer_role | + | permissionless | = | anyone forces rent into passive role's account (HIGH; griefing) |
-| unpinned_authority_owned_token_account | + | delegate-authority refactor | = | delegated hot-wallet account substituted as source; transfer paid from a different user's tokens (HIGH) |
-| external_lamport_write_unowned | + | permissionless withdraw | = | program is non-functional on mainnet, funds locked (CRIT — DoS / deposit-trap) |
-| rent_floor_unenforced_on_withdraw | + | sandwich-the-init | = | drain user's vault PDA, replay state with attacker data on next deposit (HIGH→CRIT) |
-| lamport_underflow_at_withdraw | + | release-mode wrap | = | vault balance becomes ≈ u64::MAX, downstream solvency check sees infinite vault (CRIT) |
-| pda_owner_drift_across_handlers | + | direct lamport write on later handler | = | runtime rejects tx, user funds appear locked (HIGH; DoS) |
-| unchecked_account_no_owner_check | + | downstream lamport / data mut | = | trust a chosen-data forged account (HIGH→CRIT) |
 
 ## Classification rules
 
@@ -1020,17 +755,6 @@ Use the chain's ceiling, not the primitive's:
 
 If you can't articulate a concrete attacker capability for the
 severity you assigned, downgrade.
-
-**Severity tag — `implicit-runtime-invariant`.** A finding whose
-current severity is rescued by a downstream runtime check (typically
-SPL Token's mint-mismatch rejection, or the loader's
-`ExternalAccountLamportSpend` reject). Standalone severity is what
-the bug *would* be if the runtime check changed shape (Token-2022
-substitution, runtime semantic change, mint-program upgrade).
-Surface both: "today MED — would be HIGH if the program accepts
-Token-2022 mints." This avoids the trap of grading a primitive at
-its current shielded ceiling and letting a refactor / runtime change
-silently re-promote it.
 
 ### Real vulnerability
 The impl genuinely has the bug. Action: surface as a finding with
@@ -1095,6 +819,22 @@ no chain identified" explicitly so reviewers know it was checked.>
 <minimal .qedspec edit that would have caught this in spec-aware mode>
 ​```
 
+### Reproducer (CRIT/HIGH only)
+
+**Status:** fired | inconclusive
+**Test:** `target/qedgen-repros/audit/<finding-id>.rs`
+**Run:** `qedgen verify --probe-repros --json | jq '.results[] | select(.finding_id == "<id>")'`
+
+Concrete inputs (from the JSON `assignments`):
+
+- `<var1>` = `<value1>`
+- `<var2>` = `<value2>`
+
+Observed: `<the assertion that fired — quoted from test output>`
+
+(If `inconclusive`: state why — e.g., "Mollusk can't simulate
+ExternalAccountLamportSpend; finding is structural only.")
+
 ### Corpus reference
 
 `exploits.md` § <named incident or pattern> — same shape.
@@ -1104,24 +844,35 @@ no chain identified" explicitly so reviewers know it was checked.>
 
 ```
 Audit complete: 3 critical, 2 high, 7 medium, 4 spec-gap suggestions
+                4 of 5 CRIT/HIGH repros fired (1 inconclusive); 0 silent
 
-[CRIT] withdraw — arbitrary CPI                  programs/vault/src/lib.rs:142
-[CRIT] cancel — missing post-CPI reload          programs/vault/src/lib.rs:201
-[HIGH] initialize — non-canonical PDA bump       programs/vault/src/lib.rs:30
-[HIGH] redeem — fee computation overflow at u64  programs/vault/src/lib.rs:177
-[MED]  ... (5 more)
+[CRIT] withdraw — arbitrary CPI         programs/vault/src/lib.rs:142  [fired]
+[CRIT] cancel — missing post-CPI reload programs/vault/src/lib.rs:201  [fired]
+[CRIT] init — discriminator collision   programs/vault/src/lib.rs:55   [inconclusive: Mollusk can't simulate cross-program account aliasing]
+[HIGH] initialize — non-canonical PDA   programs/vault/src/lib.rs:30   [fired]
+[HIGH] redeem — fee computation overflow programs/vault/src/lib.rs:177 [fired]
+[MED]  ... (7 more — repros not required)
 
 Spec-gap suggestions (4): impl safe, spec under-specifies — see report.
-Suppressed (2): rules written to .qed/probe-suppress.toml
+Suppressed (2 + 0 silent-repro): rules in .qed/probe-suppress.toml
 
 Scaffolded:
   vault.qedspec                              (12 handlers, 5 invariants)
   .qed/findings/audit-20260426-1715.md       (full report)
   .qed/probe-suppress.toml                   (2 false-positives)
+  target/qedgen-repros/audit/<id>.rs         (5 repros — ephemeral)
 
 Next: review vault.qedspec, refine intent, re-run /audit for
 spec-aware mode (precise gap detection + ratchet integration).
 ```
+
+The `n silent-repro` count tracks findings dropped because their
+reproducer didn't fire — they're suppressed silently per the v2.16
+contract, but the count appears in the digest so the user knows the
+audit attempted them. Zero is the expected number for a clean audit;
+non-zero is a signal that either the auditor wrote a too-narrow
+attack or the structural pattern doesn't actually exploit (in which
+case the pattern shouldn't have been flagged at CRIT/HIGH).
 
 ## What you do NOT do
 
@@ -1129,7 +880,12 @@ spec-aware mode (precise gap detection + ratchet integration).
   user decide. Editing source crosses the destructive line.
 - **Don't run Lean / Kani / proptest.** Those are heavy, opinionated
   artifacts that the user opts into via `qedgen codegen`. Audit is the
-  cheap front door.
+  cheap front door. Mollusk repros under
+  `target/qedgen-repros/audit/` are a different beast — ephemeral
+  test files that exist *only* to gate findings (fired vs silent), not
+  long-lived verification artifacts. Generating those is required for
+  CRIT/HIGH (v2.16 D5); the prohibition is specifically about Lean
+  proofs, Kani harnesses, and full proptest harnesses.
 - **Don't ask consent for the audit's named side-effects.** `.qedspec`,
   `.qed/findings/`, `.qed/probe-suppress.toml` are all expected
   artifacts of the named operation. Show them in the digest footer.

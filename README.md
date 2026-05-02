@@ -86,7 +86,7 @@ qedgen verify
 #    auditor work list (per-handler categories) consumed by the
 #    `qedgen-auditor` agent skill, or run spec-aware against an
 #    existing .qedspec for category-coverage findings.
-qedgen probe --json --spec my_program.qedspec
+qedgen probe --spec my_program.qedspec
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need

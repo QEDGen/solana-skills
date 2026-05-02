@@ -3008,6 +3008,12 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // at `qedgen check` rather than at `cargo build`.
     warnings.extend(check_checked_arith_needs_math_overflow(spec));
 
+    // v2.16: opt-in non-default arithmetic (`+=?` / `-=?` wrapping or `+=!`
+    // / `-=!` saturating) is a spec-authoring concern that needs surfacing
+    // but isn't reproducible from the spec alone. Demoted from `qedgen
+    // probe` to `qedgen check` per the reproducer-only probe contract.
+    warnings.extend(check_wrapping_arithmetic_opt_in(spec));
+
     // v2.10 — spec-authoring lints covering the security shapes the
     // v2.10 post-codegen audit caught. See
     // `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` for the full proposal and
@@ -3065,6 +3071,63 @@ fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<Completenes
         counterexample: None,
         fix_options: vec![],
     }]
+}
+
+/// `[wrapping_arithmetic]` / `[saturating_arithmetic]` — handler effect uses
+/// explicit non-default arithmetic (`+=?` / `-=?` wrapping, or `+=!` / `-=!`
+/// saturating). Default `+=` / `-=` (v2.7 G3 checked semantics) abort on
+/// overflow, which is the safe default. The non-default variants are explicit
+/// user opt-ins:
+///
+/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N. Almost always
+///   wrong on monetary amounts. Severity: Warning, priority 1.
+/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN. Hides bugs that should
+///   propagate as errors. Sometimes legitimate (rate limiters, epoch counters).
+///   Severity: Info, priority 2.
+///
+/// Demoted from `qedgen probe`'s `arithmetic_overflow_wrapping` finding
+/// (v2.16): the structural pattern is real, but it's a *spec-authoring*
+/// concern, not a reproducible vulnerability. The probe channel ships
+/// reproducer-bearing findings only; this rule is the lint-channel
+/// counterpart. See `feedback_probes_reproducible_only.md`.
+fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for op in &spec.handlers {
+        for (field, kind, _value) in &op.effects {
+            let (severity, priority, label, default_op) = match kind.as_str() {
+                "add_wrap" => (Severity::Warning, 1, "wrapping", "+="),
+                "sub_wrap" => (Severity::Warning, 1, "wrapping", "-="),
+                "add_sat" => (Severity::Info, 2, "saturating", "+="),
+                "sub_sat" => (Severity::Info, 2, "saturating", "-="),
+                _ => continue,
+            };
+            warnings.push(CompletenessWarning {
+                rule: format!("{}_arithmetic", label),
+                severity,
+                priority,
+                message: format!(
+                    "handler `{}` uses {} arithmetic on `{}` (op `{}`) — silent overflow {}. Default `{}` (checked) aborts on overflow.",
+                    op.name,
+                    label,
+                    field,
+                    kind,
+                    if label == "wrapping" { "modulo 2^N" } else { "saturating to MAX/MIN" },
+                    default_op,
+                ),
+                subject: Some(format!("{}::{}::{}", op.name, field, kind)),
+                fix: format!(
+                    "If the {label} semantic is intentional (epoch wrap, rate limiter), document the invariant inline. Otherwise change `{kind}` to `{default_op}` (checked) — the spec's `type Error` block must declare `MathOverflow`.",
+                    label = label,
+                    kind = kind,
+                    default_op = default_op,
+                ),
+                example: None,
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
+    warnings
 }
 
 /// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
@@ -4491,6 +4554,64 @@ mod tests {
 
     fn empty_spec() -> ParsedSpec {
         ParsedSpec::default()
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_on_wrap() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("tick");
+        h.effects
+            .push(("epoch".to_string(), "add_wrap".to_string(), "1".to_string()));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule, "wrapping_arithmetic");
+        assert_eq!(warnings[0].severity, Severity::Warning);
+        assert!(warnings[0].message.contains("wrapping"));
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_on_saturating() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("apply");
+        h.effects.push((
+            "balance".to_string(),
+            "add_sat".to_string(),
+            "delta".to_string(),
+        ));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule, "saturating_arithmetic");
+        assert_eq!(warnings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_silent_on_default_checked() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("deposit");
+        h.effects
+            .push(("total".to_string(), "add".to_string(), "amount".to_string()));
+        h.effects.push((
+            "fee_pool".to_string(),
+            "sub".to_string(),
+            "amount".to_string(),
+        ));
+        spec.handlers.push(h);
+        assert!(check_wrapping_arithmetic_opt_in(&spec).is_empty());
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_per_op() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("complex");
+        h.effects
+            .push(("a".to_string(), "add_wrap".to_string(), "1".to_string()));
+        h.effects
+            .push(("b".to_string(), "sub_sat".to_string(), "1".to_string()));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 2);
     }
 
     fn make_handler(name: &str) -> ParsedHandler {

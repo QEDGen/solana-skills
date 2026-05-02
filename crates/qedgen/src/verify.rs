@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use crate::verify_counterexample::Counterexample;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackendStatus {
@@ -26,6 +28,14 @@ pub struct BackendReport {
     pub duration_ms: u128,
     pub detail: Option<String>,
     pub log_path: Option<PathBuf>,
+    /// Structured counterexamples extracted by the per-backend parser
+    /// (PLAN-v2.16 D1/D2). Empty for `Passed` / `Skipped` backends, and
+    /// for `Failed` backends whose parser couldn't extract structured
+    /// data (in which case `detail` still carries the human summary).
+    /// Serialized `omitempty` so consumers pinning the v2.15 shape
+    /// continue to work.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub counterexamples: Vec<Counterexample>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +121,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 harness.display()
             )),
             log_path: None,
+            counterexamples: Vec::new(),
         };
     }
 
@@ -126,6 +137,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 duration_ms: start.elapsed().as_millis(),
                 detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
+                counterexamples: Vec::new(),
             };
         }
     };
@@ -151,16 +163,29 @@ fn run_proptest(harness: &Path) -> BackendReport {
             duration_ms,
             detail: None,
             log_path: None,
+            counterexamples: Vec::new(),
         },
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);
+            // PLAN-v2.16 D2: parse libtest's failure block into structured
+            // (harness, var, value) tuples. Then attach the persisted
+            // proptest-regressions seed for deterministic re-run. If
+            // parsing yields nothing (output shape changed, or failure
+            // happened before any property fired), `detail` still carries
+            // the existing human summary so nothing regresses.
+            let mut cxs = crate::verify_proptest_parse::parse_failures(&stdout);
+            for cx in cxs.iter_mut() {
+                cx.seed =
+                    crate::verify_proptest_parse::read_seed_for_harness(&crate_dir, test_name);
+            }
             BackendReport {
                 name: "proptest",
                 status: BackendStatus::Failed,
                 duration_ms,
                 detail: Some(summarize_cargo_failure(&stdout, &stderr)),
                 log_path: None,
+                counterexamples: cxs,
             }
         }
         Err(e) => BackendReport {
@@ -169,6 +194,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
             duration_ms,
             detail: Some(format!("failed to spawn cargo: {}", e)),
             log_path: None,
+            counterexamples: Vec::new(),
         },
     }
 }
@@ -186,6 +212,7 @@ fn run_kani(harness: &Path) -> BackendReport {
                 harness.display()
             )),
             log_path: None,
+            counterexamples: Vec::new(),
         };
     }
 
@@ -199,6 +226,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             duration_ms: start.elapsed().as_millis(),
             detail: Some(format!("{}", e)),
             log_path: None,
+            counterexamples: Vec::new(),
         };
     }
 
@@ -212,6 +240,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             duration_ms: start.elapsed().as_millis(),
             detail: Some(format!("{}", e)),
             log_path: None,
+            counterexamples: Vec::new(),
         };
     }
 
@@ -224,6 +253,7 @@ fn run_kani(harness: &Path) -> BackendReport {
                 duration_ms: start.elapsed().as_millis(),
                 detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
+                counterexamples: Vec::new(),
             };
         }
     };
@@ -245,16 +275,25 @@ fn run_kani(harness: &Path) -> BackendReport {
             duration_ms,
             detail: Some(summarize_kani_pass(&String::from_utf8_lossy(&out.stdout))),
             log_path: None,
+            counterexamples: Vec::new(),
         },
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
+            // PLAN-v2.16 D1: parse CBMC counterexample output into
+            // structured (harness, var, value, line) tuples. The human
+            // `detail` summary stays for backward compat / pretty-print.
+            // Counterexamples come exclusively from stdout (cargo-kani
+            // routes verdicts there); stderr carries build noise we
+            // fold into `detail` only.
+            let cxs = crate::verify_kani_parse::parse_failures(&stdout);
             BackendReport {
                 name: "kani",
                 status: BackendStatus::Failed,
                 duration_ms,
                 detail: Some(summarize_kani_failure(&stdout, &stderr)),
                 log_path: None,
+                counterexamples: cxs,
             }
         }
         Err(e) => BackendReport {
@@ -263,6 +302,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             duration_ms,
             detail: Some(format!("failed to spawn cargo kani: {}", e)),
             log_path: None,
+            counterexamples: Vec::new(),
         },
     }
 }
@@ -280,6 +320,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
                 lean_dir.display()
             )),
             log_path: None,
+            counterexamples: Vec::new(),
         };
     }
 
@@ -297,6 +338,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
             duration_ms,
             detail: None,
             log_path: None,
+            counterexamples: Vec::new(),
         },
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -307,6 +349,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
                 duration_ms,
                 detail: Some(summarize_lake_failure(&stdout, &stderr)),
                 log_path: None,
+                counterexamples: Vec::new(),
             }
         }
         Err(e) => BackendReport {
@@ -318,6 +361,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
                 e
             )),
             log_path: None,
+            counterexamples: Vec::new(),
         },
     }
 }

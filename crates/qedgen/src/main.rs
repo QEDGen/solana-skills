@@ -25,6 +25,7 @@ mod interface_gen;
 mod kani;
 mod lean_gen;
 mod probe;
+mod probe_repro;
 mod project;
 mod proofs_bootstrap;
 mod proptest_gen;
@@ -40,6 +41,10 @@ mod unit_test;
 mod upstream_check;
 mod validate;
 mod verify;
+mod verify_counterexample;
+mod verify_kani_parse;
+mod verify_probe_repros;
+mod verify_proptest_parse;
 
 use anyhow::{ensure, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -224,10 +229,6 @@ enum Commands {
         /// `programs/lending` for an Anchor project)
         #[arg(long)]
         root: Option<PathBuf>,
-
-        /// Emit JSON to stdout (currently the only output mode)
-        #[arg(long, default_value_t = true)]
-        json: bool,
     },
 
     /// Scaffold a .qedspec from an Anchor IDL JSON file.
@@ -470,6 +471,16 @@ enum Commands {
         /// pinned hash / no program_id) still skip cleanly. CI gate friendly.
         #[arg(long)]
         offline: bool,
+
+        /// Run probe reproducers under `<project>/target/qedgen-repros/`
+        /// (PLAN-v2.16 D4). Each repro is a Mollusk-driven Rust test
+        /// asserting a specific probe finding's bug fires; the verb
+        /// captures pass/fail per finding so the auditor / next probe
+        /// invocation can drop findings whose repros didn't reproduce.
+        /// Pre-D3 (no repros generated yet) this is a no-op that emits
+        /// a `note: no repros found` placeholder.
+        #[arg(long)]
+        probe_repros: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -1080,7 +1091,6 @@ async fn main() -> Result<()> {
             spec,
             bootstrap,
             root,
-            json: _,
         } => {
             let output = if bootstrap {
                 let root = root
@@ -1515,6 +1525,7 @@ async fn main() -> Result<()> {
             check_upstream,
             rpc_url,
             offline,
+            probe_repros,
         } => {
             require_git_repo()?;
 
@@ -1541,6 +1552,31 @@ async fn main() -> Result<()> {
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
+                let any_backend_flag = proptest || kani || lean || probe_repros;
+                if !any_backend_flag {
+                    return Ok(());
+                }
+            }
+
+            // PLAN-v2.16 D4: --probe-repros runs the per-probe Mollusk
+            // reproducers under `target/qedgen-repros/`. Like
+            // --check-upstream, it's a separate verification stage with
+            // its own report shape — not folded into the backend
+            // BackendReport rollup. Runs before the proptest/kani/lean
+            // backends so the auditor has the gating data first.
+            if probe_repros {
+                let project_root = spec.parent().map(Path::to_path_buf).unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                });
+                let report = verify_probe_repros::run(&project_root)?;
+                if json {
+                    verify_probe_repros::print_json(&report)?;
+                } else {
+                    verify_probe_repros::print_human(&report);
+                }
+                if !report.all_fired_or_inconclusive() {
+                    std::process::exit(1);
+                }
                 let any_backend_flag = proptest || kani || lean;
                 if !any_backend_flag {
                     return Ok(());

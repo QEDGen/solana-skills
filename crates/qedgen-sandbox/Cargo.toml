@@ -1,0 +1,25 @@
+[package]
+name = "qedgen-sandbox"
+version = "0.1.0"
+edition = "2021"
+authors = ["abishekk92"]
+description = "Mollusk-backed in-process Solana sandbox for qedgen probe reproducers (PLAN-v2.16 D4)"
+license = "MIT"
+repository = "https://github.com/qedgen/solana-skills"
+
+# qedgen-sandbox is intentionally NOT a dependency of the `qedgen` CLI
+# crate. It exists so that auto-generated probe reproducers (D3, written
+# under `target/qedgen-repros/`) can `[dependencies] qedgen-sandbox = "..."`
+# without forcing the CLI's dep graph to absorb Mollusk + Agave + the
+# Solana SDK. The CLI orchestrates `cargo test` against the repros via
+# `qedgen verify --probe-repros`; it never imports this crate.
+
+[dependencies]
+mollusk-svm = "0.12.1-agave-4.0"
+# Solana SDK split crates — versions chosen to match what mollusk-svm
+# 0.12.1-agave-4.0 already pulls in transitively (agave-4.0 era).
+# Pinning them explicitly here lets the Sandbox API surface use them
+# directly without forcing repros to discover the right version.
+solana-account = "3"
+solana-instruction = "3"
+solana-pubkey = "4"
