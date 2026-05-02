@@ -1,10 +1,18 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::multipart;
 use reqwest::Client;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tokio::time::sleep;
+
+/// True iff every component of `p` is `Normal` or `CurDir` (`./`).
+/// Reject `..`, root, and Windows prefix components — these escape the
+/// extraction directory under `output_dir.join(p)`. (GH issue #26.)
+fn is_safe_relative_path(p: &Path) -> bool {
+    p.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
 
 const BASE_URL: &str = "https://aristotle.harmonic.fun/api/v2";
 const REQUEST_TIMEOUT_SECS: u64 = 60;
@@ -297,7 +305,15 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
     std::fs::create_dir_all(output_dir)?;
 
     // Extract tar.gz, stripping the top-level directory prefix
-    // (Aristotle wraps results in a `project_aristotle/` directory)
+    // (Aristotle wraps results in a `project_aristotle/` directory).
+    //
+    // SECURITY: validate every entry's resolved path is contained
+    // under `output_dir` after stripping. A malicious or compromised
+    // archive could include traversal components (`..`) or absolute
+    // paths that escape the output dir; the pre-v2.15 implementation
+    // unpacked the entry's path verbatim after stripping, with no
+    // bound check. (GH issue #26.) Reject any entry whose stripped
+    // path contains `..`, a root directory, or a Windows path prefix.
     let decoder = flate2::read::GzDecoder::new(&bytes[..]);
     let mut archive = tar::Archive::new(decoder);
 
@@ -309,6 +325,14 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
         let stripped: PathBuf = path.components().skip(1).collect();
         if stripped.as_os_str().is_empty() {
             continue;
+        }
+
+        if !is_safe_relative_path(&stripped) {
+            return Err(anyhow!(
+                "aristotle archive contains unsafe path `{}` — refusing to extract \
+                 (path-traversal protection)",
+                stripped.display()
+            ));
         }
 
         let dest = output_dir.join(&stripped);
@@ -411,4 +435,29 @@ pub async fn fill_sorry(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_relative_path;
+    use std::path::Path;
+
+    #[test]
+    fn safe_paths_accept_normal_components() {
+        assert!(is_safe_relative_path(Path::new("Test.lean")));
+        assert!(is_safe_relative_path(Path::new("dir/sub/file.txt")));
+        assert!(is_safe_relative_path(Path::new("./file.txt")));
+        assert!(is_safe_relative_path(Path::new("a/./b/c")));
+    }
+
+    #[test]
+    fn unsafe_paths_rejected() {
+        // Parent-dir traversal — the canonical exploit shape.
+        assert!(!is_safe_relative_path(Path::new("../escape.txt")));
+        assert!(!is_safe_relative_path(Path::new("dir/../../../etc/passwd")));
+        // Absolute paths.
+        assert!(!is_safe_relative_path(Path::new("/etc/passwd")));
+        // Mid-path traversal — even one `..` is a refusal.
+        assert!(!is_safe_relative_path(Path::new("safe/../../escape.txt")));
+    }
 }
