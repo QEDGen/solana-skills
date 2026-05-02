@@ -67,6 +67,14 @@ docs/prds/*
 learnings/
 LEARNINGS_*.md
 
+# Audit findings: per-target eval outputs and rollups stay local. They
+# may name external source codebases (per-target attribution for
+# internal traceability) and contain unreleased exploit primitives;
+# never commit. The auditor SKILL.md / exploits.md / release notes
+# carry the *generic* taxonomy; the source-attributed findings here do
+# not.
+.qed/findings/
+
 # Local agent/editor state
 .agents/
 .claude/
