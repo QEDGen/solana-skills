@@ -25,7 +25,7 @@ pub struct Cancel<'info> {
 }
 
 impl<'info> Cancel<'info> {
-    #[qed(verified, spec = "../escrow.qedspec", handler = "cancel", hash = "ddff71e2acaaf308", spec_hash = "3f4361ea49ef7992")]
+    #[qed(verified, spec = "../escrow.qedspec", handler = "cancel", hash = "ddff71e2acaaf308", spec_hash = "c47340875b51de3b")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &CancelBumps) -> Result<(), ProgramError> {
         guards::cancel(self)?;

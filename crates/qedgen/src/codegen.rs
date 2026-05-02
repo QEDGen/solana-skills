@@ -2602,6 +2602,24 @@ fn generate_guards(
                             // match `approver_x` when looking for `approver`.
                             let after = i + nbytes.len();
                             if after >= bytes.len() || !is_ident_char(bytes[after]) {
+                                // `<acct>.pubkey` is the spec-author's
+                                // way of saying "this account's address"
+                                // — lower to the same address-load form
+                                // we use for bare `<acct>` so a
+                                // `requires acct.pubkey == state.field`
+                                // clause compiles.
+                                let pubkey_marker = b".pubkey";
+                                let after_dot_end = after + pubkey_marker.len();
+                                if after_dot_end <= bytes.len()
+                                    && &bytes[after..after_dot_end] == pubkey_marker
+                                    && (after_dot_end == bytes.len()
+                                        || !is_ident_char(bytes[after_dot_end]))
+                                {
+                                    after_accounts.push_str(&surface.account_key_expr(name));
+                                    i = after_dot_end;
+                                    matched = true;
+                                    break;
+                                }
                                 // Don't rewrite `name.` (field access on
                                 // the handler-account is a different
                                 // expression — keep the `.` access path).

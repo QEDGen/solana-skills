@@ -400,8 +400,20 @@ fn build_guard_cond_parts(
     if let Some(ref guard) = op.guard_str {
         cond_parts.push(guard.clone());
     }
-    // Requires clauses contribute their positive form as guard conditions
+    // Requires clauses contribute their positive form as guard
+    // conditions — *unless* the predicate references a handler-account
+    // pubkey (e.g. `initializer_ta.pubkey == state.X`). Handler accounts
+    // aren't in Lean scope (the model has no notion of runtime account
+    // resolution), so the expression has no meaning at the Lean level
+    // even though it's a real runtime check in the emitted Rust. The
+    // matching abort theorem is also skipped at the per-requires emit
+    // site below; together they keep Lean buildable while preserving
+    // the runtime-side enforcement. Same shape as the
+    // `is_account_binding_pubkey_ref` carve-out for effects.
     for req in &op.requires {
+        if mentions_handler_account_pubkey(&req.lean_expr, &op.accounts) {
+            continue;
+        }
         cond_parts.push(req.lean_expr.clone());
     }
     // Auto-guards for add effects (overflow prevention, type-aware).
@@ -2399,8 +2411,15 @@ fn render_aborts_if(
                 ));
             }
 
-            // Requires-based abort theorems — auto-proven via if_neg projection
+            // Requires-based abort theorems — auto-proven via if_neg projection.
+            // Skip requires that reference handler-account pubkeys: they
+            // were dropped from `cond_parts` upstream because the account
+            // isn't in Lean scope, and the abort form would be equally
+            // unprovable. The runtime-side check still emits in Rust.
             for req in &op.requires {
+                if mentions_handler_account_pubkey(&req.lean_expr, &op.accounts) {
+                    continue;
+                }
                 if let Some(ref error_name) = req.error_name {
                     let theorem_name = theorem_name_for(error_name, &mut error_seen);
                     out.push_str(&format!(
@@ -3511,6 +3530,22 @@ fn is_account_binding_pubkey_ref(
         } else {
             false
         }
+    })
+}
+
+/// True when `expr` mentions `<handler_account>.pubkey` (or `.key()`)
+/// anywhere in its body — used to suppress `requires` / `aborts_if`
+/// clauses from Lean codegen when they reference a handler account
+/// (no Lean scope). The runtime-side check still emits in Rust; only
+/// the Lean-side projection is dropped.
+fn mentions_handler_account_pubkey(
+    expr: &str,
+    accounts: &[crate::check::ParsedHandlerAccount],
+) -> bool {
+    accounts.iter().any(|a| {
+        let needle_pubkey = format!("{}.pubkey", a.name);
+        let needle_key = format!("{}.key()", a.name);
+        expr.contains(&needle_pubkey) || expr.contains(&needle_key)
     })
 }
 

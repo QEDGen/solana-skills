@@ -36,6 +36,8 @@ pub fn exchange<'info>(ctx: &mut Exchange<'info>) -> Result<(), ProgramError> {
     }
     // authority: (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())
     if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    // requires: initializer_ta.pubkey = s.initializer_token_account
+    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())
@@ -48,6 +50,8 @@ pub fn cancel<'info>(ctx: &mut Cancel<'info>) -> Result<(), ProgramError> {
     if ctx.escrow.status != Status::Open as u8 { return Err(ProgramError::from(crate::errors::EscrowError::InvalidLifecycle)); }
     // authority: (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address())
     if (*ctx.escrow_ta.owner()) != (*ctx.escrow.to_account_view().address()) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
+    // requires: initializer_ta.pubkey = s.initializer_token_account
+    if !((*ctx.initializer_ta.to_account_view().address()) == ctx.escrow.initializer_token_account) { return Err(ProgramError::from(EscrowError::Unauthorized)); }
     // lifecycle: status := Closed
     ctx.escrow.status = Status::Closed as u8;
     Ok(())

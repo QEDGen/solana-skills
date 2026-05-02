@@ -83,6 +83,12 @@ handler exchange : State.Open -> State.Closed {
     token_program  : program
   }
 
+  // bind initializer_ta to the stored receiver TA so a taker can't
+  // redirect the maker's payout to an arbitrary account (any account
+  // they control with the right mint would otherwise pass the SPL
+  // Token program's runtime mint-mismatch check).
+  requires initializer_ta.pubkey == state.initializer_token_account else Unauthorized
+
   transfers {
     from taker_ta to initializer_ta amount taker_amount authority taker
     from escrow_ta to taker_ta amount initializer_amount authority escrow
@@ -102,6 +108,12 @@ handler cancel : State.Open -> State.Closed {
     initializer_ta : writable, type token
     token_program  : program
   }
+
+  // same binding as exchange — even though the initializer is the
+  // signer here, a future delegate-authority pattern or hand-edit
+  // could allow a different token account that doesn't belong to
+  // the initializer to receive the refund. Pin it.
+  requires initializer_ta.pubkey == state.initializer_token_account else Unauthorized
 
   transfers {
     from escrow_ta to initializer_ta amount initializer_amount authority escrow

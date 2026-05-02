@@ -27,7 +27,7 @@ pub struct Exchange<'info> {
 }
 
 impl<'info> Exchange<'info> {
-    #[qed(verified, spec = "../escrow.qedspec", handler = "exchange", hash = "7b560f1c9c9b8b97", spec_hash = "8663c97860b95e28")]
+    #[qed(verified, spec = "../escrow.qedspec", handler = "exchange", hash = "7b560f1c9c9b8b97", spec_hash = "67871b9bea7db0e6")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &ExchangeBumps) -> Result<(), ProgramError> {
         guards::exchange(self)?;
