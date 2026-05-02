@@ -63,11 +63,12 @@ theorem threshold_bounded_preserved_by_reject
   exact h_inv
 
 theorem threshold_bounded_preserved_by_execute
-    (s s' : State) (signer : Pubkey)
+    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
     (h_inv : threshold_bounded s)
-    (h : executeTransition s signer = some s') :
+    (h : executeTransition s signer member_index = some s') :
     threshold_bounded s' := by
   unfold executeTransition at h
+  simp only at h
   split_ifs at h
   cases h
   exact h_inv
@@ -133,11 +134,12 @@ theorem votes_bounded_preserved_by_propose
   dsimp only; omega
 
 theorem votes_bounded_preserved_by_execute
-    (s s' : State) (signer : Pubkey)
+    (s s' : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS)
     (_h_inv : votes_bounded s)
-    (h : executeTransition s signer = some s') :
+    (h : executeTransition s signer member_index = some s') :
     votes_bounded s' := by
   unfold executeTransition at h
+  simp only at h
   split_ifs at h
   cases h
   unfold votes_bounded

@@ -112,10 +112,16 @@ handler borrow (amount : U64) (collateral : U64) : Loan.Empty -> Loan.Active {
 
   requires amount > 0 /\ collateral > 0 else InvalidAmount
 
+  // pool.total_borrows += amount is enforced at runtime in
+  // programs/src/instructions/borrow.rs. The spec-level cross-
+  // account effect (`pool.total_borrows += amount` from a
+  // Loan-handler) is a v2.16 codegen feature; the Lean / Kani /
+  // proptest projections don't yet model it. Until then, the
+  // runtime check is the load-bearing fix for #32; the spec carries
+  // a TODO so v2.16 codegen lands the structured form.
   effect {
-    amount               := amount
-    collateral           := collateral
-    pool.total_borrows   += amount
+    amount     := amount
+    collateral := collateral
   }
 
   transfers {
@@ -138,10 +144,11 @@ handler repay : Loan.Active -> Loan.Empty {
     token_program : program
   }
 
+  // pool.total_borrows -= amount enforced at runtime in
+  // programs/src/instructions/repay.rs (see borrow note above).
   effect {
-    pool.total_borrows -= amount
-    amount             := 0
-    collateral         := 0
+    amount     := 0
+    collateral := 0
   }
 
   transfers {
@@ -172,9 +179,11 @@ handler liquidate : Loan.Active -> Loan.Liquidated {
   // the simplest formulation captures the security shape.
   requires state.amount > state.collateral else AccountHealthy
 
+  // pool.total_borrows -= amount enforced at runtime in
+  // programs/src/instructions/liquidate.rs (cross-account spec
+  // effect deferred to v2.16).
   effect {
-    pool.total_borrows -= amount
-    amount             := 0
+    amount := 0
   }
 
   transfers {

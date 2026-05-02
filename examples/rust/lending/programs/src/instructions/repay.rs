@@ -27,7 +27,7 @@ pub struct Repay<'info> {
 }
 
 impl<'info> Repay<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "6c160536ed8b56b1", spec_hash = "4740e8280cb17bad")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "6c160536ed8b56b1", spec_hash = "9b5d2eb1d0b2b787")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RepayBumps) -> Result<(), ProgramError> {
         guards::repay(self)?;
