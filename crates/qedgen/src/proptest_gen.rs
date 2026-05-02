@@ -823,8 +823,16 @@ fn emit_guard_tests(
     all_fields: &[(String, String)],
 ) {
     for op in guard_ops {
-        let rust_guard =
-            rust_codegen_util::collect_full_guard(op, true).unwrap_or_else(|| "true".to_string());
+        // Skip handlers whose only guards reference handler-account
+        // pubkeys — those clauses are filtered out by
+        // `collect_full_guard` (the proptest's simplified State drops
+        // Pubkey-typed fields), and falling back to `"true"` would
+        // emit `prop_assume!(!(true))` which always rejects → "Too
+        // many global rejects" test failure. Real guard checks still
+        // emit in the runtime Rust handler.
+        let Some(rust_guard) = rust_codegen_util::collect_full_guard(op, true) else {
+            continue;
+        };
 
         out.push_str("proptest! {\n");
         // High reject limit: guard negation filters most inputs by design

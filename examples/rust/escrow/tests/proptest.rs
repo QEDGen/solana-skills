@@ -67,9 +67,6 @@ fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
 }
 
 fn exchange(s: &mut State) -> bool {
-    if !(initializer_ta.pubkey == s.initializer_token_account) {
-        return false;
-    }
     if s.status != Status::Open {
         return false;
     }
@@ -78,9 +75,6 @@ fn exchange(s: &mut State) -> bool {
 }
 
 fn cancel(s: &mut State) -> bool {
-    if !(initializer_ta.pubkey == s.initializer_token_account) {
-        return false;
-    }
     if s.status != Status::Open {
         return false;
     }
@@ -96,28 +90,6 @@ proptest! {
         prop_assume!(!((deposit_amount > 0) && (receive_amount > 0)));
         prop_assert!(!initialize(&mut s, deposit_amount, receive_amount),
             "initialize must reject when guard is violated");
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn exchange_rejects_invalid(s in arb_boundary_state()) {
-        let mut s = s;
-        prop_assume!(!(initializer_ta.pubkey == s.initializer_token_account));
-        prop_assert!(!exchange(&mut s),
-            "exchange must reject when guard is violated");
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
-    #[test]
-    fn cancel_rejects_invalid(s in arb_boundary_state()) {
-        let mut s = s;
-        prop_assume!(!(initializer_ta.pubkey == s.initializer_token_account));
-        prop_assert!(!cancel(&mut s),
-            "cancel must reject when guard is violated");
     }
 }
 

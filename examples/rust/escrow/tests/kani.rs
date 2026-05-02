@@ -53,9 +53,6 @@ fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
 }
 
 fn exchange(s: &mut State) -> bool {
-    if !(initializer_ta.pubkey == s.initializer_token_account) {
-        return false;
-    }
     if s.status != Status::Open {
         return false;
     }
@@ -64,9 +61,6 @@ fn exchange(s: &mut State) -> bool {
 }
 
 fn cancel(s: &mut State) -> bool {
-    if !(initializer_ta.pubkey == s.initializer_token_account) {
-        return false;
-    }
     if s.status != Status::Open {
         return false;
     }
@@ -93,36 +87,6 @@ fn verify_initialize_rejects_invalid() {
     kani::assume(!((deposit_amount > 0) && (receive_amount > 0)));
     assert!(!initialize(&mut s, deposit_amount, receive_amount),
         "initialize must reject when guard is violated");
-}
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_exchange_rejects_invalid() {
-    let mut s = State {
-        initializer_amount: kani::any(),
-        taker_amount: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Open);
-    kani::assume(!(initializer_ta.pubkey == s.initializer_token_account));
-    assert!(!exchange(&mut s),
-        "exchange must reject when guard is violated");
-}
-
-#[kani::proof]
-#[kani::unwind(2)]
-#[kani::solver(cadical)]
-fn verify_cancel_rejects_invalid() {
-    let mut s = State {
-        initializer_amount: kani::any(),
-        taker_amount: kani::any(),
-        status: kani::any(),
-    };
-    kani::assume(s.status == Status::Open);
-    kani::assume(!(initializer_ta.pubkey == s.initializer_token_account));
-    assert!(!cancel(&mut s),
-        "cancel must reject when guard is violated");
 }
 
 // ============================================================================

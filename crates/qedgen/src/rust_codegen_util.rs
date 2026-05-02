@@ -426,12 +426,25 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
 
 /// Collect all guard conditions from a handler (guard_str + requires clauses)
 /// as a single Rust expression. Returns None if no guards exist.
+///
+/// Skips `requires` clauses whose body references `<handler-account>.pubkey`.
+/// The proptest / Kani / integration-test models use a simplified `State`
+/// struct that drops Pubkey-typed fields (they're not exercisable from a
+/// property strategy), so a `requires acct.pubkey == state.pubkey_field`
+/// references a state field the model doesn't carry, producing a compile
+/// error in the generated harness. The runtime-side check still emits in
+/// the real Rust handler via `codegen.rs`; only the property-test
+/// projection drops it. Same shape as the lean_gen drop for handler-
+/// account pubkey refs.
 pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ref guard) = op.guard_str {
         parts.push(translate_guard_to_rust(guard, wrapping));
     }
     for req in &op.requires {
+        if mentions_handler_account_pubkey(&req.rust_expr, &op.accounts) {
+            continue;
+        }
         parts.push(translate_guard_to_rust(&req.rust_expr, wrapping));
     }
     if parts.is_empty() {
@@ -439,6 +452,22 @@ pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> 
     } else {
         Some(parts.join(" && "))
     }
+}
+
+/// True when `expr` mentions `<handler_account>.pubkey` (or `.key()`)
+/// anywhere in its body — used to suppress `requires` clauses from
+/// property-test guard collection when they reference a handler account
+/// (no scope in the simplified State model). The runtime-side check
+/// still emits in the real Rust handler.
+fn mentions_handler_account_pubkey(
+    expr: &str,
+    accounts: &[crate::check::ParsedHandlerAccount],
+) -> bool {
+    accounts.iter().any(|a| {
+        let needle_pubkey = format!("{}.pubkey", a.name);
+        let needle_key = format!("{}.key()", a.name);
+        expr.contains(&needle_pubkey) || expr.contains(&needle_key)
+    })
 }
 
 // ============================================================================
