@@ -47,6 +47,16 @@ fn guard_initialize(_state: &EscrowState, deposit_amount: u64, receive_amount: u
     true
 }
 
+/// Guard predicate for `exchange`.
+fn guard_exchange(_state: &EscrowState) -> bool {
+    true
+}
+
+/// Guard predicate for `cancel`.
+fn guard_cancel(_state: &EscrowState) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +115,58 @@ mod tests {
         let deposit_amount: u64 = 0;
         let receive_amount: u64 = 0;
         assert!(!guard_initialize(&state, deposit_amount, receive_amount));
+    }
+
+    #[test]
+    fn test_exchange_guard_accepts_valid() {
+        let state = EscrowState {
+            initializer: [1u8; 32],
+            initializer_token_account: [1u8; 32],
+            taker: [1u8; 32],
+            initializer_amount: 100,
+            taker_amount: 100,
+            escrow_token_account: [1u8; 32],
+        };
+        assert!(guard_exchange(&state));
+    }
+
+    #[test]
+    fn test_exchange_guard_rejects_invalid() {
+        let state = EscrowState {
+            initializer: [1u8; 32],
+            initializer_token_account: [1u8; 32],
+            taker: [1u8; 32],
+            initializer_amount: 100,
+            taker_amount: 100,
+            escrow_token_account: [1u8; 32],
+        };
+        assert!(!guard_exchange(&state));
+    }
+
+    #[test]
+    fn test_cancel_guard_accepts_valid() {
+        let state = EscrowState {
+            initializer: [1u8; 32],
+            initializer_token_account: [1u8; 32],
+            taker: [1u8; 32],
+            initializer_amount: 100,
+            taker_amount: 100,
+            escrow_token_account: [1u8; 32],
+        };
+        assert!(guard_cancel(&state));
+    }
+
+    #[test]
+    fn test_cancel_guard_rejects_invalid() {
+        let state = EscrowState {
+            initializer: [1u8; 32],
+            initializer_token_account: [1u8; 32],
+            taker: [1u8; 32],
+            initializer_amount: 100,
+            taker_amount: 100,
+            escrow_token_account: [1u8; 32],
+        };
+        assert!(!guard_cancel(&state));
     }
 
     // ====================================================================

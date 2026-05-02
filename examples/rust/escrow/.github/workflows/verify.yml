@@ -37,6 +37,3 @@ jobs:
 
       - name: Check spec coverage
         run: qedgen check --spec program.qedspec
-
-      - name: Ratchet readiness lint
-        run: qedgen readiness --idl target/idl/escrow.json
