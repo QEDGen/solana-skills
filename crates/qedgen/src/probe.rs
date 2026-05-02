@@ -395,11 +395,27 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "init_config_field_unanchored",
         "bounty_intent_drift",
     ];
+    // Multi-actor / quorum primitive family — added to the v2.15 SKILL.md
+    // catalog from the external multisig audit, but the prior release
+    // stamped them only as prose. The auditor caught the multisig
+    // duplicate-signer CRIT through the escalation rule rather than
+    // through a structured `applicable_categories` listing. Surface
+    // the family here so the agent walks it as part of the standard
+    // category catalog on any program that ships a multi-party state
+    // shape.
+    let multi_actor = [
+        "quorum_dup_inflation",
+        "quorum_set_dup_at_init",
+        "nonce_absent_action_replay",
+        "creator_admin_outside_quorum",
+        "signer_set_pinned_to_creator_pda_only",
+    ];
 
     match runtime {
         Runtime::Anchor | Runtime::Native => universal
             .iter()
             .chain(anchor_native.iter())
+            .chain(multi_actor.iter())
             .map(|s| s.to_string())
             .collect(),
         Runtime::Sbpf => universal.iter().map(|s| s.to_string()).collect(),
@@ -410,11 +426,13 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
             .iter()
             .chain(anchor_native.iter())
             .chain(quasar_specific.iter())
+            .chain(multi_actor.iter())
             .map(|s| s.to_string())
             .collect(),
         Runtime::QedgenCodegen => quasar_handler_body
             .iter()
             .chain(quasar_specific.iter())
+            .chain(multi_actor.iter())
             .map(|s| s.to_string())
             .collect(),
         Runtime::Unknown => universal.iter().map(|s| s.to_string()).collect(),

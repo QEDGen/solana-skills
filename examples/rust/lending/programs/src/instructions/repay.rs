@@ -27,7 +27,7 @@ pub struct Repay<'info> {
 }
 
 impl<'info> Repay<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "ab60d83abdd0c21d", spec_hash = "38b9e7598cf201bb")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "repay", hash = "6c160536ed8b56b1", spec_hash = "4740e8280cb17bad")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RepayBumps) -> Result<(), ProgramError> {
         guards::repay(self)?;
@@ -36,6 +36,12 @@ impl<'info> Repay<'info> {
         self.token_program
             .transfer(&*self.borrower_ta, &*self.pool_vault, &*self.borrower, amount)
             .invoke()?;
+        // pool.total_borrows -= amount — see borrow.rs note; v2.16 codegen
+        // will emit this from the spec's effect block.
+        let new_total: u64 = u64::from(self.pool.total_borrows)
+            .checked_sub(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        self.pool.total_borrows = new_total.into();
         self.loan.amount = (0u64).into();
         self.loan.collateral = (0u64).into();
         emit!(Repaid {

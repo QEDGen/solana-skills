@@ -79,17 +79,17 @@ structure LoanState where
 
 def borrowTransition (s : LoanState) (signer : Pubkey) (amount : Nat) (collateral : Nat) : Option LoanState :=
   if signer = s.borrower ∧ s.status = .Empty ∧ amount > 0 ∧ collateral > 0 then
-    some { s with amount := amount, collateral := collateral, status := .Active }
+    some { s with amount := amount, collateral := collateral, pool.total_borrows := s.pool.total_borrows + amount, status := .Active }
   else none
 
 def repayTransition (s : LoanState) (signer : Pubkey) : Option LoanState :=
-  if signer = s.borrower ∧ s.status = .Active then
-    some { s with amount := 0, collateral := 0, status := .Empty }
+  if signer = s.borrower ∧ s.status = .Active ∧ amount ≤ s.pool.total_borrows then
+    some { s with pool.total_borrows := s.pool.total_borrows - amount, amount := 0, collateral := 0, status := .Empty }
   else none
 
 def liquidateTransition (s : LoanState) (signer : Pubkey) : Option LoanState :=
-  if s.status = .Active ∧ s.amount > s.collateral then
-    some { s with amount := 0, status := .Liquidated }
+  if s.status = .Active ∧ amount ≤ s.pool.total_borrows ∧ s.amount > s.collateral then
+    some { s with pool.total_borrows := s.pool.total_borrows - amount, amount := 0, status := .Liquidated }
   else none
 
 /-- borrow transfer envelope: pool_vault → borrower_ta amount amount authority pool.
@@ -243,7 +243,22 @@ theorem borrow_aborts_if_InvalidAmount (s : LoanState) (signer : Pubkey) (amount
 theorem liquidate_aborts_if_AccountHealthy (s : LoanState) (signer : Pubkey)
     (h : ¬(s.amount > s.collateral)) : liquidateTransition s signer = none := by
   unfold liquidateTransition
-  rw [if_neg (fun hg => h hg.2)]
+  rw [if_neg (fun hg => h hg.2.2)]
+
+-- ============================================================================
+-- Overflow safety obligations (auto-generated for operations with add effects)
+-- ============================================================================
+
+theorem borrow_overflow_safe (s s' : LoanState) (signer : Pubkey) (amount : Nat) (collateral : Nat)
+    (h_valid : valid_u64 s.amount ∧ valid_u64 s.collateral)
+    (h_inv_pool_solvency : pool_solvency s)
+    (h : borrowTransition s signer amount collateral = some s') :
+    valid_u64 s'.amount ∧ valid_u64 s'.collateral := by
+  unfold borrowTransition at h; split at h
+  · next hg =>
+    cases h
+    refine ⟨h_valid.1, h_valid.2⟩
+  · contradiction
 
 -- ============================================================================
 -- Cover properties — reachability (existential proofs)

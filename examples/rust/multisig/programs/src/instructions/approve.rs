@@ -19,7 +19,7 @@ pub struct Approve<'info> {
 }
 
 impl<'info> Approve<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "659801016cb87703", spec_hash = "a2474552f74b6625")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "approve", hash = "659801016cb87703", spec_hash = "96727ecc91c0452e")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, bumps: &ApproveBumps) -> Result<(), ProgramError> {
         guards::approve(self, member_index)?;

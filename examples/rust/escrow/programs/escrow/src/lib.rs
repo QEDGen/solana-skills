@@ -18,6 +18,9 @@ pub mod escrow {
         amount: u64,
         taker_amount: u64,
     ) -> Result<()> {
+        require!(amount > 0, EscrowError::InvalidAmount);
+        require!(taker_amount > 0, EscrowError::InvalidAmount);
+
         let escrow = &mut ctx.accounts.escrow;
 
         escrow.initializer = ctx.accounts.initializer.key();

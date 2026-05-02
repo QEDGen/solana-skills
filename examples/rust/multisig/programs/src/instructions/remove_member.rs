@@ -18,7 +18,7 @@ pub struct RemoveMember<'info> {
 }
 
 impl<'info> RemoveMember<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "30f1786f10a626f5")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "107b30cb160a4348")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &RemoveMemberBumps) -> Result<(), ProgramError> {
         guards::remove_member(self)?;

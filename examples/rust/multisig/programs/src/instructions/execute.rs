@@ -19,10 +19,10 @@ pub struct Execute<'info> {
 }
 
 impl<'info> Execute<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "74f274605ace77f8", spec_hash = "84fd7f21daf375f3")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "execute", hash = "7b191352d0e9311b", spec_hash = "1db32bbd43fb72f5")]
     #[inline(always)]
-    pub fn handler(&mut self, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
-        guards::execute(self)?;
+    pub fn handler(&mut self, member_index: u8, bumps: &ExecuteBumps) -> Result<(), ProgramError> {
+        guards::execute(self, member_index)?;
         let _ = bumps;
         self.vault.approval_count = (0).into();
         self.vault.rejection_count = (0).into();

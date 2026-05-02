@@ -330,5 +330,19 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]
+    #[test]
+    fn borrow_no_overflow_on_pool.total_borrows(s in arb_state(), amount in 0u64..=u64::MAX, collateral in 0u64..=u64::MAX) {
+        let mut s = s;
+        let pre = s.pool.total_borrows;
+        if borrow(&mut s, amount, collateral) {
+            // If transition succeeded, the add must not have wrapped
+            prop_assert!(s.pool.total_borrows >= pre,
+                "overflow: borrow.pool.total_borrows wrapped around after add");
+        }
+    }
+}
+
 } // mod loan
 

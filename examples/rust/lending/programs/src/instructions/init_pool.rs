@@ -20,7 +20,7 @@ pub struct InitPool<'info> {
 }
 
 impl<'info> InitPool<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "8e67e51c9c857651", spec_hash = "b5d51ab2e00d8e0e")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "init_pool", hash = "8e67e51c9c857651", spec_hash = "9999ceca7b82d6e5")]
     #[inline(always)]
     pub fn handler(&mut self, rate: u64, bumps: &InitPoolBumps) -> Result<(), ProgramError> {
         guards::init_pool(self, rate)?;

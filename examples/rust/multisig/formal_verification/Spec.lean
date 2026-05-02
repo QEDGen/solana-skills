@@ -33,7 +33,7 @@ def create_vaultTransition (s : State) (signer : Pubkey) (threshold : Nat) (memb
   else none
 
 def proposeTransition (s : State) (signer : Pubkey) : Option State :=
-  if s.status = .Active then
+  if signer = s.creator ∧ s.status = .Active then
     some { s with approval_count := 0, rejection_count := 0, status := .HasProposal }
   else none
 
@@ -49,8 +49,9 @@ def rejectTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBE
     some { s with rejection_count := s.rejection_count + 1, voted := Function.update s.voted member_index (1), status := .HasProposal }
   else none
 
-def executeTransition (s : State) (signer : Pubkey) : Option State :=
-  if s.status = .HasProposal ∧ (s.approval_count ≥ s.threshold) then
+def executeTransition (s : State) (signer : Pubkey) (member_index : Fin MAX_MEMBERS) : Option State :=
+  let executor := signer
+  if s.status = .HasProposal ∧ (member_index < s.member_count) ∧ ((s.members member_index) = executor) ∧ (s.approval_count ≥ s.threshold) then
     some { s with approval_count := 0, rejection_count := 0, status := .Active }
   else none
 
@@ -74,7 +75,7 @@ inductive Operation where
   | propose
   | approve (member_index : Fin MAX_MEMBERS)
   | reject (member_index : Fin MAX_MEMBERS)
-  | execute
+  | execute (member_index : Fin MAX_MEMBERS)
   | cancel_proposal
   | add_member (member_index : Fin MAX_MEMBERS) (member_pubkey : Pubkey)
   | remove_member
@@ -84,7 +85,7 @@ def applyOp (s : State) (signer : Pubkey) : Operation → Option State
   | .propose => proposeTransition s signer
   | .approve member_index => approveTransition s signer member_index
   | .reject member_index => rejectTransition s signer member_index
-  | .execute => executeTransition s signer
+  | .execute member_index => executeTransition s signer member_index
   | .cancel_proposal => cancel_proposalTransition s signer
   | .add_member member_index member_pubkey => add_memberTransition s signer member_index member_pubkey
   | .remove_member => remove_memberTransition s signer

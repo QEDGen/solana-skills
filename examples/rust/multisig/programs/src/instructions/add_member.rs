@@ -18,7 +18,7 @@ pub struct AddMember<'info> {
 }
 
 impl<'info> AddMember<'info> {
-    #[qed(verified, spec = "../multisig.qedspec", handler = "add_member", hash = "9ec9c37e98a46e02", spec_hash = "3c4b19bb866801ba")]
+    #[qed(verified, spec = "../multisig.qedspec", handler = "add_member", hash = "9ec9c37e98a46e02", spec_hash = "4210397198e8c8a2")]
     #[inline(always)]
     pub fn handler(&mut self, member_index: u8, member_pubkey: Address, bumps: &AddMemberBumps) -> Result<(), ProgramError> {
         guards::add_member(self, member_index, member_pubkey)?;

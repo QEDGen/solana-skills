@@ -28,13 +28,20 @@ pub struct Borrow<'info> {
 }
 
 impl<'info> Borrow<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "f6629bf8fef984fe", spec_hash = "6a1c2376f61d1679")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "borrow", hash = "e35c2d86aee62838", spec_hash = "e88d76afa81506dc")]
     #[inline(always)]
     pub fn handler(&mut self, amount: u64, collateral: u64, bumps: &BorrowBumps) -> Result<(), ProgramError> {
         guards::borrow(self, amount, collateral)?;
         let _ = bumps;
         self.loan.amount = (amount).into();
         self.loan.collateral = (collateral).into();
+        // pool.total_borrows += amount — the spec carries this effect
+        // but cross-account effect lowering is a v2.16 codegen feature.
+        // Hand-emitted here so pool_solvency accounting stays sound.
+        let new_total: u64 = u64::from(self.pool.total_borrows)
+            .checked_add(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        self.pool.total_borrows = new_total.into();
         let pool_authority = self.pool.authority;
         let pool_bump = [self.pool.bump];
         let pool_seeds = [

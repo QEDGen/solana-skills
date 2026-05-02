@@ -113,8 +113,9 @@ handler borrow (amount : U64) (collateral : U64) : Loan.Empty -> Loan.Active {
   requires amount > 0 /\ collateral > 0 else InvalidAmount
 
   effect {
-    amount     := amount
-    collateral := collateral
+    amount               := amount
+    collateral           := collateral
+    pool.total_borrows   += amount
   }
 
   transfers {
@@ -138,8 +139,9 @@ handler repay : Loan.Active -> Loan.Empty {
   }
 
   effect {
-    amount     := 0
-    collateral := 0
+    pool.total_borrows -= amount
+    amount             := 0
+    collateral         := 0
   }
 
   transfers {
@@ -171,7 +173,8 @@ handler liquidate : Loan.Active -> Loan.Liquidated {
   requires state.amount > state.collateral else AccountHealthy
 
   effect {
-    amount := 0
+    pool.total_borrows -= amount
+    amount             := 0
   }
 
   transfers {

@@ -1,0 +1,29 @@
+// User-owned. Regenerating the spec does NOT overwrite this file.
+// Guard checks live in the sibling `crate::guards` module and ARE
+// regenerated on every `qedgen codegen`. Drift between the spec
+// handler block and the `spec_hash` below fires a compile_error!
+// via the `#[qed(verified, ...)]` macro.
+
+use quasar_lang::prelude::*;
+use crate::state::*;
+use crate::guards;
+use qedgen_macros::qed;
+use crate::errors::*;
+
+#[derive(Accounts)]
+pub struct RemoveMember<'info> {
+    pub creator: &'info Signer,
+    #[account(mut, seeds = [b"vault", creator], bump, has_one = creator)]
+    pub vault: &'info mut Account<MultisigAccount>,
+}
+
+impl<'info> RemoveMember<'info> {
+    #[qed(verified, spec = "multisig.qedspec", handler = "remove_member", hash = "3dc3392b8e529e3c", spec_hash = "107b30cb160a4348")]
+    #[inline(always)]
+    pub fn handler(&mut self, bumps: &RemoveMemberBumps) -> Result<(), ProgramError> {
+        guards::remove_member(self)?;
+        let _ = bumps;
+        self.vault.member_count = self.vault.member_count.checked_sub(1).ok_or(MultisigError::MathOverflow)?;
+        Ok(())
+    }
+}

@@ -27,7 +27,7 @@ pub struct Liquidate<'info> {
 }
 
 impl<'info> Liquidate<'info> {
-    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "08d6841a6b5c7b74", spec_hash = "4181bd50e04fa158")]
+    #[qed(verified, spec = "../lending.qedspec", handler = "liquidate", hash = "040997ce5a073924", spec_hash = "9bcd36c17134c0ba")]
     #[inline(always)]
     pub fn handler(&mut self, bumps: &LiquidateBumps) -> Result<(), ProgramError> {
         guards::liquidate(self)?;
@@ -43,6 +43,12 @@ impl<'info> Liquidate<'info> {
         self.token_program
             .transfer(&*self.pool_vault, &*self.liquidator_ta, &*self.pool, amount)
             .invoke_signed(&pool_seeds)?;
+        // pool.total_borrows -= amount — see borrow.rs note; v2.16 codegen
+        // will emit this from the spec's effect block.
+        let new_total: u64 = u64::from(self.pool.total_borrows)
+            .checked_sub(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        self.pool.total_borrows = new_total.into();
         self.loan.amount = (0u64).into();
         emit!(LoanLiquidated {
             borrower: self.loan.borrower,

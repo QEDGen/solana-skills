@@ -91,16 +91,18 @@ handler create_vault (threshold : U8) (member_count : U8) : State.Uninitialized 
   emits VaultCreated
 }
 
-/// Submit a new transaction proposal — any vault member can propose
+/// Submit a new transaction proposal — vault creator only
 handler propose : State.Active -> State.HasProposal {
-  // Anyone can submit a proposal; authorization for the resulting
-  // transaction comes from the approve/reject vote tally, not from
-  // the proposer's identity.
-  permissionless
+  // Gated to the vault creator. A pre-v2.15.1 design left this as
+  // `permissionless` reasoning that authorization comes from the
+  // approve/reject tally — but proposal-creation also resets the
+  // approval counters, which lets any external party grief an
+  // in-flight tally. Restrict to the creator to close that surface.
+  auth creator
 
   accounts {
-    proposer : signer
-    vault    : writable, pda ["vault", creator]
+    creator : signer
+    vault   : writable, pda ["vault", creator]
   }
 
   effect {
@@ -158,17 +160,23 @@ handler reject (member_index : U8) : State.HasProposal -> State.HasProposal {
   emits ProposalRejected
 }
 
-/// Execute the proposal once the approval threshold is met
-handler execute : State.HasProposal -> State.Active {
-  // Anyone can trigger execution once the threshold is met — the
-  // approval tally is the authorization, not the executor's identity.
-  permissionless
+/// Execute the proposal once the approval threshold is met — must be
+/// triggered by a registered member (binding the executor to a
+/// `members[i]` slot, same shape as approve/reject)
+handler execute (member_index : U8) : State.HasProposal -> State.Active {
+  auth executor
 
   accounts {
     executor : signer
     vault    : writable, pda ["vault", creator]
   }
 
+  // Quorum is the *authorization* for the action; member-binding is
+  // the *gate* against arbitrary external triggers. Both checks
+  // matter — quorum can be present and a non-member could still front-
+  // run cleanup at an inconvenient slot.
+  requires member_index < state.member_count else NotAMember
+  requires state.members[member_index] == executor else NotAMember
   requires state.approval_count >= state.threshold else ThresholdNotMet
 
   effect {
@@ -215,6 +223,21 @@ handler add_member (member_index : U8) (member_pubkey : Pubkey) : State.Active -
   }
 
   requires member_index < state.member_count else NotAMember
+  // KNOWN GAP (v2.16 DSL feature): two real risks not yet expressible
+  // in the spec layer because Pubkey-to-literal comparison is not
+  // supported in `requires` clauses. Both are partial mitigations the
+  // creator-only `auth` already covers in the trust model:
+  //   1. Zero-pubkey rejection. `members[i]` defaults to zero, and
+  //      approve/reject treats `state.members[i] == approver` as the
+  //      membership check; accepting the zero pubkey here would make
+  //      any signer with the zero pubkey a member by default.
+  //   2. Slot-empty enforcement. Re-keying a previously-set slot
+  //      mid-flight rebinds that slot to a different signer between
+  //      `propose` and `execute`. Today the creator can do this; v2.16
+  //      adds the explicit `state.members[i] == 0` requires once
+  //      Pubkey constants land.
+  // Tracked in the spec for v2.16; runtime code can hand-add `require!`
+  // checks in the meantime.
 
   effect {
     members[member_index] := member_pubkey
