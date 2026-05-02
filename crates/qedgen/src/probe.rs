@@ -11,7 +11,8 @@
 //! Spec-aware categories: `missing_signer`, `arbitrary_cpi`,
 //! `arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
 //! `unbounded_amount_param`, `permissionless_state_writer`,
-//! `init_without_pda`. Each is a *compose-able primitive* — the
+//! `init_without_pda`, `stored_field_never_written`. Each is a
+//! *compose-able primitive* — the
 //! auditor subagent chains them into kill-chains (see SKILL.md
 //! "Compose-with-what cookbook"). Spec-less / impl-side categories
 //! (`cpi_param_swap`, `pda_canonical_bump`, `account_type_confusion`,
@@ -25,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use crate::anchor_project::parse_anchor_project;
-use crate::check::{parse_spec_file, ParsedHandler};
+use crate::check::{parse_spec_file, ParsedHandler, ParsedSpec};
 
 /// Probe output schema version. Bump on incompatible finding-shape changes;
 /// the auditor pins against this.
@@ -51,6 +52,16 @@ pub enum Category {
     /// two callers can both target the same canonical address. Pair with
     /// `missing_signer` → spoof another user's init.
     InitWithoutPda,
+    /// State field declared on an `account` type and read somewhere in the
+    /// spec (`auth <field>`, a `requires`/`aborts_if` referencing
+    /// `state.<field>`, an `effect` RHS, or a property expression) but
+    /// never written by any handler `effect`. On Quasar/Anchor, `auth X`
+    /// lowers to `has_one = X`, so an unset Pubkey field makes the
+    /// constraint unsatisfiable. On counter-shaped fields, a
+    /// `preserved_by all` invariant proves vacuously because the value
+    /// is constant. Recurring shape across multisig, escrow, lending,
+    /// and percolator audits.
+    StoredFieldNeverWritten,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +92,14 @@ pub enum Runtime {
     Native,
     /// sBPF assembly (`.s` files in src/).
     Sbpf,
-    /// QEDGen's own codegen target (quasar-lang or `#[qed(verified)]` markers).
+    /// Hand-written Quasar (quasar-lang dep, NO qedgen markers / spec /
+    /// `formal_verification/`). Idiomatic Quasar code that hasn't adopted
+    /// qedgen — categories are Anchor-shaped + Quasar-specific.
+    Quasar,
+    /// QEDGen's own codegen target (quasar-lang dep AND qedgen markers
+    /// — `#[qed(verified)]`, `formal_verification/`, or `qed.toml`).
+    /// Categories collapse to user-owned-handler-body + Quasar-specific
+    /// drift / unanchored-field / bounty-intent shapes.
     QedgenCodegen,
     /// Detection inconclusive — auditor falls back to source-walking.
     Unknown,
@@ -163,6 +181,7 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
             findings.push(f);
         }
     }
+    findings.extend(predicate_stored_field_never_written(&spec));
 
     Ok(ProbeOutput {
         version: SCHEMA_VERSION,
@@ -200,7 +219,12 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
 
     let runtime = detect_runtime(project_root);
     let handlers = match runtime {
-        Runtime::Anchor => discover_anchor_handlers(project_root).unwrap_or_default(),
+        // Quasar's `#[program] mod` form is structurally compatible with
+        // the Anchor parser — `#[instruction(discriminator = N)]` is an
+        // extra attribute that doesn't disturb `pub fn` extraction.
+        Runtime::Anchor | Runtime::Quasar | Runtime::QedgenCodegen => {
+            discover_anchor_handlers(project_root).unwrap_or_default()
+        }
         _ => Vec::new(),
     };
     let applicable = applicable_categories(&runtime);
@@ -220,6 +244,15 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
 /// Runtime detection by filesystem heuristics. Order matters: a project
 /// with both `Anchor.toml` and `solana-program` dep is Anchor.
 fn detect_runtime(root: &Path) -> Runtime {
+    // QedgenCodegen wins over Anchor.toml: codegen examples scaffold an
+    // `Anchor.toml` for the test harness alongside the actual Quasar
+    // program. Without this precedence, a qedgen-codegen scaffold would
+    // be misclassified as Anchor and skip the Quasar-specific category
+    // overlay (`stored_field_never_written` etc.).
+    if has_qedgen_markers(root) {
+        return Runtime::QedgenCodegen;
+    }
+
     if root.join("Anchor.toml").exists() {
         return Runtime::Anchor;
     }
@@ -241,7 +274,15 @@ fn detect_runtime(root: &Path) -> Runtime {
     if cargo.exists() {
         let content = std::fs::read_to_string(&cargo).unwrap_or_default();
         if content.contains("quasar-lang") {
-            return Runtime::QedgenCodegen;
+            // Distinguish hand-written Quasar from qedgen-codegen output:
+            // codegen leaves a `formal_verification/` dir, a `qed.toml`,
+            // or `#[qed(verified)]` markers in source. Without any of
+            // those, treat as hand-written Quasar (Anchor-shaped surface
+            // plus Quasar-specific shapes).
+            if has_qedgen_markers(root) {
+                return Runtime::QedgenCodegen;
+            }
+            return Runtime::Quasar;
         }
         if content.contains("anchor-lang") {
             return Runtime::Anchor;
@@ -252,6 +293,25 @@ fn detect_runtime(root: &Path) -> Runtime {
     }
 
     Runtime::Unknown
+}
+
+/// Did codegen run against this crate? Three independent signals; any
+/// one is sufficient. Used to split `Runtime::Quasar` (hand-written)
+/// from `Runtime::QedgenCodegen` when the Cargo dep alone is ambiguous.
+fn has_qedgen_markers(root: &Path) -> bool {
+    if root.join("formal_verification").is_dir() {
+        return true;
+    }
+    if root.join("qed.toml").is_file() {
+        return true;
+    }
+    let lib_rs = root.join("src").join("lib.rs");
+    if let Ok(src) = std::fs::read_to_string(&lib_rs) {
+        if src.contains("#[qed(verified") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Wrap `anchor_project::parse_anchor_project` to map discovered
@@ -317,6 +377,24 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "lifecycle_one_shot_violation",
     ];
     let anchor_native = ["cpi_param_swap", "pda_canonical_bump"];
+    // QedgenCodegen runtime: codegen mechanizes the "universal" categories
+    // from the spec, so they don't apply at user-owned handler-body level.
+    // What does apply: handler-body-level numeric / lifecycle bugs and the
+    // Quasar-specific drift / unanchored-field / bounty-intent shapes added
+    // in v2.13.
+    let quasar_handler_body = [
+        "arithmetic_overflow_wrapping",
+        "lifecycle_one_shot_violation",
+    ];
+    let quasar_specific = [
+        "spec_impl_drift_user_owned",
+        "generated_guard_bypass",
+        "stored_field_never_written",
+        "qed_hash_drift_or_forgery",
+        "field_chain_missing_root_anchor",
+        "init_config_field_unanchored",
+        "bounty_intent_drift",
+    ];
 
     match runtime {
         Runtime::Anchor | Runtime::Native => universal
@@ -325,7 +403,20 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
             .map(|s| s.to_string())
             .collect(),
         Runtime::Sbpf => universal.iter().map(|s| s.to_string()).collect(),
-        Runtime::QedgenCodegen => Vec::new(),
+        // Hand-written Quasar shares Anchor's full universal-categories
+        // surface (the codegen-mechanization claim does NOT apply), plus
+        // the Quasar-specific shapes that exist independent of codegen.
+        Runtime::Quasar => universal
+            .iter()
+            .chain(anchor_native.iter())
+            .chain(quasar_specific.iter())
+            .map(|s| s.to_string())
+            .collect(),
+        Runtime::QedgenCodegen => quasar_handler_body
+            .iter()
+            .chain(quasar_specific.iter())
+            .map(|s| s.to_string())
+            .collect(),
         Runtime::Unknown => universal.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -724,6 +815,172 @@ fn predicate_init_without_pda(
         ),
         category_tag: "init_without_pda".to_string(),
     })
+}
+
+/// Spec-aware predicate: state field declared on an `account` type but
+/// never written by any handler `effect`, while being read somewhere in
+/// the spec — `auth <field>`, a `requires` / `aborts_if` referencing
+/// `state.<field>`, an effect RHS, or a property expression.
+///
+/// Reading without writing means downstream codegen lowerings see only
+/// the type's default. Two CRIT shapes recur across audits:
+/// - `auth <pubkey-field>` lowers to `has_one = <field>` — an unset
+///   Pubkey is the zero key, no signer can satisfy the constraint, the
+///   handler is unreachable. Caught the multisig `creator` and escrow
+///   `taker` shapes.
+/// - Counter / accumulator field read by a `preserved_by all` invariant
+///   but never updated — invariant proves vacuously because the value
+///   is constant. Caught lending's `total_borrows` shape.
+///
+/// Composes with:
+/// - `partial_has_one_chain` (auditor side): even if some `has_one`
+///   constraints are present, this field's missing writer makes the
+///   chain partial.
+/// - `field_chain_missing_root_anchor`: when the never-written field is
+///   a stored authority anchor.
+fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    // Step 1: collect every field name that any handler `effect` writes.
+    let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for h in &spec.handlers {
+        for (field, _, _) in &h.effects {
+            written.insert(field.as_str());
+        }
+    }
+    // Fields used as PDA seeds are bound implicitly by codegen at init
+    // (the seed value populates the field as part of address derivation).
+    // Treat them as written to avoid flagging — spec authors don't write
+    // an explicit `initializer := initializer.key()` effect for the
+    // canonical `pda X ["X", initializer]` shape.
+    for pda in &spec.pdas {
+        for seed in &pda.seeds {
+            written.insert(seed.as_str());
+        }
+    }
+
+    // Step 2: for every declared state field that is NOT written,
+    // search for readers. Skip fields that are neither written nor
+    // read — that's the `write_without_read` lint's complement on
+    // the dead-code axis, not what this predicate is about.
+    for acct in &spec.account_types {
+        for (field, _ty) in &acct.fields {
+            if written.contains(field.as_str()) {
+                continue;
+            }
+
+            let needles = [format!("state.{}", field), format!("s.{}", field)];
+
+            let mut readers: Vec<&str> = Vec::new();
+            for h in &spec.handlers {
+                let mut is_reader = false;
+
+                // `auth <field>` is a read of the stored Pubkey by the
+                // codegen-emitted `has_one = <field>` constraint.
+                if h.who.as_deref() == Some(field.as_str()) {
+                    is_reader = true;
+                }
+
+                // requires clauses (Lean form is the canonical text).
+                if !is_reader {
+                    for r in &h.requires {
+                        if needles.iter().any(|n| r.lean_expr.contains(n.as_str())) {
+                            is_reader = true;
+                            break;
+                        }
+                    }
+                }
+
+                // legacy guard string + aborts_if (pre-requires DSL).
+                if !is_reader {
+                    if let Some(g) = &h.guard_str {
+                        if needles.iter().any(|n| g.contains(n.as_str())) {
+                            is_reader = true;
+                        }
+                    }
+                }
+                if !is_reader {
+                    for a in &h.aborts_if {
+                        if needles.iter().any(|n| a.lean_expr.contains(n.as_str())) {
+                            is_reader = true;
+                            break;
+                        }
+                    }
+                }
+
+                // effect RHS reads (e.g. `field := s.other_field + 1`).
+                if !is_reader {
+                    for (_, _, rhs) in &h.effects {
+                        if needles.iter().any(|n| rhs.contains(n.as_str())) {
+                            is_reader = true;
+                            break;
+                        }
+                    }
+                }
+
+                if is_reader {
+                    readers.push(h.name.as_str());
+                }
+            }
+
+            // Property expressions (top-level, including `preserved_by all`
+            // invariants) are the most common second-source of reads.
+            let mut prop_reads = false;
+            for prop in &spec.properties {
+                if let Some(expr) = &prop.expression {
+                    if needles.iter().any(|n| expr.contains(n.as_str())) {
+                        prop_reads = true;
+                        break;
+                    }
+                }
+            }
+
+            if readers.is_empty() && !prop_reads {
+                continue;
+            }
+
+            let primary = readers
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "_property".to_string());
+
+            let read_summary = if readers.is_empty() {
+                "a property expression".to_string()
+            } else if readers.len() == 1 {
+                format!("handler `{}`", readers[0])
+            } else {
+                format!("handlers [{}]", readers.join(", "))
+            };
+            let read_extra = if !readers.is_empty() && prop_reads {
+                " and a property expression"
+            } else {
+                ""
+            };
+
+            findings.push(Finding {
+                id: stable_id(
+                    &format!("{}::{}", acct.name, field),
+                    "stored_field_never_written",
+                ),
+                category: Category::StoredFieldNeverWritten,
+                severity: Severity::Critical,
+                handler: primary,
+                spec_silent_on: format!(
+                    "field `{}` declared on `{}` and read by {}{} but never written by any handler `effect`",
+                    field, acct.name, read_summary, read_extra
+                ),
+                suppression_hint: format!(
+                    "Either (a) add an `effect` writing `state.{field}` in the appropriate handler — typically the init-shape handler that populates this field at create time — or (b) remove the field from the state declaration if it's truly unused, or (c) initialize it at the declared default if the type's zero value is intentional and document why."
+                ),
+                investigation_hint: format!(
+                    "Open the impl. On Quasar/Anchor, `auth {field}` lowers to `has_one = {field}` — if `state.{field}` is the zero pubkey (default), no signer can satisfy the constraint and the handler is unreachable (escrow `taker` / multisig `creator` shape). On counter-shaped fields read by a `preserved_by all` invariant, the invariant proves vacuously because the field is constant (lending `total_borrows` shape). Look for: pre-deploy state population from migrations, handlers that should write the field but don't, or hand-edits to codegen that diverge from the spec."
+                ),
+                category_tag: "stored_field_never_written".to_string(),
+            });
+        }
+    }
+
+    findings
 }
 
 /// True for the integer-typed DSL types `qedgen probe` reasons about.
@@ -1209,5 +1466,161 @@ handler add (i : U8) : State.Active -> State.Active {
         let spec = parse_str(src).expect("parse");
         let h = &spec.handlers[0];
         assert!(predicate_init_without_pda(h, Some("Active")).is_none());
+    }
+
+    #[test]
+    fn stored_field_never_written_fires_on_authd_field_with_no_writer() {
+        // The escrow `taker` shape: field declared, `auth taker` reads
+        // it (codegen lowers to `has_one = taker`), no handler `effect`
+        // writes it → constraint unsatisfiable. CRIT.
+        let src = r#"spec Escrow
+type State
+  | Uninitialized
+  | Open of { initializer : Pubkey, taker : Pubkey, amount : U64 }
+
+pda escrow ["escrow", initializer]
+
+handler initialize (deposit : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+  accounts {
+    initializer : signer, writable
+    escrow      : writable, pda ["escrow", initializer]
+  }
+  effect { amount := deposit }
+}
+
+handler exchange : State.Open -> State.Open {
+  auth taker
+  accounts {
+    taker : signer, writable
+    escrow : writable, pda ["escrow", initializer]
+  }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let findings = predicate_stored_field_never_written(&spec);
+        let taker_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.spec_silent_on.contains("`taker`"))
+            .collect();
+        assert_eq!(
+            taker_findings.len(),
+            1,
+            "expected one taker finding: {findings:#?}"
+        );
+        assert_eq!(taker_findings[0].category_tag, "stored_field_never_written");
+    }
+
+    #[test]
+    fn stored_field_never_written_suppressed_for_pda_seeds() {
+        // `initializer` is in the PDA seeds (`pda escrow ["escrow",
+        // initializer]`), so codegen binds it implicitly at init.
+        // Spec authors don't write an explicit
+        // `initializer := initializer.key()` effect.
+        let src = r#"spec Escrow
+type State
+  | Uninitialized
+  | Open of { initializer : Pubkey, amount : U64 }
+
+pda escrow ["escrow", initializer]
+
+handler initialize (deposit : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+  accounts {
+    initializer : signer, writable
+    escrow      : writable, pda ["escrow", initializer]
+  }
+  effect { amount := deposit }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let findings = predicate_stored_field_never_written(&spec);
+        let initializer_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.spec_silent_on.contains("`initializer`"))
+            .collect();
+        assert!(
+            initializer_findings.is_empty(),
+            "PDA seed should suppress: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn stored_field_never_written_suppressed_when_field_unused() {
+        // Field declared but never read AND never written — that's the
+        // dead-state-field axis, a different concern. This predicate
+        // is about read-without-write specifically.
+        let src = r#"spec T
+type State
+  | Active of { unused : Pubkey, counter : U64 }
+
+handler bump : State.Active -> State.Active {
+  auth admin
+  accounts { admin : signer }
+  effect { counter := 0 }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let findings = predicate_stored_field_never_written(&spec);
+        let unused_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.spec_silent_on.contains("`unused`"))
+            .collect();
+        assert!(
+            unused_findings.is_empty(),
+            "unread field should not fire: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn detect_runtime_classifies_quasar_without_qedgen_markers() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quasar-lang = "0.1"
+"#,
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::write(root.join("src").join("lib.rs"), "// no qed markers").expect("write");
+        let r = detect_runtime(root);
+        assert!(matches!(r, Runtime::Quasar), "expected Quasar, got {r:?}");
+    }
+
+    #[test]
+    fn detect_runtime_classifies_qedgen_codegen_with_markers() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quasar-lang = "0.1"
+"#,
+        )
+        .expect("write");
+        // formal_verification/ alone is enough — one of the three
+        // signals `has_qedgen_markers` checks.
+        fs::create_dir_all(root.join("formal_verification")).expect("mkdir");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::write(root.join("src").join("lib.rs"), "// codegen output").expect("write");
+        let r = detect_runtime(root);
+        assert!(
+            matches!(r, Runtime::QedgenCodegen),
+            "expected QedgenCodegen, got {r:?}"
+        );
     }
 }
