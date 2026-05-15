@@ -197,10 +197,11 @@ proptest! {
         let mut s = State {
             threshold: 0,
             member_count: 0,
-            members: 0,
-            voted: 0,
+            members: [[0u8; 32]; 32],
+            voted: [0; 32],
             approval_count: 0,
             rejection_count: 0,
+            status: Status::Uninitialized,
         };
         if create_vault(&mut s, threshold, member_count) {
             prop_assert!(threshold_bounded(&s),
@@ -315,10 +316,11 @@ proptest! {
         let mut s = State {
             threshold: 0,
             member_count: 0,
-            members: 0,
-            voted: 0,
+            members: [[0u8; 32]; 32],
+            voted: [0; 32],
             approval_count: 0,
             rejection_count: 0,
+            status: Status::Uninitialized,
         };
         if create_vault(&mut s, threshold, member_count) {
             prop_assert!(votes_bounded(&s),
@@ -563,10 +565,11 @@ proptest! {
         let mut s = State {
             threshold: 0,
             member_count: 0,
-            members: 0,
-            voted: 0,
+            members: [[0u8; 32]; 32],
+            voted: [0; 32],
             approval_count: 0,
             rejection_count: 0,
+            status: Status::Uninitialized,
         };
         let mut lifecycle = Lifecycle::Uninitialized;
         let mut initialized = false;

@@ -82,7 +82,7 @@ fn account_solvent_at(s: &State, i: usize) -> bool {
 // ============================================================================
 
 fn add_user(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 0) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) {
+    if !((s.accounts[(i) as usize].active == 0) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) {
         return false;
     }
     if s.status != Status::Active {
@@ -94,7 +94,7 @@ fn add_user(s: &mut State, i: usize) -> bool {
 }
 
 fn add_lp(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 0) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) {
+    if !((s.accounts[(i) as usize].active == 0) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) {
         return false;
     }
     if s.status != Status::Active {
@@ -154,7 +154,7 @@ fn deposit(s: &mut State, i: usize, amount: u128) -> bool {
 }
 
 fn withdraw(s: &mut State, i: usize, amount: u128) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (s.accounts[(i) as usize].capital >= amount) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((amount) as i128))) {
+    if !((s.accounts[(i) as usize].active == 1) && (s.accounts[(i) as usize].capital >= amount) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((amount) as i128))) {
         return false;
     }
     if s.status != Status::Active {
@@ -245,7 +245,7 @@ fn execute_trade(s: &mut State, a: usize, b: usize, size_q: i128, exec_price: u6
 }
 
 fn liquidate_case_0(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && (false)) {
+    if !((s.accounts[(i) as usize].active == 1) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128)) && (false)) {
         return false;
     }
     if s.status != Status::Active {
@@ -256,7 +256,7 @@ fn liquidate_case_0(s: &mut State, i: usize) -> bool {
 }
 
 fn liquidate_case_1(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128))) {
+    if !((s.accounts[(i) as usize].active == 1) && (!(((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) && (((((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) + ((s.I) as i128)) as i128) >= ((0) as i128))) {
         return false;
     }
     if s.status != Status::Active {
@@ -268,7 +268,7 @@ fn liquidate_case_1(s: &mut State, i: usize) -> bool {
 }
 
 fn liquidate_otherwise(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128))) && (false)) {
+    if !((s.accounts[(i) as usize].active == 1) && (!(((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) && (!(((((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) + ((s.I) as i128)) as i128) >= ((0) as i128))) && (false)) {
         return false;
     }
     if s.status != Status::Active {
@@ -330,7 +330,7 @@ fn verify_add_user_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 0) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))));
+    kani::assume(!((s.accounts[(i) as usize].active == 0) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))));
     assert!(!add_user(&mut s, i),
         "add_user must reject when guard is violated");
 }
@@ -348,7 +348,7 @@ fn verify_add_lp_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 0) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))));
+    kani::assume(!((s.accounts[(i) as usize].active == 0) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))));
     assert!(!add_lp(&mut s, i),
         "add_lp must reject when guard is violated");
 }
@@ -422,7 +422,7 @@ fn verify_withdraw_rejects_invalid() {
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
     let amount: u128 = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 1) && (s.accounts[(i) as usize].capital >= amount) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((amount) as i128))));
+    kani::assume(!((s.accounts[(i) as usize].active == 1) && (s.accounts[(i) as usize].capital >= amount) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((amount) as i128))));
     assert!(!withdraw(&mut s, i, amount),
         "withdraw must reject when guard is violated");
 }
@@ -517,7 +517,7 @@ fn verify_liquidate_case_0_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 1) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128)) && (false)));
+    kani::assume(!((s.accounts[(i) as usize].active == 1) && (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128)) && (false)));
     assert!(!liquidate_case_0(&mut s, i),
         "liquidate_case_0 must reject when guard is violated");
 }
@@ -535,7 +535,7 @@ fn verify_liquidate_case_1_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128))));
+    kani::assume(!((s.accounts[(i) as usize].active == 1) && (!(((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) && (((((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) + ((s.I) as i128)) as i128) >= ((0) as i128))));
     assert!(!liquidate_case_1(&mut s, i),
         "liquidate_case_1 must reject when guard is violated");
 }
@@ -553,7 +553,7 @@ fn verify_liquidate_otherwise_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let i: usize = kani::any();
-    kani::assume(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl + ((s.I) as i128) >= ((0) as i128))) && (false)));
+    kani::assume(!((s.accounts[(i) as usize].active == 1) && (!(((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))) && (!(((((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) + ((s.I) as i128)) as i128) >= ((0) as i128))) && (false)));
     assert!(!liquidate_otherwise(&mut s, i),
         "liquidate_otherwise must reject when guard is violated");
 }

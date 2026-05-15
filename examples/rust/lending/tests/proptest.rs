@@ -104,6 +104,7 @@ proptest! {
             total_deposits: 0,
             total_borrows: 0,
             interest_rate: 0,
+            status: Status::Uninitialized,
         };
         if init_pool(&mut s, rate) {
             prop_assert!(pool_solvency(&s),
@@ -209,6 +210,7 @@ proptest! {
             total_deposits: 0,
             total_borrows: 0,
             interest_rate: 0,
+            status: Status::Uninitialized,
         };
         let mut lifecycle = Lifecycle::Uninitialized;
         let mut initialized = false;
