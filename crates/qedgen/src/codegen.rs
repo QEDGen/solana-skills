@@ -2311,7 +2311,7 @@ fn precompute_body_hash(scaffold_source: &str) -> Option<String> {
 /// fixed-point helpers in `src/math.rs`. Used to gate the `use crate::math::*;`
 /// import in `guards.rs` so legacy programs whose user-owned `lib.rs` doesn't
 /// declare `pub mod math;` keep compiling.
-fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
+pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
     let mut any = false;
     let probe = |s: &str| s.contains("mul_div_floor_u128") || s.contains("mul_div_ceil_u128");
     for h in &spec.handlers {
@@ -2322,6 +2322,14 @@ fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
             any = true;
         }
         if h.ensures.iter().any(|e| probe(&e.rust_expr)) {
+            any = true;
+        }
+        // Handler-level `let bindings: (lean_expr, rust_expr)` also lower to
+        // `let X = mul_div_floor_u128(...)` in the emitted Rust handler body.
+        // Without this, specs that compute fee math via a `let` (a common
+        // pattern for splitting amounts before the effect block) wouldn't
+        // pick up the math.rs import / inline helpers.
+        if h.let_bindings.iter().any(|(_, _, r)| probe(r)) {
             any = true;
         }
     }
