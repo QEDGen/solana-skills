@@ -1284,29 +1284,46 @@ fn emit_sequence_test_for(
                     map_type(t, spec).map(|rust_type| format!("0{rt}..={rt}::MAX", rt = rust_type))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            out.push_str(&format!("        ({}).prop_map(|", strategies.join(", ")));
+            let names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
+            // proptest's `Strategy` trait is implemented for tuples up to
+            // arity 12 only. Handlers with >12 args (Anchor handlers
+            // commonly hit this — RfpCreate-style init handlers in
+            // brownfield specs are typical) overflow that bound and emit
+            // E0599 "method `prop_map` exists but trait bounds not
+            // satisfied". Chunk strategies into sub-tuples of ≤12 and
+            // destructure with a nested pattern so any arity stays
+            // well-formed.
+            const MAX_PROPTEST_TUPLE_ARITY: usize = 12;
             if op.takes_params.len() == 1 {
-                out.push_str("v| ");
-                out.push_str(&format!("Op::{}(v)", pascal));
+                out.push_str(&format!(
+                    "        ({}).prop_map(|v| Op::{}(v)),\n",
+                    strategies[0], pascal
+                ));
+            } else if op.takes_params.len() <= MAX_PROPTEST_TUPLE_ARITY {
+                out.push_str(&format!(
+                    "        ({}).prop_map(|({})| Op::{}({})),\n",
+                    strategies.join(", "),
+                    names.join(", "),
+                    pascal,
+                    names.join(", ")
+                ));
             } else {
-                out.push('(');
-                for (i, (pname, _)) in op.takes_params.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(pname);
-                }
-                out.push_str(")| ");
-                out.push_str(&format!("Op::{}(", pascal));
-                for (i, (pname, _)) in op.takes_params.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(pname);
-                }
-                out.push(')');
+                let strat_chunks: Vec<String> = strategies
+                    .chunks(MAX_PROPTEST_TUPLE_ARITY)
+                    .map(|c| format!("({})", c.join(", ")))
+                    .collect();
+                let pat_chunks: Vec<String> = names
+                    .chunks(MAX_PROPTEST_TUPLE_ARITY)
+                    .map(|c| format!("({})", c.join(", ")))
+                    .collect();
+                out.push_str(&format!(
+                    "        ({}).prop_map(|({})| Op::{}({})),\n",
+                    strat_chunks.join(", "),
+                    pat_chunks.join(", "),
+                    pascal,
+                    names.join(", ")
+                ));
             }
-            out.push_str("),\n");
         }
     }
     out.push_str("    ]\n");
