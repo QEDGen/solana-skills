@@ -973,9 +973,13 @@ fn render_rust_binary_with_coercion(
     let rk = rust_infer_kind(opts.env, &rhs.node);
     let l = expr_to_rust(&lhs.node, ctx, consts, opts);
     let r = expr_to_rust(&rhs.node, ctx, consts, opts);
+    // When widening Nat → Int we must cast BOTH sides to the same wide
+    // type. Pre-fix only the Nat side was cast, leaving comparisons like
+    // `i64 >= i128` that don't typecheck. Symmetric widening to i128 keeps
+    // operands aligned without losing precision on either side.
     match (lk, rk) {
-        (Kind::Nat, Kind::Int) => (format!("(({}) as i128)", l), r),
-        (Kind::Int, Kind::Nat) => (l, format!("(({}) as i128)", r)),
+        (Kind::Nat, Kind::Int) => (format!("(({}) as i128)", l), format!("(({}) as i128)", r)),
+        (Kind::Int, Kind::Nat) => (format!("(({}) as i128)", l), format!("(({}) as i128)", r)),
         _ => (l, r),
     }
 }
