@@ -402,6 +402,34 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     out.push_str(
         "// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n\n",
     );
+
+    // rustc's default `recursion_limit = 128` is enough for small specs
+    // but not for proptest's deeply nested `TupleValueTree<...>`
+    // instantiations when `arb_state()` composes a State with many
+    // (≳40) fields — layout/normalize queries overflow at typecheck:
+    //
+    //   error: queries overflow the depth limit!
+    //     = help: consider increasing the recursion limit by adding a
+    //       `#![recursion_limit = "256"]` attribute to your crate
+    //
+    // Gate the override emission on field count so small specs (escrow:
+    // 3 fields, lending: 6, multisig: 5) keep the rustc default and only
+    // larger specs pay the higher ceiling. 32 is a comfortable threshold
+    // — well below the empirical 99-field State that needs ≥256.
+    //
+    // Value 512 = 2× rustc's suggested 256, empirically validated against
+    // a 99-field flat State. Specs that genuinely need more will fail
+    // with the same clear diagnostic and can override locally.
+    let total_field_count: usize = rust_codegen_util::mutable_fields(&spec.state_fields).len()
+        + spec
+            .account_types
+            .iter()
+            .map(|a| rust_codegen_util::mutable_fields(&a.fields).len())
+            .sum::<usize>();
+    if total_field_count > 32 {
+        out.push_str("#![recursion_limit = \"512\"]\n\n");
+    }
+
     out.push_str("use proptest::prelude::*;\n\n");
 
     // ── Math helpers ─────────────────────────────────────────────────────
