@@ -148,6 +148,81 @@ fn strategy_for_field(
     })
 }
 
+/// Render a type-aware default value for a state field used to seed the
+/// initial `State { ... }` literal in init-handler preservation tests and
+/// in `state_machine_sequence`.
+///
+/// Pre-fix every field was initialized to `0`, which broke array fields:
+///
+///     error[E0308]: mismatched types
+///       | rfp_milestone_amounts: 0,
+///       |                        ^ expected `[u64; 8]`, found integer
+///
+/// `Map[N] T` lowers to `[T; N]` in the State struct — so its default has
+/// to be `[<inner-default>; N]`, not `0`. For non-primitive `T` (records
+/// like `Account`, or unit-variant sums) we need `Default::default()`
+/// since the record may not be numeric. Records are detected against
+/// `spec.records`; when matched, we emit `<RecordName>::default()`
+/// (relies on `#[derive(Default)]` on the record struct) and `[ ... ; N]`
+/// for arrays-of-records.
+///
+/// Returns `None` when no sensible default can be derived (e.g. a sum
+/// type with payload variants); the caller should skip the seed-init for
+/// that field and rely on `cargo` to surface the missing field, which
+/// gives a clearer diagnostic than emitting wrong-type code.
+fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Option<String> {
+    let dsl_type = dsl_type.trim();
+    // Map[BOUND] T → [<default of T>; N]
+    if let Some(rest) = dsl_type.strip_prefix("Map") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let bound_src = rest[..close].trim();
+                let inner_src = rest[close + 1..].trim();
+                if let Ok(n) = resolve_map_bound_local(bound_src, &spec.constants) {
+                    let inner_default = default_value_for_field(inner_src, spec)?;
+                    return Some(format!("[{}; {}]", inner_default, n));
+                }
+            }
+        }
+        return None;
+    }
+    // Type alias → recurse on rhs
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return default_value_for_field(rhs, spec);
+    }
+    // Record type → <Name>::default() (the matching `emit_record_structs`
+    // call below derives `Default` on every emitted record struct, so
+    // this resolves at the seed-state literal).
+    if spec.records.iter().any(|r| r.name == dsl_type) {
+        return Some(format!("{}::default()", dsl_type));
+    }
+    // Sum types with payload variants don't have a meaningful zero default
+    // — return None so the caller skips the field and rustc surfaces an
+    // E0063 missing-field at the seed-state literal, pointing at the
+    // exact line that needs attention. Unit-variant sums fall through to
+    // the primitive path below since `emit_unit_enum_sums` derives
+    // Default only when explicitly requested (which it isn't today).
+    if spec
+        .sum_types
+        .iter()
+        .any(|s| s.name == dsl_type && s.variants.iter().any(|v| !v.fields.is_empty()))
+    {
+        return None;
+    }
+    // Fin[N] → 0usize (modeled as usize index)
+    if dsl_type.starts_with("Fin[") {
+        return Some("0".to_string());
+    }
+    // Pubkey → [0u8; 32] when not filtered (rare — usually filtered upstream
+    // by mutable_fields, but a Map[N] Pubkey makes its way through).
+    if dsl_type == "Pubkey" {
+        return Some("[0u8; 32]".to_string());
+    }
+    // Primitive numeric types → 0
+    Some("0".to_string())
+}
+
 /// Local copy of codegen::resolve_map_bound (private there) — same rule: bound
 /// is either a numeric literal or a declared spec constant.
 fn resolve_map_bound_local(bound: &str, constants: &[(String, String)]) -> Result<String> {
@@ -420,7 +495,17 @@ fn emit_account_section(
     // v2.7 G1 finishes what v2.6.2 S3 started: the struct decls were emitted
     // but the strategy lookup bailed into `0u64..=u64::MAX` for record-typed
     // fields. emit_record_prop_composes + strategy_for_field below fix that.
-    rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy", |t| map_type(t, spec))?;
+    // `Default` is required by the seed-state init path (commit 3:
+    // `default_value_for_field` emits `<RecordName>::default()` for
+    // record-typed array elements like `[Account; 1024]`). All record
+    // fields in current bundled specs are primitives or fixed-size arrays
+    // of primitives, both of which derive Default automatically; specs
+    // with non-Default field types would surface as a compile error at
+    // the record struct itself, with a clearer pointer than the cascading
+    // E0599 we'd get from `<Name>::default()`.
+    rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy, Default", |t| {
+        map_type(t, spec)
+    })?;
     rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
     rust_codegen_util::emit_lifecycle_status_enum(out, spec, "Debug, Clone, Copy, PartialEq, Eq");
     emit_record_prop_composes(out, spec)?;
@@ -787,8 +872,22 @@ fn emit_preservation_tests_for(
 
             if is_init {
                 out.push_str("        let mut s = State {\n");
-                for (fname, _) in mutable_fields {
-                    out.push_str(&format!("            {}: 0,\n", fname));
+                for (fname, ftype) in mutable_fields {
+                    if let Some(default) = default_value_for_field(ftype, spec) {
+                        out.push_str(&format!("            {}: {},\n", fname, default));
+                    }
+                    // No sensible default: skip — emitting a wrong-type
+                    // value would mask the issue. The struct-init E0063
+                    // diagnostic will point the user at the missing
+                    // field.
+                }
+                // The `status` discriminator is added by emit_state_struct
+                // when has_lifecycle (≥2 states); seed it to the spec's
+                // declared initial state, not a hardcoded "Uninitialized".
+                if rust_codegen_util::has_lifecycle(spec) {
+                    if let Some(initial) = rust_codegen_util::initial_lifecycle_state(spec) {
+                        out.push_str(&format!("            status: Status::{},\n", initial));
+                    }
                 }
                 out.push_str("        };\n");
             } else {
@@ -928,8 +1027,15 @@ fn emit_invariant_preservation_tests_for(
 
             if is_init {
                 out.push_str("        let mut s = State {\n");
-                for (fname, _) in mutable_fields {
-                    out.push_str(&format!("            {}: 0,\n", fname));
+                for (fname, ftype) in mutable_fields {
+                    if let Some(default) = default_value_for_field(ftype, spec) {
+                        out.push_str(&format!("            {}: {},\n", fname, default));
+                    }
+                }
+                if rust_codegen_util::has_lifecycle(spec) {
+                    if let Some(initial) = rust_codegen_util::initial_lifecycle_state(spec) {
+                        out.push_str(&format!("            status: Status::{},\n", initial));
+                    }
                 }
                 out.push_str("        };\n");
             } else {
@@ -1269,10 +1375,20 @@ fn emit_sequence_test_for(
         seq_len
     ));
 
-    // Start from a valid initial state (zeroed — represents Uninitialized)
+    // Start from a valid initial state. Type-aware defaults: arrays get
+    // [<inner>; N], records get <Name>::default(), primitives get 0. The
+    // status discriminator (if has_lifecycle) seeds to the spec's first
+    // declared lifecycle state.
     out.push_str("        let mut s = State {\n");
-    for (fname, _) in mutable_fields {
-        out.push_str(&format!("            {}: 0,\n", fname));
+    for (fname, ftype) in mutable_fields {
+        if let Some(default) = default_value_for_field(ftype, spec) {
+            out.push_str(&format!("            {}: {},\n", fname, default));
+        }
+    }
+    if rust_codegen_util::has_lifecycle(spec) {
+        if let Some(initial) = rust_codegen_util::initial_lifecycle_state(spec) {
+            out.push_str(&format!("            status: Status::{},\n", initial));
+        }
     }
     out.push_str("        };\n");
 
