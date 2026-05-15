@@ -1858,8 +1858,12 @@ fn mechanize_effect(
         return None;
     }
 
-    let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec);
+    // Anchor / Quasar handler bodies bind state as `self.<acct>.<field>`,
+    // so a bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
+    // upstream strips `state.`) needs to resolve to `self.<acct>.rfp_buyer`.
     let acct = &state_acct.name;
+    let acct_binder = format!("self.{}.", acct);
+    let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec, Some(&acct_binder));
     // Cast index expressions in the LHS path to `usize`. `render_effect`
     // emits the field as `voted[member_index]` (Lean-friendly); on the
     // Rust side, indexing `[u8; N]` with `u8`/`u16`/Fin fails — Rust

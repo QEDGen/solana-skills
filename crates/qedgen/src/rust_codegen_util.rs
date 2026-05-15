@@ -310,15 +310,58 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Resolve an effect value to a Rust expression (param name, constant, or literal).
-pub fn resolve_value(value: &str, op: &ParsedHandler, spec: &ParsedSpec) -> String {
+/// Resolve an effect value to a Rust expression: handler param name,
+/// declared constant, state field (rebound to `<state_binder>X` when
+/// provided), or pass-through literal.
+///
+/// Why state fields need a binder: by the time effect-value rendering
+/// reaches this fn, upstream effect-RHS rendering has already stripped
+/// the `state.` prefix (see chumsky_adapter::render_effect — it unwraps
+/// `Expr::FieldAccess { base: state, .. }` to the bare field name so each
+/// backend can apply its own state binder). Different targets bind state
+/// differently:
+///
+///   - proptest fn body binds state as `s` (`fn op(s: &mut State, ...)`)
+///   - Anchor handler body accesses state via `self.<acct>.<field>`
+///   - Lean / Kani may bind differently again
+///
+/// Without a target-aware binder, a bare `X` for a state field becomes
+/// E0425 "cannot find value `X` in this scope" at compile time. Each
+/// caller passes the binder appropriate to its emission target; pass
+/// `None` to keep the legacy pass-through behavior (bare identifier).
+pub fn resolve_value(
+    value: &str,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    state_binder: Option<&str>,
+) -> String {
     if op.takes_params.iter().any(|(n, _)| n == value) {
         value.to_string()
     } else if let Some((_, const_val)) = spec.constants.iter().find(|(n, _)| n == value) {
         const_val.clone()
+    } else if let Some(binder) = state_binder {
+        if is_state_field(value, spec) {
+            format!("{}{}", binder, value)
+        } else {
+            value.to_string()
+        }
     } else {
         value.to_string()
     }
+}
+
+/// True when the bare identifier names a state field in the flat
+/// `state_fields` list or any `account_types[*].fields` (multi-account).
+fn is_state_field(name: &str, spec: &ParsedSpec) -> bool {
+    if spec.state_fields.iter().any(|(n, _)| n == name) {
+        return true;
+    }
+    for acct in &spec.account_types {
+        if acct.fields.iter().any(|(n, _)| n == name) {
+            return true;
+        }
+    }
+    false
 }
 
 // ============================================================================
@@ -385,7 +428,11 @@ pub fn emit_one_effect(
     value: &str,
     indent: &str,
 ) {
-    let rust_value = resolve_value(value, op, spec);
+    // proptest / kani body binds state as `s` — pass that binder so a
+    // bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
+    // upstream strips `state.`) renders as `s.rfp_buyer`. (PR #45 fix #2,
+    // generalized to all callers via emit_one_effect rather than per-arm.)
+    let rust_value = resolve_value(value, op, spec, Some("s."));
     match op_kind {
         "set" => {
             out.push_str(&format!("{indent}s.{field} = {rust_value};\n"));
@@ -938,6 +985,10 @@ pub fn emit_transition_fn(
         }
         out.push_str("    }\n");
     } else {
+        // PR #45 fix #2: `emit_one_effect` resolves state-field idents
+        // via `resolve_value(..., Some("s."))` so a bare state-field RHS
+        // (e.g. `bid_buyer := state.rfp_buyer` after upstream strips
+        // `state.`) renders as `s.rfp_buyer` in the proptest body.
         for (field, op_kind, value) in &op.effects {
             if field_type_is_pubkey(field, op, spec) {
                 continue;
