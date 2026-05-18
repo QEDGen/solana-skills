@@ -71,7 +71,7 @@ fn account_solvent(_s: &State) -> bool {
 /// account_solvent: per-slot check at `i: AccountIdx` (v2.20 forall lowering)
 #[allow(unused_variables)]
 fn account_solvent_at(s: &State, i: usize) -> bool {
-    (!(s.accounts[(i) as usize].active == 1)) || (((s.accounts[(i) as usize].capital) as i128) + s.accounts[(i) as usize].pnl >= ((0) as i128))
+    (!(s.accounts[(i) as usize].active == 1)) || (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))
 }
 
 // ============================================================================

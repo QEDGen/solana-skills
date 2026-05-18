@@ -49,8 +49,13 @@ theorem exchange_Token_transfer_call_1_post_0 (s : State) : s.initializer_amount
 /-- Token.transfer.ensures @ `initialize` call #0 (stance 1: axiomatized via sorry; v3.0 will close via imported callee proofs). -/
 theorem initialize_Token_transfer_call_0_post_0 (s : State) (deposit_amount : Nat) (receive_amount : Nat) : deposit_amount > 0 := by sorry
 
-/-- Invariant: conservation. -/
-theorem conservation : True := trivial
+-- INVARIANT OBLIGATION (declared, no predicate body): conservation
+--   description: total tokens preserved across initialize, exchange, cancel
+-- The spec declared this name but didn't supply a predicate body
+-- (`invariant <name> : <expr>`). The codegen has no goal to lower —
+-- pre-v2.14 emitted `theorem <name> : True := trivial`, which
+-- was tautological. To verify this invariant, give it a body in
+-- the spec.
 
 inductive Operation where
   | cancel
