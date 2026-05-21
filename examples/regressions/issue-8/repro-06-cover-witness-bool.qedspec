@@ -33,7 +33,7 @@ type State
   | Uninitialized
   | Active of { flag : Bool }
 
-type Error | E
+type Error | E | WrongState
 
 handler init : State.Uninitialized -> State.Active {
   permissionless

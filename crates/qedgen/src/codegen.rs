@@ -866,13 +866,34 @@ fn generate_lib(
 }
 
 /// v2.24 S5b — `true` when the spec's state is a multi-variant ADT
-/// (two or more variants in a single account type). Drives codegen
-/// to emit the wrapper-struct + inner-enum pattern instead of the
-/// flat-fields struct + parallel `Status` enum the pre-v2.24 path
-/// produced. Single-record account types, single-variant ADTs, and
-/// multi-account specs stay on the flat path.
+/// (two or more variants in a single account type) AND the spec has
+/// declared the `WrongState` error variant that the new emission
+/// path needs for its variant-mismatch fallthroughs.
+///
+/// `WrongState` works as the **migration signal**: a spec author
+/// opts into the wrapper-struct + inner-enum emission by declaring
+/// it in `type Error`, alongside flipping bare-field effect LHS to
+/// `Variant.field` syntax. Without that declaration, codegen falls
+/// back to the legacy flat-fields struct + parallel `Status` enum
+/// emission — which keeps unmigrated bundled examples (escrow,
+/// multisig, lending, percolator) compiling on Anchor target until
+/// they migrate at their own pace.
+///
+/// v2.24.x follow-up: pre-fix the predicate only checked variant
+/// count, which meant every multi-variant ADT spec routed through
+/// the wrapper+enum path regardless of whether it had been migrated.
+/// That exposed downstream emission gaps (lib.rs pda seeds
+/// referencing variant-payload fields, guards.rs requires bodies
+/// reaching `wrapper.X` where X moved into the inner enum) that
+/// don't show up on Quasar (which stays on the flat path) but
+/// break Anchor cargo check.
+///
+/// Single-record account types, single-variant ADTs, multi-account
+/// specs, and any spec lacking `WrongState` all stay on the flat path.
 fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
-    spec.account_types.len() == 1
+    let has_wrong_state = spec.error_codes.iter().any(|c| c == "WrongState");
+    has_wrong_state
+        && spec.account_types.len() == 1
         && spec
             .account_types
             .first()
@@ -4274,6 +4295,7 @@ type State
 
 type Error
   | InvalidAmount
+  | WrongState
 
 handler initialize (amount : U64) : State.Uninitialized -> State.Open {
   auth initializer

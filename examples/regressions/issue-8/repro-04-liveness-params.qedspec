@@ -25,7 +25,7 @@ type State
   | Uninitialized
   | Active of { c : U8 }
 
-type Error | E
+type Error | E | WrongState
 
 handler init (p : Pubkey) : State.Uninitialized -> State.Active {
   permissionless

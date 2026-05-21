@@ -86,8 +86,15 @@ fn emit_state_struct(
 /// accounts, single-variant ADTs, and multi-account specs stay on the
 /// legacy flat-`structure` path. Indexed specs (records / Map fields)
 /// route through `render_indexed_state` and are unaffected.
+///
+/// v2.24.x: also gates on `WrongState` declaration as the migration
+/// signal. Specs without it keep the legacy flat-structure Lean
+/// shape — matching the Rust-side fallback so the harness layers
+/// stay consistent.
 fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
-    spec.account_types.len() == 1
+    let has_wrong_state = spec.error_codes.iter().any(|c| c == "WrongState");
+    has_wrong_state
+        && spec.account_types.len() == 1
         && spec
             .account_types
             .first()
@@ -5417,6 +5424,7 @@ type Error
   | ThresholdUnreachable
   | NotAMember
   | MathOverflow
+  | WrongState
 
 pda vault ["vault", creator]
 
@@ -5704,7 +5712,126 @@ liveness proposal_resolves : State.HasProposal ~> State.Active via [execute, can
     // Account-binding `.pubkey` effect handling (B + D)
     // ========================================================================
 
-    const ESCROW_SPEC: &str = include_str!("../../../examples/rust/escrow/escrow.qedspec");
+    // Inline escrow spec used by v2.24 inductive-State Lean codegen tests.
+    // Mirrors examples/rust/escrow/escrow.qedspec but declares WrongState so
+    // the multi-variant ADT path fires. The bundled spec stays unmigrated
+    // (no WrongState) to keep the Anchor scaffold smoke tests on the legacy
+    // flat-struct codegen path.
+    const ESCROW_SPEC: &str = r#"
+spec Escrow
+
+type State
+  | Uninitialized
+  | Open of {
+      initializer               : Pubkey,
+      initializer_token_account : Pubkey,
+      taker                     : Pubkey,
+      initializer_amount        : U64,
+      taker_amount              : U64,
+      escrow_token_account      : Pubkey,
+    }
+  | Closed
+
+pda escrow ["escrow", initializer]
+
+event EscrowInitialized {
+  initializer : Pubkey,
+  amount      : U64,
+}
+
+event EscrowExchanged {
+  taker  : Pubkey,
+  amount : U64,
+}
+
+event EscrowCancelled {
+  initializer : Pubkey,
+}
+
+type Error
+  | InvalidAmount
+  | Unauthorized
+  | AlreadyClosed
+  | WrongState
+
+handler initialize (deposit_amount : U64) (receive_amount : U64) : State.Uninitialized -> State.Open {
+  auth initializer
+
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    mint           : readonly
+    initializer_ta : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+    system_program : program
+  }
+
+  requires deposit_amount > 0 and receive_amount > 0 else InvalidAmount
+
+  effect {
+    Open.initializer_amount        := deposit_amount
+    Open.taker_amount              := receive_amount
+    Open.initializer_token_account := initializer_ta.pubkey
+  }
+
+  transfers {
+    from initializer_ta to escrow_ta amount deposit_amount authority initializer
+  }
+
+  emits EscrowInitialized
+}
+
+handler exchange : State.Open -> State.Closed {
+  auth taker
+
+  accounts {
+    taker          : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    initializer_ta : writable, type token
+    taker_ta       : writable, type token
+    escrow_ta      : writable, type token, authority escrow
+    token_program  : program
+  }
+
+  requires initializer_ta.pubkey == Open.initializer_token_account else Unauthorized
+
+  transfers {
+    from taker_ta to initializer_ta amount Open.taker_amount authority taker
+    from escrow_ta to taker_ta amount Open.initializer_amount authority escrow
+  }
+
+  emits EscrowExchanged
+}
+
+handler cancel : State.Open -> State.Closed {
+  auth initializer
+
+  accounts {
+    initializer    : signer, writable
+    escrow         : writable, pda ["escrow", initializer]
+    escrow_ta      : writable, type token, authority escrow
+    initializer_ta : writable, type token
+    token_program  : program
+  }
+
+  requires initializer_ta.pubkey == Open.initializer_token_account else Unauthorized
+
+  transfers {
+    from escrow_ta to initializer_ta amount Open.initializer_amount authority escrow
+  }
+
+  emits EscrowCancelled
+}
+
+invariant conservation "total tokens preserved across initialize, exchange, cancel"
+
+cover happy_path [initialize, exchange]
+
+cover cancel_path [initialize, cancel]
+
+liveness escrow_settles : State.Open ~> State.Closed via [exchange, cancel] within 1
+"#;
 
     #[test]
     fn lean_gen_drops_account_binding_pubkey_effect() {
