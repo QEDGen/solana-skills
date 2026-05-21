@@ -733,17 +733,25 @@ impl ParsedHandler {
 }
 
 /// True iff the spec is a multi-variant ADT *and* the named field lives
-/// inside one or more variant payloads (not directly on the wrapper).
-/// Used by R25's `auth X → has_one = X` lowering to skip the `has_one`
-/// attribute when the field can't be reached from the Anchor wrapper —
-/// `has_one` looks up `wrapper.<field>`, which fails for fields buried
-/// in `wrapper.inner.<variant>`. See `ParsedHandlerAccount::account_attr`
-/// for the gating logic.
+/// inside one or more variant payloads (not directly on the wrapper) *and*
+/// the spec has opted into v2.24 wrapper-struct + inner-enum codegen by
+/// declaring `WrongState` in `type Error`.
+///
+/// Used by R25's `auth X → has_one = X` lowering and by
+/// `emit_variant_auth_guard` to decide whether the auth field is reachable
+/// from the Anchor wrapper. Without WrongState the spec stays on the
+/// legacy flat-struct codegen path where every field — including
+/// variant-payload fields — sits directly on the wrapper, so `has_one`
+/// keeps working and the variant-destructure guard would reference a
+/// non-existent `inner` enum.
 pub fn is_multi_variant_adt_with_field_in_variant(spec: &ParsedSpec, field: &str) -> bool {
     let Some(acct) = spec.account_types.first() else {
         return false;
     };
     if acct.variants.len() <= 1 {
+        return false;
+    }
+    if !spec.error_codes.iter().any(|c| c == "WrongState") {
         return false;
     }
     acct.variants
