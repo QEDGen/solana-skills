@@ -509,6 +509,7 @@ fn render_single_account_adt(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+    emit_ref_impls(&mut out, &spec.ref_impls);
 
     for (cname, val) in &spec.constants {
         out.push_str(&format!("abbrev {} : Nat := {}\n", safe_name(cname), val));
@@ -580,6 +581,7 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+    emit_ref_impls(&mut out, &spec.ref_impls);
 
     // Constants
     for (name, val) in &spec.constants {
@@ -686,6 +688,7 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+    emit_ref_impls(&mut out, &spec.ref_impls);
 
     // Constants
     for (name, val) in &spec.constants {
@@ -923,6 +926,51 @@ fn build_guard_cond_parts(
 /// want to strengthen a helper into a real check replace the `opaque`
 /// declaration with a `def` in their `Proofs.lean` (or a sibling
 /// support module imported before `Spec.lean`).
+/// v2.25 — emit `def name (p1 : T1) (p2 : T2) : R := body` for each
+/// `ref_impl` in the spec. These are reference implementations that
+/// `ensures` clauses can call; Lean treats them as ordinary
+/// definitions (not opaque) so proofs can unfold them when needed.
+/// The impl-targeted Kani harness (Phase B) inlines the same body
+/// at its assertion sites.
+fn emit_ref_impls(out: &mut String, ref_impls: &[crate::check::ParsedRefImpl]) {
+    if ref_impls.is_empty() {
+        return;
+    }
+    out.push_str(
+        "-- Reference implementations: pure expressions named so\n\
+         -- ensures clauses can call them. The user's Rust impl is\n\
+         -- verified to satisfy the ensures referencing these, not\n\
+         -- forced to implement them verbatim.\n",
+    );
+    for r in ref_impls {
+        let params = r
+            .params
+            .iter()
+            .map(|(n, t)| format!("({} : {})", safe_name(n), map_type(t)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ret = map_type(&r.return_type);
+        let body = &r.lean_body;
+        if params.is_empty() {
+            out.push_str(&format!(
+                "def {} : {} := {}\n",
+                safe_name(&r.name),
+                ret,
+                body
+            ));
+        } else {
+            out.push_str(&format!(
+                "def {} {} : {} := {}\n",
+                safe_name(&r.name),
+                params,
+                ret,
+                body
+            ));
+        }
+    }
+    out.push('\n');
+}
+
 fn emit_uninterpreted_helpers(out: &mut String, helpers: &[(String, Vec<String>, String)]) {
     if helpers.is_empty() {
         return;
@@ -4998,6 +5046,7 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     out.push_str("open QEDGen.Solana.IndexedState\n\n");
 
     emit_uninterpreted_helpers(&mut out, &spec.uninterpreted_helpers);
+    emit_ref_impls(&mut out, &spec.ref_impls);
 
     // -- Constants --
     for (name, val) in &spec.constants {

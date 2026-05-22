@@ -783,7 +783,7 @@ pub(crate) enum StateMode {
     /// Slice 2 binary mode — `state.x` renders to `post.x`,
     /// `old(state.x)` to `pre.x`. Used only by Slices 3-4 when emitting
     /// `PropertyClass::Binary` property fn bodies.
-    #[allow(dead_code)] // Consumed by Slices 3-4.
+    // v2.23 Slices 3-4 + v2.25 Phase B (ensures-preservation Kani harness).
     Binary,
 }
 
@@ -820,7 +820,7 @@ impl<'a, 'env> RustOpts<'a, 'env> {
     /// Return a copy with the given `state_mode`. Used by Slices 3-4 to
     /// switch from Unary (default) to Binary when rendering a
     /// `PropertyClass::Binary` property body.
-    #[allow(dead_code)] // Consumed by Slices 3-4.
+    // v2.23 Slices 3-4 + v2.25 Phase B (ensures-preservation Kani harness).
     fn with_state_mode(self, state_mode: StateMode) -> Self {
         RustOpts { state_mode, ..self }
     }
@@ -2614,6 +2614,28 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     requires,
                 });
             }
+            TopItem::RefImpl(r) => {
+                // v2.25 — collect ref_impl bodies. Lean lowering uses
+                // `lean_body`; Kani harness inlining uses `rust_body`.
+                // The body is a pure expression — no Ctx::Ensures /
+                // Ctx::Guard distinction needed; use Guard so bare
+                // state refs render as `s.x` (single-state context).
+                let params: Vec<(String, String)> = r
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+                    .collect();
+                let lean_body = expr_to_lean(&r.body.node, Ctx::Guard, consts, &env);
+                let rust_body = expr_to_rust(&r.body.node, Ctx::Guard, consts, opts_native(&env));
+                out.ref_impls.push(crate::check::ParsedRefImpl {
+                    name: r.name.clone(),
+                    doc: r.doc.clone(),
+                    params,
+                    return_type: type_ref_to_string(&r.return_type),
+                    lean_body,
+                    rust_body,
+                });
+            }
             TopItem::Pragma(p) => {
                 // Record the pragma name for target inference. Any given
                 // pragma may appear at most once per spec; duplicates are
@@ -2730,7 +2752,17 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     // F5: collect uninterpreted helpers after all other fields are
     // populated — the collector needs the full state_fields + records
     // + sum_types picture to infer argument types.
+    //
+    // v2.25 — filter out names that are declared as `ref_impl`s. Those
+    // have real bodies in Lean (emitted as `def`) so the uninterpreted
+    // `opaque foo : T → Bool` shape would conflict. Other call sites
+    // of an unknown name still flow through the helper detector and
+    // get the axiomatic treatment.
     out.uninterpreted_helpers = collect_uninterpreted_helpers(spec, &out);
+    let ref_impl_names: std::collections::HashSet<&str> =
+        out.ref_impls.iter().map(|r| r.name.as_str()).collect();
+    out.uninterpreted_helpers
+        .retain(|(n, _, _)| !ref_impl_names.contains(n.as_str()));
 
     // v2.24 #1 — expand `include <schema>` clauses on handlers. Done
     // here as a post-pass so the schema lookup sees every declared
@@ -3000,6 +3032,14 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
                     rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
+                    // v2.25 — binary rendering for Kani ensures-preservation
+                    // harness. `state.x` → `post.x`; `old(state.x)` → `pre.x`.
+                    rust_expr_binary: expr_to_rust(
+                        &e.node,
+                        Ctx::Ensures,
+                        consts,
+                        opts_native(env).with_state_mode(StateMode::Binary),
+                    ),
                 });
             }
             a::HandlerClause::Modifies(fs) => {
@@ -3295,6 +3335,12 @@ fn adapt_interface_handler<'a>(
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
                     rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
+                    rust_expr_binary: expr_to_rust(
+                        &e.node,
+                        Ctx::Ensures,
+                        consts,
+                        opts_native(env).with_state_mode(StateMode::Binary),
+                    ),
                 });
             }
         }

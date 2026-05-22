@@ -464,6 +464,32 @@ fn emit_kani_account_section(
         rust_codegen_util::emit_transition_fn(out, op, spec, false, |t| map_type(t, spec))?;
     }
 
+    // v2.25 — ref_impl bodies, emitted as Rust fns so ensures-preservation
+    // harnesses can call them at assertion sites. Pure expressions, no
+    // state mutation — render directly from `rust_body`.
+    if !spec.ref_impls.is_empty() {
+        out.push_str(
+            "// ============================================================================\n",
+        );
+        out.push_str("// Reference implementations (from qedspec ref_impl declarations).\n");
+        out.push_str(
+            "// ============================================================================\n\n",
+        );
+        for r in &spec.ref_impls {
+            let params = r
+                .params
+                .iter()
+                .map(|(n, t)| format!("{}: {}", n, map_type(t, spec).unwrap_or_else(|_| t.clone())))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let ret = map_type(&r.return_type, spec).unwrap_or_else(|_| r.return_type.clone());
+            out.push_str(&format!(
+                "fn {}({}) -> {} {{\n    {}\n}}\n\n",
+                r.name, params, ret, r.rust_body
+            ));
+        }
+    }
+
     // ── Guard enforcement proofs ─────────────────────────────────────────
     let guard_ops: Vec<&ParsedHandler> = handlers
         .iter()
@@ -813,6 +839,101 @@ fn emit_kani_account_section(
                         }
                     }
                 }
+                out.push_str("    }\n");
+                out.push_str("}\n\n");
+                counts.prop += 1;
+            }
+        }
+    }
+
+    // ── Ensures preservation proofs (v2.25 Phase B) ──────────────────────
+    // For each handler that carries `ensures <expr>` clauses, emit a BMC
+    // harness that:
+    //   1. Initializes symbolic pre-state (matches property-preservation shape)
+    //   2. Snapshots pre = s.clone() before running the transition
+    //   3. Calls the spec-translated transition (mutates s into post-state)
+    //   4. Asserts each ensures clause against (pre, s) using the
+    //      `rust_expr_binary` rendering (`old(state.x)` → `pre.x`,
+    //      bare `state.x` → `post.x`).
+    //
+    // This catches spec-internal inconsistency between the effect block
+    // and the ensures contract. If `modifies` declares a field as
+    // mutable but the effect block doesn't write it (the LP-math
+    // pattern), the transition leaves the field equal to pre — Kani
+    // surfaces a counterexample where the ensures fails for any input
+    // that exercises the missing math. That counterexample IS the
+    // signal that the user's Rust impl needs to fill the modifies-fill
+    // todo!() site to satisfy the contract.
+    //
+    // v2.26+ extends this to call the user's REAL Rust handler (bridged
+    // through the integration-test account builder). v2.25 ships the
+    // spec-model variant first because it requires no framework-specific
+    // wiring and surfaces the contract gap immediately.
+    let handlers_with_ensures: Vec<&ParsedHandler> = handlers
+        .iter()
+        .copied()
+        .filter(|h| !h.ensures.is_empty())
+        .collect();
+    if !handlers_with_ensures.is_empty() {
+        out.push_str(
+            "// ============================================================================\n",
+        );
+        out.push_str("// Ensures preservation — `ensures <expr>` clauses verified against\n");
+        out.push_str("// (pre, post) of the spec-translated transition. Counterexamples here\n");
+        out.push_str("// indicate the spec's effect block doesn't satisfy its own ensures —\n");
+        out.push_str("// usually because the math lives in the user's Rust impl, behind a\n");
+        out.push_str("// `modifies`-driven todo!() fill site. See SKILL.md §ref_impl.\n");
+        out.push_str(
+            "// ============================================================================\n\n",
+        );
+
+        for op in handlers_with_ensures {
+            for (idx, ensures) in op.ensures.iter().enumerate() {
+                out.push_str("#[kani::proof]\n");
+                out.push_str("#[kani::unwind(2)]\n");
+                out.push_str("#[kani::solver(cadical)]\n");
+                out.push_str(&format!("fn verify_{}_ensures_{}() {{\n", op.name, idx));
+
+                emit_state_init_symbolic(out, mutable_fields, lifecycle_states);
+                emit_pre_status_assume(out, op, lifecycle_states);
+
+                // Symbolic params declared first so any subsequent
+                // `kani::assume` referencing them resolves.
+                for (pname, ptype) in &op.takes_params {
+                    out.push_str(&format!(
+                        "    let {}: {} = kani::any();\n",
+                        pname,
+                        map_type(ptype, spec)?
+                    ));
+                }
+
+                // Assume the handler's `requires` guards hold pre-state.
+                // Otherwise the transition would reject the input and the
+                // ensures clause wouldn't be exercised — vacuous pass.
+                if let Some(full_guard) = rust_codegen_util::collect_full_guard(op, false) {
+                    out.push_str(&format!("    kani::assume({});\n", full_guard));
+                }
+
+                // Snapshot pre-state AFTER assumes so the snapshot
+                // reflects the constrained pre-state Kani is exploring.
+                out.push_str("    let pre = s.clone();\n");
+
+                // Call the spec-translated transition (mutates s).
+                let args: String = op
+                    .takes_params
+                    .iter()
+                    .map(|(n, _)| format!(", {}", n))
+                    .collect();
+                out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
+
+                // Post-state is the mutated `s`. Bind `post = &s` so the
+                // ensures rendering's `post.x` paths resolve.
+                out.push_str("        let post = &s;\n");
+                out.push_str(&format!("        assert!({},\n", ensures.rust_expr_binary));
+                out.push_str(&format!(
+                    "            \"ensures clause {} on {} violated by spec-translated transition\");\n",
+                    idx, op.name
+                ));
                 out.push_str("    }\n");
                 out.push_str("}\n\n");
                 counts.prop += 1;

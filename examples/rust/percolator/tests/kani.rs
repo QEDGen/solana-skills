@@ -1514,6 +1514,187 @@ fn verify_reset_preserves_account_solvent() {
 }
 
 // ============================================================================
+// Ensures preservation — `ensures <expr>` clauses verified against
+// (pre, post) of the spec-translated transition. Counterexamples here
+// indicate the spec's effect block doesn't satisfy its own ensures —
+// usually because the math lives in the user's Rust impl, behind a
+// `modifies`-driven todo!() fill site. See SKILL.md §ref_impl.
+// ============================================================================
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_execute_trade_ensures_0() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let a: usize = kani::any();
+    let b: usize = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    kani::assume((s.accounts[(a) as usize].active == 1) && (s.accounts[(b) as usize].active == 1) && (a != b) && (mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000));
+    let pre = s.clone();
+    if execute_trade(&mut s, a, b, size_q, exec_price) {
+        let post = &s;
+        assert!(post.V == pre.V,
+            "ensures clause 0 on execute_trade violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_execute_trade_ensures_1() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let a: usize = kani::any();
+    let b: usize = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    kani::assume((s.accounts[(a) as usize].active == 1) && (s.accounts[(b) as usize].active == 1) && (a != b) && (mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000));
+    let pre = s.clone();
+    if execute_trade(&mut s, a, b, size_q, exec_price) {
+        let post = &s;
+        assert!(post.I == pre.I,
+            "ensures clause 1 on execute_trade violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_execute_trade_ensures_2() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let a: usize = kani::any();
+    let b: usize = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    kani::assume((s.accounts[(a) as usize].active == 1) && (s.accounts[(b) as usize].active == 1) && (a != b) && (mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000));
+    let pre = s.clone();
+    if execute_trade(&mut s, a, b, size_q, exec_price) {
+        let post = &s;
+        assert!(post.F == pre.F,
+            "ensures clause 2 on execute_trade violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_execute_trade_ensures_3() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let a: usize = kani::any();
+    let b: usize = kani::any();
+    let size_q: i128 = kani::any();
+    let exec_price: u64 = kani::any();
+    kani::assume((s.accounts[(a) as usize].active == 1) && (s.accounts[(b) as usize].active == 1) && (a != b) && (mul_div_floor_u128(((size_q) as u128), ((exec_price) as u128), ((1000000) as u128)) <= 100000000000000000000));
+    let pre = s.clone();
+    if execute_trade(&mut s, a, b, size_q, exec_price) {
+        let post = &s;
+        assert!(sum_over::<AccountIdx>(|i| post.accounts[(i) as usize].pnl == sum_over::<AccountIdx>(|i| pre.accounts[(i) as usize].pnl)),
+            "ensures clause 3 on execute_trade violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_settle_account_ensures_0() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let i: usize = kani::any();
+    kani::assume((s.accounts[(i) as usize].active == 1));
+    let pre = s.clone();
+    if settle_account(&mut s, i) {
+        let post = &s;
+        assert!(post.V == pre.V,
+            "ensures clause 0 on settle_account violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_settle_account_ensures_1() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let i: usize = kani::any();
+    kani::assume((s.accounts[(i) as usize].active == 1));
+    let pre = s.clone();
+    if settle_account(&mut s, i) {
+        let post = &s;
+        assert!(post.I == pre.I,
+            "ensures clause 1 on settle_account violated by spec-translated transition");
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_settle_account_ensures_2() {
+    let mut s = State {
+        authority: kani::any(),
+        V: kani::any(),
+        I: kani::any(),
+        F: kani::any(),
+        accounts: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Active);
+    let i: usize = kani::any();
+    kani::assume((s.accounts[(i) as usize].active == 1));
+    let pre = s.clone();
+    if settle_account(&mut s, i) {
+        let post = &s;
+        assert!(post.F == pre.F,
+            "ensures clause 2 on settle_account violated by spec-translated transition");
+    }
+}
+
+// ============================================================================
 // Effect conformance — verify transition effects match spec
 //
 // Each proof applies a transition to symbolic state and checks that every

@@ -135,6 +135,15 @@ pub struct ParsedEnsures {
     pub rust_expr: String,
     #[allow(dead_code)]
     pub rust_expr_pod: String,
+    /// v2.25 — binary-mode rendering: `state.x` → `post.x`,
+    /// `old(state.x)` → `pre.x`. Consumed by the ensures-preservation
+    /// Kani harness so the assertion can compare pre-state captured
+    /// before the transition against post-state observed after.
+    /// Today's `rust_expr` flattens both to `s.x`, which is fine for
+    /// requires (single-state context) but loses information for
+    /// ensures (binary context).
+    #[allow(dead_code)]
+    pub rust_expr_binary: String,
 }
 
 /// Parsed cover block (reachability).
@@ -1125,6 +1134,32 @@ pub struct ParsedSpec {
     /// across the spec would need a richer type inference pass than
     /// v2.7.1 carries.
     pub uninterpreted_helpers: Vec<(String, Vec<String>, String)>,
+
+    /// v2.25 — top-level `ref_impl name (...) : T = <expr>` declarations.
+    /// Reference implementations referenced from `ensures` clauses.
+    /// Lower to Lean `def`s and inline at Kani-harness assertion sites.
+    /// Distinct from `uninterpreted_helpers`: those are *axiomatic*
+    /// (declared, not defined); ref_impls carry an executable body.
+    #[allow(dead_code)]
+    pub ref_impls: Vec<ParsedRefImpl>,
+}
+
+/// v2.25 — adapted form of `ast::RefImplDecl`. Carries both Lean and
+/// Rust renderings of the body so the same expression can lower
+/// into Spec.lean (as a `def`) and into the impl-targeted Kani
+/// harness (inlined at the assertion site).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ParsedRefImpl {
+    pub name: String,
+    pub doc: Option<String>,
+    /// Each param is `(name, type_string)`. Type strings carry the
+    /// source DSL form (`U64`, `Map[N] T`, etc.) so downstream
+    /// lowering can pick the right Lean / Rust mapping.
+    pub params: Vec<(String, String)>,
+    pub return_type: String,
+    pub lean_body: String,
+    pub rust_body: String,
 }
 
 impl ParsedSpec {

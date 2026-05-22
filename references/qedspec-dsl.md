@@ -7,10 +7,33 @@ handlers, Lean proofs, Kani harnesses, proptest suites, CI workflows, and the
 `#[qed(verified, spec, handler, spec_hash)]` drift attributes that tie
 generated code back to the spec.
 
-This reference covers the current (v2.7) grammar. Where the parser emits a
+This reference covers the current (v2.25) grammar. Where the parser emits a
 specific AST node shape that influences codegen (match, constructors, record
 updates, `mul_div_*`), the node name is called out so you can follow the
 transform into the Lean/Rust backends.
+
+## What changed in v2.25
+
+- **`ref_impl name (...) : T = <expr>` top-level declarations.** Reference
+  implementations that `ensures` clauses can call by name. Lower to Lean
+  `def`s (proofs `unfold` them) and to Rust `fn`s embedded in the Kani
+  harness so ensures-preservation assertions can invoke them. Handler
+  codegen skips ref_impls — they're verification-only, not part of the
+  impl contract. See [`ref_impl`](#ref_impl-v225).
+- **`modifies [X, Y]` agent-fill sites.** When `modifies` declares a
+  field the `effect` block doesn't write, codegen emits a structured
+  `todo!()` site in the Rust handler with the relevant `ensures`
+  clauses quoted as comments. The agent (or you) fills the math
+  against the quoted contract.
+- **`unconstrained_modifies` P0 lint.** Fires when a field appears in
+  `modifies [...]` but neither the effect block writes it nor any
+  `ensures` references it. That shape is completely unverified — add
+  an `ensures` constraint or drop the field from `modifies`.
+- **Ensures-preservation Kani harnesses.** For every handler with
+  `ensures <expr>` clauses, codegen emits a Kani BMC harness that
+  snapshots `pre = s.clone()`, runs the spec-translated transition,
+  and asserts each ensures clause against `(pre, post)`. Counterexamples
+  surface contract gaps the spec model couldn't satisfy on its own.
 
 ## What changed in v2.7
 
@@ -300,6 +323,50 @@ state {
   owner   : Pubkey
 }
 ```
+
+### `ref_impl` (v2.25)
+
+Reference implementation. Names a pure expression that `ensures` clauses
+can call by name. Lowers to a Lean `def` (proofs can `unfold` it) and to
+a Rust `fn` embedded in the Kani harness so ensures-preservation
+assertions can invoke it. Rust handler codegen *skips* `ref_impl`
+entirely — it's a verification fixture, not part of the impl contract.
+The user's real impl can compute the same value via the literal
+expression or via a semantically-equivalent variant (ceiling vs floor
+division, checked arithmetic, etc.); Kani verifies they agree.
+
+```fsharp
+ref_impl lp_out (s_lp_supply : U64) (s_pool_balance : U64) (amount : U64) : U64 =
+  if s_lp_supply == 0
+    then amount
+    else (amount * s_lp_supply) / s_pool_balance
+
+handler deposit (amount_stablecoin : U64) {
+  modifies [pool_balance, lp_supply]
+  effect { pool_balance += amount_stablecoin }
+  ensures state.lp_supply == old(state.lp_supply)
+                            + lp_out(old(state.lp_supply),
+                                     old(state.pool_balance),
+                                     amount_stablecoin)
+}
+```
+
+Rules:
+
+  - Parameters are `(name : Type)` in parentheses; multiple parameters
+    each in their own parens (no comma-separated tuple form).
+  - Body is a pure expression — no state mutation, no `match` with
+    side-effect arms, no calls to other `ref_impl`s (deferred to v2.26).
+  - Naming a ref_impl shadows any same-named uninterpreted helper:
+    code that calls `lp_out(...)` in an `ensures` body resolves to
+    the real definition, not the axiomatic `opaque foo : T → Bool`
+    fallback.
+
+When *not* to use `ref_impl`: simple inline expressions belong directly
+in `ensures`. Reach for `ref_impl` when the same math appears in
+multiple `ensures` clauses or when the math is too complex to inline
+readably (LP share-value, mul-div with rounding, Pyth-style price
+derivations).
 
 ## PDA and events
 

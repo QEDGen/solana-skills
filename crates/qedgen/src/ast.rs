@@ -132,6 +132,15 @@ pub enum TopItem {
     /// (HandlerClause::Uses) and the adapter expands every requires
     /// in the schema into the handler's requires list.
     Schema(SchemaDecl),
+    /// `ref_impl name (state : State) (params...) : T = <expr>` — v2.25
+    /// reference implementation. Names an intermediate expression that
+    /// `ensures` clauses can call. Lowers to a Lean `def` and inlines
+    /// at Kani-harness assertion sites; Rust codegen skips it entirely
+    /// (it's a verification-only construct, not part of the impl
+    /// contract). Replaces the original `ghost` proposal — the user
+    /// preferred the more honest naming, since the construct *is*
+    /// a reference implementation the real Rust impl is checked against.
+    RefImpl(RefImplDecl),
 }
 
 /// v2.24 #1 — top-level `schema` block. Body carries a list of
@@ -297,6 +306,19 @@ pub struct Variant {
 pub struct TypedField {
     pub name: String,
     pub ty: TypeRef,
+}
+
+/// v2.25 — `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>`.
+/// Reference implementation that ensures clauses can call. The body
+/// is a pure expression over the typed parameters; no state mutation,
+/// no side effects.
+#[derive(Debug, Clone)]
+pub struct RefImplDecl {
+    pub name: String,
+    pub doc: Option<String>,
+    pub params: Vec<TypedField>,
+    pub return_type: TypeRef,
+    pub body: Node<Expr>,
 }
 
 /// A type reference in the source language.

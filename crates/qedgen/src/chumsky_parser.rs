@@ -125,6 +125,8 @@ const KEYWORDS: &[&str] = &[
     // contextual (matched via `kw("from")` only inside `import_decl`), not a
     // global keyword — handlers still use `from = expr` in call args.
     "import",
+    // v2.25: reference-implementation declaration — `ref_impl name (...) : T = <expr>`.
+    "ref_impl",
 ];
 
 fn non_keyword_ident<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
@@ -1740,6 +1742,52 @@ fn liveness_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
+/// v2.25 — top-level `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>`.
+///
+/// Reference implementation. Names an intermediate expression that
+/// `ensures` clauses can call. Pure: no state mutation, no side
+/// effects, no calls to other ref_impls (yet). Lowers to a Lean
+/// `def`; Kani harnesses inline the body at the assertion site.
+/// Rust codegen skips it entirely — the construct is a verification
+/// fixture, not part of the impl contract.
+///
+/// Replaces the original `ghost` proposal — `ref_impl` is more
+/// honest: the construct *is* a reference implementation against
+/// which the user's real Rust impl is verified.
+fn ref_impl_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    // Each parameter is `(name : Type)`. Parens are required so a
+    // multi-param signature reads naturally and the parser can
+    // disambiguate from the return-type `: R` that follows.
+    let param = just('(')
+        .then_ignore(wsc())
+        .ignore_then(typed_field())
+        .then_ignore(wsc())
+        .then_ignore(just(')'));
+    let params = param.then_ignore(wsc()).repeated().collect::<Vec<_>>();
+
+    doc_comments()
+        .then_ignore(kw("ref_impl"))
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then(params)
+        .then_ignore(just(':'))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(expr())
+        .map(|((((doc, name), params), return_type), body)| {
+            TopItem::RefImpl(RefImplDecl {
+                name,
+                doc,
+                params,
+                return_type,
+                body,
+            })
+        })
+}
+
 // invariant name : expr  OR  invariant name "description"
 /// v2.24 #1 — top-level `schema name { requires expr else Err … }`.
 /// Reusable cross-cutting guard set. Pre-fix the parser rejected the
@@ -2648,6 +2696,7 @@ fn top_item<'a>() -> impl Parser<'a, &'a str, Node<TopItem>, Err<'a>> + Clone {
         liveness_decl(),
         invariant_decl(),
         schema_decl(),
+        ref_impl_decl(),
     ));
     let group_b = choice((
         pda_decl(),
@@ -3002,6 +3051,30 @@ handler foo {
         }
     }
 
+    // v2.25 — `ref_impl name (p : T) ... : R = <expr>` parses as a
+    // top-level item and captures the body for downstream Lean def
+    // emission / Kani inlining.
+    #[test]
+    fn parses_ref_impl_with_multiple_params_and_if_body() {
+        let src = "spec T\n\
+                   ref_impl lp_out (s : U64) (p : U64) (amt : U64) : U64 =\n  \
+                     if s == 0 then amt else (amt * s) / p\n";
+        let s = parse_ok(src);
+        match &s.items[0].node {
+            TopItem::RefImpl(r) => {
+                assert_eq!(r.name, "lp_out");
+                assert_eq!(r.params.len(), 3);
+                assert_eq!(r.params[0].name, "s");
+                assert_eq!(r.params[2].name, "amt");
+                match &r.return_type {
+                    TypeRef::Named(n) => assert_eq!(n, "U64"),
+                    other => panic!("expected Named return type, got {:?}", other),
+                }
+            }
+            o => panic!("expected RefImpl, got {:?}", o),
+        }
+    }
+
     #[test]
     fn parses_adt_with_map() {
         let src = r#"spec T
@@ -3167,6 +3240,7 @@ property conservation :
                 TopItem::PragmaAssign { .. } => "pragma_assign",
                 TopItem::Import { .. } => "import",
                 TopItem::Schema(_) => "schema",
+                TopItem::RefImpl(_) => "ref_impl",
             })
             .fold(
                 std::collections::BTreeMap::<&str, usize>::new(),
