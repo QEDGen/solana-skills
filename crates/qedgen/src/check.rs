@@ -3787,6 +3787,14 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // pipe form.
     warnings.extend(check_error_declared_as_record(spec));
 
+    // v2.24.x Phase A.5 — `modifies [X]` declared, X not written in
+    // `effect { ... }`, and no `ensures` clause references X. The
+    // field is completely unconstrained: Lean frame proofs allow any
+    // post-value (X is in modifies), the Rust impl-fill site has
+    // nothing to verify against. Either spec'd intent is missing or
+    // the modifies clause is wrong. Fire P0.
+    warnings.extend(check_unconstrained_modifies(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -4113,6 +4121,89 @@ fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning>
         counterexample: None,
         fix_options: vec![],
     });
+    warnings
+}
+
+/// v2.24.x Phase A.5 — `unconstrained_modifies`: fires when a field
+/// appears in a handler's `modifies [...]` list but neither
+///   - the `effect { ... }` block writes to it, nor
+///   - any `ensures` clause references it.
+///
+/// The field is *completely unconstrained*: Lean frame conditions
+/// allow any post-value (the field is in modifies, so no frame axiom
+/// pins it equal to pre); the Rust impl-fill site (codegen emits a
+/// `todo!()` for unfilled-modifies fields) has no spec contract to
+/// satisfy; Kani / proptest harnesses have no `ensures` to assert.
+///
+/// Two ways out: add an `ensures` clause that constrains the
+/// post-value (the canonical "Kani checks impl" pattern), or remove
+/// the field from `modifies` (it wasn't really being modified).
+fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for h in &spec.handlers {
+        let Some(modifies) = h.modifies.as_ref() else {
+            continue;
+        };
+        // Set of bare field names written by the effect block.
+        let mut effect_fields: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for (lhs, _, _) in &h.effects {
+            // Strip a leading `Variant.` prefix (multi-variant ADT specs
+            // use Variant-qualified LHS) and any `[idx]` subscript so the
+            // bare field name lines up with the modifies list.
+            let stripped = lhs
+                .split_once('.')
+                .map(|(_, rest)| rest)
+                .unwrap_or(lhs.as_str());
+            let bare = stripped.split('[').next().unwrap_or(stripped);
+            effect_fields.insert(bare);
+        }
+        for field in modifies {
+            if effect_fields.contains(field.as_str()) {
+                continue;
+            }
+            // Does any ensures clause reference this field by name?
+            // Conservative textual scan — `rust_expr` carries `post.<field>`
+            // / `pre.<field>` / `s.<field>` depending on opts. Substring
+            // match is fine because field names are user-declared and
+            // bounded; false positives (`field` substring of another
+            // field) are caught by the codegen lint when emitting the
+            // fill site.
+            let referenced = h
+                .ensures
+                .iter()
+                .any(|e| e.rust_expr.contains(field.as_str()));
+            if referenced {
+                continue;
+            }
+            warnings.push(CompletenessWarning {
+                rule: "unconstrained_modifies".to_string(),
+                severity: Severity::Error,
+                priority: 0,
+                message: format!(
+                    "handler '{}' lists '{}' in `modifies` but no `effect` writes \
+                     it and no `ensures` clause references it — the field is \
+                     completely unconstrained. Verification harnesses have no \
+                     contract to check against and the Lean frame conditions \
+                     allow any post-value.",
+                    h.name, field
+                ),
+                subject: Some(h.name.clone()),
+                fix: format!(
+                    "Either add an `ensures` clause that constrains `{}` against \
+                     its pre-state value (so Kani / proptest can verify the impl \
+                     satisfies the contract), or remove `{}` from `modifies` if \
+                     it isn't really being modified.",
+                    field, field
+                ),
+                example: Some(format!(
+                    "  ensures {}_grew : state.{} >= old(state.{})",
+                    field, field, field
+                )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
     warnings
 }
 
@@ -6043,6 +6134,73 @@ handler deposit (idx : U64) (amt : U64) {
     // as a Record named "Error" with field declarations rather than
     // populating `spec.error_codes`. Lint fires with a fix-it
     // pointing at the pipe form.
+    #[test]
+    // v2.24.x Phase A.5 — `modifies [X]` + no effect write + no
+    // ensures referencing X = completely unconstrained field. Lint
+    // fires P0 telling the author to either constrain via ensures
+    // or remove from modifies.
+    #[test]
+    fn unconstrained_modifies_lint_fires_on_uncovered_field() {
+        let src = r#"
+spec Probe
+state { pool_balance : U64, lp_supply : U64 }
+type Error
+  | InvalidAmount
+  | MathOverflow
+handler deposit (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  modifies [pool_balance, lp_supply]
+  effect { pool_balance += amount }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_unconstrained_modifies(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "unconstrained_modifies")
+            .expect("unconstrained_modifies fires for lp_supply");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(
+            hit.message.contains("'lp_supply'"),
+            "message names the field, got: {}",
+            hit.message
+        );
+        // pool_balance is in modifies AND in effect — no warning for it.
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.message.contains("'pool_balance'")),
+            "pool_balance must not fire — it's written by the effect"
+        );
+    }
+
+    // Inverse: when an `ensures` clause references the field, the
+    // lint stays silent. The field is constrained even if the effect
+    // block doesn't write it (the "Kani checks impl" pattern).
+    #[test]
+    fn unconstrained_modifies_lint_silent_when_ensures_references_field() {
+        let src = r#"
+spec Probe
+state { pool_balance : U64, lp_supply : U64 }
+type Error
+  | InvalidAmount
+  | MathOverflow
+handler deposit (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  modifies [pool_balance, lp_supply]
+  effect { pool_balance += amount }
+  ensures lp_supply >= old(state.lp_supply)
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_unconstrained_modifies(&spec);
+        assert!(
+            warnings.is_empty(),
+            "lint must stay silent when ensures references the field, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn error_declared_as_record_lint_fires_and_suggests_pipe_form() {
         let src = r#"

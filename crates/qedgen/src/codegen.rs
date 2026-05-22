@@ -3030,6 +3030,7 @@ fn render_handler_scaffold(
     // trailing `todo!()` for cross-variant / non-mechanical shapes).
     let variant_body =
         state_acct.and_then(|sa| emit_variant_state_handler_body(handler, spec, target, sa));
+    let variant_body_emitted = variant_body.is_some();
     if let Some(body) = variant_body {
         out.push_str(&body);
     } else {
@@ -3050,6 +3051,77 @@ fn render_handler_scaffold(
                     ));
                     any_unmechanized = true;
                 }
+            }
+        }
+    }
+
+    // v2.24.x Phase A.2 — `modifies [X, Y]` declared, but X/Y not
+    // written in `effect { ... }`: emit a structured agent-fill
+    // site for each unwritten field. This is the "Kani checks impl
+    // against spec" pattern — the spec author declares the write
+    // set + an ensures contract, codegen leaves the math as todo,
+    // the agent fills it against the quoted ensures, and the
+    // verification harnesses check the impl satisfies the contract.
+    //
+    // Restricted to the legacy flat-fields path (matches `mechanize_effect`
+    // gating above). Multi-variant ADT specs route through
+    // `emit_variant_state_handler_body` and need their own treatment.
+    if !variant_body_emitted && !is_multi_variant_adt_state(spec) {
+        if let (Some(modifies), Some(sa)) = (handler.modifies.as_ref(), state_acct) {
+            let mut effect_fields: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for (lhs, _, _) in &handler.effects {
+                let stripped = strip_variant_prefix(lhs, spec);
+                let bare = strip_array_index_suffix(&stripped);
+                effect_fields.insert(bare);
+            }
+            let acct_name = &sa.name;
+            for field in modifies {
+                if effect_fields.contains(field) {
+                    continue;
+                }
+                // Find every ensures clause that references this field
+                // (textual match — `rust_expr` carries `post.<field>` for
+                // post-state refs and `pre.<field>` for `old(...)` refs).
+                let mut referencing: Vec<&str> = Vec::new();
+                for e in &handler.ensures {
+                    if e.rust_expr.contains(field) {
+                        referencing.push(e.rust_expr.as_str());
+                    }
+                }
+                out.push_str(&format!(
+                    "        // QED agent-fill site: `{}` is in `modifies` but not in `effect`.\n",
+                    field
+                ));
+                if referencing.is_empty() {
+                    out.push_str(&format!(
+                        "        //   No `ensures` clause references `{}` — the field is\n",
+                        field
+                    ));
+                    out.push_str(
+                        "        //   unconstrained. Either add an `ensures` constraint or\n",
+                    );
+                    out.push_str(&format!(
+                        "        //   remove `{}` from `modifies`. (Lint: unconstrained_modifies)\n",
+                        field
+                    ));
+                } else {
+                    out.push_str("        //   Implement against the spec's ensures:\n");
+                    for r in &referencing {
+                        out.push_str(&format!("        //     ensures {}\n", r));
+                    }
+                    out.push_str(
+                        "        //   The Kani / proptest harness verifies the impl satisfies\n",
+                    );
+                    out.push_str(
+                        "        //   these clauses against the pre-state captured before the call.\n",
+                    );
+                }
+                out.push_str(&format!(
+                    "        self.{}.{} = todo!(\"compute {} to satisfy ensures above\");\n",
+                    acct_name, field, field
+                ));
+                any_unmechanized = true;
             }
         }
     }
