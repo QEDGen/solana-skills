@@ -3780,6 +3780,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // reference; the construct is a category error.
     warnings.extend(check_old_in_single_state_context(spec));
 
+    // v2.24.2 — `type Error = { … }` (record brace form) parses
+    // cleanly but produces no error variants, so every downstream
+    // consumer that expects `spec.error_codes` to be populated
+    // breaks silently. Fire a P0 with a fix-it pointing at the
+    // pipe form.
+    warnings.extend(check_error_declared_as_record(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -4056,6 +4063,56 @@ fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<CompletenessWarni
             ));
         }
     }
+    warnings
+}
+
+/// v2.24.2 — when a user writes `type Error = { InvalidAmount : U64, ... }`
+/// (record brace form) the parser accepts it as a `Record` named `Error`
+/// but `error_codes` ends up empty. Every downstream consumer that
+/// matches against error variants (e.g. `WrongState` gate,
+/// `MathOverflow` check) then misbehaves silently because the lookup
+/// returns no match.
+///
+/// Fire a P0 error pointing at the pipe form. Detected by walking
+/// `spec.records` for a record named "Error" alongside an empty
+/// `error_codes`. We also fire when both forms are declared (the
+/// record shadows nothing but signals user confusion).
+fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let has_error_record = spec.records.iter().any(|r| r.name == "Error");
+    if !has_error_record {
+        return warnings;
+    }
+    let fields_hint = spec
+        .records
+        .iter()
+        .find(|r| r.name == "Error")
+        .map(|r| {
+            r.fields
+                .iter()
+                .map(|(n, _)| format!("  | {}", n))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_else(|| "  | InvalidAmount\n  | Unauthorized".to_string());
+    warnings.push(CompletenessWarning {
+        rule: "error_declared_as_record".to_string(),
+        severity: Severity::Error,
+        priority: 0,
+        message: "`type Error = { ... }` (record brace form) does not declare error \
+                  variants — the parser treats it as a struct named `Error` and \
+                  `spec.error_codes` ends up empty. Downstream lowering then \
+                  misbehaves silently (CPI error refs unresolved, `WrongState` / \
+                  `MathOverflow` gates don't fire)."
+            .to_string(),
+        subject: Some("Error".to_string()),
+        fix: "Use the pipe form instead of `= { ... }`. Each variant goes on its \
+              own line with a leading `|`."
+            .to_string(),
+        example: Some(format!("  type Error\n{}", fields_hint)),
+        counterexample: None,
+        fix_options: vec![],
+    });
     warnings
 }
 
@@ -5951,6 +6008,65 @@ mod tests {
             calls: vec![],
             effect_branches: None,
         }
+    }
+
+    // v2.24.2 — `state { fields }` sugar should expose Map-typed
+    // fields to `check_map_and_subscript`. Pre-fix the adapter only
+    // pushed the sugar to `out.records`, leaving `out.account_types`
+    // empty so the lint walked nothing and `subscript_not_map` fired
+    // on every effect LHS that subscripted a sugared Map field.
+    #[test]
+    fn state_sugar_map_field_is_visible_to_subscript_lint() {
+        let src = r#"
+spec Probe
+const MAX = 8
+type User = { active : Bool, balance : U64, }
+state {
+  lsts : Map[MAX] User,
+}
+type Error
+  | InvalidAmount
+handler deposit (idx : U64) (amt : U64) {
+  effect { lsts[idx].balance := amt }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_map_and_subscript(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "subscript_not_map"),
+            "spurious subscript_not_map on `state {{ ... }}` sugar: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // v2.24.2 — `type Error = { ... }` (record brace form) parses
+    // as a Record named "Error" with field declarations rather than
+    // populating `spec.error_codes`. Lint fires with a fix-it
+    // pointing at the pipe form.
+    #[test]
+    fn error_declared_as_record_lint_fires_and_suggests_pipe_form() {
+        let src = r#"
+spec Probe
+state { balance : U64 }
+type Error = {
+  InvalidAmount : U64,
+  Unauthorized : U64,
+}
+handler init { effect { balance := 0 } }
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_error_declared_as_record(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "error_declared_as_record")
+            .expect("error_declared_as_record fires");
+        assert_eq!(hit.severity, Severity::Error);
+        let example = hit.example.as_deref().unwrap_or("");
+        assert!(
+            example.contains("type Error\n  | InvalidAmount"),
+            "example should suggest pipe form, got: {}",
+            example
+        );
     }
 
     #[test]

@@ -2687,6 +2687,30 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         }
     }
 
+    // v2.24.2 — promote the `state { ... }` sugar's record into
+    // `account_types` so downstream lints that walk `account_types`
+    // (notably `check_map_and_subscript`) can see Map-typed fields
+    // declared via the sugar. Without this, `state { lsts : Map[N] T }`
+    // parses cleanly but `lsts[idx].x := …` effects fire a spurious
+    // `subscript_not_map` error because the lint never sees the Map
+    // type information. Pre-fix workaround was to switch to the
+    // explicit `type State | Variant of { ... }` ADT form.
+    //
+    // Only synthesize when there's no explicit `type State` ADT (any
+    // account_type already in the list wins; the State record stays
+    // available via `out.records` for other consumers).
+    if out.account_types.is_empty() {
+        if let Some(state_record) = out.records.iter().find(|r| r.name == "State") {
+            out.account_types.push(ParsedAccountType {
+                name: "State".to_string(),
+                fields: state_record.fields.clone(),
+                lifecycle: Vec::new(),
+                pda_ref: None,
+                variants: Vec::new(),
+            });
+        }
+    }
+
     // Link account_types to PDAs by case-insensitive name match (pest parity).
     for acct in &mut out.account_types {
         if acct.pda_ref.is_none() {
