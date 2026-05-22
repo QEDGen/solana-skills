@@ -21,16 +21,22 @@
 //!    When auto-triggered, the file header carries a comment naming the
 //!    triggering handler(s).
 //!
-//! ## Track I splice point
+//! ## CPI ensures-as-fact (Track I)
 //!
-//! When the handler does `call Foo.bar(...)`, Track I (v2.26 Batch 2 Slice
-//! follow-up) walks `handler.calls` and emits `kani::assume(<callee_ensures>)`
-//! lines between `if result.is_ok()` and the first `assert!`. The emitted
-//! harness leaves a clearly-marked comment line at that splice point. Track
-//! H does NOT perform the substitution itself — that's I's surface area.
-//! (The v2.26 spec-model harness in `kani.rs` already does this via
-//! `crate::cpi_substitute::substitute_callee_ensures_rust_binary`; the
-//! same helper will be wired in here when Track I lands.)
+//! When the handler does `call Foo.bar(...)` and the callee declares
+//! `ensures`, we splice `kani::assume(<callee_ensures, substituted>)` lines
+//! between `if result.is_ok()` and the first caller `assert!`. The
+//! substitution maps each callee param to the caller's call-site expression
+//! via `crate::cpi_substitute::substitute_callee_ensures_rust_binary` — the
+//! same helper `kani.rs`'s spec-model harness uses. The substituted clauses
+//! come back in `pre.X` / `post.X` form (from `rust_expr_binary`); we then
+//! flatten those to the harness-local `pre_X` / `post_X` snapshots via
+//! `rewrite_pre_post_paths`.
+//!
+//! Tier-0 callees (no `ensures` declared) emit nothing — same fallback as
+//! the spec-model variant and `lean_gen.rs::render_cpi_theorems`'s
+//! `:= by sorry`. The `cpi_no_callee_ensures` lint surfaces the gap at
+//! check time.
 //!
 //! ## Out of scope (v2.26)
 //!
@@ -401,9 +407,9 @@ fn emit_account_field_skeleton(
 ///      ensures' `rust_expr_binary` reads via `pre.<field>`).
 ///   3. Declare symbolic params + `kani::assume` the handler's requires.
 ///   4. Call the user's real handler method.
-///   5. On `Ok`, snapshot post-state fields + assert the ensures clause.
-///      Track I splices `kani::assume(<callee_ensures>)` lines between (4)
-///      and (5) for any CPI calls.
+///   5. On `Ok`, snapshot post-state fields, splice CPI ensures-as-fact
+///      `kani::assume` lines for each `call Iface.foo(...)` whose callee
+///      declares ensures (Track I), then assert the caller's own ensures.
 fn emit_handler_harness(
     out: &mut String,
     handler: &ParsedHandler,
@@ -506,24 +512,19 @@ fn emit_handler_harness(
         }
     }
 
-    // ── Track I splice point ────────────────────────────────────────────
-    // CPI ensures-as-kani-assume insertion goes HERE. Track I walks
-    // `handler.calls`, substitutes each callee's
-    // `ParsedEnsures.rust_expr_binary` with the caller's call-site args
-    // (via `crate::cpi_substitute::substitute_callee_ensures_rust_binary`,
-    // already wired in `kani.rs` for the spec-model harness), and emits
-    // one `kani::assume(...);` per substituted clause. Until Track I
-    // lands, the comment serves as the contract boundary marker —
-    // analogous to the v2.8 G3 `:= by sorry` in render_cpi_theorems.
-    out.push_str("        // <Track I CPI ensures-as-fact splice point>\n");
-    if !handler.calls.is_empty() {
-        for call in &handler.calls {
-            out.push_str(&format!(
-                "        //   pending: kani::assume(<{}.{} ensures, substituted>)\n",
-                call.target_interface, call.target_handler
-            ));
-        }
-    }
+    // ── CPI ensures-as-fact (Track I) ──────────────────────────────────
+    // For every `call Iface.foo(args)` site whose callee declares its own
+    // `ensures`, splice a `kani::assume(<callee_ensures, substituted>)`
+    // line so the caller's downstream assert! can rely on the CPI's
+    // contract. Tier-0 callees (no ensures declared) emit nothing —
+    // matching the spec-model harness behavior in `kani.rs` and the
+    // `lean_gen.rs::render_cpi_theorems` `:= by sorry` fallback.
+    //
+    // The substituted clauses come back in `pre.X` / `post.X` form (from
+    // `rust_expr_binary`); we flatten those to the harness-local
+    // `pre_X` / `post_X` snapshots via the same `rewrite_pre_post_paths`
+    // helper used on the caller's own ensures below.
+    emit_cpi_ensures_as_assume(out, handler, spec);
 
     // The ensures clause's `rust_expr_binary` uses `pre.<field>` and
     // `post.<field>` paths. Our snapshots are flat `pre_<field>` /
@@ -541,6 +542,55 @@ fn emit_handler_harness(
     out.push_str("    }\n");
     out.push_str("}\n\n");
     Ok(())
+}
+
+/// Walk `handler.calls` and, for each CPI whose callee declares ensures,
+/// emit a `// CPI ensures-as-fact (Iface.handler):` comment followed by one
+/// `kani::assume(<substituted_clause>);` per ensures clause. Tier-0 callees
+/// (empty ensures) emit nothing — same fallback as the spec-model harness
+/// in `kani.rs` and `lean_gen.rs::render_cpi_theorems`'s `:= by sorry`.
+///
+/// Substitution reuses `crate::cpi_substitute::substitute_callee_ensures_rust_binary`
+/// — the same helper the spec-model harness uses, so the two backends
+/// agree on the `let X = call ...` `result` convention and word-boundary
+/// param matching. After substitution we apply `rewrite_pre_post_paths`
+/// (same transformation step the caller's own `assert!` emission uses)
+/// to flatten `pre.X` / `post.X` paths to the harness-local
+/// `pre_X` / `post_X` snapshots.
+fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
+    for call in &handler.calls {
+        let Some(iface) = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == call.target_interface)
+        else {
+            continue;
+        };
+        let Some(callee) = iface
+            .handlers
+            .iter()
+            .find(|h| h.name == call.target_handler)
+        else {
+            continue;
+        };
+        if callee.ensures.is_empty() {
+            // Tier-0 callee — `cpi_no_callee_ensures` lint surfaces the gap.
+            continue;
+        }
+        out.push_str(&format!(
+            "        // CPI ensures-as-fact ({}.{}):\n",
+            call.target_interface, call.target_handler,
+        ));
+        for callee_ens in &callee.ensures {
+            let substituted = crate::cpi_substitute::substitute_callee_ensures_rust_binary(
+                &callee_ens.rust_expr_binary,
+                call,
+                &callee.params,
+            );
+            let lowered = rewrite_pre_post_paths(&substituted);
+            out.push_str(&format!("        kani::assume({});\n", lowered));
+        }
+    }
 }
 
 /// Find the handler's writable state account by name. v2.26 Slice 1 uses a
@@ -755,38 +805,211 @@ handler bump (delta : U64) {
         );
     }
 
-    /// Track I splice point: every emitted harness has the comment marker
-    /// between `if result.is_ok()` and the first `assert!`. Track I
-    /// replaces this marker with `kani::assume(...)` lines once it lands.
+    // ========================================================================
+    // v2.26 Batch 2 Track I — CPI ensures-as-fact in impl-targeted harness
+    // ========================================================================
+
+    /// A handler with its own `ensures` AND a `call Iface.foo(args)` to an
+    /// interface that declares ensures must emit `kani::assume(...)` lines
+    /// between `if result.is_ok()` and the first caller `assert!`,
+    /// substituting the callee's param names with the caller's call-site
+    /// expressions. Mirror of `kani.rs`'s
+    /// `cpi_ensures_lowers_to_kani_assume_in_preservation_harness` for the
+    /// impl-targeted variant.
     #[test]
-    fn track_i_splice_point_present() {
-        let src = r#"spec WithCall
-state { x : U64 }
-handler bump (delta : U64) {
-  modifies [x]
-  ensures state.x == old(state.x) + delta
-  effect { }
+    fn cpi_ensures_as_assume_emits_at_splice_point() {
+        let src = r#"spec CpiImplTest
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures amount > 0
+  }
+}
+
+state { pool : U64 }
+
+handler deposit (amt : U64) {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  modifies [pool, lp_supply]
+  call Token.transfer(from = 0, to = 0, amount = amt, authority = 0)
+  effect { pool += amt }
+  ensures state.pool == old(state.pool) + amt
 }"#;
         let spec = parse_str(src).expect("parse");
-        let tmp = std::env::temp_dir().join(format!("kani_impl_splice_{}.rs", std::process::id()));
+        // The LP-shape diff (modifies = {pool, lp_supply}, effect-LHS = {pool})
+        // triggers auto-emission.
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp = std::env::temp_dir().join(format!("kani_impl_track_i_{}.rs", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
         let body = std::fs::read_to_string(&tmp).unwrap();
+
+        // 1. The splice-marker comment from Track H must be GONE — Track I
+        //    replaces it with the actual emission, no stale marker.
         assert!(
-            body.contains("<Track I CPI ensures-as-fact splice point>"),
-            "splice marker must be present so Track I can find it; got:\n{}",
+            !body.contains("<Track I CPI ensures-as-fact splice point>"),
+            "Track H's splice marker must be removed once Track I has emitted; got:\n{}",
             body
         );
-        let splice = body
-            .find("<Track I CPI ensures-as-fact splice point>")
-            .unwrap();
-        let is_ok_pos = body[..splice].rfind("if result.is_ok()").unwrap();
-        let assert_pos = body[splice..].find("assert!").unwrap();
+
+        // 2. The CPI ensures-as-fact comment + assume line must be present,
+        //    with `amount` substituted to the caller's `amt` expression.
         assert!(
-            is_ok_pos < splice && splice < splice + assert_pos,
-            "splice point must sit between is_ok() and assert!; got:\n{}",
+            body.contains("// CPI ensures-as-fact (Token.transfer):"),
+            "missing CPI ensures-as-fact comment for Token.transfer; got:\n{}",
             body
         );
+        assert!(
+            body.contains("kani::assume(amt > 0)"),
+            "missing substituted kani::assume(amt > 0); got:\n{}",
+            body
+        );
+
+        // 3. Ordering: assume must sit between `if result.is_ok()` and the
+        //    caller's first `assert!`.
+        let is_ok_pos = body
+            .find("if result.is_ok()")
+            .expect("harness must have `if result.is_ok()`");
+        let assume_pos = body
+            .find("kani::assume(amt > 0)")
+            .expect("assume present (just asserted above)");
+        let assert_pos = body[is_ok_pos..]
+            .find("assert!")
+            .map(|i| is_ok_pos + i)
+            .expect("caller's assert! must follow");
+        assert!(
+            is_ok_pos < assume_pos && assume_pos < assert_pos,
+            "CPI assume must sit between is_ok() and assert!; got:\n{}",
+            body
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Tier-0 callees (interface declares no `ensures`) must not emit any
+    /// `kani::assume` lines in the impl harness. Mirrors the spec-model
+    /// variant's `tier0_callee_emits_no_kani_assume_lines` test.
+    #[test]
+    fn tier0_callee_emits_no_kani_assume_lines() {
+        let src = r#"spec Tier0Impl
+program_id "11111111111111111111111111111111"
+
+interface Logger {
+  program_id "11111111111111111111111111111111"
+  handler log (msg : U64) {
+    accounts {
+      sink : writable
+    }
+  }
+}
+
+state { counter : U64 }
+
+handler tick (val : U64) {
+  permissionless
+  requires val > 0 else Bad
+  modifies [counter, shadow]
+  call Logger.log(msg = val)
+  effect { counter += val }
+  ensures state.counter == old(state.counter) + val
+}"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp = std::env::temp_dir().join(format!("kani_impl_tier0_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+
+        assert!(
+            !body.contains("CPI ensures-as-fact (Logger.log)"),
+            "Tier-0 callee (no ensures) must not emit any CPI assume block; got:\n{}",
+            body
+        );
+        // Caller's own assert! still emits.
+        assert!(
+            body.contains("assert!("),
+            "caller's own assert! must still emit; got:\n{}",
+            body
+        );
+        // And no `kani::assume(` introduced by Track I — the only assumes
+        // that may appear are the caller's own requires-guard assume (none
+        // here, since `val > 0` is the requires).
+        // (We check by counting: the requires-guard assume is `val > 0`,
+        // so a Logger-derived assume would appear separately.)
+        let assume_count = body.matches("kani::assume(").count();
+        // Exactly one assume — the caller's own requires-guard
+        // (`val > 0 else Bad`).
+        assert_eq!(
+            assume_count, 1,
+            "Tier-0 callee must not add any kani::assume lines; got {} assumes in:\n{}",
+            assume_count, body
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// `let X = call Foo.bar(...)` puts `X` in scope in the substituted
+    /// ensures via the `result` convention (v2.24 #11). Mirrors the
+    /// spec-model variant's `let_call_binding_participates_in_substitution`
+    /// test.
+    #[test]
+    fn let_binding_participates_in_substitution() {
+        let src = r#"spec LetCallImpl
+program_id "11111111111111111111111111111111"
+
+interface Pool {
+  program_id "11111111111111111111111111111111"
+  handler absorb (amount : U64) -> U64 {
+    accounts {
+      vault : writable
+    }
+    requires amount > 0
+    ensures result <= amount
+  }
+}
+
+state { total_loss : U64 }
+
+handler liquidate (loss : U64) {
+  permissionless
+  requires loss > 0 else Bad
+  modifies [total_loss, shadow]
+  let burned = call Pool.absorb(amount = loss)
+  effect { total_loss += loss }
+  ensures state.total_loss == old(state.total_loss) + loss
+}"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp = std::env::temp_dir().join(format!("kani_impl_letcall_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+
+        assert!(
+            body.contains("// CPI ensures-as-fact (Pool.absorb):"),
+            "missing CPI ensures-as-fact for Pool.absorb; got:\n{}",
+            body
+        );
+        // `result <= amount` substitutes `amount → loss` and
+        // `result → burned`.
+        assert!(
+            body.contains("kani::assume(burned <= loss)"),
+            "let-binding result must substitute to caller's binder; got:\n{}",
+            body
+        );
+
         let _ = std::fs::remove_file(&tmp);
     }
 }
