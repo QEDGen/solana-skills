@@ -3870,6 +3870,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // drives the impl-targeted Kani auto-trigger.
     warnings.extend(check_ref_impl_unbounded_arith(spec));
 
+    // v2.26 Track J: when a handler makes ≥2 CPI calls whose substituted
+    // ensures reference the SAME caller-state field, both `kani::assume`
+    // lines fire at the same splice point against one (pre, post)
+    // snapshot pair, which can over-constrain. Lint surfaces the
+    // structural gap; per-call snapshot frames is v3.0-class.
+    warnings.extend(check_multi_cpi_same_field(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -4348,6 +4355,140 @@ fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     "  ensures {}_grew : state.{} >= old(state.{})",
                     field, field, field
                 )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
+    warnings
+}
+
+/// v2.26 Track J — extract the set of `pre.<field>` / `post.<field>` field
+/// references from a `rust_expr_binary`-rendered expression.
+///
+/// The chumsky_adapter's binary-mode renderer is the only source of these
+/// tokens: `state.x` → `post.x`, `old(state.x)` → `pre.x`. No other DSL
+/// construct produces a bare `pre.` / `post.` prefix in the binary form, so
+/// a static regex over the textual rendering is sufficient and stable.
+///
+/// "Same field" for the multi-CPI lint normalizes `pre.X` and `post.X` both
+/// to `X` — the Kani impl harness reads both from the same snapshot pair
+/// (`pre_X` / `post_X`), so an over-constraint via `pre.X` in one assume
+/// and via `post.X` in another binds the same locals.
+pub fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<String> {
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
+        // Word-boundary at the start ensures `xpre.foo` doesn't match.
+        Regex::new(r"\b(?:pre|post)\.([A-Za-z_][A-Za-z0-9_]*)").expect("static regex")
+    });
+    let mut fields = std::collections::BTreeSet::new();
+    for cap in RE.captures_iter(expr) {
+        fields.insert(cap[1].to_string());
+    }
+    fields
+}
+
+/// v2.26 Track J — per-handler predicate consumed by both `check.rs` (lint
+/// emission) and `kani_impl.rs` (breadcrumb comment above the assume block).
+///
+/// Walks `handler.calls` and, for each unordered pair `(call_i, call_j)`
+/// with `i < j` whose callees both resolve in `spec.interfaces`, runs the
+/// same substitution `kani_impl.rs::emit_cpi_ensures_as_assume` runs and
+/// reports any `pre.X` / `post.X` field reference that appears in both
+/// callees' substituted ensures. Tier-0 callees (empty ensures) contribute
+/// no field refs → silent.
+///
+/// Returns `(call_i_label, call_j_label, shared_field)` triples, one per
+/// shared field per pair. The label format `Iface.handler` mirrors the
+/// CPI-block comment in the generated harness.
+pub fn multi_cpi_shared_fields(
+    spec: &ParsedSpec,
+    handler: &ParsedHandler,
+) -> Vec<(String, String, String)> {
+    // Resolve every call's substituted-ensures field set up front. Tier-0
+    // / unresolved callees get an empty set and effectively drop out of the
+    // pairwise compare.
+    let resolved: Vec<(String, std::collections::BTreeSet<String>)> = handler
+        .calls
+        .iter()
+        .map(|call| {
+            let label = format!("{}.{}", call.target_interface, call.target_handler);
+            let Some(iface) = spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface)
+            else {
+                return (label, std::collections::BTreeSet::new());
+            };
+            let Some(callee) = iface
+                .handlers
+                .iter()
+                .find(|h| h.name == call.target_handler)
+            else {
+                return (label, std::collections::BTreeSet::new());
+            };
+            let mut fields = std::collections::BTreeSet::new();
+            for ens in &callee.ensures {
+                let substituted = crate::cpi_substitute::substitute_callee_ensures_rust_binary(
+                    &ens.rust_expr_binary,
+                    call,
+                    &callee.params,
+                    callee.result_binder.as_deref(),
+                );
+                fields.extend(extract_pre_post_field_refs(&substituted));
+            }
+            (label, fields)
+        })
+        .collect();
+
+    let mut findings = Vec::new();
+    for i in 0..resolved.len() {
+        if resolved[i].1.is_empty() {
+            continue;
+        }
+        for j in (i + 1)..resolved.len() {
+            if resolved[j].1.is_empty() {
+                continue;
+            }
+            // Set intersection ordered by BTreeSet iteration (stable
+            // alphabetical for deterministic lint output).
+            for field in resolved[i].1.intersection(&resolved[j].1) {
+                findings.push((resolved[i].0.clone(), resolved[j].0.clone(), field.clone()));
+            }
+        }
+    }
+    findings
+}
+
+/// v2.26 Track J — P2 informational lint surfacing the multi-CPI ordering
+/// gap. Fires when `multi_cpi_shared_fields` returns at least one entry
+/// for any handler. One warning per shared field per call pair (matches
+/// the predicate's granularity).
+fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for handler in &spec.handlers {
+        let findings = multi_cpi_shared_fields(spec, handler);
+        for (call_i_label, call_j_label, field) in findings {
+            warnings.push(CompletenessWarning {
+                rule: "multi_cpi_same_field".to_string(),
+                severity: Severity::Info,
+                priority: 2,
+                message: format!(
+                    "handler '{}' makes multiple CPI calls ({} and {}) whose \
+                     substituted ensures both reference '{}'. Kani's impl-targeted \
+                     harness has only one (pre_{}, post_{}) snapshot pair captured \
+                     at handler boundary; both assumes will fire at the same splice \
+                     point, which can over-constrain.",
+                    handler.name, call_i_label, call_j_label, field, field, field
+                ),
+                subject: Some(handler.name.clone()),
+                fix: "Until per-call snapshot frames land (v3.0), either: (1) \
+                      merge the CPI calls into a single helper handler whose \
+                      ensures captures the combined effect; (2) tighten each \
+                      callee's ensures so they reference disjoint fields; or \
+                      (3) split the multi-CPI handler into separate handlers \
+                      (one per CPI) so each gets its own (pre, post) snapshot."
+                    .to_string(),
+                example: None,
                 counterexample: None,
                 fix_options: vec![],
             });
@@ -6411,6 +6552,155 @@ handler deposit (amount : U64) {
             warnings.is_empty(),
             "lint must stay silent when ensures references the field, got: {:?}",
             warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ========================================================================
+    // v2.26 Track J — multi_cpi_same_field lint
+    // ========================================================================
+
+    /// Two CPI calls whose substituted ensures both reference the same
+    /// caller-state field (`post.vault_balance`) → lint fires P2 Info.
+    /// Mirrors the bear-hug scenario where two `Token.transfer` calls
+    /// drain the same vault. Without per-call snapshot frames (v3.0),
+    /// the Kani harness can over-constrain.
+    #[test]
+    fn multi_cpi_same_field_fires_on_two_token_transfers_from_same_vault() {
+        let src = r#"spec MultiCpi
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures state.vault_balance == old(state.vault_balance) - amount
+  }
+}
+
+state { vault_balance : U64 }
+
+handler split (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  call Token.transfer(from = 0, to = 1, amount = a, authority = 0)
+  call Token.transfer(from = 0, to = 2, amount = b, authority = 0)
+  effect { vault_balance -= a }
+  ensures state.vault_balance == old(state.vault_balance) - a - b
+}"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_multi_cpi_same_field(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "multi_cpi_same_field")
+            .unwrap_or_else(|| {
+                panic!(
+                    "multi_cpi_same_field must fire; got: {:?}",
+                    warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(hit.severity, Severity::Info);
+        assert_eq!(hit.priority, 2);
+        assert!(
+            hit.message.contains("'vault_balance'"),
+            "message must name the shared field; got: {}",
+            hit.message
+        );
+        assert!(
+            hit.message.contains("Token.transfer"),
+            "message must name the call pair; got: {}",
+            hit.message
+        );
+        assert_eq!(hit.subject.as_deref(), Some("split"));
+    }
+
+    /// Two CPI calls whose substituted ensures reference disjoint
+    /// caller-state fields → lint stays silent. No (pre, post) snapshot
+    /// pair is shared, so the over-constraint risk doesn't apply.
+    #[test]
+    fn multi_cpi_same_field_silent_on_disjoint_fields() {
+        let src = r#"spec MultiCpiDisjoint
+program_id "11111111111111111111111111111111"
+
+interface VaultA {
+  program_id "11111111111111111111111111111111"
+  handler debit (amount : U64) {
+    accounts { vault : writable }
+    requires amount > 0
+    ensures state.vault_a_balance == old(state.vault_a_balance) - amount
+  }
+}
+
+interface VaultB {
+  program_id "11111111111111111111111111111111"
+  handler debit (amount : U64) {
+    accounts { vault : writable }
+    requires amount > 0
+    ensures state.vault_b_balance == old(state.vault_b_balance) - amount
+  }
+}
+
+state { vault_a_balance : U64, vault_b_balance : U64 }
+
+handler tap_both (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  call VaultA.debit(amount = a)
+  call VaultB.debit(amount = b)
+  effect { vault_a_balance -= a }
+  effect { vault_b_balance -= b }
+  ensures state.vault_a_balance == old(state.vault_a_balance) - a
+  ensures state.vault_b_balance == old(state.vault_b_balance) - b
+}"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_multi_cpi_same_field(&spec);
+        assert!(
+            warnings.is_empty(),
+            "disjoint-field CPI ensures must not fire multi_cpi_same_field; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Tier-0 callees (no `ensures` declared) → no substituted field
+    /// references → lint stays silent regardless of CPI multiplicity.
+    /// Catches the spec-shape where the user hasn't yet declared the
+    /// callee's contract; the `cpi_no_callee_ensures` lint surfaces
+    /// that gap separately.
+    #[test]
+    fn multi_cpi_same_field_silent_on_tier0_callees() {
+        let src = r#"spec MultiCpiTier0
+program_id "11111111111111111111111111111111"
+
+interface Logger {
+  program_id "11111111111111111111111111111111"
+  handler log (msg : U64) {
+    accounts { sink : writable }
+  }
+}
+
+state { counter : U64 }
+
+handler tick_twice (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  call Logger.log(msg = a)
+  call Logger.log(msg = b)
+  effect { counter += a }
+  ensures state.counter == old(state.counter) + a
+}"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_multi_cpi_same_field(&spec);
+        assert!(
+            warnings.is_empty(),
+            "tier-0 callees produce no field refs → lint must stay silent; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
         );
     }
 

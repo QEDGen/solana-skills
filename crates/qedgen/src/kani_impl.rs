@@ -568,7 +568,27 @@ fn emit_handler_harness(
 /// (same transformation step the caller's own `assert!` emission uses)
 /// to flatten `pre.X` / `post.X` paths to the harness-local
 /// `pre_X` / `post_X` snapshots.
+///
+/// **Track J breadcrumb**: when `check::multi_cpi_shared_fields` reports any
+/// shared `pre.X` / `post.X` reference across two callees of this handler,
+/// emit a WARNING comment above the assume block. The lint
+/// `multi_cpi_same_field` carries the structured guidance; this is a
+/// reader-of-generated-code breadcrumb so the harness itself flags the
+/// over-constraint risk without the user needing to cross-reference the
+/// lint output.
 fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
+    // Track J — emit the breadcrumb once, above the entire CPI assume block,
+    // when the lint predicate fires for this handler.
+    let shared = check::multi_cpi_shared_fields(spec, handler);
+    if !shared.is_empty() {
+        out.push_str("        // WARNING: multi-CPI ordering — this handler has ≥2 calls whose\n");
+        out.push_str(
+            "        // ensures reference the same caller-state field. Both kani::assume\n",
+        );
+        out.push_str("        // lines fire at the same splice point against one (pre, post)\n");
+        out.push_str("        // snapshot pair, which may over-constrain. See lint\n");
+        out.push_str("        // `multi_cpi_same_field` for context.\n");
+    }
     for call in &handler.calls {
         let Some(iface) = spec
             .interfaces
@@ -1075,6 +1095,101 @@ handler liquidate (loss : U64) {
         assert!(
             body.contains("kani::assume(burned <= loss)"),
             "let-binding result must substitute to caller's binder; got:\n{}",
+            body
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// v2.26 Track J — when `multi_cpi_shared_fields` fires for a
+    /// handler, the impl harness emits a WARNING breadcrumb comment
+    /// above the CPI assume block so a reader of the generated file
+    /// sees the over-constraint risk without cross-referencing the lint
+    /// output. The breadcrumb sits between the post-snapshot and the
+    /// first `kani::assume` from any CPI.
+    #[test]
+    fn multi_cpi_breadcrumb_emits_above_assume_block() {
+        let src = r#"spec MultiCpiKaniImpl
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures state.vault_balance == old(state.vault_balance) - amount
+  }
+}
+
+state { vault_balance : U64 }
+
+handler split (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  modifies [vault_balance, shadow]
+  call Token.transfer(from = 0, to = 1, amount = a, authority = 0)
+  call Token.transfer(from = 0, to = 2, amount = b, authority = 0)
+  effect { vault_balance -= a }
+  ensures state.vault_balance == old(state.vault_balance) - a - b
+}"#;
+        let spec = parse_str(src).expect("parse");
+        // LP-shape gap (modifies = {vault_balance, shadow}, effect-LHS =
+        // {vault_balance}) triggers auto-emission.
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp =
+            std::env::temp_dir().join(format!("kani_impl_multi_cpi_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+
+        // 1. Two CPI assume lines must be present (one per call).
+        let assume_count = body
+            .matches("// CPI ensures-as-fact (Token.transfer):")
+            .count();
+        assert_eq!(
+            assume_count, 2,
+            "two CPI assume blocks must emit; got {} in:\n{}",
+            assume_count, body
+        );
+
+        // 2. The breadcrumb WARNING must appear in the harness body
+        //    (above the CPI assume block).
+        assert!(
+            body.contains("WARNING: multi-CPI ordering"),
+            "Track J breadcrumb must emit when multi_cpi_shared_fields fires; got:\n{}",
+            body
+        );
+        assert!(
+            body.contains("`multi_cpi_same_field`"),
+            "breadcrumb must reference the lint rule name; got:\n{}",
+            body
+        );
+
+        // 3. Ordering: WARNING sits between the `if result.is_ok()`
+        //    branch open and the first `kani::assume` of the CPI block.
+        let is_ok_pos = body
+            .find("if result.is_ok()")
+            .expect("`if result.is_ok()` must be present");
+        let warn_pos = body
+            .find("WARNING: multi-CPI ordering")
+            .expect("breadcrumb present (just asserted)");
+        let first_cpi_assume = body[is_ok_pos..]
+            .find("// CPI ensures-as-fact")
+            .map(|i| is_ok_pos + i)
+            .expect("CPI assume block must follow is_ok()");
+        assert!(
+            is_ok_pos < warn_pos && warn_pos < first_cpi_assume,
+            "WARNING breadcrumb must sit between is_ok() and the first \
+             CPI ensures-as-fact comment; positions: is_ok={} warn={} cpi={}; got:\n{}",
+            is_ok_pos,
+            warn_pos,
+            first_cpi_assume,
             body
         );
 
