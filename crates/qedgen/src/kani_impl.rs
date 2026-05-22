@@ -81,8 +81,19 @@ pub fn handler_triggers_impl_harness(handler: &ParsedHandler) -> bool {
 /// Predicate: any handler in the spec triggers the auto-emission. The CLI
 /// consults this before emitting the impl harness file when `--kani-impl`
 /// was NOT passed explicitly.
+///
+/// Two trigger conditions:
+///   1. Handler `modifies ⊋ effect.lhs` — the LP-shape signal (Track H).
+///   2. Any `ref_impl` carries potentially-overflowing arithmetic over
+///      bounded-numeric params (`ref_impl_has_overflow_risk`). Lean
+///      proves on unbounded `Nat`/`Int`; Kani is the only verification
+///      surface that catches the `u64`/`i64` overflow.
 pub fn spec_triggers_impl_harness(spec: &ParsedSpec) -> bool {
     spec.handlers.iter().any(handler_triggers_impl_harness)
+        || spec
+            .ref_impls
+            .iter()
+            .any(crate::check::ref_impl_has_overflow_risk)
 }
 
 /// Names of handlers whose `modifies ⊋ effect.lhs` causes the auto-trigger.
@@ -1011,5 +1022,61 @@ handler liquidate (loss : U64) {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// v2.26 fold-in — a spec with no LP-shape handler but a ref_impl
+    /// that carries potentially-overflowing arithmetic still auto-triggers
+    /// the impl-targeted harness. Lean proves on `Nat`; Kani is the only
+    /// verification surface that catches the `u64` overflow.
+    #[test]
+    fn ref_impl_overflow_risk_auto_triggers_impl_harness() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl scaled (a : U64) (b : U64) : U64 = a * b
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+  ensures state.x == scaled(old(state.x), amt)
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        // No handler trips the LP-shape signal (`set` declares no modifies).
+        assert!(
+            !spec.handlers.iter().any(handler_triggers_impl_harness),
+            "no handler should trip the modifies-driven trigger in this fixture"
+        );
+        // But the ref_impl `scaled` has `*` over U64, so the auto-trigger
+        // still fires through the ref_impl overflow-risk predicate.
+        assert!(
+            spec_triggers_impl_harness(&spec),
+            "ref_impl with multiplication over bounded-numeric params \
+             must auto-trigger the impl harness"
+        );
+    }
+
+    /// Symmetric negative: ref_impl with only division (no overflow risk)
+    /// AND no LP-shape handler — auto-trigger stays quiet.
+    #[test]
+    fn ref_impl_without_overflow_risk_does_not_auto_trigger() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl half (a : U64) : U64 = a / 2
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        assert!(
+            !spec_triggers_impl_harness(&spec),
+            "ref_impl with only division must not auto-trigger \
+             (no overflow risk, nothing for Kani to catch)"
+        );
     }
 }

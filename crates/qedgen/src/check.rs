@@ -3849,6 +3849,14 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // the modifies clause is wrong. Fire P0.
     warnings.extend(check_unconstrained_modifies(spec));
 
+    // v2.26 fold-in: ref_impl bodies with potentially-overflowing
+    // arithmetic over bounded-numeric params surface a P2 informational
+    // lint. The Lean side proves on unbounded `Nat`; Rust runs on
+    // bounded `u64`/`i64` where the same expression can wrap or panic.
+    // Bounded-arith verification lives in Kani; the same predicate
+    // drives the impl-targeted Kani auto-trigger.
+    warnings.extend(check_ref_impl_unbounded_arith(spec));
+
     // Sort by priority (ascending), then by rule name for stability
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
@@ -4192,6 +4200,80 @@ fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning>
 /// Two ways out: add an `ensures` clause that constrains the
 /// post-value (the canonical "Kani checks impl" pattern), or remove
 /// the field from `modifies` (it wasn't really being modified).
+/// v2.26 fold-in — predicate shared with `kani_impl::spec_triggers_impl_harness`.
+/// True iff a ref_impl carries arithmetic that could overflow when lowered to
+/// bounded Rust types, even though the Lean lowering on `Nat`/`Int` cannot.
+/// Used both as a lint trigger and as an auto-trigger for the impl-targeted
+/// Kani harness so spec authors don't ship a ref_impl-bearing spec without
+/// the bit-width-bounded verification surface running.
+pub fn ref_impl_has_overflow_risk(r: &ParsedRefImpl) -> bool {
+    let has_numeric_io = std::iter::once(&r.return_type)
+        .chain(r.params.iter().map(|(_, t)| t))
+        .any(|t| {
+            matches!(
+                t.trim(),
+                "U8" | "U16" | "U32" | "U64" | "U128" | "I8" | "I16" | "I32" | "I64" | "I128"
+            )
+        });
+    if !has_numeric_io {
+        return false;
+    }
+    // Pure-expression bodies — `*` is always multiplication, `<<` is always
+    // left-shift, `+`/`-` are always add/sub (no pointer arithmetic, no
+    // unary `-` ambiguity in our DSL emission). A simple substring check
+    // is sufficient and the lint's false-positive cost is "user is told
+    // to run Kani" — tolerable.
+    let body = &r.rust_body;
+    body.contains('*') || body.contains("<<") || body.contains('+') || body.contains('-')
+}
+
+fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for r in &spec.ref_impls {
+        if !ref_impl_has_overflow_risk(r) {
+            continue;
+        }
+        let mut ops: Vec<&str> = Vec::new();
+        if r.rust_body.contains('*') {
+            ops.push("*");
+        }
+        if r.rust_body.contains("<<") {
+            ops.push("<<");
+        }
+        if r.rust_body.contains('+') {
+            ops.push("+");
+        }
+        if r.rust_body.contains('-') {
+            ops.push("-");
+        }
+        warnings.push(CompletenessWarning {
+            rule: "ref_impl_unbounded_arith".to_string(),
+            severity: Severity::Info,
+            priority: 2,
+            message: format!(
+                "ref_impl '{}' uses {} over bounded-numeric params/return. \
+                 Lean lowers this to `Nat`/`Int` (unbounded — no overflow), \
+                 but the generated Rust runs on `u64`/`i64`/etc. where the \
+                 same expression can wrap (release) or panic (debug). \
+                 Bounded-arithmetic verification lives in Kani.",
+                r.name,
+                ops.join("/"),
+            ),
+            subject: Some(r.name.clone()),
+            fix: "Run `qedgen verify --kani` against the generated impl-targeted \
+                Kani harness — auto-emitted starting v2.26 whenever a ref_impl \
+                trips this lint. The harness drives every numeric param with \
+                `kani::any()` and produces a concrete counterexample at the \
+                bit-width boundary."
+                .to_string(),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        });
+    }
+    warnings
+}
+
 fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for h in &spec.handlers {
@@ -9563,6 +9645,96 @@ property balance_monotonic :
             warnings
                 .iter()
                 .map(|w| (&w.rule, &w.message))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// v2.26 fold-in — ref_impl with multiplication over U64 params trips
+    /// the lint. Lean lowers to `Nat` (no overflow); Rust runs `u64 *
+    /// u64` which can wrap or panic.
+    #[test]
+    fn ref_impl_with_multiplication_over_u64_fires_unbounded_arith_lint() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl scaled (a : U64) (b : U64) : U64 = a * b
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"
+                    && w.subject.as_deref() == Some("scaled")),
+            "expected ref_impl_unbounded_arith on `scaled`; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Pure-division ref_impl doesn't trip the lint — `/` cannot produce
+    /// values exceeding the inputs in unsigned arithmetic.
+    #[test]
+    fn ref_impl_with_division_only_does_not_fire_unbounded_arith_lint() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl half (a : U64) : U64 = a / 2
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"),
+            "lint should not fire on division-only ref_impl; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Ref impls without bounded-numeric params (e.g., Pubkey predicates)
+    /// don't trip the lint even when they do arithmetic on other inputs.
+    /// Lean and Rust agree on Bool / Pubkey semantics, so no gap.
+    #[test]
+    fn ref_impl_with_no_numeric_params_does_not_fire_unbounded_arith_lint() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { admin : Pubkey }
+
+ref_impl is_admin (who : Pubkey) (admin : Pubkey) : Bool = who == admin
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect {}
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"),
+            "lint should not fire when ref_impl has no bounded-numeric IO; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
                 .collect::<Vec<_>>(),
         );
     }
