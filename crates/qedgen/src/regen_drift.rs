@@ -352,6 +352,26 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
     if root.join("programs/tests/kani.rs").is_file() {
         crate::kani::generate(spec_path, &temp_root.join("programs/tests/kani.rs"))?;
     }
+    // v2.26 — impl-targeted Kani harness. Regenerated against the spec
+    // only when the file already exists at that path (i.e. a prior codegen
+    // emitted it via `--kani-impl` or auto-trigger). Calling `generate`
+    // with `explicit_flag=true` matches the file-present semantics — even
+    // if the spec no longer auto-triggers, regen produces fresh output
+    // (the file was committed once, so it's user-elected).
+    if root.join("tests/kani_impl.rs").is_file() {
+        crate::kani_impl::generate(
+            spec_path,
+            &temp_root.join("tests/kani_impl.rs"),
+            /*explicit_flag=*/ true,
+        )?;
+    }
+    if root.join("programs/tests/kani_impl.rs").is_file() {
+        crate::kani_impl::generate(
+            spec_path,
+            &temp_root.join("programs/tests/kani_impl.rs"),
+            /*explicit_flag=*/ true,
+        )?;
+    }
     if root.join("tests/proptest.rs").is_file() {
         crate::proptest_gen::generate(spec_path, &temp_root.join("tests/proptest.rs"))?;
     }
@@ -401,6 +421,8 @@ fn comparable_paths(root: &Path, generated_root: &Path) -> Result<Vec<PathBuf>> 
     for rel in [
         "tests/kani.rs",
         "programs/tests/kani.rs",
+        "tests/kani_impl.rs",
+        "programs/tests/kani_impl.rs",
         "tests/proptest.rs",
         "programs/tests/proptest.rs",
         "src/tests.rs",

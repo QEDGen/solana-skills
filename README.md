@@ -250,7 +250,8 @@ qedgen codegen --spec my_program.qedspec --all          # scaffolds Rust, Lean, 
 # Or generate selectively
 qedgen codegen --spec my_program.qedspec                # Rust handler scaffold only (agent-filled)
 qedgen codegen --spec my_program.qedspec --lean         # + Lean proofs
-qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses
+qedgen codegen --spec my_program.qedspec --kani         # + Kani harnesses (spec-model)
+qedgen codegen --spec my_program.qedspec --kani-impl    # + impl-targeted Kani (calls user's Anchor handler)
 qedgen codegen --spec my_program.qedspec --test         # + unit tests
 qedgen codegen --spec my_program.qedspec --proptest     # + proptest harnesses
 qedgen codegen --spec my_program.qedspec --integration  # + in-process SVM integration tests

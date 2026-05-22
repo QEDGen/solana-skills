@@ -32,6 +32,7 @@ mod init;
 mod integration_test;
 mod interface_gen;
 mod kani;
+mod kani_impl;
 mod lean_gen;
 mod lifecycle_probe;
 mod miri_verify;
@@ -811,6 +812,24 @@ enum Commands {
         /// that layout silently broke `qedgen verify`.)
         #[arg(long, default_value = "./programs/tests/kani.rs")]
         kani_output: PathBuf,
+
+        /// Generate impl-targeted Kani harnesses (v2.26): call the user's
+        /// real Anchor handler against a symbolic `Accounts` context and
+        /// assert the spec's `ensures` clauses. Pairs with `--kani` (which
+        /// produces the spec-model harnesses). Even without this flag,
+        /// emission is auto-triggered when any handler has `modifies`
+        /// listing fields absent from its `effect` block (the v2.25 LP-
+        /// shape signal indicating the impl is expected to fill those
+        /// fields). Anchor target only in v2.26.
+        #[arg(long)]
+        kani_impl: bool,
+
+        /// Output path for impl-targeted Kani harnesses (default:
+        /// `./programs/tests/kani_impl.rs`). Separate file from the
+        /// spec-model `kani.rs` so `cargo kani --harness` can target
+        /// either set without ambiguity.
+        #[arg(long, default_value = "./programs/tests/kani_impl.rs")]
+        kani_impl_output: PathBuf,
 
         /// Generate unit tests (plain Rust, cargo test)
         #[arg(long)]
@@ -2879,6 +2898,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             output_dir,
             kani,
             kani_output,
+            kani_impl,
+            kani_impl_output,
             test,
             test_output,
             proptest,
@@ -2912,7 +2933,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             // alone (no backend flags) and Pinocchio is the chosen
             // target — that's the unambiguous "I want a Pinocchio
             // Rust program" case the scaffold can't satisfy.
-            let any_backend = kani || proptest || lean || test || integration || ci || crucible;
+            let any_backend =
+                kani || kani_impl || proptest || lean || test || integration || ci || crucible;
             let pinocchio_no_scaffold = matches!(target, Target::Pinocchio);
             if pinocchio_no_scaffold && !any_backend && !all {
                 anyhow::bail!(
@@ -2943,6 +2965,31 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 kani::generate(&spec, &kani_output)?;
             }
+
+            // v2.26 Batch 2 Track H — impl-targeted Kani harness. Emits
+            // when:
+            //   1. `--kani-impl` was passed explicitly, OR
+            //   2. `--all` was passed AND at least one handler auto-triggers
+            //      (modifies ⊋ effect.lhs — the LP-shape signal), OR
+            //   3. `--kani` was passed AND at least one handler auto-triggers
+            //      (so users on `--kani` get the impl-side coverage when
+            //      their spec declares modifies-driven fill sites).
+            //
+            // `kani_impl::spec_triggers_impl_harness` is the auto-trigger
+            // predicate. Per-handler heuristic lives in one place
+            // (mirrors `codegen.rs` Phase A's modifies-vs-effect diff).
+            let auto_impl_trigger = {
+                let parsed = check::parse_spec_file(&spec)?;
+                kani_impl::spec_triggers_impl_harness(&parsed)
+            };
+            let want_kani_impl = kani_impl || ((kani || all) && auto_impl_trigger);
+            if want_kani_impl {
+                if let Err(e) = deps::require_kani() {
+                    eprintln!("warning: {e}");
+                }
+                kani_impl::generate(&spec, &kani_impl_output, /*explicit_flag=*/ kani_impl)?;
+            }
+
             if test || all {
                 unit_test::generate(&spec, &test_output)?;
             }

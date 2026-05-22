@@ -492,8 +492,10 @@ $QEDGEN codegen --ci
 | `--all` | bool | false | Generate all artifacts |
 | `--lean` | bool | false | Generate Lean 4 proofs |
 | `--lean-output` | Path | `./formal_verification/Spec.lean` | Lean output path |
-| `--kani` | bool | false | Generate Kani proof harnesses |
+| `--kani` | bool | false | Generate Kani proof harnesses (spec-model — verifies the spec's effect block against its own `ensures` clauses). |
 | `--kani-output` | Path | `./programs/tests/kani.rs` | Kani output path. Lives **inside the program package** so `cargo kani --tests` resolves `programs/Cargo.toml` without a hand-authored root shim. |
+| `--kani-impl` | bool | false | Generate **impl-targeted** Kani harnesses (v2.26): calls the user's real Anchor handler against a symbolic `Accounts` context and asserts the spec's `ensures` clauses. Pairs with `--kani` (spec-model harnesses live in a separate file). Even without this flag, emission is auto-triggered when any handler declares `modifies` listing fields absent from its `effect` block — the LP-shape signal indicating the impl is expected to fill those fields. Anchor target only in v2.26. |
+| `--kani-impl-output` | Path | `./programs/tests/kani_impl.rs` | Impl-targeted Kani harness output path. Separate file from `--kani-output` so `cargo kani --harness` can target either set without ambiguity. |
 | `--test` | bool | false | Generate unit tests |
 | `--test-output` | Path | `./programs/src/tests.rs` | Unit test output path |
 | `--proptest` | bool | false | Generate proptest harnesses |
@@ -528,6 +530,7 @@ refreshed.
 | `programs/<name>/src/errors.rs` | Always regenerated |
 | `tests/integration/*.rs` | Scaffolded once (user-owned integration tests) |
 | `programs/tests/kani.rs` | Always regenerated |
+| `programs/tests/kani_impl.rs` | Always regenerated (when `--kani-impl` or auto-triggered) |
 | `programs/tests/proptest.rs` | Always regenerated |
 | `formal_verification/Spec.lean` | Always regenerated |
 | `formal_verification/Proofs.lean` | Scaffolded once (user-owned preservation proofs) |
