@@ -111,12 +111,19 @@ Tier-0 callees (no `ensures` declared) keep the `by sorry` shape and
 fire a new P1 lint `cpi_no_callee_ensures` pointing the user at the
 upstream contract gap.
 
-**Bundled SPL/system stdlib.** `crates/qedgen/data/interfaces/spl_token.qedspec`
-and `crates/qedgen/data/interfaces/system.qedspec` ship as Tier-1
+**Bundled SPL / system / Metaplex stdlib.**
+`crates/qedgen/data/interfaces/spl_token.qedspec`,
+`crates/qedgen/data/interfaces/system.qedspec`, and
+`crates/qedgen/data/interfaces/metaplex.qedspec` ship as Tier-1
 fixtures with `binary_hash` pins. The resolver short-circuits the
-`spl` and `system` keys before manifest lookup; specs that use only
-builtins need no `qed.toml` entry. User-authored interfaces continue
-to work unchanged.
+`spl`, `system`, and `metaplex` keys before manifest lookup; specs
+that use only builtins need no `qed.toml` entry. The Metaplex fixture
+covers the canonical Token Metadata CPI surface — NFT-mint metadata
+creation (`create_metadata_account_v3`), metadata updates
+(`update_metadata_account_v2`), creator verification
+(`sign_metadata`), and collection membership (`verify_collection`,
+`set_and_verify_collection`). User-authored interfaces continue to
+work unchanged.
 
 ### Slice 4b — first-class interfaces (Kani, both harness shapes)
 
@@ -327,14 +334,18 @@ v2.27 candidates:
   the impl-targeted Kani harness. Each needs its own account-builder
   shape (Pinocchio's raw-pointer layout, native's bespoke
   scaffolding, Quasar's zero-copy / Pod-aware fields).
-- **Real `binary_hash` pins** for bundled SPL Token + System Program
-  stdlib (current `sha256:0000…` placeholders need canonical values
-  against `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` and
-  `11111111111111111111111111111111`)
-- **Richer Token / System ensures** — current bundled clauses are
-  placeholder tautologies (`amount > 0`); real balance-preserving
-  clauses (`post.from + amount == pre.from`, `post.to == pre.to + amount`)
-  pending audit
+- **Real `binary_hash` pins** for bundled SPL Token + System Program +
+  Metaplex Token Metadata stdlib (current `sha256:0000…` placeholders
+  need canonical values against
+  `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`,
+  `11111111111111111111111111111111`, and
+  `metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s`)
+- **Richer Token / System / Metaplex ensures** — current bundled
+  clauses are placeholder tautologies (or empty for Metaplex); real
+  balance-preserving clauses (`post.from + amount == pre.from`,
+  `post.to == pre.to + amount`), authority-preserving clauses for
+  Metaplex metadata updates, and total-supply invariants for
+  `mint_to`/`burn` all pending audit
 - **Multi-CPI ordering** — per-call snapshot frames so handlers with
   ≥2 CPIs touching the same caller-state field don't over-constrain
   at the splice point. Likely v3.0-class given the structural

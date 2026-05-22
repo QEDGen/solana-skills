@@ -552,16 +552,21 @@ const BUILTIN_SPL_TOKEN: &str = include_str!("../data/interfaces/spl_token.qedsp
 /// Bundled System Program interface fixture (Tier 1).
 const BUILTIN_SYSTEM: &str = include_str!("../data/interfaces/system.qedspec");
 
+/// Bundled Metaplex Token Metadata interface fixture (Tier 1).
+const BUILTIN_METAPLEX: &str = include_str!("../data/interfaces/metaplex.qedspec");
+
 /// Returns the bundled `.qedspec` source for a builtin import key, or
 /// `None` if `key` isn't a recognized builtin.
 ///
 /// Recognized keys (case-sensitive):
 /// - `"spl"` → SPL Token program
 /// - `"system"` → System Program
+/// - `"metaplex"` → Metaplex Token Metadata program
 pub fn builtin_source(key: &str) -> Option<&'static str> {
     match key {
         "spl" => Some(BUILTIN_SPL_TOKEN),
         "system" => Some(BUILTIN_SYSTEM),
+        "metaplex" => Some(BUILTIN_METAPLEX),
         _ => None,
     }
 }
@@ -813,7 +818,7 @@ mod tests {
     // ----- v2.26 Track F: bundled-stdlib builtins -----
 
     #[test]
-    fn builtin_source_returns_spl_and_system() {
+    fn builtin_source_returns_spl_system_and_metaplex() {
         let spl = builtin_source("spl").expect("spl builtin must exist");
         assert!(
             spl.contains("interface Token"),
@@ -830,9 +835,46 @@ mod tests {
             "system fixture has System block"
         );
 
+        let metaplex = builtin_source("metaplex").expect("metaplex builtin must exist");
+        assert!(
+            metaplex.contains("interface Metadata"),
+            "metaplex fixture has Metadata block"
+        );
+        assert!(
+            metaplex.contains("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"),
+            "metaplex fixture pins the canonical Token Metadata program ID"
+        );
+
         assert!(
             builtin_source("not_a_builtin").is_none(),
             "unknown key returns None"
+        );
+    }
+
+    /// The Metaplex fixture must parse cleanly through the full pipeline
+    /// so consumers can `import Metadata from "metaplex"` without a
+    /// `qed.toml` entry and get the standard Tier-1 axiom-discharge
+    /// behavior on caller-side Lean / Kani harnesses.
+    #[test]
+    fn metaplex_builtin_parses_and_carries_interface_handlers() {
+        let src = builtin_source("metaplex").expect("metaplex builtin must exist");
+        let spec = crate::chumsky_adapter::parse_str(src).expect("metaplex must parse");
+        let iface = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == "Metadata")
+            .expect("interface Metadata must be present");
+        assert!(
+            iface.handlers.len() >= 4,
+            "Metadata interface must declare ≥4 handlers; got {}",
+            iface.handlers.len()
+        );
+        assert!(
+            iface
+                .handlers
+                .iter()
+                .any(|h| h.name == "create_metadata_account_v3"),
+            "create_metadata_account_v3 handler must be present"
         );
     }
 

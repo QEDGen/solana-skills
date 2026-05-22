@@ -57,20 +57,26 @@ Each entry is one of two source forms.
 QEDGen ships a small interface stdlib resolved before manifest lookup:
 
 ```
-import Token from "spl"        # crates/qedgen/data/interfaces/spl_token.qedspec
-import System from "system"    # crates/qedgen/data/interfaces/system.qedspec
+import Token    from "spl"        # crates/qedgen/data/interfaces/spl_token.qedspec
+import System   from "system"     # crates/qedgen/data/interfaces/system.qedspec
+import Metadata from "metaplex"   # crates/qedgen/data/interfaces/metaplex.qedspec
 ```
 
-The `"spl"` and `"system"` keys are reserved and resolved via embedded
-`include_str!` fixtures — no `qed.toml` entry needed, and a manifest
-that contains *only* builtin imports validates as empty. The bundled
-fixtures are Tier-1 (declared `ensures` + `upstream { binary_hash }`
-pin), so callers' Lean theorems discharge via
-`Token.transfer.ensures_axiom_<idx>` and Kani harnesses propagate the
-substituted ensures as `kani::assume` after the call site. The pinned
-`binary_hash` values in the bundled fixtures are `sha256:0000...`
-placeholders pending audit — the contract chain is structurally
-complete but cryptographically un-anchored until real pins land.
+The `"spl"`, `"system"`, and `"metaplex"` keys are reserved and
+resolved via embedded `include_str!` fixtures — no `qed.toml` entry
+needed, and a manifest that contains *only* builtin imports validates
+as empty. The bundled fixtures are Tier-1 (declared `ensures` +
+`upstream { binary_hash }` pin), so callers' Lean theorems discharge
+via `<Interface>.<handler>.ensures_axiom_<idx>` and Kani harnesses
+propagate the substituted ensures as `kani::assume` after the call
+site. The Metaplex fixture covers the high-traffic Token Metadata
+handlers — `create_metadata_account_v3`, `update_metadata_account_v2`,
+`sign_metadata`, `verify_collection`, `set_and_verify_collection` —
+the canonical CPI surface for NFT mint, metadata update, and
+creator/collection verification. The pinned `binary_hash` values in
+all three bundled fixtures are `sha256:0000...` placeholders pending
+audit — the contract chain is structurally complete but
+cryptographically un-anchored until real pins land.
 
 User-authored interfaces (`import X from "..."` referencing a github
 or path source declared in `qed.toml`) continue to work unchanged.
