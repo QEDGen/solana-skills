@@ -5454,7 +5454,19 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
     ));
 
     // -- Record structures (e.g. Account) --
+    //
+    // Skip a record literally named "State": v2.26's `type State = { ... }`
+    // record-form lowering deposits the State record into `spec.records`
+    // AND `spec.account_types`. The dedicated `structure State where`
+    // emission below (line ~5579) is the canonical source for the State
+    // structure; emitting it twice produces a Lean `redeclaration of State`
+    // error and breaks `lake build`. The Account-style records this loop
+    // targets are auxiliary records (e.g. Map value types), not the State
+    // record itself.
     for rec in &spec.records {
+        if rec.name == "State" {
+            continue;
+        }
         out.push_str(&format!("structure {} where\n", rec.name));
         for (fname, ftype) in &rec.fields {
             out.push_str(&format!(
@@ -5793,6 +5805,22 @@ fn render_indexed_state(spec: &ParsedSpec) -> String {
         }
         out.push('\n');
     }
+
+    // -- CPI ensures-as-axiom theorems (v2.8 G3 / v2.26 Track F).
+    //
+    // The record-form `type State = { ... }` and Map-typed paths both
+    // route through `render_indexed_state`. Before v2.26 Track L this
+    // renderer skipped `render_cpi_theorems` entirely, so a `call
+    // Token.transfer(...)` in an indexed-state handler emitted the
+    // bundled `Token.lean` axiom module but no caller-side theorem to
+    // apply it. With this call, Tier-1 (pinned `binary_hash`) CPI calls
+    // emit a caller theorem that closes via `exact Token.transfer.\
+    // ensures_axiom_<i> <args>`; Tier-0 (unpinned) calls still emit
+    // `:= by sorry` matching the other renderers' behavior. State-field
+    // prefixing uses the same `state_fields` shape the
+    // record/single-account paths feed in.
+    let ops_refs: Vec<&crate::check::ParsedHandler> = spec.handlers.iter().collect();
+    let _pinned = render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, "State", spec);
 
     // -- Property predicates --
     for prop in &spec.properties {
@@ -7511,6 +7539,138 @@ handler send : State.Active -> State.Active {
                 "expected theorem `{name}` to be emitted; got:\n{lean}"
             );
         }
+    }
+
+    /// v2.26 Track L: record-form `type State = { ... }` routes through
+    /// `render_indexed_state` (because the State record lives in
+    /// `spec.records`). Pre-Track-L, that renderer skipped
+    /// `render_cpi_theorems` entirely, so a `call Token.transfer(...)` in
+    /// a record-form-state handler emitted the bundled `Token.lean` axiom
+    /// module but no caller-side theorem applied it. This test locks in
+    /// the positive case: a Tier-1 pinned interface call in record-form
+    /// state must emit the caller theorem with body
+    /// `Token.transfer.ensures_axiom_<i> <args>` (no `sorry`).
+    #[test]
+    fn tier1_caller_theorem_emits_with_record_form_state() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec LpPool
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type Error | InvalidAmount
+type State = { pool_balance : U64, lp_supply : U64 }
+handler deposit (amount : U64) {
+  modifies [pool_balance, lp_supply]
+  requires amount > 0 else InvalidAmount
+  effect { pool_balance += amount }
+  call Token.transfer(amount = amount)
+}
+"#,
+        )
+        .expect("parse");
+        let lean = render(&spec);
+
+        // The theorem name follows the same `<op>_<Iface>_<handler>_call_<idx>_post_<idx>`
+        // shape the ADT-state renderer emits.
+        assert!(
+            lean.contains("theorem deposit_Token_transfer_call_0_post_0"),
+            "indexed-state path must emit the caller theorem for a Tier-1 CPI call; got:\n{lean}"
+        );
+        // Body must close via the bundled axiom, NOT `by sorry`. The pinned
+        // interface (`upstream.binary_hash` set) is the discharge boundary.
+        assert!(
+            lean.contains("Token.transfer.ensures_axiom_0 amount"),
+            "Tier-1 caller theorem body must apply `Token.transfer.ensures_axiom_0 \
+             amount`; got:\n{lean}"
+        );
+        assert!(
+            !lean.contains("deposit_Token_transfer_call_0_post_0 (s : State) (amount : Nat) : amount > 0 := by sorry"),
+            "Tier-1 caller theorem must not fall back to `by sorry`; got:\n{lean}"
+        );
+        // The State structure must appear exactly once. Pre-Track-L, the
+        // record-form lowering double-emitted it (once in the records
+        // loop, once in the dedicated State emission), breaking `lake build`
+        // before the new theorem could even be checked.
+        let count = lean.matches("structure State where").count();
+        assert_eq!(
+            count, 1,
+            "State structure must be emitted exactly once for record-form state \
+             (record-loop + dedicated emission previously double-emitted); got {count} \
+             in:\n{lean}"
+        );
+    }
+
+    /// v2.26 Track L (Tier-0 fallback): unpinned interfaces (no
+    /// `upstream.binary_hash`) still emit the caller theorem in
+    /// record-form state, but the body falls back to `:= by sorry` and
+    /// the `[cpi_no_callee_ensures]` lint fires elsewhere. Locks in the
+    /// negative pinning case alongside the positive `tier1_*` test.
+    #[test]
+    fn tier0_caller_theorem_emits_sorry_with_record_form_state() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec LpPool
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type Error | InvalidAmount
+type State = { pool_balance : U64 }
+handler deposit (amount : U64) {
+  modifies [pool_balance]
+  requires amount > 0 else InvalidAmount
+  effect { pool_balance += amount }
+  call Token.transfer(amount = amount)
+}
+"#,
+        )
+        .expect("parse");
+        let lean = render(&spec);
+
+        assert!(
+            lean.contains("theorem deposit_Token_transfer_call_0_post_0"),
+            "indexed-state path must emit the caller theorem regardless of pin tier; got:\n{lean}"
+        );
+        assert!(
+            lean.contains(":= by sorry"),
+            "unpinned interface caller theorem must fall back to `by sorry`; got:\n{lean}"
+        );
+        assert!(
+            !lean.contains("Token.transfer.ensures_axiom_0"),
+            "unpinned interface must not reference the axiom (no binary_hash to \
+             discharge against); got:\n{lean}"
+        );
     }
 
     // ── v2.21 Slice 4: conditional effect lowering ────────────────────────
