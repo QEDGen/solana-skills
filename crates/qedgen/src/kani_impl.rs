@@ -653,9 +653,17 @@ fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
     }
 }
 
-/// The union of `modifies` and effect-LHS bare field names — every field
-/// the ensures clause might read across the pre/post boundary. Used to
-/// drive snapshot emission.
+/// The union of `modifies`, effect-LHS bare field names, and v2.27
+/// Track A state-binder caller fields — every field the ensures clause
+/// might read across the pre/post boundary. Used to drive snapshot
+/// emission.
+///
+/// Track A: when a `call X.y(state_binders { from_balance = state.X })`
+/// is present, the CPI assume splice references `pre.X` / `post.X`
+/// (the substitution rewrote `pre.from_balance` → `pre.X`). The
+/// `rewrite_pre_post_paths` flatten then turns those into `pre_X` /
+/// `post_X` locals — which only exist if the snapshot emitter
+/// captured `X`. Including binder caller fields here closes that loop.
 fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
     let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(modifies) = &handler.modifies {
@@ -666,6 +674,16 @@ fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
     for (lhs, _, _) in &handler.effects {
         let bare = crate::rust_codegen_util::effect_target_base(lhs);
         fields.insert(bare.to_string());
+    }
+    // v2.27 Track A — pick up every caller-side field referenced by a
+    // state binder on any CPI call in this handler. Without this the
+    // CPI assume splice would reference `pre_X` / `post_X` locals the
+    // snapshot block never declared, producing a compile error in the
+    // generated harness.
+    for call in &handler.calls {
+        for binder in &call.state_binders {
+            fields.insert(binder.caller_field.clone());
+        }
     }
     fields.into_iter().collect()
 }
@@ -978,6 +996,87 @@ handler refresh (b : U64) {
         assert!(
             !body.contains("price > 0"),
             "binder name `price` must be substituted away; got:\n{}",
+            body,
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// v2.27 Track A — `state_binders { ... }` rewrites
+    /// `pre.<callee_field>` / `post.<callee_field>` to the caller's
+    /// `pre.<caller_field>` / `post.<caller_field>` in the substituted
+    /// `kani::assume`, which then flattens through
+    /// `rewrite_pre_post_paths` to the harness-local
+    /// `pre_<caller_field>` / `post_<caller_field>` snapshots.
+    #[test]
+    fn state_binders_rewrite_through_impl_snapshot_locals() {
+        let src = r#"spec StateBindersImpl
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures post.from_balance + amount == pre.from_balance
+  }
+}
+
+state { pool_balance : U64, lp_supply : U64 }
+
+handler deposit (amt : U64) {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  modifies [pool_balance, lp_supply]
+  call Token.transfer(
+    from = 0,
+    to = 0,
+    amount = amt,
+    authority = 0,
+    state_binders { from_balance = state.pool_balance },
+  )
+  effect { pool_balance -=! amt }
+  ensures state.pool_balance == old(state.pool_balance) - amt
+}"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp = std::env::temp_dir().join(format!("kani_impl_track_a_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+
+        // The substitution rewrites `pre.from_balance` /
+        // `post.from_balance` → `pre.pool_balance` / `post.pool_balance`
+        // (via state_binders), then `rewrite_pre_post_paths` flattens
+        // those to the snapshot locals `pre_pool_balance` /
+        // `post_pool_balance`.
+        assert!(
+            body.contains("kani::assume(post_pool_balance + amt == pre_pool_balance)"),
+            "expected flat snapshot locals in kani::assume; got:\n{}",
+            body,
+        );
+        // The callee abstract field name must NOT survive.
+        assert!(
+            !body.contains("from_balance"),
+            "abstract callee field `from_balance` must be substituted; got:\n{}",
+            body,
+        );
+        // The snapshot block must capture `pool_balance` (the caller-
+        // side binder field) — otherwise `pre_pool_balance` /
+        // `post_pool_balance` references the assume emits don't compile.
+        assert!(
+            body.contains("let pre_pool_balance"),
+            "snapshot block must capture pre_pool_balance; got:\n{}",
+            body,
+        );
+        assert!(
+            body.contains("let post_pool_balance"),
+            "snapshot block must capture post_pool_balance; got:\n{}",
             body,
         );
 

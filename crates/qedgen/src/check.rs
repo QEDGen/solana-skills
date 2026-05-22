@@ -631,6 +631,19 @@ pub struct ParsedCall {
     /// resulting Rust / Lean shape; Tier-0 interfaces fall back
     /// to an opaque placeholder.
     pub result_binding: Option<String>,
+    /// v2.27 Track A — `state_binders { callee_field = state.X, ... }`
+    /// entries lowered from the AST. Each binder threads through:
+    ///   1. The Lean axiom signature gets an accessor param
+    ///      `(<callee_field> : State → Nat)` and the caller theorem
+    ///      applies the axiom with `(·.<caller_field>)` for the slot.
+    ///   2. The Kani harness substitution rewrites
+    ///      `pre.<callee_field>` / `post.<callee_field>` →
+    ///      `pre.<caller_field>` / `post.<caller_field>` before the
+    ///      `rewrite_pre_post_paths` flatten to `pre_X` / `post_X`.
+    ///
+    /// Empty (default) preserves the v2.26 callee-frame, param-only
+    /// axiom shape.
+    pub state_binders: Vec<ParsedStateBinder>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -640,6 +653,30 @@ pub struct ParsedCallArg {
     pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
+}
+
+/// v2.27 Track A — one entry in a `call X.y(state_binders { ... })`
+/// block, lowered from the AST. Maps a callee-side abstract field name
+/// to a caller-side State field path.
+///
+/// Restriction in Track A: the binder RHS must be a `state.<ident>`
+/// path — the adapter validates the shape and extracts the trailing
+/// identifier. Richer RHS forms (let-bindings, computed paths) are
+/// reserved for v3.0. The substitution helpers use only `caller_field`
+/// (the bare ident); they synthesize `pre.<caller_field>` /
+/// `post.<caller_field>` and Lean `(·.<caller_field>)` at use sites.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)]
+pub struct ParsedStateBinder {
+    /// LHS — callee abstract field name. Found verbatim in the
+    /// callee's `ensures` text. Word-boundary substitution catches
+    /// every occurrence.
+    pub callee_field: String,
+    /// RHS — caller-side bare field name (the trailing ident from
+    /// `state.<ident>`). The substitution helpers prepend `pre.` /
+    /// `post.` per context; the Lean axiom-application path wraps as
+    /// `(·.<caller_field>)`.
+    pub caller_field: String,
 }
 
 impl ParsedHandler {
@@ -702,6 +739,10 @@ impl ParsedHandler {
                     },
                 ],
                 result_binding: None,
+                // v2.27 Track A — legacy `transfers { ... }` sugar
+                // never carried abstract-State binders. v2.26 callee-
+                // frame axiom shape unchanged.
+                state_binders: Vec::new(),
             })
             .collect();
         out.extend(self.calls.iter().cloned());
@@ -6803,6 +6844,7 @@ handler init { effect { balance := 0 } }
             target_handler: "initialize_mint".to_string(),
             args: vec![],
             result_binding: None,
+            state_binders: Vec::new(),
         }];
         let spec = ParsedSpec {
             handlers: vec![h],

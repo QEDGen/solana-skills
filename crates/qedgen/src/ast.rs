@@ -416,12 +416,45 @@ pub struct CallExpr {
     /// handler's return-type declaration is what gives the binding a
     /// real semantics; without it the binding is opaque.
     pub result_binding: Option<String>,
+    /// v2.27 Track A — optional `state_binders { callee_field = state.X,
+    /// ... }` block. Maps each callee-side abstract State field (the
+    /// callee declares its `ensures` as predicates over abstract field
+    /// names — see SPL Token `from_balance` / `to_balance`) to a
+    /// caller-side state path. Backends thread the binders through to
+    /// extend the Lean axiom signature with `(field : State → Nat)`
+    /// accessor params and to substitute `pre.<callee_field>` /
+    /// `post.<callee_field>` → `pre.<caller_field>` / `post.<caller_field>`
+    /// in the Kani harness assume splice. Empty (default) preserves the
+    /// v2.26 callee-frame, param-only axiom shape.
+    pub state_binders: Vec<StateBinder>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CallArg {
     pub name: String,
     pub value: Node<Expr>,
+}
+
+/// v2.27 Track A — one entry inside `state_binders { ... }`. Binds a
+/// callee-side abstract field name (the LHS) to a caller-side state path
+/// (the RHS).
+///
+/// Restriction in Track A: the RHS must be a `state.<ident>` field path.
+/// The adapter extracts the trailing identifier; backends combine it
+/// with `pre.` / `post.` to form the substituted form, or wrap it as a
+/// Lean accessor lambda `(·.<caller_field>)` at axiom application.
+/// Richer RHS forms (let-bindings, computed paths) are v3.0 work; until
+/// then the adapter rejects them at lower time.
+#[derive(Debug, Clone)]
+pub struct StateBinder {
+    /// LHS — the callee's abstract field name. Matches an identifier in
+    /// the callee's `ensures` text. Word-boundary substitution finds
+    /// every occurrence.
+    pub callee_field: String,
+    /// RHS — the caller-side expression (parsed as a generic `Expr`).
+    /// The adapter validates the shape (`state.<ident>`) and extracts
+    /// the trailing field name.
+    pub caller_expr: Node<Expr>,
 }
 
 #[derive(Debug, Clone)]

@@ -1304,6 +1304,11 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
                 target,
                 args,
                 result_binding: Some(name),
+                // v2.27 Track A — `let X = call …` (the legacy bound
+                // form) doesn't yet accept a `state_binders { ... }`
+                // block. Tracked as a v2.27 follow-up; for now the
+                // bound form preserves v2.26 callee-frame semantics.
+                state_binders: Vec::new(),
             }),
         });
 
@@ -1366,6 +1371,11 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
                     target,
                     args,
                     result_binding: None,
+                    // v2.27 Track A — match-arm CPI doesn't accept a
+                    // `state_binders { ... }` block yet. Same v2.26
+                    // callee-frame fallback as the legacy `let =`
+                    // bound form above. Follow-up tracked.
+                    state_binders: Vec::new(),
                 },
                 Vec::new(),
             )
@@ -1530,6 +1540,55 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then(expr())
         .map(|(name, value)| CallArg { name, value });
 
+    // v2.27 Track A — `state_binders { callee_field = state.X, ... }`
+    // sub-block. Maps each callee-side abstract field (LHS) to a
+    // caller-side state path (RHS). The block is contextual — the
+    // `state_binders` token is only recognized inside a `call(...)`
+    // argument list, not at the top level (so spec authors can still
+    // name a handler param `state_binders` if they really want to).
+    let state_binder_entry = non_keyword_ident()
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(expr())
+        .map(|(callee_field, caller_expr)| StateBinder {
+            callee_field,
+            caller_expr,
+        });
+    // `.boxed()` here is load-bearing: without it, the chumsky combinator
+    // type chain that flows into `call_arg_item` pushes the longest
+    // mangled symbol name (a `core::ptr::drop_in_place` instantiation for
+    // the parser combinator tree) past Apple ld's symbol-string limit
+    // (~16KB observed at link time). Boxing erases the type at this seam.
+    let state_binders_block = just("state_binders")
+        .then_ignore(wsc())
+        .then_ignore(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            state_binder_entry
+                .then_ignore(wsc())
+                .separated_by(just(',').then_ignore(wsc()))
+                .allow_trailing()
+                .collect::<Vec<StateBinder>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .boxed();
+
+    // Mixed-arg sequence: each item in the call's arg list is either a
+    // `name = expr` keyword arg or the `state_binders { ... }` sub-block.
+    // Multiple binder blocks in one call are rejected at the adapter
+    // boundary (last wins would be confusing; we hard-error instead).
+    #[derive(Debug, Clone)]
+    enum CallArgItem {
+        Kw(CallArg),
+        Binders(Vec<StateBinder>),
+    }
+    let call_arg_item = choice((
+        state_binders_block.map(CallArgItem::Binders),
+        call_kw_arg.map(CallArgItem::Kw),
+    ));
+
     // v2.24 #11 — optional `let <ident> = ` prefix binds the call's
     // return value. Without the prefix the call remains a terminal
     // statement (existing shape). Interface handlers can declare a
@@ -1540,11 +1599,27 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then_ignore(wsc())
         .then_ignore(just('='))
         .then_ignore(wsc());
-    let call_args = call_kw_arg
+    let call_args = call_arg_item
         .then_ignore(wsc())
         .separated_by(just(',').then_ignore(wsc()))
         .allow_trailing()
-        .collect::<Vec<CallArg>>();
+        .collect::<Vec<CallArgItem>>()
+        .map(|items| {
+            let mut args: Vec<CallArg> = Vec::new();
+            let mut binders: Vec<StateBinder> = Vec::new();
+            for item in items {
+                match item {
+                    CallArgItem::Kw(a) => args.push(a),
+                    // Multiple `state_binders { ... }` blocks in one
+                    // call concatenate. v2.27 Track A's expected usage
+                    // is a single block, but concatenating is the
+                    // friendliest semantics and the adapter dedups by
+                    // callee_field anyway.
+                    CallArgItem::Binders(mut b) => binders.append(&mut b),
+                }
+            }
+            (args, binders)
+        });
     let call_body = just("call")
         .then_ignore(wsc())
         .ignore_then(qualified_path())
@@ -1556,20 +1631,22 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then_ignore(just(')'));
     let call_c = choice((
         // Try the bound form first so the bare `call …` doesn't shadow it.
-        call_let_prefix
-            .then(call_body.clone())
-            .map(|(binding, (target, args))| {
+        call_let_prefix.then(call_body.clone()).map(
+            |(binding, (target, (args, state_binders)))| {
                 HandlerClause::Call(CallExpr {
                     target,
                     args,
                     result_binding: Some(binding),
+                    state_binders,
                 })
-            }),
-        call_body.map(|(target, args)| {
+            },
+        ),
+        call_body.map(|(target, (args, state_binders))| {
             HandlerClause::Call(CallExpr {
                 target,
                 args,
                 result_binding: None,
+                state_binders,
             })
         }),
     ));
@@ -4218,6 +4295,128 @@ handler h (a : U64) : State.A -> State.A {
 }
 "#;
         parse_ok(src);
+    }
+
+    /// v2.27 Track A — `call X.y(state_binders { ... })` parses, with
+    /// the binders surfacing on the lowered `CallExpr.state_binders`.
+    #[test]
+    fn call_accepts_state_binders_block() {
+        let src = r#"spec S
+type State | A of { pool_balance : U64, user_balance : U64 }
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) { discriminant "0x03" accounts { } }
+}
+
+handler deposit (amount : U64) : State.A -> State.A {
+  call Token.transfer(
+    amount = amount,
+    state_binders {
+      from_balance = state.pool_balance,
+      to_balance   = state.user_balance,
+    },
+  )
+}
+"#;
+        let s = parse_ok(src);
+        // Walk the handler's clauses to find the Call.
+        let handler = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) if h.name == "deposit" => Some(h),
+                _ => None,
+            })
+            .expect("deposit handler parses");
+        let call = handler
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Call(c) => Some(c),
+                _ => None,
+            })
+            .expect("call site parses");
+        assert_eq!(call.state_binders.len(), 2);
+        assert_eq!(call.state_binders[0].callee_field, "from_balance");
+        assert_eq!(call.state_binders[1].callee_field, "to_balance");
+    }
+
+    /// Back-compat: a call without `state_binders { ... }` still parses
+    /// and yields an empty binder list on the lowered shape.
+    #[test]
+    fn call_without_state_binders_is_back_compat() {
+        let src = r#"spec S
+type State | A of { x : U64 }
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) { discriminant "0x03" accounts { } }
+}
+
+handler deposit (amount : U64) : State.A -> State.A {
+  call Token.transfer(amount = amount)
+}
+"#;
+        let s = parse_ok(src);
+        let handler = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) if h.name == "deposit" => Some(h),
+                _ => None,
+            })
+            .expect("deposit handler parses");
+        let call = handler
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Call(c) => Some(c),
+                _ => None,
+            })
+            .expect("call site parses");
+        assert!(call.state_binders.is_empty());
+        assert_eq!(call.args.len(), 1);
+        assert_eq!(call.args[0].name, "amount");
+    }
+
+    /// v2.27 Track A — empty `state_binders { }` block parses (and
+    /// lowers to an empty binder list).
+    #[test]
+    fn call_accepts_empty_state_binders_block() {
+        let src = r#"spec S
+type State | A of { x : U64 }
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) { discriminant "0x03" accounts { } }
+}
+
+handler deposit (amount : U64) : State.A -> State.A {
+  call Token.transfer(
+    amount = amount,
+    state_binders { },
+  )
+}
+"#;
+        let s = parse_ok(src);
+        let handler = s
+            .items
+            .iter()
+            .find_map(|i| match &i.node {
+                TopItem::Handler(h) if h.name == "deposit" => Some(h),
+                _ => None,
+            })
+            .expect("deposit handler parses");
+        let call = handler
+            .clauses
+            .iter()
+            .find_map(|c| match &c.node {
+                HandlerClause::Call(c) => Some(c),
+                _ => None,
+            })
+            .expect("call site parses");
+        assert!(call.state_binders.is_empty());
     }
 
     #[test]

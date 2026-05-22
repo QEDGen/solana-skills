@@ -16,8 +16,8 @@ use crate::check::{
     ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
     ParsedHandlerAccount, ParsedImport, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
     ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
-    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedSumType, ParsedUpstream, ParsedVariant,
-    SbpfPropertyKind,
+    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedStateBinder, ParsedSumType,
+    ParsedUpstream, ParsedVariant, SbpfPropertyKind,
 };
 
 // ============================================================================
@@ -3189,6 +3189,12 @@ fn expand_handler(
                     target_handler: handler_name,
                     args,
                     result_binding: call.result_binding.clone(),
+                    // v2.27 Track A — lower the optional
+                    // `state_binders { ... }` block. Match-arm CPIs
+                    // currently always carry an empty binder list at
+                    // the parser; the lower_state_binders call still
+                    // runs so the codepath stays uniform.
+                    state_binders: lower_state_binders(&call.state_binders),
                 });
                 for Node { node: stmt, .. } in effects {
                     let (triple, on_error) = render_effect(stmt, &base.takes_params, consts);
@@ -3203,6 +3209,68 @@ fn expand_handler(
     }
 
     out
+}
+
+/// v2.27 Track A — lower the AST's `state_binders { callee_field =
+/// state.X, ... }` block into the `ParsedStateBinder` shape that
+/// downstream backends thread through to the Lean axiom signature
+/// (accessor params) and the Kani harness substitution.
+///
+/// The Track A restriction: each RHS must be exactly `state.<ident>`.
+/// Richer paths (subscripts, nested field access, computed expressions)
+/// are rejected by emitting an empty result and printing a diagnostic
+/// to stderr — the spec lint catches the same shape pre-codegen, so
+/// this is a defensive guard rather than the primary error path.
+///
+/// Returns the lowered binders. Empty input → empty output. The
+/// duplicate-callee_field case retains the first occurrence; later
+/// duplicates are dropped (the parser already coalesces multiple
+/// `state_binders { ... }` blocks, so the dedup runs across blocks).
+fn lower_state_binders(binders: &[a::StateBinder]) -> Vec<ParsedStateBinder> {
+    let mut out: Vec<ParsedStateBinder> = Vec::new();
+    for b in binders {
+        // Track A shape: the binder RHS must be `state.<ident>` —
+        // either a `Path { root: "state", segments: [Field(ident)] }`
+        // or, if the parser routed it through `Paren`, an unwrapped
+        // version of the same.
+        let caller_field = extract_state_field(&b.caller_expr.node);
+        match caller_field {
+            Some(field) => {
+                if !out.iter().any(|p| p.callee_field == b.callee_field) {
+                    out.push(ParsedStateBinder {
+                        callee_field: b.callee_field.clone(),
+                        caller_field: field,
+                    });
+                }
+            }
+            None => {
+                eprintln!(
+                    "warning: state_binders RHS for `{}` must be `state.<field>` \
+                     (v2.27 Track A restriction); binder dropped",
+                    b.callee_field,
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Walk a binder RHS looking for the v2.27 Track A shape:
+/// `state.<ident>` (with optional `Paren` wrappers). Returns the
+/// trailing field ident, or `None` if the shape doesn't match.
+fn extract_state_field(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Paren(inner) => extract_state_field(&inner.node),
+        Expr::Path(p) => {
+            if p.root == "state" && p.segments.len() == 1 {
+                if let a::PathSeg::Field(f) = &p.segments[0] {
+                    return Some(f.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> ParsedHandler {
@@ -3495,6 +3563,12 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     // v2.24 #11 — propagate optional `let <name> =`
                     // binding through to downstream backends.
                     result_binding: c.result_binding.clone(),
+                    // v2.27 Track A — propagate the optional
+                    // `state_binders { ... }` block into the parsed
+                    // shape. Empty when the spec author didn't declare
+                    // any binders; downstream backends preserve the
+                    // v2.26 callee-frame, param-only axiom in that case.
+                    state_binders: lower_state_binders(&c.state_binders),
                 });
             }
         }

@@ -2206,6 +2206,76 @@ handler refresh (b : U64) : State.Open -> State.Open {
         );
     }
 
+    /// v2.27 Track A — `state_binders { callee_field = state.X, ... }`
+    /// rewrites `pre.<callee_field>` / `post.<callee_field>` in the
+    /// substituted `kani::assume` to `pre.<caller_field>` /
+    /// `post.<caller_field>`. The spec-model harness clones the whole
+    /// State as `pre = s.clone()` and binds `post = &s`, so the rewritten
+    /// references resolve directly against fields on the State record.
+    #[test]
+    fn state_binders_rewrite_pre_post_field_in_kani_assume() {
+        let src = r#"spec StateBindersTest
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures post.from_balance + amount == pre.from_balance
+  }
+}
+
+type State
+  | Open of { pool_balance : U64, user_balance : U64 }
+
+type Error
+  | InvalidAmount
+
+handler deposit (amt : U64) : State.Open -> State.Open {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  call Token.transfer(
+    from = 0,
+    to = 0,
+    amount = amt,
+    authority = 0,
+    state_binders { from_balance = state.pool_balance },
+  )
+  effect { Open.pool_balance -=! amt }
+  ensures state.pool_balance == old(state.pool_balance) - amt
+}
+"#;
+        let out = emit_kani_section(src);
+        let start = out
+            .find("fn verify_deposit_ensures_0()")
+            .unwrap_or_else(|| panic!("missing verify_deposit_ensures_0; got:\n{}", out));
+        let end = out[start..]
+            .find("\n}\n\n")
+            .map(|i| start + i)
+            .unwrap_or(out.len());
+        let body = &out[start..end];
+
+        // The substitution must rewrite `pre.from_balance` /
+        // `post.from_balance` to the caller's `pre.pool_balance` /
+        // `post.pool_balance` field references.
+        assert!(
+            body.contains("kani::assume(post.pool_balance + amt == pre.pool_balance)"),
+            "expected substituted kani::assume with `pool_balance`; got:\n{}",
+            body,
+        );
+        // The abstract callee field name must NOT survive substitution.
+        assert!(
+            !body.contains("from_balance"),
+            "callee abstract field `from_balance` must be substituted; got:\n{}",
+            body,
+        );
+    }
+
     /// Tier-0 callees (interface declares no `ensures`) must not emit any
     /// `kani::assume` lines for the callee. The caller's own ensures still
     /// gets asserted; the `cpi_no_callee_ensures` lint surfaces the gap.

@@ -589,10 +589,18 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
     out.push_str("-- `ensures` clause on the interface handler; the caller's\n");
     out.push_str("-- Lean proof discharges its CPI post-condition by applying\n");
     out.push_str("-- the relevant axiom, instead of carrying a `sorry`.\n--\n");
-    out.push_str("-- Axioms are callee-frame: parameters and predicates only\n");
-    out.push_str("-- reference the callee's own ABI, never the caller's State\n");
-    out.push_str("-- type. This keeps a single axiom module reusable across\n");
-    out.push_str("-- every caller in the workspace.\n\n");
+    out.push_str("-- Axioms have two shapes:\n");
+    out.push_str("--   * v2.26 callee-frame — parameters and predicates only\n");
+    out.push_str("--     reference the callee's own ABI, never the caller's\n");
+    out.push_str("--     State type. Reusable across every caller.\n");
+    out.push_str("--   * v2.27 Track A caller-State-aware — the ensures\n");
+    out.push_str("--     references abstract State fields (applied-accessor\n");
+    out.push_str("--     form, e.g. `from_balance pre`). The axiom is\n");
+    out.push_str("--     polymorphic in `State` and takes pre+post snapshots\n");
+    out.push_str("--     plus one `State \u{2192} Nat` accessor per abstract\n");
+    out.push_str("--     field; callers apply the axiom with\n");
+    out.push_str("--     `(\u{00B7}.<caller_field>)` per slot via their per-call\n");
+    out.push_str("--     `state_binders { ... }` block.\n\n");
     out.push_str("import QEDGen.Solana.Account\n");
     out.push_str("import QEDGen.Solana.Cpi\n");
     out.push_str("import QEDGen.Solana.Valid\n\n");
@@ -620,26 +628,63 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
         out.push_str(&format!("namespace {}\n\n", safe_name(&handler.name)));
         for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
             let params_sig = param_sig_str(&handler.params);
+            // v2.27 Track A — scan the callee's lean_expr for any
+            // abstract State-field references (`s.X` / `s'.X`,
+            // produced by the `Ctx::Ensures` lowering of `state.X`).
+            // When the ensures only references the callee's params
+            // (the v2.26 callee-frame shape), the scan returns empty
+            // and we emit the original param-only axiom for back-compat.
+            let abstract_fields = scan_abstract_fields(&ensures.lean_expr);
             out.push_str(&format!(
                 "/-- `{}.{}` post-condition #{} (axiomatized; discharged by binary_hash pin). -/\n",
                 iface.name, handler.name, ens_idx,
             ));
-            // The axiom is callee-frame: only the callee's params are
-            // in scope. The caller-side theorem statement is the
-            // substituted form (caller's let-bindings + state field
-            // prefixes); applying this axiom with the substituted
-            // args produces exactly that statement. No reference to
-            // the caller's State namespace — that's intentional so
-            // the same axiom serves every caller across every program.
-            if handler.params.is_empty() {
-                out.push_str(&format!(
-                    "axiom ensures_axiom_{} : {}\n\n",
-                    ens_idx, ensures.lean_expr,
-                ));
+            if abstract_fields.is_empty() {
+                // v2.26 path — callee-frame, param-only. The caller-
+                // side theorem statement is the param-substituted
+                // form; applying this axiom with the substituted args
+                // produces exactly that statement.
+                if handler.params.is_empty() {
+                    out.push_str(&format!(
+                        "axiom ensures_axiom_{} : {}\n\n",
+                        ens_idx, ensures.lean_expr,
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "axiom ensures_axiom_{}{} : {}\n\n",
+                        ens_idx, params_sig, ensures.lean_expr,
+                    ));
+                }
             } else {
+                // v2.27 Track A path — caller-State-aware. The axiom
+                // takes `(pre post : State)` and one `State → Nat`
+                // accessor per abstract field referenced in the
+                // callee's ensures. The caller applies the axiom with
+                // `(·.<caller_field>)` for each accessor; β-reduction
+                // produces the substituted form the theorem statement
+                // declares.
+                //
+                // `{State : Type} [Inhabited State]` keeps the axiom
+                // polymorphic across every caller's concrete State
+                // record; `Inhabited` is required so Lean can elaborate
+                // existential statements inside `ensures` (no eager
+                // need today, but cheap and forward-compatible).
+                let mut sig = String::new();
+                sig.push_str(" {State : Type} [Inhabited State]");
+                sig.push_str(" (pre post : State)");
+                sig.push_str(&params_sig);
+                for field in &abstract_fields {
+                    sig.push_str(&format!(" ({} : State \u{2192} Nat)", field));
+                }
+                // Body rewrite: `s'.X` → `(X post)`, `s.X` → `(X pre)`.
+                // The callee's lean_expr was lowered under `Ctx::Ensures`,
+                // which produced those `s.X` / `s'.X` tokens; the axiom
+                // body must apply accessor params instead so the
+                // statement is well-typed against the polymorphic State.
+                let body = rewrite_axiom_body_to_accessors(&ensures.lean_expr);
                 out.push_str(&format!(
                     "axiom ensures_axiom_{}{} : {}\n\n",
-                    ens_idx, params_sig, ensures.lean_expr,
+                    ens_idx, sig, body,
                 ));
             }
         }
@@ -648,6 +693,50 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
 
     out.push_str(&format!("end {}\n", safe_name(&iface.name)));
     out
+}
+
+/// v2.27 Track A — scan a callee's Lean-rendered `ensures` text for
+/// abstract State-field references. The callee's `ensures` lowers
+/// `state.X` (post, `Ctx::Ensures`) as `s'.X` and `old(state.X)` (pre)
+/// as `s.X` — interface handlers don't declare `state { ... }`, so
+/// every `state.X` reference in a callee's ensures is by construction
+/// an abstract accessor over a future caller's State.
+///
+/// Returns the abstract field names in first-occurrence order, so the
+/// emitted axiom signature is deterministic. Matches both `s.X` and
+/// `s'.X` and merges them (one accessor slot per distinct field name).
+fn scan_abstract_fields(ensures_lean: &str) -> Vec<String> {
+    // Pattern: `s'.X` or `s.X` where `X` is an identifier. The Lean
+    // lowering emits these tokens whenever the source said
+    // `state.X` / `old(state.X)`; nothing else produces this form.
+    let re = regex::Regex::new(r"\bs'?\.([A-Za-z_][A-Za-z0-9_]*)")
+        .expect("regex compiles for abstract-field scan");
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for cap in re.captures_iter(ensures_lean) {
+        let field = cap.get(1).unwrap().as_str();
+        if seen.insert(field.to_string()) {
+            out.push(field.to_string());
+        }
+    }
+    out
+}
+
+/// v2.27 Track A — rewrite a callee's Lean `ensures` text into the
+/// abstract-accessor form used inside the bundled axiom body. Each
+/// `s'.X` (post-state field projection) becomes `(X post)` and each
+/// `s.X` (pre-state) becomes `(X pre)`. The axiom signature declares
+/// every distinct `X` as an accessor param `(X : State → Nat)`; the
+/// rewrite produces a body that typechecks against that signature.
+fn rewrite_axiom_body_to_accessors(ensures_lean: &str) -> String {
+    // Order matters: do `s'.X` first so we don't accidentally match
+    // the `s` half of `s'.X` after the apostrophe.
+    let re_post = regex::Regex::new(r"\bs'\.([A-Za-z_][A-Za-z0-9_]*)")
+        .expect("regex compiles for post-state accessor rewrite");
+    let after_post = re_post.replace_all(ensures_lean, "($1 post)").into_owned();
+    let re_pre = regex::Regex::new(r"\bs\.([A-Za-z_][A-Za-z0-9_]*)")
+        .expect("regex compiles for pre-state accessor rewrite");
+    re_pre.replace_all(&after_post, "($1 pre)").into_owned()
 }
 
 /// Idempotent lakefile update: ensures every pinned-interface module is
@@ -1722,7 +1811,23 @@ fn render_cpi_theorems(
                     // name. `None` falls back to the literal "result".
                     handler.result_binder.as_deref(),
                 );
-                let prefixed = prefix_state_fields(&substituted, &state_field_set);
+                // v2.27 Track A — `scan_abstract_fields` decides which
+                // codegen path to take. On the Track A path,
+                // `substitute_state_binders_lean` has already produced
+                // fully-qualified `pre.<caller_field>` / `post.<caller_field>`
+                // projections, so re-running `prefix_state_fields` would
+                // double-prefix the caller field (e.g. `post.pool_balance`
+                // → `post.s.pool_balance`) because the bare-word match
+                // happens *after* the `.` word boundary, and the
+                // `s.s.X` → `s.X` collapse doesn't catch `post.s.X` /
+                // `pre.s.X`. Skip the prefix pass when abstract fields
+                // are present.
+                let abstract_fields = scan_abstract_fields(&ensures.lean_expr);
+                let prefixed = if abstract_fields.is_empty() {
+                    prefix_state_fields(&substituted, &state_field_set)
+                } else {
+                    substituted
+                };
                 let theorem_name = safe_name(&format!(
                     "{}_{}_{}_call_{}_post_{}",
                     op.name, call.target_interface, call.target_handler, call_idx, ens_idx,
@@ -1736,8 +1841,18 @@ fn render_cpi_theorems(
                         safe_name(&call.target_handler),
                         ens_idx,
                     );
+                    // v2.27 Track A — `abstract_fields` (computed above)
+                    // already tells us whether the callee's ensures
+                    // references abstract State fields. If it does, the
+                    // axiom was emitted with the extended signature
+                    // `{State} [Inhabited State] (pre post : State)
+                    // (params...) (accessors...)` and the caller's
+                    // theorem must apply it with the matching shape. If
+                    // not, fall back to the v2.26 param-only application
+                    // form.
                     // The axiom signature is `(callee_params...) :
-                    // <callee_ensures>` — written in the callee frame,
+                    // <callee_ensures>` (or the Track A extended form
+                    // — see above) — written in the callee frame,
                     // independent of any caller's State. The caller's
                     // theorem statement is the substituted-prefixed
                     // form. Apply the axiom by passing each callee
@@ -1745,6 +1860,15 @@ fn render_cpi_theorems(
                     // is definitionally the substituted ensures, which
                     // is exactly the theorem statement.
                     let mut apply_args: Vec<String> = Vec::new();
+                    // Track A — prepend `pre post` (the caller's
+                    // pre-state binder is `s`; the theorem statement
+                    // declares both `(pre post : State)` and binds
+                    // them so the application can pass them directly).
+                    let track_a = !abstract_fields.is_empty();
+                    if track_a {
+                        apply_args.push("pre".to_string());
+                        apply_args.push("post".to_string());
+                    }
                     for (pn, _) in &handler.params {
                         // Look up the caller's lean_expr for this
                         // callee param; if the caller passed it, use
@@ -1775,16 +1899,49 @@ fn render_cpi_theorems(
                             apply_args.push(prefixed_arg);
                         }
                     }
+                    // Track A — pass `(·.<caller_field>)` for each
+                    // abstract accessor slot. The caller's
+                    // `state_binders` block provides the mapping; if
+                    // a callee field isn't bound, fall back to a
+                    // pass-through `(·.<callee_field>)` which assumes
+                    // the caller's State has a field of the same name.
+                    // The `unbound_abstract_field` lint surfaces the
+                    // gap at check time so the spec author can add
+                    // the missing binder (Track B's surface, not Track
+                    // A's).
+                    if track_a {
+                        for field in &abstract_fields {
+                            let caller_field = call
+                                .state_binders
+                                .iter()
+                                .find(|b| b.callee_field == *field)
+                                .map(|b| b.caller_field.as_str())
+                                .unwrap_or(field.as_str());
+                            apply_args.push(format!("(\u{00B7}.{})", caller_field));
+                        }
+                    }
                     out.push_str(&format!(
                         "/-- {}.{}.ensures @ `{}` call #{} (stance 1: discharged \
                          via Tier-1 binary-hash axiom; v3.0 will replace the \
                          axiom with an imported callee proof). -/\n",
                         call.target_interface, call.target_handler, op.name, call_idx,
                     ));
-                    out.push_str(&format!(
-                        "theorem {} (s : {}){} : {} :=\n",
-                        theorem_name, state_type, handler_params, prefixed,
-                    ));
+                    // Track A — the theorem declares `(pre post :
+                    // State)` so the substituted statement (which now
+                    // contains `pre.X` / `post.X` references) is well-
+                    // typed. v2.26 form unchanged when abstract_fields
+                    // is empty.
+                    if track_a {
+                        out.push_str(&format!(
+                            "theorem {} (s : {}) (pre post : {}){} : {} :=\n",
+                            theorem_name, state_type, state_type, handler_params, prefixed,
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "theorem {} (s : {}){} : {} :=\n",
+                            theorem_name, state_type, handler_params, prefixed,
+                        ));
+                    }
                     if apply_args.is_empty() {
                         out.push_str(&format!("  {}\n\n", axiom_qualified));
                     } else {
@@ -5856,6 +6013,49 @@ mod tests {
     use super::*;
     use crate::chumsky_adapter;
 
+    // v2.27 Track A — scan_abstract_fields tests.
+    #[test]
+    fn scan_abstract_fields_picks_up_state_field_refs() {
+        // Callee ensures uses `state.from_balance` / `state.to_balance`,
+        // which lowered under `Ctx::Ensures` is `s'.from_balance` /
+        // `s'.to_balance`. `old(state.from_balance)` lowered is
+        // `s.from_balance`. Scan finds three distinct abstract fields,
+        // deduped to two by name.
+        let out = scan_abstract_fields(
+            "s'.from_balance + amount = s.from_balance \u{2227} s'.to_balance = s.to_balance + amount",
+        );
+        assert_eq!(
+            out,
+            vec!["from_balance".to_string(), "to_balance".to_string()]
+        );
+    }
+
+    #[test]
+    fn scan_abstract_fields_empty_for_param_only_ensures() {
+        // v2.26-shape bundled SPL Token interface — `amount > 0` is
+        // entirely param-frame. No abstract fields, so the axiom stays
+        // in the v2.26 callee-frame param-only shape.
+        let out = scan_abstract_fields("amount > 0");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn scan_abstract_fields_order_is_first_occurrence() {
+        // Deterministic axiom signature: first occurrence wins. `b`
+        // appears before `a` in the second clause, but `a` is the
+        // first one seen overall.
+        let out = scan_abstract_fields("s'.a = s.b + s.a");
+        assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn rewrite_axiom_body_substitutes_state_projections() {
+        // Both `s.X` and `s'.X` patterns get rewritten to accessor
+        // applications.
+        let out = rewrite_axiom_body_to_accessors("s'.balance + amount = s.balance");
+        assert_eq!(out, "(balance post) + amount = (balance pre)");
+    }
+
     const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
 
     /// Scalar-only minimal multisig fixture used by the auto-prove tests
@@ -7725,6 +7925,232 @@ handler collect_fees (kind : U8) (amount : U64) : State.Active -> State.Active {
         assert!(
             lean.contains("| _ => some { s with fees_d := 0"),
             "wildcard arm should set fees_d := 0; got:\n{lean}"
+        );
+    }
+
+    /// v2.27 Track A — when a `call X.y(state_binders { ... })` is
+    /// present AND the callee's ensures references abstract State
+    /// fields, the bundled axiom signature extends with
+    /// `{State} [Inhabited State] (pre post : State) … (field : State
+    /// → Nat)`, and the caller's theorem applies it with `(·.<caller_field>)`.
+    #[test]
+    fn track_a_axiom_extends_signature_and_theorem_applies_accessor() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec LpPool
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  state.from_balance + amount == old(state.from_balance)
+  }
+}
+
+type Error | InvalidAmount
+type State = { pool_balance : U64, lp_supply : U64 }
+handler deposit (amount : U64) {
+  modifies [pool_balance, lp_supply]
+  requires amount > 0 else InvalidAmount
+  effect { pool_balance += amount }
+  call Token.transfer(
+    amount = amount,
+    state_binders { from_balance = state.pool_balance },
+  )
+}
+"#,
+        )
+        .expect("parse");
+
+        // The bundled axiom module renders separately from Spec.lean; the
+        // render() helper drives the codegen unit-test path via the
+        // `interface` AST. We exercise it directly via the helper.
+        let iface = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == "Token")
+            .expect("Token interface present");
+        let axiom_module = render_interface_axiom_module(iface);
+        // Extended signature shape: polymorphic State + Inhabited +
+        // (pre post : State) + handler params + accessor params.
+        assert!(
+            axiom_module.contains("{State : Type} [Inhabited State]"),
+            "Track A axiom must be polymorphic over State; got:\n{axiom_module}"
+        );
+        assert!(
+            axiom_module.contains("(pre post : State)"),
+            "Track A axiom must take (pre post : State); got:\n{axiom_module}"
+        );
+        assert!(
+            axiom_module.contains("(from_balance : State \u{2192} Nat)"),
+            "Track A axiom must take an accessor param for `from_balance`; got:\n{axiom_module}"
+        );
+
+        // The caller's theorem must apply the axiom with `pre`, `post`,
+        // the param `amount`, and `(·.pool_balance)` for the accessor slot.
+        let lean = render(&spec);
+        assert!(
+            lean.contains("Token.transfer.ensures_axiom_0 pre post amount (\u{00B7}.pool_balance)"),
+            "Track A caller theorem must apply the axiom with binders; got:\n{lean}"
+        );
+        // The theorem signature must declare `(pre post : State)` so the
+        // substituted statement (which references `pre.X` / `post.X`) is
+        // well-typed.
+        assert!(
+            lean.contains("(pre post : State)"),
+            "Track A caller theorem signature must bind (pre post : State); got:\n{lean}"
+        );
+    }
+
+    /// v2.27 Track A regression — the theorem STATEMENT (not just the
+    /// axiom application) must use the binder-substituted `pre.<caller>`
+    /// / `post.<caller>` projections directly. Pre-fix, a stray
+    /// `prefix_state_fields` pass over the already-substituted text
+    /// double-prefixed caller fields to `post.s.<caller>` /
+    /// `pre.s.<caller>`, which doesn't typecheck against `State` (no
+    /// field `s`). The fix gates `prefix_state_fields` on
+    /// `scan_abstract_fields(...)` being empty.
+    #[test]
+    fn track_a_theorem_statement_uses_pre_post_without_double_prefix() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec LpPool
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  state.from_balance + amount == old(state.from_balance)
+  }
+}
+
+type Error | InvalidAmount
+type State = { pool_balance : U64, lp_supply : U64 }
+handler deposit (amount : U64) {
+  modifies [pool_balance, lp_supply]
+  requires amount > 0 else InvalidAmount
+  effect { pool_balance += amount }
+  call Token.transfer(
+    amount = amount,
+    state_binders { from_balance = state.pool_balance },
+  )
+}
+"#,
+        )
+        .expect("parse");
+
+        let lean = render(&spec);
+        // The theorem statement must use the binder-substituted pre./post.
+        // projections directly — no spurious `.s.` from a stray prefix_state_fields.
+        assert!(
+            lean.contains("post.pool_balance + amount = pre.pool_balance"),
+            "Track A theorem statement must be `post.pool_balance + amount = pre.pool_balance` (no spurious .s.); got:\n{lean}"
+        );
+        assert!(
+            !lean.contains("post.s.pool_balance") && !lean.contains("pre.s.pool_balance"),
+            "Track A theorem statement must not double-prefix as `pre.s.X` / `post.s.X`; got:\n{lean}"
+        );
+    }
+
+    /// v2.27 Track A back-compat — the bundled SPL Token axiom shape
+    /// (callee-frame param-only `amount > 0`) must continue to emit in
+    /// the v2.26 param-only form, with no Track A signature surface.
+    #[test]
+    fn track_a_back_compat_param_only_ensures_unchanged() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec LpPool
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+}
+
+type Error | InvalidAmount
+type State = { pool_balance : U64, lp_supply : U64 }
+handler deposit (amount : U64) {
+  modifies [pool_balance, lp_supply]
+  requires amount > 0 else InvalidAmount
+  effect { pool_balance += amount }
+  call Token.transfer(amount = amount)
+}
+"#,
+        )
+        .expect("parse");
+        let iface = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == "Token")
+            .expect("Token interface present");
+        let axiom_module = render_interface_axiom_module(iface);
+        // v2.26 param-only — no polymorphic State, no Inhabited, no
+        // (pre post : State), no accessor params.
+        assert!(
+            !axiom_module.contains("{State : Type}"),
+            "param-only callee ensures must NOT trigger Track A signature; got:\n{axiom_module}"
+        );
+        assert!(
+            !axiom_module.contains("(pre post : State)"),
+            "param-only callee ensures must NOT declare (pre post : State); got:\n{axiom_module}"
+        );
+        // The v2.26 form: `axiom ensures_axiom_0 (amount : Nat) : amount > 0`.
+        assert!(
+            axiom_module.contains("axiom ensures_axiom_0 (amount : Nat) : amount > 0"),
+            "v2.26 param-only axiom shape must be preserved; got:\n{axiom_module}"
+        );
+
+        let lean = render(&spec);
+        // Caller theorem applies the v2.26 form — just `amount`, no
+        // `pre post` or accessor args.
+        assert!(
+            lean.contains("Token.transfer.ensures_axiom_0 amount"),
+            "v2.26 caller theorem must apply with `amount` only; got:\n{lean}"
+        );
+        assert!(
+            !lean.contains("ensures_axiom_0 pre post"),
+            "v2.26 caller theorem must NOT carry pre/post args; got:\n{lean}"
         );
     }
 
