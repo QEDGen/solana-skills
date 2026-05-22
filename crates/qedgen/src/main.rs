@@ -15,6 +15,7 @@ mod chumsky_parser;
 mod cluster;
 mod codegen;
 mod consolidate;
+mod cpi_substitute;
 mod crucible_brownfield;
 mod crucible_gen;
 mod crucible_probe;

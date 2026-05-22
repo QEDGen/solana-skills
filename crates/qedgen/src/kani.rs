@@ -929,6 +929,53 @@ fn emit_kani_account_section(
                 // Post-state is the mutated `s`. Bind `post = &s` so the
                 // ensures rendering's `post.x` paths resolve.
                 out.push_str("        let post = &s;\n");
+
+                // v2.26 Batch 2 Track G — CPI ensures-as-fact: when the
+                // handler does `call Iface.foo(args)` and the called
+                // interface declares its own `ensures`, propagate those
+                // contracts into the caller's harness as `kani::assume`
+                // facts. Substitution maps each callee param to the
+                // caller's call-site expression so the assume is in the
+                // caller's variable frame.
+                //
+                // Tier-0 callees (no ensures declared) emit nothing —
+                // the `cpi_no_callee_ensures` lint surfaces this.
+                // `let X = call Foo.bar(...)` binds the caller's
+                // result identifier into the substitution table.
+                for call in &op.calls {
+                    let Some(iface) = spec
+                        .interfaces
+                        .iter()
+                        .find(|i| i.name == call.target_interface)
+                    else {
+                        continue;
+                    };
+                    let Some(callee_handler) = iface
+                        .handlers
+                        .iter()
+                        .find(|h| h.name == call.target_handler)
+                    else {
+                        continue;
+                    };
+                    if callee_handler.ensures.is_empty() {
+                        // Tier-0 callee — nothing to propagate.
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "        // CPI ensures-as-fact ({}.{}):\n",
+                        call.target_interface, call.target_handler,
+                    ));
+                    for callee_ens in &callee_handler.ensures {
+                        let substituted =
+                            crate::cpi_substitute::substitute_callee_ensures_rust_binary(
+                                &callee_ens.rust_expr_binary,
+                                call,
+                                &callee_handler.params,
+                            );
+                        out.push_str(&format!("        kani::assume({});\n", substituted));
+                    }
+                }
+
                 out.push_str(&format!("        assert!({},\n", ensures.rust_expr_binary));
                 out.push_str(&format!(
                     "            \"ensures clause {} on {} violated by spec-translated transition\");\n",
@@ -2000,6 +2047,210 @@ property settled_monotonic :
         assert!(
             !body.contains("balance_nonneg(&s)"),
             "harness must not still reference legacy `&s`; got:\n{}",
+            body
+        );
+    }
+
+    // ========================================================================
+    // v2.26 Batch 2 Track G — CPI ensures-as-assume in ensures-preservation
+    // ========================================================================
+
+    /// A handler with its own `ensures` AND a `call Iface.foo(args)` to an
+    /// interface that declares `ensures` must emit `kani::assume` lines
+    /// between `let post = &s;` and `assert!`, substituting the callee's
+    /// param names with the caller's call-site expressions.
+    #[test]
+    fn cpi_ensures_lowers_to_kani_assume_in_preservation_harness() {
+        let src = r#"spec CpiEnsuresTest
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures amount > 0
+  }
+}
+
+type State
+  | Open of { pool : U64 }
+
+type Error
+  | InvalidAmount
+
+handler deposit (amt : U64) : State.Open -> State.Open {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  call Token.transfer(from = 0, to = 0, amount = amt, authority = 0)
+  effect { Open.pool += amt }
+  ensures state.pool == old(state.pool) + amt
+}
+"#;
+        let out = emit_kani_section(src);
+
+        // Locate the ensures-preservation harness for `deposit`.
+        let start = out
+            .find("fn verify_deposit_ensures_0()")
+            .unwrap_or_else(|| panic!("missing verify_deposit_ensures_0; got:\n{}", out));
+        let end = out[start..]
+            .find("\n}\n\n")
+            .map(|i| start + i)
+            .unwrap_or(out.len());
+        let body = &out[start..end];
+
+        // 1. The CPI ensures-as-fact comment + assume line must be present,
+        //    with `amount` substituted to the caller's `amt` expression.
+        assert!(
+            body.contains("// CPI ensures-as-fact (Token.transfer)"),
+            "missing CPI ensures-as-fact comment; got:\n{}",
+            body
+        );
+        assert!(
+            body.contains("kani::assume(amt > 0)"),
+            "missing substituted kani::assume(amt > 0); got:\n{}",
+            body
+        );
+
+        // 2. Ordering: the assume must precede the caller's assert! line.
+        let assume_pos = body
+            .find("kani::assume(amt > 0)")
+            .expect("assume present (just asserted above)");
+        let assert_pos = body
+            .find("assert!(post.pool")
+            .or_else(|| body.find("assert!("))
+            .expect("caller's assert! is emitted");
+        assert!(
+            assume_pos < assert_pos,
+            "CPI assume must precede caller's assert!; got:\n{}",
+            body
+        );
+
+        // 3. The assume must come AFTER `let post = &s;` so it sits in the
+        //    successful-transition branch only.
+        let post_bind = body
+            .find("let post = &s;")
+            .expect("post binding must precede CPI assumes");
+        assert!(
+            post_bind < assume_pos,
+            "CPI assume must follow `let post = &s;`; got:\n{}",
+            body
+        );
+    }
+
+    /// Tier-0 callees (interface declares no `ensures`) must not emit any
+    /// `kani::assume` lines for the callee. The caller's own ensures still
+    /// gets asserted; the `cpi_no_callee_ensures` lint surfaces the gap.
+    #[test]
+    fn tier0_callee_emits_no_kani_assume_lines() {
+        let src = r#"spec Tier0Test
+program_id "11111111111111111111111111111111"
+
+interface Logger {
+  program_id "11111111111111111111111111111111"
+  handler log (msg : U64) {
+    accounts {
+      sink : writable
+    }
+  }
+}
+
+type State
+  | Open of { counter : U64 }
+
+type Error
+  | Bad
+
+handler tick (val : U64) : State.Open -> State.Open {
+  permissionless
+  requires val > 0 else Bad
+  call Logger.log(msg = val)
+  effect { Open.counter += val }
+  ensures state.counter == old(state.counter) + val
+}
+"#;
+        let out = emit_kani_section(src);
+        let start = out
+            .find("fn verify_tick_ensures_0()")
+            .unwrap_or_else(|| panic!("missing verify_tick_ensures_0; got:\n{}", out));
+        let end = out[start..]
+            .find("\n}\n\n")
+            .map(|i| start + i)
+            .unwrap_or(out.len());
+        let body = &out[start..end];
+
+        // No CPI ensures-as-fact comment, no callee-derived assume.
+        assert!(
+            !body.contains("CPI ensures-as-fact (Logger.log)"),
+            "Tier-0 callee (no ensures) must not emit CPI assume block; got:\n{}",
+            body
+        );
+        // The caller's own assert! must still be present.
+        assert!(
+            body.contains("assert!("),
+            "caller's assert! must still emit; got:\n{}",
+            body
+        );
+    }
+
+    /// `let X = call Foo.bar(...)` participates in the substitution: a
+    /// callee `ensures` referencing the conventional `result` position
+    /// binds to the caller's `X`. Exercises the Track G result-binding
+    /// substitution path.
+    #[test]
+    fn let_call_binding_participates_in_substitution() {
+        let src = r#"spec LetCallTest
+program_id "11111111111111111111111111111111"
+
+interface Pool {
+  program_id "11111111111111111111111111111111"
+  handler absorb (amount : U64) {
+    accounts {
+      vault : writable
+    }
+    requires amount > 0
+    ensures result <= amount
+  }
+}
+
+type State
+  | Active of { total_loss : U64 }
+
+type Error
+  | Bad
+
+handler liquidate (loss : U64) : State.Active -> State.Active {
+  permissionless
+  requires loss > 0 else Bad
+  let burned = call Pool.absorb(amount = loss)
+  effect { Active.total_loss += loss }
+  ensures state.total_loss == old(state.total_loss) + loss
+}
+"#;
+        let out = emit_kani_section(src);
+        let start = out
+            .find("fn verify_liquidate_ensures_0()")
+            .unwrap_or_else(|| panic!("missing verify_liquidate_ensures_0; got:\n{}", out));
+        let end = out[start..]
+            .find("\n}\n\n")
+            .map(|i| start + i)
+            .unwrap_or(out.len());
+        let body = &out[start..end];
+
+        assert!(
+            body.contains("// CPI ensures-as-fact (Pool.absorb)"),
+            "missing CPI ensures-as-fact for Pool.absorb; got:\n{}",
+            body
+        );
+        // `result <= amount` should substitute `amount → loss` and
+        // `result → burned`.
+        assert!(
+            body.contains("kani::assume(burned <= loss)"),
+            "missing substituted result/param ensures; expected `kani::assume(burned <= loss)`; got:\n{}",
             body
         );
     }

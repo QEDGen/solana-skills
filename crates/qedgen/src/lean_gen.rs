@@ -1694,13 +1694,6 @@ fn render_cpi_theorems(
                 None => continue,
             };
 
-            // Build the param-name → call-site-Lean-expr substitution table.
-            let subst: std::collections::HashMap<&str, &str> = call
-                .args
-                .iter()
-                .map(|a| (a.name.as_str(), a.lean_expr.as_str()))
-                .collect();
-
             // v2.26 Track F: pinned interfaces (Tier-1/2 with
             // `binary_hash`) close the theorem via an axiom; Tier-0 or
             // unpinned interfaces still emit `:= by sorry`. The lint
@@ -1710,8 +1703,22 @@ fn render_cpi_theorems(
                 pinned_interfaces.insert(call.target_interface.clone());
             }
 
+            // Subst table for the axiom-application path below. Kept as
+            // a local borrow so the `apply_args` loop can `.get()` each
+            // callee param. Lean ensures-text substitution goes through
+            // `cpi_substitute::substitute_callee_ensures_lean`.
+            let subst: std::collections::HashMap<&str, &str> = call
+                .args
+                .iter()
+                .map(|a| (a.name.as_str(), a.lean_expr.as_str()))
+                .collect();
+
             for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
-                let substituted = substitute_params(&ensures.lean_expr, &subst);
+                let substituted = crate::cpi_substitute::substitute_callee_ensures_lean(
+                    &ensures.lean_expr,
+                    call,
+                    &handler.params,
+                );
                 let prefixed = prefix_state_fields(&substituted, &state_field_set);
                 let theorem_name = safe_name(&format!(
                     "{}_{}_{}_call_{}_post_{}",
@@ -1823,34 +1830,6 @@ fn handler_is_pinned(
     }
 }
 
-/// Substitute the caller's call-site arguments into a callee's `ensures`
-/// expression, producing the Lean form that the caller proves at the
-/// call site. Wraps `substitute_params` with a clearer name; the helper
-/// is split out so v2.26 Batch 2 (Kani harness consumption) can call it
-/// directly without re-discovering the substitution shape.
-// TODO(v2.26 Batch 2): extract for Kani harness consumption — the same
-// param substitution is needed when lowering an interface call to a Kani
-// `kani::assume(callee_ensures_substituted)` hypothesis.
-#[allow(dead_code)]
-fn substitute_callee_ensures(
-    callee_ensures_lean: &str,
-    call_args: &[crate::check::ParsedCallArg],
-    callee_params: &[(String, String)],
-) -> String {
-    let mut subst: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    for a in call_args {
-        subst.insert(a.name.as_str(), a.lean_expr.as_str());
-    }
-    // Defensive: ensure every callee param has a binding; unmatched
-    // params keep their formal-param name (Lean flags as free variable
-    // if reached). Splitting this out makes the signature audit-friendly
-    // when Batch 2 wires it into Kani.
-    for (pn, _) in callee_params {
-        subst.entry(pn.as_str()).or_insert(pn.as_str());
-    }
-    substitute_params(callee_ensures_lean, &subst)
-}
-
 /// Render `theorem <name> ...` for each declared invariant — single-account
 /// path. For multi-account specs, use `render_invariants_as_comments`
 /// (v2.14 doesn't yet lower variant-typed binders like `Loan.Active`).
@@ -1958,21 +1937,6 @@ fn prefix_state_fields(expr: &str, fields: &std::collections::HashSet<&str>) -> 
     // also matched as a bare identifier — collapse.
     let dup = regex::Regex::new(r"\bs\.s\.").expect("static regex");
     dup.replace_all(&out, "s.").into_owned()
-}
-
-/// Replace each formal-param identifier in `expr` with the caller's
-/// corresponding Lean expression. Word-boundary matching prevents
-/// `amount` from matching inside `amount_squared`.
-fn substitute_params(expr: &str, subst: &std::collections::HashMap<&str, &str>) -> String {
-    let mut out = expr.to_string();
-    for (param, replacement) in subst {
-        let pattern = format!(r"\b{}\b", regex::escape(param));
-        let re = regex::Regex::new(&pattern).expect("regex compiles for word-boundary param name");
-        out = re
-            .replace_all(&out, regex::NoExpand(replacement))
-            .into_owned();
-    }
-    out
 }
 
 /// Render Operation inductive and applyOp dispatcher.
