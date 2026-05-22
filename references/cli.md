@@ -205,8 +205,12 @@ $QEDGEN check --spec my_program.qedspec --asm src/program.s
 # Anchor project cross-check (spec ↔ #[program] mod handler set)
 $QEDGEN check --spec my_program.qedspec --anchor-project programs/my_program/
 
-# CI freeze gate: refuse to update qed.lock and refuse network fetches
+# CI freeze gate: refuse to update qed.lock and refuse network fetches.
+# v2.26 Slice 4c — `--frozen` also diffs each pinned binary_hash against
+# the on-chain .so. Mismatches surface as P2 warnings (exit 0); pair with
+# `--strict` to escalate to CRIT and fail the check.
 $QEDGEN check --spec my_program.qedspec --frozen
+$QEDGEN check --spec my_program.qedspec --frozen --strict
 $QEDGEN check --spec my_program.qedspec --frozen --no-cache
 
 # Bundled example drift gate
@@ -229,6 +233,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 | `--asm` | Path | - | sBPF assembly source (hash check + lake build) |
 | `--anchor-project` | Path | - | Anchor program crate (`Cargo.toml` + `src/lib.rs`). Cross-checks the spec's `handler` set against the `#[program]` mod's instruction set, plus an effect-coverage lint per resolved handler body. CI gate. |
 | `--frozen` | bool | false | Refuse to update `qed.lock`; error if the on-disk lock is stale or missing. Used in CI to detect un-bumped imports. |
+| `--strict` | bool | false | Escalate `--frozen` upstream binary-hash mismatches from P2 warning to CRIT (gates exit). Use in release-blocking CI; default `--frozen` stays warning-only. Requires `--frozen`. |
 | `--no-cache` | bool | false | Force-refresh the github source cache for every imported dep. Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and re-clones. |
 | `--regen-drift` | bool | false | Regenerate bundled examples into temporary directories and fail if committed generated support code, harnesses, or `Spec.lean` drift. Also fails when an example has `.qed/` state or generated artifacts but no `qed.toml`. |
 | `--examples-root` | Path | `examples/rust` | Example root scanned by `--regen-drift` |
@@ -313,10 +318,15 @@ $QEDGEN verify --spec my_program.qedspec --lean
 $QEDGEN verify --spec my_program.qedspec --fail-fast --json
 
 # Diff every imported library's pinned upstream_binary_hash against
-# the on-chain .so (requires `solana` CLI in PATH)
+# the on-chain .so (requires `solana` CLI in PATH). v2.26 Slice 4c —
+# mismatched pins surface as CRIT findings and gate exit. Auto-on when
+# qed.lock declares any pinned `binary_hash`.
 $QEDGEN verify --spec my_program.qedspec --check-upstream
 $QEDGEN verify --spec my_program.qedspec --check-upstream --rpc-url https://api.devnet.solana.com
 $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
+# Offline development — suppress the upstream check; mismatches demote
+# to Info and verify exits zero. Do NOT use in CI.
+$QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 ```
 
 | Flag | Type | Default | Description |
@@ -333,6 +343,7 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
 | `--check-upstream` | bool | false | Diff each pinned `upstream_binary_hash` against the on-chain `.so` via `solana program dump`. Skips deps without a pinned hash. Non-zero exit on any mismatch. |
 | `--rpc-url` | String | Solana CLI default | Override RPC endpoint passed to `solana program dump --url <rpc>` |
 | `--offline` | bool | false | Refuse to reach the network. Any dep that would require an on-chain fetch reports as Error. CI-gate friendly. |
+| `--upstream-stale-ok` | bool | false | Suppress the upstream binary-hash check even when the lock declares pinned hashes. Mismatches demote to Info; verify exits zero. Offline-dev only — do not use in CI. Pairs with the auto-on behavior of `--check-upstream`. |
 | `--probe-repros` | bool | false | Run probe reproducers under `<project>/target/qedgen-repros/` (PLAN-v2.16 D4). Each repro is a Mollusk-driven Rust test asserting a probe finding's bug fires; the verb captures pass/fail per finding so the auditor / next probe invocation can drop findings whose repros didn't reproduce. Pre-populated repros (v3-pending) — emits `note: no repros found` placeholder until the agent-fill workflow lands. |
 | `--crucible` | u64 | none | Run the coverage-guided fuzz engine for the given wall-clock seconds. Thin alias over `probe --fuzz` — folds findings into the BackendReport so they render through the same named-trace human surface as Kani / proptest. |
 | `--crucible-harness-dir` | Path | `./fuzz/<prog>/` | Harness directory for `--crucible`. |

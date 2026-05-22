@@ -731,6 +731,12 @@ fn generate_lib(
     if guards_use_math_helpers(spec) {
         out.push_str("pub mod math;\n");
     }
+    // v2.26 Slice 3: ref_impls module hosts the spec's `ref_impl`
+    // declarations as pure Rust fns so guards / handlers / properties
+    // can call them by name.
+    if !spec.ref_impls.is_empty() {
+        out.push_str("pub mod ref_impls;\n");
+    }
     out.push('\n');
 
     out.push_str(&format!("declare_id!(\"{}\");\n\n", program_id));
@@ -2349,12 +2355,22 @@ fn strip_array_index_suffix(field: &str) -> String {
 /// the agent fills in (CPI return values, event-binding sources).
 /// Today that lands as a `todo!()` line; v2.24.1 / v2.25 may grow
 /// a richer codegen path.
+/// v2.26 Slice 2 — return shape of the multi-variant ADT handler-body
+/// emitter. `needs_fill_tail` is true when at least one `modifies`
+/// field landed as an agent-fill `todo!()` site; the caller propagates
+/// this into `any_unmechanized` so the tail `todo!("fill non-mechanical …")`
+/// fires even when every effect line mechanized cleanly.
+struct VariantHandlerBody {
+    body: String,
+    needs_fill_tail: bool,
+}
+
 fn emit_variant_state_handler_body(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     target: Target,
     state_acct: &crate::check::ParsedHandlerAccount,
-) -> Option<String> {
+) -> Option<VariantHandlerBody> {
     if !matches!(target, Target::Anchor) {
         return None;
     }
@@ -2392,7 +2408,11 @@ fn emit_variant_state_handler_body(
             post_variant,
             &inner_name,
             &err_enum,
-        );
+        )
+        .map(|body| VariantHandlerBody {
+            body,
+            needs_fill_tail: false,
+        });
     }
 
     // Collect the unique set of bare field names referenced on the
@@ -2412,11 +2432,36 @@ fn emit_variant_state_handler_body(
         }
         mutated_fields.insert(bare);
     }
+
+    // v2.26 Slice 2 — modifies-driven agent-fill on the ADT path.
+    // Diff `modifies` against the effect-LHS set; any leftover field
+    // becomes a `*field = todo!(...)` site inside the match arm,
+    // with the relevant `ensures` clauses quoted as comments. The
+    // destructure must bind the modifies-only field too, otherwise
+    // the `*field = ...` reference doesn't resolve.
+    let modifies_only_fields: Vec<String> = handler
+        .modifies
+        .as_ref()
+        .map(|modifies| {
+            modifies
+                .iter()
+                .filter(|f| {
+                    !mutated_fields.contains(f.as_str())
+                        && post_variant.fields.iter().any(|(n, _)| n == *f)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for f in &modifies_only_fields {
+        mutated_fields.insert(f.clone());
+    }
+
     if mutated_fields.is_empty() {
-        // Pure read-only handler (no effects on state). Emit a
-        // skip-style match so the runtime still rejects the wrong
-        // variant — the guard layer doesn't catch variant drift on
-        // its own.
+        // Pure read-only handler (no effects on state, no modifies).
+        // Emit a skip-style match so the runtime still rejects the
+        // wrong variant — the guard layer doesn't catch variant
+        // drift on its own.
         let mut out = String::new();
         out.push_str(&format!("        match self.{}.inner {{\n", acct_binder));
         out.push_str(&format!(
@@ -2428,7 +2473,10 @@ fn emit_variant_state_handler_body(
             err_enum
         ));
         out.push_str("        }\n");
-        return Some(out);
+        return Some(VariantHandlerBody {
+            body: out,
+            needs_fill_tail: false,
+        });
     }
 
     let destructure = mutated_fields
@@ -2451,13 +2499,65 @@ fn emit_variant_state_handler_body(
         let line = mechanize_effect_destructured(effect, on_error, handler, spec)?;
         out.push_str(&line);
     }
+
+    // v2.26 Slice 2 — emit modifies-driven agent-fill sites inside
+    // the same match arm so the destructured binding is in scope.
+    // Mirrors the flat-fields template at the codegen `if
+    // !variant_body_emitted && !is_multi_variant_adt_state(spec)` site
+    // (indented 12 spaces, `*field` deref instead of `self.X.field`).
+    let mut needs_fill_tail = false;
+    for field in &modifies_only_fields {
+        let mut referencing: Vec<&str> = Vec::new();
+        for e in &handler.ensures {
+            if e.rust_expr.contains(field.as_str()) {
+                referencing.push(e.rust_expr.as_str());
+            }
+        }
+        out.push_str(&format!(
+            "                // QED agent-fill site: `{}` is in `modifies` but not in `effect`.\n",
+            field
+        ));
+        if referencing.is_empty() {
+            out.push_str(&format!(
+                "                //   No `ensures` clause references `{}` — the field is\n",
+                field
+            ));
+            out.push_str(
+                "                //   unconstrained. Either add an `ensures` constraint or\n",
+            );
+            out.push_str(&format!(
+                "                //   remove `{}` from `modifies`. (Lint: unconstrained_modifies)\n",
+                field
+            ));
+        } else {
+            out.push_str("                //   Implement against the spec's ensures:\n");
+            for r in &referencing {
+                out.push_str(&format!("                //     ensures {}\n", r));
+            }
+            out.push_str(
+                "                //   The Kani / proptest harness verifies the impl satisfies\n",
+            );
+            out.push_str(
+                "                //   these clauses against the pre-state captured before the call.\n",
+            );
+        }
+        out.push_str(&format!(
+            "                *{} = todo!(\"compute {} to satisfy ensures above\");\n",
+            field, field
+        ));
+        needs_fill_tail = true;
+    }
+
     out.push_str("            }\n");
     out.push_str(&format!(
         "            _ => return Err({}::WrongState.into()),\n",
         err_enum
     ));
     out.push_str("        }\n");
-    Some(out)
+    Some(VariantHandlerBody {
+        body: out,
+        needs_fill_tail,
+    })
 }
 
 /// v2.24 S5c — render an effect RHS for the cross-variant promotion
@@ -3031,8 +3131,15 @@ fn render_handler_scaffold(
     let variant_body =
         state_acct.and_then(|sa| emit_variant_state_handler_body(handler, spec, target, sa));
     let variant_body_emitted = variant_body.is_some();
-    if let Some(body) = variant_body {
+    if let Some(VariantHandlerBody {
+        body,
+        needs_fill_tail,
+    }) = variant_body
+    {
         out.push_str(&body);
+        if needs_fill_tail {
+            any_unmechanized = true;
+        }
     } else {
         for (idx, effect) in handler.effects.iter().enumerate() {
             // v2.24 §S1a — per-site error-variant override, indexed parallel
@@ -3325,6 +3432,62 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     Ok(())
 }
 
+/// v2.26 Slice 3 — Generate `src/ref_impls.rs`: one `pub fn` per
+/// `ref_impl` declaration. The same function bodies were already
+/// generated inside `tests/kani.rs` so the ensures-preservation harness
+/// could call them; v2.26 ships them into the program crate too so
+/// guards / handler bodies / properties can call them at runtime.
+///
+/// File is always regenerated; gated on `spec.ref_impls.is_empty()` at
+/// the caller — when no ref_impls exist, no file is written and lib.rs
+/// doesn't declare the module.
+fn generate_ref_impls(
+    spec: &ParsedSpec,
+    fp: &SpecFingerprint,
+    output_dir: &Path,
+    target: Target,
+) -> Result<()> {
+    if spec.ref_impls.is_empty() {
+        return Ok(());
+    }
+    let src_dir = output_dir.join("src");
+    std::fs::create_dir_all(&src_dir)?;
+    let mut out = String::new();
+    out.push_str(&marker("DO NOT EDIT", fp, "src/ref_impls.rs"));
+    out.push_str(
+        "//! Reference implementations (from qedspec `ref_impl` declarations).\n\
+         //! Pure expressions — no state mutation, no side effects.\n\
+         //! Generated alongside guards.rs so `requires` / `ensures` clauses\n\
+         //! and user handler bodies can call them by name.\n\n",
+    );
+    out.push_str("#![allow(dead_code, clippy::too_many_arguments)]\n\n");
+    for r in &spec.ref_impls {
+        let params = r
+            .params
+            .iter()
+            .map(|(n, t)| {
+                let ty = map_type_for_target(t, spec, target).unwrap_or_else(|_| t.clone());
+                format!("{}: {}", n, ty)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let ret = map_type_for_target(&r.return_type, spec, target)
+            .unwrap_or_else(|_| r.return_type.clone());
+        if let Some(doc) = &r.doc {
+            for line in doc.lines() {
+                out.push_str(&format!("/// {}\n", line.trim_start_matches("///").trim()));
+            }
+        }
+        out.push_str(&format!(
+            "#[inline]\npub fn {}({}) -> {} {{\n    {}\n}}\n\n",
+            r.name, params, ret, r.rust_body
+        ));
+    }
+    out.push_str("// ---- END GENERATED ----\n");
+    std::fs::write(src_dir.join("ref_impls.rs"), &out)?;
+    Ok(())
+}
+
 /// Generate src/guards.rs — one function per handler containing all the
 /// spec-declared guard checks. This file is always regenerated; any edit
 /// is clobbered on the next `qedgen codegen` (by design).
@@ -3366,6 +3529,14 @@ fn generate_guards(
     // would fail to resolve the path.
     if guards_use_math_helpers(spec) {
         out.push_str("use crate::math::*;\n");
+    }
+    // v2.26 Slice 3c — ref_impls are callable from `requires` bodies.
+    // The spec's `expr_to_rust` lowering emits the call by name; the
+    // ref_impl fn lives in `crate::ref_impls`, so import it
+    // unconditionally whenever the spec declares any. Under
+    // `#![allow(unused_imports)]` a never-used import is harmless.
+    if !spec.ref_impls.is_empty() {
+        out.push_str("use crate::ref_impls::*;\n");
     }
     // Pick up the per-handler `Accounts` structs. Anchor places them
     // at crate root (lib.rs); Quasar places them in
@@ -4051,6 +4222,9 @@ pub fn generate(spec_path: &Path, output_dir: &Path, target: crate::Target) -> R
     if guards_use_math_helpers(&spec) {
         generate_math(&fp, output_dir)?;
     }
+    // v2.26 Slice 3: emit ref_impls module so program code can call
+    // declared `ref_impl` fns from guards / handlers / properties.
+    generate_ref_impls(&spec, &fp, output_dir, target)?;
     generate_cargo_toml(&spec, &fp, output_dir, target)?;
 
     let file_count = 4
@@ -4589,6 +4763,155 @@ handler deposit (amount : U64) : State.Active -> State.Active {
         assert!(
             !lib.contains("has_one = owner"),
             "has_one suppression failed — wrapper-side `has_one = owner` should not appear because owner lives in variant payload; got:\n{lib}"
+        );
+    }
+
+    /// v2.26 Slice 2 — multi-variant ADT specs participate in the
+    /// modifies-driven agent-fill flow that v2.25 shipped for the
+    /// flat-fields path. A `modifies [lp_supply]` declaration on a
+    /// handler whose `effect { ... }` block doesn't write `lp_supply`
+    /// must emit a structured `*lp_supply = todo!(...)` site inside
+    /// the match arm — with the relevant `ensures` clauses quoted —
+    /// and propagate the trailing `todo!("fill non-mechanical …")`
+    /// gate so the body type-checks. Pre-v2.26 this shape silently
+    /// dropped to `Ok(())` because `emit_variant_state_handler_body`
+    /// didn't know about modifies-driven fill.
+    #[test]
+    fn variant_state_emits_modifies_driven_agent_fill() {
+        let src = r#"spec Pool
+
+type State
+  | Uninitialized
+  | Active of {
+      pool_balance : U64,
+      lp_supply    : U64,
+    }
+
+type Error
+  | MathOverflow
+  | WrongState
+  | InvalidLifecycle
+  | Unauthorized
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  accounts {
+    pool : writable
+    user : signer
+  }
+  requires amount > 0 else MathOverflow
+  modifies [pool_balance, lp_supply]
+  effect {
+    Active.pool_balance += amount
+  }
+  ensures state.lp_supply >= old(state.lp_supply)
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let spec_path = dir.path().join("pool.qedspec");
+        let out_dir = dir.path().join("programs");
+        std::fs::write(&spec_path, src).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        generate_lib(&spec, &fp, &out_dir, Target::Anchor).unwrap();
+        generate_instructions(&spec, &fp, &spec_path, &out_dir, Target::Anchor).unwrap();
+
+        let deposit = std::fs::read_to_string(out_dir.join("src/instructions/deposit.rs")).unwrap();
+
+        // Destructure must bind BOTH the mutated field and the
+        // modifies-only field so the `*lp_supply = todo!()` line
+        // resolves. BTreeSet ordering is alphabetical, so lp_supply
+        // appears before pool_balance.
+        assert!(
+            deposit.contains("PoolAccountInner::Active { lp_supply, pool_balance, .. } =>")
+                || deposit.contains("PoolAccountInner::Active { pool_balance, lp_supply, .. } =>"),
+            "expected destructure binding both pool_balance and lp_supply; got:\n{deposit}"
+        );
+
+        // The effect line still mechanizes as usual.
+        assert!(
+            deposit.contains(
+                "*pool_balance = pool_balance.checked_add(amount).ok_or(PoolError::MathOverflow)?;"
+            ),
+            "expected checked_add line for pool_balance; got:\n{deposit}"
+        );
+
+        // The agent-fill marker comment lands inside the match arm.
+        assert!(
+            deposit.contains(
+                "// QED agent-fill site: `lp_supply` is in `modifies` but not in `effect`."
+            ),
+            "expected QED agent-fill site comment; got:\n{deposit}"
+        );
+        assert!(
+            deposit.contains("//     ensures "),
+            "expected quoted ensures comment; got:\n{deposit}"
+        );
+        assert!(
+            deposit.contains("*lp_supply = todo!(\"compute lp_supply to satisfy ensures above\");"),
+            "expected destructured todo!() site for lp_supply; got:\n{deposit}"
+        );
+
+        // Trailing tail-fill todo!() must fire — easiest to check by
+        // absence of an `Ok(())` arm in the handler body.
+        assert!(
+            !deposit.contains("        Ok(())"),
+            "must not emit Ok(()) when modifies-driven fill is pending; got:\n{deposit}"
+        );
+
+        // Wrong-variant fallthrough still present.
+        assert!(
+            deposit.contains("_ => return Err(PoolError::WrongState.into()),"),
+            "expected WrongState fallthrough arm; got:\n{deposit}"
+        );
+    }
+
+    /// v2.26 Slice 2 — the `unconstrained_modifies` lint must still
+    /// fire on a multi-variant ADT spec where `modifies [X]` lists a
+    /// field that's neither written by `effect` nor referenced by any
+    /// `ensures` clause. The lint is field-name-based and target-
+    /// agnostic, so this just locks the behavior against future
+    /// regressions in the ADT path.
+    #[test]
+    fn unconstrained_modifies_fires_on_adt_spec() {
+        let src = r#"spec Pool
+
+type State
+  | Uninitialized
+  | Active of {
+      pool_balance : U64,
+      lp_supply    : U64,
+    }
+
+type Error
+  | MathOverflow
+  | WrongState
+  | InvalidLifecycle
+  | Unauthorized
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  accounts {
+    pool : writable
+    user : signer
+  }
+  requires amount > 0 else MathOverflow
+  modifies [pool_balance, lp_supply]
+  effect {
+    Active.pool_balance += amount
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).unwrap();
+        let warnings = crate::check::check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "unconstrained_modifies")
+            .expect("unconstrained_modifies must fire on the ADT spec");
+        assert!(
+            hit.message.contains("'lp_supply'"),
+            "lint message must name the unconstrained field; got: {}",
+            hit.message
         );
     }
 

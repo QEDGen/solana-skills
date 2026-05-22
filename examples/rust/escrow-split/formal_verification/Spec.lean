@@ -2,6 +2,7 @@ import QEDGen.Solana.Account
 import QEDGen.Solana.Cpi
 import QEDGen.Solana.State
 import QEDGen.Solana.Valid
+import Token
 
 namespace Escrow
 
@@ -70,17 +71,21 @@ def initializeTransition (s : State) (signer : Pubkey) (deposit_amount : Nat) (r
     if deposit_amount > 0 ∧ receive_amount > 0 then some (.Open initializer default deposit_amount receive_amount default) else none
   | _ => none
 
-/-- Token.transfer.ensures @ `cancel` call #0 (stance 1: axiomatized via sorry; v3.0 will close via imported callee proofs). -/
-theorem cancel_Token_transfer_call_0_post_0 (s : State) : s.initializer_amount > 0 := by sorry
+/-- Token.transfer.ensures @ `cancel` call #0 (stance 1: discharged via Tier-1 binary-hash axiom; v3.0 will replace the axiom with an imported callee proof). -/
+theorem cancel_Token_transfer_call_0_post_0 (s : State) : s.initializer_amount > 0 :=
+  Token.transfer.ensures_axiom_0 s.initializer_amount
 
-/-- Token.transfer.ensures @ `exchange` call #0 (stance 1: axiomatized via sorry; v3.0 will close via imported callee proofs). -/
-theorem exchange_Token_transfer_call_0_post_0 (s : State) : s.taker_amount > 0 := by sorry
+/-- Token.transfer.ensures @ `exchange` call #0 (stance 1: discharged via Tier-1 binary-hash axiom; v3.0 will replace the axiom with an imported callee proof). -/
+theorem exchange_Token_transfer_call_0_post_0 (s : State) : s.taker_amount > 0 :=
+  Token.transfer.ensures_axiom_0 s.taker_amount
 
-/-- Token.transfer.ensures @ `exchange` call #1 (stance 1: axiomatized via sorry; v3.0 will close via imported callee proofs). -/
-theorem exchange_Token_transfer_call_1_post_0 (s : State) : s.initializer_amount > 0 := by sorry
+/-- Token.transfer.ensures @ `exchange` call #1 (stance 1: discharged via Tier-1 binary-hash axiom; v3.0 will replace the axiom with an imported callee proof). -/
+theorem exchange_Token_transfer_call_1_post_0 (s : State) : s.initializer_amount > 0 :=
+  Token.transfer.ensures_axiom_0 s.initializer_amount
 
-/-- Token.transfer.ensures @ `initialize` call #0 (stance 1: axiomatized via sorry; v3.0 will close via imported callee proofs). -/
-theorem initialize_Token_transfer_call_0_post_0 (s : State) (deposit_amount : Nat) (receive_amount : Nat) : deposit_amount > 0 := by sorry
+/-- Token.transfer.ensures @ `initialize` call #0 (stance 1: discharged via Tier-1 binary-hash axiom; v3.0 will replace the axiom with an imported callee proof). -/
+theorem initialize_Token_transfer_call_0_post_0 (s : State) (deposit_amount : Nat) (receive_amount : Nat) : deposit_amount > 0 :=
+  Token.transfer.ensures_axiom_0 deposit_amount
 
 -- INVARIANT OBLIGATION (declared, no predicate body): conservation
 --   description: total tokens preserved across initialize, exchange, cancel

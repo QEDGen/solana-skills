@@ -377,7 +377,9 @@ upgraded out from under your proofs surfaces as a verification failure
 instead of a silent risk.
 
 ```bash
-# Compare every pinned upstream hash to the on-chain bytes
+# Compare every pinned upstream hash to the on-chain bytes (auto-on when
+# qed.lock declares any pinned binary_hash; pass --check-upstream
+# explicitly in scripts / CI for safety).
 qedgen verify --check-upstream
 
 # Override the cluster (defaults to the one in ~/.config/solana/cli/config.yml)
@@ -385,12 +387,33 @@ qedgen verify --check-upstream --rpc-url https://api.mainnet-beta.solana.com
 
 # CI gate — refuse to reach the network. Pinned-but-no-fetch reports as Error.
 qedgen verify --check-upstream --offline
+
+# Offline development — suppress the upstream check even when a pin is
+# present. Mismatches demote to Info; verify exits zero. Do NOT use in CI.
+qedgen verify --check-upstream --upstream-stale-ok
+```
+
+`qedgen verify --check-upstream` treats a mismatched pin as a **CRIT**
+finding and exits non-zero. The same diff also runs under `qedgen check
+--frozen`, where mismatches surface as **P2** warnings by default — the
+spec ships green, the operator sees the warning. Pair with `--strict`
+to escalate `check --frozen` mismatches to **CRIT** for release-blocking
+CI.
+
+```bash
+# Local CI — warn on a stale pin but stay green
+qedgen check --frozen
+
+# Release CI — fail on a stale pin
+qedgen check --frozen --strict
 ```
 
 Requires the [Solana CLI](https://docs.solana.com/cli/install-solana-cli-tools)
 on `PATH` (qedgen shells out to `solana program dump`). Combine with
 `--proptest` / `--kani` / `--lean` to run the binary check alongside
-the harness backends in one invocation.
+the harness backends in one invocation. Network / CLI errors always
+surface as P2 (never CRIT) so a missing Solana toolchain doesn't
+silently false-positive CI.
 
 ### Verification drift detection
 

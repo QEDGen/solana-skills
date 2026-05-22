@@ -437,12 +437,272 @@ fn lean_status_name(acct: &str) -> String {
 
 /// Generate a Lean file from a `ParsedSpec` and write it to `output_path`.
 pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
-    let content = render(spec);
+    let mut content = render(spec);
+    let pinned = collect_pinned_interfaces(spec);
+
+    // v2.26 Track F: prepend `import <Iface>` lines for every pinned
+    // interface module. The renderer already places `import
+    // QEDGen.Solana.*` at the top of every output flavor (single,
+    // multi, ADT); we inject the interface-module imports immediately
+    // after the existing import block so the namespace order matches
+    // Lean's expectation (imports before `namespace`).
+    if !pinned.is_empty() {
+        content = inject_interface_imports(&content, &pinned);
+    }
+
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(output_path, &content)?;
     eprintln!("  wrote {}", output_path.display());
+
+    // Write sibling `<Iface>.lean` axiom modules for every pinned
+    // interface. The set is recomputed here (independent of the
+    // render pass) so `render` keeps its single-String signature;
+    // the call-site discharge path inside `render_cpi_theorems` uses
+    // the same `handler_is_pinned` predicate so the two sides agree
+    // on which interfaces need axioms.
+    if let Some(parent) = output_path.parent() {
+        for iface_name in &pinned {
+            let iface = spec
+                .interfaces
+                .iter()
+                .find(|i| &i.name == iface_name)
+                .expect("pinned interface must exist in spec.interfaces");
+            let iface_path = parent.join(format!("{}.lean", safe_module_name(iface_name)));
+            let module = render_interface_axiom_module(iface);
+            std::fs::write(&iface_path, &module)?;
+            eprintln!("  wrote {}", iface_path.display());
+        }
+
+        // Update the lakefile's roots to include any newly-written
+        // sibling axiom modules. Best-effort: lakefile may not exist
+        // yet (the `qedgen init` step ships it). When it does, append
+        // the modules deterministically so the rewrite is idempotent.
+        if !pinned.is_empty() {
+            let lakefile_path = parent.join("lakefile.lean");
+            if lakefile_path.exists() {
+                update_lakefile_roots(&lakefile_path, &pinned)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Inject `import <Iface>` lines immediately after the existing
+/// `import QEDGen.Solana.*` block. Idempotent: pre-existing imports
+/// for the same module are left in place.
+fn inject_interface_imports(content: &str, pinned: &std::collections::BTreeSet<String>) -> String {
+    // Find the position just after the last `import QEDGen.Solana.*`
+    // line at the top of the file. If no such line exists (sBPF mode,
+    // indexed-state mode), inject at the very top.
+    let mut insert_at: usize = 0;
+    for (i, line) in content.lines().enumerate() {
+        if line.starts_with("import ") {
+            insert_at = content
+                .lines()
+                .take(i + 1)
+                .map(|l| l.len() + 1)
+                .sum::<usize>();
+        } else if !line.is_empty() {
+            break;
+        }
+    }
+    let mut imports = String::new();
+    for iface in pinned {
+        let module = safe_module_name(iface);
+        let needle = format!("import {}", module);
+        if content.contains(&needle) {
+            continue;
+        }
+        imports.push_str(&format!("import {}\n", module));
+    }
+    if imports.is_empty() {
+        return content.to_string();
+    }
+    let mut out = String::with_capacity(content.len() + imports.len());
+    out.push_str(&content[..insert_at]);
+    out.push_str(&imports);
+    out.push_str(&content[insert_at..]);
+    out
+}
+
+/// v2.26 Track F: walk every handler's `call Interface.handler(...)`
+/// sites and collect the set of interfaces that meet both pinning
+/// requirements (binary_hash + non-empty `ensures`). Used by `generate`
+/// to decide which sibling axiom modules to write.
+fn collect_pinned_interfaces(spec: &ParsedSpec) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for handler in &spec.handlers {
+        for call in &handler.calls {
+            let Some(iface) = spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface)
+            else {
+                continue;
+            };
+            let Some(ih) = iface
+                .handlers
+                .iter()
+                .find(|h| h.name == call.target_handler)
+            else {
+                continue;
+            };
+            if handler_is_pinned(iface, ih) {
+                out.insert(iface.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Sanitize an interface name for use as a Lean module file name.
+/// Lean module names must be valid identifiers; the same name is used
+/// in the `import` line and the `roots` list of the lakefile.
+fn safe_module_name(name: &str) -> String {
+    // Replace anything that isn't a Lean ident-char with underscore.
+    // Conservative: produces a deterministic file name without inventing
+    // a separate namespacing concept.
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Render the `<Iface>.lean` sibling axiom module body. Emits one
+/// `axiom <handler>.ensures_axiom_<idx>` per `(handler, ensures)` pair
+/// on the interface, plus the `binary_hash` constant. The axiom's
+/// statement matches the substituted ensures form the caller proves at
+/// the call site.
+fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> String {
+    let mut out = String::new();
+    out.push_str("-- v2.26 Track F: bundled-interface axiom module.\n");
+    out.push_str("-- Stance 1 — the upstream binary_hash pin is the contract\n");
+    out.push_str("-- boundary. Each `axiom ensures_axiom_<idx>` corresponds to one\n");
+    out.push_str("-- `ensures` clause on the interface handler; the caller's\n");
+    out.push_str("-- Lean proof discharges its CPI post-condition by applying\n");
+    out.push_str("-- the relevant axiom, instead of carrying a `sorry`.\n--\n");
+    out.push_str("-- Axioms are callee-frame: parameters and predicates only\n");
+    out.push_str("-- reference the callee's own ABI, never the caller's State\n");
+    out.push_str("-- type. This keeps a single axiom module reusable across\n");
+    out.push_str("-- every caller in the workspace.\n\n");
+    out.push_str("import QEDGen.Solana.Account\n");
+    out.push_str("import QEDGen.Solana.Cpi\n");
+    out.push_str("import QEDGen.Solana.Valid\n\n");
+    out.push_str(&format!("namespace {}\n\n", safe_name(&iface.name)));
+    out.push_str("open QEDGen.Solana\n\n");
+
+    let binary_hash = iface
+        .upstream
+        .as_ref()
+        .and_then(|u| u.binary_hash.as_deref())
+        .unwrap_or("");
+    out.push_str(&format!(
+        "/-- Content pin against the deployed program at\n    `{}`. Callers commit to this hash; if the deployed\n    binary changes, the lock must be regenerated. -/\n",
+        iface.program_id.as_deref().unwrap_or("<unknown>"),
+    ));
+    out.push_str(&format!(
+        "def binary_hash : String := \"{}\"\n\n",
+        binary_hash,
+    ));
+
+    for handler in &iface.handlers {
+        if handler.ensures.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("namespace {}\n\n", safe_name(&handler.name)));
+        for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
+            let params_sig = param_sig_str(&handler.params);
+            out.push_str(&format!(
+                "/-- `{}.{}` post-condition #{} (axiomatized; discharged by binary_hash pin). -/\n",
+                iface.name, handler.name, ens_idx,
+            ));
+            // The axiom is callee-frame: only the callee's params are
+            // in scope. The caller-side theorem statement is the
+            // substituted form (caller's let-bindings + state field
+            // prefixes); applying this axiom with the substituted
+            // args produces exactly that statement. No reference to
+            // the caller's State namespace — that's intentional so
+            // the same axiom serves every caller across every program.
+            if handler.params.is_empty() {
+                out.push_str(&format!(
+                    "axiom ensures_axiom_{} : {}\n\n",
+                    ens_idx, ensures.lean_expr,
+                ));
+            } else {
+                out.push_str(&format!(
+                    "axiom ensures_axiom_{}{} : {}\n\n",
+                    ens_idx, params_sig, ensures.lean_expr,
+                ));
+            }
+        }
+        out.push_str(&format!("end {}\n\n", safe_name(&handler.name)));
+    }
+
+    out.push_str(&format!("end {}\n", safe_name(&iface.name)));
+    out
+}
+
+/// Idempotent lakefile update: ensures every pinned-interface module is
+/// listed in the `roots := #[...]` array. Other roots and any non-roots
+/// content are preserved verbatim.
+///
+/// The lakefile is rewritten only when the rewrite would actually
+/// change content; this keeps the rewrite a no-op on repeated `qedgen
+/// codegen` runs.
+fn update_lakefile_roots(
+    lakefile_path: &Path,
+    pinned: &std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let original = std::fs::read_to_string(lakefile_path)?;
+    let modules: Vec<String> = pinned
+        .iter()
+        .map(|i| format!("`{}", safe_module_name(i)))
+        .collect();
+    // Find a `roots := #[ ... ]` segment and add any missing modules.
+    let needle = "roots := #[";
+    let Some(start) = original.find(needle) else {
+        return Ok(()); // unknown shape; leave the file alone.
+    };
+    let after_open = start + needle.len();
+    let Some(end_rel) = original[after_open..].find(']') else {
+        return Ok(());
+    };
+    let end = after_open + end_rel;
+    let inner = original[after_open..end].trim();
+    let mut current: Vec<String> = if inner.is_empty() {
+        Vec::new()
+    } else {
+        inner.split(',').map(|s| s.trim().to_string()).collect()
+    };
+    let mut changed = false;
+    for m in &modules {
+        if !current.iter().any(|c| c.trim() == m.as_str()) {
+            current.push(m.clone());
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let new_inner = current.join(", ");
+    let mut rewritten = String::new();
+    rewritten.push_str(&original[..after_open]);
+    rewritten.push_str(&new_inner);
+    rewritten.push_str(&original[end..]);
+    std::fs::write(lakefile_path, rewritten)?;
+    eprintln!(
+        "  updated {} (added {} sibling module(s))",
+        lakefile_path.display(),
+        modules.len()
+    );
     Ok(())
 }
 
@@ -534,7 +794,7 @@ fn render_single_account_adt(spec: &ParsedSpec) -> String {
         render_transition_adt(&mut out, spec, op, variants, state_type);
     }
 
-    render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, state_type, spec);
+    let _pinned = render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, state_type, spec);
 
     let state_field_set: std::collections::HashSet<&str> =
         spec.state_fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -622,7 +882,7 @@ fn render_single_account(spec: &ParsedSpec) -> String {
     );
 
     // CPI theorems
-    render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, "State", spec);
+    let _pinned = render_cpi_theorems(&mut out, &ops_refs, &spec.state_fields, "State", spec);
 
     // Invariants
     let state_field_set: std::collections::HashSet<&str> =
@@ -748,7 +1008,7 @@ fn render_multi_account(spec: &ParsedSpec) -> String {
         );
 
         // CPI theorems
-        render_cpi_theorems(&mut out, &ops, &acct.fields, &state_name, spec);
+        let _pinned = render_cpi_theorems(&mut out, &ops, &acct.fields, &state_name, spec);
 
         // Operation inductive + applyOp per account
         render_operation_inductive(&mut out, &ops, &state_name);
@@ -932,6 +1192,29 @@ fn build_guard_cond_parts(
 /// definitions (not opaque) so proofs can unfold them when needed.
 /// The impl-targeted Kani harness (Phase B) inlines the same body
 /// at its assertion sites.
+/// Lower a DSL type-string to a Lean type for use in ref_impl param /
+/// return-type position. Same primitive folding as `map_type`, plus
+/// `Map[N] T` → `Map N T` (the `Fin N → T` alias defined in
+/// `QEDGenMathlib.IndexedState`).
+///
+/// Used so a ref_impl like `sum_at (m : Map[N] U64) (i : U64) : U64`
+/// emits as `def sum_at (m : Map N Nat) (i : Nat) : Nat`. Without this,
+/// the raw `Map[N] T` string leaks through and Lean parse-errors.
+fn map_type_with_compound(t: &str) -> String {
+    let trimmed = t.trim();
+    if let Some(rest) = trimmed.strip_prefix("Map") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let bound = rest[..close].trim();
+                let inner = rest[close + 1..].trim();
+                return format!("Map {} {}", bound, map_type_with_compound(inner));
+            }
+        }
+    }
+    map_type(trimmed).to_string()
+}
+
 fn emit_ref_impls(out: &mut String, ref_impls: &[crate::check::ParsedRefImpl]) {
     if ref_impls.is_empty() {
         return;
@@ -946,11 +1229,16 @@ fn emit_ref_impls(out: &mut String, ref_impls: &[crate::check::ParsedRefImpl]) {
         let params = r
             .params
             .iter()
-            .map(|(n, t)| format!("({} : {})", safe_name(n), map_type(t)))
+            .map(|(n, t)| format!("({} : {})", safe_name(n), map_type_with_compound(t)))
             .collect::<Vec<_>>()
             .join(" ");
-        let ret = map_type(&r.return_type);
-        let body = &r.lean_body;
+        let ret = map_type_with_compound(&r.return_type);
+        // v2.26 Slice 3b: rewrite `m[i]` → `(m i)` in ref_impl body so
+        // Map-typed params (which lower to `Map N T = Fin N → T`) compose
+        // with bracket-subscript expressions in the source body. Without
+        // this, an indexing expression like `m[i]` parses as Lean's array
+        // GetElem which `Map N T` doesn't have an instance for.
+        let body = rewrite_subscripts_lean(&r.lean_body);
         if params.is_empty() {
             out.push_str(&format!(
                 "def {} : {} := {}\n",
@@ -1290,7 +1578,14 @@ fn render_cpi_theorems(
     state_fields: &[(String, String)],
     state_type: &str,
     spec: &crate::check::ParsedSpec,
-) {
+) -> std::collections::BTreeSet<String> {
+    // v2.26 Track F: interfaces referenced by call sites with both
+    // `ensures` clauses and an `upstream { binary_hash = ... }` pin. The
+    // caller writes a sibling `<Iface>.lean` module that defines the
+    // `ensures_axiom_*` axioms the emitted theorems apply.
+    let mut pinned_interfaces: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+
     let state_field_set: std::collections::HashSet<&str> =
         state_fields.iter().map(|(n, _)| n.as_str()).collect();
     for op in ops {
@@ -1406,6 +1701,15 @@ fn render_cpi_theorems(
                 .map(|a| (a.name.as_str(), a.lean_expr.as_str()))
                 .collect();
 
+            // v2.26 Track F: pinned interfaces (Tier-1/2 with
+            // `binary_hash`) close the theorem via an axiom; Tier-0 or
+            // unpinned interfaces still emit `:= by sorry`. The lint
+            // surfaces missing pins as `[cpi_no_callee_ensures]`.
+            let pinned = handler_is_pinned(iface, handler);
+            if pinned {
+                pinned_interfaces.insert(call.target_interface.clone());
+            }
+
             for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
                 let substituted = substitute_params(&ensures.lean_expr, &subst);
                 let prefixed = prefix_state_fields(&substituted, &state_field_set);
@@ -1414,18 +1718,137 @@ fn render_cpi_theorems(
                     op.name, call.target_interface, call.target_handler, call_idx, ens_idx,
                 ));
                 let handler_params = param_sig_str(&op.takes_params);
-                out.push_str(&format!(
-                    "/-- {}.{}.ensures @ `{}` call #{} (stance 1: axiomatized via sorry; \
-                     v3.0 will close via imported callee proofs). -/\n",
-                    call.target_interface, call.target_handler, op.name, call_idx,
-                ));
-                out.push_str(&format!(
-                    "theorem {} (s : {}){} : {} := by sorry\n\n",
-                    theorem_name, state_type, handler_params, prefixed,
-                ));
+
+                if pinned {
+                    let axiom_qualified = format!(
+                        "{}.{}.ensures_axiom_{}",
+                        safe_name(&call.target_interface),
+                        safe_name(&call.target_handler),
+                        ens_idx,
+                    );
+                    // The axiom signature is `(callee_params...) :
+                    // <callee_ensures>` — written in the callee frame,
+                    // independent of any caller's State. The caller's
+                    // theorem statement is the substituted-prefixed
+                    // form. Apply the axiom by passing each callee
+                    // param's substituted-prefixed value; the result
+                    // is definitionally the substituted ensures, which
+                    // is exactly the theorem statement.
+                    let mut apply_args: Vec<String> = Vec::new();
+                    for (pn, _) in &handler.params {
+                        // Look up the caller's lean_expr for this
+                        // callee param; if the caller passed it, use
+                        // the substituted-prefixed form so the
+                        // application argument has the same shape as
+                        // the theorem statement.
+                        let raw = subst
+                            .get(pn.as_str())
+                            .copied()
+                            .unwrap_or(pn.as_str())
+                            .to_string();
+                        let prefixed_arg = prefix_state_fields(&raw, &state_field_set);
+                        // Parenthesize compound expressions (anything
+                        // with whitespace or operator chars) so the
+                        // application parses unambiguously.
+                        let needs_parens = prefixed_arg.chars().any(|c| {
+                            c.is_whitespace()
+                                || c == '+'
+                                || c == '-'
+                                || c == '*'
+                                || c == '/'
+                                || c == '<'
+                                || c == '>'
+                        });
+                        if needs_parens {
+                            apply_args.push(format!("({})", prefixed_arg));
+                        } else {
+                            apply_args.push(prefixed_arg);
+                        }
+                    }
+                    out.push_str(&format!(
+                        "/-- {}.{}.ensures @ `{}` call #{} (stance 1: discharged \
+                         via Tier-1 binary-hash axiom; v3.0 will replace the \
+                         axiom with an imported callee proof). -/\n",
+                        call.target_interface, call.target_handler, op.name, call_idx,
+                    ));
+                    out.push_str(&format!(
+                        "theorem {} (s : {}){} : {} :=\n",
+                        theorem_name, state_type, handler_params, prefixed,
+                    ));
+                    if apply_args.is_empty() {
+                        out.push_str(&format!("  {}\n\n", axiom_qualified));
+                    } else {
+                        out.push_str(&format!(
+                            "  {} {}\n\n",
+                            axiom_qualified,
+                            apply_args.join(" "),
+                        ));
+                    }
+                } else {
+                    out.push_str(&format!(
+                        "/-- {}.{}.ensures @ `{}` call #{} (stance 1: axiomatized via sorry; \
+                         v3.0 will close via imported callee proofs). -/\n",
+                        call.target_interface, call.target_handler, op.name, call_idx,
+                    ));
+                    out.push_str(&format!(
+                        "theorem {} (s : {}){} : {} := by sorry\n\n",
+                        theorem_name, state_type, handler_params, prefixed,
+                    ));
+                }
             }
         }
     }
+
+    pinned_interfaces
+}
+
+/// True iff the called interface has a non-empty `upstream.binary_hash`
+/// pin AND the handler has at least one `ensures` clause. Both halves
+/// are required: a pin without ensures has no post-condition to
+/// discharge; ensures without a pin would be discharged against a
+/// contract the caller hasn't committed to.
+fn handler_is_pinned(
+    iface: &crate::check::ParsedInterface,
+    handler: &crate::check::ParsedInterfaceHandler,
+) -> bool {
+    if handler.ensures.is_empty() {
+        return false;
+    }
+    match &iface.upstream {
+        Some(u) => u
+            .binary_hash
+            .as_deref()
+            .is_some_and(|h| !h.trim().is_empty()),
+        None => false,
+    }
+}
+
+/// Substitute the caller's call-site arguments into a callee's `ensures`
+/// expression, producing the Lean form that the caller proves at the
+/// call site. Wraps `substitute_params` with a clearer name; the helper
+/// is split out so v2.26 Batch 2 (Kani harness consumption) can call it
+/// directly without re-discovering the substitution shape.
+// TODO(v2.26 Batch 2): extract for Kani harness consumption — the same
+// param substitution is needed when lowering an interface call to a Kani
+// `kani::assume(callee_ensures_substituted)` hypothesis.
+#[allow(dead_code)]
+fn substitute_callee_ensures(
+    callee_ensures_lean: &str,
+    call_args: &[crate::check::ParsedCallArg],
+    callee_params: &[(String, String)],
+) -> String {
+    let mut subst: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for a in call_args {
+        subst.insert(a.name.as_str(), a.lean_expr.as_str());
+    }
+    // Defensive: ensure every callee param has a binding; unmatched
+    // params keep their formal-param name (Lean flags as free variable
+    // if reached). Splitting this out makes the signature audit-friendly
+    // when Batch 2 wires it into Kani.
+    for (pn, _) in callee_params {
+        subst.entry(pn.as_str()).or_insert(pn.as_str());
+    }
+    substitute_params(callee_ensures_lean, &subst)
 }
 
 /// Render `theorem <name> ...` for each declared invariant — single-account

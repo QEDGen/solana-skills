@@ -204,6 +204,33 @@ pub fn entry_for_resolved(
     }
 }
 
+/// Build a lock entry for a bundled-stdlib builtin import
+/// (v2.26 Track F). No manifest dep descriptor exists, so the source
+/// is recorded as `builtin:<key>` and version/ref fields are derived
+/// from the imported interface's `upstream` block (when present).
+#[allow(dead_code)]
+pub fn entry_for_builtin(
+    resolved: &crate::import_resolver::ResolvedImport,
+    iface: &crate::check::ParsedInterface,
+) -> LockEntry {
+    let spec_hash = compute_spec_hash(&resolved.sources);
+    let (upstream_binary_hash, upstream_version) = match &iface.upstream {
+        Some(u) => (u.binary_hash.clone(), u.version.clone()),
+        None => (None, None),
+    };
+    LockEntry {
+        name: resolved.dep_key.clone(),
+        source: format!("builtin:{}", resolved.dep_key),
+        spec_hash,
+        git_ref: None,
+        resolved_commit: None,
+        path: None,
+        program_id: iface.program_id.clone(),
+        upstream_binary_hash,
+        upstream_version,
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Reconciling the computed lock with disk
 // ----------------------------------------------------------------------------

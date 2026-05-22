@@ -7,11 +7,13 @@
 
 spec Escrow
 
-// v2.8 G1 — Token interface arrives via the qed.toml manifest entry
-// for `spl_token`, which points at the canonical
-// interfaces/spl_token.qedspec at the workspace root. Replaces the
-// pre-v2.8 inlined `interfaces/token.qedspec` fragment.
-import Token from "spl_token"
+// v2.26 Track F — Token interface arrives via the bundled-stdlib `spl`
+// builtin (no qed.toml entry needed). Replaces the v2.8 G1 path
+// dependency at `interfaces/spl_token.qedspec` with the binary-bundled
+// fixture, so the spec compiles standalone. The Tier-1 binary_hash pin
+// on the interface lets the generated Lean theorems discharge
+// `Token.transfer.ensures_axiom_*` instead of `by sorry`.
+import Token from "spl"
 
 type State
   | Uninitialized

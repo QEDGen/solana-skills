@@ -1,0 +1,92 @@
+// QEDGen bundled library interface — SPL Token (Tier 1).
+//
+// This file ships with the qedgen binary. Specs reference it via
+//   import Token from "spl"
+// without declaring `spl` in their qed.toml — the builtin keys ("spl",
+// "system") are recognized by the resolver directly. See
+// crates/qedgen/src/import_resolver.rs.
+//
+// The `upstream { binary_hash = ... }` pin is the contract boundary:
+// when the spec author commits to that hash, the caller's Lean proofs
+// may discharge SPL Token's `ensures` clauses by appeal to the bundled
+// `Token.<handler>.ensures_axiom_<idx>` axiom, instead of `sorry`. The
+// hash is a content pin against the canonical SPL Token program ID
+// `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` at version v4.0.3.
+//
+// See docs/design/spec-composition.md §2 "Tier 1 — effects hand-authored."
+
+spec SplTokenInterface
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    source       "https://github.com/solana-program/token/tree/v4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    verified_with ["proptest"]
+    verified_at  "2026-05-22"
+  }
+
+  /// Transfer `amount` tokens from `from` to `to`, authorized by `authority`.
+  /// Balance-preserving: total supply unchanged, individual balances shift.
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable, type token
+      to        : writable, type token
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Mint `amount` new tokens to `to`, authorized by `mint_authority`.
+  /// Not balance-preserving: total supply grows by `amount`.
+  handler mint_to (amount : U64) {
+    discriminant "0x07"
+    accounts {
+      mint            : writable
+      to              : writable, type token
+      mint_authority  : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Burn `amount` tokens from `from`, authorized by `authority`.
+  /// Not balance-preserving: total supply shrinks by `amount`.
+  handler burn (amount : U64) {
+    discriminant "0x08"
+    accounts {
+      from      : writable, type token
+      mint      : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Initialize a new token account owned by `owner` for `mint`.
+  /// Account pre-state: uninitialized. Post-state: zero balance, owned by `owner`.
+  handler initialize_account {
+    discriminant "0x01"
+    accounts {
+      account : writable
+      mint    : readonly
+      owner   : readonly
+      rent    : readonly
+    }
+  }
+
+  /// Close `account`, draining rent lamports to `destination`.
+  handler close_account {
+    discriminant "0x09"
+    accounts {
+      account     : writable, type token
+      destination : writable
+      authority   : signer
+    }
+  }
+}

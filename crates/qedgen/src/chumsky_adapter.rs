@@ -1750,6 +1750,29 @@ fn collect_uninterpreted_helpers(
                     &mut seen,
                 );
             }
+            // v2.26 Slice 3a — walk ref_impl bodies too. Without this,
+            // a helper called only from a ref_impl body (e.g.
+            // `mul_div_floor`-like names that aren't builtins or other
+            // ref_impls) never enters the uninterpreted-helper bag, and
+            // Lean fails elaboration on the unresolved name. The
+            // post-walk ref_impl-name filter (`out.uninterpreted_helpers
+            // .retain(...)`) strips out names that are themselves
+            // ref_impls so the `def`/`opaque` declarations don't
+            // collide.
+            TopItem::RefImpl(r) => {
+                let param_types: std::collections::HashMap<String, String> = r
+                    .params
+                    .iter()
+                    .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
+                    .collect();
+                walk_apps(
+                    &r.body.node,
+                    &field_types,
+                    &param_types,
+                    &mut out,
+                    &mut seen,
+                );
+            }
             _ => {}
         }
     }
@@ -1876,6 +1899,178 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
             typecheck_handler(h, &field_types, &param_types, &const_literals)?;
         }
     }
+
+    // v2.26 Slice 3a — reject recursive `ref_impl`s (direct or mutual).
+    // Termination + Lean `def` lowering for recursive ref_impls becomes
+    // a meta-question we don't need to answer for the LP-shape sweet
+    // spot. Lean would emit a non-terminating `def` and fail
+    // elaboration; better to surface this at adapt time with a clear
+    // fix-it pointing at structural decomposition.
+    check_no_recursive_ref_impls(spec)?;
+
+    Ok(())
+}
+
+/// Collect every function name referenced as `Expr::App { func, .. }`
+/// anywhere in `expr`. Used by the ref_impl recursion checker — direct
+/// and mutual recursion both manifest as a ref_impl body calling
+/// another (or itself).
+fn collect_app_funcs(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::App { func, args } => {
+            out.insert(func.clone());
+            for n in args {
+                collect_app_funcs(&n.node, out);
+            }
+        }
+        Expr::BoolOp { lhs, rhs, .. }
+        | Expr::Cmp { lhs, rhs, .. }
+        | Expr::Arith { lhs, rhs, .. } => {
+            collect_app_funcs(&lhs.node, out);
+            collect_app_funcs(&rhs.node, out);
+        }
+        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
+            collect_app_funcs(&inner.node, out);
+        }
+        Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
+            collect_app_funcs(&body.node, out);
+        }
+        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+            collect_app_funcs(&a.node, out);
+            collect_app_funcs(&b.node, out);
+            collect_app_funcs(&d.node, out);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_app_funcs(&cond.node, out);
+            collect_app_funcs(&then_branch.node, out);
+            collect_app_funcs(&else_branch.node, out);
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_app_funcs(&scrutinee.node, out);
+            for arm in arms {
+                collect_app_funcs(&arm.body.node, out);
+            }
+        }
+        Expr::Let { value, body, .. } => {
+            collect_app_funcs(&value.node, out);
+            collect_app_funcs(&body.node, out);
+        }
+        Expr::Ctor {
+            payload: Some(p), ..
+        } => {
+            collect_app_funcs(&p.node, out);
+        }
+        Expr::RecordLit(fields) => {
+            for (_, v) in fields {
+                collect_app_funcs(&v.node, out);
+            }
+        }
+        Expr::RecordUpdate { base, updates } => {
+            collect_app_funcs(&base.node, out);
+            for (_, v) in updates {
+                collect_app_funcs(&v.node, out);
+            }
+        }
+        Expr::IsVariant { scrutinee, .. } => {
+            collect_app_funcs(&scrutinee.node, out);
+        }
+        Expr::Field { base, .. } => {
+            collect_app_funcs(&base.node, out);
+        }
+        _ => {}
+    }
+}
+
+/// v2.26 Slice 3a — reject recursive `ref_impl`s. Walks the spec's
+/// ref_impl bodies, builds the call graph restricted to ref_impl names,
+/// and DFS-detects any cycle. Direct (`r calls r`) and mutual
+/// (`r → s → r`) recursion both fail with a fix-it pointing at
+/// structural decomposition (split into a non-recursive helper +
+/// state-bearing handler).
+fn check_no_recursive_ref_impls(spec: &a::Spec) -> anyhow::Result<()> {
+    // Gather ref_impl names + their bodies.
+    let mut ref_impls: Vec<(String, &Node<Expr>)> = Vec::new();
+    for Node { node, .. } in &spec.items {
+        if let TopItem::RefImpl(r) = node {
+            ref_impls.push((r.name.clone(), &r.body));
+        }
+    }
+    if ref_impls.is_empty() {
+        return Ok(());
+    }
+    let ref_impl_names: std::collections::HashSet<String> =
+        ref_impls.iter().map(|(n, _)| n.clone()).collect();
+
+    // Build the per-impl set of called ref_impl names. Calls to
+    // non-ref_impl functions (builtins, uninterpreted helpers,
+    // mul_div_*) are ignored.
+    let mut call_graph: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (name, body) in &ref_impls {
+        let mut calls = std::collections::HashSet::new();
+        collect_app_funcs(&body.node, &mut calls);
+        let edges: Vec<String> = calls
+            .into_iter()
+            .filter(|f| ref_impl_names.contains(f))
+            .collect();
+        call_graph.insert(name.clone(), edges);
+    }
+
+    // DFS cycle detection: WHITE (unvisited), GRAY (on stack), BLACK
+    // (fully explored). A back-edge to GRAY signals a cycle.
+    enum Color {
+        Gray,
+        Black,
+    }
+    let mut color: std::collections::HashMap<String, Color> = std::collections::HashMap::new();
+
+    fn visit(
+        node: &str,
+        graph: &std::collections::HashMap<String, Vec<String>>,
+        color: &mut std::collections::HashMap<String, Color>,
+        stack: &mut Vec<String>,
+    ) -> anyhow::Result<()> {
+        color.insert(node.to_string(), Color::Gray);
+        stack.push(node.to_string());
+        if let Some(succs) = graph.get(node) {
+            for next in succs {
+                match color.get(next) {
+                    Some(Color::Gray) => {
+                        // Cycle. Find the start of the cycle in `stack`.
+                        let cycle_start = stack.iter().position(|n| n == next).unwrap_or(0);
+                        let mut cycle: Vec<&str> =
+                            stack[cycle_start..].iter().map(|s| s.as_str()).collect();
+                        cycle.push(next.as_str());
+                        let chain = cycle.join(" -> ");
+                        anyhow::bail!(
+                            "recursive `ref_impl` not supported: {chain}\n\
+                             v2.26 rejects direct and mutual recursion in `ref_impl` bodies.\n\
+                             Fix: split into a non-recursive helper plus a state-bearing handler.\n\
+                             Termination + Lean `def` lowering for recursive refs is a meta-question\n\
+                             outside the LP-shape scope this construct targets."
+                        );
+                    }
+                    Some(Color::Black) => continue,
+                    None => visit(next, graph, color, stack)?,
+                }
+            }
+        }
+        stack.pop();
+        color.insert(node.to_string(), Color::Black);
+        Ok(())
+    }
+
+    for (name, _) in &ref_impls {
+        if !color.contains_key(name) {
+            let mut stack: Vec<String> = Vec::new();
+            visit(name, &call_graph, &mut color, &mut stack)?;
+        }
+    }
+
     Ok(())
 }
 

@@ -137,22 +137,30 @@ fn resolve_recursive(
     chain: &mut Vec<String>,
 ) -> Result<()> {
     for imp in imports {
-        let dep = manifest.dependencies.get(&imp.from).ok_or_else(|| {
-            anyhow!(
-                "import `{}` references manifest dep `{}`, but no such entry in qed.toml under [dependencies] (looking in {})",
-                imp.name,
-                imp.from,
-                manifest_dir.display(),
-            )
-        })?;
-
-        let res = match dep {
-            Dependency::Path { path } => resolve_path_dep(&imp.name, path, manifest_dir)?,
-            Dependency::Github {
-                repo,
-                git_ref,
-                path,
-            } => resolve_github_dep(&imp.name, repo, git_ref, path.as_deref(), cache_opts)?,
+        // v2.26 Track F (4a-3): builtin stdlib short-circuit. Keys "spl"
+        // and "system" point at bundled `.qedspec` fixtures shipped with
+        // the qedgen binary. The manifest doesn't need to declare them;
+        // they're always available. Materialize to the cache once and
+        // resolve as if they were a path dep.
+        let res = if let Some(builtin) = builtin_source(&imp.from) {
+            resolve_builtin_dep(&imp.from, builtin)?
+        } else {
+            let dep = manifest.dependencies.get(&imp.from).ok_or_else(|| {
+                anyhow!(
+                    "import `{}` references manifest dep `{}`, but no such entry in qed.toml under [dependencies] (looking in {})",
+                    imp.name,
+                    imp.from,
+                    manifest_dir.display(),
+                )
+            })?;
+            match dep {
+                Dependency::Path { path } => resolve_path_dep(&imp.name, path, manifest_dir)?,
+                Dependency::Github {
+                    repo,
+                    git_ref,
+                    path,
+                } => resolve_github_dep(&imp.name, repo, git_ref, path.as_deref(), cache_opts)?,
+            }
         };
 
         // Canonical source path = canonicalized first source file.
@@ -533,6 +541,60 @@ fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 // ----------------------------------------------------------------------------
+// Builtin stdlib (v2.26 Track F)
+// ----------------------------------------------------------------------------
+
+/// Bundled SPL Token interface fixture. Tier 1 — `ensures` clauses backed
+/// by an `upstream { binary_hash = ... }` pin so callers can discharge
+/// post-conditions via the bundled axiom module instead of `sorry`.
+const BUILTIN_SPL_TOKEN: &str = include_str!("../data/interfaces/spl_token.qedspec");
+
+/// Bundled System Program interface fixture (Tier 1).
+const BUILTIN_SYSTEM: &str = include_str!("../data/interfaces/system.qedspec");
+
+/// Returns the bundled `.qedspec` source for a builtin import key, or
+/// `None` if `key` isn't a recognized builtin.
+///
+/// Recognized keys (case-sensitive):
+/// - `"spl"` → SPL Token program
+/// - `"system"` → System Program
+pub fn builtin_source(key: &str) -> Option<&'static str> {
+    match key {
+        "spl" => Some(BUILTIN_SPL_TOKEN),
+        "system" => Some(BUILTIN_SYSTEM),
+        _ => None,
+    }
+}
+
+/// True iff every import key is a recognized builtin. Used by
+/// `check.rs::resolve_and_merge_imports` to skip the `qed.toml`
+/// requirement when consumers only use bundled stdlib interfaces.
+pub fn all_imports_are_builtins(imports: &[ParsedImport]) -> bool {
+    !imports.is_empty() && imports.iter().all(|i| builtin_source(&i.from).is_some())
+}
+
+/// Materialize a builtin fixture to `<cache_root>/builtin/<key>/<key>.qedspec`
+/// and return its source. The cache dir is created fresh each time only if
+/// the file is missing — once written, the same path is reused for cycle /
+/// conflict detection. Stable canonical paths matter for the resolver's
+/// dedup logic.
+fn resolve_builtin_dep(key: &str, source: &'static str) -> Result<ResolvedSource> {
+    let cache_root = cache_root();
+    let builtin_dir = cache_root.join("builtin").join(key);
+    std::fs::create_dir_all(&builtin_dir)
+        .with_context(|| format!("creating builtin cache dir {}", builtin_dir.display()))?;
+    let file_path = builtin_dir.join(format!("{}.qedspec", key));
+    if !file_path.exists() {
+        std::fs::write(&file_path, source)
+            .with_context(|| format!("materializing builtin fixture {}", file_path.display()))?;
+    }
+    Ok(ResolvedSource {
+        sources: vec![(file_path, source.to_string())],
+        commit: None,
+    })
+}
+
+// ----------------------------------------------------------------------------
 // Spec source loading (path or cache-rooted)
 // ----------------------------------------------------------------------------
 
@@ -746,6 +808,65 @@ mod tests {
             err.contains("no such entry in qed.toml"),
             "unexpected error: {err}"
         );
+    }
+
+    // ----- v2.26 Track F: bundled-stdlib builtins -----
+
+    #[test]
+    fn builtin_source_returns_spl_and_system() {
+        let spl = builtin_source("spl").expect("spl builtin must exist");
+        assert!(
+            spl.contains("interface Token"),
+            "spl fixture has Token block"
+        );
+        assert!(
+            spl.contains("binary_hash"),
+            "spl fixture has binary_hash pin"
+        );
+
+        let system = builtin_source("system").expect("system builtin must exist");
+        assert!(
+            system.contains("interface System"),
+            "system fixture has System block"
+        );
+
+        assert!(
+            builtin_source("not_a_builtin").is_none(),
+            "unknown key returns None"
+        );
+    }
+
+    #[test]
+    fn all_imports_are_builtins_classifies_mixed_sets() {
+        let only_spl = vec![imp("Token", "spl")];
+        assert!(all_imports_are_builtins(&only_spl));
+
+        let mixed = vec![imp("Token", "spl"), imp("MyAmm", "my_amm")];
+        assert!(!all_imports_are_builtins(&mixed));
+
+        let only_path = vec![imp("MyAmm", "my_amm")];
+        assert!(!all_imports_are_builtins(&only_path));
+
+        let empty: Vec<ParsedImport> = vec![];
+        assert!(!all_imports_are_builtins(&empty));
+    }
+
+    #[test]
+    fn resolves_spl_builtin_without_manifest_entry() {
+        let _env_lock = lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let _cache_dir = EnvVarGuard::set("QEDGEN_CACHE_DIR", tmp.path());
+
+        // Empty manifest — the builtin short-circuit kicks in before
+        // the manifest lookup.
+        let manifest = manifest_with(vec![]);
+        let imports = vec![imp("Token", "spl")];
+        let resolved = resolve_imports(&imports, &manifest, Path::new(".")).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].dep_key, "spl");
+        assert!(resolved[0].sources[0]
+            .1
+            .contains("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
     }
 
     // ----- v2.9 G5: transitive resolution -----

@@ -536,6 +536,14 @@ enum Commands {
         #[arg(long)]
         frozen: bool,
 
+        /// v2.26 Slice 4c — escalate `--check-upstream`-style pin
+        /// mismatches surfaced by `--frozen` to CRIT severity, so a
+        /// stale `upstream { binary_hash }` pin fails the check instead
+        /// of just warning. Use in release-blocking CI; default `--frozen`
+        /// stays warning-only (P2) for everyday local runs.
+        #[arg(long, requires = "frozen")]
+        strict: bool,
+
         /// Force-refresh the github source cache for every imported dep.
         /// Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and
         /// re-clones. Use after a force-pushed tag or when the
@@ -634,6 +642,17 @@ enum Commands {
         /// pinned hash / no program_id) still skip cleanly. CI gate friendly.
         #[arg(long)]
         offline: bool,
+
+        /// v2.26 Slice 4c — suppress the upstream binary-hash check
+        /// even when the lock declares pinned hashes. Mismatches demote
+        /// to `Info` and the verify run stays green. Intended for
+        /// offline development; **do not** use in CI — a real stale pin
+        /// is silently masked. Pairs with the auto-on behavior of
+        /// `--check-upstream`: when any `upstream { binary_hash }` is
+        /// pinned, verify runs the check by default unless this flag is
+        /// set.
+        #[arg(long)]
+        upstream_stale_ok: bool,
 
         /// Run probe reproducers under `<project>/target/qedgen-repros/`
         /// (PLAN-v2.16 D4). Each repro is a Mollusk-driven Rust test
@@ -2235,6 +2254,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             asm,
             json,
             frozen,
+            strict,
             no_cache,
             regen_drift,
             examples_root,
@@ -2297,6 +2317,50 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             };
 
             let mut has_issues = false;
+
+            // v2.26 Slice 4c — `check --frozen` runs the upstream
+            // binary-hash diff opportunistically. Mismatches surface as
+            // P2 warnings (`has_issues` stays false; exit zero) so a
+            // routine CI run that misses a redeploy still draws
+            // attention without blocking. `--strict` escalates mismatch
+            // to CRIT and gates exit, matching the verify behavior.
+            //
+            // Fetch errors (missing `solana` CLI, no network) never
+            // gate either mode — they always surface as P2 so a sandbox
+            // without the Solana toolchain doesn't false-positive CI.
+            if frozen {
+                let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+                let pinned = qed_lock::read(spec_dir)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    .map(upstream_check::lock_has_pinned_hash)
+                    .unwrap_or(false);
+                if pinned {
+                    match upstream_check::check_lock(spec_dir, None, false) {
+                        Ok(results) => {
+                            let gate = if strict {
+                                upstream_check::Gate::CheckFrozenStrict
+                            } else {
+                                upstream_check::Gate::CheckFrozen
+                            };
+                            let routed = upstream_check::route_findings(results, gate);
+                            let blocking = upstream_check::print_routed_report(&routed);
+                            if blocking {
+                                has_issues = true;
+                            }
+                        }
+                        Err(e) => {
+                            // Couldn't open the lock to dispatch — surface
+                            // a P2-equivalent note but never gate exit
+                            // (parity with the verify path's Error
+                            // routing). `--strict` users see the message;
+                            // they decide whether to investigate.
+                            eprintln!("note: --frozen upstream check skipped: {}", e);
+                        }
+                    }
+                }
+            }
 
             // sBPF verification (--asm)
             if let Some(ref asm_path) = asm {
@@ -2546,6 +2610,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             check_upstream,
             rpc_url,
             offline,
+            upstream_stale_ok,
             probe_repros,
             crucible,
             crucible_harness_dir,
@@ -2561,22 +2626,58 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
 
-            // v2.8 G5: --check-upstream is a separate verification stage
-            // from the proptest/kani/lean backends — it diffs each
+            // v2.8 G5 / v2.26 Slice 4c: --check-upstream diffs each
             // imported library's pinned binary hash against the on-chain
             // `.so` via `solana program dump`. Runs independently so
             // users can `--check-upstream` without re-running the harnesses.
             // F6 fold-in: --offline refuses any network fetch.
-            if check_upstream {
-                let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+            //
+            // v2.26 Slice 4c — auto-on when `qed.lock` declares any
+            // pinned `upstream_binary_hash`. Explicit `--check-upstream`
+            // still works (and is the right flag in scripts / CI), but
+            // skipping it no longer silently bypasses the gate. Pair
+            // with `--upstream-stale-ok` to suppress the check for
+            // offline dev runs.
+            let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
+            let run_upstream = if upstream_stale_ok {
+                // Honor the suppression flag even when --check-upstream
+                // is explicit — `upstream-stale-ok` is the local-dev
+                // escape hatch, not a "render warnings anyway" knob.
+                false
+            } else if check_upstream {
+                true
+            } else {
+                // Auto-on detection: only when a qed.lock exists and
+                // at least one entry has a populated binary_hash pin.
+                qed_lock::read(spec_dir)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    .map(upstream_check::lock_has_pinned_hash)
+                    .unwrap_or(false)
+            };
+            if run_upstream {
                 let results = upstream_check::check_lock(spec_dir, rpc_url.as_deref(), offline)?;
-                let any_failure = upstream_check::print_report(&results);
-                if any_failure {
+                let gate = upstream_check::Gate::Verify;
+                let routed = upstream_check::route_findings(results, gate);
+                let blocking = upstream_check::print_routed_report(&routed);
+                if blocking {
                     std::process::exit(1);
                 }
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
+                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
+                if check_upstream && !any_backend_flag {
+                    return Ok(());
+                }
+            } else if check_upstream && upstream_stale_ok {
+                // The combination is explicitly allowed — emit a single
+                // breadcrumb so the operator knows the gate was honored
+                // but the suppression flag won.
+                eprintln!(
+                    "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
+                );
                 let any_backend_flag = proptest || kani || lean || miri || probe_repros;
                 if !any_backend_flag {
                     return Ok(());

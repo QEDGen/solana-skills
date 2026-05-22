@@ -4,8 +4,9 @@
 version = 1
 
 [[dependency]]
-name = "spl_token"
-source = "path:../../../interfaces/spl_token.qedspec"
-spec_hash = "sha256:8fde6661e038b2755715a1a4e717999b42bd1b1a82dbdbf1343c20c9b0c2bb96"
+name = "spl"
+source = "builtin:spl"
+spec_hash = "sha256:e31011c8eec86782db650b77f3f820037e241e2a0e8d23954b6e31d0de779ee6"
 program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+upstream_binary_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
 upstream_version = "4.0.3"

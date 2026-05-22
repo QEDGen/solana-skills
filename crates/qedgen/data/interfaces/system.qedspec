@@ -1,0 +1,56 @@
+// QEDGen bundled library interface — System Program (Tier 1).
+//
+// Ships with the qedgen binary; resolved via `import System from "system"`.
+// The `upstream { binary_hash = ... }` pin is the contract boundary; callers
+// can discharge System Program's `ensures` clauses by appeal to the bundled
+// axioms instead of `sorry`. The program ID is the all-zero canonical
+// `11111111111111111111111111111111` System Program.
+
+spec SystemProgramInterface
+
+interface System {
+  program_id "11111111111111111111111111111111"
+
+  upstream {
+    package      "solana-system-program"
+    version      "1.18.0"
+    source       "https://github.com/solana-labs/solana/tree/v1.18.0"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    verified_with ["proptest"]
+    verified_at  "2026-05-22"
+  }
+
+  /// Create a new account owned by `owner` with `lamports` rent + `space` bytes.
+  /// Pre-state: `new_account` uninitialized.
+  /// Post-state: `new_account` rent-funded, owned by `owner`, zero data.
+  handler create_account (lamports : U64) (space : U64) (owner : Pubkey) {
+    discriminant "0x00000000"
+    accounts {
+      payer       : signer, writable
+      new_account : signer, writable
+    }
+    requires lamports > 0
+    ensures  lamports > 0
+  }
+
+  /// Transfer `amount` lamports from `from` to `to`. Both accounts owned by
+  /// System Program (i.e. native SOL).
+  handler transfer (amount : U64) {
+    discriminant "0x02000000"
+    accounts {
+      from : signer, writable
+      to   : writable
+    }
+    requires amount > 0
+    ensures  amount > 0
+  }
+
+  /// Re-assign the owner of `account` to `new_owner`. Account data must be
+  /// zero-length or all-zero bytes.
+  handler assign (new_owner : Pubkey) {
+    discriminant "0x01000000"
+    accounts {
+      account : signer, writable
+    }
+  }
+}

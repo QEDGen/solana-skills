@@ -1482,16 +1482,25 @@ fn resolve_and_merge_imports(
         return Ok(());
     }
 
-    // Locate qed.toml. Required when imports are present.
+    // Locate qed.toml. Required when imports are present, EXCEPT when
+    // every import resolves to a bundled-stdlib builtin (`from "spl"`,
+    // `from "system"`). The resolver short-circuits those before
+    // consulting the manifest, so an empty manifest is fine.
     let manifest = match crate::qed_manifest::load_from_dir(manifest_dir)? {
         Some(m) => m,
-        None => anyhow::bail!(
-            "spec has {} `import` statement(s) but no `qed.toml` next to it (expected at {})",
-            parsed.imports.len(),
-            manifest_dir
-                .join(crate::qed_manifest::MANIFEST_FILENAME)
-                .display(),
-        ),
+        None => {
+            if crate::import_resolver::all_imports_are_builtins(&parsed.imports) {
+                crate::qed_manifest::Manifest::default()
+            } else {
+                anyhow::bail!(
+                    "spec has {} `import` statement(s) but no `qed.toml` next to it (expected at {})",
+                    parsed.imports.len(),
+                    manifest_dir
+                        .join(crate::qed_manifest::MANIFEST_FILENAME)
+                        .display(),
+                )
+            }
+        }
     };
 
     let resolved = crate::import_resolver::resolve_imports_with_opts(
@@ -1547,11 +1556,16 @@ fn resolve_and_merge_imports(
         // resolved import (sources + commit), the manifest dep descriptor
         // (source kind + ref), and the imported interface (carries
         // program_id and the optional upstream block).
-        let dep = manifest
-            .dependencies
-            .get(&r.dep_key)
-            .expect("resolver only returns deps that are in the manifest");
-        let lock_entry = crate::qed_lock::entry_for_resolved(&r, dep, iface);
+        //
+        // Bundled-stdlib builtins (v2.26 Track F) don't appear in
+        // `manifest.dependencies`; their lock entry uses a synthetic
+        // `builtin:<key>` source identifier so reproducibility is still
+        // recorded but no manifest entry is consulted.
+        let lock_entry = if let Some(dep) = manifest.dependencies.get(&r.dep_key) {
+            crate::qed_lock::entry_for_resolved(&r, dep, iface)
+        } else {
+            crate::qed_lock::entry_for_builtin(&r, iface)
+        };
         lock.dependencies.push(lock_entry);
 
         // F5 fold-in: apply the optional `as <alias>` rename when merging
@@ -3764,6 +3778,11 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // program is verified." See docs/design/spec-composition.md §2.
     warnings.extend(check_shape_only_cpi(spec));
 
+    // v2.26 Track F: complement to shape_only_cpi — flags declared handlers
+    // with no `ensures` clauses, since the caller's Lean theorem still has
+    // to carry `by sorry` in that case.
+    warnings.extend(check_cpi_no_callee_ensures(spec));
+
     // PDA seed collision: two PDA declarations with identical seed tuples resolve
     // to the same on-chain address — a common source of account confusion bugs.
     warnings.extend(check_pda_collisions(spec));
@@ -5011,6 +5030,65 @@ fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarn
     warnings
 }
 
+/// v2.26 Track F lint: `cpi_no_callee_ensures` flags a `call
+/// Interface.handler(...)` site whose interface handler has no
+/// `ensures` clauses. The caller's Lean proof carries a `by sorry` at
+/// the call site (Tier-0 axiomatization) because there's no
+/// post-condition to discharge. Adding an `ensures` clause — even a
+/// trivial one — gives the caller a binding hypothesis after the call.
+///
+/// Distinct from `shape_only_cpi` (v2.24 #15, which flags missing
+/// interface / handler declarations) — this one fires on declared
+/// handlers that simply have no post-condition shape.
+fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for handler in &spec.handlers {
+        for call in &handler.calls {
+            let Some(iface) = spec
+                .interfaces
+                .iter()
+                .find(|i| i.name == call.target_interface)
+            else {
+                continue; // shape_only_cpi handles undeclared interfaces.
+            };
+            let Some(ih) = iface
+                .handlers
+                .iter()
+                .find(|h| h.name == call.target_handler)
+            else {
+                continue; // shape_only_cpi handles undeclared handlers.
+            };
+            if !ih.ensures.is_empty() {
+                continue;
+            }
+            warnings.push(CompletenessWarning {
+                rule: "cpi_no_callee_ensures".to_string(),
+                severity: Severity::Info,
+                priority: 1,
+                message: format!(
+                    "handler '{}' calls `{}.{}` — callee has no `ensures` clauses; \
+                     caller's Lean theorem carries `by sorry` (Tier-0 axiomatization)",
+                    handler.name, call.target_interface, call.target_handler,
+                ),
+                subject: Some(handler.name.clone()),
+                fix: format!(
+                    "Add at least one `ensures <expr>` inside `interface {} {{ handler {} {{ ... }} }}`, \
+                     or commit to an `upstream {{ binary_hash = ... }}` pin on the interface so the \
+                     caller can discharge via the bundled axiom module.",
+                    call.target_interface, call.target_handler,
+                ),
+                example: Some(format!(
+                    "  interface {} {{\n    handler {} (...) {{\n      ensures /* observable post-condition */\n    }}\n  }}",
+                    call.target_interface, call.target_handler,
+                )),
+                counterexample: None,
+                fix_options: vec![],
+            });
+        }
+    }
+    warnings
+}
+
 fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
 
@@ -5526,6 +5604,11 @@ pub fn check_code_drift(
     }
     if !spec.error_codes.is_empty() {
         codegen_owned_files.push("src/errors.rs".to_string());
+    }
+    // v2.26 Slice 3: ref_impls.rs is codegen-owned whenever the spec
+    // declares any `ref_impl` — the file holds one `pub fn` per impl.
+    if !spec.ref_impls.is_empty() {
+        codegen_owned_files.push("src/ref_impls.rs".to_string());
     }
 
     // Per-handler files at `src/instructions/<handler>.rs` are user-owned
