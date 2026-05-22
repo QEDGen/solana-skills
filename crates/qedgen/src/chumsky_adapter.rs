@@ -2943,6 +2943,78 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         out.lifecycle_states = first.lifecycle.clone();
     }
 
+    // v2.26 — when the spec uses `state { ... }` sugar or
+    // `type State = { ... }` record form, and a handler has no
+    // explicit `accounts { ... }`, synthesize a default state-bearing
+    // account so downstream codegen can bind `state.X` references.
+    // Without this, guards.rs emits raw `s.X` (the lowered form of
+    // `state.X`) which refers to an undefined symbol because no
+    // Anchor account carries the state. Gated on
+    // `records.contains("State")` so ADT-state specs
+    // (`type State | Variant of { ... }`) stay unchanged — they
+    // declare variants explicitly and downstream consumers
+    // (crucible_gen, variant-state codegen) emit the right shape.
+    // The synthetic account name "state" matches the lowercase of
+    // "State" so `infer_state_name`'s case-insensitive lookup binds
+    // it to the canonical `<ProgramPascalCase>Account` struct.
+    let is_state_record_form = out.records.iter().any(|r| r.name == "State");
+    if is_state_record_form && !out.state_fields.is_empty() {
+        // `path_to_lean` already lowered `state.X` to `s.X` (Ctx::Guard)
+        // or `s'.X` (Ctx::Ensures) before storing in lean_expr, so the
+        // textual marker we look for is the lowered prefix, not the
+        // spec-level `state.` form. Word-bound the scan so identifiers
+        // like `is_active` or method names ending in `s` don't trip it.
+        let mentions_state = |text: &str| {
+            let bytes = text.as_bytes();
+            for i in 0..bytes.len().saturating_sub(1) {
+                if bytes[i] != b's' {
+                    continue;
+                }
+                let prev_word_char =
+                    i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                if prev_word_char {
+                    continue;
+                }
+                let next = bytes[i + 1];
+                if next == b'.' {
+                    return true;
+                }
+                if next == b'\'' && i + 2 < bytes.len() && bytes[i + 2] == b'.' {
+                    return true;
+                }
+            }
+            false
+        };
+        for handler in &mut out.handlers {
+            if !handler.accounts.is_empty() {
+                continue;
+            }
+            let touches_state = !handler.effects.is_empty()
+                || handler
+                    .requires
+                    .iter()
+                    .any(|r| mentions_state(&r.lean_expr))
+                || handler
+                    .aborts_if
+                    .iter()
+                    .any(|a| mentions_state(&a.lean_expr))
+                || handler.ensures.iter().any(|e| mentions_state(&e.lean_expr));
+            if !touches_state {
+                continue;
+            }
+            handler.accounts.push(ParsedHandlerAccount {
+                name: "state".to_string(),
+                is_signer: false,
+                is_writable: !handler.effects.is_empty(),
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("State".to_string()),
+                authority: None,
+                default_pubkey: None,
+            });
+        }
+    }
+
     out.constants = constants;
     // F5: collect uninterpreted helpers after all other fields are
     // populated — the collector needs the full state_fields + records
@@ -4608,6 +4680,101 @@ handler bump (delta : U64) : State.Active -> State.Active {
         assert_eq!(
             class_of(&src, "balance_tracked"),
             crate::check::PropertyClass::Unary
+        );
+    }
+
+    /// v2.26 — when state sugar is used (or `type State = { ... }`)
+    /// and a handler has no explicit `accounts { ... }` clause, a
+    /// default `state` handler-account is synthesized so guards.rs
+    /// can rewrite `s.X` → `ctx.state.X`. Without the fix, generated
+    /// guards leaked raw `s.X` (undefined symbol → compile error).
+    #[test]
+    fn state_sugar_handler_without_accounts_synthesizes_state_account() {
+        let src = r#"spec Pool
+const MAX = 4
+type Error | InvalidAmount
+type State = { values : Map[MAX] U64, total : U64 }
+
+handler set_total (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { total := amt }
+}
+
+handler check_total (idx : U64) {
+  requires state.values[idx] > 0 else InvalidAmount
+  effect { }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let set_total = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "set_total")
+            .unwrap();
+        let check_total = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "check_total")
+            .unwrap();
+
+        // Effect-bearing handler: synthesized writable state account.
+        assert_eq!(set_total.accounts.len(), 1);
+        assert_eq!(set_total.accounts[0].name, "state");
+        assert!(set_total.accounts[0].is_writable);
+        assert_eq!(set_total.accounts[0].account_type.as_deref(), Some("State"));
+
+        // Read-only handler referencing state.X via requires:
+        // synthesized read-only state account.
+        assert_eq!(check_total.accounts.len(), 1);
+        assert_eq!(check_total.accounts[0].name, "state");
+        assert!(!check_total.accounts[0].is_writable);
+        assert_eq!(
+            check_total.accounts[0].account_type.as_deref(),
+            Some("State")
+        );
+    }
+
+    /// v2.26 — explicit `accounts { ... }` declarations win over the
+    /// synthesis. Bundled examples all declare accounts and must not
+    /// pick up a stray `state` field.
+    #[test]
+    fn explicit_accounts_clause_suppresses_state_synthesis() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { total : U64 }
+
+handler bump (amt : U64) {
+  accounts { vault : writable }
+  requires amt > 0 else InvalidAmount
+  effect { total := amt }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
+        assert_eq!(h.accounts.len(), 1);
+        assert_eq!(h.accounts[0].name, "vault");
+    }
+
+    /// v2.26 — handlers that don't touch state stay account-less even
+    /// when the spec has state_fields. Without this gate, library-style
+    /// handlers (pure helpers, no-op stubs) would silently grow a
+    /// surprise state account in their Anchor instruction signature.
+    #[test]
+    fn no_state_synthesis_when_handler_does_not_touch_state() {
+        let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { total : U64 }
+
+handler noop (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = spec.handlers.iter().find(|h| h.name == "noop").unwrap();
+        assert!(
+            h.accounts.is_empty(),
+            "noop handler should stay account-less"
         );
     }
 }
