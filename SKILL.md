@@ -117,9 +117,21 @@ Step 5. Verify generated backends.
 ```bash
 $QEDGEN verify --spec program.qedspec --proptest
 $QEDGEN verify --spec program.qedspec --kani
+$QEDGEN verify --spec program.qedspec --kani-impl   # v2.26 — calls user's real Anchor handler (opt-in)
 $QEDGEN verify --spec program.qedspec --lean
 $QEDGEN verify --spec program.qedspec --crucible 300   # coverage-guided fuzz (5 min)
+$QEDGEN verify --spec program.qedspec --check-upstream # v2.26 — pin-mismatch is CRIT (use --upstream-stale-ok offline)
 ```
+
+v2.26 split the Kani layer into two harness shapes: `--kani` runs the
+v2.25 ensures-preservation harness against the spec-translated transition
+fn (catches spec-internal inconsistency); `--kani-impl` runs the new
+impl-targeted harness against the user's *real* Anchor handler against
+a symbolic `Accounts` context (catches impl-violates-spec). The impl
+harness is opt-in via the flag, and auto-triggers when any handler has
+`modifies ⊋ effect.lhs` (the LP-shape signal) or any `ref_impl` carries
+potentially-overflowing arithmetic over bounded-numeric params (the
+`ref_impl_unbounded_arith` lint shape).
 
 The Crucible fuzz path is a separate engine: it drives the deployed `.so`
 with mutated typed-action sequences and crashes from real execution. Run

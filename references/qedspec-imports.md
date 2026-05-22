@@ -50,7 +50,30 @@ system_program = { github = "QEDGen/solana-skills", path = "interfaces/system_pr
 my_amm         = { path = "../my_amm" }
 ```
 
-Each entry is one of two source forms:
+Each entry is one of two source forms.
+
+### Builtin sources (v2.26)
+
+QEDGen ships a small interface stdlib resolved before manifest lookup:
+
+```
+import Token from "spl"        # crates/qedgen/data/interfaces/spl_token.qedspec
+import System from "system"    # crates/qedgen/data/interfaces/system.qedspec
+```
+
+The `"spl"` and `"system"` keys are reserved and resolved via embedded
+`include_str!` fixtures — no `qed.toml` entry needed, and a manifest
+that contains *only* builtin imports validates as empty. The bundled
+fixtures are Tier-1 (declared `ensures` + `upstream { binary_hash }`
+pin), so callers' Lean theorems discharge via
+`Token.transfer.ensures_axiom_<idx>` and Kani harnesses propagate the
+substituted ensures as `kani::assume` after the call site. The pinned
+`binary_hash` values in the bundled fixtures are `sha256:0000...`
+placeholders pending audit — the contract chain is structurally
+complete but cryptographically un-anchored until real pins land.
+
+User-authored interfaces (`import X from "..."` referencing a github
+or path source declared in `qed.toml`) continue to work unchanged.
 
 ### GitHub source
 
@@ -197,6 +220,24 @@ Per-dep outcomes:
   `program_id`).
 - **Error** — `solana` CLI failed (network, auth, CLI missing) or
   `--offline` blocked a needed fetch.
+
+### v2.26 — differentiated severity gates
+
+`--check-upstream` is now a real verification gate with severity that
+varies by surface:
+
+| Surface | Mismatch severity | Blocking? |
+|---|---|---|
+| `qedgen verify --check-upstream` | **CRIT** | yes (non-zero exit) |
+| `qedgen verify --check-upstream --upstream-stale-ok` | Info | no |
+| `qedgen check --frozen` (default) | P2 warning | no |
+| `qedgen check --frozen --strict` | **CRIT** | yes |
+
+Auto-on when `qed.lock` declares any pinned hash; no-op otherwise.
+Network/CLI errors (missing `solana`, unreachable RPC) stay P2 under
+any gate — a missing toolchain does NOT false-positive CRIT. Use
+`--upstream-stale-ok` for offline development; use `check --frozen
+--strict` in CI when frozen-lock drift should block the build.
 
 ## End-to-end example: escrow with SPL Token
 

@@ -356,7 +356,20 @@ Rules:
   - Parameters are `(name : Type)` in parentheses; multiple parameters
     each in their own parens (no comma-separated tuple form).
   - Body is a pure expression — no state mutation, no `match` with
-    side-effect arms, no calls to other `ref_impl`s (deferred to v2.26).
+    side-effect arms. v2.26 Slice 3 added composition: ref_impls can
+    call other ref_impls (recursive calls are rejected at parse time
+    with a clear error), take `Map[N] T` parameters (lowered to
+    `[T; N]` in Rust and `Map N T = Fin N → T` in Lean), and are
+    callable from `requires` bodies via the generated
+    `programs/src/ref_impls.rs` module.
+  - **v2.26 lint `ref_impl_unbounded_arith` (P2)** fires when a
+    ref_impl body has `*`, `<<`, `+`, or `-` over bounded-numeric
+    (`U64`/`I64`/...) params or return. Lean lowers those to
+    `Nat`/`Int` (unbounded — no overflow); Rust runs on bounded
+    `u64`/`i64` where the same expression can wrap or panic. Same
+    predicate auto-triggers the impl-targeted Kani harness so
+    bounded-arith verification runs even without the explicit
+    `--kani-impl` flag.
   - Naming a ref_impl shadows any same-named uninterpreted helper:
     code that calls `lp_out(...)` in an `ensures` body resolves to
     the real definition, not the axiomatic `opaque foo : T → Bool`
