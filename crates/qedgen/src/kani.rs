@@ -971,6 +971,11 @@ fn emit_kani_account_section(
                                 &callee_ens.rust_expr_binary,
                                 call,
                                 &callee_handler.params,
+                                // v2.26 Track K — pass the callee's declared
+                                // return-binder name. `None` falls back to
+                                // the literal "result" for back-compat with
+                                // pre-Track-K specs.
+                                callee_handler.result_binder.as_deref(),
                             );
                         out.push_str(&format!("        kani::assume({});\n", substituted));
                     }
@@ -2139,6 +2144,65 @@ handler deposit (amt : U64) : State.Open -> State.Open {
             post_bind < assume_pos,
             "CPI assume must follow `let post = &s;`; got:\n{}",
             body
+        );
+    }
+
+    /// v2.26 Track K — when the callee declares `-> <ident> : T`, the
+    /// identifier (not the literal `result`) is the name used in the
+    /// callee's `ensures`. `let X = call Foo.bar(…)` substitutes that
+    /// identifier for `X` in the emitted `kani::assume`.
+    #[test]
+    fn named_return_binder_substitutes_into_kani_assume() {
+        let src = r#"spec NamedBinderTest
+program_id "11111111111111111111111111111111"
+
+interface Oracle {
+  program_id "11111111111111111111111111111111"
+  handler quote (base : U64) -> price : U64 {
+    ensures price > 0
+  }
+}
+
+type State
+  | Open of { last_price : U64 }
+
+type Error
+  | E
+
+handler refresh (b : U64) : State.Open -> State.Open {
+  permissionless
+  let p = call Oracle.quote(base = b)
+  effect { Open.last_price := b }
+  ensures state.last_price == b
+}
+"#;
+        let out = emit_kani_section(src);
+        let start = out
+            .find("fn verify_refresh_ensures_0()")
+            .unwrap_or_else(|| panic!("missing verify_refresh_ensures_0; got:\n{}", out));
+        let end = out[start..]
+            .find("\n}\n\n")
+            .map(|i| start + i)
+            .unwrap_or(out.len());
+        let body = &out[start..end];
+
+        // The callee declared `-> price : U64`, so the ensures `price > 0`
+        // must be rewritten to `p > 0` (the caller's let-binder), NOT
+        // left as `price > 0` and NOT rewritten via the literal `result`.
+        assert!(
+            body.contains("kani::assume(p > 0)"),
+            "expected `kani::assume(p > 0)` from named binder substitution; got:\n{}",
+            body,
+        );
+        assert!(
+            !body.contains("price > 0"),
+            "binder name `price` must be substituted away; got:\n{}",
+            body,
+        );
+        assert!(
+            !body.contains("kani::assume(result"),
+            "the literal `result` must not appear when binder is `price`; got:\n{}",
+            body,
         );
     }
 

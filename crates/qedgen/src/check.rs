@@ -1257,6 +1257,14 @@ pub struct ParsedInterfaceHandler {
     /// terminal and any caller-side `let` binding is dropped with a
     /// warning.
     pub return_type: Option<String>,
+    /// v2.26 Track K — when the interface handler declares
+    /// `-> <ident> : <Type>`, the identifier names the return value
+    /// inside the callee's `ensures`. The CPI substitution helper
+    /// rewrites that identifier to the caller's `let X = …` binder
+    /// at each call site. `None` (plain `-> Type` or no return) means
+    /// the substitution falls back to the literal `"result"` for
+    /// back-compat with the v2.24 #11 convention.
+    pub result_binder: Option<String>,
 }
 
 /// v2.24 #1 — parsed `schema` block. A named bundle of `requires`
@@ -1618,6 +1626,11 @@ fn synthesize_interface_from_imported(
             // for now Tier-2 callers using `let x = call …` will
             // see the binding dropped with a lint warning.
             return_type: None,
+            // v2.26 Track K — same story: the synthesizer can't
+            // recover a named binder until top-level handlers carry
+            // one. Defaults to `None` ⇒ literal `"result"` in the
+            // substitution.
+            result_binder: None,
         })
         .collect();
     Some(ParsedInterface {

@@ -77,10 +77,18 @@ pub fn rust_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
 /// interface handler. Unmatched params (no corresponding caller arg)
 /// keep their formal name, which Lean flags as a free variable; the
 /// spec-author lint catches this.
+///
+/// `callee_result_binder` (v2.26 Track K) is the identifier the callee's
+/// `ensures` uses to refer to its own return value, as declared by
+/// `handler foo (…) -> <ident> : Type`. When the caller binds the
+/// result via `let X = call …`, the identifier is rewritten to `X`.
+/// `None` falls back to the conventional `"result"` literal for
+/// back-compat with v2.24 #11 specs that don't declare a binder.
 pub fn substitute_callee_ensures_lean(
     callee_ensures_lean: &str,
     call: &ParsedCall,
     callee_params: &[(String, String)],
+    callee_result_binder: Option<&str>,
 ) -> String {
     let mut subst: HashMap<&str, &str> = lean_subst_table(call);
     // Defensive: ensure every callee param has *some* entry (default to
@@ -93,10 +101,11 @@ pub fn substitute_callee_ensures_lean(
     // into the substitution table so a callee `ensures` referencing the
     // return-value position resolves to the caller's binder.
     if let Some(ref result_name) = call.result_binding {
-        // Callees that declare their return via a `result` keyword (v2.26+)
-        // would surface as a named param; today we conservatively inject
-        // the binder so any forward-compat ensures that name it resolve.
-        subst.entry("result").or_insert(result_name.as_str());
+        // The binder name on the callee side comes from the interface
+        // declaration (`-> <ident> : Type`); `None` defaults to the
+        // historical literal `"result"`.
+        let binder = callee_result_binder.unwrap_or("result");
+        subst.entry(binder).or_insert(result_name.as_str());
     }
     substitute_word_boundary(callee_ensures_lean, &subst)
 }
@@ -112,17 +121,24 @@ pub fn substitute_callee_ensures_lean(
 /// `params` — so the substitution is purely a param swap. The
 /// `state.x`/`pre.x`/`post.x` forms pass through unchanged and bind to
 /// the caller's own pre/post snapshots at the assume site.
+///
+/// `callee_result_binder` (v2.26 Track K) is the identifier the callee's
+/// `ensures` uses to refer to its own return value, as declared by
+/// `handler foo (…) -> <ident> : Type`. `None` falls back to the
+/// literal `"result"` for back-compat.
 pub fn substitute_callee_ensures_rust_binary(
     callee_ensures_rust_binary: &str,
     call: &ParsedCall,
     callee_params: &[(String, String)],
+    callee_result_binder: Option<&str>,
 ) -> String {
     let mut subst: HashMap<&str, &str> = rust_subst_table(call);
     for (pn, _) in callee_params {
         subst.entry(pn.as_str()).or_insert(pn.as_str());
     }
     if let Some(ref result_name) = call.result_binding {
-        subst.entry("result").or_insert(result_name.as_str());
+        let binder = callee_result_binder.unwrap_or("result");
+        subst.entry(binder).or_insert(result_name.as_str());
     }
     substitute_word_boundary(callee_ensures_rust_binary, &subst)
 }
@@ -165,7 +181,7 @@ mod tests {
             &[("amount", "s.taker_amount"), ("from", "taker_ta")],
         );
         let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_lean("amount > 0", &call, &params);
+        let out = substitute_callee_ensures_lean("amount > 0", &call, &params, None);
         assert_eq!(out, "s.taker_amount > 0");
     }
 
@@ -177,7 +193,7 @@ mod tests {
             &[("amount", "amount"), ("from", "taker_ta")],
         );
         let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary("amount > 0", &call, &params);
+        let out = substitute_callee_ensures_rust_binary("amount > 0", &call, &params, None);
         assert_eq!(out, "amount > 0");
     }
 
@@ -191,6 +207,7 @@ mod tests {
             "post.balance == pre.balance + amount",
             &call,
             &params,
+            None,
         );
         assert_eq!(out, "post.balance == pre.balance + amount");
     }
@@ -202,8 +219,60 @@ mod tests {
         let mut call = mk_call("Foo", "bar", &[("amount", "amount")]);
         call.result_binding = Some("delta".to_string());
         let params = vec![("amount".to_string(), "U64".to_string())];
-        let out = substitute_callee_ensures_rust_binary("result == amount * 2", &call, &params);
+        let out =
+            substitute_callee_ensures_rust_binary("result == amount * 2", &call, &params, None);
         assert_eq!(out, "delta == amount * 2");
+    }
+
+    #[test]
+    fn substitute_rust_defaults_to_result_when_unspecified() {
+        // v2.26 Track K back-compat: `None` for `callee_result_binder`
+        // makes the substitution fall back to the literal `"result"`,
+        // matching pre-Track-K behavior (and the existing
+        // `substitute_rust_let_binding_result` test above).
+        let mut call = mk_call("Foo", "bar", &[("amount", "amount")]);
+        call.result_binding = Some("out".to_string());
+        let params = vec![("amount".to_string(), "U64".to_string())];
+        let out = substitute_callee_ensures_rust_binary(
+            "result <= amount",
+            &call,
+            &params,
+            None, // no declared binder ⇒ default to literal "result"
+        );
+        assert_eq!(out, "out <= amount");
+    }
+
+    #[test]
+    fn substitute_rust_uses_declared_binder_name() {
+        // v2.26 Track K — the callee declared `-> price : U64`, so its
+        // ensures uses the identifier `price` to refer to the return.
+        // The caller's `let X = call …` binder substitutes for `price`
+        // (NOT the literal `result`).
+        let mut call = mk_call("Oracle", "quote", &[("base", "base"), ("quote", "qmint")]);
+        call.result_binding = Some("p".to_string());
+        let params = vec![
+            ("base".to_string(), "Pubkey".to_string()),
+            ("quote".to_string(), "Pubkey".to_string()),
+        ];
+        // Callee's ensures refers to its return as `price`.
+        let out = substitute_callee_ensures_rust_binary(
+            "price > 0 && price < u64::MAX",
+            &call,
+            &params,
+            Some("price"),
+        );
+        // `price` rewrites to `p` (caller's binder), not to `result`.
+        assert_eq!(out, "p > 0 && p < u64::MAX");
+    }
+
+    #[test]
+    fn substitute_lean_uses_declared_binder_name() {
+        // Lean counterpart of `substitute_rust_uses_declared_binder_name`.
+        let mut call = mk_call("Oracle", "quote", &[("base", "s.base_mint")]);
+        call.result_binding = Some("p".to_string());
+        let params = vec![("base".to_string(), "Pubkey".to_string())];
+        let out = substitute_callee_ensures_lean("price > 0", &call, &params, Some("price"));
+        assert_eq!(out, "p > 0");
     }
 
     #[test]
@@ -221,6 +290,7 @@ mod tests {
             "amount > 0 && recipient != Pubkey::default()",
             &call,
             &params,
+            None,
         );
         // Both params present; only `amount` was bound to a caller arg
         assert_eq!(out, "amount > 0 && recipient != Pubkey::default()");

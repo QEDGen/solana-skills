@@ -2519,10 +2519,31 @@ fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl
     // v2.24 #11 — optional `-> Type` return-type after the params.
     // When present, callers can write `let x = call Foo.handler(...)`
     // and the codegen lowers the binding to a `get_return_data` read.
-    let return_type = just("->")
+    //
+    // v2.26 Track K — the return-type slot now optionally accepts a
+    // named binder: `-> <ident> : <Type>`. The identifier is the name
+    // the callee's `ensures` uses to refer to the return value; the
+    // CPI substitution helper maps it to the caller's `let X = …`
+    // binder at each call site. Plain `-> <Type>` (no binder) stays
+    // accepted unchanged and defaults the binder to the literal
+    // `"result"` downstream (the existing convention).
+    let named_return = just("->")
+        .then_ignore(wsc())
+        .ignore_then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(just(':'))
+        .then_ignore(wsc())
+        .then(type_ref())
+        .then_ignore(wsc())
+        .map(|(name, ty)| (Some(name), ty));
+    let bare_return = just("->")
         .then_ignore(wsc())
         .ignore_then(type_ref())
-        .then_ignore(wsc());
+        .then_ignore(wsc())
+        .map(|ty| (None, ty));
+    // `named_return` first — it has a more specific shape (`ident :`) so
+    // chumsky's `choice` resolves greedily without backtracking surprises.
+    let return_decl = choice((named_return, bare_return));
     doc_comments()
         .then_ignore(kw("handler"))
         .then(non_keyword_ident())
@@ -2534,7 +2555,7 @@ fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl
                 .collect::<Vec<TypedField>>(),
         )
         .then_ignore(wsc())
-        .then(return_type.or_not())
+        .then(return_decl.or_not())
         .then_ignore(wsc())
         .then_ignore(just('{'))
         .then_ignore(wsc())
@@ -2547,15 +2568,20 @@ fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl
         )
         .then_ignore(wsc())
         .then_ignore(just('}'))
-        .map(
-            |((((doc, name), params), return_type), clauses)| InterfaceHandlerDecl {
+        .map(|((((doc, name), params), ret_decl), clauses)| {
+            let (result_binder, return_type) = match ret_decl {
+                Some((binder, ty)) => (binder, Some(ty)),
+                None => (None, None),
+            };
+            InterfaceHandlerDecl {
                 name,
                 doc,
                 params,
                 return_type,
+                result_binder,
                 clauses,
-            },
-        )
+            }
+        })
 }
 
 fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
@@ -3774,6 +3800,109 @@ interface Token {
             }
             o => panic!("expected Interface, got {:?}", o),
         }
+    }
+
+    // v2.26 Track K — `-> <ident> : <Type>` named-result-binding.
+    #[test]
+    fn interface_handler_with_explicit_result_binding_parses() {
+        let src = r#"spec Demo
+interface Pool {
+  program_id "11111111111111111111111111111111"
+
+  handler absorb (amount : U64) -> result : U64 {
+    requires amount > 0
+    ensures  result <= amount
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "absorb");
+        assert_eq!(h.result_binder.as_deref(), Some("result"));
+        match &h.return_type {
+            Some(TypeRef::Named(n)) => assert_eq!(n, "U64"),
+            other => panic!("expected Named return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn interface_handler_with_named_result_binder_parses() {
+        // The binder doesn't have to be the word "result" — any
+        // identifier is fine (e.g. `price`, `out`, `total`).
+        let src = r#"spec Demo
+interface Oracle {
+  program_id "11111111111111111111111111111111"
+
+  handler quote (base : Pubkey) -> price : U64 {
+    ensures price > 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let h = &i.handlers[0];
+        assert_eq!(h.result_binder.as_deref(), Some("price"));
+        match &h.return_type {
+            Some(TypeRef::Named(n)) => assert_eq!(n, "U64"),
+            other => panic!("expected Named return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn interface_handler_without_result_binding_still_parses() {
+        // Back-compat: bare `-> Type` (no named binder) keeps working;
+        // `result_binder` is `None` and downstream substitution falls
+        // back to the literal "result".
+        let src = r#"spec Demo
+interface Pool {
+  program_id "11111111111111111111111111111111"
+
+  handler absorb (amount : U64) -> U64 {
+    requires amount > 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let h = &i.handlers[0];
+        assert!(h.result_binder.is_none());
+        match &h.return_type {
+            Some(TypeRef::Named(n)) => assert_eq!(n, "U64"),
+            other => panic!("expected Named return type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn interface_handler_without_any_return_still_parses() {
+        // Back-compat: no `-> …` at all (terminal CPI). Both fields
+        // are `None`.
+        let src = r#"spec Demo
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  handler transfer (amount : U64) {
+    requires amount > 0
+  }
+}
+"#;
+        let s = parse_ok(src);
+        let i = match &s.items[0].node {
+            TopItem::Interface(i) => i,
+            o => panic!("expected Interface, got {:?}", o),
+        };
+        let h = &i.handlers[0];
+        assert!(h.result_binder.is_none());
+        assert!(h.return_type.is_none());
     }
 
     // ------------------------------------------------------------------

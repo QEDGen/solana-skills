@@ -3552,6 +3552,11 @@ fn adapt_interface_handler<'a>(
         requires: Vec::new(),
         ensures: Vec::new(),
         return_type: h.return_type.as_ref().map(type_ref_to_string),
+        // v2.26 Track K — plumb the optional named binder through.
+        // `None` means the spec wrote either nothing or the legacy
+        // `-> Type` (no binder); downstream substitution defaults to
+        // the literal `"result"` for back-compat.
+        result_binder: h.result_binder.clone(),
     };
 
     for Node { node: clause, .. } in &h.clauses {

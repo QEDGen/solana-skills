@@ -1718,6 +1718,9 @@ fn render_cpi_theorems(
                     &ensures.lean_expr,
                     call,
                     &handler.params,
+                    // v2.26 Track K — pass the declared return-binder
+                    // name. `None` falls back to the literal "result".
+                    handler.result_binder.as_deref(),
                 );
                 let prefixed = prefix_state_fields(&substituted, &state_field_set);
                 let theorem_name = safe_name(&format!(

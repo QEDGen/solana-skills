@@ -597,6 +597,9 @@ fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &
                 &callee_ens.rust_expr_binary,
                 call,
                 &callee.params,
+                // v2.26 Track K — propagate the declared return-binder
+                // name. `None` keeps the literal "result" convention.
+                callee.result_binder.as_deref(),
             );
             let lowered = rewrite_pre_post_paths(&substituted);
             out.push_str(&format!("        kani::assume({});\n", lowered));
@@ -902,6 +905,60 @@ handler deposit (amt : U64) {
             is_ok_pos < assume_pos && assume_pos < assert_pos,
             "CPI assume must sit between is_ok() and assert!; got:\n{}",
             body
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// v2.26 Track K — impl-targeted variant of the spec-model
+    /// `named_return_binder_substitutes_into_kani_assume` test.
+    /// `let p = call Oracle.quote(…)` with `-> price : U64` declared
+    /// must rewrite `price` to `p` in the emitted `kani::assume`.
+    #[test]
+    fn named_return_binder_substitutes_in_impl_harness() {
+        let src = r#"spec NamedBinderImpl
+program_id "11111111111111111111111111111111"
+
+interface Oracle {
+  program_id "11111111111111111111111111111111"
+  handler quote (base : U64) -> price : U64 {
+    ensures price > 0
+  }
+}
+
+state { last_price : U64, lp_supply : U64 }
+
+handler refresh (b : U64) {
+  permissionless
+  modifies [last_price, lp_supply]
+  let p = call Oracle.quote(base = b)
+  effect { last_price := b }
+  ensures state.last_price == b
+}"#;
+        let spec = parse_str(src).expect("parse");
+        assert!(spec_triggers_impl_harness(&spec));
+
+        let tmp = std::env::temp_dir().join(format!("kani_impl_track_k_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false).expect("generate");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+
+        assert!(
+            body.contains("// CPI ensures-as-fact (Oracle.quote):"),
+            "missing CPI ensures-as-fact comment for Oracle.quote; got:\n{}",
+            body,
+        );
+        // The callee uses `price` as its return binder; the caller's
+        // `let p = …` makes `p` the substituted form.
+        assert!(
+            body.contains("kani::assume(p > 0)"),
+            "expected `kani::assume(p > 0)` from named binder substitution; got:\n{}",
+            body,
+        );
+        assert!(
+            !body.contains("price > 0"),
+            "binder name `price` must be substituted away; got:\n{}",
+            body,
         );
 
         let _ = std::fs::remove_file(&tmp);

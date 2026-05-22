@@ -480,6 +480,14 @@ pub struct InterfaceHandlerDecl {
     /// after the CPI via Solana's `get_return_data` syscall. `None`
     /// keeps the existing terminal-statement shape.
     pub return_type: Option<TypeRef>,
+    /// v2.26 Track K — optional named binder for the return value, used
+    /// inside the handler's own `ensures` clauses. When the spec writes
+    /// `-> result : U64` (or any identifier in place of `result`) the
+    /// identifier becomes a free name in scope of the ensures; the CPI
+    /// substitution helper rewrites it to the caller's `let X = …`
+    /// binder at each call site. Defaults to the conventional `"result"`
+    /// when only `-> Type` is written (no named binder).
+    pub result_binder: Option<String>,
     pub clauses: Vec<Node<InterfaceHandlerClause>>,
 }
 
