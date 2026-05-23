@@ -67,8 +67,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --bin qedgen
+          repo_root="$(pwd)"
           mkdir -p bin
-          cp target/release/qedgen bin/qedgen
+          cp target/release/qedgen "$repo_root/bin/qedgen"
           for ex in examples/rust/escrow-split examples/rust/bundled-stdlib-demo; do
             if [ -f "$ex/qed.toml" ]; then
               echo "==> regen lakefile for $ex"
@@ -83,7 +84,13 @@ jobs:
               if [ -f "$lakefile" ]; then
                 sed -i '/^require [a-zA-Z_][a-zA-Z0-9_]*Proofs from /d; /^-- v2\.27 Track B: verified-callee proof package/d' "$lakefile"
               fi
-              bin/qedgen codegen --lean --spec "$ex"
+              # cd into the example: `qedgen codegen --lean`'s default
+              # output is `./formal_verification/Spec.lean` (cwd-relative).
+              # Running from the repo root would write to the wrong place
+              # AND the inject step would skip because `./formal_verification/
+              # lakefile.lean` wouldn't exist in cwd. Session-3 carry-forward
+              # `--lean-output` cwd-default limitation; fix queued for v2.27.x.
+              ( cd "$ex" && "$repo_root/bin/qedgen" codegen --lean --spec . )
               # The fresh require for `tokenProofs` / `metadataProofs`
               # isn't in the cached lake-manifest.json. Invalidate the
               # stale manifest so the bootstrap step's `lake update`
