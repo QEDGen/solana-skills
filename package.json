@@ -1,6 +1,6 @@
 {
   "name": "qedgen-solana-skills",
-  "version": "2.27.0",
+  "version": "2.27.1",
   "description": "Agent skill for spec-driven verification and audit of Solana programs — .qedspec specs generate proptest, Kani, and Lean 4 backends plus agent-fill Anchor / Quasar scaffolds; brownfield probes audit Anchor / Quasar / Pinocchio / native / sBPF programs (Miri verify, scaffold-to-spec interview, deploy-safety ratchet).",
   "keywords": [
     "agent-skill",
