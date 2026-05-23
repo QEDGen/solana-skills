@@ -531,6 +531,8 @@ mod tests {
             program_id: None,
             upstream_binary_hash: hash.map(str::to_string),
             upstream_version: None,
+            verified: false,
+            proof_hash: None,
         }
     }
 
@@ -911,6 +913,8 @@ mod tests {
                 program_id: Some(program_id.clone()),
                 upstream_binary_hash: Some(pinned_hash),
                 upstream_version: Some("4.0.3".to_string()),
+                verified: false,
+                proof_hash: None,
             }],
         };
         crate::qed_lock::write(dir, &lock).expect("write qed.lock");

@@ -99,6 +99,32 @@ pub struct LockEntry {
     pub upstream_binary_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub upstream_version: Option<String>,
+
+    // ---- v2.27 Track B — verified-callee composition. ----
+    /// `true` iff the provider shipped a Lake-buildable proof package
+    /// alongside the qedspec. Detected by
+    /// `import_resolver::ResolvedImport::has_proofs`; the consumer's
+    /// Lean codegen pulls the provider's proof module via a `require`
+    /// directive instead of generating its own sibling axiom module.
+    ///
+    /// Default `false` on old lockfiles (no migration needed); a freshly
+    /// resolved spec that detects proofs writes `verified = true` next
+    /// run, and `--frozen` notices the drift.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verified: bool,
+    /// sha256 of the provider's proof package contents (sorted-path
+    /// concatenation of every `.lean` file under the proof package
+    /// root). `None` when `verified` is false.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub proof_hash: Option<String>,
+}
+
+/// Helper for `skip_serializing_if` on `bool` fields that default to
+/// false. serde's `Option::is_none` doesn't work for plain `bool`, so we
+/// hand-roll a predicate that skips the field when it's the default.
+#[allow(dead_code)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl LockFile {
@@ -163,6 +189,43 @@ pub fn compute_spec_hash(sources: &[(std::path::PathBuf, String)]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+/// v2.27 Track B — sha256 of the provider's proof package contents.
+/// Walks every `.lean` file under `proof_pkg_root` in sorted-path order
+/// and concatenates with the same fragment boundary used by
+/// `compute_spec_hash`. The hash lands in `LockEntry.proof_hash` so
+/// `--frozen` notices when the provider's proofs change.
+///
+/// Returns `None` when the package root doesn't exist or contains no
+/// `.lean` files — the resolver would have set `has_proofs = false` in
+/// that case, so callers shouldn't see this path; defensive default.
+#[allow(dead_code)]
+pub fn compute_proof_hash(proof_pkg_root: &std::path::Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if !proof_pkg_root.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(proof_pkg_root) {
+        Ok(rd) => rd
+            .filter_map(|r| r.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "lean"))
+            .collect(),
+        Err(_) => return None,
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort();
+    let mut hasher = Sha256::new();
+    for path in &entries {
+        if let Ok(bytes) = std::fs::read(path) {
+            hasher.update(&bytes);
+            hasher.update(b"\n--QEDGEN-FRAGMENT-BOUNDARY--\n");
+        }
+    }
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
 /// Build a single lock entry from a resolved import + its manifest dep
 /// descriptor + the imported interface (which carries its `program_id`
 /// and optional `upstream` block).
@@ -191,6 +254,14 @@ pub fn entry_for_resolved(
         Some(u) => (u.binary_hash.clone(), u.version.clone()),
         None => (None, None),
     };
+    // v2.27 Track B — verified flag + proof hash come from the resolver.
+    // The hash is computed only when the resolver detected proofs;
+    // otherwise the field stays None and serializes as omitted.
+    let proof_hash = resolved
+        .proof_pkg_root
+        .as_deref()
+        .filter(|_| resolved.has_proofs)
+        .and_then(compute_proof_hash);
     LockEntry {
         name: resolved.dep_key.clone(),
         source,
@@ -201,6 +272,8 @@ pub fn entry_for_resolved(
         program_id: iface.program_id.clone(),
         upstream_binary_hash,
         upstream_version,
+        verified: resolved.has_proofs,
+        proof_hash,
     }
 }
 
@@ -218,6 +291,11 @@ pub fn entry_for_builtin(
         Some(u) => (u.binary_hash.clone(), u.version.clone()),
         None => (None, None),
     };
+    let proof_hash = resolved
+        .proof_pkg_root
+        .as_deref()
+        .filter(|_| resolved.has_proofs)
+        .and_then(compute_proof_hash);
     LockEntry {
         name: resolved.dep_key.clone(),
         source: format!("builtin:{}", resolved.dep_key),
@@ -228,6 +306,8 @@ pub fn entry_for_builtin(
         program_id: iface.program_id.clone(),
         upstream_binary_hash,
         upstream_version,
+        verified: resolved.has_proofs,
+        proof_hash,
     }
 }
 
@@ -415,6 +495,8 @@ mod tests {
             program_id: None,
             upstream_binary_hash: None,
             upstream_version: None,
+            verified: false,
+            proof_hash: None,
         }
     }
 
@@ -445,6 +527,8 @@ mod tests {
                 program_id: Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string()),
                 upstream_binary_hash: Some("sha256:9c1e".to_string()),
                 upstream_version: Some("spl-token@4.0.3".to_string()),
+                verified: true,
+                proof_hash: Some("sha256:abcd".to_string()),
             }],
         };
         write(tmp.path(), &lock).unwrap();
@@ -659,6 +743,168 @@ spec_hash = "sha256:abc"
         write(tmp.path(), &lock).unwrap();
         handle_lock(tmp.path(), &lock, LockMode::Frozen).unwrap();
     }
+
+    // ----- v2.27 Track B: verified + proof_hash schema -----
+
+    #[test]
+    fn old_lockfile_without_verified_field_parses_with_default_false() {
+        // Hand-written v2.26 lockfile shape — no `verified` / `proof_hash`
+        // fields. Must still parse, with both fields defaulting.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(LOCK_FILENAME),
+            r#"version = 1
+
+[[dependency]]
+name = "x"
+source = "path:./x"
+spec_hash = "sha256:abc"
+"#,
+        )
+        .unwrap();
+        let lock = read(tmp.path()).unwrap().expect("must parse");
+        assert_eq!(lock.dependencies.len(), 1);
+        assert!(!lock.dependencies[0].verified);
+        assert!(lock.dependencies[0].proof_hash.is_none());
+    }
+
+    #[test]
+    fn verified_false_is_elided_from_serialized_form() {
+        // Default (verified = false, proof_hash = None) should NOT appear
+        // on disk — otherwise every v2.26 lockfile would visibly churn
+        // on the next regen.
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![entry("local", "path:../l", "sha256:0")],
+        };
+        write(tmp.path(), &lock).unwrap();
+        let on_disk = std::fs::read_to_string(tmp.path().join(LOCK_FILENAME)).unwrap();
+        assert!(
+            !on_disk.contains("verified"),
+            "verified=false should not appear on disk; got:\n{on_disk}"
+        );
+        assert!(
+            !on_disk.contains("proof_hash"),
+            "proof_hash=None should not appear on disk; got:\n{on_disk}"
+        );
+    }
+
+    #[test]
+    fn verified_true_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                name: "amm".to_string(),
+                source: "path:./amm".to_string(),
+                spec_hash: "sha256:s".to_string(),
+                git_ref: None,
+                resolved_commit: None,
+                path: None,
+                program_id: None,
+                upstream_binary_hash: None,
+                upstream_version: None,
+                verified: true,
+                proof_hash: Some("sha256:p".to_string()),
+            }],
+        };
+        write(tmp.path(), &lock).unwrap();
+        let read_back = read(tmp.path()).unwrap().unwrap();
+        assert_eq!(read_back, lock);
+        // And confirm the serialized form actually contains the fields.
+        let on_disk = std::fs::read_to_string(tmp.path().join(LOCK_FILENAME)).unwrap();
+        assert!(on_disk.contains("verified = true"), "got:\n{on_disk}");
+        assert!(on_disk.contains("proof_hash"), "got:\n{on_disk}");
+    }
+
+    #[test]
+    fn compute_proof_hash_is_deterministic_across_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Token.lean"), "-- module\n").unwrap();
+        std::fs::write(tmp.path().join("lakefile.lean"), "-- lakefile\n").unwrap();
+        let a = compute_proof_hash(tmp.path()).expect("present");
+        let b = compute_proof_hash(tmp.path()).expect("present");
+        assert_eq!(a, b);
+        assert!(a.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn compute_proof_hash_changes_with_module_content() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp1.path().join("Token.lean"), "-- v1\n").unwrap();
+        std::fs::write(tmp1.path().join("lakefile.lean"), "-- lake\n").unwrap();
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        std::fs::write(tmp2.path().join("Token.lean"), "-- v2 different\n").unwrap();
+        std::fs::write(tmp2.path().join("lakefile.lean"), "-- lake\n").unwrap();
+
+        let h1 = compute_proof_hash(tmp1.path()).unwrap();
+        let h2 = compute_proof_hash(tmp2.path()).unwrap();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn compute_proof_hash_returns_none_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nope = tmp.path().join("does-not-exist");
+        assert!(compute_proof_hash(&nope).is_none());
+    }
+
+    #[test]
+    fn compute_proof_hash_returns_none_when_no_lean_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("README.md"), "not lean").unwrap();
+        assert!(compute_proof_hash(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn frozen_drift_on_proof_hash_change_fires() {
+        // Verified dep whose proof_hash drifts → --frozen must report it.
+        // Same shape as the existing spec_hash drift test; ensures the
+        // diff renderer treats proof_hash as a first-class field.
+        let tmp = tempfile::tempdir().unwrap();
+        let old = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                name: "amm".to_string(),
+                source: "path:./amm".to_string(),
+                spec_hash: "sha256:same".to_string(),
+                git_ref: None,
+                resolved_commit: None,
+                path: None,
+                program_id: None,
+                upstream_binary_hash: None,
+                upstream_version: None,
+                verified: true,
+                proof_hash: Some("sha256:OLD".to_string()),
+            }],
+        };
+        write(tmp.path(), &old).unwrap();
+
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                name: "amm".to_string(),
+                source: "path:./amm".to_string(),
+                spec_hash: "sha256:same".to_string(),
+                git_ref: None,
+                resolved_commit: None,
+                path: None,
+                program_id: None,
+                upstream_binary_hash: None,
+                upstream_version: None,
+                verified: true,
+                proof_hash: Some("sha256:NEW".to_string()),
+            }],
+        };
+        let err = handle_lock(tmp.path(), &computed, LockMode::Frozen)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stale (--frozen)"), "got: {err}");
+    }
+
+    // ----- end Track B -----
 
     #[test]
     fn handle_lock_frozen_describes_added_and_removed_deps() {

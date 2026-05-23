@@ -462,8 +462,21 @@ pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
     // the call-site discharge path inside `render_cpi_theorems` uses
     // the same `handler_is_pinned` predicate so the two sides agree
     // on which interfaces need axioms.
+    //
+    // v2.27 Track B — verified callees (those in `spec.verified_callees`)
+    // get their proof modules from the provider package via a `require`
+    // directive in the consumer's lakefile. Skip writing the local
+    // sibling axiom module for them and don't add them to the lakefile
+    // `roots := #[...]` array (the imported package owns those modules).
+    // Unverified pinned callees stay on the v2.26 stance-1 path:
+    // sibling axiom module + roots entry.
     if let Some(parent) = output_path.parent() {
-        for iface_name in &pinned {
+        let local_pinned: std::collections::BTreeSet<String> = pinned
+            .iter()
+            .filter(|i| !spec.verified_callees.contains_key(i.as_str()))
+            .cloned()
+            .collect();
+        for iface_name in &local_pinned {
             let iface = spec
                 .interfaces
                 .iter()
@@ -482,12 +495,151 @@ pub fn generate(spec: &ParsedSpec, output_path: &Path) -> Result<()> {
         if !pinned.is_empty() {
             let lakefile_path = parent.join("lakefile.lean");
             if lakefile_path.exists() {
-                update_lakefile_roots(&lakefile_path, &pinned)?;
+                // v2.27 Track B — strip stale sibling-module roots for
+                // callees that transitioned from unverified to
+                // verified. The local `<Iface>.lean` is no longer
+                // written, so its `roots` entry would point at a
+                // non-existent module and break `lake build`. Narrow:
+                // only removes roots whose name matches a verified
+                // callee.
+                let verified_roots: Vec<String> = spec
+                    .verified_callees
+                    .keys()
+                    .map(|n| safe_module_name(n))
+                    .collect();
+                if !verified_roots.is_empty() {
+                    remove_lakefile_roots(&lakefile_path, &verified_roots)?;
+                }
+                update_lakefile_roots(&lakefile_path, &local_pinned)?;
+                // v2.27 Track B — inject a `require <pkg> from
+                // "<rel-path>"` directive for every verified callee.
+                // The relative path is computed from the consumer's
+                // lakefile location to the provider's proof package
+                // root recorded in `spec.verified_callees`.
+                let verified_for_emit: Vec<(String, std::path::PathBuf)> = pinned
+                    .iter()
+                    .filter_map(|name| {
+                        spec.verified_callees
+                            .get(name)
+                            .map(|pkg_root| (name.clone(), pkg_root.clone()))
+                    })
+                    .collect();
+                if !verified_for_emit.is_empty() {
+                    inject_verified_callee_requires(&lakefile_path, &verified_for_emit)?;
+                }
             }
         }
     }
 
     Ok(())
+}
+
+/// v2.27 Track B — idempotent injection of `require <pkg> from "<path>"`
+/// directives for every verified callee (one per imported interface
+/// whose provider shipped a Lake-buildable proof package).
+///
+/// The directive lands immediately after the existing
+/// `require qedgenSupport from ...` block (or, when absent, after the
+/// `package ...` declaration). Pre-existing directives for the same
+/// package name are left untouched, so repeated `qedgen codegen` runs
+/// don't churn the file.
+fn inject_verified_callee_requires(
+    lakefile_path: &Path,
+    verified: &[(String, std::path::PathBuf)],
+) -> Result<()> {
+    let original = std::fs::read_to_string(lakefile_path)?;
+    let lakefile_parent = lakefile_path.parent().unwrap_or(Path::new("."));
+    let mut to_add: Vec<String> = Vec::new();
+    for (iface_name, pkg_root) in verified {
+        let pkg = proof_pkg_name(iface_name);
+        let needle = format!("require {} from", pkg);
+        if original.contains(&needle) {
+            continue;
+        }
+        let rel =
+            pathdiff_relative_from(pkg_root, lakefile_parent).unwrap_or_else(|| pkg_root.clone());
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        to_add.push(format!(
+            "-- v2.27 Track B: verified-callee proof package (Stance 2).\n\
+             require {} from \"{}\"\n",
+            pkg, rel_str,
+        ));
+    }
+    if to_add.is_empty() {
+        return Ok(());
+    }
+    // Anchor: prefer the line right after `package <name>` (always
+    // present in qedgen-emitted lakefiles). Falls back to file-end.
+    let injected = match original.find("package ") {
+        Some(start) => {
+            let line_end = original[start..]
+                .find('\n')
+                .map(|n| start + n + 1)
+                .unwrap_or(original.len());
+            let mut rewritten = String::with_capacity(original.len() + 128);
+            rewritten.push_str(&original[..line_end]);
+            rewritten.push('\n');
+            for block in &to_add {
+                rewritten.push_str(block);
+            }
+            rewritten.push_str(&original[line_end..]);
+            rewritten
+        }
+        None => {
+            // Unusual shape; append to end so we never silently drop.
+            let mut rewritten = original.clone();
+            if !rewritten.ends_with('\n') {
+                rewritten.push('\n');
+            }
+            for block in &to_add {
+                rewritten.push_str(block);
+            }
+            rewritten
+        }
+    };
+    std::fs::write(lakefile_path, injected)?;
+    eprintln!(
+        "  updated {} (added {} verified-callee require(s))",
+        lakefile_path.display(),
+        to_add.len()
+    );
+    Ok(())
+}
+
+/// Compute `target` relative to `base`. Pure-string version of
+/// `std::path` semantics — only descends when components match. Falls
+/// back to an absolute path when no common prefix exists (so the
+/// lakefile still compiles even when the provider lives outside the
+/// consumer's tree).
+fn pathdiff_relative_from(target: &Path, base: &Path) -> Option<std::path::PathBuf> {
+    use std::path::Component;
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let mut t_iter = target.components();
+    let mut b_iter = base.components();
+    loop {
+        match (t_iter.clone().next(), b_iter.clone().next()) {
+            (Some(a), Some(b)) if a == b => {
+                t_iter.next();
+                b_iter.next();
+            }
+            _ => break,
+        }
+    }
+    let mut out = std::path::PathBuf::new();
+    for _ in b_iter.filter(|c| !matches!(c, Component::RootDir | Component::Prefix(_))) {
+        out.push("..");
+    }
+    for c in t_iter {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        Some(std::path::PathBuf::from("."))
+    } else {
+        Some(out)
+    }
 }
 
 /// Inject `import <Iface>` lines immediately after the existing
@@ -574,6 +726,27 @@ fn safe_module_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// v2.27 Track B — Lake package name convention for a verified-callee's
+/// proof package. The provider's `lakefile.lean` must declare
+/// `package <return_value>`, and the consumer's lakefile emits a
+/// matching `require <return_value> from "<rel-path>"` directive.
+///
+/// Convention: lowercase the interface's first character + append
+/// `Proofs`. `Token` → `tokenProofs`, `SPL` → `sPLProofs`, `myAmm` →
+/// `myAmmProofs`. Deterministic; no parsing of the provider's lakefile
+/// required.
+pub(crate) fn proof_pkg_name(iface_name: &str) -> String {
+    let safe = safe_module_name(iface_name);
+    let mut chars = safe.chars();
+    match chars.next() {
+        Some(c) => {
+            let lower: String = c.to_lowercase().collect();
+            format!("{}{}Proofs", lower, chars.as_str())
+        }
+        None => "stdlibProofs".to_string(),
+    }
 }
 
 /// Render the `<Iface>.lean` sibling axiom module body. Emits one
@@ -737,6 +910,56 @@ fn rewrite_axiom_body_to_accessors(ensures_lean: &str) -> String {
     let re_pre = regex::Regex::new(r"\bs\.([A-Za-z_][A-Za-z0-9_]*)")
         .expect("regex compiles for pre-state accessor rewrite");
     re_pre.replace_all(&after_post, "($1 pre)").into_owned()
+}
+
+/// v2.27 Track B — strip the named modules from a lakefile's
+/// `roots := #[...]` array. Counterpart to `update_lakefile_roots`,
+/// used when a callee transitions from unverified (sibling axiom
+/// module written, root listed) to verified (no local module, root
+/// must be cleared or `lake build` fails on the missing import).
+///
+/// Idempotent: when none of the named modules are present, the file
+/// is left untouched.
+fn remove_lakefile_roots(lakefile_path: &Path, to_remove: &[String]) -> Result<()> {
+    if to_remove.is_empty() {
+        return Ok(());
+    }
+    let original = std::fs::read_to_string(lakefile_path)?;
+    let needle = "roots := #[";
+    let Some(start) = original.find(needle) else {
+        return Ok(());
+    };
+    let after_open = start + needle.len();
+    let Some(end_rel) = original[after_open..].find(']') else {
+        return Ok(());
+    };
+    let end = after_open + end_rel;
+    let inner = original[after_open..end].trim();
+    if inner.is_empty() {
+        return Ok(());
+    }
+    let target_strs: Vec<String> = to_remove.iter().map(|m| format!("`{}", m)).collect();
+    let current: Vec<String> = inner.split(',').map(|s| s.trim().to_string()).collect();
+    let retained: Vec<String> = current
+        .iter()
+        .filter(|r| !target_strs.iter().any(|t| t == *r))
+        .cloned()
+        .collect();
+    if retained.len() == current.len() {
+        return Ok(());
+    }
+    let new_inner = retained.join(", ");
+    let mut rewritten = String::new();
+    rewritten.push_str(&original[..after_open]);
+    rewritten.push_str(&new_inner);
+    rewritten.push_str(&original[end..]);
+    std::fs::write(lakefile_path, rewritten)?;
+    eprintln!(
+        "  reconciled {} (removed {} stale verified-callee root(s))",
+        lakefile_path.display(),
+        current.len() - retained.len(),
+    );
+    Ok(())
 }
 
 /// Idempotent lakefile update: ensures every pinned-interface module is
@@ -1920,11 +2143,25 @@ fn render_cpi_theorems(
                             apply_args.push(format!("(\u{00B7}.{})", caller_field));
                         }
                     }
+                    // v2.27 Track B — docstring reflects whether the
+                    // application discharges against an imported
+                    // theorem (Stance 2) or the bundled axiom
+                    // (Stance 1). The emitted identifier
+                    // (`ensures_axiom_<idx>`) is identical either way:
+                    // per the v2.27 lake-graph spike, when axiom and
+                    // theorem share the same signature the consumer's
+                    // Lean output is byte-identical. The require
+                    // directive in the consumer's lakefile is what
+                    // pulls the provider's theorem vs the local axiom.
+                    let stance = if spec.verified_callees.contains_key(&call.target_interface) {
+                        "stance 2: discharged via imported callee proof"
+                    } else {
+                        "stance 1: discharged via Tier-1 binary-hash axiom; \
+                         v3.0 will replace the axiom with an imported callee proof"
+                    };
                     out.push_str(&format!(
-                        "/-- {}.{}.ensures @ `{}` call #{} (stance 1: discharged \
-                         via Tier-1 binary-hash axiom; v3.0 will replace the \
-                         axiom with an imported callee proof). -/\n",
-                        call.target_interface, call.target_handler, op.name, call_idx,
+                        "/-- {}.{}.ensures @ `{}` call #{} ({}). -/\n",
+                        call.target_interface, call.target_handler, op.name, call_idx, stance,
                     ));
                     // Track A — the theorem declares `(pre post :
                     // State)` so the substituted statement (which now

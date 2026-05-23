@@ -51,6 +51,20 @@ pub struct ResolvedImport {
     pub local_alias: Option<String>,
     pub sources: Vec<(PathBuf, String)>,
     pub commit: Option<String>,
+    /// v2.27 Track B — true iff the provider ships a Lake-buildable
+    /// proof package alongside the qedspec. Detected by the presence
+    /// of both `<source_dir>/.qed/proofs/<bound_name>.lean` and
+    /// `<source_dir>/.qed/proofs/lakefile.lean`. When true, the
+    /// consumer's codegen skips writing its local sibling axiom module
+    /// and emits a `require` directive in its lakefile against
+    /// `proof_pkg_root` instead.
+    pub has_proofs: bool,
+    /// v2.27 Track B — directory containing the provider's proof
+    /// package (i.e. the parent of `<bound_name>.lean` and
+    /// `lakefile.lean`). Populated when `has_proofs` is true; `None`
+    /// otherwise. The consumer's lakefile rewrite computes a relative
+    /// path from its own location to this directory.
+    pub proof_pkg_root: Option<PathBuf>,
 }
 
 /// Cache-handling options for github fetches. v2.8 fold-in F7.
@@ -206,6 +220,24 @@ fn resolve_recursive(
             continue;
         }
 
+        // v2.27 Track B — detect a Lake-buildable proof package alongside
+        // the qedspec. Convention: `<source_dir>/.qed/proofs/<bound_name>.lean`
+        // plus a sibling `lakefile.lean` declaring `package <name>Proofs`
+        // (see `lean_gen::proof_pkg_name`). Both must be present; the
+        // module file alone isn't enough because the consumer's `require`
+        // directive needs a Lake package to point at.
+        let source_dir = first_source.parent().unwrap_or(Path::new("."));
+        let proof_module = source_dir
+            .join(".qed")
+            .join("proofs")
+            .join(format!("{}.lean", imp.name));
+        let proof_lakefile = source_dir.join(".qed").join("proofs").join("lakefile.lean");
+        let (has_proofs, proof_pkg_root) = if proof_module.is_file() && proof_lakefile.is_file() {
+            (true, Some(source_dir.join(".qed").join("proofs")))
+        } else {
+            (false, None)
+        };
+
         state.seen.insert(imp.from.clone(), canonical.clone());
         state.resolved.push(ResolvedImport {
             bound_name: imp.name.clone(),
@@ -213,6 +245,8 @@ fn resolve_recursive(
             local_alias: imp.as_name.clone(),
             sources: res.sources.clone(),
             commit: res.commit.clone(),
+            has_proofs,
+            proof_pkg_root,
         });
 
         // Walk into transitive deps. Imported specs that contain
@@ -721,6 +755,129 @@ mod tests {
             as_name: None,
         }
     }
+
+    // ----- v2.27 Track B: verified-callee detection -----
+
+    #[test]
+    fn detects_proof_package_alongside_qedspec() {
+        // Layout:
+        //   <root>/
+        //     qed.toml
+        //     token.qedspec
+        //     .qed/proofs/
+        //       Token.lean
+        //       lakefile.lean
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_dir = tmp.path();
+        std::fs::write(
+            manifest_dir.join("token.qedspec"),
+            "spec Token\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        let proofs_dir = manifest_dir.join(".qed").join("proofs");
+        std::fs::create_dir_all(&proofs_dir).unwrap();
+        std::fs::write(proofs_dir.join("Token.lean"), "-- proof module\n").unwrap();
+        std::fs::write(proofs_dir.join("lakefile.lean"), "-- lakefile\n").unwrap();
+
+        let manifest = manifest_with(vec![(
+            "spl_token",
+            Dependency::Path {
+                path: "token.qedspec".to_string(),
+            },
+        )]);
+        let imports = vec![imp("Token", "spl_token")];
+
+        let resolved = resolve_imports(&imports, &manifest, manifest_dir).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(
+            resolved[0].has_proofs,
+            "should detect proofs at .qed/proofs/Token.lean"
+        );
+        assert_eq!(
+            resolved[0].proof_pkg_root.as_ref(),
+            Some(&proofs_dir),
+            "proof_pkg_root should point at the .qed/proofs/ dir"
+        );
+    }
+
+    #[test]
+    fn no_proofs_when_module_file_is_missing() {
+        // lakefile present but no <bound_name>.lean → not verified.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_dir = tmp.path();
+        std::fs::write(
+            manifest_dir.join("token.qedspec"),
+            "spec Token\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        let proofs_dir = manifest_dir.join(".qed").join("proofs");
+        std::fs::create_dir_all(&proofs_dir).unwrap();
+        std::fs::write(proofs_dir.join("lakefile.lean"), "-- lakefile\n").unwrap();
+
+        let manifest = manifest_with(vec![(
+            "spl_token",
+            Dependency::Path {
+                path: "token.qedspec".to_string(),
+            },
+        )]);
+        let imports = vec![imp("Token", "spl_token")];
+
+        let resolved = resolve_imports(&imports, &manifest, manifest_dir).unwrap();
+        assert!(!resolved[0].has_proofs);
+        assert!(resolved[0].proof_pkg_root.is_none());
+    }
+
+    #[test]
+    fn no_proofs_when_lakefile_is_missing() {
+        // Module file alone isn't enough — need lakefile for the `require`
+        // directive to compile on the consumer side.
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_dir = tmp.path();
+        std::fs::write(
+            manifest_dir.join("token.qedspec"),
+            "spec Token\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        let proofs_dir = manifest_dir.join(".qed").join("proofs");
+        std::fs::create_dir_all(&proofs_dir).unwrap();
+        std::fs::write(proofs_dir.join("Token.lean"), "-- proof module\n").unwrap();
+
+        let manifest = manifest_with(vec![(
+            "spl_token",
+            Dependency::Path {
+                path: "token.qedspec".to_string(),
+            },
+        )]);
+        let imports = vec![imp("Token", "spl_token")];
+
+        let resolved = resolve_imports(&imports, &manifest, manifest_dir).unwrap();
+        assert!(!resolved[0].has_proofs);
+        assert!(resolved[0].proof_pkg_root.is_none());
+    }
+
+    #[test]
+    fn has_proofs_defaults_to_false_for_bare_path_dep() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest_dir = tmp.path();
+        std::fs::write(
+            manifest_dir.join("token.qedspec"),
+            "spec Token\ninterface Token { program_id \"x\" }\n",
+        )
+        .unwrap();
+        let manifest = manifest_with(vec![(
+            "spl_token",
+            Dependency::Path {
+                path: "token.qedspec".to_string(),
+            },
+        )]);
+        let imports = vec![imp("Token", "spl_token")];
+
+        let resolved = resolve_imports(&imports, &manifest, manifest_dir).unwrap();
+        assert!(!resolved[0].has_proofs);
+        assert!(resolved[0].proof_pkg_root.is_none());
+    }
+
+    // ----- end Track B -----
 
     #[test]
     fn resolves_path_source_pointing_at_single_file() {
