@@ -318,6 +318,7 @@ qedgen`); 4/4 codegen_smoke; 4/4 upstream_check_e2e.
 | Lockfile diff renderer misses `program_id` + `upstream_version` | `qed_lock::describe_lock_diff` | Minor; not blocking                |
 | `is_sentinel_hash` accepts `SHA256:` prefix shorthand          | Defensive against hand-edited specs | Intentional looseness            |
 | `--recursive`'s lake build runs in the host shell, not sandboxed | `main.rs` verify handler | A malicious provider's lakefile.lean could run arbitrary Lean; v2.27 trust model is "you opted into the dep when you wrote `import X from \"Y\"`"; sandboxing is v3.0+ scope |
+| Bundled-stdlib `require <pkg>Proofs from "<rel-path>"` directive in committed lakefiles is author-machine-specific | `lean_gen::inject_verified_callee_requires` + `pathdiff_relative_from` | The relative path computed against `$HOME`-rooted cache resolves to the right cache only on the author's machine layout. Other clones (and CI) must run `qedgen codegen --lean --spec <ex>` to materialize the bundled proof package + rewrite the lakefile with their own layout. Lake-build CI workflow does this automatically (v2.27.1). v2.28 design: vendor the bundled package into the consumer tree OR use a git source so the require directive is portable. |
 
 ## Upgrade notes
 

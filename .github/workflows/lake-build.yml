@@ -47,6 +47,35 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-lake-
 
+      # v2.27 — examples that import bundled stdlib (`Token from "spl"`,
+      # `Metadata from "metaplex"`) have lakefiles whose `require
+      # tokenProofs from "<rel-path>"` directive was rewritten relative
+      # to the author's `$HOME` (the bundled proof package is
+      # materialized to `~/.qedgen/cache/builtin/<key>/.qed/proofs/`).
+      # The relative-path depth depends on how deep the repo is under
+      # `$HOME` — committed lakefiles therefore only resolve cleanly on
+      # the machine they were generated on. Rebuild qedgen and re-run
+      # codegen on each affected example to (a) materialize the bundled
+      # proof package into the runner's `$HOME/.qedgen/cache/`, and
+      # (b) rewrite the lakefile's require directive with a path that
+      # resolves correctly under the runner's path layout.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Build qedgen + regen bundled-stdlib lakefiles
+        run: |
+          set -euo pipefail
+          cargo build --release --bin qedgen
+          mkdir -p bin
+          cp target/release/qedgen bin/qedgen
+          for ex in examples/rust/escrow-split examples/rust/bundled-stdlib-demo; do
+            if [ -f "$ex/qed.toml" ]; then
+              echo "==> regen lakefile for $ex"
+              bin/qedgen codegen --lean --spec "$ex"
+            fi
+          done
+
       # Populate `.lake/` for any example whose cache missed. `lake update`
       # is a no-op when the manifest matches; otherwise it fetches Mathlib.
       - name: Bootstrap missing .lake directories

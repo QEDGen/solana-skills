@@ -43,7 +43,16 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
+      # macOS runners ship Xcode's new ld-prime linker, which trips an
+      # assertion on Rust-generated symbol names longer than its internal
+      # limit (`name.size() <= maxLength` in `SymbolString.cpp`). The
+      # classic Mach-O linker handles them without complaint. Apple has
+      # an open bug; until it's fixed in `ld-prime`, every macOS Rust
+      # build of qedgen needs `-Wl,-ld_classic`. Non-macOS targets are
+      # unaffected.
       - name: Build
+        env:
+          RUSTFLAGS: ${{ startsWith(matrix.os, 'macos') && '-C link-arg=-Wl,-ld_classic' || '' }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package and checksum
