@@ -78,8 +78,109 @@ all three bundled fixtures are `sha256:0000...` placeholders pending
 audit — the contract chain is structurally complete but
 cryptographically un-anchored until real pins land.
 
+v2.27 — the bundled fixtures gained substantive state-aware
+contracts (balance preservation on `Token.transfer`, lamport
+conservation on `System.transfer`, verified-flag flips on
+`Metadata.sign_metadata`, …). SPL Token + Metaplex also ship
+bundled Lake-buildable proof packages alongside the qedspec
+fixtures, materialized to `<cache>/builtin/<key>/.qed/proofs/`
+on demand — callers automatically get Stance 2 (imported callee
+theorem) end-to-end with no manual proof authoring. System Program
+intentionally stays Stance 1 in v2.27; see the "Stance 1 vs
+Stance 2" section below.
+
+Real `binary_hash` pins replace the v2.26 `sha256:0000…`
+placeholders for SPL Token + Metaplex (captured 2026-05-23 from
+mainnet payload dumps). The System Program stays at the all-zero
+sentinel (native program; no deployed binary to hash).
+
 User-authored interfaces (`import X from "..."` referencing a github
 or path source declared in `qed.toml`) continue to work unchanged.
+
+### Stance 1 vs Stance 2 — verified-callee composition
+
+Two ways an imported interface's `ensures` clauses can be discharged
+at the caller's `lake build`:
+
+- **Stance 1** (default, unchanged from v2.26): codegen writes a
+  local sibling `<Iface>.lean` axiom module next to `Spec.lean`.
+  The caller's theorem applies `Token.transfer.ensures_axiom_<i>`
+  against an `axiom` declared in that local module. Trust anchor:
+  the `upstream { binary_hash }` pin on the interface.
+- **Stance 2** (v2.27, opt-in via shipped proofs): when the
+  provider ships `<source_dir>/.qed/proofs/<Iface>.lean +
+  lakefile.lean` alongside the qedspec, the resolver detects it
+  and:
+  - Codegen does NOT emit the local `<Iface>.lean` axiom module.
+  - The consumer's `lakefile.lean` gets a `require <pkg>Proofs
+    from "<rel-path>"` directive injected (the package name is
+    `<lowercase-first-char + rest>Proofs` — e.g. `tokenProofs`,
+    `metadataProofs`).
+  - The caller's theorem applies the same identifier — but it now
+    resolves to the imported `theorem` from the provider package
+    instead of the local `axiom`. Per the v2.27 Phase 2 lake-graph
+    spike, the Spec.lean theorem application string is byte-
+    identical between stances.
+
+Bundled stdlib coverage in v2.27:
+
+- `import Token from "spl"` → Stance 2 (bundled `tokenProofs` package).
+- `import Metadata from "metaplex"` → Stance 2 (bundled `metadataProofs`).
+- `import System from "system"` → Stance 1 (no bundled proof package
+  in v2.27 — its handlers have `Pubkey` params that would require
+  the bundled module to import `QEDGen.Solana.Account`, defeating
+  the self-contained-distribution goal).
+
+`qedgen verify --require-verified` is the CI gate that surfaces any
+imported Tier-1+ interface that's still on Stance 1. Default-off
+in v2.27 because System Program is unbundled-Stance-1; revisit when
+its bundled proof package lands.
+
+### Abstract callee-state vocabulary
+
+An interface can declare its abstract callee-state vocabulary with an
+optional `state { name : Type, ... }` block (v2.27 Phase 0). The
+named fields can be referenced from per-handler `ensures` clauses via
+`state.X` (post-state) and `old(state.X)` (pre-state); they lower to
+polymorphic `(X : State → T)` accessors in the bundled axiom
+signature. Callers map them to concrete State fields via per-call
+`state_binders`:
+
+```
+interface Token {
+  state {
+    from_balance : U64
+    to_balance   : U64
+    total_supply : U64
+  }
+  handler transfer (amount : U64) {
+    requires amount > 0
+    ensures  state.from_balance == old(state.from_balance) - amount
+    ensures  state.to_balance == old(state.to_balance) + amount
+  }
+}
+```
+
+Caller side:
+
+```
+call Token.transfer(
+  amount = amount,
+  state_binders {
+    from_balance = state.alice_balance,
+    to_balance = state.bob_balance,
+  },
+)
+```
+
+Type map: `Nat` for the `U*` family (also the back-compat default
+when a field is not declared in `state { ... }`), `Int` for `I*`,
+`Bool` for `Bool`, `Pubkey` for `Pubkey`. Skip-comment fallback:
+when the caller supplies NO binders for an ensures, that per-ensures
+theorem is silently dropped from the caller's Spec.lean with a
+one-line explanatory comment — the contract still holds in the
+callee (binary_hash is the warrant), the caller just doesn't pull
+it into its own proof.
 
 ### GitHub source
 

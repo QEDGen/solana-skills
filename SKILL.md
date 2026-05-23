@@ -121,6 +121,8 @@ $QEDGEN verify --spec program.qedspec --kani-impl   # v2.26 — calls user's rea
 $QEDGEN verify --spec program.qedspec --lean
 $QEDGEN verify --spec program.qedspec --crucible 300   # coverage-guided fuzz (5 min)
 $QEDGEN verify --spec program.qedspec --check-upstream # v2.26 — pin-mismatch is CRIT (use --upstream-stale-ok offline)
+$QEDGEN verify --spec program.qedspec --recursive       # v2.27 — DFS-walk transitive proof packages; lake build per layer
+$QEDGEN verify --spec program.qedspec --require-verified # v2.27 — exits non-zero on any Tier-1+ import without a bundled proof package (default-off)
 ```
 
 v2.26 split the Kani layer into two harness shapes: `--kani` runs the

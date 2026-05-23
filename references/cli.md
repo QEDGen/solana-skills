@@ -233,7 +233,7 @@ $QEDGEN check --regen-drift --examples-root examples/rust
 | `--asm` | Path | - | sBPF assembly source (hash check + lake build) |
 | `--anchor-project` | Path | - | Anchor program crate (`Cargo.toml` + `src/lib.rs`). Cross-checks the spec's `handler` set against the `#[program]` mod's instruction set, plus an effect-coverage lint per resolved handler body. CI gate. |
 | `--frozen` | bool | false | Refuse to update `qed.lock`; error if the on-disk lock is stale or missing. Used in CI to detect un-bumped imports. |
-| `--strict` | bool | false | Escalate `--frozen` upstream binary-hash mismatches from P2 warning to CRIT (gates exit). Use in release-blocking CI; default `--frozen` stays warning-only. Requires `--frozen`. |
+| `--strict` | bool | false | Escalate `--frozen` upstream binary-hash mismatches AND v2.27 Track D1 proof_hash drift from P2 warning to CRIT (gates exit). Use in release-blocking CI; default `--frozen` stays warning-only. Requires `--frozen`. |
 | `--no-cache` | bool | false | Force-refresh the github source cache for every imported dep. Wipes `~/.qedgen/cache/github/<org>/<repo>/<kind>/<ref>/` and re-clones. |
 | `--regen-drift` | bool | false | Regenerate bundled examples into temporary directories and fail if committed generated support code, harnesses, or `Spec.lean` drift. Also fails when an example has `.qed/` state or generated artifacts but no `qed.toml`. |
 | `--examples-root` | Path | `examples/rust` | Example root scanned by `--regen-drift` |
@@ -349,6 +349,8 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --upstream-stale-ok
 | `--crucible-harness-dir` | Path | `./fuzz/<prog>/` | Harness directory for `--crucible`. |
 | `--crucible-no-smoke` | bool | false | Skip the 30s smoke pre-flight. |
 | `--crucible-stateful` | bool | false | Stateful action-chain mode for `--crucible`. |
+| `--recursive` | bool | false | v2.27 Track D3 — DFS-walk the transitive proof-package closure (deduped by path) and run `lake build` per layer. Per-layer PASS/FAIL is reported; failed layers print the first ~10 lines of stderr/stdout. Exits non-zero on any layer failure; emits "every imported proof package built clean" when all pass. No-op success when the spec imports nothing with `verified = true` in `qed.lock`. |
+| `--require-verified` | bool | false | v2.27 Track D2 — exits non-zero before any backend dispatches if any imported Tier-1+ interface (binary_hash + `ensures`) did NOT ship a `.qed/proofs/<Iface>.lean + lakefile.lean` package alongside. Tier-0 (no ensures) and sentinel-pinned natives (all-zero binary_hash) are exempt. Default-off in v2.27 because the bundled stdlib still ships Stance 1 for `import System from "system"` (no bundled proof package for Pubkey-param handlers). |
 
 ### `probe`
 Probe a `.qedspec` for category-coverage gaps (spec-aware mode) or
