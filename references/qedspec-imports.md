@@ -116,11 +116,23 @@ at the caller's `lake build`:
     from "<rel-path>"` directive injected (the package name is
     `<lowercase-first-char + rest>Proofs` — e.g. `tokenProofs`,
     `metadataProofs`).
-  - The caller's theorem applies the same identifier — but it now
-    resolves to the imported `theorem` from the provider package
-    instead of the local `axiom`. Per the v2.27 Phase 2 lake-graph
+  - The caller's theorem applies the same identifier — and it
+    resolves to a bundled `axiom` in the shared provider package
+    instead of a local one. Per the v2.27 Phase 2 lake-graph
     spike, the Spec.lean theorem application string is byte-
     identical between stances.
+
+  v2.28 note: the bundled packages declare their `ensures_axiom_<i>`
+  as top-level `axiom`s directly (v2.27 wrapped them in
+  one-step `theorem ... := runtime_trust_<binder>` indirection;
+  the indirection masked the trust surface in `#print axioms`
+  output). Stance 2's value vs Stance 1 in v2.28 is structural —
+  one shared axiom across all consumers rather than N per-consumer
+  copies — not verification strength. Both stances still
+  axiomatize against the upstream `binary_hash` pin. The real
+  Stance 3 (qedsvm-discharged theorems against the pinned ELF)
+  ships in v3.0+; bundled package docstrings name the
+  `qedsvm_discharge` target for each axiom.
 
 Bundled stdlib coverage in v2.27:
 

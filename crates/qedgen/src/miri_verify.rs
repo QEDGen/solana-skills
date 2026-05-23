@@ -295,6 +295,7 @@ pub fn run(project_root: &Path) -> BackendReport {
             ),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -307,6 +308,7 @@ pub fn run(project_root: &Path) -> BackendReport {
             detail: Some(format!("{}", e)),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -320,6 +322,7 @@ pub fn run(project_root: &Path) -> BackendReport {
                 detail: Some(format!("miri runner error: {}", e)),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             };
         }
     };
@@ -366,6 +369,7 @@ pub fn run(project_root: &Path) -> BackendReport {
         detail: Some(summary),
         log_path: None,
         counterexamples: Vec::new(),
+        axioms: Vec::new(),
     }
 }
 

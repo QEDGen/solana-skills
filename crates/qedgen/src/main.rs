@@ -1156,6 +1156,7 @@ fn crucible_backend_report(
                 detail: Some(format!("failed to parse spec: {e}")),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             }
         }
     };
@@ -1204,6 +1205,7 @@ fn crucible_backend_report(
                 detail: Some(format!("crucible run failed: {e:#}")),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             }
         }
     };
@@ -1242,6 +1244,7 @@ fn crucible_backend_report(
         detail,
         log_path: None,
         counterexamples,
+        axioms: Vec::new(),
     }
 }
 

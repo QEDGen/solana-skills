@@ -1,24 +1,31 @@
--- v2.27 Track C2: bundled SPL Token proof package (Stance 2).
+-- v2.28 — bundled SPL Token proof package (explicit-axiom shape).
 --
--- The consumer's lakefile pulls this module via
---   require splProofs from <qedgen-cache>/builtin/spl/.qed/proofs
--- and `import Token` resolves to the theorem symbols below instead of
--- the Stance-1 local axiom module that codegen would otherwise write.
+-- WHAT THIS PACKAGE IS NOT. These are NOT proofs that the deployed SPL
+-- Token program honors the `ensures` clauses declared in
+-- `crates/qedgen/data/interfaces/spl_token.qedspec`. They are
+-- AXIOMATIZED contracts. The package's load-bearing guarantee is the
+-- `binary_hash` content pin against the deployed program at
+-- `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` — `verify
+-- --check-upstream` re-dumps and compares. Nothing in this module
+-- proves that those pinned bytes implement the contracts below.
 --
--- Trust boundary. Each handler's contract is consolidated into ONE
--- named axiom (`<handler>.runtime_trust_<binder>`) per abstract-state
--- accessor referenced. The `ensures_axiom_<i>` THEOREMS that consumers
--- apply derive trivially from those axioms — same byte-for-byte
--- signature as the Stance-1 codegen, so the consumer's Lean code is
--- unchanged across stances.
+-- v2.28 — explicit-axiom rename. v2.27 wrapped each axiom in a one-step
+-- `theorem ensures_axiom_<i> := runtime_trust_<binder>` indirection.
+-- That made `#print axioms` on consumer proofs report `runtime_trust_*`
+-- by name (one level removed from the symbol the consumer references)
+-- and visually framed the package as "proven." Both are now dropped:
+-- each `ensures_axiom_<i>` is declared as a top-level `axiom` directly,
+-- so the unverified trust surface appears under exactly the symbol
+-- consumers apply. Consumer code (`exact Token.transfer.ensures_axiom_0
+-- pre post amount (·.field)`) is byte-identical across v2.27 and v2.28.
 --
--- The substantive difference vs Stance 1: the runtime-trust assumption
--- is now NAMED and DOCUMENTED at one location per handler, rather than
--- scattered across N unlabelled `axiom ensures_axiom_<i>` declarations.
--- Future hardening (formal-svm spinout): replace the runtime_trust
--- axioms with actual proofs against a Lean model of the deployed SPL
--- Token binary at the pinned `binary_hash`. v2.27 ships the structure
--- + the documented trust surface; the model-based discharge is v3.0+.
+-- v3.0+ (Stance 3) — when QEDGen/qedsvm ships per-handler separation-
+-- logic specs + a `qedsvm_discharge` tactic, each `axiom
+-- ensures_axiom_<i>` below becomes `theorem ensures_axiom_<i> ... := by
+-- qedsvm_discharge "<binary_hash>" "<handler>"`. The tactic decodes the
+-- ELF at `binary_hash`, applies the bundled SL spec via `sl_block_auto`,
+-- and projects onto the abstract State accessor. Consumer code remains
+-- unchanged through that transition.
 
 namespace Token
 
@@ -37,34 +44,24 @@ def binary_hash : String :=
 
 namespace transfer
 
-/-- Runtime-trust assumption: the deployed SPL Token program at the
-    pinned `binary_hash` enforces balance-debit on `from` upon a
-    successful `transfer`. This is the trust boundary; the binary
-    pin is the warrant. -/
-axiom runtime_trust_from {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `transfer` debits `from_balance` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+: decode the pinned ELF, apply the `transfer` SL spec via
+    `sl_block_auto`, project onto `from_balance`. Until then this is an
+    author-asserted axiom; `#print axioms` on any consumer proof will
+    surface this name. -/
+axiom ensures_axiom_0 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (from_balance : State → Nat) :
   (from_balance post) = (from_balance pre) - amount
 
-/-- Runtime-trust assumption: the deployed SPL Token program at the
-    pinned `binary_hash` enforces balance-credit on `to` upon a
-    successful `transfer`. -/
-axiom runtime_trust_to {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `transfer` credits `to_balance` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+ (see `ensures_axiom_0`). -/
+axiom ensures_axiom_1 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (to_balance : State → Nat) :
   (to_balance post) = (to_balance pre) + amount
-
-/-- Codegen-shape theorem matching `Token.transfer`'s ensures #0.
-    Discharges via `runtime_trust_from`. -/
-theorem ensures_axiom_0 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (from_balance : State → Nat) :
-    (from_balance post) = (from_balance pre) - amount :=
-  runtime_trust_from pre post amount from_balance
-
-/-- Codegen-shape theorem matching `Token.transfer`'s ensures #1.
-    Discharges via `runtime_trust_to`. -/
-theorem ensures_axiom_1 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (to_balance : State → Nat) :
-    (to_balance post) = (to_balance pre) + amount :=
-  runtime_trust_to pre post amount to_balance
 
 end transfer
 
@@ -76,23 +73,21 @@ end transfer
 
 namespace mint_to
 
-axiom runtime_trust_supply {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `mint_to` grows `total_supply` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+. -/
+axiom ensures_axiom_0 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (total_supply : State → Nat) :
   (total_supply post) = (total_supply pre) + amount
 
-axiom runtime_trust_to {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `mint_to` credits `to_balance` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+. -/
+axiom ensures_axiom_1 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (to_balance : State → Nat) :
   (to_balance post) = (to_balance pre) + amount
-
-theorem ensures_axiom_0 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (total_supply : State → Nat) :
-    (total_supply post) = (total_supply pre) + amount :=
-  runtime_trust_supply pre post amount total_supply
-
-theorem ensures_axiom_1 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (to_balance : State → Nat) :
-    (to_balance post) = (to_balance pre) + amount :=
-  runtime_trust_to pre post amount to_balance
 
 end mint_to
 
@@ -104,23 +99,21 @@ end mint_to
 
 namespace burn
 
-axiom runtime_trust_supply {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `burn` shrinks `total_supply` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+. -/
+axiom ensures_axiom_0 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (total_supply : State → Nat) :
   (total_supply post) = (total_supply pre) - amount
 
-axiom runtime_trust_from {State : Type} [Inhabited State]
+/-- TRUST ASSUMPTION — not verified. Asserts that a successful
+    `burn` debits `from_balance` by `amount` on the deployed SPL
+    Token program at `Token.binary_hash`. Discharged by `qedsvm` in
+    v3.0+. -/
+axiom ensures_axiom_1 {State : Type} [Inhabited State]
     (pre post : State) (amount : Nat) (from_balance : State → Nat) :
   (from_balance post) = (from_balance pre) - amount
-
-theorem ensures_axiom_0 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (total_supply : State → Nat) :
-    (total_supply post) = (total_supply pre) - amount :=
-  runtime_trust_supply pre post amount total_supply
-
-theorem ensures_axiom_1 {State : Type} [Inhabited State]
-    (pre post : State) (amount : Nat) (from_balance : State → Nat) :
-    (from_balance post) = (from_balance pre) - amount :=
-  runtime_trust_from pre post amount from_balance
 
 end burn
 

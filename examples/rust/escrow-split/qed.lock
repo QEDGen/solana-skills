@@ -11,4 +11,4 @@ program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 upstream_binary_hash = "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
 upstream_version = "4.0.3"
 verified = true
-proof_hash = "sha256:efcf8ce46aa30a02e316fc2e2f31dbd65f89a3b79508aacb0fbe80a20ea4a930"
+proof_hash = "sha256:9ac644d3090b94b0eb9393bf600dcbe79a8e788b636a5dfae36d73ad257a8c78"

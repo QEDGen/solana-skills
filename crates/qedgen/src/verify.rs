@@ -36,6 +36,33 @@ pub struct BackendReport {
     /// continue to work.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub counterexamples: Vec<Counterexample>,
+    /// v2.28 — for the `lean` backend, the unverified axioms each
+    /// top-level theorem in Spec.lean / Proofs.lean depends on. Surfaces
+    /// the trust surface (`*.ensures_axiom_*` from bundled callees +
+    /// any `sorryAx` from incomplete proofs) as a first-class artifact.
+    /// Empty when the backend isn't `lean`, when the build failed,
+    /// when no top-level theorems were found, or when every theorem
+    /// only depends on Lean built-ins. `omitempty` so v2.27 JSON
+    /// consumers continue to work.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub axioms: Vec<AxiomDependency>,
+}
+
+/// One theorem's dependence on unverified axioms (v2.28).
+///
+/// Lean built-ins (`propext`, `Classical.choice`, `Quot.sound`, the
+/// `Lean.ofReduceBool` / `Lean.trustCompiler` pair used by
+/// `native_decide`) are filtered out before this is constructed —
+/// they're part of every Lean program's trust base and not actionable.
+/// What remains is the user-meaningful trust surface: bundled-callee
+/// `*.ensures_axiom_*` axioms (Stance-1 codegen module or Stance-2
+/// bundled package) and `sorryAx` from incomplete proofs.
+#[derive(Debug, Clone, Serialize)]
+pub struct AxiomDependency {
+    /// Fully-qualified theorem name (`Namespace.theoremName`).
+    pub theorem: String,
+    /// Axioms the theorem depends on, with Lean built-ins filtered.
+    pub axioms: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -139,6 +166,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
             )),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -155,6 +183,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             };
         }
     };
@@ -181,6 +210,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
             detail: None,
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         },
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -203,6 +233,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 detail: Some(summarize_cargo_failure(&stdout, &stderr)),
                 log_path: None,
                 counterexamples: cxs,
+                axioms: Vec::new(),
             }
         }
         Err(e) => BackendReport {
@@ -212,6 +243,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
             detail: Some(format!("failed to spawn cargo: {}", e)),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         },
     }
 }
@@ -230,6 +262,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             )),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -244,6 +277,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             detail: Some(format!("{}", e)),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -258,6 +292,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             detail: Some(format!("{}", e)),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -271,6 +306,7 @@ fn run_kani(harness: &Path) -> BackendReport {
                 detail: Some(format!("no Cargo.toml found above {}", harness.display())),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             };
         }
     };
@@ -293,6 +329,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             detail: Some(summarize_kani_pass(&String::from_utf8_lossy(&out.stdout))),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         },
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -311,6 +348,7 @@ fn run_kani(harness: &Path) -> BackendReport {
                 detail: Some(summarize_kani_failure(&stdout, &stderr)),
                 log_path: None,
                 counterexamples: cxs,
+                axioms: Vec::new(),
             }
         }
         Err(e) => BackendReport {
@@ -320,6 +358,7 @@ fn run_kani(harness: &Path) -> BackendReport {
             detail: Some(format!("failed to spawn cargo kani: {}", e)),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         },
     }
 }
@@ -338,6 +377,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
             )),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         };
     }
 
@@ -349,14 +389,22 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
     let duration_ms = start.elapsed().as_millis();
 
     match output {
-        Ok(out) if out.status.success() => BackendReport {
-            name: "lean",
-            status: BackendStatus::Passed,
-            duration_ms,
-            detail: None,
-            log_path: None,
-            counterexamples: Vec::new(),
-        },
+        Ok(out) if out.status.success() => {
+            // v2.28 — surface the unverified trust surface alongside the
+            // pass. Soft-failing: if the axiom query can't run (file IO,
+            // `lake env lean` not on PATH, regex misses), we silently
+            // return an empty list rather than failing the verify.
+            let axioms = collect_axiom_report(lean_dir).unwrap_or_default();
+            BackendReport {
+                name: "lean",
+                status: BackendStatus::Passed,
+                duration_ms,
+                detail: None,
+                log_path: None,
+                counterexamples: Vec::new(),
+                axioms,
+            }
+        }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -367,6 +415,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
                 detail: Some(summarize_lake_failure(&stdout, &stderr)),
                 log_path: None,
                 counterexamples: Vec::new(),
+                axioms: Vec::new(),
             }
         }
         Err(e) => BackendReport {
@@ -379,6 +428,7 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
             )),
             log_path: None,
             counterexamples: Vec::new(),
+            axioms: Vec::new(),
         },
     }
 }
@@ -480,6 +530,147 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
+// ---- v2.28 — `#print axioms` trust-surface report ---------------------
+
+/// Lean built-ins that appear in every program's axiom closure. We
+/// filter these out before reporting so the user-actionable list isn't
+/// drowned in noise. `propext`, `Classical.choice`, `Quot.sound` are
+/// the classical-logic trio every Mathlib-using proof transitively
+/// pulls in; `Lean.ofReduceBool` + `Lean.trustCompiler` are the pair
+/// behind `native_decide` and `decide`-on-reducible-Props, both of
+/// which are part of Lean's compiler-trust base, not the user's.
+const LEAN_BUILTIN_AXIOMS: &[&str] = &[
+    "propext",
+    "Classical.choice",
+    "Quot.sound",
+    "Lean.ofReduceBool",
+    "Lean.trustCompiler",
+];
+
+/// Discover top-level theorems in Spec.lean / Proofs.lean and query
+/// their axiom closure via `lake env lean`. Soft-fails: returns None
+/// when file IO breaks, the lake invocation can't spawn, or no
+/// theorems are found. `Some(vec![])` means "queried successfully, no
+/// theorem depends on a non-builtin axiom" — the all-proven case.
+fn collect_axiom_report(lean_dir: &Path) -> Option<Vec<AxiomDependency>> {
+    let theorems = collect_theorem_names(lean_dir);
+    if theorems.is_empty() {
+        return Some(Vec::new());
+    }
+    run_axiom_query(lean_dir, &theorems)
+}
+
+/// Parse Spec.lean + Proofs.lean for top-level `theorem` declarations.
+/// Tracks namespace nesting to produce fully-qualified names.
+fn collect_theorem_names(lean_dir: &Path) -> Vec<String> {
+    let mut result = Vec::new();
+    for fname in ["Spec.lean", "Proofs.lean"] {
+        let path = lean_dir.join(fname);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            collect_theorems_from_text(&text, &mut result);
+        }
+    }
+    result
+}
+
+fn collect_theorems_from_text(text: &str, out: &mut Vec<String>) {
+    let theorem_re = regex::Regex::new(
+        r"^(?:(?:private|protected|noncomputable)\s+)*theorem\s+([A-Za-z_][A-Za-z0-9_']*)",
+    )
+    .expect("static regex");
+    let mut ns: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if line.starts_with("--") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("namespace ") {
+            if let Some(name) = first_ident(rest) {
+                ns.push(name);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("end ") {
+            if let Some(name) = first_ident(rest) {
+                if ns.last().map(|s| s.as_str()) == Some(name.as_str()) {
+                    ns.pop();
+                }
+            }
+            continue;
+        }
+        if let Some(caps) = theorem_re.captures(line) {
+            let name = caps[1].to_string();
+            let full = if ns.is_empty() {
+                name
+            } else {
+                format!("{}.{}", ns.join("."), name)
+            };
+            out.push(full);
+        }
+    }
+}
+
+fn first_ident(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let end = s
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\'')
+        .unwrap_or(s.len());
+    if end == 0 {
+        None
+    } else {
+        Some(s[..end].to_string())
+    }
+}
+
+fn run_axiom_query(lean_dir: &Path, theorems: &[String]) -> Option<Vec<AxiomDependency>> {
+    let report_path = lean_dir.join("_QedgenAxiomReport.lean");
+    let mut content = String::new();
+    if lean_dir.join("Spec.lean").exists() {
+        content.push_str("import Spec\n");
+    }
+    if lean_dir.join("Proofs.lean").exists() {
+        content.push_str("import Proofs\n");
+    }
+    content.push('\n');
+    for thm in theorems {
+        content.push_str(&format!("#print axioms {}\n", thm));
+    }
+    if std::fs::write(&report_path, &content).is_err() {
+        return None;
+    }
+    let output = Command::new("lake")
+        .args(["env", "lean", "_QedgenAxiomReport.lean"])
+        .current_dir(lean_dir)
+        .output();
+    let _ = std::fs::remove_file(&report_path);
+    let out = output.ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Some(parse_axiom_output(&stdout))
+}
+
+/// Parse Lean's `#print axioms` output. Two output shapes per theorem:
+///   `'<name>' depends on axioms: [a, b, c]`   → captured here
+///   `'<name>' does not depend on any axioms`  → silently skipped
+/// (the second shape means the theorem's trust closure is empty after
+/// our built-in filter; nothing to surface).
+fn parse_axiom_output(stdout: &str) -> Vec<AxiomDependency> {
+    let re =
+        regex::Regex::new(r"'([^']+)' depends on axioms:\s*\[([^\]]*)\]").expect("static regex");
+    let mut result = Vec::new();
+    for cap in re.captures_iter(stdout) {
+        let theorem = cap[1].to_string();
+        let axioms: Vec<String> = cap[2]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|a| !a.is_empty() && !LEAN_BUILTIN_AXIOMS.contains(&a.as_str()))
+            .collect();
+        if !axioms.is_empty() {
+            result.push(AxiomDependency { theorem, axioms });
+        }
+    }
+    result
+}
+
 pub fn print_human(report: &VerifyReport) {
     eprint!("{}", format_human(report));
 }
@@ -506,6 +697,7 @@ pub fn format_human(report: &VerifyReport) -> String {
             }
         }
         format_counterexamples(&mut out, &b.counterexamples);
+        format_axioms(&mut out, &b.axioms);
     }
     if report.ok() {
         out.push_str("OK\n");
@@ -548,6 +740,25 @@ fn format_counterexamples(out: &mut String, cxs: &[Counterexample]) {
         }
         if let Some(seed) = &cx.seed {
             out.push_str(&format!("           seed: {}\n", seed));
+        }
+    }
+}
+
+/// v2.28 — render the unverified trust surface below the backend's
+/// status block. Groups by theorem; one axiom per indented line. Lean
+/// built-ins (propext / Classical.choice / Quot.sound / native_decide
+/// kernel pair) are filtered upstream so they don't appear here.
+/// Empty `axioms` → no section emitted; "all proven" surfaces as
+/// silent pass, same as today.
+fn format_axioms(out: &mut String, axioms: &[AxiomDependency]) {
+    if axioms.is_empty() {
+        return;
+    }
+    out.push_str("         trust surface (unverified axioms each theorem depends on):\n");
+    for dep in axioms {
+        out.push_str(&format!("           {}\n", dep.theorem));
+        for ax in &dep.axioms {
+            out.push_str(&format!("             - {}\n", ax));
         }
     }
 }
@@ -625,6 +836,7 @@ mod tests {
                 detail: Some("1 of 2 failed".into()),
                 log_path: None,
                 counterexamples: vec![cx_kani_overflow()],
+                axioms: Vec::new(),
             }],
         };
         let out = format_human(&report);
@@ -663,6 +875,7 @@ mod tests {
                 detail: None,
                 log_path: None,
                 counterexamples: vec![cx_proptest_lifecycle()],
+                axioms: Vec::new(),
             }],
         };
         let out = format_human(&report);
@@ -685,6 +898,7 @@ mod tests {
                     detail: None,
                     log_path: None,
                     counterexamples: vec![],
+                    axioms: Vec::new(),
                 },
                 BackendReport {
                     name: "kani",
@@ -693,6 +907,7 @@ mod tests {
                     detail: Some("1 of 1 failed".into()),
                     log_path: None,
                     counterexamples: vec![cx_kani_overflow()],
+                    axioms: Vec::new(),
                 },
                 BackendReport {
                     name: "lean",
@@ -701,6 +916,7 @@ mod tests {
                     detail: Some("no lakefile".into()),
                     log_path: None,
                     counterexamples: vec![],
+                    axioms: Vec::new(),
                 },
             ],
         };
@@ -729,10 +945,140 @@ mod tests {
                 detail: None,
                 log_path: None,
                 counterexamples: vec![],
+                axioms: Vec::new(),
             }],
         };
         let out = format_human(&report);
         assert!(!out.contains("counterexample"));
         assert!(out.ends_with("OK\n"));
+    }
+
+    // ---- v2.28 axiom-report tests --------------------------------------
+
+    #[test]
+    fn collects_top_level_theorems_with_namespace_prefix() {
+        let src = r#"
+namespace PoolDemo
+
+def foo (x : Nat) : Nat := x + 1
+
+theorem deposit_Token_transfer_call_0_post_1 (s : State) : True := trivial
+theorem deposit_aborts_if_InvalidAmount : 1 = 1 := rfl
+
+end PoolDemo
+
+theorem at_root : True := trivial
+"#;
+        let mut out = Vec::new();
+        collect_theorems_from_text(src, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                "PoolDemo.deposit_Token_transfer_call_0_post_1".to_string(),
+                "PoolDemo.deposit_aborts_if_InvalidAmount".to_string(),
+                "at_root".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_theorems_with_modifiers_and_nested_namespaces() {
+        let src = r#"
+namespace Outer
+namespace Inner
+
+private theorem hidden : True := trivial
+protected theorem visible (n : Nat) : n = n := rfl
+noncomputable theorem chosen : True := trivial
+
+end Inner
+end Outer
+"#;
+        let mut out = Vec::new();
+        collect_theorems_from_text(src, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                "Outer.Inner.hidden".to_string(),
+                "Outer.Inner.visible".to_string(),
+                "Outer.Inner.chosen".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_lean_print_axioms_output_and_filters_builtins() {
+        // Verbatim shape Lean emits for `#print axioms <thm>`. Built-ins
+        // (propext, Classical.choice, Quot.sound) must NOT appear in the
+        // structured output; user-meaningful axioms (sorryAx, bundled-
+        // callee ensures_axiom_*) must.
+        let stdout = "\
+'PoolDemo.deposit_aborts_if_InvalidAmount' depends on axioms: [propext, Token.transfer.ensures_axiom_1]
+'PoolDemo.deposit_frame' depends on axioms: [Classical.choice, Quot.sound, sorryAx]
+'PoolDemo.all_proven' does not depend on any axioms
+'PoolDemo.only_builtins' depends on axioms: [propext, Classical.choice]
+";
+        let report = parse_axiom_output(stdout);
+        assert_eq!(
+            report.len(),
+            2,
+            "only theorems with non-builtin axioms surface"
+        );
+        assert_eq!(
+            report[0].theorem,
+            "PoolDemo.deposit_aborts_if_InvalidAmount"
+        );
+        assert_eq!(report[0].axioms, vec!["Token.transfer.ensures_axiom_1"]);
+        assert_eq!(report[1].theorem, "PoolDemo.deposit_frame");
+        assert_eq!(report[1].axioms, vec!["sorryAx"]);
+    }
+
+    #[test]
+    fn renders_axiom_report_below_lean_backend() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![BackendReport {
+                name: "lean",
+                status: BackendStatus::Passed,
+                duration_ms: 850,
+                detail: None,
+                log_path: None,
+                counterexamples: vec![],
+                axioms: vec![
+                    AxiomDependency {
+                        theorem: "PoolDemo.deposit_Token_transfer_call_0_post_1".into(),
+                        axioms: vec!["Token.transfer.ensures_axiom_1".into()],
+                    },
+                    AxiomDependency {
+                        theorem: "PoolDemo.deposit_frame".into(),
+                        axioms: vec!["sorryAx".into()],
+                    },
+                ],
+            }],
+        };
+        let out = format_human(&report);
+        assert!(out.contains("trust surface"));
+        assert!(out.contains("PoolDemo.deposit_Token_transfer_call_0_post_1"));
+        assert!(out.contains("- Token.transfer.ensures_axiom_1"));
+        assert!(out.contains("- sorryAx"));
+        assert!(out.ends_with("OK\n"));
+    }
+
+    #[test]
+    fn empty_axiom_report_emits_no_trust_surface_section() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![BackendReport {
+                name: "lean",
+                status: BackendStatus::Passed,
+                duration_ms: 850,
+                detail: None,
+                log_path: None,
+                counterexamples: vec![],
+                axioms: Vec::new(),
+            }],
+        };
+        let out = format_human(&report);
+        assert!(!out.contains("trust surface"));
     }
 }
