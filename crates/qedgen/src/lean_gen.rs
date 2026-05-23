@@ -104,6 +104,10 @@ fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
 }
 
 /// Emit an `inductive State` block with one constructor per variant.
+/// Picks the first variant as the `Inhabited` default. v2.27 Phase 0:
+/// the bundled axiom signatures require `[Inhabited State]`, which Lean
+/// can't auto-derive from `inductive` blocks. Emitting the default
+/// explicitly here keeps consumer Spec.lean self-sufficient.
 fn emit_inductive_state(out: &mut String, name: &str, variants: &[crate::check::ParsedVariant]) {
     out.push_str(&format!("inductive {} where\n", name));
     for v in variants {
@@ -119,6 +123,28 @@ fn emit_inductive_state(out: &mut String, name: &str, variants: &[crate::check::
         }
     }
     out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
+    // v2.27 Phase 0 — Inhabited instance derived from the first variant.
+    // Fields default by type via `default`; payload-less variants emit a
+    // bare constructor. The first variant is the canonical "initial"
+    // state in qedgen specs (e.g. `Uninitialized`), so picking it as the
+    // Inhabited witness preserves intent.
+    if let Some(first) = variants.first() {
+        if first.fields.is_empty() {
+            out.push_str(&format!(
+                "instance : Inhabited {} := \u{27E8}.{}\u{27E9}\n\n",
+                name, first.name,
+            ));
+        } else {
+            let defaults: Vec<String> =
+                first.fields.iter().map(|_| "default".to_string()).collect();
+            out.push_str(&format!(
+                "instance : Inhabited {} := \u{27E8}.{} {}\u{27E9}\n\n",
+                name,
+                first.name,
+                defaults.join(" "),
+            ));
+        }
+    }
 }
 
 /// Emit per-field accessor `def State.<field> : State → <Type>` for every
@@ -770,8 +796,13 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
     out.push_str("--     references abstract State fields (applied-accessor\n");
     out.push_str("--     form, e.g. `from_balance pre`). The axiom is\n");
     out.push_str("--     polymorphic in `State` and takes pre+post snapshots\n");
-    out.push_str("--     plus one `State \u{2192} Nat` accessor per abstract\n");
-    out.push_str("--     field; callers apply the axiom with\n");
+    out.push_str("--     plus one `State \u{2192} T` accessor per abstract\n");
+    out.push_str("--     field, where `T` comes from the interface's\n");
+    out.push_str("--     `state { name : Type, ... }` declaration (v2.27\n");
+    out.push_str("--     Phase 0): `Nat` for the `U*` family, `Int` for\n");
+    out.push_str("--     `I*`, `Bool` for `Bool`, `Pubkey` for `Pubkey`.\n");
+    out.push_str("--     Fields not declared in the state block default to\n");
+    out.push_str("--     `Nat` (back-compat). Callers apply the axiom with\n");
     out.push_str("--     `(\u{00B7}.<caller_field>)` per slot via their per-call\n");
     out.push_str("--     `state_binders { ... }` block.\n\n");
     out.push_str("import QEDGen.Solana.Account\n");
@@ -830,7 +861,7 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
                 }
             } else {
                 // v2.27 Track A path — caller-State-aware. The axiom
-                // takes `(pre post : State)` and one `State → Nat`
+                // takes `(pre post : State)` and one `State → T`
                 // accessor per abstract field referenced in the
                 // callee's ensures. The caller applies the axiom with
                 // `(·.<caller_field>)` for each accessor; β-reduction
@@ -842,12 +873,25 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
                 // record; `Inhabited` is required so Lean can elaborate
                 // existential statements inside `ensures` (no eager
                 // need today, but cheap and forward-compatible).
+                //
+                // v2.27 Phase 0 — `T` per accessor is chosen by the
+                // interface's `state { name : Type, ... }` declaration:
+                // `Nat` for the `U*` family (the v2.26 / Track A default
+                // before Phase 0), `Int` for the `I*` family, `Bool` for
+                // `Bool`, `Pubkey` for `Pubkey`. Fields not declared in
+                // the state block fall back to `Nat` (back-compat).
                 let mut sig = String::new();
                 sig.push_str(" {State : Type} [Inhabited State]");
                 sig.push_str(" (pre post : State)");
                 sig.push_str(&params_sig);
                 for field in &abstract_fields {
-                    sig.push_str(&format!(" ({} : State \u{2192} Nat)", field));
+                    let codomain = iface
+                        .state_fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, t)| map_type(t.as_str()))
+                        .unwrap_or("Nat");
+                    sig.push_str(&format!(" ({} : State \u{2192} {})", field, codomain));
                 }
                 // Body rewrite: `s'.X` → `(X post)`, `s.X` → `(X pre)`.
                 // The callee's lean_expr was lowered under `Ctx::Ensures`,
@@ -2046,6 +2090,37 @@ fn render_cpi_theorems(
                 // `pre.s.X`. Skip the prefix pass when abstract fields
                 // are present.
                 let abstract_fields = scan_abstract_fields(&ensures.lean_expr);
+                // v2.27 Phase 0 follow-up — when the callee's ensures
+                // references abstract State fields AND the caller did
+                // not supply `state_binders` for ANY of them, the caller
+                // chose not to consume this contract. Skip the per-
+                // ensures theorem emission rather than emit a Lean
+                // statement that references caller-state fields with
+                // no matching projection. The CPI still happens; this
+                // ensures is just outside the caller's proof scope.
+                // Real engagement: a single binding suffices to opt in,
+                // even for one field of many — the pass-through default
+                // covers unbound fields and the spec author can decide
+                // whether the partial coverage is meaningful.
+                if !abstract_fields.is_empty() {
+                    let any_bound = abstract_fields
+                        .iter()
+                        .any(|f| call.state_binders.iter().any(|b| b.callee_field == *f));
+                    if !any_bound {
+                        out.push_str(&format!(
+                            "-- `{}.{}` ensures #{} ({}): caller supplied no \
+                             `state_binders` for these abstract fields; ensures \
+                             not pulled into caller proof. Bind via \
+                             `state_binders {{ {} = state.<field> }}` to consume.\n",
+                            call.target_interface,
+                            call.target_handler,
+                            ens_idx,
+                            abstract_fields.join(", "),
+                            abstract_fields[0],
+                        ));
+                        continue;
+                    }
+                }
                 let prefixed = if abstract_fields.is_empty() {
                     prefix_state_fields(&substituted, &state_field_set)
                 } else {
@@ -8388,6 +8463,164 @@ handler deposit (amount : U64) {
         assert!(
             !lean.contains("ensures_axiom_0 pre post"),
             "v2.26 caller theorem must NOT carry pre/post args; got:\n{lean}"
+        );
+    }
+
+    /// v2.27 Phase 0 follow-up — when the callee's ensures references
+    /// abstract State fields AND the caller's call site supplies no
+    /// `state_binders` for any of them, the per-ensures theorem is
+    /// SKIPPED (caller did not opt in to consume this contract). This
+    /// prevents emitting Lean that references caller-state fields
+    /// (e.g. `(·.from_balance)`) that don't exist on the caller's
+    /// concrete State. The bundled axiom is still emitted; only the
+    /// caller's theorem application is suppressed.
+    #[test]
+    fn phase_0_caller_with_no_state_binders_skips_state_aware_ensures() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec EscrowLite
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+  upstream {
+    package      "spl-token"
+    version      "4.0.3"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  state {
+    from_balance : U64
+    to_balance   : U64
+  }
+
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures  state.from_balance == old(state.from_balance) - amount
+    ensures  state.to_balance == old(state.to_balance) + amount
+  }
+}
+
+type Error | E
+type State = { trade_open : Bool }
+handler exchange {
+  permissionless
+  modifies [trade_open]
+  effect { trade_open := false }
+  call Token.transfer(amount = 100)
+}
+"#,
+        )
+        .expect("parse");
+        let lean = render(&spec);
+        // No `(·.from_balance)` / `(·.to_balance)` references — the
+        // caller's State has no such fields and the application would
+        // not typecheck. The skip comment must surface instead.
+        assert!(
+            !lean.contains("(\u{00B7}.from_balance)") && !lean.contains("(\u{00B7}.to_balance)"),
+            "skip path must NOT emit pass-through accessors for unbound abstract fields; got:\n{lean}"
+        );
+        assert!(
+            lean.contains("caller supplied no `state_binders`"),
+            "skip path must emit an explanatory comment; got:\n{lean}"
+        );
+        // No theorem named *_Token_transfer_call_0_* should be emitted
+        // for this call (both ensures are abstract-only and unbound).
+        assert!(
+            !lean.contains("theorem exchange_Token_transfer_call_0_post_0"),
+            "skip path must NOT emit a per-ensures theorem when no binders; got:\n{lean}"
+        );
+    }
+
+    /// v2.27 Phase 0 — when the interface declares a `state { name : Type }`
+    /// block, the bundled axiom emits `(name : State → T)` accessors with
+    /// `T` derived from the declared type. Without the block (back-compat),
+    /// accessors default to `State → Nat` (covered by
+    /// `track_a_axiom_extends_signature_and_theorem_applies_accessor`).
+    /// Here we exercise the typed-codomain path with both Bool and Pubkey
+    /// in one interface, demonstrating the type-generic surface needed by
+    /// Metaplex's creator-verified / collection-key contracts.
+    #[test]
+    fn phase_0_typed_state_block_drives_axiom_accessor_codomain() {
+        let spec = chumsky_adapter::parse_str(
+            r#"spec NftDemo
+program_id "11111111111111111111111111111111"
+
+interface Metadata {
+  program_id "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+
+  upstream {
+    package      "mpl-token-metadata"
+    version      "1.13.0"
+    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+
+  state {
+    creator_verified : Bool
+    collection_key   : Pubkey
+  }
+
+  handler sign_metadata {
+    discriminant "0x07"
+    accounts {
+      metadata : writable
+      creator  : signer
+    }
+    ensures  state.creator_verified == true
+  }
+
+  handler verify_collection {
+    discriminant "0x12"
+    accounts {
+      metadata             : writable
+      collection_authority : signer
+    }
+    ensures  state.collection_key == old(state.collection_key)
+  }
+}
+
+type Error | E
+type State = { alice_verified : Bool, my_collection : Pubkey }
+handler do_sign {
+  permissionless
+  modifies [alice_verified]
+  effect { alice_verified := true }
+  call Metadata.sign_metadata(
+    state_binders { creator_verified = state.alice_verified },
+  )
+}
+"#,
+        )
+        .expect("parse");
+
+        let iface = spec
+            .interfaces
+            .iter()
+            .find(|i| i.name == "Metadata")
+            .expect("Metadata interface present");
+        let axiom_module = render_interface_axiom_module(iface);
+        // Bool-typed accessor (from `state { creator_verified : Bool }`)
+        // must lower to `State → Bool`, not the default `State → Nat`.
+        assert!(
+            axiom_module.contains("(creator_verified : State \u{2192} Bool)"),
+            "Phase 0 typed state must emit Bool accessor; got:\n{axiom_module}"
+        );
+        // Pubkey-typed accessor must lower to `State → Pubkey`.
+        assert!(
+            axiom_module.contains("(collection_key : State \u{2192} Pubkey)"),
+            "Phase 0 typed state must emit Pubkey accessor; got:\n{axiom_module}"
+        );
+        // Negative: must NOT fall back to the Nat default when the field
+        // is declared with a non-Nat type.
+        assert!(
+            !axiom_module.contains("(creator_verified : State \u{2192} Nat)"),
+            "Phase 0 typed Bool field must NOT default to Nat; got:\n{axiom_module}"
         );
     }
 

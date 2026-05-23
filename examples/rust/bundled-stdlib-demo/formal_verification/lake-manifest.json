@@ -15,6 +15,6 @@
    "inherited": false,
    "dir": "../../../../../../.qedgen/cache/builtin/spl/.qed/proofs",
    "configFile": "lakefile.lean"}],
- "name": "escrow_splitProofs",
+ "name": "pool_demoProofs",
  "lakeDir": ".lake",
  "fixedToolchain": false}

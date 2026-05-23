@@ -1,0 +1,6 @@
+{
+  "name": "pool_demo",
+  "spec": "pool.qedspec",
+  "interfaces_dir": ".qed/interfaces",
+  "created_at": "1779513323s-since-epoch"
+}

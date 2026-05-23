@@ -3604,6 +3604,14 @@ fn adapt_interface<'a>(
             verified_with: u.verified_with.clone(),
             verified_at: u.verified_at.clone(),
         }),
+        // v2.27 Phase 0 — pass through the interface-level
+        // `state { name : Type, ... }` block as (name, type-string) pairs.
+        // Empty when no block was declared (back-compat default).
+        state_fields: iface
+            .state_fields
+            .iter()
+            .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
+            .collect(),
         handlers,
     }
 }

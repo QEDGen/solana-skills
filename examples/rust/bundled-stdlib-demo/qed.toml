@@ -1,0 +1,6 @@
+# v2.27 Track C2 — bundled-stdlib end-to-end demonstration.
+# The `Token from "spl"` import resolves via the bundled SPL Token
+# builtin (no manifest entry required; the resolver materializes the
+# fixture + bundled proof package on demand).
+
+[dependencies]

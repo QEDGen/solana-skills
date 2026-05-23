@@ -1303,6 +1303,14 @@ pub struct ParsedInterface {
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<ParsedUpstream>,
+    /// v2.27 Phase 0 — typed callee-state vocabulary declared by the
+    /// optional interface-level `state { name : Type, ... }` block.
+    /// References to `state.X` in any handler's `ensures`/`requires`
+    /// consult this table to choose the abstract accessor's Lean
+    /// codomain in the bundled axiom signature (`State → T`). Empty
+    /// when no block is declared; lean_gen's axiom emitter defaults
+    /// to `State → Nat` for back-compat with v2.26 / v2.27 Track A specs.
+    pub state_fields: Vec<(String, String)>,
     pub handlers: Vec<ParsedInterfaceHandler>,
 }
 
@@ -1751,6 +1759,13 @@ fn synthesize_interface_from_imported(
         doc: None,
         program_id: imported.program_id.clone(),
         upstream: None,
+        // v2.27 Phase 0 — synthesized interfaces inherit no abstract-state
+        // vocabulary today. Top-level handlers can express their callee
+        // ensures with concrete `state.X` references (the imported spec's
+        // own State type provides the codomain at the caller's site), so
+        // the bundled-axiom path that needs typed accessors doesn't fire
+        // for Tier-2 callees. Defaults to empty.
+        state_fields: Vec::new(),
         handlers,
     })
 }

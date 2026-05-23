@@ -589,6 +589,46 @@ const BUILTIN_SYSTEM: &str = include_str!("../data/interfaces/system.qedspec");
 /// Bundled Metaplex Token Metadata interface fixture (Tier 1).
 const BUILTIN_METAPLEX: &str = include_str!("../data/interfaces/metaplex.qedspec");
 
+// ---------------------------------------------------------------------
+// v2.27 Track C2 — bundled proof packages (Stance 2).
+//
+// Each tuple is (relative_path_inside_<cache>/builtin/<key>/.qed/proofs,
+// content). The resolver writes them out alongside the materialized
+// qedspec; the existing proof-detection logic at line 230 picks them
+// up automatically because the conventional location matches.
+//
+// System Program intentionally has no bundled proof package in v2.27:
+// `create_account` and `assign` have `Pubkey` params that would force
+// the bundled module to `import QEDGen.Solana.Account`, which would in
+// turn require a `require qedgenSupport` directive in the bundled
+// lakefile — defeating the self-contained-distribution goal.
+// `import System from "system"` therefore stays Stance-1 (axiom from
+// codegen-emitted local sibling module), unchanged from v2.26.
+// v2.28 may revisit if there's demand.
+const BUILTIN_SPL_PROOF_LAKEFILE: &str = include_str!("../data/proofs/spl/lakefile.lean");
+const BUILTIN_SPL_PROOF_MODULE: &str = include_str!("../data/proofs/spl/Token.lean");
+const BUILTIN_METAPLEX_PROOF_LAKEFILE: &str = include_str!("../data/proofs/metaplex/lakefile.lean");
+const BUILTIN_METAPLEX_PROOF_MODULE: &str = include_str!("../data/proofs/metaplex/Metadata.lean");
+
+/// Per-builtin bundled proof package: `(module_filename, module_source)`
+/// alongside a shared `lakefile.lean` source. `None` for builtins with
+/// no bundled proof (currently System Program — see comment above).
+fn builtin_proof_pkg(key: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    match key {
+        "spl" => Some((
+            "Token.lean",
+            BUILTIN_SPL_PROOF_MODULE,
+            BUILTIN_SPL_PROOF_LAKEFILE,
+        )),
+        "metaplex" => Some((
+            "Metadata.lean",
+            BUILTIN_METAPLEX_PROOF_MODULE,
+            BUILTIN_METAPLEX_PROOF_LAKEFILE,
+        )),
+        _ => None,
+    }
+}
+
 /// Returns the bundled `.qedspec` source for a builtin import key, or
 /// `None` if `key` isn't a recognized builtin.
 ///
@@ -639,6 +679,37 @@ fn resolve_builtin_dep(key: &str, source: &'static str) -> Result<ResolvedSource
         std::fs::write(&file_path, source)
             .with_context(|| format!("materializing builtin fixture {}", file_path.display()))?;
     }
+
+    // v2.27 Track C2 — also materialize the bundled proof package, if
+    // one ships for this builtin. The existing proof-detection logic
+    // (around line 230) looks for `<source_dir>/.qed/proofs/<Iface>.lean`
+    // + `lakefile.lean`. Match that convention so Track B's
+    // `verified_callees` populates automatically without a special
+    // builtin-aware code path.
+    //
+    // The cache file is refreshed whenever the bundled `include_str!`
+    // source differs from the on-disk copy — same staleness rule as
+    // the qedspec above. A qedgen-version upgrade that rewrites the
+    // bundled theorem package is immediately visible to consumers.
+    if let Some((module_filename, module_src, lakefile_src)) = builtin_proof_pkg(key) {
+        let proofs_dir = builtin_dir.join(".qed").join("proofs");
+        std::fs::create_dir_all(&proofs_dir)
+            .with_context(|| format!("creating bundled proof-pkg dir {}", proofs_dir.display()))?;
+        let lakefile_path = proofs_dir.join("lakefile.lean");
+        let module_path = proofs_dir.join(module_filename);
+        for (path, content) in [(&lakefile_path, lakefile_src), (&module_path, module_src)] {
+            let needs = match std::fs::read_to_string(path) {
+                Ok(existing) => existing != content,
+                Err(_) => true,
+            };
+            if needs {
+                std::fs::write(path, content).with_context(|| {
+                    format!("materializing bundled proof-pkg file {}", path.display())
+                })?;
+            }
+        }
+    }
+
     Ok(ResolvedSource {
         sources: vec![(file_path, source.to_string())],
         commit: None,

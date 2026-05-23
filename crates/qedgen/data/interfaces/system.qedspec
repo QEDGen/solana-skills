@@ -3,8 +3,8 @@
 // Ships with the qedgen binary; resolved via `import System from "system"`.
 // The `upstream { binary_hash = ... }` pin is the contract boundary; callers
 // can discharge System Program's `ensures` clauses by appeal to the bundled
-// axioms instead of `sorry`. The program ID is the all-zero canonical
-// `11111111111111111111111111111111` System Program.
+// axioms (Stance 1) or imported theorem (Stance 2). The program ID is the
+// all-zero canonical `11111111111111111111111111111111` System Program.
 //
 // Native-program caveat (v2.27 Track C3): unlike SPL Token and Metaplex,
 // the System Program is a native built-in implemented inside the validator
@@ -16,6 +16,11 @@
 // not a content-addressable deployed binary. Callers committing to this
 // upstream block are committing to the runtime semantics, not a payload
 // hash. `qedgen verify --check-upstream` skips this entry by design.
+//
+// v2.27 — state-aware ensures pin lamport-conservation contracts via
+// Track A's abstract-accessor mechanism + Phase 0's typed `state`
+// block. Callers map their own concrete lamport-holding State fields
+// onto the abstract accessors at each call site via `state_binders`.
 
 spec SystemProgramInterface
 
@@ -32,9 +37,21 @@ interface System {
     verified_at  "2026-05-23"
   }
 
+  // Abstract callee-state vocabulary. `from_lamports` / `to_lamports`
+  // are bound at each `transfer` call site; `payer_lamports` /
+  // `new_account_lamports` at each `create_account` site. All Nat.
+  state {
+    from_lamports        : U64
+    to_lamports          : U64
+    payer_lamports       : U64
+    new_account_lamports : U64
+  }
+
   /// Create a new account owned by `owner` with `lamports` rent + `space` bytes.
-  /// Pre-state: `new_account` uninitialized.
+  /// Pre-state: `new_account` uninitialized (`new_account_lamports == 0`).
   /// Post-state: `new_account` rent-funded, owned by `owner`, zero data.
+  /// `payer_lamports` drops by `lamports`; `new_account_lamports` rises
+  /// to `lamports`.
   handler create_account (lamports : U64) (space : U64) (owner : Pubkey) {
     discriminant "0x00000000"
     accounts {
@@ -42,11 +59,12 @@ interface System {
       new_account : signer, writable
     }
     requires lamports > 0
-    ensures  lamports > 0
+    ensures  state.payer_lamports == old(state.payer_lamports) - lamports
+    ensures  state.new_account_lamports == lamports
   }
 
   /// Transfer `amount` lamports from `from` to `to`. Both accounts owned by
-  /// System Program (i.e. native SOL).
+  /// System Program (i.e. native SOL). Lamport-conserving on success.
   handler transfer (amount : U64) {
     discriminant "0x02000000"
     accounts {
@@ -54,11 +72,14 @@ interface System {
       to   : writable
     }
     requires amount > 0
-    ensures  amount > 0
+    ensures  state.from_lamports == old(state.from_lamports) - amount
+    ensures  state.to_lamports == old(state.to_lamports) + amount
   }
 
   /// Re-assign the owner of `account` to `new_owner`. Account data must be
-  /// zero-length or all-zero bytes.
+  /// zero-length or all-zero bytes. No state-aware ensures: ownership
+  /// changes aren't typically modeled in caller State; the binary_hash
+  /// pin warrants the runtime's checks.
   handler assign (new_owner : Pubkey) {
     discriminant "0x01000000"
     accounts {

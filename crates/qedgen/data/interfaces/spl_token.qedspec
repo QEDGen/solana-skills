@@ -9,14 +9,24 @@
 // The `upstream { binary_hash = ... }` pin is the contract boundary:
 // when the spec author commits to that hash, the caller's Lean proofs
 // may discharge SPL Token's `ensures` clauses by appeal to the bundled
-// `Token.<handler>.ensures_axiom_<idx>` axiom, instead of `sorry`. The
-// hash is a content pin against the canonical SPL Token program ID
-// `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` at version v4.0.3.
-// `binary_hash` is the sha256 of the deployed program payload as
-// returned by `solana program dump TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
-// against mainnet, captured 2026-05-23 (Track C3).
+// `Token.<handler>.ensures_axiom_<idx>` axiom (Stance 1) — or by an
+// imported theorem from the bundled proof package when present
+// (Stance 2). The hash is a content pin against the canonical SPL
+// Token program ID `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` at
+// version v4.0.3. `binary_hash` is the sha256 of the deployed program
+// payload as returned by `solana program dump
+// TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` against mainnet,
+// captured 2026-05-23 (Track C3).
 //
-// See docs/design/spec-composition.md §2 "Tier 1 — effects hand-authored."
+// v2.27 — state-aware ensures pin substantive contracts via Track A's
+// abstract-accessor mechanism + Phase 0's typed `state { ... }` block.
+// `from_balance` / `to_balance` / `total_supply` are the abstract Nat
+// accessors callers map to their concrete State fields through each
+// call site's `state_binders { ... }`. Post-state ensures use the
+// success-path semantics: when SPL Token's runtime checks reject the
+// transfer/mint/burn the caller never reaches the post; when they pass
+// the post matches these contracts and the binary_hash pin warrants
+// the match.
 
 spec SplTokenInterface
 
@@ -32,8 +42,19 @@ interface Token {
     verified_at  "2026-05-23"
   }
 
+  // Abstract callee-state vocabulary. Callers bind these names to their
+  // concrete State fields via `state_binders` at each call site. Types
+  // are Nat (U64 in qedspec lowers to Lean Nat via Phase 0's typed-
+  // accessor codomain).
+  state {
+    from_balance : U64
+    to_balance   : U64
+    total_supply : U64
+  }
+
   /// Transfer `amount` tokens from `from` to `to`, authorized by `authority`.
-  /// Balance-preserving: total supply unchanged, individual balances shift.
+  /// Balance-preserving on the success path: total supply unchanged,
+  /// `from_balance` drops by `amount`, `to_balance` rises by `amount`.
   handler transfer (amount : U64) {
     discriminant "0x03"
     accounts {
@@ -42,11 +63,12 @@ interface Token {
       authority : signer
     }
     requires amount > 0
-    ensures  amount > 0
+    ensures  state.from_balance == old(state.from_balance) - amount
+    ensures  state.to_balance == old(state.to_balance) + amount
   }
 
   /// Mint `amount` new tokens to `to`, authorized by `mint_authority`.
-  /// Not balance-preserving: total supply grows by `amount`.
+  /// Total supply grows by `amount`; `to_balance` rises by `amount`.
   handler mint_to (amount : U64) {
     discriminant "0x07"
     accounts {
@@ -55,11 +77,12 @@ interface Token {
       mint_authority  : signer
     }
     requires amount > 0
-    ensures  amount > 0
+    ensures  state.total_supply == old(state.total_supply) + amount
+    ensures  state.to_balance == old(state.to_balance) + amount
   }
 
   /// Burn `amount` tokens from `from`, authorized by `authority`.
-  /// Not balance-preserving: total supply shrinks by `amount`.
+  /// Total supply shrinks by `amount`; `from_balance` drops by `amount`.
   handler burn (amount : U64) {
     discriminant "0x08"
     accounts {
@@ -68,11 +91,15 @@ interface Token {
       authority : signer
     }
     requires amount > 0
-    ensures  amount > 0
+    ensures  state.total_supply == old(state.total_supply) - amount
+    ensures  state.from_balance == old(state.from_balance) - amount
   }
 
   /// Initialize a new token account owned by `owner` for `mint`.
   /// Account pre-state: uninitialized. Post-state: zero balance, owned by `owner`.
+  /// No state-aware ensures: callers don't typically track the
+  /// initialized-account's balance through their own State; v2.28 may
+  /// add a `to_balance == 0` post-condition if a real consumer needs it.
   handler initialize_account {
     discriminant "0x01"
     accounts {
@@ -84,6 +111,9 @@ interface Token {
   }
 
   /// Close `account`, draining rent lamports to `destination`.
+  /// Pre-state: `from_balance == 0` (SPL Token enforces this; we don't
+  /// re-assert because the axiom-as-success-path frame already covers
+  /// it). No abstract-state ensures shipped.
   handler close_account {
     discriminant "0x09"
     accounts {

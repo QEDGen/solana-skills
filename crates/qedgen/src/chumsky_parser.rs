@@ -2457,6 +2457,7 @@ fn instruction_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone 
 enum InterfaceItem {
     ProgramId(String),
     Upstream(UpstreamDecl),
+    StateFields(Vec<TypedField>),
     Handler(InterfaceHandlerDecl),
 }
 
@@ -2666,9 +2667,30 @@ fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .ignore_then(string_lit())
         .map(InterfaceItem::ProgramId);
     let upstream = upstream_block().map(InterfaceItem::Upstream);
+    // v2.27 Phase 0 — interface-level `state { name : Type, ... }` block
+    // declaring abstract callee-state vocabulary. Entries may be separated
+    // by commas, newlines, or both (consistent with how interface item
+    // separation is forgiving). Empty block is rejected by the field list
+    // requiring at least one entry; explicit empties offer no value over
+    // omitting the block.
+    let state_block = kw("state")
+        .ignore_then(just('{'))
+        .then_ignore(wsc())
+        .ignore_then(
+            typed_field()
+                .then_ignore(wsc())
+                .then_ignore(just(',').or_not())
+                .then_ignore(wsc())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<TypedField>>(),
+        )
+        .then_ignore(wsc())
+        .then_ignore(just('}'))
+        .map(InterfaceItem::StateFields);
     let handler = interface_handler_decl().map(InterfaceItem::Handler);
 
-    let item = choice((program_id, upstream, handler));
+    let item = choice((program_id, upstream, state_block, handler));
 
     doc_comments()
         .then_ignore(kw("interface"))
@@ -2686,11 +2708,13 @@ fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|((doc, name), items)| {
             let mut program_id = None;
             let mut upstream = None;
+            let mut state_fields = Vec::new();
             let mut handlers = Vec::new();
             for it in items {
                 match it {
                     InterfaceItem::ProgramId(s) => program_id = Some(s),
                     InterfaceItem::Upstream(u) => upstream = Some(u),
+                    InterfaceItem::StateFields(fs) => state_fields.extend(fs),
                     InterfaceItem::Handler(h) => handlers.push(h),
                 }
             }
@@ -2699,6 +2723,7 @@ fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
                 doc,
                 program_id,
                 upstream,
+                state_fields,
                 handlers,
             })
         })

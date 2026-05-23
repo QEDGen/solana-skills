@@ -1,0 +1,48 @@
+// v2.27 Track C2 — bundled-stdlib end-to-end demonstration.
+//
+// This example imports `Token` from the bundled SPL stdlib and engages
+// the verified-callee composition (Stance 2) via `state_binders`. The
+// caller's State carries a single `pool_balance` Nat field, mapped to
+// the callee's abstract `to_balance` accessor on every deposit. The
+// generated Spec.lean theorem applies `Token.transfer.ensures_axiom_1`
+// — the bundled Stance-2 theorem from `crates/qedgen/data/proofs/spl/
+// Token.lean` — against the caller's `pool_balance`, demonstrating
+// the typed-accessor mechanism end-to-end.
+//
+// No `programs/` directory is generated for this example; it's a
+// formal-verification-only fixture exercising the lakefile rewrite,
+// bundled-proof materialization, and Track A axiom-application path.
+
+spec PoolDemo
+program_id "11111111111111111111111111111111"
+
+import Token from "spl"
+
+type State
+  | Uninitialized
+  | Open of { pool_balance : U64 }
+
+type Error
+  | InvalidAmount
+  | WrongState
+
+handler initialize (initial : U64) : State.Uninitialized -> State.Open {
+  requires initial > 0 else InvalidAmount
+  effect {
+    pool_balance := initial
+  }
+}
+
+handler deposit (amount : U64) : State.Open -> State.Open {
+  requires amount > 0 else InvalidAmount
+  modifies [pool_balance]
+  effect {
+    pool_balance += amount
+  }
+  call Token.transfer(
+    amount = amount,
+    state_binders {
+      to_balance = state.pool_balance,
+    },
+  )
+}

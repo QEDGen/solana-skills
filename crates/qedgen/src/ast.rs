@@ -479,6 +479,14 @@ pub struct InterfaceDecl {
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<UpstreamDecl>,
+    /// v2.27 Phase 0 — abstract callee-state vocabulary. Optional `state { name : Type, ... }`
+    /// block declares the types of the abstract State accessors referenced by
+    /// handler ensures. When absent, accessors default to `Nat` for back-compat
+    /// with v2.26/v2.27 Track A specs. The declared type chooses the Lean
+    /// codomain of `(X : State → T)` in the emitted axiom signature: `Nat` for
+    /// the `U*` family, `Int` for the `I*` family, `Bool` for `Bool`, `Pubkey`
+    /// for `Pubkey`.
+    pub state_fields: Vec<TypedField>,
     pub handlers: Vec<InterfaceHandlerDecl>,
 }
 
