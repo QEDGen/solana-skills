@@ -5,6 +5,17 @@
 // can discharge System Program's `ensures` clauses by appeal to the bundled
 // axioms instead of `sorry`. The program ID is the all-zero canonical
 // `11111111111111111111111111111111` System Program.
+//
+// Native-program caveat (v2.27 Track C3): unlike SPL Token and Metaplex,
+// the System Program is a native built-in implemented inside the validator
+// itself, not a deployed BPF/SBF binary. `solana program dump
+// 11111111111111111111111111111111` returns "not an SBF program" because
+// there is no on-chain payload to fetch. The `binary_hash` therefore
+// stays at the all-zero placeholder — the trust anchor for System
+// Program is the Solana runtime itself (validator client + consensus),
+// not a content-addressable deployed binary. Callers committing to this
+// upstream block are committing to the runtime semantics, not a payload
+// hash. `qedgen verify --check-upstream` skips this entry by design.
 
 spec SystemProgramInterface
 
@@ -15,9 +26,10 @@ interface System {
     package      "solana-system-program"
     version      "1.18.0"
     source       "https://github.com/solana-labs/solana/tree/v1.18.0"
+    // Native program — no SBF binary to hash. See header comment.
     binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     verified_with ["proptest"]
-    verified_at  "2026-05-22"
+    verified_at  "2026-05-23"
   }
 
   /// Create a new account owned by `owner` with `lamports` rent + `space` bytes.

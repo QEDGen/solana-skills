@@ -414,6 +414,24 @@ fn describe_lock_diff(existing: Option<&LockFile>, computed: &LockFile) -> Strin
                         existing_entry.spec_hash, computed_entry.spec_hash
                     ));
                 }
+                if existing_entry.upstream_binary_hash != computed_entry.upstream_binary_hash {
+                    out.push_str(&format!(
+                        "      upstream_binary_hash: {:?} → {:?}\n",
+                        existing_entry.upstream_binary_hash, computed_entry.upstream_binary_hash,
+                    ));
+                }
+                if existing_entry.proof_hash != computed_entry.proof_hash {
+                    out.push_str(&format!(
+                        "      proof_hash: {:?} → {:?}\n",
+                        existing_entry.proof_hash, computed_entry.proof_hash,
+                    ));
+                }
+                if existing_entry.verified != computed_entry.verified {
+                    out.push_str(&format!(
+                        "      verified: {} → {}\n",
+                        existing_entry.verified, computed_entry.verified,
+                    ));
+                }
             }
             None => {
                 out.push_str(&format!(
@@ -905,6 +923,97 @@ spec_hash = "sha256:abc"
     }
 
     // ----- end Track B -----
+
+    #[test]
+    fn handle_lock_frozen_diff_names_upstream_binary_hash() {
+        // v2.27 Track C3 — when a bundled qedspec bumps its
+        // `binary_hash`, the resulting frozen diff should call out
+        // `upstream_binary_hash` by name (in addition to spec_hash,
+        // which also changes since the source bytes drift). Prior to
+        // Track C3 the renderer only inspected spec_hash + source + ref
+        // + resolved_commit.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut old = LockEntry {
+            name: "spl".to_string(),
+            source: "builtin:spl".to_string(),
+            spec_hash: "sha256:same".to_string(),
+            git_ref: None,
+            resolved_commit: None,
+            path: None,
+            program_id: Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string()),
+            upstream_binary_hash: Some("sha256:OLD".to_string()),
+            upstream_version: Some("4.0.3".to_string()),
+            verified: false,
+            proof_hash: None,
+        };
+        let old_lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![old.clone()],
+        };
+        write(tmp.path(), &old_lock).unwrap();
+
+        old.upstream_binary_hash = Some("sha256:NEW".to_string());
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![old],
+        };
+        let err = handle_lock(tmp.path(), &computed, LockMode::Frozen)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("upstream_binary_hash"),
+            "diff must call out upstream_binary_hash; got: {err}"
+        );
+        assert!(err.contains("OLD"), "diff should include old value: {err}");
+        assert!(err.contains("NEW"), "diff should include new value: {err}");
+    }
+
+    #[test]
+    fn handle_lock_frozen_diff_names_proof_hash_and_verified() {
+        // Verified-callee flip plus proof_hash drift should both
+        // surface in the diff (Track C3 fold-in: the renderer was
+        // upgraded alongside the binary_hash field so all the new
+        // Track B fields are visible in frozen failures too).
+        let tmp = tempfile::tempdir().unwrap();
+        let old = LockEntry {
+            name: "amm".to_string(),
+            source: "path:./amm".to_string(),
+            spec_hash: "sha256:same".to_string(),
+            git_ref: None,
+            resolved_commit: None,
+            path: None,
+            program_id: None,
+            upstream_binary_hash: None,
+            upstream_version: None,
+            verified: false,
+            proof_hash: None,
+        };
+        let old_lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![old.clone()],
+        };
+        write(tmp.path(), &old_lock).unwrap();
+
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                verified: true,
+                proof_hash: Some("sha256:NEW".to_string()),
+                ..old
+            }],
+        };
+        let err = handle_lock(tmp.path(), &computed, LockMode::Frozen)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("verified"),
+            "diff must call out verified flip; got: {err}"
+        );
+        assert!(
+            err.contains("proof_hash"),
+            "diff must call out proof_hash; got: {err}"
+        );
+    }
 
     #[test]
     fn handle_lock_frozen_describes_added_and_removed_deps() {

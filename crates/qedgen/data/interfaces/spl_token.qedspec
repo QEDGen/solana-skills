@@ -12,6 +12,9 @@
 // `Token.<handler>.ensures_axiom_<idx>` axiom, instead of `sorry`. The
 // hash is a content pin against the canonical SPL Token program ID
 // `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` at version v4.0.3.
+// `binary_hash` is the sha256 of the deployed program payload as
+// returned by `solana program dump TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`
+// against mainnet, captured 2026-05-23 (Track C3).
 //
 // See docs/design/spec-composition.md §2 "Tier 1 — effects hand-authored."
 
@@ -24,9 +27,9 @@ interface Token {
     package      "spl-token"
     version      "4.0.3"
     source       "https://github.com/solana-program/token/tree/v4.0.3"
-    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    binary_hash  "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
     verified_with ["proptest"]
-    verified_at  "2026-05-22"
+    verified_at  "2026-05-23"
   }
 
   /// Transfer `amount` tokens from `from` to `to`, authorized by `authority`.

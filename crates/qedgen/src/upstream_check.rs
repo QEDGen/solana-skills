@@ -359,6 +359,23 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
         }
     };
 
+    // v2.27 Track C3 — `sha256:00…00` is the recognized sentinel for
+    // "no payload to pin against". Native programs like the System
+    // Program live inside the validator binary itself and aren't
+    // returned by `solana program dump` — there's nothing to fetch and
+    // nothing to hash. Treating the sentinel as a real pin would
+    // produce a confusing Error ("11111111111111111111111111111111 is
+    // not an SBF program") instead of a clean skip. Bundled-stdlib
+    // interfaces that ship with the sentinel are intentionally Stance-1
+    // tautology axioms with no on-chain counterpart; the trust anchor
+    // is the runtime, not a content hash.
+    if is_sentinel_hash(pinned) {
+        return DepCheckOutcome::Skipped {
+            reason: "binary_hash sentinel (sha256:00…00) — native program or unverified pin"
+                .to_string(),
+        };
+    }
+
     // program_id flows from the imported interface's
     // `program_id "..."` declaration into qed.lock at resolution time
     // (v2.8 fold-in F1). Only `None` when the imported interface itself
@@ -410,6 +427,21 @@ fn format_hash(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("sha256:{:x}", hasher.finalize())
+}
+
+/// v2.27 Track C3 — recognize the "no payload to pin" sentinel.
+/// Accepts `sha256:` prefix, any case, and either 64 zero characters
+/// (the standard form qedgen emits) or fewer (a degenerate shorthand a
+/// user might hand-write). Defensive: stricter matching would let the
+/// production fetcher attempt `solana program dump` on entries the
+/// author marked as native, producing confusing "not an SBF program"
+/// errors instead of a clean skip.
+fn is_sentinel_hash(pinned: &str) -> bool {
+    let body = pinned
+        .strip_prefix("sha256:")
+        .or_else(|| pinned.strip_prefix("SHA256:"))
+        .unwrap_or(pinned);
+    !body.is_empty() && body.chars().all(|c| c == '0')
 }
 
 // ----------------------------------------------------------------------------
@@ -591,6 +623,59 @@ mod tests {
             other => panic!("expected Skipped, got {:?}", other),
         }
     }
+
+    // ----- v2.27 Track C3: sentinel-hash skip -----
+
+    #[test]
+    fn skips_entries_with_zero_sentinel_hash() {
+        // Native programs (e.g. the System Program) have no on-chain
+        // SBF payload to fetch. The sentinel `sha256:00…00` marks that
+        // case; check_one returns Skipped with a sentinel-explaining
+        // reason instead of trying to fetch and erroring.
+        let zero = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let mut e = entry_with_hash("system", Some(zero));
+        e.program_id = Some("11111111111111111111111111111111".to_string());
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![e],
+        };
+        // Fetcher is never called for sentinel entries; assert that by
+        // leaving it empty — a fetch attempt would error and propagate
+        // through as DepCheckOutcome::Error.
+        let mut fetcher = FakeFetcher::new();
+        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        match &results[0].outcome {
+            DepCheckOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("sentinel"),
+                    "should explain the sentinel skip; got: {reason}"
+                );
+            }
+            other => panic!("expected Skipped (sentinel hash), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sentinel_detection_accepts_prefix_and_short_form() {
+        // Defensive matching: both `sha256:` and `SHA256:` prefixes,
+        // and shorthand of fewer than 64 zeros, still classify as
+        // sentinel. Stricter matching risks running the real fetcher
+        // on intentionally-unpinned entries.
+        assert!(is_sentinel_hash(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ));
+        assert!(is_sentinel_hash("SHA256:0000"));
+        assert!(is_sentinel_hash("0000000000000000"));
+        assert!(!is_sentinel_hash(
+            "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
+        ));
+        // Empty body shouldn't be classified as sentinel — that case
+        // is the "no hash pinned" branch.
+        assert!(!is_sentinel_hash("sha256:"));
+        assert!(!is_sentinel_hash(""));
+    }
+
+    // ----- end Track C3 -----
 
     #[test]
     fn skips_when_imported_interface_omits_program_id() {

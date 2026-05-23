@@ -617,13 +617,25 @@ pub fn all_imports_are_builtins(imports: &[ParsedImport]) -> bool {
 /// the file is missing — once written, the same path is reused for cycle /
 /// conflict detection. Stable canonical paths matter for the resolver's
 /// dedup logic.
+///
+/// v2.27 Track C3 — the cached file is also refreshed whenever the bundled
+/// `include_str!` source differs from the on-disk copy. Without this, a
+/// qedgen-version upgrade that updates a bundled qedspec (e.g. real
+/// `binary_hash` pins replacing `sha256:0000…` placeholders) would not be
+/// visible to consumers until they manually `rm -rf ~/.qedgen/cache/builtin`.
+/// The on-disk path is still stable across runs, just its contents track
+/// the binary's bundled source.
 fn resolve_builtin_dep(key: &str, source: &'static str) -> Result<ResolvedSource> {
     let cache_root = cache_root();
     let builtin_dir = cache_root.join("builtin").join(key);
     std::fs::create_dir_all(&builtin_dir)
         .with_context(|| format!("creating builtin cache dir {}", builtin_dir.display()))?;
     let file_path = builtin_dir.join(format!("{}.qedspec", key));
-    if !file_path.exists() {
+    let needs_write = match std::fs::read_to_string(&file_path) {
+        Ok(existing) => existing != source,
+        Err(_) => true,
+    };
+    if needs_write {
         std::fs::write(&file_path, source)
             .with_context(|| format!("materializing builtin fixture {}", file_path.display()))?;
     }

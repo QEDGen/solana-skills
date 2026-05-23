@@ -16,8 +16,10 @@
 //
 // Placeholder ensures: like the SPL Token and System Program bundles, the
 // ensures clauses are conservative tautologies until the v2.27 audit pass
-// pins real balance-preserving / authority-preserving contracts. The
-// `binary_hash` field is `sha256:000...` for the same reason.
+// pins real balance-preserving / authority-preserving contracts.
+// `binary_hash` is the sha256 of the deployed program payload returned
+// by `solana program dump metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s`
+// against mainnet, captured 2026-05-23 (Track C3).
 
 spec MetaplexInterface
 
@@ -28,9 +30,9 @@ interface Metadata {
     package      "mpl-token-metadata"
     version      "1.13.0"
     source       "https://github.com/metaplex-foundation/mpl-token-metadata"
-    binary_hash  "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    binary_hash  "sha256:31f0a627dba051a938de650464e55cc5397a4be0fd496929c1f9cf02fe5e9011"
     verified_with ["proptest"]
-    verified_at  "2026-05-22"
+    verified_at  "2026-05-23"
   }
 
   /// Create a metadata PDA for `mint`, authorized by `update_authority`.

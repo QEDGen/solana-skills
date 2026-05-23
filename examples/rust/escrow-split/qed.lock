@@ -6,7 +6,7 @@ version = 1
 [[dependency]]
 name = "spl"
 source = "builtin:spl"
-spec_hash = "sha256:e31011c8eec86782db650b77f3f820037e241e2a0e8d23954b6e31d0de779ee6"
+spec_hash = "sha256:e09896c58be6b9b02b45b08741a3a6ad623559db119d6f33ab33826c15c29350"
 program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-upstream_binary_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+upstream_binary_hash = "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
 upstream_version = "4.0.3"
