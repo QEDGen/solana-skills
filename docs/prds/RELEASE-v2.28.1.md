@@ -18,6 +18,15 @@ catches the gap before tagging.
   `scripts/check-version-consistency.sh` as the local validator. The
   lowercase `claude.md` mirror stays byte-identical (same file on
   case-insensitive macOS filesystems).
+- **Bundled examples' `qedgen-macros` tag pin** sed-bumped across 7
+  Cargo.toml files (escrow, lending, multisig, percolator + their
+  `programs/` sub-crates) from `tag = "v2.27.1"` → `tag = "v2.28.1"`.
+  `codegen::render_qedgen_cargo_toml` embeds the value via
+  `env!("CARGO_PKG_VERSION")`, so the `check --regen-drift` CI gate
+  expects the pinned tag to match the current crate version. Same
+  gap shipped in v2.24.1 as commit 4ee40bd; pre-release checklist
+  should grow a regen step in a future release to catch this before
+  tagging.
 
 ## What's NOT in
 
