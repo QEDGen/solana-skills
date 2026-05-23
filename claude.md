@@ -441,7 +441,7 @@ After `qedgen generate`:
 
 Before cutting a new release or tag:
 
-1. **Bump version** in `crates/qedgen/Cargo.toml` — `install.sh` derives its version from there
+1. **Bump version** in BOTH `crates/qedgen/Cargo.toml` AND `package.json` — `install.sh` derives its version from Cargo.toml; the `check-version-consistency.sh` CI gate fails the build if the two drift (v2.28.0 shipped with this exact mismatch; v2.28.1 hotfixed it). Run `bash scripts/check-version-consistency.sh` after bumping to confirm.
 2. **`cargo fmt --check`** — matches the CI gate; `cargo test` does NOT run fmt, so this is an easy miss if skipped
 3. **`cargo clippy -- -D warnings`** — matches the CI gate (plain `cargo clippy` is too lenient)
 4. **`cargo test`** — all tests must pass
