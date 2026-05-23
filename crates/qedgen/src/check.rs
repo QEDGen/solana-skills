@@ -1206,6 +1206,27 @@ pub struct ParsedSpec {
     /// path/github sources without proofs alongside.
     #[allow(dead_code)]
     pub verified_callees: std::collections::BTreeMap<String, std::path::PathBuf>,
+
+    /// v2.27 Track D1 — proof_hash drift detected during qed.lock
+    /// reconciliation in Frozen mode. Empty in Auto/Skip modes (the lock
+    /// auto-writes anyway) and empty in Frozen when there's no drift or
+    /// when structural drift caused a bail. The check handler in
+    /// `main.rs` routes these through
+    /// `crate::upstream_check::route_findings` with `Gate::CheckFrozen`
+    /// (P2 default) or `Gate::CheckFrozenStrict` (CRIT) depending on
+    /// whether `--strict` was passed.
+    #[allow(dead_code)]
+    pub proof_hash_findings: Vec<crate::upstream_check::DepCheckResult>,
+
+    /// v2.27 Track D3 — the proof-package directories of every imported
+    /// interface in the transitive resolution closure that ships a
+    /// Lake-buildable proof package. DFS-pre-order, deduplicated by
+    /// path. `qedgen verify --recursive` walks this list bottom-up
+    /// (per-entry `lake build`) so the consumer's claim "the dep graph
+    /// is fully proven" reduces to "every layer's Lake build succeeds."
+    /// Empty when no imports ship proofs.
+    #[allow(dead_code)]
+    pub verified_proof_pkgs: Vec<std::path::PathBuf>,
 }
 
 /// v2.25 — adapted form of `ast::RefImplDecl`. Carries both Lean and
@@ -1652,17 +1673,33 @@ fn resolve_and_merge_imports(
         // deciding which sibling axiom modules to skip and which
         // `require` directives to emit in the lakefile. Skip when the
         // resolver detected no proof package alongside the qedspec.
+        //
+        // v2.27 Track D3 fold-in: every transitive verified entry's
+        // pkg_root also goes onto `verified_proof_pkgs` (path-deduped
+        // after the loop) so `verify --recursive` can iterate the
+        // entire dep graph's proof packages without re-running the
+        // resolver. The resolver returns DFS-pre-order, so the natural
+        // iteration is also bottom-up-by-leaf.
         if r.has_proofs {
             if let Some(ref pkg_root) = r.proof_pkg_root {
                 parsed
                     .verified_callees
                     .insert(merged.name.clone(), pkg_root.clone());
+                parsed.verified_proof_pkgs.push(pkg_root.clone());
             }
         }
         parsed.interfaces.push(merged);
     }
+    // Dedup while preserving first-seen DFS order — handles diamond
+    // dep shapes where the same provider is reached via two import
+    // paths.
+    let mut seen = std::collections::HashSet::new();
+    parsed
+        .verified_proof_pkgs
+        .retain(|p| seen.insert(p.clone()));
 
-    crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
+    let proof_hash_findings = crate::qed_lock::handle_lock(manifest_dir, &lock, lock_mode)?;
+    parsed.proof_hash_findings = proof_hash_findings;
 
     Ok(())
 }
@@ -5493,6 +5530,87 @@ fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
     warnings
+}
+
+/// v2.27 Track D2 — one finding per imported interface that
+/// `qedgen verify --require-verified` would reject. Carries enough
+/// context (interface name + fix hint pointing at the expected proof
+/// package shape) for main.rs to render a CRIT line and exit non-zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct UnverifiedCallee {
+    pub interface_name: String,
+    pub fix_hint: String,
+}
+
+/// v2.27 Track D2 — `qedgen verify --require-verified` predicate.
+/// Walks the resolved imports and yields one [`UnverifiedCallee`] per
+/// imported interface that satisfies all of:
+///
+/// - The interface was reached via `import X from "..."` (not declared
+///   inline by the same spec author).
+/// - At least one of its handlers declares non-empty `ensures` clauses
+///   (Tier-1 or Tier-2 — Tier-0 shape-only imports are exempt and
+///   covered by the `cpi_no_callee_ensures` P1 lint instead).
+/// - The resolver did NOT detect a Lake-buildable proof package at
+///   `<source>/.qed/proofs/` (i.e. `spec.verified_callees` doesn't
+///   contain the interface).
+/// - The interface's bundled `upstream { binary_hash }` is NOT the
+///   sentinel `sha256:00…00`. Sentinel-pinned native programs (System)
+///   are documented runtime trust boundaries — their `ensures` are
+///   discharged by the validator itself, not by a proof package, so
+///   counting them as "unverified" would always fail any spec that
+///   imports them.
+///
+/// Mirrors [`check_cpi_unverified_callee`]'s P2 advisory predicate.
+/// Returns an empty vec when every imported interface either ships
+/// proofs, is Tier-0, or is sentinel-pinned native — i.e. the dep graph
+/// is "fully proven" from a Stance-2 standpoint and the gate passes.
+#[allow(dead_code)]
+pub fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
+    let import_iface_names: std::collections::HashSet<&str> = spec
+        .imports
+        .iter()
+        .map(|i| i.as_name.as_deref().unwrap_or(i.name.as_str()))
+        .collect();
+
+    let mut results = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for iface in &spec.interfaces {
+        if !import_iface_names.contains(iface.name.as_str()) {
+            continue;
+        }
+        let has_ensures = iface.handlers.iter().any(|h| !h.ensures.is_empty());
+        if !has_ensures {
+            continue;
+        }
+        if spec.verified_callees.contains_key(&iface.name) {
+            continue;
+        }
+        if iface
+            .upstream
+            .as_ref()
+            .and_then(|u| u.binary_hash.as_deref())
+            .map(crate::upstream_check::is_sentinel_hash)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !seen.insert(iface.name.clone()) {
+            continue;
+        }
+        let proof_pkg = crate::lean_gen::proof_pkg_name(&iface.name);
+        results.push(UnverifiedCallee {
+            interface_name: iface.name.clone(),
+            fix_hint: format!(
+                "provider must ship `<source>/.qed/proofs/{}.lean` + a sibling `lakefile.lean` \
+                 declaring `package {}`. Run without --require-verified to accept Stance-1 \
+                 axiom discharge instead.",
+                iface.name, proof_pkg
+            ),
+        });
+    }
+    results
 }
 
 fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
@@ -10394,4 +10512,274 @@ handler set (amt : U64) {
                 .collect::<Vec<_>>(),
         );
     }
+
+    // ------------------------------------------------------------------
+    // v2.27 Track D2 — collect_require_verified_findings
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn require_verified_fires_on_unverified_import_with_ensures() {
+        // Non-sentinel binary_hash so the sentinel exemption doesn't
+        // intercept. `verified_callees` is empty → provider shipped no
+        // proof package → finding.
+        let src = r#"spec Demo
+
+import Token from "amm_lib"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream { binary_hash "sha256:abc123" }
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let findings = collect_require_verified_findings(&parsed);
+        assert_eq!(
+            findings.len(),
+            1,
+            "expected one finding for unverified Token; got: {findings:?}"
+        );
+        assert_eq!(findings[0].interface_name, "Token");
+        assert!(
+            findings[0].fix_hint.contains(".qed/proofs"),
+            "fix hint should point at the proof-package path; got: {}",
+            findings[0].fix_hint
+        );
+    }
+
+    #[test]
+    fn require_verified_silent_when_provider_shipped_proofs() {
+        // verified_callees populated → provider has proofs → no finding.
+        let src = r#"spec Demo
+
+import Token from "amm_lib"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream { binary_hash "sha256:abc123" }
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let mut parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        parsed
+            .verified_callees
+            .insert("Token".to_string(), std::path::PathBuf::from("/tmp/x"));
+        let findings = collect_require_verified_findings(&parsed);
+        assert!(
+            findings.is_empty(),
+            "verified callee must suppress the finding; got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn require_verified_silent_on_tier0_imports() {
+        // No ensures clauses on any handler → Tier 0. Owned by the
+        // cpi_no_callee_ensures P1 lint, not by --require-verified.
+        let src = r#"spec Demo
+
+import Token from "amm_lib"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream { binary_hash "sha256:abc123" }
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let findings = collect_require_verified_findings(&parsed);
+        assert!(
+            findings.is_empty(),
+            "Tier-0 (no ensures) imports must not fire --require-verified; got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn require_verified_silent_on_sentinel_pinned_natives() {
+        // Sentinel binary_hash (sha256:00…00) marks a native program
+        // (System Program style) — the validator runtime is the trust
+        // boundary, not a proof package. `--require-verified` exempts
+        // these so any spec that imports `from "system"` doesn't
+        // false-fail.
+        let src = r#"spec Demo
+
+import System from "system_lib"
+
+interface System {
+  program_id "11111111111111111111111111111111"
+  upstream { binary_hash "sha256:0000000000000000000000000000000000000000000000000000000000000000" }
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call System.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let findings = collect_require_verified_findings(&parsed);
+        assert!(
+            findings.is_empty(),
+            "sentinel-pinned native must be exempt; got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn require_verified_silent_on_inline_interfaces() {
+        // Interface declared inline (no `import` statement) — author
+        // owns both sides of the contract. `--require-verified` only
+        // gates on imported interfaces.
+        let src = r#"spec Demo
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  upstream { binary_hash "sha256:abc123" }
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+
+handler pay : State.A -> State.A {
+  call Token.transfer(from = src_ta, to = dst_ta, amount = 1)
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let findings = collect_require_verified_findings(&parsed);
+        assert!(
+            findings.is_empty(),
+            "inline interfaces must not fire; got: {findings:?}"
+        );
+    }
+
+    // ----- end Track D2 -----
+
+    // ------------------------------------------------------------------
+    // v2.27 Track D3 — ParsedSpec.verified_proof_pkgs population.
+    // The runner that shells `lake build` is exercised via the smoke
+    // in /tmp/v227-smoke-b/ (handoff documents the end-to-end check);
+    // this test just pins the resolver→ParsedSpec wiring.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn verified_proof_pkgs_populated_when_provider_ships_proof_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Provider qedspec at spec_dir/token.qedspec.
+        std::fs::write(
+            spec_dir.join("token.qedspec"),
+            r#"spec TokenLib
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    ensures amount > 0
+  }
+}
+"#,
+        )
+        .unwrap();
+        // Proof package alongside the qedspec — both module + lakefile
+        // must be present for `has_proofs` to be true.
+        let proofs_dir = spec_dir.join(".qed").join("proofs");
+        std::fs::create_dir_all(&proofs_dir).unwrap();
+        std::fs::write(proofs_dir.join("Token.lean"), "-- stub proof").unwrap();
+        std::fs::write(proofs_dir.join("lakefile.lean"), "package tokenProofs").unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            r#"
+[dependencies]
+spl_token = { path = "token.qedspec" }
+"#,
+        )
+        .unwrap();
+        let consumer = spec_dir.join("escrow.qedspec");
+        std::fs::write(
+            &consumer,
+            r#"spec Escrow
+import Token from "spl_token"
+
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        let parsed = parse_spec_file(&consumer).expect("parse should succeed");
+        assert_eq!(
+            parsed.verified_proof_pkgs.len(),
+            1,
+            "expected 1 proof package; got {:?}",
+            parsed.verified_proof_pkgs
+        );
+        assert!(
+            parsed.verified_proof_pkgs[0].ends_with(".qed/proofs")
+                || parsed.verified_proof_pkgs[0].ends_with(".qed\\proofs"),
+            "should point at the provider's proof package root; got: {}",
+            parsed.verified_proof_pkgs[0].display()
+        );
+    }
+
+    #[test]
+    fn verified_proof_pkgs_empty_when_no_provider_proofs() {
+        // No `.qed/proofs/` alongside the provider qedspec → resolver
+        // sets has_proofs=false → no entry in verified_proof_pkgs.
+        let tmp = tempfile::tempdir().unwrap();
+        let consumer = write_simple_path_dep_setup(tmp.path());
+        let parsed = parse_spec_file(&consumer).expect("parse should succeed");
+        assert!(
+            parsed.verified_proof_pkgs.is_empty(),
+            "no provider proofs → empty list; got: {:?}",
+            parsed.verified_proof_pkgs
+        );
+    }
+
+    // ----- end Track D3 -----
 }

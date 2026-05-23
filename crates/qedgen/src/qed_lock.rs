@@ -316,12 +316,26 @@ pub fn entry_for_builtin(
 // ----------------------------------------------------------------------------
 
 /// Compare `computed` against the lock on disk at `spec_dir/qed.lock`
-/// and act per `mode`. Returns Ok(()) if the lock is current (or was
-/// updated successfully); Err(...) if Frozen mode finds drift.
+/// and act per `mode`. Returns the proof_hash drift findings (empty in
+/// Auto/Skip; empty in Frozen unless the only difference is proof_hash);
+/// Err(...) when Frozen mode finds structural drift (every field other
+/// than `proof_hash`).
+///
+/// v2.27 Track D1 — proof_hash drift is reported as a soft finding
+/// (P2/CRIT routing happens at the call site via
+/// [`crate::upstream_check::route_findings`]) instead of bailing through
+/// the structural-drift path. Auto mode writes the new lock either way;
+/// only Frozen mode's exit behavior changed. Structural drift (changed
+/// `spec_hash`, `upstream_binary_hash`, `verified`, source identity,
+/// added/removed entries) still bails as before.
 #[allow(dead_code)]
-pub fn handle_lock(spec_dir: &Path, computed: &LockFile, mode: LockMode) -> Result<()> {
+pub fn handle_lock(
+    spec_dir: &Path,
+    computed: &LockFile,
+    mode: LockMode,
+) -> Result<Vec<crate::upstream_check::DepCheckResult>> {
     if matches!(mode, LockMode::Skip) {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut computed_sorted = computed.clone();
@@ -338,15 +352,30 @@ pub fn handle_lock(spec_dir: &Path, computed: &LockFile, mode: LockMode) -> Resu
     };
 
     if !needs_update {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     match mode {
         LockMode::Auto => {
             write(spec_dir, &computed_sorted)?;
-            Ok(())
+            Ok(Vec::new())
         }
         LockMode::Frozen => {
+            // Track D1 — if the only delta is proof_hash, surface the
+            // drift as soft findings for the caller to route through
+            // upstream_check::route_findings (P2 default, CRIT under
+            // `--strict`). Structural drift (every other field, plus
+            // added/removed entries) still bails through the legacy
+            // path; rebuilding from the wrong git ref or spec source
+            // isn't a soft signal.
+            if let Some(existing) = on_disk.as_ref() {
+                if structurally_equal(existing, &computed_sorted) {
+                    return Ok(detect_proof_hash_drift_from_locks(
+                        existing,
+                        &computed_sorted,
+                    ));
+                }
+            }
             let diff = describe_lock_diff(on_disk.as_ref(), &computed_sorted);
             anyhow::bail!(
                 "qed.lock at {} is stale (--frozen):\n{}",
@@ -356,6 +385,64 @@ pub fn handle_lock(spec_dir: &Path, computed: &LockFile, mode: LockMode) -> Resu
         }
         LockMode::Skip => unreachable!(),
     }
+}
+
+/// Track D1 — true if `a` and `b` agree on every per-entry field except
+/// `proof_hash` and have the same entry set. Used by `handle_lock`'s
+/// Frozen path to decide whether to bail (structural drift) or surface
+/// soft findings (proof_hash-only drift).
+fn structurally_equal(a: &LockFile, b: &LockFile) -> bool {
+    let mut aa = a.clone();
+    let mut bb = b.clone();
+    aa.sort_dependencies();
+    bb.sort_dependencies();
+    for e in &mut aa.dependencies {
+        e.proof_hash = None;
+    }
+    for e in &mut bb.dependencies {
+        e.proof_hash = None;
+    }
+    aa == bb
+}
+
+/// Track D1 — extract proof_hash drift between an on-disk lock and a
+/// freshly-computed one. Walks the computed lock's `verified` entries,
+/// looks each one up by name in the on-disk lock, and yields a
+/// [`crate::upstream_check::DepCheckOutcome::ProofHashMismatch`] for every
+/// pair whose proof_hash differs. Entries present on one side but not
+/// the other count as structural drift (handled elsewhere); this helper
+/// only yields per-entry proof_hash mismatches so the routing layer can
+/// surface them as P2 / CRIT findings without false-positiving on
+/// adds/removes.
+#[allow(dead_code)]
+pub fn detect_proof_hash_drift_from_locks(
+    on_disk: &LockFile,
+    computed: &LockFile,
+) -> Vec<crate::upstream_check::DepCheckResult> {
+    use crate::upstream_check::{DepCheckOutcome, DepCheckResult};
+    let on_disk_map: std::collections::BTreeMap<&str, &LockEntry> = on_disk
+        .dependencies
+        .iter()
+        .map(|d| (d.name.as_str(), d))
+        .collect();
+    let mut results = Vec::new();
+    for entry in &computed.dependencies {
+        if !entry.verified {
+            continue;
+        }
+        if let Some(existing) = on_disk_map.get(entry.name.as_str()) {
+            if existing.proof_hash != entry.proof_hash {
+                results.push(DepCheckResult {
+                    name: entry.name.clone(),
+                    outcome: DepCheckOutcome::ProofHashMismatch {
+                        pinned: existing.proof_hash.clone().unwrap_or_default(),
+                        computed: entry.proof_hash.clone().unwrap_or_default(),
+                    },
+                });
+            }
+        }
+    }
+    results
 }
 
 /// Render a short human-readable diff between an existing lock (or
@@ -877,10 +964,15 @@ spec_hash = "sha256:abc"
     }
 
     #[test]
-    fn frozen_drift_on_proof_hash_change_fires() {
-        // Verified dep whose proof_hash drifts → --frozen must report it.
-        // Same shape as the existing spec_hash drift test; ensures the
-        // diff renderer treats proof_hash as a first-class field.
+    fn frozen_proof_hash_only_drift_returns_soft_findings_not_bail() {
+        // v2.27 Track D1 — proof_hash-only drift is no longer a hard
+        // bail under `--frozen`. handle_lock returns the drift as
+        // `DepCheckOutcome::ProofHashMismatch` findings; the caller
+        // (main.rs check handler) routes them through
+        // upstream_check::route_findings as P2 (default) or CRIT
+        // (`--strict`). Other structural drift still bails — see
+        // `handle_lock_frozen_diff_names_proof_hash_and_verified` below
+        // for the `verified=true` flip path.
         let tmp = tempfile::tempdir().unwrap();
         let old = LockFile {
             version: LOCK_VERSION,
@@ -916,13 +1008,148 @@ spec_hash = "sha256:abc"
                 proof_hash: Some("sha256:NEW".to_string()),
             }],
         };
+        let findings = handle_lock(tmp.path(), &computed, LockMode::Frozen)
+            .expect("proof_hash-only drift must return Ok, not bail");
+        assert_eq!(findings.len(), 1, "one finding for one drifted dep");
+        match &findings[0].outcome {
+            crate::upstream_check::DepCheckOutcome::ProofHashMismatch { pinned, computed } => {
+                assert_eq!(pinned, "sha256:OLD");
+                assert_eq!(computed, "sha256:NEW");
+            }
+            other => panic!("expected ProofHashMismatch, got {:?}", other),
+        }
+        assert_eq!(findings[0].name, "amm");
+    }
+
+    #[test]
+    fn frozen_structural_drift_still_bails_even_with_proof_hash_change() {
+        // Track D1 — soft-routing only applies when proof_hash is the
+        // ONLY drifted field. If spec_hash (or any other structural
+        // field) ALSO drifts, the bail-on-structural path still runs;
+        // proof_hash gets reported in the diff line for completeness but
+        // it's not promoted to a soft finding.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = LockEntry {
+            name: "amm".to_string(),
+            source: "path:./amm".to_string(),
+            spec_hash: "sha256:OLD".to_string(),
+            git_ref: None,
+            resolved_commit: None,
+            path: None,
+            program_id: None,
+            upstream_binary_hash: None,
+            upstream_version: None,
+            verified: true,
+            proof_hash: Some("sha256:proof_OLD".to_string()),
+        };
+        write(
+            tmp.path(),
+            &LockFile {
+                version: LOCK_VERSION,
+                dependencies: vec![base.clone()],
+            },
+        )
+        .unwrap();
+
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                spec_hash: "sha256:NEW".to_string(),
+                proof_hash: Some("sha256:proof_NEW".to_string()),
+                ..base
+            }],
+        };
         let err = handle_lock(tmp.path(), &computed, LockMode::Frozen)
-            .unwrap_err()
+            .expect_err("structural drift must still bail")
             .to_string();
         assert!(err.contains("stale (--frozen)"), "got: {err}");
     }
 
     // ----- end Track B -----
+
+    // ----- v2.27 Track D1: detect_proof_hash_drift_from_locks -----
+
+    fn verified_entry(name: &str, proof_hash: Option<&str>) -> LockEntry {
+        let mut e = entry(name, "path:./x", "sha256:same");
+        e.verified = true;
+        e.proof_hash = proof_hash.map(str::to_string);
+        e
+    }
+
+    #[test]
+    fn detect_proof_hash_drift_yields_mismatch_when_verified_proof_changes() {
+        let on_disk = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![verified_entry("amm", Some("sha256:OLD"))],
+        };
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![verified_entry("amm", Some("sha256:NEW"))],
+        };
+        let drifts = detect_proof_hash_drift_from_locks(&on_disk, &computed);
+        assert_eq!(drifts.len(), 1);
+        assert_eq!(drifts[0].name, "amm");
+        match &drifts[0].outcome {
+            crate::upstream_check::DepCheckOutcome::ProofHashMismatch { pinned, computed } => {
+                assert_eq!(pinned, "sha256:OLD");
+                assert_eq!(computed, "sha256:NEW");
+            }
+            other => panic!("expected ProofHashMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn detect_proof_hash_drift_silent_when_proof_hash_matches() {
+        let on_disk = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![verified_entry("amm", Some("sha256:SAME"))],
+        };
+        let computed = on_disk.clone();
+        assert!(detect_proof_hash_drift_from_locks(&on_disk, &computed).is_empty());
+    }
+
+    #[test]
+    fn detect_proof_hash_drift_skips_unverified_entries() {
+        // verified=false means the consumer didn't expect Stance-2
+        // proofs for this dep — proof_hash drift on those entries is
+        // either a None→None no-op or a structural drift handled by
+        // handle_lock's bail path. Either way, no soft finding.
+        let on_disk = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![entry("noproofs", "path:./n", "sha256:0")],
+        };
+        let mut changed = entry("noproofs", "path:./n", "sha256:0");
+        changed.proof_hash = Some("sha256:NEW".to_string());
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![changed],
+        };
+        assert!(
+            detect_proof_hash_drift_from_locks(&on_disk, &computed).is_empty(),
+            "verified=false drift must not produce ProofHashMismatch findings",
+        );
+    }
+
+    #[test]
+    fn detect_proof_hash_drift_ignores_entries_added_or_removed() {
+        // Added/removed entries are structural — the caller bails through
+        // describe_lock_diff. The detector only emits per-entry drift for
+        // matched names so the routing layer doesn't double-report.
+        let on_disk = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![verified_entry("removed", Some("sha256:gone"))],
+        };
+        let computed = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![verified_entry("added", Some("sha256:new"))],
+        };
+        assert!(
+            detect_proof_hash_drift_from_locks(&on_disk, &computed).is_empty(),
+            "added/removed entries must not yield ProofHashMismatch",
+        );
+    }
+
+    // ----- end Track D1 -----
 
     #[test]
     fn handle_lock_frozen_diff_names_upstream_binary_hash() {

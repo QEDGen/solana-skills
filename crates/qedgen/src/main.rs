@@ -686,6 +686,38 @@ enum Commands {
         /// Use Crucible's stateful mode (action-chain pool).
         #[arg(long)]
         crucible_stateful: bool,
+
+        /// v2.27 Track D2 — exit non-zero if any imported interface
+        /// declares `ensures` clauses (Tier-1+) but the provider did NOT
+        /// ship a Lake-buildable proof package alongside its qedspec
+        /// (`<source>/.qed/proofs/<Iface>.lean` + `lakefile.lean`).
+        /// Tier-0 shape-only imports (no ensures) and sentinel-pinned
+        /// native programs (System) are exempt — the former are
+        /// flagged by the `cpi_no_callee_ensures` P1 lint instead, and
+        /// the latter are runtime trust boundaries that no proof
+        /// package can express.
+        ///
+        /// Default-off in v2.27: the bundled stdlib still ships as
+        /// Stance-1 (binary_hash axiom discharge), so default-on would
+        /// always fail on `from "spl"` / `from "metaplex"` imports.
+        /// Re-evaluate in v2.28 after Track C2 ships bundled proofs.
+        #[arg(long)]
+        require_verified: bool,
+
+        /// v2.27 Track D3 — walk the transitive dep graph and run
+        /// `lake build` against every imported proof package, not just
+        /// the consumer's own Lean tree. The resolver returns deps in
+        /// DFS-pre-order so iteration is naturally bottom-up. Each
+        /// layer's pass/fail is reported individually; exits non-zero
+        /// if any layer fails. Cycle detection is reused from
+        /// `import_resolver::resolve_recursive`.
+        ///
+        /// Implied by `--lean` when imports ship verified proofs but
+        /// not auto-enabled — operators may want to verify only the
+        /// consumer's own tree (the v2.26 behavior) before paying the
+        /// per-layer Lake build cost.
+        #[arg(long)]
+        recursive: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -2380,6 +2412,34 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                         }
                     }
                 }
+
+                // v2.27 Track D1 — proof_hash drift routing. Sibling to
+                // the binary_hash dispatch above; parses the spec under
+                // Frozen mode so qed_lock::handle_lock populates
+                // `ParsedSpec.proof_hash_findings` with any Stance-2
+                // proof package whose content drifted from the on-disk
+                // lock. P2 under plain `--frozen` (warn, exit 0), CRIT
+                // under `--frozen --strict`. Parse errors here surface
+                // identically to the main parse below (they would have
+                // fired there too); we let the downstream parse re-raise
+                // them rather than double-reporting.
+                if let Ok(parsed) = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts) {
+                    if !parsed.proof_hash_findings.is_empty() {
+                        let gate = if strict {
+                            upstream_check::Gate::CheckFrozenStrict
+                        } else {
+                            upstream_check::Gate::CheckFrozen
+                        };
+                        let routed = upstream_check::route_findings(
+                            parsed.proof_hash_findings.clone(),
+                            gate,
+                        );
+                        let blocking = upstream_check::print_routed_report(&routed);
+                        if blocking {
+                            has_issues = true;
+                        }
+                    }
+                }
             }
 
             // sBPF verification (--asm)
@@ -2636,6 +2696,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             crucible_harness_dir,
             crucible_no_smoke,
             crucible_stateful,
+            require_verified,
+            recursive,
         } => {
             require_git_repo()?;
 
@@ -2645,6 +2707,114 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             // works as documented.
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
+
+            // v2.27 Track D2 / D3 — parse the spec once if either flag
+            // needs the ParsedSpec (verified_callees / verified_proof_pkgs).
+            // Both gates are pre-checks that may exit before backends
+            // dispatch; bundling the parse avoids paying for it twice.
+            let parsed_for_gates = if require_verified || recursive {
+                Some(check::parse_spec_file(&spec)?)
+            } else {
+                None
+            };
+
+            // v2.27 Track D2 — short-circuit on unverified imports
+            // before any backend dispatches. Rationale: if the dep
+            // graph isn't fully Stance-2 proven, running proptest /
+            // Kani / Lean against it still produces results that
+            // depend on Stance-1 axiom discharge. Failing fast lets CI
+            // gate on "all imports verified" cleanly without
+            // surrounding the verify call with shell glue.
+            if require_verified {
+                let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
+                let findings = check::collect_require_verified_findings(parsed);
+                if !findings.is_empty() {
+                    eprintln!(
+                        "--require-verified: {} unverified import(s) — every imported interface \
+                         with `ensures` clauses must ship a Lake-buildable proof package.",
+                        findings.len(),
+                    );
+                    for f in &findings {
+                        eprintln!("  [CRIT] {}: unverified callee", f.interface_name);
+                        eprintln!("         {}", f.fix_hint);
+                    }
+                    std::process::exit(1);
+                }
+            }
+
+            // v2.27 Track D3 — `--recursive` walks the transitive
+            // resolution closure (cycle-detected by the resolver) and
+            // runs `lake build` against every imported proof package.
+            // Per-layer pass/fail is reported up-front so a downstream
+            // backend failure doesn't mask a transitive proof failure.
+            // Each layer's failure is independent: keep walking so
+            // operators see every breakage, then aggregate exit at the
+            // end.
+            //
+            // Empty `verified_proof_pkgs` is a no-op success — this
+            // spec doesn't import any verified providers, so there's
+            // nothing transitive to build.
+            if recursive {
+                let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
+                if parsed.verified_proof_pkgs.is_empty() {
+                    eprintln!(
+                        "--recursive: no imported proof packages in this spec's dep graph; \
+                         nothing to walk."
+                    );
+                } else {
+                    eprintln!(
+                        "--recursive: walking {} verified provider proof package(s) bottom-up.",
+                        parsed.verified_proof_pkgs.len(),
+                    );
+                    let mut any_failed = false;
+                    for (idx, pkg_root) in parsed.verified_proof_pkgs.iter().enumerate() {
+                        eprintln!(
+                            "  [{}/{}] lake build — {}",
+                            idx + 1,
+                            parsed.verified_proof_pkgs.len(),
+                            pkg_root.display(),
+                        );
+                        match std::process::Command::new("lake")
+                            .arg("build")
+                            .current_dir(pkg_root)
+                            .output()
+                        {
+                            Ok(out) if out.status.success() => {
+                                eprintln!("       PASS");
+                            }
+                            Ok(out) => {
+                                any_failed = true;
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let stdout = String::from_utf8_lossy(&out.stdout);
+                                eprintln!("       FAIL");
+                                // Show the first ~10 lines of each
+                                // stream — `lake build` output gets
+                                // very long; the head is usually
+                                // enough to identify the failure.
+                                for line in stderr.lines().take(10) {
+                                    eprintln!("         | {}", line);
+                                }
+                                for line in stdout.lines().take(10) {
+                                    eprintln!("         | {}", line);
+                                }
+                            }
+                            Err(e) => {
+                                any_failed = true;
+                                eprintln!("       ERROR: failed to spawn `lake build`: {}", e);
+                            }
+                        }
+                    }
+                    if any_failed {
+                        eprintln!(
+                            "--recursive: at least one provider's Lake build failed; the dep \
+                             graph is NOT fully proven. Fix the provider(s) above before \
+                             trusting this consumer's Stance-2 axioms."
+                        );
+                        std::process::exit(1);
+                    }
+                    eprintln!("--recursive: every imported proof package built clean.");
+                }
+            }
 
             // v2.8 G5 / v2.26 Slice 4c: --check-upstream diffs each
             // imported library's pinned binary hash against the on-chain

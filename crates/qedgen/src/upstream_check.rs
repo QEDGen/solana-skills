@@ -70,6 +70,18 @@ pub enum DepCheckOutcome {
         pinned: String,
         on_chain: String,
     },
+    /// v2.27 Track D1 — proof_hash drift between the on-disk lock and the
+    /// content of the provider's proof package on disk. No network fetch:
+    /// the "on-chain" side is `qed_lock::compute_proof_hash` walking the
+    /// provider's `.qed/proofs/` directory. Routed through the same
+    /// [`Gate`]-aware severity layer as [`DepCheckOutcome::Mismatch`] so
+    /// `check --frozen` warns (P2) while `--strict` and `verify` block
+    /// (CRIT). Surfaces when a provider's proof package was edited
+    /// without re-running `qedgen check` to refresh the lockfile.
+    ProofHashMismatch {
+        pinned: String,
+        computed: String,
+    },
     Skipped {
         reason: String,
     },
@@ -183,6 +195,26 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
                     message: format!(
                         "binary_hash pin for {} ({}) is stale — pinned {}, on-chain {}",
                         r.name, program_id, pinned, on_chain
+                    ),
+                });
+            }
+            DepCheckOutcome::ProofHashMismatch { pinned, computed } => {
+                // Track D1 — same severity routing as binary_hash
+                // Mismatch. Drift between the on-disk lock and the
+                // provider's proof package content is the legible signal
+                // that a Stance-2 callee's proofs changed without the
+                // consumer rerunning `qedgen check`.
+                let severity = match gate {
+                    Gate::Verify | Gate::CheckFrozenStrict => FindingSeverity::Crit,
+                    Gate::CheckFrozen => FindingSeverity::P2,
+                    Gate::VerifyStaleOk => FindingSeverity::Info,
+                };
+                findings.push(Finding {
+                    name: r.name.clone(),
+                    severity,
+                    message: format!(
+                        "proof_hash for {} is stale — pinned {}, computed {}",
+                        r.name, pinned, computed
                     ),
                 });
             }
@@ -436,7 +468,15 @@ fn format_hash(bytes: &[u8]) -> String {
 /// production fetcher attempt `solana program dump` on entries the
 /// author marked as native, producing confusing "not an SBF program"
 /// errors instead of a clean skip.
-fn is_sentinel_hash(pinned: &str) -> bool {
+///
+/// v2.27 Track D2 fold-in: also called by
+/// `check::collect_require_verified_findings` to exempt sentinel-pinned
+/// native programs (System) from `--require-verified` — their `ensures`
+/// clauses are validated by the validator runtime itself, not by a
+/// Lake-buildable proof package. Made `pub(crate)` so the lint reuses the
+/// same definition the runtime fetcher trusts.
+#[allow(dead_code)]
+pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
     let body = pinned
         .strip_prefix("sha256:")
         .or_else(|| pinned.strip_prefix("SHA256:"))
@@ -468,6 +508,12 @@ pub fn print_report(results: &[DepCheckResult]) -> bool {
                 eprintln!("      pinned:   {}", pinned);
                 eprintln!("      on-chain: {}", on_chain);
             }
+            DepCheckOutcome::ProofHashMismatch { pinned, computed } => {
+                any_failure = true;
+                eprintln!("  ✗ {}: PROOF_HASH MISMATCH", r.name);
+                eprintln!("      pinned:   {}", pinned);
+                eprintln!("      computed: {}", computed);
+            }
             DepCheckOutcome::Skipped { reason } => {
                 eprintln!("  · {}: skipped — {}", r.name, reason);
             }
@@ -496,6 +542,9 @@ pub fn print_routed_report(report: &RoutedReport) -> bool {
             }
             DepCheckOutcome::Mismatch { program_id, .. } => {
                 eprintln!("  ✗ {} ({}): MISMATCH", r.name, program_id);
+            }
+            DepCheckOutcome::ProofHashMismatch { .. } => {
+                eprintln!("  ✗ {}: PROOF_HASH MISMATCH", r.name);
             }
             DepCheckOutcome::Skipped { reason } => {
                 eprintln!("  · {}: skipped — {}", r.name, reason);
@@ -575,6 +624,16 @@ mod tests {
                 program_id: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(),
                 pinned: "sha256:aaaa".to_string(),
                 on_chain: "sha256:bbbb".to_string(),
+            },
+        }
+    }
+
+    fn proof_hash_mismatch_result() -> DepCheckResult {
+        DepCheckResult {
+            name: "tokenlib".to_string(),
+            outcome: DepCheckOutcome::ProofHashMismatch {
+                pinned: "sha256:proof_old".to_string(),
+                computed: "sha256:proof_new".to_string(),
             },
         }
     }
@@ -931,6 +990,49 @@ mod tests {
         let routed = route_findings(vec![match_result(), skipped_result()], Gate::Verify);
         assert!(routed.findings.is_empty());
         assert!(!routed.any_blocking());
+    }
+
+    // ----------------------------------------------------------------------
+    // v2.27 Track D1 — proof_hash drift severity routing. Same shape as
+    // the binary_hash Mismatch routing: P2 under `check --frozen`, CRIT
+    // under `verify` and `--frozen --strict`, Info under
+    // `--upstream-stale-ok`.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn proof_hash_drift_routes_crit_under_verify() {
+        let routed = route_findings(vec![proof_hash_mismatch_result()], Gate::Verify);
+        assert_eq!(routed.findings.len(), 1);
+        assert_eq!(routed.findings[0].severity, FindingSeverity::Crit);
+        assert!(
+            routed.findings[0].message.contains("proof_hash"),
+            "message must name the drifted field; got: {}",
+            routed.findings[0].message,
+        );
+        assert!(routed.any_blocking());
+    }
+
+    #[test]
+    fn proof_hash_drift_routes_p2_under_check_frozen() {
+        let routed = route_findings(vec![proof_hash_mismatch_result()], Gate::CheckFrozen);
+        assert_eq!(routed.findings[0].severity, FindingSeverity::P2);
+        assert!(!routed.any_blocking(), "default --frozen must not block");
+        assert!(routed.any_warning());
+    }
+
+    #[test]
+    fn proof_hash_drift_routes_crit_under_strict_frozen() {
+        let routed = route_findings(vec![proof_hash_mismatch_result()], Gate::CheckFrozenStrict);
+        assert_eq!(routed.findings[0].severity, FindingSeverity::Crit);
+        assert!(routed.any_blocking(), "--strict must escalate to CRIT");
+    }
+
+    #[test]
+    fn proof_hash_drift_demotes_to_info_under_stale_ok() {
+        let routed = route_findings(vec![proof_hash_mismatch_result()], Gate::VerifyStaleOk);
+        assert_eq!(routed.findings[0].severity, FindingSeverity::Info);
+        assert!(!routed.any_blocking());
+        assert!(!routed.any_warning());
     }
 
     #[test]
