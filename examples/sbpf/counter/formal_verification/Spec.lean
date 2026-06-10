@@ -48,7 +48,7 @@ theorem rejects_wrong_account_count
     (executeFn progAt (initState inputAddr mem rt) 8).exitCode = some E_N_ACCOUNTS := by
   have h1 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INCREMENT) := by rw [h_num]; exact h_ne2
   have h2 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INIT) := by rw [h_num]; exact h_ne3
-  wp_exec [progAt, progAt_0, progAt_1] [ea_0, Width.bytes]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0]
 
 /-! ## P2: user data length nonzero (initialize) → error 2
 
@@ -67,7 +67,7 @@ theorem init_rejects_user_data_len
     (executeFn progAt (initState inputAddr mem rt) 10).exitCode = some E_USER_DATA_LEN := by
   have h_ne2 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INCREMENT) := by rw [h_num]; decide
   have h_ne_dl : ¬(readU64 mem (inputAddr + 88) = DATA_LEN_ZERO) := by rw [h_udl]; exact h_ne
-  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88, U32_MODULUS, Width.bytes]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88, U32_MODULUS]
 
 /-! ## P3: PDA duplicate (initialize) → error 5
 
@@ -88,6 +88,6 @@ theorem init_rejects_pda_duplicate
     (executeFn progAt (initState inputAddr mem rt) 12).exitCode = some E_PDA_DUPLICATE := by
   have h_ne2 : ¬(readU64 mem inputAddr = N_ACCOUNTS_INCREMENT) := by rw [h_num]; decide
   have h_ne_dup : ¬(readU8 mem (inputAddr + 10344) = NON_DUP_MARKER) := by rw [h_pdup]; exact h_dup
-  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88, ea_10344, U32_MODULUS, Width.bytes]
+  wp_exec [progAt, progAt_0, progAt_1] [ea_0, ea_88, ea_10344, U32_MODULUS]
 
 end CounterProofs

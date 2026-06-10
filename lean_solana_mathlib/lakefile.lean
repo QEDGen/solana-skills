@@ -18,7 +18,7 @@ require qedgenSupport from "../lean_solana"
 -- requirement — exactly the drift that made every environment a
 -- moving target.
 require mathlib from git
-  "https://github.com/leanprover-community/mathlib4.git" @ "v4.30.0-rc2"
+  "https://github.com/leanprover-community/mathlib4.git" @ "v4.30.0"
 
 @[default_target]
 lean_lib QEDGenMathlib where
