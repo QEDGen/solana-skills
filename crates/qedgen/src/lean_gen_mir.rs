@@ -3065,23 +3065,39 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
                 );
 
                 // v2.27 Track A — same skip-path logic as legacy.
-                let abstract_fields = scan_abstract_fields(&ensures.0.lean);
+                let abstract_fields =
+                    crate::cpi_substitute::scan_lean_abstract_fields(&ensures.0.lean);
                 if !abstract_fields.is_empty() {
-                    let any_bound = abstract_fields
-                        .iter()
-                        .any(|f| state_binders.iter().any(|b| &b.callee_field == f));
-                    if !any_bound {
-                        out.push_str(&format!(
-                            "-- `{}.{}` ensures #{} ({}): caller supplied no \
-                             `state_binders` for these abstract fields; ensures \
-                             not pulled into caller proof. Bind via \
-                             `state_binders {{ {} = state.<field> }}` to consume.\n",
-                            target.0,
-                            method.0,
-                            ens_idx,
-                            abstract_fields.join(", "),
-                            abstract_fields[0],
-                        ));
+                    let missing = crate::cpi_substitute::missing_state_binders(
+                        &abstract_fields,
+                        &synthetic_call.state_binders,
+                    );
+                    if !missing.is_empty() {
+                        if missing.len() == abstract_fields.len() {
+                            out.push_str(&format!(
+                                "-- `{}.{}` ensures #{} ({}): caller supplied no \
+                                 `state_binders` for these abstract fields; ensures \
+                                 not pulled into caller proof. Bind via \
+                                 `state_binders {{ {} = state.<field> }}` to consume.\n",
+                                target.0,
+                                method.0,
+                                ens_idx,
+                                abstract_fields.join(", "),
+                                abstract_fields[0],
+                            ));
+                        } else {
+                            out.push_str(&format!(
+                                "-- `{}.{}` ensures #{} ({}): caller supplied incomplete \
+                                 `state_binders`; missing {}; ensures not pulled into caller proof. \
+                                 Bind via `state_binders {{ {} = state.<field> }}` to consume.\n",
+                                target.0,
+                                method.0,
+                                ens_idx,
+                                abstract_fields.join(", "),
+                                missing.join(", "),
+                                missing[0],
+                            ));
+                        }
                         continue;
                     }
                 }
@@ -3264,23 +3280,6 @@ fn synthesize_parsed_call(
             })
             .collect(),
     }
-}
-
-/// Scan a Lean-form `ensures` text for abstract State-field references
-/// (`s.X` or `s'.X`), returning the field names in first-occurrence
-/// order. Mirrors `lean_gen::scan_abstract_fields`.
-fn scan_abstract_fields(ensures_lean: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"\bs'?\.([A-Za-z_][A-Za-z0-9_]*)")
-        .expect("regex compiles for abstract-field scan");
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut out: Vec<String> = Vec::new();
-    for cap in re.captures_iter(ensures_lean) {
-        let field = cap.get(1).unwrap().as_str();
-        if seen.insert(field.to_string()) {
-            out.push(field.to_string());
-        }
-    }
-    out
 }
 
 /// Emit property declarations + preservation theorems. Mirrors

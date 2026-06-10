@@ -43,6 +43,7 @@ mod native_extractor;
 mod paired_validator_probe;
 mod pinocchio_extractor;
 mod pinocchio_probe;
+mod pinocchio_profile;
 mod pinocchio_to_spec;
 mod probe;
 mod probe_repro;
@@ -3167,10 +3168,12 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             // when:
             //   1. `--kani-impl` was passed explicitly, OR
             //   2. `--all` was passed AND at least one handler auto-triggers
-            //      (modifies ⊋ effect.lhs — the LP-shape signal), OR
-            //   3. `--kani` was passed AND at least one handler auto-triggers
-            //      (so users on `--kani` get the impl-side coverage when
-            //      their spec declares modifies-driven fill sites).
+            //      (modifies ⊋ effect.lhs — the LP-shape signal).
+            //
+            // Plain `--kani` stays model-only so callers can keep the
+            // spec-transition and implementation proof gates separate. This
+            // also lets wrappers run the model proofs one harness at a time
+            // without doing extra impl-harness generation first.
             //
             // `kani_impl::spec_triggers_impl_harness` is the auto-trigger
             // predicate. Per-handler heuristic lives in one place
@@ -3186,8 +3189,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     parsed.is_assembly_target(),
                 )
             };
-            let want_kani_impl =
-                !is_assembly && (kani_impl || ((kani || all) && auto_impl_trigger));
+            let want_kani_impl = !is_assembly && (kani_impl || (all && auto_impl_trigger));
             if want_kani_impl {
                 if let Err(e) = deps::require_kani() {
                     eprintln!("warning: {e}");

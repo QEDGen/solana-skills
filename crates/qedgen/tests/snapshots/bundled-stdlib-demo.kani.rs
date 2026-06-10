@@ -79,6 +79,7 @@ fn verify_initialize_rejects_invalid() {
     kani::assume(s.status == Status::Uninitialized);
     let initial: u64 = kani::any();
     kani::assume(!((initial > 0)));
+    kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(!initialize(&mut s, initial),
         "initialize must reject when guard is violated");
 }
@@ -94,6 +95,7 @@ fn verify_deposit_rejects_invalid() {
     kani::assume(s.status == Status::Open);
     let amount: u64 = kani::any();
     kani::assume(!((amount > 0)));
+    kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(!deposit(&mut s, amount),
         "deposit must reject when guard is violated");
 }

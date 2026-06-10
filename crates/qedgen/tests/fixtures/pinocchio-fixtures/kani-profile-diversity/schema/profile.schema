@@ -1,0 +1,166 @@
+seed VAULT_AUTHORITY_SEED vault-authority
+limit MAX_ALLOWED_MINTS 4
+
+instruction MOVE_TOKENS 1
+account MOVE_TOKENS SOURCE 0 writable type token
+account MOVE_TOKENS DESTINATION 1 writable type token
+account MOVE_TOKENS AUTHORITY 2 signer
+account MOVE_TOKENS MINT 3 type mint
+account MOVE_TOKENS TOKEN_PROGRAM 4 program type token
+
+record MOVE_TOKENS_ARGS
+field AMOUNT u64
+end
+
+instruction_record MOVE_TOKENS MOVE_TOKENS_ARGS
+
+instruction MOVE_BATCH 2
+account MOVE_BATCH BATCH_STATE 0 writable
+
+record TRANSFER
+field FROM_LANE_ID u8
+field TO_LANE_ID u8
+field AMOUNT u64
+end
+
+record MOVE_BATCH_ARGS
+field TRANSFER_COUNT u8
+repeat TRANSFER transfer 2 TRANSFER_COUNT
+end
+
+instruction_record MOVE_BATCH MOVE_BATCH_ARGS
+
+instruction TOUCH_CONFIG 3
+account TOUCH_CONFIG CONFIG 0 writable
+
+record CONFIG_ACCOUNT
+field MAGIC bytes8
+field ADMIN pubkey
+field OPERATOR pubkey
+field REBALANCER pubkey
+field MAX_FEE_BPS u16
+field PAUSED bool
+field LANE_COUNT u8
+field MINT_COUNT u8
+repeat ALLOWED_MINT pubkey MAX_ALLOWED_MINTS MINT_COUNT
+end
+
+record TOUCH_CONFIG_ARGS
+field MAX_FEE_BPS u16
+end
+
+magic CONFIG_MAGIC CFGMAGIC
+instruction_record TOUCH_CONFIG TOUCH_CONFIG_ARGS
+account_record CONFIG CONFIG_ACCOUNT
+
+instruction ROUTE_ATA 4
+account ROUTE_ATA AUTHORITY 0
+account ROUTE_ATA MINT 1
+account ROUTE_ATA VAULT 2 writable
+
+record ROUTE_ATA_ARGS
+field LANE_ID u8
+end
+
+instruction_record ROUTE_ATA ROUTE_ATA_ARGS
+
+instruction PARTIAL_FALLBACK 5
+account PARTIAL_FALLBACK SCRATCH 0 writable
+
+instruction SET_FEE 6
+account SET_FEE CONFIG 0 writable
+account SET_FEE ADMIN 1 signer
+
+record SET_FEE_ARGS
+field NEW_MAX_FEE_BPS u16
+end
+
+instruction_record SET_FEE SET_FEE_ARGS
+
+instruction SET_PAUSED 7
+account SET_PAUSED CONFIG 0 writable
+account SET_PAUSED ADMIN 1 signer
+
+record SET_PAUSED_ARGS
+field PAUSED bool
+end
+
+instruction_record SET_PAUSED SET_PAUSED_ARGS
+
+instruction ROUTER_SWAP 8
+account ROUTER_SWAP CONFIG 0
+account ROUTER_SWAP USER_VAULT 1 signer
+account ROUTER_SWAP USER_INPUT 2 writable type token
+account ROUTER_SWAP USER_OUTPUT 3 writable type token
+account ROUTER_SWAP VAULT_INPUT 4 writable type token
+account ROUTER_SWAP VAULT_OUTPUT 5 writable type token
+account ROUTER_SWAP INPUT_MINT 6 type mint
+account ROUTER_SWAP OUTPUT_MINT 7 type mint
+account ROUTER_SWAP VAULT_AUTHORITY 8
+account ROUTER_SWAP OPERATOR 9 signer
+account ROUTER_SWAP TOKEN_PROGRAM 10 program type token
+
+record ROUTER_SWAP_ARGS
+field AMOUNT_IN u64
+field AMOUNT_OUT u64
+field MIN_OUT u64
+field MAX_FEE_BPS u16
+field LANE_ID u8
+end
+
+instruction_record ROUTER_SWAP ROUTER_SWAP_ARGS
+
+instruction ROUTER_WITHDRAW 9
+account ROUTER_WITHDRAW CONFIG 0
+account ROUTER_WITHDRAW ADMIN 1 signer
+account ROUTER_WITHDRAW VAULT_SOURCE 2 writable type token
+account ROUTER_WITHDRAW DESTINATION 3 writable type token
+account ROUTER_WITHDRAW MINT 4 type mint
+account ROUTER_WITHDRAW VAULT_AUTHORITY 5
+account ROUTER_WITHDRAW TOKEN_PROGRAM 6 program type token
+
+record ROUTER_WITHDRAW_ARGS
+field AMOUNT u64
+end
+
+instruction_record ROUTER_WITHDRAW ROUTER_WITHDRAW_ARGS
+
+instruction ROUTER_REBALANCE 10
+account ROUTER_REBALANCE CONFIG 0
+account ROUTER_REBALANCE REBALANCER 1 signer
+account ROUTER_REBALANCE TOKEN_PROGRAM 2 program type token
+account ROUTER_REBALANCE MINT 3 type mint
+account ROUTER_REBALANCE SOURCE_AUTHORITY 4
+account ROUTER_REBALANCE SOURCE_INVENTORY 5 writable type token
+account ROUTER_REBALANCE DESTINATION_INVENTORY 6 writable type token
+
+record ROUTER_REBALANCE_ARGS
+field AMOUNT u64
+field FROM_LANE_ID u8
+field TO_LANE_ID u8
+end
+
+instruction_record ROUTER_REBALANCE ROUTER_REBALANCE_ARGS
+
+instruction ROUTER_REBALANCE_PAIR 11
+account ROUTER_REBALANCE_PAIR CONFIG 0
+account ROUTER_REBALANCE_PAIR REBALANCER 1 signer
+account ROUTER_REBALANCE_PAIR TOKEN_PROGRAM 2 program type token
+account ROUTER_REBALANCE_PAIR MINT 3 type mint
+account ROUTER_REBALANCE_PAIR SOURCE_AUTHORITY_0 4
+account ROUTER_REBALANCE_PAIR SOURCE_INVENTORY_0 5 writable type token
+account ROUTER_REBALANCE_PAIR DESTINATION_INVENTORY_0 6 writable type token
+account ROUTER_REBALANCE_PAIR SOURCE_AUTHORITY_1 7
+account ROUTER_REBALANCE_PAIR SOURCE_INVENTORY_1 8 writable type token
+account ROUTER_REBALANCE_PAIR DESTINATION_INVENTORY_1 9 writable type token
+
+record ROUTER_REBALANCE_PAIR_ARGS
+field AMOUNT_0 u64
+field FROM_LANE_ID_0 u8
+field TO_LANE_ID_0 u8
+field AMOUNT_1 u64
+field FROM_LANE_ID_1 u8
+field TO_LANE_ID_1 u8
+end
+
+instruction_record ROUTER_REBALANCE_PAIR ROUTER_REBALANCE_PAIR_ARGS

@@ -1,0 +1,229 @@
+spec KaniProfileDiversity
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  handler transfer (amount : U64) {
+    discriminant "0x03"
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures amount > 0
+  }
+}
+
+type Error | InvalidAmount
+           | InvalidFee
+           | Unauthorized
+
+state {
+  max_fee_bps : U64
+  paused      : U64
+}
+
+handler move_tokens (amount : U64) {
+  permissionless
+  accounts {
+    source        : writable, type token
+    destination   : writable, type token
+    authority     : signer
+    mint          : readonly, type mint
+    token_program : program, type token
+  }
+  requires amount > 0 else InvalidAmount
+  call Token.transfer(from = source, to = destination, amount = amount, authority = authority)
+  ensures amount > 0
+}
+
+handler move_batch
+  (transfer_count : U64)
+  (from_lane_id_0 : U64)
+  (to_lane_id_0 : U64)
+  (amount_0 : U64)
+  (from_lane_id_1 : U64)
+  (to_lane_id_1 : U64)
+  (amount_1 : U64) {
+  permissionless
+  accounts {
+    batch_state : writable
+  }
+  requires transfer_count <= 2
+  ensures transfer_count <= 2
+}
+
+handler touch_config (max_fee_bps : U64) {
+  permissionless
+  accounts {
+    config : writable
+  }
+  ensures max_fee_bps <= 10000
+}
+
+handler set_fee (new_max_fee_bps : U64) {
+  permissionless
+  accounts {
+    config : writable
+    admin  : signer
+  }
+  requires new_max_fee_bps <= 10000 else InvalidFee
+  effect { max_fee_bps := new_max_fee_bps }
+  ensures state.max_fee_bps == new_max_fee_bps
+}
+
+handler set_paused (paused_value : U64) {
+  permissionless
+  accounts {
+    config : writable
+    admin  : signer
+  }
+  requires paused_value <= 1 else InvalidAmount
+  effect { paused := paused_value }
+  ensures state.paused == paused_value
+}
+
+handler router_swap
+  (amount_in : U64)
+  (amount_out : U64)
+  (min_out : U64)
+  (max_fee_bps : U128)
+  (retained_value_bps : U128)
+  (lane_id : U64)
+  (input_decimals : U64)
+  (output_decimals : U64)
+  (fee_input_normalized : U128)
+  (fee_output_normalized : U128) {
+  permissionless
+  accounts {
+    config          : readonly
+    user_vault      : signer
+    user_input      : writable, type token
+    user_output     : writable, type token
+    vault_input     : writable, type token
+    vault_output    : writable, type token
+    input_mint      : readonly, type mint
+    output_mint     : readonly, type mint
+    vault_authority : readonly, pda ["vault-authority", lane_id]
+    operator        : signer
+    token_program   : program, type token
+  }
+  requires amount_in > 0 else InvalidAmount
+  requires amount_out > 0 else InvalidAmount
+  requires amount_in == 1 else InvalidAmount
+  requires amount_out == 1 else InvalidAmount
+  requires min_out == 1 else InvalidAmount
+  requires amount_in <= 1000000 else InvalidAmount
+  requires amount_out <= 1000000 else InvalidAmount
+  requires amount_out >= min_out else InvalidAmount
+  requires amount_out >= amount_in else InvalidAmount
+  requires max_fee_bps <= 10000 else InvalidFee
+  requires max_fee_bps == 0 else InvalidFee
+  requires retained_value_bps <= 10000 else InvalidFee
+  requires max_fee_bps + retained_value_bps == 10000 else InvalidFee
+  requires lane_id < 2 else InvalidAmount
+  requires input_decimals <= 18 else InvalidAmount
+  requires output_decimals <= 18 else InvalidAmount
+  requires input_decimals == 6 else InvalidAmount
+  requires output_decimals == 6 else InvalidAmount
+  requires fee_input_normalized <= 340282366920938463463374607431768211 else InvalidFee
+  requires
+    fee_output_normalized >= (fee_input_normalized * retained_value_bps) / 10000
+    else InvalidFee
+  call Token.transfer(from = user_input, to = vault_input, amount = amount_in, authority = user_vault)
+  call Token.transfer(from = vault_output, to = user_output, amount = amount_out, authority = vault_authority)
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+  ensures state.paused == old(state.paused)
+}
+
+handler router_withdraw (amount : U64) {
+  permissionless
+  accounts {
+    config          : readonly
+    admin           : signer
+    vault_source    : writable, type token
+    destination     : writable, type token
+    mint            : readonly, type mint
+    vault_authority : readonly
+    token_program   : program, type token
+  }
+  requires amount > 0 else InvalidAmount
+  call Token.transfer(from = vault_source, to = destination, amount = amount, authority = vault_authority)
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+}
+
+handler router_rebalance
+  (amount : U64)
+  (from_lane_id : U64)
+  (to_lane_id : U64) {
+  permissionless
+  accounts {
+    config                : readonly
+    rebalancer            : signer
+    token_program         : program, type token
+    mint                  : readonly, type mint
+    source_authority      : readonly
+    source_inventory      : writable, type token
+    destination_inventory : writable, type token
+  }
+  requires amount > 0 else InvalidAmount
+  requires from_lane_id != to_lane_id else InvalidAmount
+  call Token.transfer(from = source_inventory, to = destination_inventory, amount = amount, authority = source_authority)
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+}
+
+handler router_rebalance_pair
+  (amount_0 : U64)
+  (from_lane_id_0 : U64)
+  (to_lane_id_0 : U64)
+  (amount_1 : U64)
+  (from_lane_id_1 : U64)
+  (to_lane_id_1 : U64) {
+  permissionless
+  accounts {
+    config                  : readonly
+    rebalancer              : signer
+    token_program           : program, type token
+    mint                    : readonly, type mint
+    source_authority_0      : readonly
+    source_inventory_0      : writable, type token
+    destination_inventory_0 : writable, type token
+    source_authority_1      : readonly
+    source_inventory_1      : writable, type token
+    destination_inventory_1 : writable, type token
+  }
+  requires amount_0 > 0 else InvalidAmount
+  requires amount_1 > 0 else InvalidAmount
+  requires from_lane_id_0 != to_lane_id_0 else InvalidAmount
+  requires from_lane_id_1 != to_lane_id_1 else InvalidAmount
+  call Token.transfer(from = source_inventory_0, to = destination_inventory_0, amount = amount_0, authority = source_authority_0)
+  call Token.transfer(from = source_inventory_1, to = destination_inventory_1, amount = amount_1, authority = source_authority_1)
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+}
+
+handler route_ata (lane_id : U64) {
+  permissionless
+  accounts {
+    authority : readonly
+    mint      : readonly
+    vault     : writable
+  }
+  ensures lane_id <= 255
+}
+
+handler partial_fallback (opaque : Pubkey) {
+  permissionless
+  accounts {
+    scratch : writable
+  }
+  ensures true
+}
+
+handler missing_profile (opaque : Pubkey) {
+  permissionless
+  accounts {
+    scratch : writable
+  }
+  ensures true
+}

@@ -14,6 +14,16 @@
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 #![cfg(kani)]
 
+#[allow(dead_code)]
+fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[7] == b[7] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11] && a[12] == b[12] && a[13] == b[13] && a[14] == b[14] && a[15] == b[15] && a[16] == b[16] && a[17] == b[17] && a[18] == b[18] && a[19] == b[19] && a[20] == b[20] && a[21] == b[21] && a[22] == b[22] && a[23] == b[23] && a[24] == b[24] && a[25] == b[25] && a[26] == b[26] && a[27] == b[27] && a[28] == b[28] && a[29] == b[29] && a[30] == b[30] && a[31] == b[31]
+}
+
+#[allow(dead_code)]
+fn pubkey_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    !pubkey_eq(a, b)
+}
+
 // ============================================================================
 // State model (derived from qedspec — no framework dependencies)
 // ============================================================================
@@ -91,6 +101,7 @@ fn verify_initialize_rejects_invalid() {
     let deposit_amount: u64 = kani::any();
     let receive_amount: u64 = kani::any();
     kani::assume(!(((deposit_amount > 0) && (receive_amount > 0))));
+    kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(!initialize(&mut s, deposit_amount, receive_amount),
         "initialize must reject when guard is violated");
 }

@@ -98,6 +98,10 @@ fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, Valida
     let validator_re = Regex::new(r"(?s)\bif\s+(?P<cond>[^{]+?)\s*\{\s*return\s+Err")
         .expect("static regex compiles");
 
+    if is_cfg_kani_file(source) {
+        return Vec::new();
+    }
+
     let mut out: Vec<(String, ValidatorSite)> = Vec::new();
     for caps in validator_re.captures_iter(source) {
         let m = caps.get(0).unwrap();
@@ -106,10 +110,13 @@ fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, Valida
         if line_is_commented(source, m.start()) {
             continue;
         }
-        let Some(fn_name) = enclosing_fn_name(source, m.start()) else {
+        let Some((fn_start, fn_name)) = enclosing_fn_start_and_name(source, m.start()) else {
             continue;
         };
         if is_test_fn_name(&fn_name) {
+            continue;
+        }
+        if has_cfg_kani_attr_before(source, fn_start) {
             continue;
         }
         // Skip plain "early return" patterns that aren't validator
@@ -122,6 +129,9 @@ fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, Valida
             continue;
         }
         let normalized = normalize_condition(cond);
+        if is_membership_check(&normalized) {
+            continue;
+        }
         let site = ValidatorSite {
             rel_file: rel_file.to_path_buf(),
             line,
@@ -152,6 +162,9 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
             shapes.entry(s.normalized_cond.clone()).or_default().push(s);
         }
         if shapes.len() < 2 {
+            continue;
+        }
+        if shapes_are_base_guard_refinements(&shapes) {
             continue;
         }
         // Skip cases where every "shape" is a near-trivial echo —
@@ -230,6 +243,24 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
         });
     }
     out
+}
+
+fn is_membership_check(normalized_cond: &str) -> bool {
+    normalized_cond.contains(".contains(") || normalized_cond.contains("contains(")
+}
+
+fn shapes_are_base_guard_refinements(
+    shapes: &std::collections::BTreeMap<String, Vec<&ValidatorSite>>,
+) -> bool {
+    shapes.keys().any(|base| {
+        shapes.keys().all(|shape| {
+            shape == base
+                || shape
+                    .split("||")
+                    .map(|clause| clause.trim())
+                    .any(|clause| clause == base)
+        })
+    })
 }
 
 /// Render a human-readable summary of the shape set: one line per
@@ -358,10 +389,53 @@ fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
     1 + prefix.chars().filter(|c| *c == '\n').count() as u32
 }
 
-fn enclosing_fn_name(source: &str, offset: usize) -> Option<String> {
+fn enclosing_fn_start_and_name(source: &str, offset: usize) -> Option<(usize, String)> {
     let head = &source[..offset.min(source.len())];
     let re = Regex::new(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<\(]").expect("static regex");
-    re.captures_iter(head).last().map(|c| c[1].to_string())
+    re.captures_iter(head)
+        .last()
+        .map(|c| (c.get(0).expect("full fn match").start(), c[1].to_string()))
+}
+
+fn is_cfg_kani_file(source: &str) -> bool {
+    source
+        .lines()
+        .take_while(|line| {
+            let trimmed = line.trim();
+            trimmed.is_empty()
+                || trimmed.starts_with("//")
+                || trimmed.starts_with("#![")
+                || trimmed.starts_with("#[")
+        })
+        .any(is_inner_cfg_kani_line)
+}
+
+fn has_cfg_kani_attr_before(source: &str, offset: usize) -> bool {
+    let mut lines_before_fn: Vec<&str> = source[..offset.min(source.len())].lines().collect();
+    while let Some(line) = lines_before_fn.pop() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[") {
+            if is_cfg_kani_attr_line(trimmed) {
+                return true;
+            }
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+fn is_inner_cfg_kani_line(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with("#![cfg(kani")
+}
+
+fn is_cfg_kani_attr_line(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with("#[cfg(kani")
 }
 
 fn is_test_fn_name(fn_name: &str) -> bool {
@@ -530,6 +604,114 @@ fn test_b() -> Result<(), Error> {
         assert!(
             findings.is_empty(),
             "test fns should NOT contribute, got {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn ignores_base_guard_plus_or_refinement() {
+        let src = r#"
+fn parse(lane_count: u8) -> Result<(), Error> {
+    if lane_count == 0 {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+
+fn require_lane(lane_count: u8, lane_id: u8) -> Result<(), Error> {
+    if lane_count == 0 || lane_id >= lane_count {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+"#;
+        let mut by_field: BTreeMap<String, Vec<ValidatorSite>> = BTreeMap::new();
+        for (f, s) in extract_validator_sites(&p("state.rs"), src) {
+            by_field.entry(f).or_default().push(s);
+        }
+        let findings = emit_findings(&by_field);
+        assert!(
+            findings.is_empty(),
+            "base guard plus lane-id refinement should NOT fire, got {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn ignores_membership_checks_for_count_fields() {
+        let src = r#"
+fn write_account(mint_count: usize) -> Result<(), Error> {
+    if mint_count == 0 || mint_count > MAX_ALLOWED_MINTS {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+
+fn require_allowed_mint(mint_count: usize, mint: Pubkey) -> Result<(), Error> {
+    if mint_count == 0 || mint_count > MAX_ALLOWED_MINTS {
+        return Err(Error::Invalid);
+    }
+    if !allowed_mints[..mint_count].contains(&mint) {
+        return Err(Error::Invalid);
+    }
+    Ok(())
+}
+"#;
+        let mut by_field: BTreeMap<String, Vec<ValidatorSite>> = BTreeMap::new();
+        for (f, s) in extract_validator_sites(&p("state.rs"), src) {
+            by_field.entry(f).or_default().push(s);
+        }
+        let findings = emit_findings(&by_field);
+        assert!(
+            findings.is_empty(),
+            "membership check should NOT become mint_count domain drift, got {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn ignores_cfg_kani_validator_functions() {
+        let src = r#"
+#[cfg(not(kani))]
+fn read_account_runtime(config_owner: &Pubkey, program_id: &Pubkey) -> Result<(), Error> {
+    if config_owner != program_id {
+        return Err(Error::WrongOwner);
+    }
+    Ok(())
+}
+
+#[cfg(kani)]
+fn read_account_kani(config_owner: &Pubkey, program_id: &Pubkey) -> Result<(), Error> {
+    if !pubkey_eq_kani(config_owner, program_id) {
+        return Err(Error::WrongOwner);
+    }
+    Ok(())
+}
+"#;
+        let mut by_field: BTreeMap<String, Vec<ValidatorSite>> = BTreeMap::new();
+        for (f, s) in extract_validator_sites(&p("state.rs"), src) {
+            by_field.entry(f).or_default().push(s);
+        }
+        let findings = emit_findings(&by_field);
+        assert!(
+            findings.is_empty(),
+            "cfg(kani) proof-model helpers should NOT pair with runtime validators, got {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn ignores_inner_cfg_kani_files() {
+        let src = r#"
+#![cfg(kani)]
+
+fn proof_model(owner: &Pubkey, program_id: &Pubkey) -> Result<(), Error> {
+    if !pubkey_eq_kani(owner, program_id) {
+        return Err(Error::WrongOwner);
+    }
+    Ok(())
+}
+"#;
+        let sites = extract_validator_sites(&p("kani_impl.rs"), src);
+        assert!(
+            sites.is_empty(),
+            "inner cfg(kani) files should not contribute production validator sites"
         );
     }
 

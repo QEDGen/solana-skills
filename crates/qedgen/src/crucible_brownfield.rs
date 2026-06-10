@@ -487,23 +487,6 @@ fn anchor_str_to_dsl(s: &str) -> String {
     }
 }
 
-/// Extract instruction names from either an Anchor 0.30 IDL JSON
-/// (top-level `instructions[]`) or a Codama IR JSON (nested
-/// `program.instructions[]` under a `rootNode`). Returns the snake_case
-/// form *without* a `process_` prefix — the harness emitter PascalCases
-/// the handler name to build `instruction::Foo` literals that must
-/// match the IDL macro's output, and the macro names types from the
-/// IDL's `instructions[].name` field (no prefix). A `process_` prefix
-/// would produce `instruction::ProcessFoo`, which `declare_fuzz_program!`
-/// doesn't emit.
-#[cfg(test)]
-fn handler_names_from_idl(idl_text: &str) -> Vec<String> {
-    handlers_with_args_from_idl(idl_text)
-        .into_iter()
-        .map(|(n, _)| n)
-        .collect()
-}
-
 /// Write the synthesised IDL JSON into `<harness>/idls/<prog>.json`.
 /// Idempotent — if the destination already exists it is overwritten so
 /// re-runs pick up scanner improvements without manual cleanup.

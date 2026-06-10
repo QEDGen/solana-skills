@@ -4,6 +4,18 @@
 /// the qedspec-to-Rust translation logic.
 use crate::check::{ParsedHandler, ParsedProperty, ParsedSpec};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardTermSource {
+    Guard,
+    Requires { error_name: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardTerm {
+    pub source: GuardTermSource,
+    pub rust_expr: String,
+}
+
 /// Translate a qedspec guard expression to Rust syntax.
 ///
 /// Handles: state.field → s.field, Unicode operators → ASCII,
@@ -25,6 +37,520 @@ pub fn translate_guard_to_rust(guard: &str, wrapping: bool) -> String {
         wrap_arithmetic(&result)
     } else {
         result
+    }
+}
+
+/// Rewrite handler-account pubkey references into a generated account
+/// environment. `foo.pubkey` becomes `<binder>.foo.pubkey`; `foo.key()` is
+/// normalized to the same pubkey field.
+pub fn rewrite_account_pubkey_refs(
+    expr: &str,
+    accounts: &[crate::check::ParsedHandlerAccount],
+    binder: &str,
+) -> String {
+    let mut out = expr.to_string();
+    for account in accounts {
+        let key_call = format!("{}.key()", account.name);
+        let pubkey_ref = format!("{}.pubkey", account.name);
+        let replacement = format!("{}.{}.pubkey", binder, account.name);
+        out = out.replace(&key_call, &replacement);
+        out = out.replace(&pubkey_ref, &replacement);
+    }
+    out
+}
+
+pub fn emit_kani_pubkey_helpers(out: &mut String) {
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {\n");
+    out.push_str("    ");
+    for i in 0..32 {
+        if i > 0 {
+            out.push_str(" && ");
+        }
+        out.push_str(&format!("a[{i}] == b[{i}]"));
+    }
+    out.push_str("\n}\n\n");
+    out.push_str("#[allow(dead_code)]\n");
+    out.push_str("fn pubkey_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {\n");
+    out.push_str("    !pubkey_eq(a, b)\n");
+    out.push_str("}\n\n");
+}
+
+pub fn spec_uses_pubkey(spec: &ParsedSpec) -> bool {
+    spec.state_fields
+        .iter()
+        .any(|(_, ty)| type_is_or_contains_pubkey(ty))
+        || spec.account_types.iter().any(|acct| {
+            acct.fields
+                .iter()
+                .any(|(_, ty)| type_is_or_contains_pubkey(ty))
+                || acct.variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, ty)| type_is_or_contains_pubkey(ty))
+                })
+        })
+        || spec.handlers.iter().any(|op| {
+            op.takes_params
+                .iter()
+                .chain(op.abstract_binders.iter())
+                .any(|(_, ty)| type_is_or_contains_pubkey(ty))
+        })
+}
+
+pub fn rewrite_kani_pubkey_comparisons(
+    expr: &str,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut cursor = 0;
+
+    while let Some((op_start, cmp)) = find_next_equality_op(expr, cursor) {
+        let op_end = op_start + cmp.len();
+        let lhs_start = find_cmp_lhs_start(expr, op_start);
+        let rhs_end = find_cmp_rhs_end(expr, op_end);
+
+        if lhs_start < cursor || rhs_end <= op_end {
+            out.push_str(&expr[cursor..op_end]);
+            cursor = op_end;
+            continue;
+        }
+
+        let lhs = expr[lhs_start..op_start].trim();
+        let rhs = expr[op_end..rhs_end].trim();
+        if kani_operand_is_pubkey(lhs, op, spec) && kani_operand_is_pubkey(rhs, op, spec) {
+            out.push_str(&expr[cursor..lhs_start]);
+            let helper = if cmp.trim() == "==" {
+                "pubkey_eq"
+            } else {
+                "pubkey_ne"
+            };
+            out.push_str(&format!("{helper}(&{lhs}, &{rhs})"));
+            cursor = rhs_end;
+        } else {
+            out.push_str(&expr[cursor..op_end]);
+            cursor = op_end;
+        }
+    }
+
+    out.push_str(&expr[cursor..]);
+    rewrite_kani_guard_arithmetic(&out)
+}
+
+pub fn rewrite_kani_guard_arithmetic(expr: &str) -> String {
+    let expr = rewrite_kani_bps_mul_div(expr);
+    rewrite_kani_checked_add_equality(&expr)
+}
+
+pub fn rewrite_kani_bps_mul_div(expr: &str) -> String {
+    let parenthesized = regex::Regex::new(
+        r"\((?P<a>[A-Za-z_][A-Za-z0-9_\.]*)\s*\*\s*(?P<b>[A-Za-z_][A-Za-z0-9_\.]*)\)\s*/\s*10000\b",
+    )
+    .expect("valid bps mul/div regex");
+    let rewritten = parenthesized
+        .replace_all(expr, "mul_bps_floor_u128($a, $b)")
+        .to_string();
+
+    let bare = regex::Regex::new(
+        r"\b(?P<a>[A-Za-z_][A-Za-z0-9_\.]*)\s*\*\s*(?P<b>[A-Za-z_][A-Za-z0-9_\.]*)\s*/\s*10000\b",
+    )
+    .expect("valid bare bps mul/div regex");
+    bare.replace_all(&rewritten, "mul_bps_floor_u128($a, $b)")
+        .to_string()
+}
+
+pub fn rewrite_kani_checked_add_equality(expr: &str) -> String {
+    let add_eq = regex::Regex::new(
+        r"\b(?P<a>[A-Za-z_][A-Za-z0-9_\.]*)\s*\+\s*(?P<b>[A-Za-z_][A-Za-z0-9_\.]*)\s*(?P<op>==|!=)\s*(?P<c>[A-Za-z_][A-Za-z0-9_\.]*|\d+)\b",
+    )
+    .expect("valid checked add equality regex");
+    add_eq
+        .replace_all(expr, "$a.checked_add($b) $op Some($c)")
+        .to_string()
+}
+
+pub fn spec_uses_kani_bps_mul_div_helper(spec: &ParsedSpec) -> bool {
+    let uses_helper = |expr: &str| rewrite_kani_bps_mul_div(expr) != expr;
+    spec.handlers.iter().any(|op| {
+        op.guard_str
+            .as_deref()
+            .map(|guard| uses_helper(&translate_guard_to_rust(guard, false)))
+            .unwrap_or(false)
+            || op.requires.iter().any(|req| uses_helper(&req.rust_expr))
+            || op
+                .aborts_if
+                .iter()
+                .any(|abort| uses_helper(&abort.rust_expr))
+            || op
+                .ensures
+                .iter()
+                .any(|ensures| uses_helper(&ensures.rust_expr_binary))
+            || op
+                .let_bindings
+                .iter()
+                .any(|(_, _, rust_expr)| uses_helper(rust_expr))
+    }) || spec
+        .properties
+        .iter()
+        .any(|property| property.rust_expression.as_deref().is_some_and(uses_helper))
+}
+
+pub fn negate_simple_top_level_comparison(expr: &str) -> Option<String> {
+    let trimmed = strip_balanced_outer_parens(expr.trim());
+    if contains_top_level_logical_op(trimmed) {
+        return None;
+    }
+    let bytes = trimmed.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => in_string = true,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
+            for (op, negated) in [
+                ("==", "!="),
+                ("!=", "=="),
+                (">=", "<"),
+                ("<=", ">"),
+                (">", "<="),
+                ("<", ">="),
+            ] {
+                if trimmed[i..].starts_with(op) {
+                    let lhs = trimmed[..i].trim();
+                    let rhs = trimmed[i + op.len()..].trim();
+                    if !lhs.is_empty() && !rhs.is_empty() {
+                        return Some(format!("{lhs} {negated} {rhs}"));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn contains_top_level_logical_op(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => in_string = true,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'&' | b'|'
+                if i + 1 < bytes.len()
+                    && bytes[i + 1] == b
+                    && paren_depth == 0
+                    && bracket_depth == 0
+                    && brace_depth == 0 =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn strip_balanced_outer_parens(mut expr: &str) -> &str {
+    loop {
+        let trimmed = expr.trim();
+        if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+            return trimmed;
+        }
+        let inner = &trimmed[1..trimmed.len() - 1];
+        if split_top_level_and(inner).len() == 1 && outer_parens_are_balanced(trimmed) {
+            expr = inner;
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+fn outer_parens_are_balanced(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, b) in bytes.iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && idx + 1 < bytes.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn find_next_equality_op(expr: &str, from: usize) -> Option<(usize, &'static str)> {
+    let eq = expr[from..].find(" == ").map(|p| (from + p, " == "));
+    let ne = expr[from..].find(" != ").map(|p| (from + p, " != "));
+    match (eq, ne) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn find_cmp_lhs_start(expr: &str, op_start: usize) -> usize {
+    let bytes = expr.as_bytes();
+    let mut i = op_start;
+    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    let mut depth = 0usize;
+    while i > 0 {
+        if depth == 0 && i >= 2 && (&expr[i - 2..i] == "&&" || &expr[i - 2..i] == "||") {
+            break;
+        }
+
+        let b = bytes[i - 1];
+        match b {
+            b')' => {
+                depth += 1;
+                i -= 1;
+            }
+            b'(' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                i -= 1;
+            }
+            b',' if depth == 0 => break,
+            _ => i -= 1,
+        }
+    }
+    i
+}
+
+fn find_cmp_rhs_end(expr: &str, op_end: usize) -> usize {
+    let bytes = expr.as_bytes();
+    let mut i = op_end;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if depth == 0 && i + 1 < bytes.len() && (&expr[i..i + 2] == "&&" || &expr[i..i + 2] == "||")
+        {
+            break;
+        }
+
+        match bytes[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                i += 1;
+            }
+            b',' if depth == 0 => break,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+fn kani_operand_is_pubkey(operand: &str, op: &ParsedHandler, spec: &ParsedSpec) -> bool {
+    let operand = operand.trim().trim_start_matches('&').trim();
+    if operand.ends_with(".pubkey") || operand.ends_with(".key()") {
+        return true;
+    }
+
+    // `pubkey_eq` takes `&[u8; 32]`, so it only applies to a *scalar*
+    // pubkey operand: a `Pubkey` field, or an indexed element of a
+    // pubkey collection (`members[i]`). A bare reference to a whole
+    // collection (`s.members: [[u8; 32]; 32]`) must stay on `==`
+    // (derived array `PartialEq`) or it won't typecheck under Kani.
+    let indexed = operand.contains('[');
+
+    for prefix in ["s.", "pre.", "post."] {
+        if let Some(field) = operand.strip_prefix(prefix) {
+            return spec_field_is_scalar_pubkey(field, spec, indexed);
+        }
+    }
+
+    if let Some(field) = operand.strip_prefix("pre_") {
+        return spec_field_is_scalar_pubkey(field, spec, indexed);
+    }
+
+    if op
+        .takes_params
+        .iter()
+        .chain(op.abstract_binders.iter())
+        .any(|(name, ty)| name == operand && type_is_scalar_pubkey(ty))
+    {
+        return true;
+    }
+
+    spec_field_is_scalar_pubkey(operand, spec, indexed)
+}
+
+/// Resolve the declared spec type of a (possibly variant-prefixed,
+/// possibly subscripted) field path.
+fn spec_field_type<'a>(field: &str, spec: &'a ParsedSpec) -> Option<&'a str> {
+    let field = strip_variant_prefix_for_flat_state(field, spec);
+    let base = effect_target_base(field.as_str()).to_string();
+    if let Some((_, ty)) = spec.state_fields.iter().find(|(name, _)| *name == base) {
+        return Some(ty.as_str());
+    }
+    for acct in &spec.account_types {
+        if let Some((_, ty)) = acct.fields.iter().find(|(name, _)| *name == base) {
+            return Some(ty.as_str());
+        }
+        for variant in &acct.variants {
+            if let Some((_, ty)) = variant.fields.iter().find(|(name, _)| *name == base) {
+                return Some(ty.as_str());
+            }
+        }
+    }
+    None
+}
+
+/// True when the operand denotes a single `[u8; 32]` pubkey value —
+/// eligible for the `pubkey_eq`/`pubkey_ne` rewrite. A pubkey
+/// *collection* qualifies only when the operand indexes into it.
+fn spec_field_is_scalar_pubkey(field: &str, spec: &ParsedSpec, indexed: bool) -> bool {
+    match spec_field_type(field, spec) {
+        Some(ty) => type_is_scalar_pubkey(ty) || (indexed && type_is_or_contains_pubkey(ty)),
+        None => false,
+    }
+}
+
+fn type_is_or_contains_pubkey(ty: &str) -> bool {
+    ty.contains("Pubkey")
+}
+
+/// A single `Pubkey`, as opposed to a collection of them
+/// (`Map[N] Pubkey`, `[Pubkey; N]`, `Vec<Pubkey>`, …). Only scalar
+/// pubkeys lower to `[u8; 32]` and can be compared with `pubkey_eq`.
+fn type_is_scalar_pubkey(ty: &str) -> bool {
+    type_is_or_contains_pubkey(ty) && !type_is_pubkey_collection(ty)
+}
+
+fn type_is_pubkey_collection(ty: &str) -> bool {
+    let ty = ty.trim();
+    ty.contains('[') || ty.contains("Map") || ty.contains("Vec") || ty.contains("Array")
+}
+
+pub fn is_account_pubkey_ref(expr: &str, accounts: &[crate::check::ParsedHandlerAccount]) -> bool {
+    accounts
+        .iter()
+        .any(|a| expr == format!("{}.pubkey", a.name) || expr == format!("{}.key()", a.name))
+}
+
+pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
+    op.requires
+        .iter()
+        .any(|r| mentions_handler_account_pubkey(&r.rust_expr, &op.accounts))
+        || op
+            .guard_str
+            .as_ref()
+            .is_some_and(|g| mentions_handler_account_pubkey(g, &op.accounts))
+        || op
+            .effects
+            .iter()
+            .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+        || op.effect_branches.as_ref().is_some_and(|branches| {
+            branches.arms.iter().any(|arm| {
+                arm.effects
+                    .iter()
+                    .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+            })
+        })
+}
+
+pub fn handler_account_env_struct_name(op_name: &str) -> String {
+    let sanitized = crate::codegen_shared::sanitize_ident(op_name);
+    let mut out = String::new();
+    for part in sanitized.split('_').filter(|p| !p.is_empty()) {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    if out.is_empty() {
+        "Handler".to_string()
+    } else {
+        format!("{}Accounts", out)
     }
 }
 
@@ -409,6 +935,22 @@ pub fn resolve_value(
     }
 }
 
+pub fn resolve_value_with_account_env(
+    value: &str,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    state_binder: Option<&str>,
+    account_binder: Option<&str>,
+) -> String {
+    if let Some(binder) = account_binder {
+        let rewritten = rewrite_account_pubkey_refs(value, &op.accounts, binder);
+        if rewritten != value {
+            return rewritten;
+        }
+    }
+    resolve_value(value, op, spec, state_binder)
+}
+
 /// True when the bare identifier names a state field in the flat
 /// `state_fields` list or any `account_types[*].fields` (multi-account).
 fn is_state_field(name: &str, spec: &ParsedSpec) -> bool {
@@ -531,6 +1073,21 @@ pub fn emit_one_effect(
     value: &str,
     indent: &str,
 ) {
+    emit_one_effect_inner(out, op, spec, wrapping, field, op_kind, value, indent, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_one_effect_inner(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    field: &str,
+    op_kind: &str,
+    value: &str,
+    indent: &str,
+    account_binder: Option<&str>,
+) {
     // v2.24 S5d — proptest / Kani / integration_test all run against a
     // flat `State` struct (the spec's union-of-variant-fields view). A
     // `Variant.field := …` effect from a multi-variant ADT spec must
@@ -545,7 +1102,7 @@ pub fn emit_one_effect(
     // bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
     // upstream strips `state.`) renders as `s.rfp_buyer`. (PR #45 fix #2,
     // generalized to all callers via emit_one_effect rather than per-arm.)
-    let rust_value = resolve_value(value, op, spec, Some("s."));
+    let rust_value = resolve_value_with_account_env(value, op, spec, Some("s."), account_binder);
     match op_kind {
         "set" => {
             out.push_str(&format!("{indent}s.{field} = {rust_value};\n"));
@@ -604,6 +1161,31 @@ pub fn emit_one_effect(
             ));
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_one_effect_with_account_env(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    field: &str,
+    op_kind: &str,
+    value: &str,
+    indent: &str,
+    account_binder: &str,
+) {
+    emit_one_effect_inner(
+        out,
+        op,
+        spec,
+        wrapping,
+        field,
+        op_kind,
+        value,
+        indent,
+        Some(account_binder),
+    );
 }
 
 /// Verify that every field referenced as an effect target in any handler is
@@ -723,24 +1305,139 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
 /// projection drops it. Same shape as the lean_gen drop for handler-
 /// account pubkey refs.
 pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
+    collect_full_guard_with_account_env(op, wrapping, None)
+}
+
+pub fn collect_full_guard_with_account_env(
+    op: &ParsedHandler,
+    wrapping: bool,
+    account_binder: Option<&str>,
+) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(ref guard) = op.guard_str {
-        parts.push(format!("({})", translate_guard_to_rust(guard, wrapping)));
+        let translated = translate_guard_to_rust(guard, wrapping);
+        let translated = account_binder
+            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+            .unwrap_or(translated);
+        parts.push(format!("({})", translated));
     }
     for req in &op.requires {
-        if mentions_handler_account_pubkey(&req.rust_expr, &op.accounts) {
+        if account_binder.is_none() && mentions_handler_account_pubkey(&req.rust_expr, &op.accounts)
+        {
             continue;
         }
-        parts.push(format!(
-            "({})",
-            translate_guard_to_rust(&req.rust_expr, wrapping)
-        ));
+        let translated = translate_guard_to_rust(&req.rust_expr, wrapping);
+        let translated = account_binder
+            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+            .unwrap_or(translated);
+        parts.push(format!("({})", translated));
     }
     if parts.is_empty() {
         None
     } else {
         Some(parts.join(" && "))
     }
+}
+
+pub fn collect_guard_terms_with_account_env(
+    op: &ParsedHandler,
+    wrapping: bool,
+    account_binder: Option<&str>,
+) -> Vec<GuardTerm> {
+    let mut terms = Vec::new();
+    if let Some(ref guard) = op.guard_str {
+        let translated = translate_guard_to_rust(guard, wrapping);
+        let translated = account_binder
+            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+            .unwrap_or(translated);
+        push_split_guard_terms(&mut terms, GuardTermSource::Guard, &translated);
+    }
+    for req in &op.requires {
+        if account_binder.is_none() && mentions_handler_account_pubkey(&req.rust_expr, &op.accounts)
+        {
+            continue;
+        }
+        let translated = translate_guard_to_rust(&req.rust_expr, wrapping);
+        let translated = account_binder
+            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+            .unwrap_or(translated);
+        push_split_guard_terms(
+            &mut terms,
+            GuardTermSource::Requires {
+                error_name: req.error_name.clone(),
+            },
+            &translated,
+        );
+    }
+    terms
+}
+
+fn push_split_guard_terms(terms: &mut Vec<GuardTerm>, source: GuardTermSource, expr: &str) {
+    for term in split_top_level_and(expr) {
+        terms.push(GuardTerm {
+            source: source.clone(),
+            rust_expr: term,
+        });
+    }
+}
+
+pub fn split_top_level_and(expr: &str) -> Vec<String> {
+    let bytes = expr.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => in_string = true,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            b'&' if i + 1 < bytes.len()
+                && bytes[i + 1] == b'&'
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                let part = expr[start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part.to_string());
+                }
+                i += 2;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let tail = expr[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+    parts
 }
 
 /// True when `expr` mentions `<handler_account>.pubkey` (or `.key()`)
@@ -1171,17 +1868,54 @@ pub fn emit_transition_fn(
     wrapping: bool,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
+    emit_transition_fn_inner(out, op, spec, wrapping, None, false, map_type_fn)
+}
+
+pub fn emit_transition_fn_for_kani(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    let account_env =
+        handler_needs_account_env(op).then(|| handler_account_env_struct_name(&op.name));
+    emit_transition_fn_inner(
+        out,
+        op,
+        spec,
+        wrapping,
+        account_env.as_deref(),
+        true,
+        map_type_fn,
+    )
+}
+
+fn emit_transition_fn_inner(
+    out: &mut String,
+    op: &ParsedHandler,
+    spec: &ParsedSpec,
+    wrapping: bool,
+    account_env_struct: Option<&str>,
+    rewrite_pubkey_comparisons: bool,
+    map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
     if let Some(ref doc) = op.doc {
         out.push_str(&format!("/// {}\n", doc.trim()));
     }
 
-    let params: String = op
-        .takes_params
-        .iter()
-        .chain(op.abstract_binders.iter())
-        .map(|(n, t)| map_type_fn(t).map(|rt| format!(", {}: {}", n, rt)))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .concat();
+    let mut params = String::new();
+    if let Some(account_env_struct) = account_env_struct {
+        params.push_str(&format!(", accounts: &{}", account_env_struct));
+    }
+    params.push_str(
+        &op.takes_params
+            .iter()
+            .chain(op.abstract_binders.iter())
+            .map(|(n, t)| map_type_fn(t).map(|rt| format!(", {}: {}", n, rt)))
+            .collect::<anyhow::Result<Vec<_>>>()?
+            .concat(),
+    );
     // v2.29 Slice A (#8) — abstract binders ride alongside the
     // real handler params in the spec-model transition signature.
     // Callers (Kani / proptest harnesses, integration tests) pass
@@ -1194,13 +1928,39 @@ pub fn emit_transition_fn(
     ));
 
     // Guard check (merges guard_str + requires clauses)
-    if let Some(guard_expr) = collect_full_guard(op, wrapping) {
+    if let Some(guard_expr) =
+        collect_full_guard_with_account_env(op, wrapping, account_env_struct.map(|_| "accounts"))
+    {
         if let Some(ref raw) = op.guard_str {
             out.push_str(&format!("    // guard: {}\n", raw));
         }
-        out.push_str(&format!("    if !({}) {{\n", guard_expr));
-        out.push_str("        return false;\n");
-        out.push_str("    }\n");
+
+        let guard_terms = collect_guard_terms_with_account_env(
+            op,
+            wrapping,
+            account_env_struct.map(|_| "accounts"),
+        );
+        if rewrite_pubkey_comparisons && guard_terms.len() > 8 {
+            for term in guard_terms {
+                let term_expr = rewrite_kani_pubkey_comparisons(&term.rust_expr, op, spec);
+                if let Some(negated) = negate_simple_top_level_comparison(&term_expr) {
+                    out.push_str(&format!("    if {} {{\n", negated));
+                } else {
+                    out.push_str(&format!("    if !({}) {{\n", term_expr));
+                }
+                out.push_str("        return false;\n");
+                out.push_str("    }\n");
+            }
+        } else {
+            let guard_expr = if rewrite_pubkey_comparisons {
+                rewrite_kani_pubkey_comparisons(&guard_expr, op, spec)
+            } else {
+                guard_expr
+            };
+            out.push_str(&format!("    if !({}) {{\n", guard_expr));
+            out.push_str("        return false;\n");
+            out.push_str("    }\n");
+        }
     }
 
     // Pre-status check — handlers declared `State.X -> State.Y` must reject
@@ -1257,19 +2017,33 @@ pub fn emit_transition_fn(
         for arm in &branches.arms {
             out.push_str(&format!("        {} => {{\n", arm.pattern_rust));
             for (field, op_kind, value) in &arm.effects {
-                if field_type_is_pubkey(field, op, spec) {
+                if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
                     continue;
                 }
-                emit_one_effect(
-                    out,
-                    op,
-                    spec,
-                    wrapping,
-                    field,
-                    op_kind,
-                    value,
-                    "            ",
-                );
+                if account_env_struct.is_some() {
+                    emit_one_effect_with_account_env(
+                        out,
+                        op,
+                        spec,
+                        wrapping,
+                        field,
+                        op_kind,
+                        value,
+                        "            ",
+                        "accounts",
+                    );
+                } else {
+                    emit_one_effect(
+                        out,
+                        op,
+                        spec,
+                        wrapping,
+                        field,
+                        op_kind,
+                        value,
+                        "            ",
+                    );
+                }
                 emit_after_store_hooks(out, spec, field, "            ");
             }
             out.push_str("        }\n");
@@ -1289,10 +2063,16 @@ pub fn emit_transition_fn(
         // (e.g. `bid_buyer := state.rfp_buyer` after upstream strips
         // `state.`) renders as `s.rfp_buyer` in the proptest body.
         for (field, op_kind, value) in &op.effects {
-            if field_type_is_pubkey(field, op, spec) {
+            if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
                 continue;
             }
-            emit_one_effect(out, op, spec, wrapping, field, op_kind, value, "    ");
+            if account_env_struct.is_some() {
+                emit_one_effect_with_account_env(
+                    out, op, spec, wrapping, field, op_kind, value, "    ", "accounts",
+                );
+            } else {
+                emit_one_effect(out, op, spec, wrapping, field, op_kind, value, "    ");
+            }
             emit_after_store_hooks(out, spec, field, "    ");
         }
     }
@@ -1538,6 +2318,155 @@ handler close : State.Open -> State.Closed { effect { x := 0 } }
         assert!(
             out.contains("status: Status,"),
             "lifecycle spec must inject `status: Status` field:\n{out}"
+        );
+    }
+
+    #[test]
+    fn kani_pubkey_rewrite_handles_account_and_state_fields() {
+        let src = r#"spec T
+type State | Active of { admin_key : Pubkey }
+type Error | Unauthorized
+handler set_admin : State.Active -> State.Active {
+  accounts { admin : signer }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  effect { admin_key := admin.pubkey }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let expr = "(accounts.admin.pubkey == s.admin_key) && (amount > 0)";
+        let rewritten = rewrite_kani_pubkey_comparisons(expr, op, &spec);
+        assert_eq!(
+            rewritten,
+            "(pubkey_eq(&accounts.admin.pubkey, &s.admin_key)) && (amount > 0)"
+        );
+    }
+
+    #[test]
+    fn kani_pubkey_rewrite_handles_indexed_pubkey_arrays() {
+        let src = r#"spec T
+const MAX_MEMBERS = 32
+type State | Active of { members : Map[MAX_MEMBERS] Pubkey }
+handler approve (member_index : U8) (approver : Pubkey) : State.Active -> State.Active {
+  requires state.members[member_index] == approver
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let op = &spec.handlers[0];
+        let expr = "(s.members[(member_index) as usize] == approver) && (member_index < 32)";
+        let rewritten = rewrite_kani_pubkey_comparisons(expr, op, &spec);
+        assert_eq!(
+            rewritten,
+            "(pubkey_eq(&s.members[(member_index) as usize], &approver)) && (member_index < 32)"
+        );
+    }
+
+    #[test]
+    fn split_top_level_and_splits_only_balanced_top_level_terms() {
+        assert_eq!(
+            split_top_level_and("amount > 0 && fee_bps <= 100 && min_out > 0"),
+            vec!["amount > 0", "fee_bps <= 100", "min_out > 0"]
+        );
+        assert_eq!(
+            split_top_level_and("(amount > 0 && fee_bps <= 100) && min_out > 0"),
+            vec!["(amount > 0 && fee_bps <= 100)", "min_out > 0"]
+        );
+        assert_eq!(
+            split_top_level_and(
+                "is_allowed(mints[(lane) as usize] == mint && lane < 32) && amount > 0"
+            ),
+            vec![
+                "is_allowed(mints[(lane) as usize] == mint && lane < 32)",
+                "amount > 0"
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_guard_terms_splits_guard_and_requires_without_nested_or_splits() {
+        let src = r#"spec T
+type State | Active of { admin_key : Pubkey, allowed : Bool }
+type Error | Unauthorized | InvalidAmount
+handler swap (amount : U64) (min_out : U64) : State.Active -> State.Active {
+  accounts { admin : signer }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  requires amount >= min_out and min_out > 0 else InvalidAmount
+}
+"#;
+        let mut spec = parse_str(src).expect("parse");
+        spec.handlers[0].guard_str = Some("state.allowed && (amount > 0 || min_out > 0)".into());
+        let op = &spec.handlers[0];
+        let terms = collect_guard_terms_with_account_env(op, false, Some("accounts"));
+        let exprs = terms
+            .into_iter()
+            .map(|term| term.rust_expr)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exprs,
+            vec![
+                "s.allowed",
+                "(amount > 0 || min_out > 0)",
+                "accounts.admin.pubkey == s.admin_key",
+                "(amount >= min_out)",
+                "(min_out > 0)",
+            ]
+        );
+    }
+
+    #[test]
+    fn rewrite_kani_bps_mul_div_uses_solver_friendly_helper() {
+        assert_eq!(
+            rewrite_kani_bps_mul_div(
+                "fee_output_normalized >= (fee_input_normalized * retained_value_bps) / 10000"
+            ),
+            "fee_output_normalized >= mul_bps_floor_u128(fee_input_normalized, retained_value_bps)"
+        );
+        assert_eq!(
+            rewrite_kani_bps_mul_div("amount_in * fee_bps / 10000 <= amount_in"),
+            "mul_bps_floor_u128(amount_in, fee_bps) <= amount_in"
+        );
+        assert_eq!(
+            rewrite_kani_bps_mul_div("(a + b) * fee_bps / 10000 <= a"),
+            "(a + b) * fee_bps / 10000 <= a"
+        );
+    }
+
+    #[test]
+    fn rewrite_kani_checked_add_equality_avoids_overflow_checks() {
+        assert_eq!(
+            rewrite_kani_guard_arithmetic("max_fee_bps + retained_value_bps == 10000"),
+            "max_fee_bps.checked_add(retained_value_bps) == Some(10000)"
+        );
+        assert_eq!(
+            rewrite_kani_guard_arithmetic(
+                "fee_output_normalized >= (fee_input_normalized * retained_value_bps) / 10000 && max_fee_bps + retained_value_bps == 10000"
+            ),
+            "fee_output_normalized >= mul_bps_floor_u128(fee_input_normalized, retained_value_bps) && max_fee_bps.checked_add(retained_value_bps) == Some(10000)"
+        );
+    }
+
+    #[test]
+    fn negate_simple_top_level_comparison_flips_only_outer_operator() {
+        assert_eq!(
+            negate_simple_top_level_comparison(
+                "fee_output_normalized >= mul_bps_floor_u128(fee_input_normalized, retained_value_bps)"
+            ),
+            Some(
+                "fee_output_normalized < mul_bps_floor_u128(fee_input_normalized, retained_value_bps)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            negate_simple_top_level_comparison(
+                "(mul_bps_floor_u128(amount_in, fee_bps) <= amount_in)"
+            ),
+            Some("mul_bps_floor_u128(amount_in, fee_bps) > amount_in".to_string())
+        );
+        assert_eq!(
+            negate_simple_top_level_comparison(
+                "pubkey_eq(&accounts.input_mint.pubkey, &s.allowed_mint_0) || amount > 0"
+            ),
+            None
         );
     }
 

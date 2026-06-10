@@ -286,6 +286,12 @@ fn emit_lib(
     }
     out.push_str("pub mod state;\n");
     out.push_str("pub mod guards;\n");
+    if matches!(target, Target::Pinocchio) {
+        out.push_str("#[cfg(kani)]\n");
+        out.push_str("extern crate kani;\n");
+        out.push_str("#[cfg(kani)]\n");
+        out.push_str("mod kani_impl;\n");
+    }
     if crate::codegen_shared::guards_use_math_helpers(parsed) {
         out.push_str("pub mod math;\n");
     }
@@ -1521,10 +1527,6 @@ mod tests {
         assert!(!mir.state.variants.is_empty(), "escrow has state variants");
     }
 
-    /// Pinocchio has no `#[event]` macro — `emit_events` must emit a plain
-    /// `#[derive(Clone)]` data struct, not panic (the slice-6 milestone-2
-    /// `unreachable!()` shipped a crash on any Pinocchio spec with `emits`).
-    #[test]
     /// CI regression: a spec that declares `type Account = { … }`
     /// (percolator) lands a `pub struct Account` in `crate::state`, which
     /// — glob-imported alongside `anchor_lang::prelude::*` in the Anchor

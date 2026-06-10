@@ -237,3 +237,12 @@ fn snapshot_percolator() {
         "percolator.qedspec",
     );
 }
+
+#[test]
+fn snapshot_kani_cpi_account_bindings() {
+    assert_or_update_snapshot(
+        "kani-cpi-account-bindings",
+        "crates/qedgen/tests/fixtures/kani-cpi-account-bindings",
+        "config.qedspec",
+    );
+}

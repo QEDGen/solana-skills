@@ -253,6 +253,7 @@ impl SitePatterns {
 
 fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSite> {
     let mut sites = Vec::new();
+    let source = strip_cfg_kani_regions(source);
     let lines: Vec<&str> = source.lines().collect();
     let unsafe_ranges = compute_unsafe_block_ranges(&lines);
     let safety_blocks = parse_safety_comments(&lines);
@@ -572,6 +573,75 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
     }
 
     sites
+}
+
+fn strip_cfg_kani_regions(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    if lines.iter().any(|line| is_inner_cfg_kani_attr(line)) {
+        return vec![String::new(); lines.len()].join("\n");
+    }
+
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        if !is_cfg_kani_attr(lines[i]) {
+            out.push(lines[i].to_string());
+            i += 1;
+            continue;
+        }
+
+        out.push(String::new());
+        i += 1;
+
+        while i < lines.len() && lines[i].trim().is_empty() {
+            out.push(String::new());
+            i += 1;
+        }
+
+        let mut depth = 0_i32;
+        let mut saw_open = false;
+        while i < lines.len() {
+            let stripped = strip_line_comment(lines[i]);
+            for ch in stripped.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        saw_open = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            let statement_done = !saw_open && stripped.contains(';');
+            out.push(String::new());
+            i += 1;
+
+            if statement_done || (saw_open && depth <= 0) {
+                break;
+            }
+        }
+    }
+
+    out.join("\n")
+}
+
+fn is_cfg_kani_attr(line: &str) -> bool {
+    is_inner_cfg_kani_attr(line) || is_outer_cfg_kani_attr(line)
+}
+
+fn is_inner_cfg_kani_attr(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact == "#![cfg(kani)]"
+        || compact.starts_with("#![cfg(all(kani")
+        || compact.starts_with("#![cfg(any(kani")
+}
+
+fn is_outer_cfg_kani_attr(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact == "#[cfg(kani)]"
+        || compact.starts_with("#[cfg(all(kani")
+        || compact.starts_with("#[cfg(any(kani")
 }
 
 /// Best-effort detection of `unsafe { ... }` block extents. We scan
@@ -1165,6 +1235,73 @@ fn foo(account: &Account) {
         assert!(sites
             .iter()
             .any(|s| matches!(s.kind, SiteKind::BorrowUnchecked)));
+    }
+
+    #[test]
+    fn ignores_cfg_kani_file() {
+        let src = r#"
+#![cfg(kani)]
+
+fn proof_only(account: &Account) {
+    let data = unsafe { account.borrow_mut_data_unchecked() };
+}
+
+fn also_proof_only(accounts: &[AccountInfo]) {
+    let account = unsafe { core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, 2) };
+    let amount = u64::from_le_bytes(data[AMOUNT_OFFSET..AMOUNT_OFFSET + 8].try_into().unwrap());
+}
+"#;
+        let p = SitePatterns::new();
+        let sites = scan_file(Path::new("kani_impl.rs"), src, &p);
+        assert!(
+            sites.is_empty(),
+            "cfg(kani)-only files should not produce production probe sites: {sites:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_cfg_kani_function_but_keeps_production_lines() {
+        let src = r#"
+#[cfg(kani)]
+fn proof_only(account: &Account) {
+    let data = unsafe { account.borrow_mut_data_unchecked() };
+}
+
+fn production(account: &Account) {
+    let data = unsafe { account.borrow_mut_data_unchecked() };
+}
+"#;
+        let p = SitePatterns::new();
+        let sites = scan_file(Path::new("processor.rs"), src, &p);
+        let borrow_sites = sites
+            .iter()
+            .filter(|s| matches!(s.kind, SiteKind::BorrowUnchecked))
+            .collect::<Vec<_>>();
+        assert_eq!(borrow_sites.len(), 1, "got sites: {sites:?}");
+        assert_eq!(borrow_sites[0].line, 8);
+    }
+
+    #[test]
+    fn ignores_cfg_kani_inner_block() {
+        let src = r#"
+fn invoke(account: &Account) {
+    #[cfg(kani)]
+    {
+        let data = unsafe { account.borrow_mut_data_unchecked() };
+        return;
+    }
+
+    let data = unsafe { account.borrow_mut_data_unchecked() };
+}
+"#;
+        let p = SitePatterns::new();
+        let sites = scan_file(Path::new("processor.rs"), src, &p);
+        let borrow_sites = sites
+            .iter()
+            .filter(|s| matches!(s.kind, SiteKind::BorrowUnchecked))
+            .collect::<Vec<_>>();
+        assert_eq!(borrow_sites.len(), 1, "got sites: {sites:?}");
+        assert_eq!(borrow_sites[0].line, 9);
     }
 
     #[test]

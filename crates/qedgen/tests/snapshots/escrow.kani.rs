@@ -14,6 +14,16 @@
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 #![cfg(kani)]
 
+#[allow(dead_code)]
+fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[4] == b[4] && a[5] == b[5] && a[6] == b[6] && a[7] == b[7] && a[8] == b[8] && a[9] == b[9] && a[10] == b[10] && a[11] == b[11] && a[12] == b[12] && a[13] == b[13] && a[14] == b[14] && a[15] == b[15] && a[16] == b[16] && a[17] == b[17] && a[18] == b[18] && a[19] == b[19] && a[20] == b[20] && a[21] == b[21] && a[22] == b[22] && a[23] == b[23] && a[24] == b[24] && a[25] == b[25] && a[26] == b[26] && a[27] == b[27] && a[28] == b[28] && a[29] == b[29] && a[30] == b[30] && a[31] == b[31]
+}
+
+#[allow(dead_code)]
+fn pubkey_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    !pubkey_eq(a, b)
+}
+
 // ============================================================================
 // State model (derived from qedspec — no framework dependencies)
 // ============================================================================
@@ -36,6 +46,41 @@ struct State {
     status: Status,
 }
 
+#[derive(Clone, Copy)]
+struct KaniAccount {
+    pubkey: [u8; 32],
+}
+
+#[derive(Clone, Copy)]
+struct InitializeAccounts {
+    initializer: KaniAccount,
+    escrow: KaniAccount,
+    mint: KaniAccount,
+    initializer_ta: KaniAccount,
+    escrow_ta: KaniAccount,
+    token_program: KaniAccount,
+    system_program: KaniAccount,
+}
+
+#[derive(Clone, Copy)]
+struct ExchangeAccounts {
+    taker: KaniAccount,
+    escrow: KaniAccount,
+    initializer_ta: KaniAccount,
+    taker_ta: KaniAccount,
+    escrow_ta: KaniAccount,
+    token_program: KaniAccount,
+}
+
+#[derive(Clone, Copy)]
+struct CancelAccounts {
+    initializer: KaniAccount,
+    escrow: KaniAccount,
+    escrow_ta: KaniAccount,
+    initializer_ta: KaniAccount,
+    token_program: KaniAccount,
+}
+
 // ============================================================================
 // Transition functions (from qedspec operations — effects + guards)
 //
@@ -43,7 +88,7 @@ struct State {
 // false if the guard rejects the operation.
 // ============================================================================
 
-fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
+fn initialize(s: &mut State, accounts: &InitializeAccounts, deposit_amount: u64, receive_amount: u64) -> bool {
     if !(((deposit_amount > 0) && (receive_amount > 0))) {
         return false;
     }
@@ -52,11 +97,15 @@ fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
     }
     s.initializer_amount = deposit_amount;
     s.taker_amount = receive_amount;
+    s.initializer_token_account = accounts.initializer_ta.pubkey;
     s.status = Status::Open;
     true
 }
 
-fn exchange(s: &mut State) -> bool {
+fn exchange(s: &mut State, accounts: &ExchangeAccounts) -> bool {
+    if !((pubkey_eq(&accounts.initializer_ta.pubkey, &s.initializer_token_account))) {
+        return false;
+    }
     if s.status != Status::Open {
         return false;
     }
@@ -64,7 +113,10 @@ fn exchange(s: &mut State) -> bool {
     true
 }
 
-fn cancel(s: &mut State) -> bool {
+fn cancel(s: &mut State, accounts: &CancelAccounts) -> bool {
+    if !((pubkey_eq(&accounts.initializer_ta.pubkey, &s.initializer_token_account))) {
+        return false;
+    }
     if s.status != Status::Open {
         return false;
     }
@@ -92,9 +144,74 @@ fn verify_initialize_rejects_invalid() {
     kani::assume(s.status == Status::Uninitialized);
     let deposit_amount: u64 = kani::any();
     let receive_amount: u64 = kani::any();
+    let accounts = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
     kani::assume(!(((deposit_amount > 0) && (receive_amount > 0))));
-    assert!(!initialize(&mut s, deposit_amount, receive_amount),
+    kani::cover!(true, "guard-violation domain is satisfiable");
+    assert!(!initialize(&mut s, &accounts, deposit_amount, receive_amount),
         "initialize must reject when guard is violated");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_exchange_rejects_invalid() {
+    let mut s = State {
+        initializer: kani::any(),
+        initializer_token_account: kani::any(),
+        taker: kani::any(),
+        initializer_amount: kani::any(),
+        taker_amount: kani::any(),
+        escrow_token_account: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Open);
+    let accounts = ExchangeAccounts {
+        taker: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        taker_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+    };
+    kani::assume(!((pubkey_eq(&accounts.initializer_ta.pubkey, &s.initializer_token_account))));
+    kani::cover!(true, "guard-violation domain is satisfiable");
+    assert!(!exchange(&mut s, &accounts),
+        "exchange must reject when guard is violated");
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+#[kani::solver(cadical)]
+fn verify_cancel_rejects_invalid() {
+    let mut s = State {
+        initializer: kani::any(),
+        initializer_token_account: kani::any(),
+        taker: kani::any(),
+        initializer_amount: kani::any(),
+        taker_amount: kani::any(),
+        escrow_token_account: kani::any(),
+        status: kani::any(),
+    };
+    kani::assume(s.status == Status::Open);
+    let accounts = CancelAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+    };
+    kani::assume(!((pubkey_eq(&accounts.initializer_ta.pubkey, &s.initializer_token_account))));
+    kani::cover!(true, "guard-violation domain is satisfiable");
+    assert!(!cancel(&mut s, &accounts),
+        "cancel must reject when guard is violated");
 }
 
 // ============================================================================
@@ -124,11 +241,20 @@ fn verify_initialize_effect_initializer_amount() {
     let pre_taker = s.taker;
     let pre_taker_amount = s.taker_amount;
     let pre_escrow_token_account = s.escrow_token_account;
-    if initialize(&mut s, deposit_amount, receive_amount) {
+    let accounts = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
+    if initialize(&mut s, &accounts, deposit_amount, receive_amount) {
         assert!(s.initializer_amount == deposit_amount, "initializer_amount must equal deposit_amount");
-        assert!(s.initializer == pre_initializer, "initializer must not change");
-        assert!(s.taker == pre_taker, "taker must not change");
-        assert!(s.escrow_token_account == pre_escrow_token_account, "escrow_token_account must not change");
+        assert!(pubkey_eq(&s.initializer, &pre_initializer), "initializer must not change");
+        assert!(pubkey_eq(&s.taker, &pre_taker), "taker must not change");
+        assert!(pubkey_eq(&s.escrow_token_account, &pre_escrow_token_account), "escrow_token_account must not change");
     }
 }
 
@@ -152,11 +278,20 @@ fn verify_initialize_effect_taker_amount() {
     let pre_taker = s.taker;
     let pre_initializer_amount = s.initializer_amount;
     let pre_escrow_token_account = s.escrow_token_account;
-    if initialize(&mut s, deposit_amount, receive_amount) {
+    let accounts = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
+    if initialize(&mut s, &accounts, deposit_amount, receive_amount) {
         assert!(s.taker_amount == receive_amount, "taker_amount must equal receive_amount");
-        assert!(s.initializer == pre_initializer, "initializer must not change");
-        assert!(s.taker == pre_taker, "taker must not change");
-        assert!(s.escrow_token_account == pre_escrow_token_account, "escrow_token_account must not change");
+        assert!(pubkey_eq(&s.initializer, &pre_initializer), "initializer must not change");
+        assert!(pubkey_eq(&s.taker, &pre_taker), "taker must not change");
+        assert!(pubkey_eq(&s.escrow_token_account, &pre_escrow_token_account), "escrow_token_account must not change");
     }
 }
 
@@ -180,11 +315,20 @@ fn verify_initialize_effect_initializer_token_account() {
     let pre_initializer_amount = s.initializer_amount;
     let pre_taker_amount = s.taker_amount;
     let pre_escrow_token_account = s.escrow_token_account;
-    if initialize(&mut s, deposit_amount, receive_amount) {
-        assert!(s.initializer_token_account == initializer_ta.pubkey, "initializer_token_account must equal initializer_ta.pubkey");
-        assert!(s.initializer == pre_initializer, "initializer must not change");
-        assert!(s.taker == pre_taker, "taker must not change");
-        assert!(s.escrow_token_account == pre_escrow_token_account, "escrow_token_account must not change");
+    let accounts = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
+    if initialize(&mut s, &accounts, deposit_amount, receive_amount) {
+        assert!(pubkey_eq(&s.initializer_token_account, &accounts.initializer_ta.pubkey), "initializer_token_account must equal accounts.initializer_ta.pubkey");
+        assert!(pubkey_eq(&s.initializer, &pre_initializer), "initializer must not change");
+        assert!(pubkey_eq(&s.taker, &pre_taker), "taker must not change");
+        assert!(pubkey_eq(&s.escrow_token_account, &pre_escrow_token_account), "escrow_token_account must not change");
     }
 }
 
@@ -207,8 +351,25 @@ fn cover_happy_path() {
     };
     let deposit_amount_0: u64 = kani::any();
     let receive_amount_0: u64 = kani::any();
-    if initialize(&mut s, deposit_amount_0, receive_amount_0) {
-        kani::cover!(exchange(&mut s), "happy_path trace is reachable");
+    let accounts_0 = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
+    if initialize(&mut s, &accounts_0, deposit_amount_0, receive_amount_0) {
+        let accounts_1 = ExchangeAccounts {
+            taker: KaniAccount { pubkey: kani::any() },
+            escrow: KaniAccount { pubkey: kani::any() },
+            initializer_ta: KaniAccount { pubkey: kani::any() },
+            taker_ta: KaniAccount { pubkey: kani::any() },
+            escrow_ta: KaniAccount { pubkey: kani::any() },
+            token_program: KaniAccount { pubkey: kani::any() },
+        };
+        kani::cover!(exchange(&mut s, &accounts_1), "happy_path trace is reachable");
     }
 }
 
@@ -227,8 +388,24 @@ fn cover_cancel_path() {
     };
     let deposit_amount_0: u64 = kani::any();
     let receive_amount_0: u64 = kani::any();
-    if initialize(&mut s, deposit_amount_0, receive_amount_0) {
-        kani::cover!(cancel(&mut s), "cancel_path trace is reachable");
+    let accounts_0 = InitializeAccounts {
+        initializer: KaniAccount { pubkey: kani::any() },
+        escrow: KaniAccount { pubkey: kani::any() },
+        mint: KaniAccount { pubkey: kani::any() },
+        initializer_ta: KaniAccount { pubkey: kani::any() },
+        escrow_ta: KaniAccount { pubkey: kani::any() },
+        token_program: KaniAccount { pubkey: kani::any() },
+        system_program: KaniAccount { pubkey: kani::any() },
+    };
+    if initialize(&mut s, &accounts_0, deposit_amount_0, receive_amount_0) {
+        let accounts_1 = CancelAccounts {
+            initializer: KaniAccount { pubkey: kani::any() },
+            escrow: KaniAccount { pubkey: kani::any() },
+            escrow_ta: KaniAccount { pubkey: kani::any() },
+            initializer_ta: KaniAccount { pubkey: kani::any() },
+            token_program: KaniAccount { pubkey: kani::any() },
+        };
+        kani::cover!(cancel(&mut s, &accounts_1), "cancel_path trace is reachable");
     }
 }
 
@@ -254,10 +431,25 @@ fn verify_liveness_escrow_settles() {
         let op: u8 = kani::any();
         match op {
             0 => {
-                exchange(&mut s);
+            let accounts = ExchangeAccounts {
+                taker: KaniAccount { pubkey: kani::any() },
+                escrow: KaniAccount { pubkey: kani::any() },
+                initializer_ta: KaniAccount { pubkey: kani::any() },
+                taker_ta: KaniAccount { pubkey: kani::any() },
+                escrow_ta: KaniAccount { pubkey: kani::any() },
+                token_program: KaniAccount { pubkey: kani::any() },
+            };
+                exchange(&mut s, &accounts);
             }
             1 => {
-                cancel(&mut s);
+            let accounts = CancelAccounts {
+                initializer: KaniAccount { pubkey: kani::any() },
+                escrow: KaniAccount { pubkey: kani::any() },
+                escrow_ta: KaniAccount { pubkey: kani::any() },
+                initializer_ta: KaniAccount { pubkey: kani::any() },
+                token_program: KaniAccount { pubkey: kani::any() },
+            };
+                cancel(&mut s, &accounts);
             }
             _ => {}
         }

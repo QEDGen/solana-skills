@@ -4799,10 +4799,8 @@ fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
                         let rhs = expr[i + 1..].trim();
                         return Some((lhs, ">", rhs));
                     }
-                } else {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
+                } else if depth > 0 {
+                    depth -= 1;
                 }
             }
             b'=' => {
@@ -5176,6 +5174,9 @@ pub fn multi_cpi_shared_fields(
             if resolved[j].1.is_empty() {
                 continue;
             }
+            if disjoint_token_transfer_resources(&handler.calls[i], &handler.calls[j]) {
+                continue;
+            }
             // Set intersection ordered by BTreeSet iteration (stable
             // alphabetical for deterministic lint output).
             for field in resolved[i].1.intersection(&resolved[j].1) {
@@ -5184,6 +5185,29 @@ pub fn multi_cpi_shared_fields(
         }
     }
     findings
+}
+
+fn disjoint_token_transfer_resources(left: &ParsedCall, right: &ParsedCall) -> bool {
+    fn token_transfer_resources(call: &ParsedCall) -> Option<std::collections::BTreeSet<String>> {
+        if call.target_interface != "Token" || call.target_handler != "transfer" {
+            return None;
+        }
+
+        let mut resources = std::collections::BTreeSet::new();
+        for arg_name in ["from", "to"] {
+            let arg = call.args.iter().find(|arg| arg.name == arg_name)?;
+            resources.insert(arg.rust_expr.trim().to_string());
+        }
+        Some(resources)
+    }
+
+    let Some(left_resources) = token_transfer_resources(left) else {
+        return false;
+    };
+    let Some(right_resources) = token_transfer_resources(right) else {
+        return false;
+    };
+    left_resources.is_disjoint(&right_resources)
 }
 
 /// v2.26 Track J — P2 informational lint surfacing the multi-CPI ordering
@@ -7577,6 +7601,48 @@ handler split (a : U64) (b : U64) {
             hit.message
         );
         assert_eq!(hit.subject.as_deref(), Some("split"));
+    }
+
+    /// Disjoint Token.transfer resources are handled by the Pinocchio
+    /// impl-targeted token projection backend. The abstract callee fields
+    /// are the same, but the generated proof reads and asserts each token
+    /// account's concrete amount independently.
+    #[test]
+    fn multi_cpi_same_field_silent_on_disjoint_token_transfer_resources() {
+        let src = r#"spec MultiCpiDisjointToken
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures state.from_balance == old(state.from_balance) - amount
+    ensures state.to_balance == old(state.to_balance) + amount
+  }
+}
+
+state { from_balance : U64, to_balance : U64 }
+
+handler swap_like (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  call Token.transfer(from = user_input, to = hub_input, amount = a, authority = auth)
+  call Token.transfer(from = hub_output, to = user_output, amount = b, authority = auth)
+  ensures state.from_balance == old(state.from_balance) - a
+}"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_multi_cpi_same_field(&spec);
+        assert!(
+            warnings.is_empty(),
+            "disjoint Token.transfer resources use per-account projections; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
     }
 
     /// Two CPI calls whose substituted ensures reference disjoint

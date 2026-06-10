@@ -819,6 +819,10 @@ pub(crate) fn emit_pinocchio_program_lib(
     }
     out.push_str("pub mod state;\n");
     out.push_str("pub mod guards;\n");
+    out.push_str("#[cfg(kani)]\n");
+    out.push_str("extern crate kani;\n");
+    out.push_str("#[cfg(kani)]\n");
+    out.push_str("mod kani_impl;\n");
     if guards_use_math_helpers(spec) {
         out.push_str("pub mod math;\n");
     }

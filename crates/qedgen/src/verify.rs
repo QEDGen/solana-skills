@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -296,14 +297,14 @@ fn run_kani(harness: &Path) -> BackendReport {
         };
     }
 
-    let crate_dir = match nearest_cargo_dir(harness) {
-        Some(dir) => dir,
-        None => {
+    let kani_crate = match prepare_standalone_kani_crate(harness) {
+        Ok(dir) => dir,
+        Err(e) => {
             return BackendReport {
                 name: "kani",
                 status: BackendStatus::Failed,
                 duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!("no Cargo.toml found above {}", harness.display())),
+                detail: Some(format!("failed to prepare standalone Kani crate: {}", e)),
                 log_path: None,
                 counterexamples: Vec::new(),
                 axioms: Vec::new(),
@@ -311,12 +312,13 @@ fn run_kani(harness: &Path) -> BackendReport {
         }
     };
 
-    // `--tests` scopes Kani to #[kani::proof] functions under tests/.
-    // The generated harness is `#![cfg(kani)]`, so `cargo test` ignores
-    // it and only `cargo kani` picks it up.
+    // Run the spec-model Kani harness in an isolated crate. The harness is
+    // framework-neutral; tying it to the generated program package means
+    // unrelated Anchor/Pinocchio scaffold compile errors can prevent Kani
+    // from checking the model at all.
     let output = Command::new("cargo")
         .args(["kani", "--tests"])
-        .current_dir(&crate_dir)
+        .current_dir(kani_crate.path())
         .output();
 
     let duration_ms = start.elapsed().as_millis();
@@ -431,6 +433,27 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
             axioms: Vec::new(),
         },
     }
+}
+
+fn prepare_standalone_kani_crate(harness: &Path) -> Result<tempfile::TempDir> {
+    let tmp = tempfile::tempdir().context("create temporary Kani crate")?;
+    let src_dir = tmp.path().join("src");
+    fs::create_dir_all(&src_dir).context("create temporary Kani src dir")?;
+    fs::copy(harness, src_dir.join("lib.rs"))
+        .with_context(|| format!("copy Kani harness from {}", harness.display()))?;
+    fs::write(
+        tmp.path().join("Cargo.toml"),
+        r#"[package]
+name = "qedgen-kani-harness"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+    )
+    .context("write temporary Kani Cargo.toml")?;
+    Ok(tmp)
 }
 
 fn nearest_cargo_dir(start: &Path) -> Option<PathBuf> {
@@ -823,6 +846,23 @@ mod tests {
             failure_message: Some("deposit must reject zero amount".into()),
             source_location: None,
         }
+    }
+
+    #[test]
+    fn prepares_standalone_kani_crate_from_harness() {
+        let src = tempfile::tempdir().expect("tempdir");
+        let harness = src.path().join("kani.rs");
+        fs::write(&harness, "#[kani::proof]\nfn generated_harness() {}\n").expect("write harness");
+
+        let kani_crate = prepare_standalone_kani_crate(&harness).expect("standalone crate");
+
+        let cargo_toml =
+            fs::read_to_string(kani_crate.path().join("Cargo.toml")).expect("Cargo.toml");
+        assert!(cargo_toml.contains("name = \"qedgen-kani-harness\""));
+        assert!(cargo_toml.contains("path = \"src/lib.rs\""));
+
+        let copied = fs::read_to_string(kani_crate.path().join("src/lib.rs")).expect("lib.rs");
+        assert!(copied.contains("generated_harness"));
     }
 
     #[test]

@@ -1,0 +1,13 @@
+spec KaniPing
+program_id "11111111111111111111111111111111"
+
+type Error | InvalidAmount
+
+handler ping (amount : U64) {
+  permissionless
+  accounts {
+    signer : signer
+  }
+  requires amount > 0 else InvalidAmount
+  ensures amount > 0
+}

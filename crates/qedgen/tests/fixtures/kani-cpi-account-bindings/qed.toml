@@ -1,0 +1,6 @@
+# QEDGen manifest for the Kani CPI account-bindings example.
+#
+# The `Token from "spl"` import resolves through the bundled SPL Token
+# interface, so this fixture does not need explicit manifest dependencies.
+
+[dependencies]

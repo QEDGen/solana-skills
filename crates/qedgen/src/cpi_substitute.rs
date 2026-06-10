@@ -207,6 +207,43 @@ pub fn substitute_callee_ensures_rust_binary(
     substitute_state_binders_rust_binary(&after_params, &call.state_binders)
 }
 
+/// Scan a Rust binary-form `ensures` expression for abstract State-field
+/// projections (`pre.X` / `post.X`), returning field names in first occurrence
+/// order.
+pub fn scan_rust_abstract_fields(expr: &str) -> Vec<String> {
+    scan_prefixed_fields(expr, r"\b(?:pre|post)\.([A-Za-z_][A-Za-z0-9_]*)")
+}
+
+/// Scan a Lean-form `ensures` expression for abstract State-field projections
+/// (`s.X` / `s'.X`), returning field names in first occurrence order.
+pub fn scan_lean_abstract_fields(expr: &str) -> Vec<String> {
+    scan_prefixed_fields(expr, r"\bs'?\.([A-Za-z_][A-Za-z0-9_]*)")
+}
+
+/// Return the abstract fields from `fields` that are not covered by a
+/// `state_binders` entry. Backends use this to avoid importing callee ensures
+/// into a caller frame that cannot name the callee's abstract state.
+pub fn missing_state_binders(fields: &[String], binders: &[ParsedStateBinder]) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|f| !binders.iter().any(|b| &b.callee_field == *f))
+        .cloned()
+        .collect()
+}
+
+fn scan_prefixed_fields(expr: &str, pattern: &str) -> Vec<String> {
+    let re = regex::Regex::new(pattern).expect("regex compiles for abstract-field scan");
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for cap in re.captures_iter(expr) {
+        let field = cap.get(1).unwrap().as_str().to_string();
+        if seen.insert(field.clone()) {
+            out.push(field);
+        }
+    }
+    out
+}
+
 /// v2.27 Track A — apply the Rust binary state-binder substitution.
 /// Each binder `(callee_field, caller_field)` rewrites
 /// `pre.<callee_field>` → `pre.<caller_field>` and
@@ -427,6 +464,34 @@ mod tests {
             out,
             "post.pool_balance + amount == pre.pool_balance && post.user_balance == pre.user_balance + amount"
         );
+    }
+
+    #[test]
+    fn scans_and_reports_missing_state_binders() {
+        let fields = scan_rust_abstract_fields(
+            "post.from_balance + amount == pre.from_balance && post.to_balance == pre.to_balance + amount",
+        );
+        assert_eq!(fields, vec!["from_balance", "to_balance"]);
+
+        let missing_all = missing_state_binders(&fields, &[]);
+        assert_eq!(missing_all, fields);
+
+        let missing_partial = missing_state_binders(
+            &fields,
+            &[ParsedStateBinder {
+                callee_field: "from_balance".into(),
+                caller_field: "pool_balance".into(),
+            }],
+        );
+        assert_eq!(missing_partial, vec!["to_balance"]);
+    }
+
+    #[test]
+    fn scans_lean_abstract_fields() {
+        let fields = scan_lean_abstract_fields(
+            "s'.from_balance + amount = s.from_balance \u{2227} s'.to_balance = s.to_balance + amount",
+        );
+        assert_eq!(fields, vec!["from_balance", "to_balance"]);
     }
 
     #[test]

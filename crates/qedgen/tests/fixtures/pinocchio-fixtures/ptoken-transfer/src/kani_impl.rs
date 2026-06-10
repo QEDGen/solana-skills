@@ -87,9 +87,9 @@ const SPL_TOKEN_PROGRAM_ID: [u8; 32] = [
 /// `AccountState::Initialized = 1`.
 const STATE_INITIALIZED: u8 = 1;
 
-/// Sentinel `borrow_state` after `deserialize` runs: clear (no
-/// outstanding borrows). `0` lets the handler take borrows freely.
-const BORROW_STATE_CLEAR: u8 = 0;
+/// Pinocchio tracks borrow availability with set bits. At instruction entry,
+/// all lamport/data mutable and immutable borrow slots are available.
+const BORROW_STATE_CLEAR: u8 = 0xff;
 
 /// Build a stack-resident token account. `key` and `owner_in_data`
 /// are concrete; `amount` is the per-test parameter (symbolic via

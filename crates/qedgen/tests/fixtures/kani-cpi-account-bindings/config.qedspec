@@ -1,0 +1,93 @@
+spec KaniCpiAccountBindings
+
+program_id "11111111111111111111111111111111"
+
+import Token from "spl"
+
+type State
+  | Uninitialized
+  | Active of {
+      admin_key    : Pubkey,
+      pool_balance : U64,
+      user_balance : U64,
+    }
+
+type Error
+  | InvalidAmount
+  | Unauthorized
+
+handler initialize : State.Uninitialized -> State.Active {
+  accounts {
+    admin : signer
+  }
+  effect {
+    admin_key    := admin.pubkey
+    pool_balance := 0
+    user_balance := 0
+  }
+}
+
+handler unbound_transfer (amount : U64) : State.Active -> State.Active {
+  accounts {
+    admin         : signer
+    pool_ta       : writable, type token
+    user_ta       : writable, type token
+    token_program : program, type token
+  }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  requires amount > 0 else InvalidAmount
+  ensures state.pool_balance == old(state.pool_balance)
+  call Token.transfer(
+    from      = pool_ta,
+    to        = user_ta,
+    authority = admin,
+    amount    = amount,
+  )
+}
+
+handler bound_transfer (amount : U64) : State.Active -> State.Active {
+  accounts {
+    admin         : signer
+    pool_ta       : writable, type token
+    user_ta       : writable, type token
+    token_program : program, type token
+  }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  requires amount > 0 else InvalidAmount
+  modifies [pool_balance, user_balance]
+  effect {
+    pool_balance -= amount
+    user_balance += amount
+  }
+  ensures state.pool_balance + amount == old(state.pool_balance)
+  call Token.transfer(
+    from      = pool_ta,
+    to        = user_ta,
+    authority = admin,
+    amount    = amount,
+    state_binders {
+      from_balance = state.pool_balance,
+      to_balance   = state.user_balance,
+    },
+  )
+}
+
+handler stable_swap_large_guard (amount_in : U128) (min_out : U128) (fee_bps : U128) (lane : U8) (input_mint : Pubkey) (output_mint : Pubkey) : State.Active -> State.Active {
+  accounts {
+    admin         : signer
+    pool_ta       : writable, type token
+    user_ta       : writable, type token
+    token_program : program, type token
+  }
+  requires admin.pubkey == state.admin_key else Unauthorized
+  requires amount_in > 0 else InvalidAmount
+  requires min_out > 0 else InvalidAmount
+  requires fee_bps <= 10000 else InvalidAmount
+  requires lane < 32 else InvalidAmount
+  requires input_mint != output_mint else InvalidAmount
+  requires (input_mint == output_mint or amount_in >= min_out) else InvalidAmount
+  requires amount_in * fee_bps / 10000 <= amount_in else InvalidAmount
+  requires amount_in >= min_out else InvalidAmount
+  requires amount_in <= 1000000000000000 else InvalidAmount
+  ensures state.pool_balance == old(state.pool_balance)
+}
