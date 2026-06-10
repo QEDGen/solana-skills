@@ -46,7 +46,7 @@ theorem rejects_wrong_account_count
     (h_ne : numAccounts ≠ N_ACCOUNTS_EXPECTED) :
     (executeFn progAt (initState inputAddr mem rt) 6).exitCode = some E_N_ACCOUNTS := by
   have h_ne3 : ¬(readU64 mem inputAddr = N_ACCOUNTS_EXPECTED) := by rw [h_num]; exact h_ne
-  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80, Width.bytes]
+  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
 
 /-! ## P2: insufficient lamports → error 7
 
@@ -74,7 +74,7 @@ theorem rejects_insufficient_lamports
     (h_bal   : readU64 mem (inputAddr + 80) = senderLamports)
     (h_insuf : senderLamports < amount) :
     (executeFn progAt (initState inputAddr mem rt) 20).exitCode = some E_INSUFFICIENT_LAMPORTS := by
-  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80, Width.bytes]
+  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
 
 /-! ## P3: happy path → exit 0
 
@@ -104,6 +104,6 @@ theorem accepts_valid_transfer
     (h_suf   : senderLamports ≥ amount) :
     (executeFn progAt (initState inputAddr mem rt) 20).exitCode = some 0 := by
   have h_not_lt : ¬(senderLamports < amount) := by omega
-  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80, Width.bytes]
+  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
 
 end TransferProofs

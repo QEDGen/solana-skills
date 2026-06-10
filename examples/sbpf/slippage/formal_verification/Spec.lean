@@ -34,7 +34,7 @@ theorem rejects_insufficient_balance
     (h_tok : readU64 mem (inputAddr + 160) = tokenBal)
     (h_slip : minBal ≥ tokenBal) :
     (executeFn progAt (initState inputAddr mem rt) 10).exitCode = some 1 := by
-  wp_exec [progAt] [ea_min, ea_tok, Width.bytes]
+  wp_exec [progAt] [ea_min, ea_tok]
 
 /-! ## Property P2: slippage acceptance
 
@@ -52,6 +52,6 @@ theorem accepts_sufficient_balance
     (h_ok : minBal < tokenBal) :
     (executeFn progAt (initState inputAddr mem rt) 10).exitCode = some 0 := by
   have h_not_ge : ¬(minBal ≥ tokenBal) := by omega
-  wp_exec [progAt] [ea_min, ea_tok, Width.bytes]
+  wp_exec [progAt] [ea_min, ea_tok]
 
 end SlippageProofs

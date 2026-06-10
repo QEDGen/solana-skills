@@ -56,7 +56,7 @@ theorem rejects_invalid_discriminator
   have h1 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INSERT) := by rw [h_disc]; exact h_ne1
   have h2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; exact h_ne2
   have h3 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INITIALIZE) := by rw [h_disc]; exact h_ne0
-  wp_exec [progAt, progAt_0, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO, Width.bytes]
+  wp_exec [progAt, progAt_0, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 /-! ## P2: initialize with wrong instruction data length → error 12
 
@@ -79,7 +79,7 @@ theorem init_rejects_wrong_data_len
   have h_ne2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; decide
   have h_ne_dl : ¬(readU64 mem (insn - 8) = SIZE_OF_INITIALIZE_INSTRUCTION) := by
     rw [h_dlen]; exact h_ne
-  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO, Width.bytes]
+  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 /-! ## P3: initialize with wrong account count → error 1
 
@@ -103,6 +103,6 @@ theorem init_rejects_wrong_account_count
   have h_ne1 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_INSERT) := by rw [h_disc]; decide
   have h_ne2 : ¬(readU8 mem insn = INSN_DISCRIMINATOR_REMOVE) := by rw [h_disc]; decide
   have h_ne_na : ¬(readU64 mem accts = IB_N_ACCOUNTS_INIT) := by rw [h_naccts]; exact h_ne
-  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO, Width.bytes]
+  wp_exec [progAt, progAt_0, progAt_4, treeInit] [ea_neg_SIZE_OF_U64 _ h_insn, ea_IB_N_ACCOUNTS_OFF, ea_OFFSET_ZERO]
 
 end TreeProofs

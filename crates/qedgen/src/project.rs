@@ -44,7 +44,7 @@ import QEDGen.Solana.Spec\n";
 /// for `lean_solana_mathlib/lakefile.lean`. Kept in sync with the
 /// `lean-toolchain` so a `lake update` can't float the dep to a HEAD
 /// commit that drags in a newer Lean.
-const MATHLIB_TAG: &str = "v4.30.0-rc2";
+const MATHLIB_TAG: &str = "v4.30.0";
 
 /// Render the Mathlib `require` stanza appended to the `lean_solana/`
 /// sub-lakefile. When the shared workspace install exists, emit a
