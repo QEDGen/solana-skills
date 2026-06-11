@@ -609,7 +609,6 @@ via Lean + client-side tests.)
 
 - **[Counter](examples/sbpf/counter/)** — PDA counter
 - **[Tree](examples/sbpf/tree/)** — Red-black tree
-- **[Dropset](examples/sbpf/dropset/)** — On-chain order book
 - **[Transfer](examples/sbpf/transfer/)** — SOL transfer via System Program CPI
 - **[Slippage](examples/sbpf/slippage/)** — AMM slippage guard
 

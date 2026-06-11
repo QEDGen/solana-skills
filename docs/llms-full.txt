@@ -338,10 +338,6 @@ Collateralized lending market with liquidation and interest accrual.
 
 A native sBPF lamport transfer program. Verified properties: input validation, duplicate account rejection, balance sufficiency.
 
-### Dropset (sBPF Assembly)
-
-An on-chain order book's RegisterMarket instruction (180 sBPF instructions). 13 security properties verified: discriminant dispatch, account count validation, instruction length validation, per-account freshness, per-account uniqueness, PDA integrity, System Program identity, and Rent sysvar identity. See `examples/sbpf/dropset/formal_verification/SPEC.md`.
-
 ### Slippage (sBPF Assembly)
 
 A SIMD-0321-style slippage guard.

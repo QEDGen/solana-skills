@@ -1412,7 +1412,7 @@ what the imported source actually declares.
 
 Everything in this section lives inside `pragma sbpf { ... }`. The pragma
 wrapping is mandatory in v2.5; the grammar rejects these items at the top
-level. See `examples/sbpf/dropset/dropset.qedspec` for a full example.
+level. See `examples/sbpf/tree/tree.qedspec` for a full example.
 
 ```fsharp
 pragma sbpf {

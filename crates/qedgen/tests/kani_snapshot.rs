@@ -84,6 +84,7 @@ fn render_mir_kani(fixture_dir: &str, spec_arg: &str) -> String {
             "-aq",
             "--exclude=.anchor",
             "--exclude=target",
+            "--exclude=.lake",
             "--exclude=node_modules",
         ])
         .arg(format!("{}/", src.display()))

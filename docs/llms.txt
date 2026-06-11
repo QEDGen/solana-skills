@@ -26,8 +26,6 @@ A `.qedspec` is the single source of truth. It can live in one file or span mult
 ### sBPF Assembly
 - [Transfer spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/transfer/transfer.qedspec): Native sBPF lamport transfer (input validation, balance checks)
 - [Transfer Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/transfer/formal_verification/Spec.lean): Generated proofs over the sBPF program module
-- [Dropset spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/dropset.qedspec): On-chain order book RegisterMarket (discriminant dispatch, account uniqueness, freshness checks)
-- [Dropset Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/dropset/formal_verification/Spec.lean): Generated proofs for the dropset program
 - [Slippage spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/slippage/slippage.qedspec): Slippage guard program (SIMD-0321 style)
 - [Counter spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/sbpf/counter/counter.qedspec): Minimal sBPF example for onboarding
 
