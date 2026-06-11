@@ -1,7 +1,7 @@
 # Solana Security Primer
 
-Long-form reference for the named exploits and operational
-threat-model incidents the QEDGen Auditor's category catalog cites
+Long-form reference for the exploit classes and operational
+threat-model shapes the QEDGen Auditor's category catalog cites
 in its `Corpus:` lines. This file lives outside the loaded skill
 surface — it's intended as human-readable background for someone
 exploring the repo, **not** loaded into the auditor's context on
@@ -16,25 +16,30 @@ in `SKILL.md`. Don't expand this primer at the cost of catalog
 expressiveness — the primer is reference, the catalog is the
 working surface.
 
+Incidents are described by their *vulnerability class*, not by the
+protocol they happened to. The shape is what generalizes; the name
+is not.
+
 ---
 
-## Part 1 — Named on-chain exploits
+## Part 1 — On-chain exploit classes
 
-The nine incidents below are public, code-pattern exploits (not
+The nine classes below are public, code-pattern exploits (not
 key-management / supply-chain incidents — those are in Part 2).
 Each maps to one or more SKILL.md categories' `Corpus:` line.
 Auditors investigating that category should re-read the relevant
 entry here to refresh their mental model of *how the primitive
 actually got exercised at scale*.
 
-### Wormhole sysvar-instructions spoof (2022, $326M)
+### Sysvar-instructions spoof (2022, ~$326M)
 
 **SKILL.md categories:** `account_type_confusion`, `arbitrary_cpi`
 
-**Root cause:** `verify_signatures` used `load_instruction_at`
-(deprecated) which did not check that the input account was the
-real `sysvar::instructions` account; attacker passed a fake sysvar
-that looked like a successful prior secp256k1 verification.
+**Root cause:** signature verification used a deprecated
+instruction-introspection call that did not check that the input
+account was the real `sysvar::instructions` account; attacker
+passed a fake sysvar that looked like a successful prior secp256k1
+verification.
 
 **Attack flow:**
 1. Construct an account whose data mimics the layout the
@@ -42,10 +47,10 @@ that looked like a successful prior secp256k1 verification.
    Ed25519 / secp256k1 verify.
 2. Pass that fake account in the position the program expected
    the real sysvar.
-3. `verify_signatures` reads the fake "previous" verification,
-   marks the guardian set as approved.
-4. Call `complete_wrapped` to mint 120k wETH on Solana with no
-   Ethereum-side lock.
+3. The verifier reads the fake "previous" verification, marks the
+   guardian / signer set as approved.
+4. Call the privileged mint path to issue wrapped assets with no
+   collateral-side lock.
 
 **Grep for:**
 - `load_instruction_at(` (deprecated; use
@@ -63,24 +68,25 @@ account type confusion (treating any AccountInfo as a sysvar).
 
 ---
 
-### Cashio fake-account chain (2022, $52.8M)
+### Fake-account collateral chain (2022, ~$52.8M)
 
 **SKILL.md categories:** `field_chain_missing_root_anchor`,
 `missing_owner_check`
 
-**Root cause:** no "trusted root" — the `mint` field on the arrow
-account was never validated against the real Saber LP mint.
-Attacker forged the entire chain (arrow → crate_collateral_tokens
-→ mint) with worthless underlying.
+**Root cause:** no "trusted root" — the `mint` field on the leaf
+account was never validated against the real LP mint. Attacker
+forged the entire chain (leaf → collateral-tokens → mint) with
+worthless underlying.
 
 **Attack flow:**
-1. Create a fake `arrow` account with a mint pointer to
+1. Create a fake leaf account with a mint pointer to
    attacker-controlled tokens.
-2. Create a fake `crate_collateral_tokens` account that points to
-   the fake arrow.
-3. Pass the fake chain into `print_cash`, which trusts the leaf
-   and walks up.
-4. Mint 2B CASH against zero real collateral; dump.
+2. Create a fake collateral-tokens account that points to the
+   fake leaf.
+3. Pass the fake chain into the mint instruction, which trusts the
+   leaf and walks up.
+4. Mint billions of stablecoin units against zero real collateral;
+   dump.
 
 **Grep for:**
 - Account-A reads pubkey field from Account-B without verifying
@@ -97,30 +103,29 @@ the swap path).
 
 ---
 
-### Mango Markets oracle manipulation (2022, $114M)
+### Thin-spot-oracle cross-margin manipulation (2022, ~$114M)
 
 **SKILL.md categories:** `oracle_staleness`,
 `frontrunnable_no_slippage`, `flash_loan_amplified_governance`
 
-**Root cause:** thin spot oracle for low-liquidity governance
-token (MNGO); single-block price ramp via cross-trading from one
-attacker account to another, leveraging artificially-inflated
-MNGO as collateral against real assets.
+**Root cause:** thin spot oracle for a low-liquidity governance
+token; single-block price ramp via cross-trading from one attacker
+account to another, leveraging the artificially-inflated token as
+collateral against real assets.
 
 **Attack flow:**
-1. Open offsetting long+short positions in MNGO-PERP from two
-   attacker accounts ($10M USDC seed).
-2. Pump MNGO spot price 2¢ → 91¢ in ~10 minutes with
+1. Open offsetting long+short perp positions in the thin token
+   from two attacker accounts (~$10M seed).
+2. Pump the token's spot price ~45x in ~10 minutes with
    low-liquidity buys.
 3. Long-side account's collateral value balloons; borrow ~$114M
-   of real assets (USDC, BTC, ETH, SOL, mSOL) against it.
-4. Walk away — short side gets liquidated, but the borrows
+   of real assets against it.
+4. Walk away — the short side gets liquidated, but the borrows
    already left.
 
 **Grep for:**
 - Oracle reads with no TWAP / no min-confidence-interval check
-- Single-source price feeds (one Pyth product, no Switchboard
-  cross-check)
+- Single-source price feeds (one oracle product, no cross-check)
 - Collateral valuation that uses spot price without
   liquidity-adjusted haircut on thin markets
 - `borrow_value = collateral_value * ltv` patterns where
@@ -132,14 +137,15 @@ borrow caps = no circuit breaker.
 
 ---
 
-### Crema Finance fake tick account (2022, $8.8M)
+### Fake CLMM tick account (2022, ~$8.8M)
 
 **SKILL.md categories:** `account_type_confusion`,
 `missing_owner_check`
 
-**Root cause:** CLMM accepted attacker-supplied "tick" account
-without owner check or PDA derivation check; tick stored in-band
-fee-growth values that the program trusted.
+**Root cause:** a concentrated-liquidity AMM accepted an
+attacker-supplied "tick" account without owner check or PDA
+derivation check; the tick stored in-band fee-growth values that
+the program trusted.
 
 **Attack flow:**
 1. Flash-loan from a lending protocol.
@@ -164,7 +170,7 @@ tick crossed).
 
 ---
 
-### Saber / SPL token-swap rounding (2022, ~$700M at risk; Neodyme public disclosure pre-exploit)
+### Stable-swap bidirectional rounding (2022, ~$700M at risk; public pre-exploit disclosure)
 
 **SKILL.md category:** `rounding_direction_round_trip`
 
@@ -194,21 +200,21 @@ round-trips before pool empties).
 
 ---
 
-### Solend USDH oracle manipulation (2022, $1.26M)
+### DEX-pool-sourced oracle write-lock manipulation (2022, ~$1.26M)
 
 **SKILL.md category:** `oracle_staleness`
 
-**Root cause:** USDH price feed sourced from a single Saber pool;
-attacker write-locked the pool account in the same slot as the
-oracle update to prevent arbitrage and inflate the read.
+**Root cause:** a stablecoin price feed sourced from a single DEX
+pool; attacker write-locked the pool account in the same slot as
+the oracle update to prevent arbitrage and inflate the read.
 
 **Attack flow:**
-1. Predict the slot the oracle will sample USDH price.
-2. Send a tx in that slot that write-locks the Saber USDH/USDC
-   pool while pumping price.
+1. Predict the slot the oracle will sample the price.
+2. Send a tx in that slot that write-locks the source pool while
+   pumping price.
 3. Oracle reads inflated price ($1 → $15).
-4. Deposit USDH as collateral, borrow $1.26M of real assets,
-   walk.
+4. Deposit the stablecoin as collateral, borrow ~$1.26M of real
+   assets, walk.
 
 **Grep for:**
 - Oracle wrapper reading from a DEX pool reserve as the price
@@ -224,20 +230,21 @@ permissionless borrow against single-asset.
 
 ---
 
-### Nirvana flash-loan oracle pump (2022, $3.5M)
+### Self-priced-token flash-loan pump (2022, ~$3.5M)
 
 **SKILL.md category:** `oracle_staleness` (specifically, the
 self-priced-token sub-shape)
 
-**Root cause:** ANA price oracle read from internal bonding curve
-which itself responded to flash-loan-sized buys.
+**Root cause:** the protocol token's price oracle read from an
+internal bonding curve which itself responded to flash-loan-sized
+buys.
 
 **Attack flow:**
-1. Borrow $10M USDC flash loan from a lending protocol.
-2. Mint ANA via Nirvana's bonding curve, pumping its internal
-   price.
-3. Use the inflated ANA holdings as collateral to drain the
-   treasury at the new price.
+1. Borrow ~$10M flash loan from a lending protocol.
+2. Mint the protocol token via its bonding curve, pumping its
+   internal price.
+3. Use the inflated holdings as collateral to drain the treasury
+   at the new price.
 4. Repay flash loan, keep delta.
 
 **Grep for:**
@@ -251,28 +258,29 @@ requirement); same-tx price+borrow (no cooldown).
 
 ---
 
-### Loopscale RateX collateral mispricing (2025, $5.8M)
+### Niche-collateral single-read mispricing (2025, ~$5.8M)
 
 **SKILL.md category:** `oracle_staleness`
 
-**Root cause:** isolated lending market priced RateX PT tokens
-from a single point-in-time pool read with no TWAP; attacker
-manipulated the source pool to overstate collateral.
+**Root cause:** an isolated lending market priced a niche
+principal-token from a single point-in-time pool read with no
+TWAP; attacker manipulated the source pool to overstate
+collateral.
 
 **Attack flow:**
-1. Identify which market uses the manipulable RateX-PT pool as
-   its price source.
+1. Identify which market uses the manipulable principal-token pool
+   as its price source.
 2. Trade against that pool to push the spot price upward in one
    block.
-3. Deposit PT tokens at inflated valuation, borrow USDC / SOL up
-   to the inflated cap.
+3. Deposit the principal tokens at inflated valuation, borrow
+   stablecoin / SOL up to the inflated cap.
 4. Walk; the rest of the market is collateralized in real assets.
 
 **Grep for:**
 - New / niche / illiquid token added as collateral with the same
   oracle pattern as blue-chip
 - Per-market collateral pricing where the function pulls a fresh
-  read each call (no TWAP, no Pyth confidence band)
+  read each call (no TWAP, no oracle confidence band)
 - "Genesis vault" or "isolated pool" that shares a price oracle
   with an attacker-influenceable venue
 
@@ -282,7 +290,7 @@ token); single-block price + borrow.
 
 ---
 
-### Jet Protocol C-ratio close-account bypass (2022, $25M near-miss; private disclosure)
+### Sentinel-null close-account solvency bypass (2022, ~$25M near-miss)
 
 **SKILL.md categories:** `sentinel_null_key_array_short_circuit`,
 `pda_lifecycle_reuse_after_close`
@@ -290,7 +298,7 @@ token); single-block price + borrow.
 **Root cause:** position-array iteration broke the loop when it
 encountered `Pubkey::default()` as a sentinel for "closed
 account"; attacker placed real positions *after* the closed slot
-so they were skipped during collateralization check.
+so they were skipped during the collateralization check.
 
 **Attack flow:**
 1. Open a benign position to fill array slot 0.
@@ -313,7 +321,7 @@ permissionless position-open (creates the array hole).
 
 ## Part 2 — Operational / off-chain threat-model incidents
 
-The five incidents below are *off-chain* — key custody, social
+The five shapes below are *off-chain* — key custody, social
 engineering, supply chain, telemetry. They don't map to a code
 pattern in SKILL.md because the bug isn't in the program; the
 bug is in the operational envelope around it. Auditors should
@@ -323,7 +331,7 @@ threat-models that handwave these — "the admin key is secure,"
 and a real audit interrogates those claims rather than accepting
 them.
 
-### Raydium admin-key trojan (2022, $4.4M)
+### Hot-wallet admin-key trojan (2022, ~$4.4M)
 
 **Threat-model shape:** privileged operations gated by a single
 hot-wallet authority; key exfiltrated by malware on the operator's
@@ -344,7 +352,7 @@ draws.
 
 ---
 
-### Cypher economic-loop exploit (2023, $1M)
+### Self-trade economic-loop exploit (2023, ~$1M)
 
 **Threat-model shape:** margin / PnL accounting that updates from
 same-tx self-trade fills — the program had no notion that a trade
@@ -362,14 +370,14 @@ self-cross allowed.
 
 ---
 
-### Durable-nonce admin-takeover (2026-04, $285M)
+### Durable-nonce admin-takeover (2026-04, ~$285M)
 
-**Threat-model shape:** governance multisig signed
+**Threat-model shape:** a governance multisig signed
 durable-nonce-anchored transactions that were submitted weeks
 later. Attackers spent months building social trust as a fake
 quant firm, captured signatures intended for one purpose, then
 replayed them with attacker-controlled durable-nonce accounts to
-execute admin transfer.
+execute an admin transfer.
 
 **Attack flow:**
 1. Social-engineer access; create 4 durable-nonce accounts (2
@@ -381,7 +389,7 @@ execute admin transfer.
 4. Submit when context shifts (after a real test withdrawal);
    transfer admin authority to attacker.
 5. Whitelist a fake collateral token, deposit 500M of it, borrow
-   $285M.
+   ~$285M.
 
 **Auditor question:** does the program's admin-transfer flow
 have a time-lock? Does it use a fresh recent blockhash (not a
@@ -396,19 +404,19 @@ signature-validity model = arbitrary delay; instant admin reconfig
 
 ---
 
-### Mobile wallet Sentry-telemetry key leak (2022, $6M, 9,231 wallets)
+### Telemetry-SDK key leak (2022, ~$6M, ~9,231 wallets)
 
-**Threat-model shape:** mobile wallet pointed Sentry SDK at a
-self-hosted endpoint, transmitted private-key material in error
-logs. Attacker observed leaked secrets at the Sentry endpoint
-and reconstructed private keys for affected users.
+**Threat-model shape:** a mobile wallet pointed a crash-telemetry
+SDK at a self-hosted endpoint and transmitted private-key material
+in error logs. Attacker observed leaked secrets at the telemetry
+endpoint and reconstructed private keys for affected users.
 
 **Auditor question:** for any companion SDK shipping with the
 program (frontend, signing service, indexer), does any
 secret-bearing object pass through a logging / telemetry SDK
-without redaction? Sentry, LogRocket, Datadog, OpenTelemetry —
-all need an explicit `beforeSend` scrubber or a structured
-"this field never gets logged" pattern.
+without redaction? Any crash-reporting / observability SDK needs
+an explicit `beforeSend` scrubber or a structured "this field
+never gets logged" pattern.
 
 **Compose with:** off-chain — listed here because Solana program
 audits frequently include a companion SDK whose telemetry leaks
@@ -416,11 +424,12 @@ PDA seeds, derivation paths, or unsigned tx payloads.
 
 ---
 
-### Solana web3.js supply-chain backdoor (2024-12, ~$130-160k)
+### Client-library supply-chain backdoor (2024-12, ~$130-160k)
 
-**Threat-model shape:** spear-phish on npm publish-credential
-holder; v1.95.6 / 1.95.7 shipped with `addToQueue` exfiltrating
-private keys via fake CloudFlare headers.
+**Threat-model shape:** spear-phish on an npm publish-credential
+holder; two patch versions of a widely-used Solana client library
+shipped with code exfiltrating private keys via fake CloudFlare
+headers.
 
 **Attack flow:**
 1. Phish credentials + 2FA from a maintainer.
@@ -451,11 +460,12 @@ threat model: they need pen-testing on the signing-prompt
 surface, anti-phishing review of the dApp-pairing handshake,
 and OS-level isolation review for key storage.
 
-The Slope and web3.js incidents in Part 2 illustrate why this
-boundary matters: both were catastrophic for users despite the
-on-chain programs being correct. An auditor finding "the program
-holds no admin keys" is a *true* statement that doesn't bound the
-user's risk if their wallet leaks signatures.
+The telemetry-leak and supply-chain incidents in Part 2
+illustrate why this boundary matters: both were catastrophic for
+users despite the on-chain programs being correct. An auditor
+finding "the program holds no admin keys" is a *true* statement
+that doesn't bound the user's risk if their wallet leaks
+signatures.
 
 When auditing a project that ships both program code and a
 wallet / signing companion, escalate the wallet surface to a

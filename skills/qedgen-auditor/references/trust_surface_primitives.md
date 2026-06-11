@@ -40,8 +40,8 @@ attack (EU-CMA) given one observed signature per keypair.
    signed in its own chains. Attacker observes `sig` on `m1`, grinds
    `m2` with `digest(m2) ≤ digest(m1)` pointwise, walks each chain
    forward by `(d1[i] - d2[i])`. Polynomial-time, no hash-function
-   break needed. (See `audits/pinocchio-wild-2026-05/
-   solana-winternitz-vault/` for a fired reproducer.)
+   break needed. (A WOTS-shape vault program in our audit corpus
+   had a fired reproducer for exactly this.)
 2. **Key reuse beyond one signature.** Even with checksum, a second
    signature with the same keypair reveals enough chain positions to
    forge any third message. The program must enforce one-shot
