@@ -430,6 +430,13 @@ pub struct Block {
 /// Statement kinds. Total: 12 — 4 primary intrinsics + 7 effect/control +
 /// 1 escape hatch CPI. See `docs/design/intrinsic-fixture-map.md` for
 /// the fixture evidence per kind.
+///
+/// **Exhaustiveness discipline (#66):** matches over `Stmt` must list
+/// every variant explicitly — no `_` arms. The point of the closed enum
+/// is that adding a variant breaks every consumer at compile time, so
+/// each backend is forced to decide how the new statement kind renders
+/// (even if the decision is "nothing"). A wildcard arm silently opts the
+/// site out of that safety net.
 #[derive(Debug, Clone)]
 pub enum Stmt {
     // ---- Primary intrinsics (fixture-evidence anchored) ----
