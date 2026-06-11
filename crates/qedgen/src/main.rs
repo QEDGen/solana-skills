@@ -3266,7 +3266,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     // v2.32 deleted the legacy `proptest_gen`.
                     let parsed = check::parse_spec_file(&spec)?;
                     let mir = mir::lower(&parsed);
-                    proptest_gen_mir::generate(&mir, &parsed, &spec, &proptest_output)?;
+                    proptest_gen_mir::generate(&mir, &parsed, &proptest_output)?;
                 }
             }
             if crucible || all {

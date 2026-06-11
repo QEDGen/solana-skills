@@ -24,7 +24,7 @@ The UX is **agent-first**: the user interacts with the SKILL (`SKILL.md`) and ag
 - Codegen mechanizes only deterministic translation; business logic (transfers, CPI authority, events, PDA creation) stays agent-filled `todo!()`.
 - When a template can't close a case, emit `sorry` with a comment — never bury it in tactics that might spuriously close.
 - Don't pre-shell to Leanstral/Aristotle for what a local LLM can do. Escalation is for *after* you've tried, not when you expect to need to.
-- The typed MIR (`mir.rs`) exists for bug-class elimination, not LoC: matches over the closed `Stmt` enum are exhaustive by discipline (no `_` arms — see the enum doc in `mir.rs`), so a new statement kind is a compile error at every `Stmt` consumer (Lean codegen + Rust scaffold), not silent drift. Kani/proptest still lower effects from `ParsedSpec` via `rust_codegen_util`. Measure intrinsics by bugs eliminated, not lines saved.
+- The typed MIR (`mir.rs`) exists for bug-class elimination, not LoC: matches over the closed `Stmt` enum are exhaustive by discipline (no `_` arms — see the enum doc in `mir.rs`), so a new statement kind is a compile error at every `Stmt` consumer (Lean codegen, Rust scaffold, and the Kani/proptest effect lowering via `rust_codegen_util::stmt_effect_triple`), not silent drift. Conditional `effect { match … }` bodies still render from `ParsedHandler.effect_branches` pending the Phase-5 `Branch` lowering. Measure intrinsics by bugs eliminated, not lines saved.
 
 ## Build and test
 
