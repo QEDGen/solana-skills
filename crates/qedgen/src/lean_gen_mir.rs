@@ -465,7 +465,13 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
     // aborting. Lookup the field's type in the pre-variant so the
     // bound is correctly typed (unsigned add → overflow; unsigned sub
     // → underflow; signed types skip the check).
-    for stmt in &h.body.stmts {
+    //
+    // `Stmt::Branch` arms are flattened to their union here — the ADT
+    // renderer predates conditional-effect rendering and keeps the
+    // pre-Phase-5 union semantics; real per-arm ADT rendering is a
+    // follow-up (the flat-state renderer at `emit_handler_transition`
+    // already renders a true Lean `match`).
+    for stmt in stmts_with_branch_union(&h.body.stmts) {
         match stmt {
             Stmt::CheckedAdd { path, delta, .. } => {
                 let stripped = strip_variant_prefix(path, mir);
@@ -521,10 +527,11 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
 
     // Build an effect map keyed by stripped field name. Account-
     // binding `.pubkey` assignments (no Lean scope) are skipped
-    // — matches `lean_gen::render_transition_adt:355`.
+    // — matches `lean_gen::render_transition_adt:355`. Branch arms
+    // flatten to their union (see the bound-check walk above).
     let mut effect_map: std::collections::HashMap<String, (&'static str, String)> =
         std::collections::HashMap::new();
-    for stmt in &h.body.stmts {
+    for stmt in stmts_with_branch_union(&h.body.stmts) {
         match stmt {
             Stmt::Assign { path, rhs } => {
                 if is_account_pubkey_ref(&rhs.rust) {
@@ -2686,9 +2693,164 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
         }
     }
 
-    // Assign / Add / Sub family → record-update parts.
+    // Lifecycle promotion + ghost updates apply on every exit path
+    // (appended to the flat `{ s with … }` parts, or to every arm of a
+    // conditional-effect `match`).
+    let mut common_parts: Vec<String> = Vec::new();
+    // Lifecycle promotion: `state := .NextVariant` lowers as
+    // `status := .NextVariant` on the lifecycle marker field. For
+    // pilot fixtures, the transition arrow on HandlerMir.transition
+    // captures this; emit the post-status set when present.
+    if let Some((_, post)) = &h.transition {
+        // Only emit the `status :=` part when lifecycle is real
+        // (≥2 states); single-lifecycle specs skip the marker per
+        // issue #43.
+        if mir.state.lifecycle_states.len() >= 2 {
+            common_parts.push(format!("status := .{}", safe_name(post)));
+        }
+    }
+    // Issue #67 item 3 — ghost field updates. A ghost with an `on <this
+    // handler>` clause assigns its new value alongside the normal effects;
+    // ghosts without a clause are left unchanged (the `{ s with … }`
+    // record update preserves unmentioned fields — the frame condition).
+    for ghost in &mir.ghosts {
+        if let Some(val) = ghost.updates.get(&h.name) {
+            common_parts.push(format!("{} := {}", safe_name(&ghost.name), val.lean));
+        }
+    }
+
+    let some_body = |effect_parts: Vec<String>| -> String {
+        let parts: Vec<String> = effect_parts
+            .into_iter()
+            .chain(common_parts.iter().cloned())
+            .collect();
+        if parts.is_empty() {
+            "some s".to_string()
+        } else {
+            format!("some {{ s with {} }}", parts.join(", "))
+        }
+    };
+
+    // Conditional effects (Phase 5, issue #42) — `effect { match … }`
+    // lowers to a `Stmt::Branch`; render a real Lean `match` so the
+    // model applies exactly one arm (the pre-Phase-5 renderer applied
+    // the *union* of every arm unconditionally — semantically wrong).
+    let branch = h.body.stmts.iter().find_map(|st| match st {
+        Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } => Some((scrutinee, arms, default)),
+        _ => None,
+    });
+
+    if let Some((scrutinee, arms, default)) = branch {
+        let scrutinee_lean = match scrutinee {
+            crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
+            crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+        };
+        // Per-arm: overflow/underflow bound guards for the arm's own
+        // effects move *inside* the arm (an untaken arm's bounds must
+        // not abort the transition), then the arm's record update.
+        let arm_line = |block: &crate::mir::Block| -> String {
+            let body = some_body(flat_effect_with_parts(h, &block.stmts));
+            let bounds = flat_effect_bound_conds(mir, h, &block.stmts, &conds);
+            if bounds.is_empty() {
+                body
+            } else {
+                let joined = bounds
+                    .iter()
+                    .map(|c| paren_low_prec(c))
+                    .collect::<Vec<_>>()
+                    .join(" \u{2227} ");
+                format!("if {} then {} else none", joined, body)
+            }
+        };
+        let indent = if conds.is_empty() { "  " } else { "    " };
+        let mut match_block = String::new();
+        match_block.push_str(&format!("{}match {} with\n", indent, scrutinee_lean));
+        for arm in arms {
+            let pat = arm
+                .pattern
+                .as_ref()
+                .map(|p| p.lean.clone())
+                .unwrap_or_else(|| "_".to_string());
+            match_block.push_str(&format!(
+                "{}| {} => {}\n",
+                indent,
+                pat,
+                arm_line(&arm.block)
+            ));
+        }
+        let default_line = match default {
+            Some(block) => arm_line(block),
+            // No wildcard arm in the spec — untaken scrutinee values
+            // leave the state unchanged (mirrors the Rust `_ => {}`).
+            None => some_body(Vec::new()),
+        };
+        let mut full = match_block;
+        full.push_str(&format!("{}| _ => {}\n", indent, default_line));
+
+        if conds.is_empty() {
+            out.push_str(&full);
+            out.push('\n');
+        } else {
+            let joined = conds
+                .iter()
+                .map(|c| paren_low_prec(c))
+                .collect::<Vec<_>>()
+                .join(" \u{2227} ");
+            out.push_str(&format!("  if {} then\n", joined));
+            out.push_str(&full);
+            out.push_str("  else none\n\n");
+        }
+        return;
+    }
+
+    let then_body = some_body(flat_effect_with_parts(h, &h.body.stmts));
+
+    if conds.is_empty() {
+        out.push_str(&format!("  {}\n\n", then_body));
+    } else {
+        let joined = conds
+            .iter()
+            .map(|c| paren_low_prec(c))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} ");
+        out.push_str(&format!("  if {} then\n", joined));
+        out.push_str(&format!("    {}\n", then_body));
+        out.push_str("  else none\n\n");
+    }
+}
+
+/// Body statements with `Stmt::Branch` arms flattened in (the union
+/// view). Used by the ADT transition renderer, which predates
+/// conditional-effect rendering and keeps pre-Phase-5 union semantics.
+fn stmts_with_branch_union(stmts: &[crate::mir::Stmt]) -> Vec<&crate::mir::Stmt> {
+    let mut out = Vec::new();
+    for s in stmts {
+        match s {
+            crate::mir::Stmt::Branch { arms, default, .. } => {
+                for a in arms {
+                    out.extend(stmts_with_branch_union(&a.block.stmts));
+                }
+                if let Some(d) = default {
+                    out.extend(stmts_with_branch_union(&d.stmts));
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Assign / Add / Sub family → `{ s with … }` record-update parts for a
+/// flat-state transition. Shared by the unconditional effect path and
+/// the per-arm `Stmt::Branch` rendering.
+fn flat_effect_with_parts(h: &crate::mir::HandlerMir, stmts: &[crate::mir::Stmt]) -> Vec<String> {
+    use crate::mir::Stmt;
     let mut with_parts: Vec<String> = Vec::new();
-    for stmt in &h.body.stmts {
+    for stmt in stmts {
         match stmt {
             Stmt::Assign { path, rhs } => {
                 // Drop `<field> := <account_binding>.pubkey` — the
@@ -2733,48 +2895,98 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
             | Stmt::Emit { .. } => {}
         }
     }
+    with_parts
+}
 
-    // Lifecycle promotion: `state := .NextVariant` lowers as
-    // `status := .NextVariant` on the lifecycle marker field. For
-    // pilot fixtures, the transition arrow on HandlerMir.transition
-    // captures this; emit the post-status set when present.
-    if let Some((_, post)) = &h.transition {
-        // Only emit the `status :=` part when lifecycle is real
-        // (≥2 states); single-lifecycle specs skip the marker per
-        // issue #43.
-        if mir.state.lifecycle_states.len() >= 2 {
-            with_parts.push(format!("status := .{}", safe_name(post)));
-        }
-    }
+/// Overflow/underflow bound conjuncts for one statement list — the
+/// per-arm analogue of `build_guard_cond_parts` items 3 and 5 (same
+/// formats, same all-arithmetic-kinds coverage, same dedup against
+/// already-present conjuncts). Used by the `Stmt::Branch` rendering so
+/// an arm's bounds gate only that arm.
+fn flat_effect_bound_conds(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    stmts: &[crate::mir::Stmt],
+    outer_conds: &[String],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let state_fields = flat_state_fields(mir);
+    let mut conds: Vec<String> = Vec::new();
 
-    // Issue #67 item 3 — ghost field updates. A ghost with an `on <this
-    // handler>` clause assigns its new value alongside the normal effects;
-    // ghosts without a clause are left unchanged (the `{ s with … }`
-    // record update preserves unmentioned fields — the frame condition).
-    for ghost in &mir.ghosts {
-        if let Some(val) = ghost.updates.get(&h.name) {
-            with_parts.push(format!("{} := {}", safe_name(&ghost.name), val.lean));
-        }
-    }
-
-    let then_body = if with_parts.is_empty() {
-        "some s".to_string()
-    } else {
-        format!("some {{ s with {} }}", with_parts.join(", "))
-    };
-
-    if conds.is_empty() {
-        out.push_str(&format!("  {}\n\n", then_body));
-    } else {
-        let joined = conds
+    for stmt in stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedAdd { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        if let Some(ty) = state_fields
             .iter()
-            .map(|c| paren_low_prec(c))
-            .collect::<Vec<_>>()
-            .join(" \u{2227} ");
-        out.push_str(&format!("  if {} then\n", joined));
-        out.push_str(&format!("    {}\n", then_body));
-        out.push_str("  else none\n\n");
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            if ty_max_const(&ty).is_some() {
+                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
+            }
+        }
     }
+
+    for stmt in stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedSub { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        let ty = match state_fields
+            .iter()
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            Some(t) => t,
+            None => continue,
+        };
+        let max = match ty_max_const(&ty) {
+            Some(m) => m,
+            None => continue,
+        };
+        let sf = safe_name(&field);
+        let needle_a = format!("s.{} + {}", sf, delta.lean);
+        let needle_b = format!("{} + s.{}", delta.lean, sf);
+        let already = conds
+            .iter()
+            .chain(outer_conds.iter())
+            .any(|c| c.contains(&needle_a) || c.contains(&needle_b));
+        if already {
+            continue;
+        }
+        conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
+    }
+
+    conds
 }
 
 /// Build the if-condition conjuncts for a handler's flat-state
@@ -5664,6 +5876,78 @@ fn safe_name(name: &str) -> String {
 mod tests {
     use super::*;
     use std::path::Path as FsPath;
+
+    /// Phase-5 #42 — the flat-state transition renders `Stmt::Branch` as
+    /// a real Lean `match` with per-arm semantics: checked-add bounds
+    /// gate only their own arm, and the model applies exactly one arm
+    /// (the pre-Phase-5 renderer applied the *union* of every arm
+    /// unconditionally — semantically wrong).
+    #[test]
+    fn flat_transition_renders_branch_as_lean_match() {
+        let src = r#"spec CondFee
+program_id "11111111111111111111111111111111"
+type State
+  | Active of { a : U64, b : U64, d : U64 }
+type Error
+  | InvalidAmount
+handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
+  permissionless
+  requires amount > 0 else InvalidAmount
+  effect {
+    match fee_type {
+      0 => a +=! amount,
+      1 => b += amount,
+      _ => d := 0,
+    }
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        let mut out = String::new();
+        emit_handler_transition(&mut out, &mir, &mir.handlers[0]);
+
+        assert!(
+            out.contains("match fee_type with"),
+            "transition must render a Lean match:\n{out}"
+        );
+        // Bound guards mirror `build_guard_cond_parts` exactly: ALL add
+        // kinds (checked / saturating / wrapping) gain the `≤ MAX`
+        // conjunct in the flat renderer — per-arm, gating only their
+        // own arm. (Refining Sat/Wrap Lean semantics is a separate,
+        // pre-existing concern — see the same all-kinds match in
+        // `build_guard_cond_parts`.)
+        assert!(
+            out.contains(
+                "| 0 => if s.a + amount \u{2264} 18446744073709551615 then \
+                 some { s with a := s.a + amount } else none"
+            ),
+            "saturating arm's bound gates only that arm:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "| 1 => if s.b + amount \u{2264} 18446744073709551615 then \
+                 some { s with b := s.b + amount } else none"
+            ),
+            "checked arm's overflow bound gates only that arm:\n{out}"
+        );
+        assert!(
+            out.contains("| _ => some { s with d := 0 }"),
+            "wildcard arm renders from Branch.default:\n{out}"
+        );
+        // The union must not leak into the top-level guard: only the
+        // requires conjunct remains.
+        assert!(
+            out.contains("if amount > 0 then\n"),
+            "top-level guard keeps only the requires conjunct:\n{out}"
+        );
+        // Exactly one record update per field (no union duplication).
+        assert_eq!(
+            out.matches("a := s.a + amount").count(),
+            1,
+            "arm effect rendered exactly once:\n{out}"
+        );
+    }
 
     /// sBPF Lean codegen regression gate. The 5 bundled `examples/sbpf/*`
     /// specs use modern `handler` syntax with no `instruction` blocks, so

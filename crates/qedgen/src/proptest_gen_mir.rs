@@ -810,12 +810,15 @@ fn emit_account_section(
     }
 
     // Overflow detection tests
-    // #66 — checked-add filter reads the lowered MIR body, not `op.effects`.
+    // #66 — checked-add filter reads the lowered MIR body, not
+    // `op.effects`. Deep walk: adds inside `Stmt::Branch` arms count
+    // (the `>= pre` overflow assertion holds whether or not the arm
+    // fires — an untaken arm leaves the field unchanged).
     let overflow_ops: Vec<&&ParsedHandler> = handlers
         .iter()
         .filter(|op| {
             mir.handler_block(&op.name).is_some_and(|body| {
-                rust_codegen_util::block_effect_triples(body)
+                rust_codegen_util::block_effect_triples_deep(body)
                     .iter()
                     .any(|(_, k, _)| *k == "add")
             })
@@ -1401,7 +1404,7 @@ fn emit_overflow_tests_for(
         let body = mir
             .handler_block(&op.name)
             .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
-        for (field_raw, kind, _value) in rust_codegen_util::block_effect_triples(body) {
+        for (field_raw, kind, _value) in rust_codegen_util::block_effect_triples_deep(body) {
             if kind != "add" {
                 continue;
             }

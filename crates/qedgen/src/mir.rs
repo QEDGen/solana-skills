@@ -1655,41 +1655,13 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         stmts.push(Stmt::Abort(ab.error_name.clone()));
     }
 
-    // 3. Effects → typed Stmt kinds per op_kind.
-    //    effect_on_error[i] (when present) supplies the per-site error name
-    //    for checked variants.
-    for (i, (field, op_kind, value)) in h.effects.iter().enumerate() {
-        let err_override = h.effect_on_error.get(i).and_then(|o| o.clone());
-        let path = parse_field_path(field);
-        let rhs = Expr::from_raw(value.clone());
-        let stmt = match op_kind.as_str() {
-            "set" => Stmt::Assign { path, rhs },
-            "add" => Stmt::CheckedAdd {
-                path,
-                delta: rhs,
-                err: err_override.unwrap_or_else(|| "Overflow".to_string()),
-            },
-            "sub" => Stmt::CheckedSub {
-                path,
-                delta: rhs,
-                err: err_override.unwrap_or_else(|| "Underflow".to_string()),
-            },
-            "add_wrap" => Stmt::WrapAdd { path, delta: rhs },
-            "sub_wrap" => Stmt::WrapSub { path, delta: rhs },
-            "add_sat" => Stmt::SatAdd { path, delta: rhs },
-            "sub_sat" => Stmt::SatSub { path, delta: rhs },
-            other => {
-                // Unknown op_kind — synthesize an Assign with a structured
-                // comment marker so codegens can surface it as a bug.
-                Stmt::Assign {
-                    path,
-                    rhs: Expr::from_raw(format!(
-                        "/* MIR-TODO: unknown op_kind `{other}` */ {value}"
-                    )),
-                }
-            }
-        };
-        stmts.push(stmt);
+    // 3. Effects → typed Stmt kinds per op_kind. Suppressed when the
+    //    handler declared `effect { match … }` — `h.effects` then
+    //    carries the *union* of every arm's effects (parser back-compat
+    //    view) and the real statements live on the `Stmt::Branch`
+    //    lowered in step 7; lowering both would double-emit.
+    if h.effect_branches.is_none() {
+        stmts.extend(lower_effects(&h.effects, &h.effect_on_error));
     }
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
@@ -1753,17 +1725,88 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         stmts.push(Stmt::Emit { event: ev.clone() });
     }
 
-    // 7. ParsedEffectBranches: Phase 0c stub — emit a placeholder Abort
-    //    with a marker error name. Phase 5 fills in proper Branch
-    //    lowering. The TokenTransfer-using pilot fixtures don't trip
-    //    this path; this is purely a forward-compatibility hook.
-    if h.effect_branches.is_some() {
-        stmts.push(Stmt::Abort(
-            "__MIR_TODO_PHASE_5_BRANCH_LOWERING__".to_string(),
-        ));
+    // 7. ParsedEffectBranches → `Stmt::Branch` (Phase 5, issue #42).
+    //    Non-wildcard arms lower in declaration order; the wildcard arm
+    //    becomes `default`. The flat union in `h.effects` was suppressed
+    //    in step 3 — the Branch is the sole carrier of these effects.
+    if let Some(br) = &h.effect_branches {
+        let mut arms = Vec::new();
+        let mut default = None;
+        for arm in &br.arms {
+            let block = Block {
+                stmts: lower_effects(&arm.effects, &arm.effect_on_error),
+            };
+            if arm.is_wildcard {
+                default = Some(block);
+            } else {
+                arms.push(BranchArm {
+                    pattern: Some(Expr {
+                        lean: arm.pattern_lean.clone(),
+                        rust: arm.pattern_rust.clone(),
+                        rust_pod: arm.pattern_rust.clone(),
+                        rust_binary: String::new(),
+                        source_span: None,
+                    }),
+                    block,
+                });
+            }
+        }
+        stmts.push(Stmt::Branch {
+            scrutinee: BranchScrutinee::Match(Expr {
+                lean: br.scrutinee_lean.clone(),
+                rust: br.scrutinee_rust.clone(),
+                rust_pod: br.scrutinee_rust_pod.clone(),
+                rust_binary: String::new(),
+                source_span: None,
+            }),
+            arms,
+            default,
+        });
     }
 
     Block { stmts }
+}
+
+/// Lower a parsed effect-triple list into typed `Stmt`s.
+/// `on_error[i]` (when present) supplies the per-site error name for
+/// checked variants. Shared by the flat-effects path and the per-arm
+/// `Stmt::Branch` lowering.
+fn lower_effects(effects: &[(String, String, String)], on_error: &[Option<String>]) -> Vec<Stmt> {
+    let mut stmts = Vec::new();
+    for (i, (field, op_kind, value)) in effects.iter().enumerate() {
+        let err_override = on_error.get(i).and_then(|o| o.clone());
+        let path = parse_field_path(field);
+        let rhs = Expr::from_raw(value.clone());
+        let stmt = match op_kind.as_str() {
+            "set" => Stmt::Assign { path, rhs },
+            "add" => Stmt::CheckedAdd {
+                path,
+                delta: rhs,
+                err: err_override.unwrap_or_else(|| "Overflow".to_string()),
+            },
+            "sub" => Stmt::CheckedSub {
+                path,
+                delta: rhs,
+                err: err_override.unwrap_or_else(|| "Underflow".to_string()),
+            },
+            "add_wrap" => Stmt::WrapAdd { path, delta: rhs },
+            "sub_wrap" => Stmt::WrapSub { path, delta: rhs },
+            "add_sat" => Stmt::SatAdd { path, delta: rhs },
+            "sub_sat" => Stmt::SatSub { path, delta: rhs },
+            other => {
+                // Unknown op_kind — synthesize an Assign with a structured
+                // comment marker so codegens can surface it as a bug.
+                Stmt::Assign {
+                    path,
+                    rhs: Expr::from_raw(format!(
+                        "/* MIR-TODO: unknown op_kind `{other}` */ {value}"
+                    )),
+                }
+            }
+        };
+        stmts.push(stmt);
+    }
+    stmts
 }
 
 /// Parse a dotted field path like `state.admin` or `accounts.escrow_ta.amount`
@@ -1818,6 +1861,86 @@ fn parse_ty(s: &str) -> Ty {
 mod tests {
     use super::*;
     use std::path::Path as FsPath;
+
+    /// Phase-5 #42 — `effect { match … }` lowers to a real `Stmt::Branch`:
+    /// non-wildcard arms in order, wildcard arm as `default`, NO flat
+    /// union effects (they would double-emit), no Phase-5 stub `Abort`.
+    #[test]
+    fn effect_branches_lower_to_branch_stmt() {
+        let src = r#"spec CondFee
+program_id "11111111111111111111111111111111"
+type State
+  | Active of { a : U64, b : U64, d : U64 }
+type Error
+  | InvalidAmount
+handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
+  permissionless
+  requires amount > 0 else InvalidAmount
+  effect {
+    match fee_type {
+      0 => a +=! amount,
+      1 => b += amount,
+      _ => d := 0,
+    }
+  }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = lower(&spec);
+        let body = mir.handler_block("route").expect("route body");
+
+        let branches: Vec<&Stmt> = body
+            .stmts
+            .iter()
+            .filter(|s| matches!(s, Stmt::Branch { .. }))
+            .collect();
+        assert_eq!(branches.len(), 1, "exactly one Branch stmt: {body:?}");
+        let Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } = branches[0]
+        else {
+            unreachable!()
+        };
+        let BranchScrutinee::Match(scrut) = scrutinee else {
+            panic!("expected Match scrutinee");
+        };
+        assert_eq!(scrut.rust, "fee_type");
+        assert_eq!(arms.len(), 2, "two non-wildcard arms");
+        assert!(
+            matches!(arms[0].block.stmts.as_slice(), [Stmt::SatAdd { .. }]),
+            "arm 0 should be SatAdd: {:?}",
+            arms[0].block.stmts
+        );
+        assert!(
+            matches!(arms[1].block.stmts.as_slice(), [Stmt::CheckedAdd { .. }]),
+            "arm 1 should be CheckedAdd: {:?}",
+            arms[1].block.stmts
+        );
+        let default = default.as_ref().expect("wildcard arm becomes default");
+        assert!(
+            matches!(default.stmts.as_slice(), [Stmt::Assign { .. }]),
+            "default should be Assign: {:?}",
+            default.stmts
+        );
+
+        // No flat union effects and no stub Abort alongside the Branch.
+        assert!(
+            !body.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::Assign { .. }
+                    | Stmt::CheckedAdd { .. }
+                    | Stmt::CheckedSub { .. }
+                    | Stmt::WrapAdd { .. }
+                    | Stmt::WrapSub { .. }
+                    | Stmt::SatAdd { .. }
+                    | Stmt::SatSub { .. }
+                    | Stmt::Abort(_)
+            )),
+            "flat union effects / stub Abort must be suppressed: {body:?}"
+        );
+    }
 
     // ---- Phase 0b: type-composition smoke tests ----
 
