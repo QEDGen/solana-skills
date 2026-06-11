@@ -1486,7 +1486,19 @@ fn mir_needs_spl(mir: &Mir) -> bool {
             match stmt {
                 Stmt::TokenTransfer { .. } => return true,
                 Stmt::Cpi { target, .. } if target.0 == "Token" => return true,
-                _ => {}
+                Stmt::Cpi { .. }
+                | Stmt::RequireOrAbort { .. }
+                | Stmt::VariantPromote { .. }
+                | Stmt::Assign { .. }
+                | Stmt::CheckedAdd { .. }
+                | Stmt::CheckedSub { .. }
+                | Stmt::WrapAdd { .. }
+                | Stmt::WrapSub { .. }
+                | Stmt::SatAdd { .. }
+                | Stmt::SatSub { .. }
+                | Stmt::Branch { .. }
+                | Stmt::Abort(_)
+                | Stmt::Emit { .. } => {}
             }
         }
     }

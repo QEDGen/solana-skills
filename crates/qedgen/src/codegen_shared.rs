@@ -1949,10 +1949,13 @@ const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 /// `(target, is_spl_token)`.
 ///
 /// - Anchor    + SPL Token → `anchor_spl::token::*` builder shape
+/// - Anchor    + System    → `anchor_lang::system_program::*` builder shape
 /// - Anchor    + generic   → `solana_program::program::invoke` shape
 /// - Quasar    + SPL Token → `quasar_spl::TokenCpi` method chain
+/// - Quasar    + System    → `Program<SystemProgram>` method chain
 /// - Quasar    + generic   → not implemented (spike scope; §8 slice 3)
 /// - Pinocchio + SPL Token → `pinocchio_token::instructions::*` struct + invoke
+/// - Pinocchio + System    → `pinocchio_system::instructions::*` struct + invoke
 /// - Pinocchio + generic   → not implemented (spike scope; §8 slice 7)
 ///
 /// Returns `None` for any branch that isn't implemented yet — the
@@ -1976,8 +1979,10 @@ fn try_emit_cpi(
         (Target::Anchor, false, true) => emit_system_cpi_anchor(call, handler, iface, spec),
         (Target::Anchor, false, false) => emit_generic_cpi_anchor(call, handler, iface, spec),
         (Target::Quasar, true, _) => emit_spl_token_cpi_quasar(call, handler, spec),
-        // Quasar generic / System CPI — follow-on slice (uses `BufCpiCall`).
-        (Target::Quasar, false, _) => None,
+        (Target::Quasar, false, true) => emit_system_cpi_quasar(call, handler, spec),
+        // Quasar generic (non-SPL, non-System) CPI — follow-on slice
+        // (uses `BufCpiCall`).
+        (Target::Quasar, false, false) => None,
         (Target::Pinocchio, true, _) => emit_spl_token_cpi_pinocchio(call, handler, spec),
         (Target::Pinocchio, false, true) => emit_system_cpi_pinocchio(call, handler, spec),
         // Pinocchio generic (non-SPL, non-System) CPI — follow-on slice
@@ -2516,7 +2521,7 @@ fn emit_system_anchor(
 /// `initialize_account` stays `None` — `quasar-spl` exposes only
 /// `initialize_account3`, whose `owner: &Address` positional is a raw key
 /// (not an account view) and which omits the rent sysvar, so it doesn't
-/// fit the uniform `emit_spl_quasar` helper (see the match arm).
+/// fit the uniform `emit_quasar_method_chain` helper (see the match arm).
 fn emit_spl_token_cpi_quasar(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2526,7 +2531,7 @@ fn emit_spl_token_cpi_quasar(
     let prog_name = &token_program_acct.name;
 
     match call.target_handler.as_str() {
-        "transfer" => emit_spl_quasar(
+        "transfer" => emit_quasar_method_chain(
             call,
             handler,
             spec,
@@ -2538,7 +2543,7 @@ fn emit_spl_token_cpi_quasar(
             &["from", "to", "authority"],
             Some("amount"),
         ),
-        "mint_to" => emit_spl_quasar(
+        "mint_to" => emit_quasar_method_chain(
             call,
             handler,
             spec,
@@ -2551,7 +2556,7 @@ fn emit_spl_token_cpi_quasar(
             &["mint", "to", "mint_authority"],
             Some("amount"),
         ),
-        "burn" => emit_spl_quasar(
+        "burn" => emit_quasar_method_chain(
             call,
             handler,
             spec,
@@ -2561,7 +2566,7 @@ fn emit_spl_token_cpi_quasar(
             &["from", "mint", "authority"],
             Some("amount"),
         ),
-        "close_account" => emit_spl_quasar(
+        "close_account" => emit_quasar_method_chain(
             call,
             handler,
             spec,
@@ -2576,27 +2581,29 @@ fn emit_spl_token_cpi_quasar(
         // exposes only `initialize_account3`, whose third positional is
         // `owner: &Address` (a raw key, not an account view) and which
         // omits the rent sysvar. That divergent signature doesn't fit the
-        // positional-account-view `emit_spl_quasar` helper, so it falls
+        // positional-account-view `emit_quasar_method_chain` helper, so it falls
         // through to the caller's `todo!()`.
         _ => None,
     }
 }
 
-/// Emit one Quasar `quasar_spl::*` CPI as a single-line method chain on
-/// the token-program account: `self.<prog>.<method>(&self.<a>, …,
-/// scalar).invoke()?;`. The shape comes from `quasar-spl-0.0.0`'s
-/// `TokenCpi` trait (sibling shape to the Anchor builder).
+/// Emit one Quasar CPI as a single-line method chain on a program
+/// account: `self.<prog>.<method>(&self.<a>, …, scalar).invoke()?;`.
+/// The shape comes from `quasar-spl-0.0.0`'s `TokenCpi` trait (sibling
+/// shape to the Anchor builder); `quasar-lang`'s
+/// `Program<SystemProgram>` exposes the identical chain, so the System
+/// dispatcher (`emit_system_cpi_quasar`) reuses this emitter.
 ///
 /// `account_args_in_order` carries the call-site arg names in the order
-/// the Quasar trait method expects (e.g. `["from", "to", "authority"]`
+/// the Quasar method expects (e.g. `["from", "to", "authority"]`
 /// for `transfer`). The function looks each one up in `call.args` and
 /// resolves it to `&self.<rust_expr>`. Unrecognized arg names short-
 /// circuit to `None`.
-fn emit_spl_quasar(
+fn emit_quasar_method_chain(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
-    token_program: &str,
+    program_account: &str,
     method_name: &str,
     account_args_in_order: &[&str],
     scalar_arg: Option<&str>,
@@ -2612,10 +2619,41 @@ fn emit_spl_quasar(
     }
     Some(format!(
         "        self.{}.{}({}).invoke()?;\n",
-        token_program,
+        program_account,
         method_name,
         args.join(", ")
     ))
+}
+
+/// Dispatch a `call System.<handler>(...)` site to its Quasar
+/// `Program<SystemProgram>` method-chain shape
+/// (`self.<system_program>.transfer(&self.<from>, &self.<to>,
+/// <lamports>).invoke()?;`). Only `transfer` is mechanized — the same
+/// slice boundary as the Anchor / Pinocchio System emitters:
+/// `create_account` / `assign` take an `&Address` owner whose
+/// resolution from a spec `Pubkey` arg is a follow-on, so they return
+/// `None` and the caller keeps the breadcrumb.
+fn emit_system_cpi_quasar(
+    call: &crate::check::ParsedCall,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+) -> Option<String> {
+    let sys_prog = find_program_account_for_interface(handler, &call.target_interface)?;
+    let prog_name = &sys_prog.name;
+    match call.target_handler.as_str() {
+        // Program<SystemProgram>::transfer(from, to, lamports) — the
+        // spec's `amount` arg binds the `lamports` positional.
+        "transfer" => emit_quasar_method_chain(
+            call,
+            handler,
+            spec,
+            prog_name,
+            "transfer",
+            &["from", "to"],
+            Some("amount"),
+        ),
+        _ => None,
+    }
 }
 
 /// Pinocchio SPL Token dispatcher. Routes to the right
@@ -6592,14 +6630,10 @@ handler do_init : State.Active -> State.Active {
         );
     }
 
-    /// Pinocchio System Program `transfer` CPI. `call System.transfer(...)`
-    /// must lower to `pinocchio_system::instructions::Transfer { from, to,
-    /// lamports }.invoke()?` — the spec's `amount` arg binds the struct's
-    /// `lamports` field. Before this slice, System calls fell through to a
-    /// `todo!()` breadcrumb on Pinocchio (only SPL Token was mechanized).
-    #[test]
-    fn cpi_emits_pinocchio_system_transfer() {
-        let spec = crate::chumsky_adapter::parse_str(
+    /// Caller fixture for `System.transfer` (payer → pda lamport top-up).
+    /// Shared by the Anchor / Quasar / Pinocchio System transfer tests.
+    fn parse_system_transfer_caller_spec() -> ParsedSpec {
+        crate::chumsky_adapter::parse_str(
             r#"spec Caller
 program_id "11111111111111111111111111111111"
 
@@ -6630,7 +6664,17 @@ handler topup (n : U64) : State.Active -> State.Active {
 }
 "#,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Pinocchio System Program `transfer` CPI. `call System.transfer(...)`
+    /// must lower to `pinocchio_system::instructions::Transfer { from, to,
+    /// lamports }.invoke()?` — the spec's `amount` arg binds the struct's
+    /// `lamports` field. Before this slice, System calls fell through to a
+    /// `todo!()` breadcrumb on Pinocchio (only SPL Token was mechanized).
+    #[test]
+    fn cpi_emits_pinocchio_system_transfer() {
+        let spec = parse_system_transfer_caller_spec();
         let handler = spec.handlers.iter().find(|h| h.name == "topup").unwrap();
         let call = handler.calls.first().unwrap();
         let rendered = try_emit_cpi(call, handler, &spec, Target::Pinocchio)
@@ -6673,13 +6717,10 @@ handler topup (n : U64) : State.Active -> State.Active {
         );
     }
 
-    /// System `create_account` / `assign` are not mechanized this slice
-    /// (their `owner: &Pubkey` resolution from a spec `Pubkey` arg is a
-    /// follow-on). `try_emit_cpi` must return `None` so the caller keeps
-    /// the breadcrumb rather than emit code that may not type-check.
-    #[test]
-    fn cpi_pinocchio_system_create_account_is_breadcrumb() {
-        let spec = crate::chumsky_adapter::parse_str(
+    /// Caller fixture for `System.create_account`. Shared by the
+    /// Quasar + Pinocchio breadcrumb tests.
+    fn parse_system_create_account_caller_spec() -> ParsedSpec {
+        crate::chumsky_adapter::parse_str(
             r#"spec Caller
 program_id "11111111111111111111111111111111"
 
@@ -6710,7 +6751,16 @@ handler make (l : U64) (s : U64) (o : Pubkey) : State.Active -> State.Active {
 }
 "#,
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// System `create_account` / `assign` are not mechanized this slice
+    /// (their `owner: &Pubkey` resolution from a spec `Pubkey` arg is a
+    /// follow-on). `try_emit_cpi` must return `None` so the caller keeps
+    /// the breadcrumb rather than emit code that may not type-check.
+    #[test]
+    fn cpi_pinocchio_system_create_account_is_breadcrumb() {
+        let spec = parse_system_create_account_caller_spec();
         let handler = spec.handlers.iter().find(|h| h.name == "make").unwrap();
         let call = handler.calls.first().unwrap();
         assert!(
@@ -6726,38 +6776,7 @@ handler make (l : U64) (s : U64) (o : Pubkey) : State.Active -> State.Active {
     /// (which is what System fell through to on Anchor before this slice).
     #[test]
     fn cpi_emits_anchor_system_transfer() {
-        let spec = crate::chumsky_adapter::parse_str(
-            r#"spec Caller
-program_id "11111111111111111111111111111111"
-
-interface System {
-  program_id "11111111111111111111111111111111"
-  handler transfer (amount : U64) {
-    discriminant "0x02000000"
-    accounts {
-      from : signer, writable
-      to   : writable
-    }
-    requires amount > 0
-  }
-}
-
-type State | Active of { balance : U64 }
-type Error | E
-
-handler topup (n : U64) : State.Active -> State.Active {
-  permissionless
-  accounts {
-    state          : writable
-    payer          : signer, writable
-    pda            : writable
-    system_program : program
-  }
-  call System.transfer(from = payer, to = pda, amount = n)
-}
-"#,
-        )
-        .unwrap();
+        let spec = parse_system_transfer_caller_spec();
         let handler = spec.handlers.iter().find(|h| h.name == "topup").unwrap();
         let call = handler.calls.first().unwrap();
         let rendered = try_emit_cpi(call, handler, &spec, Target::Anchor)
@@ -6786,6 +6805,63 @@ handler topup (n : U64) : State.Active -> State.Active {
             !rendered.contains("solana_program::program::invoke")
                 && !rendered.contains("anchor_spl"),
             "System transfer must be idiomatic, not generic invoke / SPL; got:\n{rendered}"
+        );
+    }
+
+    /// Quasar System Program `transfer` CPI. `call System.transfer(...)`
+    /// must lower to the `Program<SystemProgram>` method chain
+    /// `self.system_program.transfer(&self.payer, &self.pda, n).invoke()?;`
+    /// — the spec's `amount` arg binds the `lamports` positional. Before
+    /// this slice, ALL non-SPL Quasar CPIs fell through to the `todo!()`
+    /// breadcrumb.
+    #[test]
+    fn cpi_emits_quasar_system_transfer() {
+        let spec = parse_system_transfer_caller_spec();
+        let handler = spec.handlers.iter().find(|h| h.name == "topup").unwrap();
+        let call = handler.calls.first().unwrap();
+        let rendered = try_emit_cpi(call, handler, &spec, Target::Quasar)
+            .expect("Quasar System transfer must emit");
+        assert!(
+            rendered.contains("self.system_program.transfer("),
+            "must invoke transfer on the system-program account; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("&self.payer"),
+            "from arg must resolve to &self.payer; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("&self.pda"),
+            "to arg must resolve to &self.pda; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(", n)"),
+            "amount param `n` passes through bare as the lamports positional; got:\n{rendered}"
+        );
+        assert!(
+            rendered.trim_end().ends_with(".invoke()?;"),
+            "Quasar method chain must terminate with .invoke()?; got:\n{rendered}"
+        );
+        // Anti-regression: no Anchor / Pinocchio shape leakage.
+        assert!(
+            !rendered.contains("CpiContext")
+                && !rendered.contains("anchor")
+                && !rendered.contains("pinocchio_system"),
+            "Quasar emission must not leak Anchor / Pinocchio shape; got:\n{rendered}"
+        );
+    }
+
+    /// Quasar System `create_account` / `assign` are not mechanized this
+    /// slice (same `&Address` owner-resolution follow-on as the Anchor /
+    /// Pinocchio emitters). `try_emit_cpi` must return `None` so the
+    /// caller keeps the breadcrumb.
+    #[test]
+    fn cpi_quasar_system_create_account_is_breadcrumb() {
+        let spec = parse_system_create_account_caller_spec();
+        let handler = spec.handlers.iter().find(|h| h.name == "make").unwrap();
+        let call = handler.calls.first().unwrap();
+        assert!(
+            try_emit_cpi(call, handler, &spec, Target::Quasar).is_none(),
+            "Quasar create_account must stay a breadcrumb (None) this slice"
         );
     }
 

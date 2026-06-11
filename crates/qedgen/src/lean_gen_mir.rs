@@ -502,7 +502,20 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
                     }
                 }
             }
-            _ => {}
+            // `Wrap*` / `Sat*` handle the boundary without aborting;
+            // non-arithmetic stmts carry no bound to check.
+            Stmt::Assign { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
         }
     }
 
@@ -529,7 +542,13 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
             | Stmt::SatSub { path, delta } => {
                 effect_map.insert(strip_variant_prefix(path, mir), ("sub", delta.lean.clone()));
             }
-            _ => {}
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
         }
     }
 
@@ -1428,7 +1447,13 @@ fn infer_idx_promotions_mir(
             | Stmt::WrapSub { path, .. }
             | Stmt::SatAdd { path, .. }
             | Stmt::SatSub { path, .. } => path.segments.first().cloned().unwrap_or_default(),
-            _ => continue,
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
         };
         if let Some((root, idx, _)) = parse_indexed_lhs(&lhs) {
             record(idx, root);
@@ -1645,7 +1670,13 @@ fn emit_indexed_transition(
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => (path, "sub", delta.lean.as_str()),
-            _ => continue,
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
         };
         // Drop `<field> := <account_binding>.pubkey` — no Lean scope
         // for account-binding pubkey refs.
@@ -2693,7 +2724,13 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
                 let d = effect_value_to_lean_mir(&delta.lean, &h.params);
                 with_parts.push(format!("{} := s.{} - {}", f, f, d));
             }
-            _ => {}
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
         }
     }
 
@@ -2781,7 +2818,17 @@ fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> Vec<String> 
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => (path, delta),
-            _ => continue,
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedAdd { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
         };
         let field = path_field_name(path);
         if let Some(ty) = state_fields
@@ -2810,7 +2857,17 @@ fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> Vec<String> 
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => (path, delta),
-            _ => continue,
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedSub { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
         };
         let field = path_field_name(path);
         let ty = match state_fields
@@ -3426,7 +3483,13 @@ fn preservation_proof_script(
         | Stmt::WrapSub { path, .. }
         | Stmt::SatAdd { path, .. }
         | Stmt::SatSub { path, .. } => prop_fields.iter().any(|f| f == &path_field_name(path)),
-        _ => false,
+        Stmt::RequireOrAbort { .. }
+        | Stmt::TokenTransfer { .. }
+        | Stmt::VariantPromote { .. }
+        | Stmt::Branch { .. }
+        | Stmt::Abort(_)
+        | Stmt::Cpi { .. }
+        | Stmt::Emit { .. } => false,
     }) || (h.transition.is_some()
         && prop_fields.iter().any(|f| f == "status"));
 
@@ -3513,7 +3576,13 @@ fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> S
                 | Stmt::SatSub { path, .. } => {
                     prop_fields.iter().any(|f| f == &path_field_name(path))
                 }
-                _ => false,
+                Stmt::RequireOrAbort { .. }
+                | Stmt::TokenTransfer { .. }
+                | Stmt::VariantPromote { .. }
+                | Stmt::Branch { .. }
+                | Stmt::Abort(_)
+                | Stmt::Cpi { .. }
+                | Stmt::Emit { .. } => false,
             });
             if !touches_prop_field {
                 proof.push_str(&format!(
@@ -4323,7 +4392,13 @@ impl WitnessState {
                         f.1 = cur.saturating_sub(sub).to_string();
                     }
                 }
-                _ => {}
+                Stmt::RequireOrAbort { .. }
+                | Stmt::TokenTransfer { .. }
+                | Stmt::VariantPromote { .. }
+                | Stmt::Branch { .. }
+                | Stmt::Abort(_)
+                | Stmt::Cpi { .. }
+                | Stmt::Emit { .. } => {}
             }
         }
         if let Some((_, post)) = &h.transition {
@@ -5273,7 +5348,21 @@ fn overflow_proof_script(
     let is_add_field = |field: &str| -> bool {
         h.body.stmts.iter().any(|s| match s {
             Stmt::CheckedAdd { path, .. } => path_field_name(path) == field,
-            _ => false,
+            // Only checked adds gate the overflow proof shape here;
+            // wrap/sat arithmetic and non-arithmetic stmts don't abort.
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedSub { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => false,
         })
     };
 
