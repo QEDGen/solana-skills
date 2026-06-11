@@ -502,7 +502,7 @@ $QEDGEN codegen --ci
 | `--test-output` | Path | `./programs/src/tests.rs` | Unit test output path |
 | `--proptest` | bool | false | Generate proptest harnesses |
 | `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). |
-| `--crucible` | bool | false | Generate a coverage-guided fuzz harness (v2.18). Anchor target only; sBPF / Pinocchio specs error early. Output is a self-contained `fuzz/<prog>/` directory with `Cargo.toml`, `src/main.rs` (the harness), and `idls/`. Action-body `accounts::X { ... }` literals emit as `todo!()` for agent-fill (same as handler bodies). |
+| `--crucible` | bool | false | Generate a coverage-guided fuzz harness (v2.18). Anchor target only; sBPF specs are skipped with a note (assembly is Lean-verified); Pinocchio specs error early. Output is a self-contained `fuzz/<prog>/` directory with `Cargo.toml`, `src/main.rs` (the harness), and `idls/`. Action-body `accounts::X { ... }` literals emit as `todo!()` for agent-fill (same as handler bodies). |
 | `--crucible-output` | Path | `./fuzz` | Parent directory for the generated harness. Final tree lives at `<dir>/<prog>/`. |
 | `--integration` | bool | false | Generate in-process SVM integration tests |
 | `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
@@ -526,9 +526,16 @@ on as `codegen_shared.rs`). Output is locked by checked-in snapshot
 suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`).
 
 `lean_gen_mir` handles every spec shape, including sBPF
-(`mir.is_assembly` → `render_sbpf`). `--kani` and `--proptest` skip sBPF
-specs entirely — assembly is verified via Lean proofs + client-side
-tests, not generated harnesses.
+(`mir.is_assembly` → `render_sbpf`). For sBPF specs (`pragma sbpf`)
+only `--lean` and `--ci` emit — the Rust scaffold and every
+Rust-shaped backend (`--kani` / `--kani-impl` / `--test` /
+`--proptest` / `--crucible` / `--integration`) are skipped with a
+note, since assembly is verified via Lean proofs + client-side tests,
+not generated Rust artifacts. The canonical sBPF regen command is:
+
+```bash
+qedgen codegen --lean --spec <spec>.qedspec --lean-output formal_verification/Spec.lean
+```
 
 #### Scaffold-once vs. always-regenerate
 

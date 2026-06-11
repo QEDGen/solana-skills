@@ -3121,17 +3121,31 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             let is_pinocchio = matches!(target, Target::Pinocchio);
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
+            // sBPF specs (`pragma sbpf`) model assembly, not a Rust
+            // state machine — old-syntax specs declare `instruction`
+            // blocks instead of handlers, and every Rust-shaped
+            // artifact (scaffold, Kani, proptest, unit/integration
+            // tests, Crucible) is meaningless for them. Decide up
+            // front so the scaffold's handlers gate can't fire before
+            // the Lean branch is reached (#88): for assembly targets
+            // only `--lean` and `--ci` emit.
+            let is_assembly = check::parse_spec_file(&spec)?.is_assembly_target();
             // Rust skeleton — all three targets emit via the MIR path
             // (`codegen_mir`, the sole Rust-codegen path since v2.32
             // deleted the legacy `codegen::generate`).
-            {
+            if is_assembly {
+                eprintln!(
+                    "note: sBPF spec — skipping Rust scaffold (assembly programs \
+                     generate Lean proofs via --lean; runtime checks belong in \
+                     client-side tests)."
+                );
+            } else {
                 let parsed = check::parse_spec_file(&spec)?;
                 let mir = mir::lower(&parsed);
                 codegen_mir::generate(&mir, &parsed, &spec, &output_dir, target)?;
             }
 
             if kani || all {
-                let parsed = check::parse_spec_file(&spec)?;
                 // sBPF programs are verified by Lean proofs over the
                 // assembly (Program.lean + wp_exec), not by Kani BMC over
                 // a Rust model — and their runtime behavior is exercised
@@ -3140,7 +3154,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 // would emit Anchor-shaped harnesses treating the spec's
                 // `State` enum as an Anchor account, which is meaningless.
                 // Skip Kani codegen entirely for assembly targets.
-                if parsed.is_assembly_target() {
+                if is_assembly {
                     if kani {
                         eprintln!(
                             "note: skipping Kani codegen for sBPF spec — assembly \
@@ -3159,6 +3173,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     // MIR is the sole Kani-codegen path (v2.32 deleted the
                     // legacy `kani.rs` after byte-parity was proven across
                     // every pilot fixture — gated by `tests/kani_snapshot.rs`).
+                    let parsed = check::parse_spec_file(&spec)?;
                     let mir = mir::lower(&parsed);
                     kani_mir::generate(&mir, &parsed, &kani_output)?;
                 }
@@ -3182,12 +3197,11 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             // block above) — the impl-targeted variant is likewise
             // meaningless for assembly targets, so suppress its
             // auto-trigger too.
-            let (auto_impl_trigger, is_assembly) = {
+            let auto_impl_trigger = if is_assembly {
+                false
+            } else {
                 let parsed = check::parse_spec_file(&spec)?;
-                (
-                    kani_impl::spec_triggers_impl_harness(&parsed),
-                    parsed.is_assembly_target(),
-                )
+                kani_impl::spec_triggers_impl_harness(&parsed)
             };
             let want_kani_impl = !is_assembly && (kani_impl || (all && auto_impl_trigger));
             if want_kani_impl {
@@ -3218,16 +3232,28 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             }
 
             if test || all {
-                unit_test::generate(&spec, &test_output)?;
+                // Unit tests exercise effects/guards on the Rust spec
+                // model — meaningless for assembly targets (same
+                // rationale as the Kani block).
+                if is_assembly {
+                    if test {
+                        eprintln!(
+                            "note: skipping unit-test codegen for sBPF spec — assembly \
+                             programs are verified via Lean proofs; runtime checks \
+                             belong in client-side tests."
+                        );
+                    }
+                } else {
+                    unit_test::generate(&spec, &test_output)?;
+                }
             }
             if proptest || all {
-                let parsed = check::parse_spec_file(&spec)?;
                 // Same rationale as the Kani block: sBPF specs model
                 // assembly, not a Rust state machine, so a proptest
                 // harness over the spec model is meaningless. Runtime
                 // properties are exercised via client-side tests. Skip
                 // proptest codegen for assembly targets.
-                if parsed.is_assembly_target() {
+                if is_assembly {
                     if proptest {
                         eprintln!(
                             "note: skipping proptest codegen for sBPF spec — assembly \
@@ -3238,20 +3264,43 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     // `proptest_gen_mir` is the sole proptest path since
                     // v2.32 deleted the legacy `proptest_gen`.
+                    let parsed = check::parse_spec_file(&spec)?;
                     let mir = mir::lower(&parsed);
                     proptest_gen_mir::generate(&mir, &parsed, &spec, &proptest_output)?;
                 }
             }
             if crucible || all {
-                let parsed = check::parse_spec_file(&spec)?;
-                crucible_gen::generate(
-                    &parsed,
-                    &crucible_output,
-                    crucible_gen::InvariantMode::Spec,
-                )?;
+                // Crucible fuzzes the Rust handler surface — likewise
+                // meaningless for assembly targets.
+                if is_assembly {
+                    if crucible {
+                        eprintln!(
+                            "note: skipping Crucible codegen for sBPF spec — assembly \
+                             programs are verified via Lean proofs; runtime checks \
+                             belong in client-side tests."
+                        );
+                    }
+                } else {
+                    let parsed = check::parse_spec_file(&spec)?;
+                    crucible_gen::generate(
+                        &parsed,
+                        &crucible_output,
+                        crucible_gen::InvariantMode::Spec,
+                    )?;
+                }
             }
             if integration || all {
-                integration_test::generate(&spec, &integration_output)?;
+                if is_assembly {
+                    if integration {
+                        eprintln!(
+                            "note: skipping integration-test codegen for sBPF spec — \
+                             assembly programs are verified via Lean proofs; runtime \
+                             checks belong in client-side tests."
+                        );
+                    }
+                } else {
+                    integration_test::generate(&spec, &integration_output)?;
+                }
             }
             if lean || all {
                 // Same rationale as the Kani branch: `lean_gen_mir::generate`
@@ -3311,10 +3360,11 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             // exact `qedgen check --drift … --update-hashes` invocation.
             //
             // Skipped for pure-Pinocchio specs (no Rust scaffold; no
-            // user-owned `#[qed(verified)]` stamps to drift). Also
+            // user-owned `#[qed(verified)]` stamps to drift) and for
+            // assembly targets (no Rust scaffold at all). Also
             // skipped on output_dir miss, since the drift scan only
             // makes sense when the scaffold tree was actually emitted.
-            if !is_pinocchio && output_dir.exists() {
+            if !is_pinocchio && !is_assembly && output_dir.exists() {
                 match drift::check_stamped_drift(&output_dir) {
                     Ok(stamped) if !stamped.is_empty() => {
                         eprintln!(
