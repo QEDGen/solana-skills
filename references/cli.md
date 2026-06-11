@@ -26,7 +26,7 @@ commands don't need `--spec`.
 
 ```bash
 $QEDGEN init --name escrow   --spec escrow.qedspec
-$QEDGEN init --name dropset  --spec dropset.qedspec --asm src/dropset.s
+$QEDGEN init --name tree     --spec tree.qedspec --asm src/tree.s
 $QEDGEN init --name engine   --spec engine.qedspec --mathlib
 $QEDGEN init --name counter  --spec counter.qedspec --target anchor
 ```
