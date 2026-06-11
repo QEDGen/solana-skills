@@ -151,8 +151,8 @@ suite, check whether it runs under Miri.
 
 ## Corpus
 
-**sokoban red-black-tree `DoubleEndedIterator` (pre-fix).** Ellipsis
-Labs' zero-copy data-structures crate. The `iter_mut` method exposed a
+**Zero-copy red-black-tree `DoubleEndedIterator` (pre-fix).** A
+widely-used zero-copy data-structures crate. The `iter_mut` method exposed a
 `DoubleEndedIterator` whose `next` and `next_back` tracked separate
 cursors with no shared termination check. Once the cursors crossed,
 the same value was reachable from both ends within a single
@@ -164,10 +164,10 @@ iteration. Discovery shape: trust-surface walk of a matching engine
 using `iter_mut` on the RB-tree for in-place price-level updates —
 auditor reads the iterator `impl`, spots the absent shared
 termination, fires a Mollusk repro by replaying two adjacent fills
-through the program's API path. The Phoenix empirical study
-(`audits/phoenix-v1/`) walked past this bug because the v2.19 §3c
-gate only triggered on crypto verbs (`sign`, `verify`, `prove`,
-`commit`) — sokoban is the gap §S3.5 closes.
+through the program's API path. An internal empirical study walked
+past this bug because the v2.19 §3c gate only triggered on crypto
+verbs (`sign`, `verify`, `prove`, `commit`) — the zero-copy
+data-structure dep is the gap §S3.5 closes.
 
 ---
 

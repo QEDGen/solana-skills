@@ -16,7 +16,7 @@ The auditor's §3c trust-surface walk and authority-side intent-drift
 sweep require sustained multi-step reasoning across the program's
 dependency graph and documented invariants. Use one of:
 
-- **Claude Opus 4.7 with extended thinking** (Claude Code — this
+- **Claude Opus 4.8 with extended thinking** (Claude Code — this
   skill auto-injects `ultrathink` via a UserPromptSubmit hook
   installed alongside the skill; see `hooks/README.md`).
 - **GPT-5.5 in high-reasoning mode** (Codex / Cursor / other
@@ -104,13 +104,12 @@ Working assumptions when auditing:
   findings. Walk the Category catalog below before writing the
   report and ask, for each category's Corpus line, "could the same
   shape happen here?" Investigate even if the category isn't in the
-  spec-aware probe output. For long-form narrative on the named
-  incidents the Corpus lines cite (Wormhole, Cashio, Mango, Saber,
-  Crema, Solend, Nirvana, Loopscale, Jet, King-of-the-SOL) and the
-  operational threat-model context (key-management compromises,
-  supply-chain attacks), see `docs/security-primer.md` in the
-  repository — kept outside the loaded skill surface to preserve
-  the auditor's context budget for live audit work.
+  spec-aware probe output. For long-form narrative on the public
+  exploit classes the Corpus lines cite and the operational
+  threat-model context (key-management compromises, supply-chain
+  attacks), see `docs/security-primer.md` in the repository — kept
+  outside the loaded skill surface to preserve the auditor's context
+  budget for live audit work.
 - **Authority-side intent-drift is the catalog's edge.** Hand audits
   implicitly model an unprivileged attacker; *"the authority is
   trusted"* dismisses most authority-side findings as out-of-scope.
@@ -118,7 +117,7 @@ Working assumptions when auditing:
   own authority is still a real finding — users count on documented
   behavior even when they trust the operator. Walk every privileged
   action against every documented invariant in source comments / README
-  / docstrings. Phoenix's empirical study (5 catalog hits both prior
+  / docstrings. An internal empirical study (5 catalog hits both prior
   audits missed) is the corpus.
 
 If you finish an audit and your worst finding is a generic
@@ -565,13 +564,11 @@ value.
 Detection cue: pattern-match on `.saturating_sub(<expr with raw * or
 +>)`, `.checked_add(<expr with raw mul>)`, etc.
 
-- Corpus: pre-audit `phoenix-v1` (commit `85b9158`,
-  `src/state/markets/fifo.rs::match_order` lines 1041-1046) —
-  `inflight_order.adjusted_quote_lot_budget.saturating_sub(
-  self.tick_size * order_id.price_in_ticks *
-  num_base_lots_quoted)`. The three-way `u64` multiplication panics on
-  extreme parameters; `saturating_sub` only catches subtraction
-  underflow.
+- Corpus: a pre-audit order-book program — in the order-matching path,
+  `adjusted_quote_lot_budget.saturating_sub(tick_size *
+  price_in_ticks * num_base_lots_quoted)`. The three-way `u64`
+  multiplication panics on extreme parameters; `saturating_sub` only
+  catches subtraction underflow.
 
 ### `lifecycle_one_shot_violation` — MEDIUM
 Spec-aware: spec models lifecycle states; handler mutates state but
@@ -610,7 +607,7 @@ Spec-less only.
   via helpers (e.g., `check_pool_authority_address(...)?` returning a
   bump seed) is also canonical — recognize the indirection.
 
-### `account_type_confusion` — CRITICAL (Wormhole shape)
+### `account_type_confusion` — CRITICAL (well-known-account spoof shape)
 Spec-less only — a "well-known" account (sysvar, token program,
 mint, mint-authority, vault) is typed as `AccountInfo<'info>` /
 `UncheckedAccount` instead of its strongly-typed wrapper. Attacker
@@ -623,14 +620,14 @@ shape; downstream reads trust the spoof.
 - **Native:** AccountInfo passed for a sysvar / mint / token
   program without an `==` check on the well-known program ID, or for
   a user account without an `is_initialized` discriminator check.
-- Corpus: Wormhole sysvar-instructions spoof (2022, $326M; OtterSec /
-  Wormhole joint post-mortem); Cashio fake-account chain (2022,
-  $52.8M; canonical example, mint trust chain); Crema Finance fake
-  tick account (2022, $8.8M — CLMM tick-account sub-shape); Sysvar
-  typed as `AccountInfo` (recurring Anchor variant of the Wormhole
-  shape). For the field-level forgery sub-class where the typed
-  wrapper passes but a stored `Pubkey` field is unanchored, see
-  `field_chain_missing_root_anchor` (Cashio's underlying shape).
+- Corpus: the sysvar-instructions spoof class (2022, ~$326M loss; a
+  forged instructions-sysvar account); the fake-account mint-trust-chain
+  class (2022, ~$52.8M); the fake CLMM tick-account sub-shape (2022,
+  ~$8.8M); Sysvar typed as `AccountInfo` (recurring Anchor variant of
+  the spoof shape). For the field-level forgery sub-class where the
+  typed wrapper passes but a stored `Pubkey` field is unanchored, see
+  `field_chain_missing_root_anchor` (the mint-trust-chain underlying
+  shape).
 
 ### `missing_owner_check` — CRITICAL
 Spec-less only — handler reads or trusts data from an account
@@ -651,7 +648,8 @@ finding class — see `token_account_role_anchoring` below.
 - **Native:** any `account.data.borrow()` or struct deserialize
   without first verifying `account.owner == &expected_program_id`.
 - Corpus: typed-account-with-untyped-owner pattern (widely-documented
-  Solana-native primitive; named publicly by Neodyme among others).
+  Solana-native primitive; named publicly in multiple security
+  write-ups).
   Scope-pair clarifier: this category is about the SOLANA-RUNTIME
   `account.owner` field; the SPL token-account internal `owner`
   byte-range is `token_account_role_anchoring` (above).
@@ -887,7 +885,7 @@ no one whose signature is required has a reason to invoke.
   Fixed in PR #35 by adding a permissionless path once
   `claimed == total`.
 
-### `field_chain_missing_root_anchor` — CRITICAL (Cashio shape)
+### `field_chain_missing_root_anchor` — CRITICAL (forged-collateral-chain shape)
 Spec-less only. **Distinct from `missing_owner_check`** — Anchor's
 typed wrappers (`Account<T>`) close the runtime-owner question for
 an incoming account, but **the *fields* on that typed account
@@ -900,7 +898,7 @@ validator pins it back to the bank's stored value.
 A fresh auditor walking the catalog from `missing_owner_check`
 will see "Anchor types this account, owner check enforced — no
 finding" and move on. That's correct for the owner check, wrong
-for field-level forgery. The Cashio exploit is exactly this gap.
+for field-level forgery. The forged-collateral-chain class is exactly this gap.
 
 - **Anchor:** for every `Validate::validate()` (or per-handler
   validation block) and for each passed-in account A and field F
@@ -915,10 +913,11 @@ for field-level forgery. The Cashio exploit is exactly this gap.
 - **Native:** same shape; walk every `key()` / `pubkey ==`
   comparison. If neither side is `<trusted-state>.<field>`, the
   comparison only proves consistency, not anchoring.
-- Corpus: Cashio fake-account chain — the canonical example
-  (`crate_token` / `crate_mint` / `crate_collateral_tokens` form
-  an internally-consistent chain that's never anchored to
-  `bank.crate_token` / `bank.crate_mint`). $52.8M in 2022.
+- Corpus: the fake-account collateral-chain class — the canonical
+  example is a stablecoin bank where the deposit-token / mint /
+  collateral accounts form an internally-consistent chain that's
+  never anchored to the bank's stored token/mint fields (~$52.8M,
+  2022).
 
 ### `close_account_redirection` — HIGH
 Anchor `close = <destination>` field, or manual close via lamport
@@ -930,8 +929,8 @@ and not validated against an expected wallet (creator, treasury, etc.).
   **to.try_borrow_mut_lamports()? += x;` with no destination check.
 - Pair with `missing_signer` or `permissionless` marker → drain rent
   from any closable PDA.
-- Corpus: Jet Protocol C-ratio close-account bypass (2022, $25M
-  near-miss; private disclosure / publicly-discussed post-mortem);
+- Corpus: a lending-protocol collateral-ratio close-account bypass
+  (2022, ~$25M near-miss; publicly-discussed post-mortem);
   token-account close to wrong destination is the Anchor
   `close = receiver` variant of the same shape.
 
@@ -1004,22 +1003,23 @@ balance/votes/whatever.
   of init handlers; or the init handler accepts an existing account
   and overwrites in place.
 - Corpus: recurring audit-firm primitive; the canonical
-  Cashio-shape kill-chain pairs init-without-is-initialized with
-  `pda_lifecycle_reuse_after_close` for full account replay.
+  forged-collateral-chain kill-chain pairs init-without-is-initialized
+  with `pda_lifecycle_reuse_after_close` for full account replay.
 
 ### `oracle_staleness` — HIGH (DeFi-specific)
 Spec-less only — handler reads a price/rate-shaped field from an
 oracle account without verifying freshness (timestamp window) or
 confidence (deviation bound).
-- **Anchor / Native:** `pyth::load_price_feed(...)` followed by
-  immediate use without `get_price_no_older_than` or equivalent.
-  Switchboard: `AggregatorAccountData::get_result()` without a
-  staleness check on `latest_confirmed_round.round_open_timestamp`.
-- Corpus: Mango Markets oracle manipulation (2022, $114M); Solend
-  USDH (2022, $1.26M); Nirvana flash-loan oracle pump (2022,
-  $3.5M); Loopscale RateX collateral mispricing (2025, $5.8M). For
-  the short-TWAP-window sub-shape (fresh oracle, gameable in one
-  block) see `twap_gameable_single_block`.
+- **Anchor / Native:** an oracle price-load call (e.g.
+  `load_price_feed(...)`) followed by immediate use without a
+  `get_price_no_older_than`-style staleness gate; or an aggregator
+  read (e.g. `get_result()`) with no staleness check on the
+  round-open timestamp.
+- Corpus: cross-margin oracle manipulation (2022, ~$114M); a stablecoin
+  oracle mispricing (2022, ~$1.26M); a flash-loan oracle pump (2022,
+  ~$3.5M); collateral mispricing from a stale derived rate (2025,
+  ~$5.8M). For the short-TWAP-window sub-shape (fresh oracle, gameable
+  in one block) see `twap_gameable_single_block`.
 
 ### `frontrunnable_no_slippage` — HIGH (DeFi-specific)
 Permissionless swap-shape handler accepts no `min_amount_out` /
@@ -1031,7 +1031,7 @@ Sandwich-bot bait.
 - **Anchor / Native:** `swap`-shape handler signature with no
   `min_*` parameter, or with one that's ignored in the body.
 - Corpus: sandwich / MEV against AMM swap is the recurring shape;
-  the Mango perp-market manipulation (2022, $114M) is the same
+  the cross-margin perp-market manipulation (2022, ~$114M) is the same
   primitive applied to a thin spot oracle rather than to a swap
   router. "Frontrun the permissionless `claim` / `crank`" is the
   same primitive on rate-limited cleanup handlers.
@@ -1043,8 +1043,8 @@ or rent-exempt account silently, can also bypass ownership checks
 the runtime would otherwise enforce.
 - **Native / Anchor (rare):** any direct mutation of
   `*account.lamports.borrow_mut()` outside a close path.
-- Corpus: "King of the SOL" lamport-transfer freeze
-  (OtterSec public blog post). Same primitive turns up across
+- Corpus: the lamport-transfer-freeze class (documented in public
+  security-research write-ups). Same primitive turns up across
   audit-firm reports as "manual lamport mutation freezes
   rent-exempt / executable accounts."
 
@@ -1163,8 +1163,8 @@ swap pairs per transaction and drains the pool over hours.
   gets fewer underlying) — the asymmetric pair.
 - Compose-with-what: low-fee bulk transactions (Solana's 5000-lamport
   flat tx cost makes hundreds of round-trip swaps per tx economical).
-- Corpus: Saber / SPL token-swap stable-swap rounding (2022, ~$700M
-  at risk; Neodyme public disclosure pre-exploit). Same-class
+- Corpus: the canonical stable-swap rounding class (2022, ~$700M
+  at risk; public disclosure pre-exploit). Same-class
   generalization of bidirectional rounding on any stable-swap or
   two-leg conversion pair; also recurs as "loss of precision / wrong
   rounding direction" across audit-firm reports.
@@ -1238,7 +1238,7 @@ returned in same transaction.
   same chain (Solana has multiple lending protocols routinely used as
   flash sources); permissionless vote submission.
 - Corpus: same shape as the cross-margin oracle manipulations
-  (Mango 2022) when applied to governance rather than collateral —
+  (2022) when applied to governance rather than collateral —
   the live-balance read at decision time is the gap in both.
 
 ### `authority_transfer_missing_nominate_accept` — MEDIUM (operational hardening)
@@ -1332,12 +1332,10 @@ can grief the future creation by pre-funding the PDA address with
 - **Native:** look for `invoke_signed(&system_instruction::create_account(...), ...)`
   with seeds derived from caller-supplied or deterministically-public
   inputs (e.g. `[b"seat", market_key, trader_key]`).
-- Corpus: pre-audit `phoenix-v1` (commit `85b9158`,
-  `src/program/processor/manage_seat.rs:75-85` for seat PDAs and
-  `src/program/processor/initialize.rs:170-189` for market vault PDAs)
-  used raw `system_instruction::create_account` against deterministic
-  PDA addresses. Subsequently fixed via a `system_utils::create_account`
-  helper that does transfer+allocate+assign.
+- Corpus: a pre-audit order-book program used raw
+  `system_instruction::create_account` against deterministic PDA
+  addresses (seat PDAs and market-vault PDAs). Subsequently fixed via a
+  `create_account` helper that does transfer+allocate+assign.
 
 ### `execution_order_state_before_check` — MEDIUM
 Spec-less only. A handler mutates state field X in an early branch,
@@ -1349,13 +1347,12 @@ Detection cue: an early-return / early-mutation arm of an `if let` /
 `match` that zeroes / freezes a field that a later condition tests
 for being nonzero / unmodified.
 
-- Corpus: pre-audit `phoenix-v1` (commit `85b9158`,
-  `src/state/markets/fifo.rs::place_order_inner`) — the no-deposit-mode
-  branch (lines 782-796) zeroes `num_*_lots_out` and moves the matched
-  amount into trader free funds. The later FOK check (line 819)
-  compares those fields against `min_*_to_fill` — but they were just
-  zeroed, so FOK in no-deposit mode always fails the minimum-fill
-  check. Subsequently fixed by reordering the branches.
+- Corpus: a pre-audit order-book program — in the place-order path, the
+  no-deposit-mode branch zeroes `num_*_lots_out` and moves the matched
+  amount into trader free funds. The later FOK check compares those
+  fields against `min_*_to_fill` — but they were just zeroed, so FOK in
+  no-deposit mode always fails the minimum-fill check. Subsequently
+  fixed by reordering the branches.
 
 ### `flag_branch_no_op` — MEDIUM
 Spec-less only. A `match` / `if-else` arm distinguishes two variants
@@ -1367,14 +1364,12 @@ Detection cue: `A | B => { primary_effect(); if variant == B {
 secondary(); } }` where `primary_effect` is load-bearing and
 `secondary` is local-only.
 
-- Corpus: pre-audit `phoenix-v1` (commit `85b9158`,
-  `src/state/markets/fifo.rs::match_order` lines 1019-1051) — the
-  `SelfTradeBehavior::CancelProvide | DecrementTake` arm calls the
-  same `reduce_order_inner(..., None, ...)` (which removes the full
-  resting order) for both variants. The post-branch only adjusts the
-  inflight budget bookkeeping, never reduces the cancellation amount.
-  `DecrementTake` is documented as a *partial* reduction but is
-  implemented identically to `CancelProvide`.
+- Corpus: a pre-audit order-book program — in the order-matching path,
+  a self-trade-behavior arm calls the same full-order-reduction helper
+  for two variants. The post-branch only adjusts the inflight budget
+  bookkeeping, never reduces the cancellation amount. One variant is
+  documented as a *partial* reduction but is implemented identically to
+  the full-cancel variant.
 
 ## qedgen-codegen runtime
 
@@ -1562,7 +1557,7 @@ exhaustive; use as a thinking primer, not a checklist.
 | transfer_hook_reentrancy | + | mid-transfer state read | = | classic reentrancy (Solana-native, HIGH→CRIT) |
 | permissionless marker | + | unbounded amount param | = | griefing / draining via repeated calls (HIGH) |
 | permissionless init | + | unchecked authority field on init | = | attacker bakes their own pubkey as `mint_authority` / `withdraw_authority` / `admin` at init time → privileged CPI authority on every later operation (CRIT) |
-| field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, Cashio shape) |
+| field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, forged-collateral-chain shape) |
 | init_config_field_unanchored | + | permissionless_state_writer init | = | frontrun legitimate init, bake attacker pubkey as stored "creator" / "authority" field, capture every fee/yield/withdraw routed through it (CRIT, DAMM-v2 OOD shape) |
 | bounty_intent_drift (mode flag accepted but unbranched) | + | permissionless caller | = | invoke the "forbidden" mode the bounty claimed it didn't allow, every time (HIGH→CRIT depending on what the mode controls) |
 | bounty_intent_drift (spec docstring claims behavior the spec body doesn't enforce) | + | qedgen-codegen mechanization | = | formal-verification artifacts (Lean / Kani / proptest) faithfully translate the broken spec — `lake build` green proves the broken behavior, **giving false confidence that the program is correct** (HIGH-CRIT depending on what the docstring claimed) |
@@ -1792,9 +1787,9 @@ case the pattern shouldn't have been flagged at CRIT/HIGH).
 - 30–60s for native-Rust programs of similar size — multi-file call
   chains (e.g., `try_deposit` → `maybe_invoke_deposit` →
   `spl_token::instruction::transfer`) cost more roundtrips.
-- For large programs (Drift / Mango scale), warn the user up front
-  that a full audit may take several minutes; offer a `programs/`
-  subset cut.
+- For large programs (multi-thousand-line, many-handler scale), warn
+  the user up front that a full audit may take several minutes; offer a
+  `programs/` subset cut.
 
 ## Responsible disclosure (third-party programs)
 
