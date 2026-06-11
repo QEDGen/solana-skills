@@ -1058,6 +1058,73 @@ pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> Str
     path.to_string()
 }
 
+/// Project an effect-shaped MIR `Stmt` back onto the `(field, op_kind,
+/// value)` triple the string templates below consume. This is the #66
+/// adaptor that makes `Stmt` the iteration source for the Kani/proptest
+/// transition bodies while keeping their output byte-identical:
+/// `mir::lower_body` builds effect stmts from `ParsedHandler.effects` in
+/// order, `Path` round-trips the dotted field via `split('.')`/`join(".")`,
+/// and `Expr::from_raw` carries the RHS string verbatim in `.rust`.
+///
+/// Returns `None` for every non-effect variant — each with the reason it
+/// renders as *nothing* in the pure spec-model transition. The match is
+/// exhaustive by discipline (no `_` arm; see the `Stmt` enum doc): a new
+/// `Stmt` variant is a compile error here, forcing an explicit decision
+/// for the Kani/proptest backends.
+pub fn stmt_effect_triple(stmt: &crate::mir::Stmt) -> Option<(String, &'static str, &str)> {
+    use crate::mir::Stmt;
+    match stmt {
+        Stmt::Assign { path, rhs } => Some((path.segments.join("."), "set", rhs.rust.as_str())),
+        Stmt::CheckedAdd { path, delta, .. } => {
+            // The lowered per-site error name is Lean/scaffold surface;
+            // the pure model signals overflow via `return false`.
+            Some((path.segments.join("."), "add", delta.rust.as_str()))
+        }
+        Stmt::CheckedSub { path, delta, .. } => {
+            Some((path.segments.join("."), "sub", delta.rust.as_str()))
+        }
+        Stmt::SatAdd { path, delta } => {
+            Some((path.segments.join("."), "add_sat", delta.rust.as_str()))
+        }
+        Stmt::SatSub { path, delta } => {
+            Some((path.segments.join("."), "sub_sat", delta.rust.as_str()))
+        }
+        Stmt::WrapAdd { path, delta } => {
+            Some((path.segments.join("."), "add_wrap", delta.rust.as_str()))
+        }
+        Stmt::WrapSub { path, delta } => {
+            Some((path.segments.join("."), "sub_wrap", delta.rust.as_str()))
+        }
+        // Guard surface: `requires X else Err` folds into the guard
+        // conjunction via `collect_full_guard*`, not the body.
+        Stmt::RequireOrAbort { .. } => None,
+        // CPI surface: no state mutation in the pure model; the Kani
+        // CPI-fact harnesses read the call sites separately.
+        Stmt::TokenTransfer { .. } => None,
+        Stmt::Cpi { .. } => None,
+        // Lifecycle surface: the transition body drives variant changes
+        // through the pre/post-status writes, not a promote statement.
+        Stmt::VariantPromote { .. } => None,
+        // Conditional effects render from `op.effect_branches` until the
+        // Phase-5 Branch lowering lands (`lower_body` step 7 emits a
+        // stub `Abort` and the *union* of arm effects today — walking
+        // arms here would double-emit against the branch path).
+        Stmt::Branch { .. } => None,
+        // Abort clauses are harnessed from the `aborts_if` predicate
+        // surface; in the body they carry no state mutation.
+        Stmt::Abort(_) => None,
+        // Events: auxiliary, no state mutation in the pure model.
+        Stmt::Emit { .. } => None,
+    }
+}
+
+/// All effect triples of a lowered handler body, in spec order. The
+/// shared iteration source for the Kani/proptest transition emitters,
+/// conformance harnesses, and overflow filters.
+pub fn block_effect_triples(body: &crate::mir::Block) -> Vec<(String, &'static str, &str)> {
+    body.stmts.iter().filter_map(stmt_effect_triple).collect()
+}
+
 /// Render a single `(field, op_kind, value)` triple into Rust at the given
 /// indent. Shared between unconditional effect lowering and v2.20's
 /// match-arm lowering. The helper writes the trailing newline; the caller
@@ -1861,18 +1928,27 @@ fn emit_after_store_hooks(out: &mut String, spec: &ParsedSpec, field: &str, inde
     }
 }
 
+/// Both transition emitters require the handler's lowered MIR body —
+/// the effect block iterates `Stmt` (via `stmt_effect_triple`), not
+/// `ParsedHandler.effects` (#66: a new `Stmt` variant is a compile
+/// error at the adaptor, covering the Kani + proptest backends). The
+/// guard / status / let-binding / ghost scaffold around the effects
+/// stays `ParsedHandler`-fed by design — that's predicate/account
+/// surface, same boundary as `codegen_mir`'s guards.
 pub fn emit_transition_fn(
     out: &mut String,
+    body: &crate::mir::Block,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
-    emit_transition_fn_inner(out, op, spec, wrapping, None, false, map_type_fn)
+    emit_transition_fn_inner(out, body, op, spec, wrapping, None, false, map_type_fn)
 }
 
 pub fn emit_transition_fn_for_kani(
     out: &mut String,
+    body: &crate::mir::Block,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
@@ -1882,6 +1958,7 @@ pub fn emit_transition_fn_for_kani(
         handler_needs_account_env(op).then(|| handler_account_env_struct_name(&op.name));
     emit_transition_fn_inner(
         out,
+        body,
         op,
         spec,
         wrapping,
@@ -1891,8 +1968,10 @@ pub fn emit_transition_fn_for_kani(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_transition_fn_inner(
     out: &mut String,
+    body: &crate::mir::Block,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
@@ -2062,7 +2141,14 @@ fn emit_transition_fn_inner(
         // via `resolve_value(..., Some("s."))` so a bare state-field RHS
         // (e.g. `bid_buyer := state.rfp_buyer` after upstream strips
         // `state.`) renders as `s.rfp_buyer` in the proptest body.
-        for (field, op_kind, value) in &op.effects {
+        //
+        // #66 — iterate the handler's lowered MIR body, not
+        // `op.effects`: `stmt_effect_triple` projects each effect-shaped
+        // `Stmt` back onto the triple these templates consume
+        // (byte-identical; see its doc) and skips the non-effect
+        // variants in-stream without reordering.
+        for (field, op_kind, value) in block_effect_triples(body) {
+            let field = field.as_str();
             if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
                 continue;
             }
@@ -2112,6 +2198,123 @@ mod tests {
     use super::*;
     use crate::chumsky_adapter::parse_str;
 
+    /// #66 adaptor invariant — for every handler, the effect triples
+    /// projected from the lowered MIR body must equal
+    /// `ParsedHandler.effects` exactly (order + content). This is what
+    /// makes the `Stmt`-driven Kani/proptest emission byte-identical to
+    /// the former `op.effects` iteration. Checked over a synthetic spec
+    /// covering all seven op kinds plus the non-effect statement shapes.
+    #[test]
+    fn stmt_effect_triples_round_trip_parsed_effects() {
+        let src = r#"spec RoundTrip
+state {
+  pool : U64,
+  fees : U64,
+  spent : U64,
+  cap : U64,
+  owner : Pubkey,
+}
+type Error | Overflow | Unauthorized
+handler churn (amount : U64) (who : Pubkey) {
+  requires amount > 0 else Unauthorized
+  effect {
+    pool += amount,
+    fees +=! amount,
+    spent +=? amount,
+    cap -= amount,
+    pool -=! amount,
+    fees -=? amount,
+    owner := who,
+  }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        for op in &spec.handlers {
+            let body = mir.handler_block(&op.name).expect("mir body");
+            let got: Vec<(String, String, String)> = block_effect_triples(body)
+                .into_iter()
+                .map(|(f, k, v)| (f, k.to_string(), v.to_string()))
+                .collect();
+            let want: Vec<(String, String, String)> = op
+                .effects
+                .iter()
+                .map(|(f, k, v)| (f.clone(), k.clone(), v.clone()))
+                .collect();
+            assert_eq!(
+                got, want,
+                "MIR effect triples diverge from op.effects for `{}`",
+                op.name
+            );
+        }
+        // Sanity: the seven kinds all round-tripped (not vacuous).
+        let kinds: Vec<&str> = block_effect_triples(mir.handler_block("churn").expect("mir body"))
+            .iter()
+            .map(|(_, k, _)| *k)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["add", "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap", "set"]
+        );
+    }
+
+    /// Same invariant over every bundled example spec — the real-world
+    /// shapes (indexed records, variant prefixes, match-arm expansion,
+    /// transfers/CPI/emit interleaving).
+    #[test]
+    fn stmt_effect_triples_round_trip_bundled_examples() {
+        let examples = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root")
+            .join("examples/rust");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&examples).expect("examples/rust") {
+            let dir = entry.expect("dir entry").path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(spec_path) = std::fs::read_dir(&dir)
+                .expect("example dir")
+                .filter_map(|e| Some(e.ok()?.path()))
+                .find(|p| p.extension().is_some_and(|x| x == "qedspec"))
+            else {
+                continue;
+            };
+            let spec = match crate::check::parse_spec_file(&spec_path) {
+                Ok(s) => s,
+                // Brownfield onboarding fixtures may be intentionally
+                // partial — the invariant only applies to parseable specs.
+                Err(_) => continue,
+            };
+            let mir = crate::mir::lower(&spec);
+            for op in &spec.handlers {
+                let body = mir
+                    .handler_block(&op.name)
+                    .unwrap_or_else(|| panic!("MIR missing `{}` in {:?}", op.name, spec_path));
+                let got: Vec<(String, String, String)> = block_effect_triples(body)
+                    .into_iter()
+                    .map(|(f, k, v)| (f, k.to_string(), v.to_string()))
+                    .collect();
+                let want: Vec<(String, String, String)> = op
+                    .effects
+                    .iter()
+                    .map(|(f, k, v)| (f.clone(), k.clone(), v.clone()))
+                    .collect();
+                assert_eq!(
+                    got, want,
+                    "MIR effect triples diverge from op.effects for `{}` in {:?}",
+                    op.name, spec_path
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10,
+            "expected to check many handlers, got {checked}"
+        );
+    }
+
     #[test]
     fn effect_target_base_strips_subscripts_and_dots() {
         assert_eq!(effect_target_base("plain"), "plain");
@@ -2152,9 +2355,11 @@ state { pool : U64 }
 handler buy (amount : U64) { effect { pool += amount } }
 "#;
         let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2179,9 +2384,11 @@ state { pool : U64 }
 handler buy (amount : U64) { effect { pool +=! amount } }
 "#;
         let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2202,9 +2409,11 @@ state { pool : U64 }
 handler buy (amount : U64) { effect { pool +=? amount } }
 "#;
         let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2230,9 +2439,11 @@ handler buy (amount : U64) { effect { pool +=? amount } }
                 "spec T\nstate {{ pool : U64 }}\nhandler buy (amount : U64) {{ effect {{ pool {op_str} amount }} }}\n"
             );
             let spec = parse_str(&src).expect("parse");
+            let mir = crate::mir::lower(&spec);
             let op = &spec.handlers[0];
+            let body = mir.handler_block(&op.name).expect("mir body");
             let mut out = String::new();
-            emit_transition_fn(&mut out, op, &spec, false, |t| {
+            emit_transition_fn(&mut out, body, op, &spec, false, |t| {
                 crate::codegen_shared::map_type(t, &spec)
             })
             .expect("emit");
@@ -2258,9 +2469,11 @@ type State
 handler close : State.Open -> State.Closed { effect { x := 0 } }
 "#;
         let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2284,9 +2497,11 @@ state { balance : U64 }
 handler deposit (amount : U64) { effect { balance += amount } }
 "#;
         let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");

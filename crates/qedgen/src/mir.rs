@@ -203,6 +203,21 @@ pub struct Mir {
     pub adt_state: bool,
 }
 
+impl Mir {
+    /// Look up a handler's lowered body by name. Handler names are
+    /// unique (spec validation rejects duplicates), and the per-account
+    /// scoped `ParsedSpec` views the Kani/proptest emitters build only
+    /// *filter* the handler set — they never rewrite handler content —
+    /// so a name-keyed lookup against the unscoped `Mir` stays valid
+    /// inside scoped sections.
+    pub fn handler_block(&self, name: &str) -> Option<&Block> {
+        self.handlers
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| &h.body)
+    }
+}
+
 // ----------------------------------------------------------------------
 // State
 // ----------------------------------------------------------------------
@@ -490,7 +505,9 @@ pub enum Stmt {
         err: ErrorRef,
     },
 
-    /// `field +=!` — wrapping arithmetic, no error. v2.24 explicit marker.
+    /// `field +=?` — wrapping arithmetic, no error. v2.24 explicit marker
+    /// (parser op_kind `add_wrap`; see the tier table in
+    /// `rust_codegen_util::emit_transition_fn_inner`).
     WrapAdd {
         path: Path,
         delta: Expr,
@@ -500,7 +517,8 @@ pub enum Stmt {
         delta: Expr,
     },
 
-    /// `field +=?` — saturating arithmetic, no error. v2.24 explicit marker.
+    /// `field +=!` — saturating arithmetic, no error. v2.24 explicit marker
+    /// (parser op_kind `add_sat`).
     SatAdd {
         path: Path,
         delta: Expr,

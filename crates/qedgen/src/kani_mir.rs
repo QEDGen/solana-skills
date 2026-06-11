@@ -93,13 +93,16 @@ fn render_inner(mir: &Mir, parsed: &ParsedSpec, progress: bool, skip_guard_proof
         // File-level features (covers / liveness / environment) are
         // skipped — per-ADT lifting is v2.22 scope per the legacy
         // comment; spec-level emit only happens in single-mode.
-        if let Err(e) = emit_multi_account_sections(&mut out, parsed, progress, skip_guard_proofs) {
+        if let Err(e) =
+            emit_multi_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
+        {
             out.push_str(&format!("// MIR-ERROR: multi-account emit failed: {}\n", e));
         }
     } else {
         // Single-account path — every section consumes the parsed
         // ParsedSpec directly.
-        if let Err(e) = emit_single_account_sections(&mut out, parsed, progress, skip_guard_proofs)
+        if let Err(e) =
+            emit_single_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
         {
             out.push_str(&format!(
                 "// MIR-ERROR: single-account emit failed: {}\n",
@@ -125,6 +128,7 @@ fn skip_guard_proofs_from_env() -> bool {
 /// legacy order against the parsed spec directly.
 fn emit_single_account_sections(
     out: &mut String,
+    mir: &Mir,
     parsed: &ParsedSpec,
     progress: bool,
     skip_guard_proofs: bool,
@@ -132,7 +136,7 @@ fn emit_single_account_sections(
     if progress {
         eprintln!("Rendering Kani section: state model");
     }
-    emit_account_section_structural(out, parsed)?;
+    emit_account_section_structural(out, mir, parsed)?;
     if skip_guard_proofs {
         if progress {
             eprintln!(
@@ -167,11 +171,11 @@ fn emit_single_account_sections(
     if progress {
         eprintln!("Rendering Kani section: effect conformance proofs");
     }
-    emit_effect_conformance_harnesses(out, parsed)?;
+    emit_effect_conformance_harnesses(out, mir, parsed)?;
     if progress {
         eprintln!("Rendering Kani section: overflow proofs");
     }
-    emit_overflow_detection_harnesses(out, parsed)?;
+    emit_overflow_detection_harnesses(out, mir, parsed)?;
     // File-level features (covers / liveness / environment) —
     // single-mode only. Multi-account specs skip these entirely
     // (per-ADT lifting is v2.22 scope per the legacy comment).
@@ -206,6 +210,7 @@ fn emit_single_account_sections(
 /// and aren't emitted in multi-mode at all.
 fn emit_multi_account_sections(
     out: &mut String,
+    mir: &Mir,
     parsed: &ParsedSpec,
     progress: bool,
     skip_guard_proofs: bool,
@@ -235,7 +240,7 @@ fn emit_multi_account_sections(
         out.push_str(&format!("mod {} {{\n", mod_name));
         out.push_str("    use super::*;\n\n");
 
-        emit_account_section_structural(out, &scoped)?;
+        emit_account_section_structural(out, mir, &scoped)?;
         if skip_guard_proofs {
             if progress {
                 eprintln!(
@@ -249,8 +254,8 @@ fn emit_multi_account_sections(
         emit_property_preservation_harnesses(out, &scoped)?;
         emit_ensures_preservation_harnesses(out, &scoped)?;
         emit_invariant_preservation_harnesses(out, &scoped)?;
-        emit_effect_conformance_harnesses(out, &scoped)?;
-        emit_overflow_detection_harnesses(out, &scoped)?;
+        emit_effect_conformance_harnesses(out, mir, &scoped)?;
+        emit_overflow_detection_harnesses(out, mir, &scoped)?;
 
         out.push_str(&format!("}} // mod {}\n\n", mod_name));
     }
@@ -448,7 +453,7 @@ fn emit_constants(out: &mut String, mir: &Mir) {
 /// Multi-account dispatch (`mod <lowercase>`) is Phase 3e — until
 /// then, multi-account specs emit only the primary account's view
 /// here, prefixed by a `MIR-TODO(phase-3e)` marker in `render()`.
-fn emit_account_section_structural(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
+fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
@@ -574,7 +579,10 @@ fn emit_account_section_structural(out: &mut String, parsed: &ParsedSpec) -> Res
         "// ============================================================================\n\n",
     );
     for op in &handlers {
-        util::emit_transition_fn_for_kani(out, op, parsed, false, |t| map_type(t, parsed))?;
+        let body = mir
+            .handler_block(&op.name)
+            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
+        util::emit_transition_fn_for_kani(out, body, op, parsed, false, |t| map_type(t, parsed))?;
     }
 
     // 8. Reference implementations (v2.25 — pure-expression fns
@@ -1704,7 +1712,11 @@ fn emit_invariant_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) 
 ///     - sub → `s.F == pre_F.wrapping_sub(<resolved>)`
 ///   * Sibling fields assert `s.G == pre_G` unless another effect in
 ///     the same handler mutates them.
-fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
+fn emit_effect_conformance_harnesses(
+    out: &mut String,
+    mir: &Mir,
+    parsed: &ParsedSpec,
+) -> Result<()> {
     use crate::codegen_shared::{map_type, sanitize_ident};
     use crate::rust_codegen_util as util;
 
@@ -1760,8 +1772,16 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
     for op in &effect_ops {
         let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
-        for (field, op_kind, value) in &op.effects {
-            let base = util::effect_target_base(field);
+        // #66 — the per-effect harness loop iterates the handler's
+        // lowered MIR body (projected back onto triples by the shared
+        // adaptor), not `op.effects`. Same order/content; the sibling-
+        // frame check below reads the same triple list.
+        let body = mir
+            .handler_block(&op.name)
+            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
+        let triples = util::block_effect_triples(body);
+        for (field, op_kind, value) in triples.iter().cloned() {
+            let base = util::effect_target_base(&field);
             if !field_type_lookup.contains_key(base) {
                 continue;
             }
@@ -1775,7 +1795,7 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
             out.push_str(&format!(
                 "fn verify_{}_effect_{}() {{\n",
                 op.name,
-                sanitize_ident(field)
+                sanitize_ident(&field)
             ));
 
             if is_init {
@@ -1824,7 +1844,7 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
             // set-target.
             let needs_pre_for: Vec<&&(String, String)> = mutable
                 .iter()
-                .filter(|(fname, _)| !(fname.as_str() == field.as_str() && op_kind == "set"))
+                .filter(|(fname, _)| !(fname.as_str() == field && op_kind == "set"))
                 .collect();
             for (fname, _) in &needs_pre_for {
                 out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
@@ -1845,7 +1865,7 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
                 Some("pre_"),
                 util::handler_needs_account_env(op).then_some("accounts"),
             );
-            match op_kind.as_str() {
+            match op_kind {
                 "set" => {
                     let assertion = util::rewrite_kani_pubkey_comparisons(
                         &format!("s.{field} == {resolved}"),
@@ -1875,11 +1895,9 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
             // Assert sibling fields unchanged (unless mutated by another
             // effect in the same handler).
             for (fname, _) in &mutable {
-                if fname.as_str() != field.as_str() {
-                    let sibling_mutated = op
-                        .effects
-                        .iter()
-                        .any(|(f, _, _)| f.as_str() == fname.as_str());
+                if fname.as_str() != field {
+                    let sibling_mutated =
+                        triples.iter().any(|(f, _, _)| f.as_str() == fname.as_str());
                     if !sibling_mutated {
                         let assertion = util::rewrite_kani_pubkey_comparisons(
                             &format!("s.{fname} == pre_{fname}"),
@@ -1911,16 +1929,28 @@ fn emit_effect_conformance_harnesses(out: &mut String, parsed: &ParsedSpec) -> R
 /// fires on `+=` inside the transition body — no explicit assert
 /// required; the proof exists to drive BMC across the parameter
 /// space. Mirrors `kani::emit_kani_account_section` lines ~1279–1330.
-fn emit_overflow_detection_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
+fn emit_overflow_detection_harnesses(
+    out: &mut String,
+    mir: &Mir,
+    parsed: &ParsedSpec,
+) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
 
+    // #66 — the checked-add filter reads the lowered MIR body
+    // (`Stmt::CheckedAdd` projects to kind `"add"`), not `op.effects`.
     let overflow_ops: Vec<&crate::check::ParsedHandler> = handlers
         .iter()
         .copied()
-        .filter(|op| op.effects.iter().any(|(_, kind, _)| kind == "add"))
+        .filter(|op| {
+            mir.handler_block(&op.name).is_some_and(|body| {
+                util::block_effect_triples(body)
+                    .iter()
+                    .any(|(_, kind, _)| *kind == "add")
+            })
+        })
         .collect();
 
     if overflow_ops.is_empty() {

@@ -3239,7 +3239,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     // `proptest_gen_mir` is the sole proptest path since
                     // v2.32 deleted the legacy `proptest_gen`.
                     let mir = mir::lower(&parsed);
-                    proptest_gen_mir::generate(&mir, &parsed, &spec, &proptest_output)?;
+                    proptest_gen_mir::generate(&mir, &parsed, &proptest_output)?;
                 }
             }
             if crucible || all {

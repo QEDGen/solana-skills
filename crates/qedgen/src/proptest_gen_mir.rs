@@ -5,35 +5,30 @@
 //! counterexamples; lighter-weight than Kani BMC). Gated by
 //! `tests/proptest_snapshot.rs`.
 //!
-//! The harness emission (`generate_impl` + its per-handler arb_state /
-//! preservation / invariant / guard / overflow / sequence sub-emitters)
-//! reads `ParsedSpec` directly — those harnesses derive from account /
-//! property / requires surface, not the effect-body `Stmt` IR. The
-//! public `generate` takes the lowered `Mir` on its signature for
-//! dispatch-site uniformity with the other codegens.
+//! Effect-body lowering is MIR-driven (#66): the transition functions
+//! and the overflow filters/tests iterate the handler's lowered `Stmt`
+//! body via the shared `rust_codegen_util::stmt_effect_triple` adaptor,
+//! so a new `Stmt` variant is a compile error at this backend. The
+//! surrounding harness emission (arb_state strategies / preservation /
+//! invariant / guard / sequence sub-emitters) reads `ParsedSpec`
+//! directly — those derive from account / property / requires surface,
+//! not effect-body IR, the same boundary as `codegen_mir`'s guards.
 
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedHandler, ParsedInvariant, ParsedProperty, ParsedSpec};
+use crate::check::{ParsedHandler, ParsedInvariant, ParsedProperty, ParsedSpec};
 use crate::codegen_shared::map_type;
 use crate::mir::Mir;
 use crate::rust_codegen_util;
 
 /// Generate the proptest harness file at `output_path`, consuming a
-/// pre-lowered `Mir` + `ParsedSpec` + the originating spec path (the
-/// harness emitter re-parses from the path for its drift-stamp logic).
-pub fn generate(
-    mir: &Mir,
-    parsed: &ParsedSpec,
-    spec_path: &Path,
-    output_path: &Path,
-) -> Result<()> {
-    let _ = mir;
+/// pre-lowered `Mir` + its originating `ParsedSpec`.
+pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
     if parsed.handlers.is_empty() {
         anyhow::bail!("No operations found in the spec — is this a valid qedspec file?");
     }
-    generate_impl(spec_path, output_path)
+    generate_impl(mir, parsed, output_path)
 }
 
 /// Return the proptest strategy string for a DSL primitive type. For compound
@@ -400,28 +395,19 @@ fn extract_field_upper_bounds(
     bounds
 }
 
-/// Generate proptest harnesses from a spec file (.qedspec).
+/// Generate proptest harnesses from a pre-lowered `Mir` + `ParsedSpec`.
 ///
 /// Produces property-based tests that exercise the spec's state machine with
 /// random inputs, checking invariants after every transition. Finds
 /// counterexamples in milliseconds — the first tier of the verification waterfall.
-fn generate_impl(spec_path: &Path, output_path: &Path) -> Result<()> {
-    let spec = check::parse_spec_file(spec_path)?;
-
-    if spec.handlers.is_empty() {
-        anyhow::bail!(
-            "No operations found in {}. Is this a valid qedspec file?",
-            spec_path.display()
-        );
-    }
-
-    rust_codegen_util::check_effect_targets(&spec)?;
+fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()> {
+    rust_codegen_util::check_effect_targets(spec)?;
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let fp = crate::fingerprint::compute_fingerprint(&spec);
+    let fp = crate::fingerprint::compute_fingerprint(spec);
     let hash = fp
         .file_hashes
         .get("tests/proptest.rs")
@@ -491,7 +477,7 @@ fn generate_impl(spec_path: &Path, output_path: &Path) -> Result<()> {
     //
     // Detection reuses `codegen::guards_use_math_helpers` so this gate
     // tracks the same predicate as the `--all` math.rs emission.
-    if crate::codegen_shared::guards_use_math_helpers(&spec) {
+    if crate::codegen_shared::guards_use_math_helpers(spec) {
         out.push_str(
             "#[allow(dead_code)]\n\
 #[inline]\n\
@@ -549,13 +535,14 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             // Build a minimal ParsedSpec view for this account
             emit_account_section(
                 &mut out,
+                mir,
                 &acct.name,
                 &acct_fields,
                 &acct.fields,
                 &acct_handlers,
                 &acct_props,
                 &acct.lifecycle,
-                &spec,
+                spec,
             )?;
 
             out.push_str(&format!("}} // mod {}\n\n", mod_name));
@@ -579,13 +566,14 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
         let all_props: Vec<&ParsedProperty> = spec.properties.iter().collect();
         emit_account_section(
             &mut out,
+            mir,
             &spec.program_name,
             &mutable_fields,
             state_fields,
             &all_handlers,
             &all_props,
             &spec.lifecycle_states,
-            &spec,
+            spec,
         )?;
     }
 
@@ -598,6 +586,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
 #[allow(clippy::too_many_arguments)]
 fn emit_account_section(
     out: &mut String,
+    mir: &Mir,
     _acct_name: &str,
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
@@ -781,7 +770,7 @@ fn emit_account_section(
     rust_codegen_util::emit_invariant_predicates(out, &linked_invs);
 
     // Transition functions
-    emit_transition_functions_for(out, handlers, spec)?;
+    emit_transition_functions_for(out, mir, handlers, spec)?;
 
     // Clone properties once for sections that need owned copies
     let owned_props: Vec<ParsedProperty> = properties.iter().map(|p| (*p).clone()).collect();
@@ -821,14 +810,22 @@ fn emit_account_section(
     }
 
     // Overflow detection tests
+    // #66 — checked-add filter reads the lowered MIR body, not `op.effects`.
     let overflow_ops: Vec<&&ParsedHandler> = handlers
         .iter()
-        .filter(|op| op.effects.iter().any(|(_, k, _)| k == "add"))
+        .filter(|op| {
+            mir.handler_block(&op.name).is_some_and(|body| {
+                rust_codegen_util::block_effect_triples(body)
+                    .iter()
+                    .any(|(_, k, _)| *k == "add")
+            })
+        })
         .collect();
     if !overflow_ops.is_empty() {
         let overflow_refs: Vec<&ParsedHandler> = overflow_ops.iter().map(|op| **op).collect();
         emit_overflow_tests_for(
             out,
+            mir,
             &overflow_refs,
             mutable_fields,
             all_fields,
@@ -957,14 +954,20 @@ fn emit_state_strategy_inner(
     Ok(())
 }
 
-/// Emit transition functions for a slice of handlers.
+/// Emit transition functions for a slice of handlers. #66 — the effect
+/// block inside each transition iterates the handler's lowered MIR body
+/// (see `rust_codegen_util::stmt_effect_triple`), not `op.effects`.
 fn emit_transition_functions_for(
     out: &mut String,
+    mir: &Mir,
     handlers: &[&ParsedHandler],
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        rust_codegen_util::emit_transition_fn(out, op, spec, true, |t| map_type(t, spec))?;
+        let body = mir
+            .handler_block(&op.name)
+            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
+        rust_codegen_util::emit_transition_fn(out, body, op, spec, true, |t| map_type(t, spec))?;
     }
     Ok(())
 }
@@ -1384,8 +1387,10 @@ fn emit_guard_tests(
 }
 
 /// Emit overflow detection tests for add effects.
+#[allow(clippy::too_many_arguments)]
 fn emit_overflow_tests_for(
     out: &mut String,
+    mir: &Mir,
     overflow_ops: &[&ParsedHandler],
     mutable_fields: &[&(String, String)],
     all_fields: &[(String, String)],
@@ -1393,7 +1398,10 @@ fn emit_overflow_tests_for(
     properties: &[ParsedProperty],
 ) -> Result<()> {
     for op in overflow_ops {
-        for (field_raw, kind, _value) in &op.effects {
+        let body = mir
+            .handler_block(&op.name)
+            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
+        for (field_raw, kind, _value) in rust_codegen_util::block_effect_triples(body) {
             if kind != "add" {
                 continue;
             }
@@ -1402,7 +1410,7 @@ fn emit_overflow_tests_for(
             // (both in the generated function name and the field
             // lookup).
             let field_owned =
-                rust_codegen_util::strip_variant_prefix_for_flat_state(field_raw, spec);
+                rust_codegen_util::strip_variant_prefix_for_flat_state(&field_raw, spec);
             let field = field_owned.as_str();
 
             let dsl_type = all_fields
@@ -1819,14 +1827,14 @@ property balance_nonneg :
   state.balance >= 0
   preserved_by all
 "#;
-        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
         let dir = tempfile::tempdir().unwrap();
         let spec_path = dir.path().join("vault.qedspec");
         let out_path = dir.path().join("tests/proptest.rs");
         std::fs::write(&spec_path, src).unwrap();
-        generate_impl(&spec_path, &out_path).unwrap();
+        let spec = crate::check::parse_spec_file(&spec_path).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        generate_impl(&mir, &spec, &out_path).unwrap();
         let body = std::fs::read_to_string(&out_path).unwrap();
-        let _ = spec; // suppress unused
 
         // Function names land as bare-field, not variant-prefixed.
         assert!(
@@ -2011,6 +2019,7 @@ handler noop { }
     /// Used by Slice 3 tests to verify the generated harness shape.
     fn emit_test_section(src: &str) -> String {
         let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
         let mutable_fields: Vec<&(String, String)> = spec.state_fields.iter().collect();
         let all_fields: Vec<(String, String)> = spec.state_fields.clone();
         let handlers: Vec<&ParsedHandler> = spec.handlers.iter().collect();
@@ -2018,6 +2027,7 @@ handler noop { }
         let mut out = String::new();
         emit_account_section(
             &mut out,
+            &mir,
             "TestAccount",
             &mutable_fields,
             &all_fields,
