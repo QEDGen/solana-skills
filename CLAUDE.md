@@ -2,8 +2,6 @@
 
 Guidance for Claude Code when working in this repository. This file is loaded into **every** session — keep it lean. Deep material lives in `references/` and `docs/design/`; this file orients and points.
 
-> The lowercase `claude.md` is a byte-identical mirror — edit both together (CI gate; see [docs/RELEASING.md](docs/RELEASING.md)).
-
 ## What this is
 
 QEDGen is a Claude Code skill for spec-driven verification of Solana programs. The `.qedspec` is the single source of truth: `qedgen check` validates it (lint + proptest + Lean), `qedgen codegen` generates downstream artifacts (Rust scaffold, Kani/proptest harnesses, Lean proofs, CI), and `#[qed(verified)]` stamps verified code. Leanstral and Aristotle fill hard proof sub-goals when escalated.
