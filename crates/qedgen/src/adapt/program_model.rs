@@ -61,12 +61,10 @@ pub struct HandlerArgModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum HandlerShape {
     Inline,
     FreeFn,
     Method { impl_type: String },
-    Entrypoint { convention: String },
     SourceWalk,
     Unrecognized { reason: String },
 }

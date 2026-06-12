@@ -152,17 +152,20 @@ enum Commands {
         escalate: bool,
     },
 
-    /// Brownfield adapter for existing Anchor programs. Two modes:
+    /// Brownfield adapter for existing Solana programs. Two modes:
     ///
-    /// `--program <c>` (scaffold): parses `<c>/src/lib.rs`, finds the
-    /// `#[program]` mod, walks each instruction to its handler body,
-    /// and emits a `.qedspec` skeleton with TODO markers for state
-    /// machine / requires / effects. Round-trips through the parser.
+    /// `--program <c>` (scaffold): detects the framework — Anchor (an
+    /// `anchor-lang` dep or a `#[program]` mod), else Pinocchio
+    /// (`pub fn process_*`), else native (any `pub fn`) — walks the
+    /// program's handlers, and emits a `.qedspec` skeleton with TODO
+    /// markers for state machine / requires / effects. The Anchor path
+    /// resolves each instruction to its handler body and round-trips
+    /// through the parser.
     ///
-    /// `--program <c> --spec <s>` (attribute): given an existing spec,
-    /// emits one `#[qed(verified, spec = ..., handler = ..., hash = ...,
-    /// spec_hash = ...)]` line per handler. Paste each above its
-    /// handler `pub fn`; future body edits fire `compile_error!`
+    /// `--program <c> --spec <s>` (attribute, Anchor-only): given an
+    /// existing spec, emits one `#[qed(verified, spec = ..., handler = ...,
+    /// hash = ..., spec_hash = ...)]` line per handler. Paste each above
+    /// its handler `pub fn`; future body edits fire `compile_error!`
     /// until you re-run this command.
     Adapt {
         /// Path to the program crate (the directory containing the

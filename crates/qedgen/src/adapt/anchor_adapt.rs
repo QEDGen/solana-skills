@@ -108,6 +108,17 @@ impl ProgramAdapter for AnchorAdapter<'_> {
     }
 }
 
+/// Parse-independent "is this an Anchor crate?" check: an `anchor-lang`
+/// dependency in the crate's `Cargo.toml`. Adapter detection consults this so
+/// a malformed Anchor program surfaces the real Anchor parse error instead of
+/// being swallowed by the permissive native source-walk (which regex-scans
+/// for `pub fn` and would emit a wrong-shaped skeleton).
+pub(crate) fn looks_like_anchor(program_root: &Path) -> bool {
+    std::fs::read_to_string(program_root.join("Cargo.toml"))
+        .map(|s| s.contains("anchor-lang"))
+        .unwrap_or(false)
+}
+
 /// Generate a starter `.qedspec` for the Anchor program at `program_root`
 /// (the crate dir holding `src/`). `overrides` points unrecognized handlers
 /// at their actual implementation.
@@ -833,12 +844,6 @@ fn render_handler(s: &mut String, entry: &HandlerModel) {
                  ///       custom dispatcher or a shape the adapter doesn't\n\
                  ///       cover yet.\n",
             );
-        }
-        HandlerShape::Entrypoint { convention } => {
-            s.push_str(&format!(
-                "/// `{}` — entrypoint discovered by `{}` convention\n",
-                entry.name, convention
-            ));
         }
         HandlerShape::SourceWalk => {
             s.push_str(&format!(

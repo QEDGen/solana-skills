@@ -22,6 +22,12 @@ struct CodegenCtx<'a> {
     output_dir: &'a Path,
 }
 
+/// Per-framework codegen. Every `emit_*` method defaults to the shared
+/// `emit_*` free function (dispatched on `self.target()`), so today the three
+/// implementors differ only in the `Target` they return. Each method is an
+/// intentional override point for upcoming per-target divergence — e.g.
+/// Pinocchio zero-copy `State`, Quasar pod layout — where the shared default
+/// no longer fits; until then the defaults keep all targets in lockstep.
 trait FrameworkCodegen {
     fn target(&self) -> Target;
 
