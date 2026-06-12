@@ -52,11 +52,12 @@ pub enum TopItem {
     },
     /// `type T = { f : Type, ... }` — plain record.
     Record(RecordDecl),
-    /// `type State | Active of { ... } | Draining | ...` — ADT.
-    Adt(AdtDecl),
-    /// `type Error | Foo | Bar = 42 "desc"` — flat enum for error codes.
-    /// Represented as an ADT with variants with no payload; the name
+    /// `type State | Active of { ... } | Draining | ...` — ADT. Flat error
+    /// enums (`type Error | Foo | Bar = 42 "desc"`) are the no-payload case,
+    /// represented as an ADT with variants with no payload; the name
     /// "Error" is conventional.
+    Adt(AdtDecl),
+    /// `handler name (args) { requires / effect / … }` — an instruction handler.
     Handler(HandlerDecl),
     Property(PropertyDecl),
     Cover(CoverDecl),

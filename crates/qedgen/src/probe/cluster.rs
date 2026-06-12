@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// findings, presented as a single interview question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cluster {
-    /// Deterministic hash of `(kind, scope, normalized_clause_text)`,
+    /// Deterministic hash of `(kind, scope)`,
     /// stable across runs on an unchanged program. Suppression rules and
     /// resumed-interview state key off this.
     pub id: String,

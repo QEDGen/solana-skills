@@ -1076,10 +1076,6 @@ enum AristotleCommands {
     },
 }
 
-/// Walk up from `start` looking for a `.git` directory. Returns true if one
-/// is found before hitting the filesystem root. qedgen refuses to write
-/// scaffolding unless the user has a git repo — the safety net for
-/// regeneration is a clean working tree.
 /// Redirect a `…/tests/kani_impl.rs` path to a sibling `…/src/kani_impl.rs`.
 /// Pinocchio Kani harnesses must live in the lib (`src/`) because
 /// `cargo kani` only discovers `#[kani::proof]` there, not in `tests/`
@@ -1100,6 +1096,10 @@ fn redirect_kani_impl_to_src(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Walk up from `start` looking for a `.git` directory. Returns true if one
+/// is found before hitting the filesystem root. qedgen refuses to write
+/// scaffolding unless the user has a git repo — the safety net for
+/// regeneration is a clean working tree.
 fn has_git_repo(start: &std::path::Path) -> bool {
     let mut cur = match start.canonicalize() {
         Ok(p) => p,
