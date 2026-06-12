@@ -7,3 +7,4 @@ pub(crate) mod native_extractor;
 pub(crate) mod pinocchio_extractor;
 pub(crate) mod pinocchio_profile;
 pub(crate) mod pinocchio_to_spec;
+pub(crate) mod program_model;

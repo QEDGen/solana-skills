@@ -85,45 +85,15 @@ pub struct VerifyOpts {
 
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
     let mut backends = Vec::new();
+    let runners: [&dyn VerifyBackend; 4] =
+        [&ProptestBackend, &KaniBackend, &LeanBackend, &MiriBackend];
 
-    if opts.proptest {
-        let report = run_proptest(&opts.proptest_path);
-        let failed = matches!(report.status, BackendStatus::Failed);
-        backends.push(report);
-        if failed && opts.fail_fast {
-            return Ok(VerifyReport {
-                spec: opts.spec.clone(),
-                backends,
-            });
+    for runner in runners {
+        if !runner.enabled(opts) {
+            continue;
         }
-    }
 
-    if opts.kani {
-        let report = run_kani(&opts.kani_path);
-        let failed = matches!(report.status, BackendStatus::Failed);
-        backends.push(report);
-        if failed && opts.fail_fast {
-            return Ok(VerifyReport {
-                spec: opts.spec.clone(),
-                backends,
-            });
-        }
-    }
-
-    if opts.lean {
-        let report = run_lean(&opts.lean_dir);
-        let failed = matches!(report.status, BackendStatus::Failed);
-        backends.push(report);
-        if failed && opts.fail_fast {
-            return Ok(VerifyReport {
-                spec: opts.spec.clone(),
-                backends,
-            });
-        }
-    }
-
-    if opts.miri {
-        let report = crate::miri_verify::run(&opts.project_root);
+        let report = runner.run(opts);
         let failed = matches!(report.status, BackendStatus::Failed);
         backends.push(report);
         if failed && opts.fail_fast {
@@ -138,6 +108,56 @@ pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
         spec: opts.spec.clone(),
         backends,
     })
+}
+
+trait VerifyBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool;
+    fn run(&self, opts: &VerifyOpts) -> BackendReport;
+}
+
+struct ProptestBackend;
+struct KaniBackend;
+struct LeanBackend;
+struct MiriBackend;
+
+impl VerifyBackend for ProptestBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.proptest
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        run_proptest(&opts.proptest_path)
+    }
+}
+
+impl VerifyBackend for KaniBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.kani
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        run_kani(&opts.kani_path)
+    }
+}
+
+impl VerifyBackend for LeanBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.lean
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        run_lean(&opts.lean_dir)
+    }
+}
+
+impl VerifyBackend for MiriBackend {
+    fn enabled(&self, opts: &VerifyOpts) -> bool {
+        opts.miri
+    }
+
+    fn run(&self, opts: &VerifyOpts) -> BackendReport {
+        crate::miri_verify::run(&opts.project_root)
+    }
 }
 
 fn run_proptest(harness: &Path) -> BackendReport {

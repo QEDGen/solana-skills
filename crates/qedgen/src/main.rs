@@ -12,7 +12,7 @@ mod verify;
 // groups; these keep every pre-existing `crate::<module>` path valid.
 pub(crate) use adapt::{
     anchor_adapt, anchor_check, anchor_extractor, anchor_project, anchor_resolver,
-    native_extractor, pinocchio_extractor, pinocchio_profile, pinocchio_to_spec,
+    native_extractor, pinocchio_extractor, pinocchio_profile, pinocchio_to_spec, program_model,
 };
 pub(crate) use codegen::{
     asm2lean, banner, codegen_mir, codegen_shared, crucible_gen, fingerprint, integration_test,

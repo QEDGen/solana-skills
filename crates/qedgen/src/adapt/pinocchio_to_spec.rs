@@ -8,6 +8,8 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::program_model::{HandlerModel, HandlerShape, ProgramFramework, ProgramModel};
+
 /// Structural `.qedspec` skeleton for a Pinocchio program — complete and
 /// parseable, handlers present with empty bodies.
 pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String> {
@@ -19,13 +21,38 @@ pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String
 /// candidate handler.
 pub fn render_skeleton_native(project_root: &Path, program_name: &str) -> Result<String> {
     let handlers = enumerate_handlers_with_prefix(project_root, "")?;
-    Ok(render_skeleton_from_handlers(&handlers, program_name))
+    let model = program_model_from_handlers(&handlers, program_name, ProgramFramework::Native);
+    Ok(render_skeleton_from_model(&model))
 }
 
 /// Takes handler names directly so rendering is testable independent of the
 /// source walker.
 pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) -> String {
-    let pascal = to_pascal_case(program_name);
+    let model = program_model_from_handlers(handlers, program_name, ProgramFramework::Pinocchio);
+    render_skeleton_from_model(&model)
+}
+
+pub fn program_model_from_handlers(
+    handlers: &[String],
+    program_name: &str,
+    framework: ProgramFramework,
+) -> ProgramModel {
+    let mut model = ProgramModel::new(framework, program_name);
+    model.handlers = handlers
+        .iter()
+        .map(|name| HandlerModel {
+            name: name.clone(),
+            args: Vec::new(),
+            accounts_type: None,
+            source_path: None,
+            shape: HandlerShape::SourceWalk,
+        })
+        .collect();
+    model
+}
+
+pub fn render_skeleton_from_model(model: &ProgramModel) -> String {
+    let pascal = to_pascal_case(&model.name);
     let mut s = String::new();
     s.push_str("// Skeleton emitted by `qedgen probe --emit-spec-candidates` (Pinocchio).\n");
     s.push_str("// Empty handler stubs only — semantic clauses (requires / effect / transfers /\n");
@@ -45,13 +72,19 @@ pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) ->
     s.push_str("  | InvalidArgument\n");
     s.push_str("  | Unauthorized\n\n");
 
-    if handlers.is_empty() {
+    if model.handlers.is_empty() {
         s.push_str("// No `pub fn process_*` handlers discovered under the project root.\n");
         s.push_str("// Add handler declarations manually or verify the source-walk worked.\n");
     } else {
-        for h in handlers {
-            s.push_str(&format!("/// `{}` — discovered via source-walk\n", h));
-            s.push_str(&format!("handler {} : State.Init -> State.Active {{\n", h));
+        for handler in &model.handlers {
+            s.push_str(&format!(
+                "/// `{}` — discovered via source-walk\n",
+                handler.name
+            ));
+            s.push_str(&format!(
+                "handler {} : State.Init -> State.Active {{\n",
+                handler.name
+            ));
             s.push_str("  // accounts, requires, effect, transfers — filled by interview\n");
             s.push_str("}\n\n");
         }
@@ -185,6 +218,18 @@ mod tests {
         let pos_transfer = out.find("handler process_transfer").unwrap();
         assert!(pos_burn < pos_transfer, "alphabetical order");
         assert_eq!(out.matches("handler process_transfer").count(), 1);
+    }
+
+    #[test]
+    fn builds_program_model_from_handlers() {
+        let handlers = vec!["process_transfer".to_string()];
+        let model = program_model_from_handlers(&handlers, "p-token", ProgramFramework::Pinocchio);
+
+        assert_eq!(model.framework, ProgramFramework::Pinocchio);
+        assert_eq!(model.name, "p-token");
+        assert_eq!(model.handlers.len(), 1);
+        assert_eq!(model.handlers[0].name, "process_transfer");
+        assert_eq!(model.handlers[0].shape, HandlerShape::SourceWalk);
     }
 
     #[test]
