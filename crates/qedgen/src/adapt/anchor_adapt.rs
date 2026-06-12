@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use crate::anchor_project::{parse_anchor_project, Instruction};
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
 use crate::program_model::{
-    ErrorModel, HandlerArgModel, HandlerModel, HandlerShape, ProgramFramework, ProgramModel,
+    ErrorModel, HandlerArgModel, HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework,
+    ProgramModel,
 };
 
 /// Per-handler override naming the real implementation when the classifier
@@ -66,12 +67,40 @@ pub fn parse_handler_override(value: &str) -> Result<(String, HandlerOverride)> 
     Ok((name.to_string(), rust_override))
 }
 
+pub struct AnchorAdapter<'a> {
+    overrides: &'a HashMap<String, HandlerOverride>,
+}
+
+impl<'a> AnchorAdapter<'a> {
+    pub fn new(overrides: &'a HashMap<String, HandlerOverride>) -> Self {
+        Self { overrides }
+    }
+}
+
+impl ProgramAdapter for AnchorAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Anchor
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        parse_anchor_project(root).is_ok()
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        extract_program_model(root, self.overrides)
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_spec(model))
+    }
+}
+
 /// Generate a starter `.qedspec` for the Anchor program at `program_root`
 /// (the crate dir holding `src/`). `overrides` points unrecognized handlers
 /// at their actual implementation.
 pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
-    let model = extract_program_model(program_root, overrides)?;
-    let rendered = render_spec(&model);
+    let adapter = AnchorAdapter::new(overrides);
+    let rendered = adapter.adapt(program_root)?;
 
     // Round-trip: a parse failure here is a renderer bug, not user input.
     crate::chumsky_adapter::parse_str(&rendered).context(
@@ -1010,6 +1039,39 @@ mod tests {
         assert_eq!(handler.args.len(), 1);
         assert_eq!(handler.args[0].name, "amount");
         assert_eq!(handler.args[0].qedspec_type.as_deref(), Some("U64"));
+    }
+
+    #[test]
+    fn anchor_adapter_trait_detects_extracts_and_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[(
+                "src/lib.rs",
+                r#"
+                use anchor_lang::prelude::*;
+
+                #[program]
+                pub mod inline_prog {
+                    use super::*;
+                    pub fn initialize(ctx: Context<Init>, x: u64) -> Result<()> {
+                        Ok(())
+                    }
+                }
+                "#,
+            )],
+        );
+        let overrides = HashMap::new();
+        let adapter = AnchorAdapter::new(&overrides);
+
+        assert_eq!(adapter.framework(), ProgramFramework::Anchor);
+        assert!(adapter.detect(&root));
+
+        let model = adapter.extract(&root).unwrap();
+        assert_eq!(model.name, "inline_prog");
+        let rendered = adapter.render_spec(&model).unwrap();
+        assert!(rendered.contains("spec InlineProg"));
+        assert!(rendered.contains("handler initialize (x : U64)"));
     }
 
     #[test]

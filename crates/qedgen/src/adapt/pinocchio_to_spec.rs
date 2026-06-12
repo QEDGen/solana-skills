@@ -8,25 +8,95 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::program_model::{HandlerModel, HandlerShape, ProgramFramework, ProgramModel};
+use crate::program_model::{
+    HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework, ProgramModel,
+};
+
+pub struct PinocchioAdapter<'a> {
+    program_name: &'a str,
+}
+
+impl<'a> PinocchioAdapter<'a> {
+    pub fn new(program_name: &'a str) -> Self {
+        Self { program_name }
+    }
+}
+
+impl ProgramAdapter for PinocchioAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Pinocchio
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        enumerate_handlers(root)
+            .map(|handlers| !handlers.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        let handlers = enumerate_handlers(root)?;
+        Ok(program_model_from_handlers(
+            &handlers,
+            self.program_name,
+            ProgramFramework::Pinocchio,
+        ))
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_skeleton_from_model(model))
+    }
+}
+
+pub struct NativeAdapter<'a> {
+    program_name: &'a str,
+}
+
+impl<'a> NativeAdapter<'a> {
+    pub fn new(program_name: &'a str) -> Self {
+        Self { program_name }
+    }
+}
+
+impl ProgramAdapter for NativeAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Native
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        enumerate_handlers_with_prefix(root, "")
+            .map(|handlers| !handlers.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        let handlers = enumerate_handlers_with_prefix(root, "")?;
+        Ok(program_model_from_handlers(
+            &handlers,
+            self.program_name,
+            ProgramFramework::Native,
+        ))
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_skeleton_from_model(model))
+    }
+}
 
 /// Structural `.qedspec` skeleton for a Pinocchio program — complete and
 /// parseable, handlers present with empty bodies.
 pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String> {
-    let handlers = enumerate_handlers(project_root)?;
-    Ok(render_skeleton_from_handlers(&handlers, program_name))
+    PinocchioAdapter::new(program_name).adapt(project_root)
 }
 
 /// Native variant — no canonical naming prefix, so any `pub fn` is a
 /// candidate handler.
 pub fn render_skeleton_native(project_root: &Path, program_name: &str) -> Result<String> {
-    let handlers = enumerate_handlers_with_prefix(project_root, "")?;
-    let model = program_model_from_handlers(&handlers, program_name, ProgramFramework::Native);
-    Ok(render_skeleton_from_model(&model))
+    NativeAdapter::new(program_name).adapt(project_root)
 }
 
 /// Takes handler names directly so rendering is testable independent of the
 /// source walker.
+#[allow(dead_code)]
 pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) -> String {
     let model = program_model_from_handlers(handlers, program_name, ProgramFramework::Pinocchio);
     render_skeleton_from_model(&model)
@@ -230,6 +300,53 @@ mod tests {
         assert_eq!(model.handlers.len(), 1);
         assert_eq!(model.handlers[0].name, "process_transfer");
         assert_eq!(model.handlers[0].shape, HandlerShape::SourceWalk);
+    }
+
+    #[test]
+    fn pinocchio_adapter_detects_extracts_and_renders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn process_transfer(accounts: &[AccountInfo]) -> ProgramResult { Ok(()) }\n",
+        )
+        .unwrap();
+        let adapter = PinocchioAdapter::new("p-token");
+
+        assert_eq!(adapter.framework(), ProgramFramework::Pinocchio);
+        assert!(adapter.detect(root));
+
+        let model = adapter.extract(root).unwrap();
+        assert_eq!(model.handlers.len(), 1);
+        assert_eq!(model.handlers[0].name, "process_transfer");
+        let rendered = adapter.render_spec(&model).unwrap();
+        assert!(rendered.contains("spec PToken"));
+        assert!(rendered.contains("handler process_transfer"));
+    }
+
+    #[test]
+    fn native_adapter_uses_all_public_functions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn initialize() {}\nfn helper() {}\npub fn close_account() {}\n",
+        )
+        .unwrap();
+        let adapter = NativeAdapter::new("native-program");
+
+        assert_eq!(adapter.framework(), ProgramFramework::Native);
+        assert!(adapter.detect(root));
+
+        let model = adapter.extract(root).unwrap();
+        let names: Vec<&str> = model.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["close_account", "initialize"]);
+        assert!(adapter
+            .render_spec(&model)
+            .unwrap()
+            .contains("handler close_account"));
     }
 
     #[test]

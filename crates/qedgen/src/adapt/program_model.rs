@@ -6,7 +6,8 @@
 //! types where known, source breadcrumbs, account bindings, and discovered
 //! error enums.
 
-use std::path::PathBuf;
+use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -76,4 +77,17 @@ pub struct ErrorModel {
     pub source_path: Option<PathBuf>,
     pub enum_name: String,
     pub variants: Vec<String>,
+}
+
+#[allow(dead_code)]
+pub trait ProgramAdapter {
+    fn framework(&self) -> ProgramFramework;
+    fn detect(&self, root: &Path) -> bool;
+    fn extract(&self, root: &Path) -> Result<ProgramModel>;
+    fn render_spec(&self, model: &ProgramModel) -> Result<String>;
+
+    fn adapt(&self, root: &Path) -> Result<String> {
+        let model = self.extract(root)?;
+        self.render_spec(&model)
+    }
 }
