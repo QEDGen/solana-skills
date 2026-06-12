@@ -1941,12 +1941,15 @@ fn emit_overflow_detection_harnesses(
 
     // #66 — the checked-add filter reads the lowered MIR body
     // (`Stmt::CheckedAdd` projects to kind `"add"`), not `op.effects`.
+    // Deep walk: a checked add inside a `Stmt::Branch` arm can still
+    // overflow, and the harness just invokes the transition (Kani
+    // explores every match arm).
     let overflow_ops: Vec<&crate::check::ParsedHandler> = handlers
         .iter()
         .copied()
         .filter(|op| {
             mir.handler_block(&op.name).is_some_and(|body| {
-                util::block_effect_triples(body)
+                util::block_effect_triples_deep(body)
                     .iter()
                     .any(|(_, kind, _)| *kind == "add")
             })

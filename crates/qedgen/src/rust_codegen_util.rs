@@ -1120,9 +1120,36 @@ pub fn stmt_effect_triple(stmt: &crate::mir::Stmt) -> Option<(String, &'static s
 
 /// All effect triples of a lowered handler body, in spec order. The
 /// shared iteration source for the Kani/proptest transition emitters,
-/// conformance harnesses, and overflow filters.
+/// conformance harnesses, and overflow filters. Top-level only —
+/// `Stmt::Branch` arms are NOT descended (per-arm rendering owns
+/// those); use [`block_effect_triples_deep`] for analyses that must
+/// see conditionally-applied effects.
 pub fn block_effect_triples(body: &crate::mir::Block) -> Vec<(String, &'static str, &str)> {
     body.stmts.iter().filter_map(stmt_effect_triple).collect()
+}
+
+/// Like [`block_effect_triples`] but descends into `Stmt::Branch`
+/// arms/default. For *may-this-effect-fire* analyses (overflow filters
+/// and tests) where a conditionally-applied effect counts.
+pub fn block_effect_triples_deep(body: &crate::mir::Block) -> Vec<(String, &'static str, &str)> {
+    fn walk<'a>(stmts: &'a [crate::mir::Stmt], out: &mut Vec<(String, &'static str, &'a str)>) {
+        for s in stmts {
+            if let Some(t) = stmt_effect_triple(s) {
+                out.push(t);
+            }
+            if let crate::mir::Stmt::Branch { arms, default, .. } = s {
+                for a in arms {
+                    walk(&a.block.stmts, out);
+                }
+                if let Some(d) = default {
+                    walk(&d.stmts, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&body.stmts, &mut out);
+    out
 }
 
 /// Render a single `(field, op_kind, value)` triple into Rust at the given
@@ -2085,17 +2112,27 @@ fn emit_transition_fn_inner(
     // identity is validated by the Anchor accounts struct at handler
     // entry, not in the random-state machine. Matches v2.11 brownfield
     // findings on token-fundraiser.
-    // v2.20 §S1.2: when the spec uses `match` inside `effect { … }`, the
-    // adapter populates `op.effect_branches` and `op.effects` carries the
-    // *union* of every arm's effects (for back-compat with pre-v2.20
-    // readers). Emit a real Rust `match` block from `effect_branches`
-    // when present; otherwise fall through to the flat list as before.
-    if let Some(branches) = &op.effect_branches {
-        out.push_str(&format!("    match {} {{\n", branches.scrutinee_rust));
-        let has_wildcard = branches.arms.iter().any(|a| a.is_wildcard);
-        for arm in &branches.arms {
-            out.push_str(&format!("        {} => {{\n", arm.pattern_rust));
-            for (field, op_kind, value) in &arm.effects {
+    // v2.20 §S1.2 / Phase-5 #42: when the spec uses `match` inside
+    // `effect { … }`, lowering produces a `Stmt::Branch` (and suppresses
+    // the flat union that `op.effects` still carries for back-compat
+    // readers). Emit a real Rust `match` block from the Branch when
+    // present; otherwise fall through to the flat list as before.
+    if let Some((scrutinee, arms, default)) = body.stmts.iter().find_map(|st| match st {
+        crate::mir::Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } => Some((scrutinee, arms, default)),
+        _ => None,
+    }) {
+        let scrutinee_rust = match scrutinee {
+            crate::mir::BranchScrutinee::Match(e) => e.rust.as_str(),
+            crate::mir::BranchScrutinee::Predicate(p) => p.0.rust.as_str(),
+        };
+        out.push_str(&format!("    match {} {{\n", scrutinee_rust));
+        let emit_arm_block = |out: &mut String, block: &crate::mir::Block| {
+            for (field, op_kind, value) in block_effect_triples(block) {
+                let field = field.as_str();
                 if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
                     continue;
                 }
@@ -2125,9 +2162,18 @@ fn emit_transition_fn_inner(
                 }
                 emit_after_store_hooks(out, spec, field, "            ");
             }
+        };
+        for arm in arms {
+            let pattern = arm.pattern.as_ref().map(|p| p.rust.as_str()).unwrap_or("_");
+            out.push_str(&format!("        {} => {{\n", pattern));
+            emit_arm_block(out, &arm.block);
             out.push_str("        }\n");
         }
-        if !has_wildcard {
+        if let Some(default_block) = default {
+            out.push_str("        _ => {\n");
+            emit_arm_block(out, default_block);
+            out.push_str("        }\n");
+        } else {
             // Without a `_` arm Rust requires exhaustive match. Spec
             // patterns are literal-only in v2.20, so we synthesize a
             // wildcard that no-ops — codegen guarantees the harness
@@ -2255,6 +2301,65 @@ handler churn (amount : U64) (who : Pubkey) {
         assert_eq!(
             kinds,
             vec!["add", "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap", "set"]
+        );
+    }
+
+    /// Phase-5 #42 — the transition emitter renders `effect { match … }`
+    /// from the lowered `Stmt::Branch` (per-arm semantics, wildcard arm
+    /// as `_`), pinned against the exact pre-Phase-5 `effect_branches`
+    /// output shape so the Kani/proptest harness text is unchanged.
+    #[test]
+    fn transition_fn_renders_branch_as_match() {
+        let src = r#"spec CondFee
+program_id "11111111111111111111111111111111"
+type State
+  | Active of { a : U64, b : U64, d : U64 }
+type Error
+  | InvalidAmount
+handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
+  permissionless
+  requires amount > 0 else InvalidAmount
+  effect {
+    match fee_type {
+      0 => a +=! amount,
+      1 => b += amount,
+      _ => d := 0,
+    }
+  }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let mir = crate::mir::lower(&spec);
+        let op = &spec.handlers[0];
+        let body = mir.handler_block(&op.name).expect("mir body");
+        let mut out = String::new();
+        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+            crate::codegen_shared::map_type(t, &spec)
+        })
+        .expect("emit");
+        let expected = "    match fee_type {\n\
+                        \x20       0 => {\n\
+                        \x20           s.a = s.a.saturating_add(amount);\n\
+                        \x20       }\n\
+                        \x20       1 => {\n\
+                        \x20           match s.b.checked_add(amount) {\n\
+                        \x20               Some(__v) => s.b = __v,\n\
+                        \x20               None => return false,\n\
+                        \x20           }\n\
+                        \x20       }\n\
+                        \x20       _ => {\n\
+                        \x20           s.d = 0;\n\
+                        \x20       }\n\
+                        \x20   }\n";
+        assert!(
+            out.contains(expected),
+            "transition must render the Branch as a Rust match:\n{out}"
+        );
+        // The flat union must NOT leak alongside the match.
+        assert_eq!(
+            out.matches("s.a = s.a.saturating_add(amount);").count(),
+            1,
+            "arm effect emitted exactly once:\n{out}"
         );
     }
 
