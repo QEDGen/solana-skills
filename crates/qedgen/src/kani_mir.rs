@@ -579,10 +579,7 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
         "// ============================================================================\n\n",
     );
     for op in &handlers {
-        let body = mir
-            .handler_block(&op.name)
-            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
-        util::emit_transition_fn_for_kani(out, body, op, parsed, false, |t| map_type(t, parsed))?;
+        util::emit_transition_fn_for_kani(out, mir, op, parsed, false, |t| map_type(t, parsed))?;
     }
 
     // 8. Reference implementations (v2.25 — pure-expression fns
@@ -1717,7 +1714,7 @@ fn emit_effect_conformance_harnesses(
     mir: &Mir,
     parsed: &ParsedSpec,
 ) -> Result<()> {
-    use crate::codegen_shared::{map_type, sanitize_ident};
+    use crate::codegen_shared::sanitize_ident;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
@@ -1770,153 +1767,273 @@ fn emit_effect_conformance_harnesses(
         .collect();
 
     for op in &effect_ops {
-        let is_init = op.pre_status.as_deref() == Some("Uninitialized");
-
         // #66 — the per-effect harness loop iterates the handler's
         // lowered MIR body (projected back onto triples by the shared
         // adaptor), not `op.effects`. Same order/content; the sibling-
-        // frame check below reads the same triple list.
+        // frame check reads the same triple list.
         let body = mir
             .handler_block(&op.name)
             .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
         let triples = util::block_effect_triples(body);
         for (field, op_kind, value) in triples.iter().cloned() {
-            let base = util::effect_target_base(&field);
-            if !field_type_lookup.contains_key(base) {
-                continue;
-            }
-
-            let field_type = field_type_lookup.get(field.as_str()).copied().unwrap_or("");
-            let solver = util::pick_kani_solver_for_effect(field_type, value, op);
-
-            out.push_str("#[kani::proof]\n");
-            out.push_str("#[kani::unwind(2)]\n");
-            out.push_str(&format!("#[kani::solver({})]\n", solver));
-            out.push_str(&format!(
-                "fn verify_{}_effect_{}() {{\n",
-                op.name,
-                sanitize_ident(&field)
-            ));
-
-            if is_init {
-                util::emit_state_init_zeroed(out, &mutable, lifecycle, parsed);
-            } else {
-                util::emit_state_init_symbolic(out, &mutable, lifecycle);
-                util::emit_pre_status_assume(out, op, lifecycle);
-            }
-
-            for (pname, ptype) in &op.takes_params {
-                out.push_str(&format!(
-                    "    let {}: {} = kani::any();\n",
-                    pname,
-                    map_type(ptype, parsed)?
-                ));
-            }
-            util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
-
-            // Bounds assumptions for arithmetic safety (non-init only).
-            if !is_init {
-                if !parsed.constants.is_empty() {
-                    for (cname, _) in &parsed.constants {
-                        let upper = cname.to_uppercase();
-                        if upper.contains("MAX") || upper.contains("MEMBER") {
-                            if mutable.iter().any(|(f, _)| f == "member_count") {
-                                out.push_str(&format!(
-                                    "    kani::assume(s.member_count <= {});\n",
-                                    upper
-                                ));
-                            }
-                            break;
-                        }
-                    }
-                }
-                let owned_props: Vec<crate::check::ParsedProperty> =
-                    properties.iter().map(|p| (*p).clone()).collect();
-                util::emit_add_strict_bounds(
-                    out,
-                    op,
-                    &owned_props,
-                    "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n",
-                );
-            }
-
-            // Pre-state snapshot — every mutable field except the
-            // set-target.
-            let needs_pre_for: Vec<&&(String, String)> = mutable
-                .iter()
-                .filter(|(fname, _)| !(fname.as_str() == field && op_kind == "set"))
-                .collect();
-            for (fname, _) in &needs_pre_for {
-                out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
-            }
-
-            // Call transition + assertion dispatch.
-            emit_kani_account_env_binding(out, op, "accounts", "    ");
-            let args = transition_call_args(
-                op,
-                util::handler_needs_account_env(op).then_some("accounts"),
-            );
-            out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
-
-            let resolved = util::resolve_value_with_account_env(
-                value,
-                op,
+            let harness_name = format!("verify_{}_effect_{}", op.name, sanitize_ident(&field));
+            emit_one_conformance_harness(
+                out,
                 parsed,
-                Some("pre_"),
-                util::handler_needs_account_env(op).then_some("accounts"),
-            );
-            match op_kind {
-                "set" => {
-                    let assertion = util::rewrite_kani_pubkey_comparisons(
-                        &format!("s.{field} == {resolved}"),
-                        op,
-                        parsed,
+                op,
+                &mutable,
+                lifecycle,
+                &properties,
+                &field_type_lookup,
+                &harness_name,
+                &[],
+                (&field, op_kind, value),
+                &triples,
+            )?;
+        }
+
+        // #42 — conditional effects: one harness per (arm, effect)
+        // under a `kani::assume(<scrutinee> == <pattern>)` pin, so the
+        // post-state assertions hold under match semantics (exactly one
+        // arm fires). The sibling-frame check is scoped to the arm's
+        // own effects: with the arm pinned, no other arm can mutate.
+        // The wildcard arm pins via negated assumes over every literal
+        // pattern.
+        let branch = body.stmts.iter().find_map(|st| match st {
+            crate::mir::Stmt::Branch {
+                scrutinee,
+                arms,
+                default,
+            } => Some((scrutinee, arms, default)),
+            _ => None,
+        });
+        if let Some((scrutinee, arms, default)) = branch {
+            let scrut = match scrutinee {
+                crate::mir::BranchScrutinee::Match(e) => e.rust.as_str(),
+                crate::mir::BranchScrutinee::Predicate(p) => p.0.rust.as_str(),
+            };
+            let patterns: Vec<&str> = arms
+                .iter()
+                .filter_map(|a| a.pattern.as_ref().map(|p| p.rust.as_str()))
+                .collect();
+            for (idx, arm) in arms.iter().enumerate() {
+                let Some(pattern) = arm.pattern.as_ref().map(|p| p.rust.as_str()) else {
+                    continue;
+                };
+                let assume = vec![format!("    kani::assume({} == {});\n", scrut, pattern)];
+                let arm_triples = util::block_effect_triples(&arm.block);
+                for (field, op_kind, value) in arm_triples.iter().cloned() {
+                    let harness_name = format!(
+                        "verify_{}_arm{}_effect_{}",
+                        op.name,
+                        idx,
+                        sanitize_ident(&field)
                     );
-                    out.push_str(&format!(
-                        "        assert!({}, \"{} must equal {}\");\n",
-                        assertion, field, resolved
-                    ));
-                }
-                "add" => {
-                    out.push_str(&format!(
-                        "        assert!(s.{} == pre_{}.wrapping_add({}), \"{} must increment by {}\");\n",
-                        field, field, resolved, field, resolved
-                    ));
-                }
-                "sub" => {
-                    out.push_str(&format!(
-                        "        assert!(s.{} == pre_{}.wrapping_sub({}), \"{} must decrement by {}\");\n",
-                        field, field, resolved, field, resolved
-                    ));
-                }
-                _ => {}
-            }
-
-            // Assert sibling fields unchanged (unless mutated by another
-            // effect in the same handler).
-            for (fname, _) in &mutable {
-                if fname.as_str() != field {
-                    let sibling_mutated =
-                        triples.iter().any(|(f, _, _)| f.as_str() == fname.as_str());
-                    if !sibling_mutated {
-                        let assertion = util::rewrite_kani_pubkey_comparisons(
-                            &format!("s.{fname} == pre_{fname}"),
-                            op,
-                            parsed,
-                        );
-                        out.push_str(&format!(
-                            "        assert!({}, \"{} must not change\");\n",
-                            assertion, fname
-                        ));
-                    }
+                    emit_one_conformance_harness(
+                        out,
+                        parsed,
+                        op,
+                        &mutable,
+                        lifecycle,
+                        &properties,
+                        &field_type_lookup,
+                        &harness_name,
+                        &assume,
+                        (&field, op_kind, value),
+                        &arm_triples,
+                    )?;
                 }
             }
-
-            out.push_str("    }\n");
-            out.push_str("}\n\n");
+            if let Some(default_block) = default {
+                let assumes: Vec<String> = patterns
+                    .iter()
+                    .map(|p| format!("    kani::assume({} != {});\n", scrut, p))
+                    .collect();
+                let default_triples = util::block_effect_triples(default_block);
+                for (field, op_kind, value) in default_triples.iter().cloned() {
+                    let harness_name = format!(
+                        "verify_{}_default_effect_{}",
+                        op.name,
+                        sanitize_ident(&field)
+                    );
+                    emit_one_conformance_harness(
+                        out,
+                        parsed,
+                        op,
+                        &mutable,
+                        lifecycle,
+                        &properties,
+                        &field_type_lookup,
+                        &harness_name,
+                        &assumes,
+                        (&field, op_kind, value),
+                        &default_triples,
+                    )?;
+                }
+            }
         }
     }
 
+    Ok(())
+}
+
+/// One effect-conformance harness: symbolic (or zeroed-init) state,
+/// symbolic params, optional scrutinee-pin assumes (#42 per-arm sites),
+/// transition call, post-state assertion for the target effect, and the
+/// frame check over `sibling_triples` (the effect set that can legally
+/// fire alongside the target — the whole flat body, or one Branch arm).
+#[allow(clippy::too_many_arguments)]
+fn emit_one_conformance_harness(
+    out: &mut String,
+    parsed: &ParsedSpec,
+    op: &crate::check::ParsedHandler,
+    mutable: &[&(String, String)],
+    lifecycle: &[String],
+    properties: &[&crate::check::ParsedProperty],
+    field_type_lookup: &std::collections::HashMap<&str, &str>,
+    harness_name: &str,
+    assume_lines: &[String],
+    (field, op_kind, value): (&str, &str, &str),
+    sibling_triples: &[(String, &'static str, &str)],
+) -> Result<()> {
+    use crate::codegen_shared::map_type;
+    use crate::rust_codegen_util as util;
+
+    let is_init = op.pre_status.as_deref() == Some("Uninitialized");
+
+    let base = util::effect_target_base(field);
+    if !field_type_lookup.contains_key(base) {
+        return Ok(());
+    }
+
+    let field_type = field_type_lookup.get(field).copied().unwrap_or("");
+    let solver = util::pick_kani_solver_for_effect(field_type, value, op);
+
+    out.push_str("#[kani::proof]\n");
+    out.push_str("#[kani::unwind(2)]\n");
+    out.push_str(&format!("#[kani::solver({})]\n", solver));
+    out.push_str(&format!("fn {}() {{\n", harness_name));
+
+    if is_init {
+        util::emit_state_init_zeroed(out, mutable, lifecycle, parsed);
+    } else {
+        util::emit_state_init_symbolic(out, mutable, lifecycle);
+        util::emit_pre_status_assume(out, op, lifecycle);
+    }
+
+    for (pname, ptype) in &op.takes_params {
+        out.push_str(&format!(
+            "    let {}: {} = kani::any();\n",
+            pname,
+            map_type(ptype, parsed)?
+        ));
+    }
+    util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+
+    // #42 — pin the scrutinee to this arm (or away from every literal
+    // pattern, for the wildcard arm) before any state is read.
+    for line in assume_lines {
+        out.push_str(line);
+    }
+
+    // Bounds assumptions for arithmetic safety (non-init only).
+    if !is_init {
+        if !parsed.constants.is_empty() {
+            for (cname, _) in &parsed.constants {
+                let upper = cname.to_uppercase();
+                if upper.contains("MAX") || upper.contains("MEMBER") {
+                    if mutable.iter().any(|(f, _)| f == "member_count") {
+                        out.push_str(&format!("    kani::assume(s.member_count <= {});\n", upper));
+                    }
+                    break;
+                }
+            }
+        }
+        let owned_props: Vec<crate::check::ParsedProperty> =
+            properties.iter().map(|p| (*p).clone()).collect();
+        util::emit_add_strict_bounds(
+            out,
+            op,
+            &owned_props,
+            "    kani::assume(s.{field} < s.{bound}); // strict bound: {field} increments\n",
+        );
+    }
+
+    // Pre-state snapshot — every mutable field except the
+    // set-target.
+    let needs_pre_for: Vec<&&(String, String)> = mutable
+        .iter()
+        .filter(|(fname, _)| !(fname.as_str() == field && op_kind == "set"))
+        .collect();
+    for (fname, _) in &needs_pre_for {
+        out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
+    }
+
+    // Call transition + assertion dispatch.
+    emit_kani_account_env_binding(out, op, "accounts", "    ");
+    let args = transition_call_args(
+        op,
+        util::handler_needs_account_env(op).then_some("accounts"),
+    );
+    out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
+
+    let resolved = util::resolve_value_with_account_env(
+        value,
+        op,
+        parsed,
+        Some("pre_"),
+        util::handler_needs_account_env(op).then_some("accounts"),
+    );
+    match op_kind {
+        "set" => {
+            let assertion = util::rewrite_kani_pubkey_comparisons(
+                &format!("s.{field} == {resolved}"),
+                op,
+                parsed,
+            );
+            out.push_str(&format!(
+                "        assert!({}, \"{} must equal {}\");\n",
+                assertion, field, resolved
+            ));
+        }
+        "add" => {
+            out.push_str(&format!(
+                "        assert!(s.{} == pre_{}.wrapping_add({}), \"{} must increment by {}\");\n",
+                field, field, resolved, field, resolved
+            ));
+        }
+        "sub" => {
+            out.push_str(&format!(
+                "        assert!(s.{} == pre_{}.wrapping_sub({}), \"{} must decrement by {}\");\n",
+                field, field, resolved, field, resolved
+            ));
+        }
+        _ => {}
+    }
+
+    // Assert sibling fields unchanged (unless mutated by another
+    // effect in the same frame — the flat body, or this arm).
+    for (fname, _) in mutable {
+        if fname.as_str() != field {
+            let sibling_mutated = sibling_triples
+                .iter()
+                .any(|(f, _, _)| f.as_str() == fname.as_str());
+            if !sibling_mutated {
+                let assertion = util::rewrite_kani_pubkey_comparisons(
+                    &format!("s.{fname} == pre_{fname}"),
+                    op,
+                    parsed,
+                );
+                out.push_str(&format!(
+                    "        assert!({}, \"{} must not change\");\n",
+                    assertion, fname
+                ));
+            }
+        }
+    }
+
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
     Ok(())
 }
 
@@ -2285,6 +2402,66 @@ mod tests {
     use super::*;
     use crate::check;
     use std::path::Path;
+
+    /// #42 — conditional-effect handlers get per-arm conformance
+    /// harnesses: each arm pinned via `kani::assume(<scrutinee> ==
+    /// <pattern>)` with the frame check scoped to that arm's effects;
+    /// the wildcard arm pins via negated assumes over every literal
+    /// pattern. (Flat per-effect harnesses self-skip for Branch
+    /// handlers — their unconditional assertions are invalid under
+    /// match semantics.)
+    #[test]
+    fn branch_handlers_get_per_arm_conformance_harnesses() {
+        let (mir, parsed) = lower_fixture(
+            "crates/qedgen/tests/fixtures/regressions/issue-42-conditional/fee_router.qedspec",
+        );
+        let out = render(&mir, &parsed);
+
+        // Per-arm harnesses with scrutinee pins.
+        assert!(
+            out.contains("fn verify_collect_fees_arm0_effect_fees_a_withdrawn()"),
+            "arm-0 harness missing:\n{out}"
+        );
+        assert!(
+            out.contains("    kani::assume(fee_type == 0);"),
+            "arm-0 scrutinee pin missing:\n{out}"
+        );
+        // Wildcard arm: negated pins + the set-effect assertion.
+        assert!(
+            out.contains("fn verify_collect_fees_default_effect_fees_d_accumulated()"),
+            "default-arm harness missing:\n{out}"
+        );
+        for pin in [
+            "    kani::assume(fee_type != 0);",
+            "    kani::assume(fee_type != 1);",
+            "    kani::assume(fee_type != 2);",
+        ] {
+            assert!(out.contains(pin), "default pin `{pin}` missing:\n{out}");
+        }
+        // Frame scoped to the arm: under the arm-0 pin, every other
+        // field must be asserted unchanged (including the other arms'
+        // targets).
+        let arm0 = out
+            .split("fn verify_collect_fees_arm0_effect_fees_a_withdrawn()")
+            .nth(1)
+            .and_then(|rest| rest.split("#[kani::proof]").next())
+            .expect("arm-0 harness body");
+        for sibling in [
+            "fees_b_withdrawn must not change",
+            "fees_c_accumulated must not change",
+            "fees_d_accumulated must not change",
+        ] {
+            assert!(
+                arm0.contains(sibling),
+                "frame check `{sibling}` missing:\n{arm0}"
+            );
+        }
+        // No unconditional flat harness for a Branch handler.
+        assert!(
+            !out.contains("fn verify_collect_fees_effect_"),
+            "flat per-effect harness must self-skip for Branch handlers:\n{out}"
+        );
+    }
 
     fn lower_fixture(rel_path: &str) -> (Mir, ParsedSpec) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))

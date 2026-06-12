@@ -2292,7 +2292,8 @@ fn scope_mir_to_account(mir: &Mir, acct: &crate::mir::AccountStateMir) -> Mir {
         handlers,
         invariants: Vec::new(), // emit_invariants_as_comments handles
         events: mir.events.clone(),
-        constants: Vec::new(),             // already emitted at top
+        constants: Vec::new(), // already emitted at top
+        hooks: mir.hooks.clone(),
         uninterpreted_helpers: Vec::new(), // already emitted
         ref_impls: Vec::new(),             // already emitted
         properties: Vec::new(),            // emit_properties_multi handles
@@ -6223,6 +6224,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             invariants: vec![],
             events: vec![],
             constants: vec![],
+            hooks: vec![],
             uninterpreted_helpers: vec![crate::mir::UninterpretedHelper {
                 name: "is_valid".to_string(),
                 arg_types: vec!["Nat".to_string()],
@@ -6260,6 +6262,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             invariants: vec![],
             events: vec![],
             constants: vec![],
+            hooks: vec![],
             uninterpreted_helpers: vec![],
             ref_impls: vec![crate::mir::RefImpl {
                 name: "scale".to_string(),

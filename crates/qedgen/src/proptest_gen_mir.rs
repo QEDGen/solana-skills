@@ -842,7 +842,7 @@ fn emit_account_section(
     // #67 item 4) — the sequence harness drives random op sequences from
     // `init`, which is what exercises the `after_store` assertions injected
     // into the transitions (without a driver the hooks would never fire).
-    let want_sequence = (!owned_props.is_empty() && handlers.len() > 1) || !spec.hooks.is_empty();
+    let want_sequence = (!owned_props.is_empty() && handlers.len() > 1) || !mir.hooks.is_empty();
     if want_sequence && !handlers.is_empty() {
         emit_sequence_test_for(
             out,
@@ -967,10 +967,7 @@ fn emit_transition_functions_for(
     spec: &ParsedSpec,
 ) -> Result<()> {
     for op in handlers {
-        let body = mir
-            .handler_block(&op.name)
-            .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
-        rust_codegen_util::emit_transition_fn(out, body, op, spec, true, |t| map_type(t, spec))?;
+        rust_codegen_util::emit_transition_fn(out, mir, op, spec, true, |t| map_type(t, spec))?;
     }
     Ok(())
 }

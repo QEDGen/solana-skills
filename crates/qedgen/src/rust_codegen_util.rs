@@ -1939,10 +1939,15 @@ pub fn emit_property_predicates_with(
 /// failed assertion panics, which both the proptest and Kani harnesses
 /// surface as a failure / verification violation. On-chain codegen doesn't
 /// use this transition emitter, so hooks never reach the program.
-fn emit_after_store_hooks(out: &mut String, spec: &ParsedSpec, field: &str, indent: &str) {
+fn emit_after_store_hooks(
+    out: &mut String,
+    hooks: &[crate::mir::HookMir],
+    field: &str,
+    indent: &str,
+) {
     let base = effect_target_base(field);
-    for hook in &spec.hooks {
-        if let crate::check::ParsedHookKind::AfterStore(f) = &hook.kind {
+    for hook in hooks {
+        if let crate::mir::HookKind::AfterStore(f) = &hook.kind {
             if f == base {
                 for a in &hook.asserts {
                     out.push_str(&format!(
@@ -1964,18 +1969,18 @@ fn emit_after_store_hooks(out: &mut String, spec: &ParsedSpec, field: &str, inde
 /// surface, same boundary as `codegen_mir`'s guards.
 pub fn emit_transition_fn(
     out: &mut String,
-    body: &crate::mir::Block,
+    mir: &crate::mir::Mir,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
-    emit_transition_fn_inner(out, body, op, spec, wrapping, None, false, map_type_fn)
+    emit_transition_fn_inner(out, mir, op, spec, wrapping, None, false, map_type_fn)
 }
 
 pub fn emit_transition_fn_for_kani(
     out: &mut String,
-    body: &crate::mir::Block,
+    mir: &crate::mir::Mir,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
@@ -1985,7 +1990,7 @@ pub fn emit_transition_fn_for_kani(
         handler_needs_account_env(op).then(|| handler_account_env_struct_name(&op.name));
     emit_transition_fn_inner(
         out,
-        body,
+        mir,
         op,
         spec,
         wrapping,
@@ -1998,7 +2003,7 @@ pub fn emit_transition_fn_for_kani(
 #[allow(clippy::too_many_arguments)]
 fn emit_transition_fn_inner(
     out: &mut String,
-    body: &crate::mir::Block,
+    mir: &crate::mir::Mir,
     op: &ParsedHandler,
     spec: &ParsedSpec,
     wrapping: bool,
@@ -2006,6 +2011,9 @@ fn emit_transition_fn_inner(
     rewrite_pubkey_comparisons: bool,
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) -> anyhow::Result<()> {
+    let body = mir
+        .handler_block(&op.name)
+        .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
     if let Some(ref doc) = op.doc {
         out.push_str(&format!("/// {}\n", doc.trim()));
     }
@@ -2160,7 +2168,7 @@ fn emit_transition_fn_inner(
                         "            ",
                     );
                 }
-                emit_after_store_hooks(out, spec, field, "            ");
+                emit_after_store_hooks(out, &mir.hooks, field, "            ");
             }
         };
         for arm in arms {
@@ -2205,7 +2213,7 @@ fn emit_transition_fn_inner(
             } else {
                 emit_one_effect(out, op, spec, wrapping, field, op_kind, value, "    ");
             }
-            emit_after_store_hooks(out, spec, field, "    ");
+            emit_after_store_hooks(out, &mir.hooks, field, "    ");
         }
     }
 
@@ -2331,9 +2339,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2462,9 +2469,8 @@ handler buy (amount : U64) { effect { pool += amount } }
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2491,9 +2497,8 @@ handler buy (amount : U64) { effect { pool +=! amount } }
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2516,9 +2521,8 @@ handler buy (amount : U64) { effect { pool +=? amount } }
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2546,9 +2550,8 @@ handler buy (amount : U64) { effect { pool +=? amount } }
             let spec = parse_str(&src).expect("parse");
             let mir = crate::mir::lower(&spec);
             let op = &spec.handlers[0];
-            let body = mir.handler_block(&op.name).expect("mir body");
             let mut out = String::new();
-            emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+            emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
                 crate::codegen_shared::map_type(t, &spec)
             })
             .expect("emit");
@@ -2576,9 +2579,8 @@ handler close : State.Open -> State.Closed { effect { x := 0 } }
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
@@ -2604,9 +2606,8 @@ handler deposit (amount : U64) { effect { balance += amount } }
         let spec = parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
         let op = &spec.handlers[0];
-        let body = mir.handler_block(&op.name).expect("mir body");
         let mut out = String::new();
-        emit_transition_fn(&mut out, body, op, &spec, false, |t| {
+        emit_transition_fn(&mut out, &mir, op, &spec, false, |t| {
             crate::codegen_shared::map_type(t, &spec)
         })
         .expect("emit");
