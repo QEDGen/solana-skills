@@ -1,0 +1,2442 @@
+use super::*;
+use crate::chumsky_adapter::parse_str;
+
+/// A conservation ensures (`post.X == pre.X + delta`) must NOT classify
+/// `X` as unchanged: the rendered string contains `post.X==pre.X` as a
+/// substring, and an unanchored match emits an equality assertion that
+/// fails on a correct implementation.
+#[test]
+fn unchanged_fields_exclude_pre_plus_delta_ensures() {
+    assert_eq!(
+        pinocchio_unchanged_ensures_fields(
+            "post.fee_pool == pre.fee_pool + fee && post.admin == pre.admin"
+        ),
+        vec!["admin".to_string()],
+    );
+    // Reversed orientation continues the same way.
+    assert_eq!(
+        pinocchio_unchanged_ensures_fields("pre.fee_pool == post.fee_pool - fee"),
+        Vec::<String>::new(),
+    );
+    // Genuinely-unchanged claims still match at every anchored position:
+    // end of expression, before `&&`, and inside parens.
+    assert_eq!(
+        pinocchio_unchanged_ensures_fields("(post.vault == pre.vault) && post.total == pre.total"),
+        vec!["total".to_string(), "vault".to_string()],
+    );
+}
+
+/// Auto-trigger fires when a handler has `modifies` listing a field
+/// that's absent from the effect block's LHS set (the LP-deposit
+/// shape).
+#[test]
+fn auto_trigger_fires_on_lp_shape() {
+    let src = r#"spec Pool
+state { pool_balance : U64, lp_supply : U64 }
+handler deposit (amount : U64) {
+  requires amount > 0 else InvalidAmount
+  modifies [pool_balance, lp_supply]
+  ensures state.pool_balance == old(state.pool_balance) + amount
+  effect {
+    pool_balance += amount
+  }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let h = &spec.handlers[0];
+    assert!(
+        handler_triggers_impl_harness(h),
+        "modifies = [pool_balance, lp_supply] but effect only writes pool_balance → trigger",
+    );
+    assert!(spec_triggers_impl_harness(&spec));
+}
+
+/// Auto-trigger does NOT fire when modifies matches the effect-LHS
+/// set (no LP-shape gap — the spec's effect block covers every
+/// declared write).
+#[test]
+fn auto_trigger_silent_when_modifies_matches_effects() {
+    let src = r#"spec Counter
+state { count : U64 }
+handler bump (delta : U64) {
+  requires delta > 0 else InvalidAmount
+  modifies [count]
+  ensures state.count == old(state.count) + delta
+  effect {
+    count += delta
+  }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let h = &spec.handlers[0];
+    assert!(
+        !handler_triggers_impl_harness(h),
+        "modifies = [count] = effect LHS = {{count}} → no trigger",
+    );
+    assert!(!spec_triggers_impl_harness(&spec));
+}
+
+/// Auto-trigger silent when no `modifies` clause is declared at all.
+/// Bundled examples today take this path.
+#[test]
+fn auto_trigger_silent_without_modifies() {
+    let src = r#"spec NoModifies
+state { x : U64 }
+handler set_x (v : U64) {
+  ensures state.x == v
+  effect { x := v }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(!spec_triggers_impl_harness(&spec));
+}
+
+/// Slice 5: Quasar emits the struct-based impl harness, reusing the
+/// Anchor symbolic-accounts builder + per-handler proof emitter (the
+/// Quasar scaffold's `Ctx<X>` dispatcher forwards to the same
+/// `impl <Pascal> { fn handler(&mut self, …) }` method). The header
+/// must be Quasar-flavored and must NOT leak the Anchor framework
+/// crates or the Pinocchio stack scaffold.
+#[test]
+fn quasar_target_emits_handler_harness() {
+    let src = r#"spec QuasarBump
+state { x : U64 }
+handler bump (delta : U64) {
+  ensures state.x == old(state.x) + delta
+  effect { x += delta }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_quasar_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Quasar)
+        .expect("Quasar kani_impl must emit");
+    assert!(tmp.is_file(), "Quasar target must write a harness file");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    // Quasar-flavored header.
+    assert!(
+        body.contains("Quasar (`#[program]`) program"),
+        "header must name the Quasar framework; got:\n{body}"
+    );
+    assert!(
+        body.contains("#[cfg(kani)] mod kani_impl;"),
+        "header must document the src/lib.rs placement line; got:\n{body}"
+    );
+
+    // Struct-based shape, shared with Anchor.
+    assert!(
+        body.contains("mod symbolic_accounts {")
+            && body.contains("pub fn build_bump() -> crate::Bump"),
+        "must emit the symbolic accounts builder for crate::Bump; got:\n{body}"
+    );
+    assert!(
+        body.contains("fn verify_bump_impl_ensures_0()")
+            && body.contains("accounts.handler(delta)"),
+        "must emit the per-handler proof calling the real .handler(); got:\n{body}"
+    );
+
+    // The shared module comment must say "Quasar", not "Anchor".
+    assert!(
+        body.contains("host for this harness. Quasar"),
+        "symbolic_accounts comment must be Quasar-flavored; got:\n{body}"
+    );
+
+    // Must NOT leak the word "Anchor" anywhere — the framework label
+    // threads through every shared-emitter comment.
+    assert!(
+        !body.contains("Anchor"),
+        "Quasar harness must not leak the Anchor framework name; got:\n{body}"
+    );
+    assert!(
+        !body.contains("struct AccountLayout") && !body.contains("build_token_account"),
+        "Quasar harness must not emit the Pinocchio stack scaffold; got:\n{body}"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// Slice 8 M3: Pinocchio emits a stack-allocated `AccountInfo`
+/// harness. Validates the deterministic scaffold + per-handler
+/// proof shape that the M2 reference
+/// (crates/qedgen/tests/fixtures/pinocchio-fixtures/ptoken-transfer/src/kani_impl.rs)
+/// proved catches real overflow bugs.
+#[test]
+fn pinocchio_target_emits_stack_harness() {
+    // SPL-transfer-shaped handler: two explicit token accounts
+    // (source, destination), a readonly mint, a signer authority.
+    let src = r#"spec PtokenTransfer
+state { dummy : U64 }
+handler transfer (amount : U64) {
+  accounts {
+    source : writable, token
+    mint : readonly
+    destination : writable, token
+    authority : signer
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pinocchio_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    assert!(tmp.is_file(), "Pinocchio target must write a harness file");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    // Deterministic scaffold present.
+    assert!(
+        body.contains("struct AccountLayout"),
+        "must emit the Account layout mirror; got:\n{body}"
+    );
+    assert!(
+        body.contains("assert!(core::mem::size_of::<AccountLayout>() == 88)"),
+        "must emit the layout size assertion; got:\n{body}"
+    );
+    assert!(
+        body.contains("fn build_token_account")
+            && body.contains("fn build_minimal_account")
+            && body.contains("fn account_info_from_stack"),
+        "must emit the build + transmute helpers; got:\n{body}"
+    );
+
+    // Per-handler proof.
+    assert!(
+        body.contains("#[kani::proof]") && body.contains("#[kani::unwind(34)]"),
+        "must emit the proof attribute + memcmp unwind bound; got:\n{body}"
+    );
+    assert!(
+        body.contains("fn verify_transfer_impl()"),
+        "must emit the per-handler proof fn; got:\n{body}"
+    );
+
+    // Account classification: explicit token accounts -> token account;
+    // signer/readonly → minimal.
+    assert!(
+        body.contains("let mut source = build_token_account(")
+            && body.contains("let mut destination = build_token_account("),
+        "explicit token accounts must build as token accounts; got:\n{body}"
+    );
+    assert!(
+        body.contains("let mut mint = build_minimal_account(")
+            && body.contains("let mut authority = build_minimal_account("),
+        "readonly + signer accounts must build as minimal accounts; got:\n{body}"
+    );
+
+    // Param packing + real dispatcher call.
+    assert!(
+        body.contains("let amount: u64 = kani::any();")
+            && body.contains("let instruction_tag: u8 = crate::TRANSFER;")
+            && body.contains("instruction_data.push(instruction_tag);")
+            && body.contains("instruction_data.extend_from_slice(&amount.to_le_bytes());"),
+        "U64 param must be symbolic + tag/LE-packed; got:\n{body}"
+    );
+    assert!(
+        body.contains("crate::process_instruction(&program_id, accounts_slice, &instruction_data)"),
+        "must call the real process_instruction dispatcher; got:\n{body}"
+    );
+
+    // Must NOT leak the Anchor shape.
+    assert!(
+        !body.contains("Context<") && !body.contains("symbolic_accounts"),
+        "Pinocchio harness must not leak the Anchor Context shape; got:\n{body}"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn pinocchio_dispatcher_packs_numeric_params_in_spec_order() {
+    let src = r#"spec Pool
+state { lane_count : U64 }
+handler batch_16
+  (amount_0 : U64) (from_lane_id_0 : U64) (to_lane_id_0 : U64)
+  (amount_1 : U64) (from_lane_id_1 : U64) (to_lane_id_1 : U64)
+  (amount_2 : U64) (from_lane_id_2 : U64) (to_lane_id_2 : U64)
+  (amount_3 : U64) (from_lane_id_3 : U64) (to_lane_id_3 : U64)
+  (amount_4 : U64) (from_lane_id_4 : U64) (to_lane_id_4 : U64)
+  (amount_5 : U64) (from_lane_id_5 : U64) (to_lane_id_5 : U64)
+  (amount_6 : U64) (from_lane_id_6 : U64) (to_lane_id_6 : U64)
+  (amount_7 : U64) (from_lane_id_7 : U64) (to_lane_id_7 : U64)
+  (amount_8 : U64) (from_lane_id_8 : U64) (to_lane_id_8 : U64)
+  (amount_9 : U64) (from_lane_id_9 : U64) (to_lane_id_9 : U64)
+  (amount_10 : U64) (from_lane_id_10 : U64) (to_lane_id_10 : U64)
+  (amount_11 : U64) (from_lane_id_11 : U64) (to_lane_id_11 : U64)
+  (amount_12 : U64) (from_lane_id_12 : U64) (to_lane_id_12 : U64)
+  (amount_13 : U64) (from_lane_id_13 : U64) (to_lane_id_13 : U64)
+  (amount_14 : U64) (from_lane_id_14 : U64) (to_lane_id_14 : U64)
+  (amount_15 : U64) (from_lane_id_15 : U64) (to_lane_id_15 : U64) {
+  accounts {
+    config : readonly
+    inventory_rebalancer : signer
+    token_program : readonly
+    mint : readonly
+    source_authority_0 : readonly
+    source_inventory_0 : writable
+    destination_inventory_0 : writable
+  }
+  ensures state.lane_count == old(state.lane_count)
+  effect { lane_count := lane_count }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_batch_pack_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        body.contains("let instruction_tag: u8 = crate::BATCH;")
+            && body.contains("instruction_data.extend_from_slice(&amount_0.to_le_bytes());")
+            && body.contains("instruction_data.extend_from_slice(&from_lane_id_15.to_le_bytes());")
+            && body.contains("instruction_data.extend_from_slice(&to_lane_id_15.to_le_bytes());")
+            && body.contains("instruction_data.extend_from_slice(&amount_15.to_le_bytes());"),
+        "generic Pinocchio packing must use the base tag and declared numeric params; got:\n{body}"
+    );
+    assert!(
+        !body.contains("instruction_data.push(16u8);")
+            && !body.contains("from_lane_id_15 as u8")
+            && !body.contains("to_lane_id_15 as u8")
+            && !body.contains("crate::BATCH_16"),
+        "runtime-specific arity bytes and narrowing casts require an ABI profile; got:\n{body}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn pinocchio_impl_packs_abi_repeated_records_from_indexed_params() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(program_root.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+limit MAX_ITEMS 4
+instruction BATCH 4
+
+record TRANSFER
+field FROM_LANE_ID u8
+field TO_LANE_ID u8
+field AMOUNT u64
+end
+
+record BATCH_ARGS
+field ITEM_COUNT u8
+repeat ITEM transfer MAX_ITEMS ITEM_COUNT
+end
+
+instruction_record BATCH BATCH_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec Pool
+state { lane_count : U64 }
+handler batch_2
+  (amount_0 : U64) (from_lane_id_0 : U64) (to_lane_id_0 : U64)
+  (amount_1 : U64) (from_lane_id_1 : U64) (to_lane_id_1 : U64) {
+  accounts {
+    config : readonly
+    source_0 : writable
+    destination_0 : writable
+  }
+  ensures state.lane_count == old(state.lane_count)
+  effect { lane_count := lane_count }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+        body.contains("let instruction_tag: u8 = 4u8;")
+            && body.contains("instruction_data[1] = 2u8;")
+            && body.contains("instruction_data[2] = (from_lane_id_0 as u8) as u8;")
+            && body.contains("instruction_data[3] = (to_lane_id_0 as u8) as u8;")
+            && body.contains(
+                "let generated_instruction_data_4_bytes = (amount_0 as u64).to_le_bytes();"
+            )
+            && body.contains("instruction_data[12] = (from_lane_id_1 as u8) as u8;")
+            && body.contains("instruction_data[13] = (to_lane_id_1 as u8) as u8;")
+            && body.contains(
+                "let generated_instruction_data_14_bytes = (amount_1 as u64).to_le_bytes();"
+            ),
+        "ABI repeat profile must pack count and indexed item fields in ABI order; got:\n{body}"
+    );
+    assert!(
+            !body.contains("source profile references param `item_count` absent"),
+            "repeat count should be derived from indexed params, not treated as a missing param; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_emits_verified_stubs_for_contracted_source_helpers() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(
+        program_root.join("src/lib.rs"),
+        "mod processor;\nmod validation;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        program_root.join("src/validation.rs"),
+        r#"
+#[cfg_attr(kani, kani::requires(amount > 0))]
+#[cfg_attr(kani, kani::ensures(|result| result.is_ok()))]
+pub fn check_amount(amount: u64) -> Result<(), ()> {
+    if amount == 0 { Err(()) } else { Ok(()) }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        program_root.join("src/processor.rs"),
+        r#"
+use crate::validation::check_amount;
+
+pub fn process_transfer(_accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let amount = u64::from_le_bytes(data[0..8].try_into().unwrap());
+    check_amount(amount)?;
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+instruction TRANSFER 1
+
+record TRANSFER_ARGS
+field AMOUNT u64
+end
+
+instruction_record TRANSFER TRANSFER_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec Pool
+state { dummy : U64 }
+handler transfer (amount : U64) {
+  accounts { payer : signer }
+  requires amount > 0 else InvalidAmount
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("#[kani::stub_verified(crate::validation::check_amount)]")
+                && body.contains("fn verify_transfer_impl()")
+                && body.contains("crate::process_instruction(&program_id"),
+            "contracted source helper calls should emit verified stubs on the real-dispatcher harness; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_packs_abi_repeated_pubkey_fields_from_indexed_params() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(program_root.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+limit MAX_ITEMS 4
+instruction BATCH 4
+
+record TRANSFER
+field MINT pubkey
+field AMOUNT u64
+end
+
+record BATCH_ARGS
+field ITEM_COUNT u8
+repeat ITEM transfer MAX_ITEMS ITEM_COUNT
+end
+
+instruction_record BATCH BATCH_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec PubkeyBatch
+state { total : U64 }
+handler batch_2
+  (mint_0 : Pubkey) (amount_0 : U64)
+  (mint_1 : Pubkey) (amount_1 : U64) {
+  accounts { config : readonly }
+  ensures state.total == old(state.total)
+  effect { total := total }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+        body.contains("let mint_0: [u8; 32] = kani::any(); // spec type: Pubkey")
+            && body.contains("let mint_1: [u8; 32] = kani::any(); // spec type: Pubkey"),
+        "indexed Pubkey repeat fields must be declared as symbolic 32-byte arrays; got:\n{body}"
+    );
+    assert!(
+        body.contains("instruction_data[1] = 2u8;")
+            && body.contains("write_fixed_32(&mut instruction_data, 2, mint_0);")
+            && body.contains(
+                "let generated_instruction_data_34_bytes = (amount_0 as u64).to_le_bytes();"
+            )
+            && body.contains("write_fixed_32(&mut instruction_data, 42, mint_1);")
+            && body.contains(
+                "let generated_instruction_data_74_bytes = (amount_1 as u64).to_le_bytes();"
+            ),
+        "ABI repeat profile must pack indexed Pubkey fields in ABI order; got:\n{body}"
+    );
+    assert!(
+        !body.contains("TODO: pack repeat field `mint`"),
+        "Pubkey repeat fields should no longer be dropped from the ABI profile; got:\n{body}"
+    );
+}
+
+#[test]
+fn pinocchio_impl_emits_token_transfer_balance_assertions() {
+    let src = r#"spec TokenMove
+state { dummy : U64 }
+handler move_tokens (amount : U64) {
+  accounts {
+    source : writable
+    destination : writable
+    authority : signer
+  }
+  call Token.transfer(
+    from = source,
+    to = destination,
+    amount = amount,
+    authority = authority,
+  )
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!(
+        "kani_impl_token_assertions_{}.rs",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        body.contains("let pre_transfer_0_from = read_token_amount(&source);")
+            && body.contains("let pre_transfer_0_to = read_token_amount(&destination);")
+            && body.contains("kani::assume(pre_transfer_0_from >= (amount as u64));")
+            && body.contains("kani::assume(pre_transfer_0_to <= u64::MAX - (amount as u64));"),
+        "must snapshot and constrain Token.transfer balances; got:\n{body}"
+    );
+    assert!(
+        body.contains("if _result.is_ok() {")
+            && body.contains(
+                "assert_eq!(read_token_amount(&source), pre_transfer_0_from - (amount as u64));"
+            )
+            && body.contains(
+                "assert_eq!(read_token_amount(&destination), pre_transfer_0_to + (amount as u64));"
+            ),
+        "must assert Token.transfer balance deltas on success; got:\n{body}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn pinocchio_impl_does_not_classify_all_writable_accounts_as_tokens() {
+    let src = r#"spec TokenMove
+state { dummy : U64 }
+handler move_tokens (amount : U64) {
+  accounts {
+    config : writable
+    source : writable, token
+    destination : writable, token
+    authority : signer
+    token_program : program, type token
+  }
+  call Token.transfer(
+    from = source,
+    to = destination,
+    amount = amount,
+    authority = authority,
+  )
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_token_roles_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    assert!(
+            body.contains("let mut config = build_minimal_account(")
+                && body.contains("let mut source = build_token_account(")
+                && body.contains("let mut destination = build_token_account(")
+                && body.contains("let mut token_program = build_minimal_account(")
+                && !body.contains("let config_amount: u64 = kani::any();"),
+            "only explicit token accounts or Token.transfer resources should use token layout; got:\n{body}"
+        );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn pinocchio_impl_uses_abi_account_roles_for_token_projection() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(program_root.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+instruction MOVE_TOKENS 8
+account MOVE_TOKENS SOURCE 0 writable type token
+account MOVE_TOKENS DESTINATION 1 writable type token
+account MOVE_TOKENS MINT 2 type mint
+account MOVE_TOKENS TOKEN_PROGRAM 3 program type token
+
+record MOVE_TOKENS_ARGS
+field AMOUNT u64
+end
+
+instruction_record MOVE_TOKENS MOVE_TOKENS_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec TokenMove
+state { dummy : U64 }
+handler move_tokens (amount : U64) {
+  accounts {
+    source : readonly
+    destination : readonly
+    mint : readonly
+    token_program : program
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let mut source = build_token_account([1u8; 32], true, false")
+                && body
+                    .contains("let mut destination = build_token_account([2u8; 32], true, false")
+                && body.contains("let mut mint = build_mint_account([3u8; 32], false, false, 6u8);")
+                && body.contains("let mut token_program = build_minimal_account(SPL_TOKEN_PROGRAM_ID, false, false)")
+                && !body.contains("let token_program_amount: u64 = kani::any();"),
+            "ABI account roles should project token accounts and mints without treating token_program as token data; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_projects_source_inferred_token_account_mint_and_owner() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::write(
+        program_root.join("src/lib.rs"),
+        r#"
+pub fn process_instruction(
+    _program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        8 => process_move_tokens(accounts, data),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+fn process_move_tokens(accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let source = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let authority = next_account_info(account_info_iter)?;
+    require_token_account(source, mint.key(), authority.key())?;
+    let decimals = read_mint_decimals(mint)?;
+    let amount = u64::from_le_bytes(
+        instruction_data
+            .get(0..8)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec TokenProjection
+state { dummy : U64 }
+handler move_tokens (amount : U64) {
+  accounts {
+    source : writable
+    mint : readonly
+    authority : signer
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let source_amount: u64 = kani::any();")
+                && body.contains("let mut source = build_token_account([1u8; 32], true, false, [2u8; 32], authority_key, (source_amount as u64));")
+                && body.contains("let mut mint = build_mint_account([2u8; 32], false, false, 6u8);"),
+            "source-inferred token account bindings should project mint and owner bytes; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_projects_repeated_token_binding_from_key_alias() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(program_root.join("schema")).unwrap();
+    std::fs::write(
+            program_root.join("src/lib.rs"),
+            r#"
+pub fn derive_authority(program_id: &pinocchio::pubkey::Pubkey, lane_id: u8) -> ([u8; 32], u8) {
+    pinocchio::pubkey::try_find_program_address(&[AUTHORITY_SEED, &[lane_id]], program_id).unwrap()
+}
+
+pub fn process_instruction(
+    program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        9 => process_move_tokens(program_id, accounts, data),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+fn process_move_tokens(program_id: &pinocchio::pubkey::Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let source = next_account_info(account_info_iter)?;
+    let destination = next_account_info(account_info_iter)?;
+    let mint = next_account_info(account_info_iter)?;
+    let source_authority = next_account_info(account_info_iter)?;
+    let lane_id = u8::from_le_bytes(
+        instruction_data
+            .get(8..9)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    let source_authority_key = derive_authority(program_id, 0).0;
+    let destination_authority_key = derive_authority(program_id, lane_id).0;
+    require_key(source_authority, &source_authority_key)?;
+    require_token_account(source, mint.key(), &source_authority_key)?;
+    require_token_account(destination, mint.key(), &destination_authority_key)?;
+    let decimals = read_mint_decimals(mint)?;
+    let amount = u64::from_le_bytes(
+        instruction_data
+            .get(0..8)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+    std::fs::write(
+        program_root.join("schema/program.schema"),
+        "seed AUTHORITY_SEED authority\n",
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec TokenProjection
+state { dummy : U64 }
+handler move_tokens (amount : U64) (lane_id : U64) {
+  accounts {
+    source_0 : writable
+    destination_0 : writable
+    mint : readonly
+    source_authority_0 : signer
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let source_authority_0_key = crate::derive_authority(&program_id, lane_id as u8).0;")
+                && body.contains("let source_0_amount: u64 = kani::any();")
+                && body.contains("let mut source_0 = build_token_account([1u8; 32], true, false, [3u8; 32], source_authority_0_key, (source_0_amount as u64));"),
+            "repeated token account should inherit source loop binding and owner key alias; got:\n{body}"
+        );
+    assert!(
+            body.contains("let destination_0_owner_key = crate::derive_authority(&program_id, lane_id as u8).0;")
+                && body.contains("let destination_0_amount: u64 = kani::any();")
+                && body.contains("let mut destination_0 = build_token_account([2u8; 32], true, false, [3u8; 32], destination_0_owner_key, (destination_0_amount as u64));"),
+            "repeated token account should project owner bytes from a source-derived key; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_uses_abi_account_layout_for_symbolic_data_account() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(program_root.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+instruction UPDATE_CONFIG 9
+account UPDATE_CONFIG CONFIG 0 writable
+
+record CONFIG_ACCOUNT
+field MAGIC bytes8
+field ADMIN pubkey
+field MAX_FEE_BPS u16
+field PAUSED bool
+end
+
+record UPDATE_CONFIG_ARGS
+field MAX_FEE_BPS u16
+end
+
+magic CONFIG_MAGIC CFGMAGIC
+instruction_record UPDATE_CONFIG UPDATE_CONFIG_ARGS
+account_record CONFIG CONFIG_ACCOUNT
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec ConfigProgram
+state { max_fee_bps : U64 }
+handler update_config (max_fee_bps : U64) {
+  accounts {
+    config : readonly
+  }
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+  effect { max_fee_bps := max_fee_bps }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("fn build_data_account")
+                && body.contains("// ABI account layout `config_account`: 43 byte data region.")
+                && body.contains("let mut config_data: [u8; 43] = [0u8; 43];")
+                && body.contains("config_data[0] = 67u8;")
+                && body.contains("config_data[7] = 67u8;")
+                && body.contains("let mut config = build_data_account([1u8; 32], program_id, false, true, config_data);")
+                && body.contains("write_state_u16(&mut config, 40, (max_fee_bps as u16));")
+                && !body.contains("let mut config = build_minimal_account("),
+            "ABI account layouts should emit program-owned data accounts with profiled byte length and state witnesses; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_binds_profiled_pda_account_keys() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(
+        program_root.join("src/state.rs"),
+        r#"
+pub fn derive_config(program_id: &Pubkey) -> (Pubkey, u8) {
+    pinocchio::pubkey::find_program_address(&[CONFIG_SEED], program_id)
+}
+
+pub fn derive_vault_authority(program_id: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    pinocchio::pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, &[lane_id]], program_id)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+seed CONFIG_SEED config
+seed VAULT_AUTHORITY_SEED vault-authority
+instruction ROUTE 3
+account ROUTE CONFIG 0 writable
+account ROUTE VAULT_AUTHORITY 1
+
+record ROUTE_ARGS
+field LANE_ID u8
+end
+
+instruction_record ROUTE ROUTE_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec RouteProgram
+state { dummy : U64 }
+handler route (lane_id : U64) {
+  accounts {
+    config : writable
+    vault_authority : readonly
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let config_key = crate::derive_config(&program_id).0;")
+                && body.contains("let vault_authority_key = crate::derive_vault_authority(&program_id, lane_id as u8).0;")
+                && body.contains(
+                    "let mut config = build_minimal_account(config_key, false, true);"
+                )
+                && body.contains(
+                    "let mut vault_authority = build_minimal_account(vault_authority_key, false, false);"
+                ),
+            "profiled PDA derivations should bind exact account keys generically; got:\n{body}"
+        );
+    assert!(
+            body.contains(
+                "/// - PDA derivations: config -> config (found); vault_authority -> vault_authority (found)"
+            ),
+            "generated impl harness should report inferred PDA derivations; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_binds_account_keys_from_source_require_key_derivation() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(program_root.join("schema")).unwrap();
+    std::fs::write(
+            program_root.join("src/lib.rs"),
+            r#"
+pub fn derive_vault_authority(program_id: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    pinocchio::pubkey::try_find_program_address(&[VAULT_AUTHORITY_SEED, &[lane_id]], program_id).unwrap()
+}
+
+pub fn process_instruction(
+    program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        3 => process_route(program_id, accounts, data),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+
+fn process_route(program_id: &pinocchio::pubkey::Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let vault = next_account_info(account_info_iter)?;
+    let lane_id = u8::from_le_bytes(
+        instruction_data
+            .get(0..1)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    let vault_key = derive_vault_authority(program_id, lane_id).0;
+    require_key(vault, &vault_key)?;
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+    std::fs::write(
+        program_root.join("schema/program.schema"),
+        "seed VAULT_AUTHORITY_SEED vault-authority\n",
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec RouteProgram
+state { dummy : U64 }
+handler route (lane_id : U64) {
+  accounts {
+    vault : readonly
+  }
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+        body.contains(
+            "let vault_key = crate::derive_vault_authority(&program_id, lane_id as u8).0;"
+        ) && body.contains("let mut vault = build_minimal_account(vault_key, false, false);"),
+        "source require_key derived-key guards should bind exact account keys; got:\n{body}"
+    );
+}
+
+#[test]
+fn pinocchio_impl_binds_non_program_id_pda_from_source_require_key_derivation() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::write(
+            program_root.join("src/lib.rs"),
+            r#"
+use pinocchio::{account_info::AccountInfo, pubkey::Pubkey, ProgramResult};
+
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = [8u8; 32];
+pub const TOKEN_PROGRAM_ID: Pubkey = [9u8; 32];
+
+pub fn derive_token_vault(authority: &Pubkey, mint: &Pubkey) -> (Pubkey, u8) {
+    pinocchio::pubkey::find_program_address(
+        &[authority.as_ref(), mint.as_ref()],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+}
+
+pub fn process_instruction(
+    program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        3 => process_route(program_id, accounts, data),
+        _ => Ok(()),
+    }
+}
+
+fn process_route(_program_id: &pinocchio::pubkey::Pubkey, accounts: &[AccountInfo], _instruction_data: &[u8]) -> ProgramResult {
+    let [authority, mint, vault, ..] = accounts else {
+        return Ok(());
+    };
+    require_key(vault, &derive_token_vault(authority.key(), mint.key()).0)?;
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec NonProgramPda
+state { balance : U64 }
+handler route (nonce : U64) {
+  accounts {
+    authority : readonly
+    mint      : readonly
+    vault     : writable
+  }
+  ensures state.balance == old(state.balance)
+  effect { balance := balance }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let vault_key = crate::derive_token_vault(&[1u8; 32], &[2u8; 32]).0;")
+                && body.contains("let mut vault = build_minimal_account(vault_key, false, true);"),
+            "non-program-id PDA account keys should render from source require_key derivations; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_binds_non_program_id_pda_with_nested_derived_key_seed() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(program_root.join("schema")).unwrap();
+    std::fs::write(
+            program_root.join("src/lib.rs"),
+            r#"
+use pinocchio::{account_info::AccountInfo, pubkey::Pubkey, ProgramResult};
+
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = [8u8; 32];
+
+pub fn derive_authority(program_id: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    pinocchio::pubkey::find_program_address(&[AUTHORITY_SEED, &[lane_id]], program_id)
+}
+
+pub fn derive_token_vault(program_id: &Pubkey, mint: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    let authority = derive_authority(program_id, lane_id).0;
+    pinocchio::pubkey::find_program_address(
+        &[authority.as_ref(), crate::TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+}
+
+pub fn process_instruction(
+    program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        3 => process_route(program_id, accounts, data),
+        _ => Ok(()),
+    }
+}
+
+fn process_route(program_id: &pinocchio::pubkey::Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let [mint, vault, ..] = accounts else {
+        return Ok(());
+    };
+    let lane_id = u8::from_le_bytes(
+        instruction_data
+            .get(0..1)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    let descriptor = VaultDescriptor {
+        lane_id,
+        mint: MintKey(*mint.key()),
+    };
+    require_key(
+        vault,
+        &derive_token_vault(program_id, &descriptor.mint.0, descriptor.lane_id.0).0,
+    )?;
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+    std::fs::write(
+        program_root.join("schema/program.schema"),
+        "seed AUTHORITY_SEED authority\n",
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec NestedPda
+state { balance : U64 }
+handler route (lane_id : U64) {
+  accounts {
+    mint  : readonly
+    vault : writable
+  }
+  ensures state.balance == old(state.balance)
+  effect { balance := balance }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let vault_authority_key = crate::derive_authority(&program_id, lane_id as u8).0;")
+                && body.contains("let vault_key = crate::derive_token_vault(&program_id, &[1u8; 32], lane_id as u8).0;")
+                && body.contains("let mut vault = build_minimal_account(vault_key, false, true);"),
+            "nested derived-key PDA seeds should render before the outer non-program-id PDA; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_binds_repeated_loop_account_derivations_from_source() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(program_root.join("schema")).unwrap();
+    std::fs::write(
+            program_root.join("src/lib.rs"),
+            r#"
+use pinocchio::{account_info::AccountInfo, pubkey::Pubkey, ProgramResult};
+
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = [8u8; 32];
+pub const TOKEN_PROGRAM_ID: Pubkey = [9u8; 32];
+
+pub fn derive_authority(program_id: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    pinocchio::pubkey::find_program_address(&[AUTHORITY_SEED, &[lane_id]], program_id)
+}
+
+pub fn derive_token_vault(program_id: &Pubkey, mint: &Pubkey, lane_id: u8) -> (Pubkey, u8) {
+    let authority = derive_authority(program_id, lane_id).0;
+    pinocchio::pubkey::find_program_address(
+        &[authority.as_ref(), crate::TOKEN_PROGRAM_ID.as_ref(), mint.as_ref()],
+        &ASSOCIATED_TOKEN_PROGRAM_ID,
+    )
+}
+
+pub fn process_instruction(
+    program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, data) = instruction_data.split_first().unwrap();
+    match *tag {
+        3 => process_route(program_id, accounts, data),
+        _ => Ok(()),
+    }
+}
+
+fn process_route(program_id: &pinocchio::pubkey::Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let args = RouteArgs::try_from(instruction_data)?;
+    let account_info_iter = &mut accounts.iter();
+    let mint = next_account_info(account_info_iter)?;
+    let route_mint = MintKey(*mint.key());
+    for transfer in args.transfers {
+        let source_vault = next_account_info(account_info_iter)?;
+        let destination_vault = next_account_info(account_info_iter)?;
+        require_key(
+            source_vault,
+            &derive_token_vault(program_id, &route_mint.0, transfer.from_lane_id.0).0,
+        )?;
+        require_key(
+            destination_vault,
+            &derive_token_vault(program_id, &route_mint.0, transfer.to_lane_id.0).0,
+        )?;
+    }
+    Ok(())
+}
+"#,
+        )
+        .unwrap();
+    std::fs::write(
+        program_root.join("schema/program.schema"),
+        r#"seed AUTHORITY_SEED authority
+field FROM_LANE_ID u8
+field TO_LANE_ID u8
+record TRANSFER
+field FROM_LANE_ID u8
+field TO_LANE_ID u8
+record ROUTE_ARGS
+field TRANSFER_COUNT u8
+repeat TRANSFER transfer 2 TRANSFER_COUNT
+instruction ROUTE 3
+instruction_record ROUTE ROUTE_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec RepeatedLoopPda
+state { balance : U64 }
+handler route_2
+  (from_lane_id_0 : U64)
+  (to_lane_id_0 : U64)
+  (from_lane_id_1 : U64)
+  (to_lane_id_1 : U64) {
+  accounts {
+    mint                  : readonly
+    source_vault_0        : writable
+    destination_vault_0   : writable
+    source_vault_1        : writable
+    destination_vault_1   : writable
+  }
+  ensures state.balance == old(state.balance)
+  effect { balance := balance }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let source_vault_0_authority_key = crate::derive_authority(&program_id, from_lane_id_0 as u8).0;")
+                && body.contains("let source_vault_0_key = crate::derive_token_vault(&program_id, &[1u8; 32], from_lane_id_0 as u8).0;")
+                && body.contains("let destination_vault_1_authority_key = crate::derive_authority(&program_id, to_lane_id_1 as u8).0;")
+                && body.contains("let destination_vault_1_key = crate::derive_token_vault(&program_id, &[1u8; 32], to_lane_id_1 as u8).0;")
+                && body.contains("let mut source_vault_0 = build_minimal_account(source_vault_0_key, false, true);")
+                && body.contains("let mut destination_vault_1 = build_minimal_account(destination_vault_1_key, false, true);"),
+            "repeated loop account-key derivations should bind suffixed accounts from source; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_uses_source_profile_for_tag_accounts_and_payload_widths() {
+    let src = r#"spec TokenMove
+state { dummy : U64 }
+handler move_tokens (amount : U64) (lane : U64) {
+  accounts {
+    source : writable
+    destination : writable
+    authority : signer
+  }
+  call Token.transfer(
+    from = source,
+    to = destination,
+    amount = amount,
+    authority = authority,
+  )
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src_dir = dir.path().join("src");
+    std::fs::create_dir_all(src_dir.join("instructions")).unwrap();
+    std::fs::write(
+        src_dir.join("lib.rs"),
+        r#"
+pub fn process_instruction(
+    _program_id: &pinocchio::pubkey::Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (discriminant, data) = instruction_data.split_first().unwrap();
+    match *discriminant {
+        9 => instructions::move_tokens::process_move_tokens(accounts, data),
+        _ => Err(ProgramError::InvalidInstructionData),
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("instructions/move_tokens.rs"),
+        r#"
+pub fn process_move_tokens(accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let [destination, authority, source, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let lane = u8::from_le_bytes(
+        instruction_data
+            .get(0..1)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    let amount = u64::from_le_bytes(
+        instruction_data
+            .get(1..9)
+            .ok_or(ProgramError::InvalidInstructionData)?
+            .try_into()
+            .map_err(|_| ProgramError::InvalidInstructionData)?,
+    );
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+
+    let output = src_dir.join("kani_impl.rs");
+    generate_from_spec(
+        &spec,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+        body.contains("let instruction_tag: u8 = 9u8;"),
+        "must use source-inferred dispatcher tag; got:\n{body}"
+    );
+    assert!(
+        body.contains("/// - source account order: destination, authority, source")
+            && body.contains("/// - ABI/dispatcher tag: 9")
+            && body.contains("/// - PDA derivations: none inferred"),
+        "generated impl harness should explain profile facts and fallbacks; got:\n{body}"
+    );
+    let destination_pos = body
+        .find("ManuallyDrop::new(account_info_from_stack(&mut destination))")
+        .unwrap();
+    let authority_pos = body
+        .find("ManuallyDrop::new(account_info_from_stack(&mut authority))")
+        .unwrap();
+    let source_pos = body
+        .find("ManuallyDrop::new(account_info_from_stack(&mut source))")
+        .unwrap();
+    assert!(
+        destination_pos < authority_pos && authority_pos < source_pos,
+        "must use source-inferred account order; got:\n{body}"
+    );
+    assert!(
+        body.contains("instruction_data[1] = (lane as u8) as u8;")
+            && body.contains(
+                "let generated_instruction_data_2_bytes = (amount as u64).to_le_bytes();"
+            ),
+        "must use source-inferred payload order and widths; got:\n{body}"
+    );
+}
+
+#[test]
+fn pinocchio_impl_keeps_non_trailing_unsupported_abi_fields_visible() {
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let program_root = workspace.path().join("program");
+    let abi_root = workspace.path().join("program-abi");
+    std::fs::create_dir_all(program_root.join("src")).unwrap();
+    std::fs::create_dir_all(program_root.join("verification")).unwrap();
+    std::fs::create_dir_all(abi_root.join("schema")).unwrap();
+    std::fs::write(program_root.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        abi_root.join("schema/program.schema"),
+        r#"
+instruction UPLOAD 12
+
+record UPLOAD_ARGS
+field MEMO bytes8
+field AMOUNT u64
+end
+
+instruction_record UPLOAD UPLOAD_ARGS
+"#,
+    )
+    .unwrap();
+
+    let spec_path = program_root.join("verification/program.qedspec");
+    std::fs::write(
+        &spec_path,
+        r#"spec Upload
+state { total : U64 }
+handler upload (amount : U64) {
+  accounts { payer : signer }
+  ensures state.total == old(state.total)
+  effect { total := total }
+}"#,
+    )
+    .unwrap();
+
+    let output = program_root.join("src/kani_impl.rs");
+    generate(
+        &spec_path,
+        &output,
+        /*explicit_flag=*/ true,
+        Target::Pinocchio,
+    )
+    .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&output).unwrap();
+
+    assert!(
+            body.contains("let mut instruction_data = [0u8; 17];")
+                && body.contains(
+                    "TODO: unsupported instruction field `memo` type `bytes8` at offset 1..9"
+                )
+                && body.contains(
+                    "let generated_instruction_data_9_bytes = (amount as u64).to_le_bytes();"
+                ),
+            "non-trailing unsupported ABI fields must keep absolute layout visible and pack later fields at the right offset; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_token_delta_assertions_skip_aliasing_transfers() {
+    let chained = vec![
+        PinocchioTokenTransferAssertion {
+            from: "account_a".to_string(),
+            to: "account_b".to_string(),
+            amount: "amount_0".to_string(),
+        },
+        PinocchioTokenTransferAssertion {
+            from: "account_b".to_string(),
+            to: "account_c".to_string(),
+            amount: "amount_1".to_string(),
+        },
+    ];
+    let mut body = String::new();
+    emit_pinocchio_token_pre_snapshots(&mut body, &chained);
+    emit_pinocchio_token_post_assertions(&mut body, &chained);
+    assert!(
+        body.contains("token transfer delta assertions skipped")
+            && !body.contains("assert_eq!(read_token_amount"),
+        "chained transfers should not emit independent per-transfer final assertions; got:\n{body}"
+    );
+
+    let self_transfer = vec![PinocchioTokenTransferAssertion {
+        from: "account_a".to_string(),
+        to: "account_a".to_string(),
+        amount: "amount".to_string(),
+    }];
+    let mut body = String::new();
+    emit_pinocchio_token_pre_snapshots(&mut body, &self_transfer);
+    emit_pinocchio_token_post_assertions(&mut body, &self_transfer);
+    assert!(
+        body.contains("token transfer delta assertions skipped")
+            && !body.contains("assert_eq!(read_token_amount"),
+        "self-transfer aliases should not emit independent debit/credit assertions; got:\n{body}"
+    );
+}
+
+#[test]
+fn pinocchio_account_order_matches_normalized_names() {
+    let src = r#"spec AccountOrder
+state { total : U64 }
+handler route {
+  accounts {
+    user_vault : signer
+    token_program : program
+    output_mint : readonly
+  }
+  ensures state.total == old(state.total)
+  effect { total := total }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let handler = &spec.handlers[0];
+    let profile = PinocchioHandlerProfile {
+        name: "route".to_string(),
+        instruction_tag: None,
+        accounts: vec![
+            "outputMint".to_string(),
+            "tokenProgram".to_string(),
+            "userVault".to_string(),
+        ],
+        account_roles: BTreeMap::new(),
+        token_account_bindings: BTreeMap::new(),
+        mint_decimal_bindings: BTreeMap::new(),
+        account_key_derivations: BTreeMap::new(),
+        source_expr_aliases: BTreeMap::new(),
+        verified_stubs: Vec::new(),
+        params: Vec::new(),
+        repeats: Vec::new(),
+    };
+
+    let ordered = pinocchio_account_order(handler, Some(&profile));
+    let names: Vec<_> = ordered
+        .iter()
+        .map(|account| account.name.as_str())
+        .collect();
+    assert_eq!(names, ["output_mint", "token_program", "user_vault"]);
+}
+
+#[test]
+fn pinocchio_profile_notes_explain_unusable_account_order() {
+    let src = r#"spec AccountOrder
+state { total : U64 }
+handler route {
+  accounts {
+    user_vault : signer
+    token_program : program
+  }
+  ensures state.total == old(state.total)
+  effect { total := total }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let handler = &spec.handlers[0];
+    let profile = PinocchioHandlerProfile {
+        name: "route".to_string(),
+        instruction_tag: None,
+        accounts: vec!["userVault".to_string(), "tokenProgramExtra".to_string()],
+        account_roles: BTreeMap::new(),
+        token_account_bindings: BTreeMap::new(),
+        mint_decimal_bindings: BTreeMap::new(),
+        account_key_derivations: BTreeMap::new(),
+        source_expr_aliases: BTreeMap::new(),
+        verified_stubs: Vec::new(),
+        params: Vec::new(),
+        repeats: Vec::new(),
+    };
+
+    let mut notes = String::new();
+    emit_pinocchio_profile_notes(&mut notes, handler, None, Some(&profile));
+    assert!(
+            notes.contains(
+                "source account order: inferred order unusable; profile account `tokenProgramExtra` did not match spec accounts; using spec order"
+            ),
+            "unusable inferred order should leave a generated breadcrumb; got:\n{notes}"
+        );
+}
+
+#[test]
+fn pinocchio_fee_normalization_equal_literal_decimals_uses_checked_threshold() {
+    let src = r#"spec FeeSwap
+state { max_fee_bps : U128 }
+handler swap
+  (amount_in : U64)
+  (amount_out : U64)
+  (max_fee_bps : U128)
+  (input_decimals : U64)
+  (output_decimals : U64)
+  (fee_input_normalized : U128)
+  (fee_output_normalized : U128) {
+  accounts {
+    input_mint  : readonly
+    output_mint : readonly
+  }
+  requires amount_in > 0 else InvalidAmount
+  requires amount_out > 0 else InvalidAmount
+  requires max_fee_bps <= 10000 else InvalidFee
+  requires input_decimals == 6 else InvalidMint
+  requires output_decimals == 6 else InvalidMint
+  requires fee_input_normalized == amount_in * 1000000000000 else InvalidAmount
+  requires fee_output_normalized == amount_out * 1000000000000 else InvalidAmount
+  ensures state.max_fee_bps == old(state.max_fee_bps)
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let handler = &spec.handlers[0];
+    let mut mint_decimal_bindings = BTreeMap::new();
+    mint_decimal_bindings.insert("input_mint".to_string(), "input_decimals".to_string());
+    mint_decimal_bindings.insert("output_mint".to_string(), "output_decimals".to_string());
+    let profile = PinocchioHandlerProfile {
+        name: "swap".to_string(),
+        instruction_tag: None,
+        accounts: Vec::new(),
+        account_roles: BTreeMap::new(),
+        token_account_bindings: BTreeMap::new(),
+        mint_decimal_bindings,
+        account_key_derivations: BTreeMap::new(),
+        source_expr_aliases: BTreeMap::new(),
+        verified_stubs: Vec::new(),
+        params: Vec::new(),
+        repeats: Vec::new(),
+    };
+
+    let mut body = String::new();
+    emit_pinocchio_fee_normalization_assumptions(&mut body, handler, Some(&profile));
+
+    assert!(
+            body.contains(
+                "let generated_fee_min_output = ((amount_in as u128) * generated_fee_retained_bps) / 10000u128;"
+            ) && body.contains(
+                "kani::assume((amount_out as u128) >= generated_fee_min_output);"
+            ),
+            "equal literal decimals should cancel the shared normalization scale and emit the bounded fee floor; got:\n{body}"
+        );
+    assert!(
+        !body.contains("generated_fee_input_normalized"),
+        "equal literal decimals must not emit normalization-scale multiplication; got:\n{body}"
+    );
+}
+
+#[test]
+fn pinocchio_impl_emits_effect_only_state_harnesses_without_project_specifics() {
+    let src = r#"spec ProjectSpecificConfig
+state { max_fee_bps : U128 }
+handler update_limit (new_max_fee_bps : U128) {
+  accounts {
+    config : writable, pda ["config"]
+    admin  : signer
+  }
+  modifies [max_fee_bps]
+  effect { max_fee_bps := new_max_fee_bps }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!(
+        "kani_impl_project_config_{}.rs",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+            body.contains("fn verify_update_limit_impl")
+                && body.contains("kani::cover!(_result.is_ok()")
+                && body.contains("let program_id: [u8; 32] = [42u8; 32];")
+                && body.contains("crate::process_instruction(&program_id"),
+            "effect-only handlers should emit generic state assertions without project-specific branches; got:\n{body}"
+        );
+}
+
+#[test]
+fn pinocchio_impl_declares_and_packs_pubkey_params() {
+    let src = r#"spec PubkeyParam
+state { dummy : U64 }
+handler register (member : Pubkey) {
+  accounts { config : writable }
+  modifies [dummy]
+  ensures state.dummy == old(state.dummy)
+  effect { dummy := dummy }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pubkey_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Pinocchio)
+        .expect("Pinocchio kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    assert!(
+        body.contains("let member: [u8; 32] = kani::any(); // spec type: Pubkey"),
+        "Pubkey params must be declared as symbolic 32-byte arrays; got:\n{body}"
+    );
+    assert!(
+        body.contains("instruction_data.extend_from_slice(&member);"),
+        "Pubkey params must pack raw 32-byte values into instruction data; got:\n{body}"
+    );
+    assert!(
+        !body.contains("TODO: declare symbolic param `member`")
+            && !body.contains("TODO: pack param `member`"),
+        "Pubkey params should no longer fall through to TODOs; got:\n{body}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// `--kani-impl` flag explicitly forces emission for every handler
+/// with ensures, regardless of the modifies-diff.
+#[test]
+fn explicit_flag_forces_emission_for_handlers_with_ensures() {
+    let src = r#"spec ExplicitFlag
+state { x : U64 }
+handler bump (delta : U64) {
+  ensures state.x == old(state.x) + delta
+  effect { x += delta }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    // Auto-trigger silent (no modifies declared).
+    assert!(!spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_explicit_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor).expect("generate");
+    assert!(tmp.is_file(), "explicit flag must emit the file");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        body.contains("fn verify_bump_impl_ensures_0()"),
+        "explicit flag must emit per-handler harness; got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("accounts.handler(delta)"),
+        "harness must call the user's real handler; got:\n{}",
+        body
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// PDA-derived account addresses bind to the spec-declared seeds
+/// rather than `kani::any()`.
+#[test]
+fn pda_derived_accounts_bind_seed_expressions() {
+    let src = r#"spec EscrowLite
+state { initializer : Pubkey, amount : U64 }
+pda escrow ["escrow", initializer]
+handler open (deposit_amount : U64) {
+  accounts {
+    initializer : signer, writable
+    escrow      : writable, pda ["escrow", initializer]
+  }
+  modifies [amount, initializer]
+  ensures state.amount == deposit_amount
+  effect { amount := deposit_amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pda_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        body.contains("find_program_address(&[b\"escrow\", initializer.as_ref()]"),
+        "PDA derivation must come from the spec's `pda` declaration; got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("`initializer`: signer"),
+        "signer account must appear in the symbolic builder; got:\n{}",
+        body
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// Issue #71: an integer handler param used as a PDA seed must
+/// serialize via `to_le_bytes()` — `u64::as_ref()` does not exist.
+/// Pubkey seeds / account keys keep `.as_ref()`.
+#[test]
+fn integer_param_seed_serializes_via_to_le_bytes() {
+    let src = r#"spec Pool
+state { lane_count : U64 }
+pda vault_authority ["vault-authority", lane_id]
+handler swap (lane_id : U64) {
+  accounts {
+    vault_authority : writable, pda ["vault-authority", lane_id]
+    caller        : signer
+  }
+  modifies [lane_count]
+  ensures state.lane_count == lane_id
+  effect { lane_count := lane_id }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_intseed_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    assert!(
+        body.contains("lane_id.to_le_bytes().as_ref()"),
+        "integer-param seed must serialize via to_le_bytes; got:\n{}",
+        body
+    );
+    assert!(
+        !body.contains("[b\"vault-authority\", lane_id.as_ref()"),
+        "must not emit bare `lane_id.as_ref()` for a u64 param; got:\n{}",
+        body
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// No emit when neither the explicit flag is on NOR any handler
+/// triggers auto-emission.
+#[test]
+fn no_emit_when_neither_flag_nor_auto_trigger() {
+    let src = r#"spec Silent
+state { x : U64 }
+handler bump (delta : U64) {
+  ensures state.x == old(state.x) + delta
+  effect { x += delta }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_silent_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    assert!(
+        !tmp.is_file(),
+        "no flag + no auto-trigger must skip file emission"
+    );
+}
+
+// ========================================================================
+// v2.26 Batch 2 Track I — CPI ensures-as-fact in impl-targeted harness
+// ========================================================================
+
+/// A handler with its own `ensures` AND a `call Iface.foo(args)` to an
+/// interface that declares ensures must emit `kani::assume(...)` lines
+/// between `if result.is_ok()` and the first caller `assert!`,
+/// substituting the callee's param names with the caller's call-site
+/// expressions. Mirror of `kani.rs`'s
+/// `cpi_ensures_lowers_to_kani_assume_in_preservation_harness` for the
+/// impl-targeted variant.
+#[test]
+fn cpi_ensures_as_assume_emits_at_splice_point() {
+    let src = r#"spec CpiImplTest
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures amount > 0
+  }
+}
+
+state { pool : U64 }
+
+handler deposit (amt : U64) {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  modifies [pool, lp_supply]
+  call Token.transfer(from = 0, to = 0, amount = amt, authority = 0)
+  effect { pool += amt }
+  ensures state.pool == old(state.pool) + amt
+}"#;
+    let spec = parse_str(src).expect("parse");
+    // The LP-shape diff (modifies = {pool, lp_supply}, effect-LHS = {pool})
+    // triggers auto-emission.
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_track_i_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    // 1. The splice-marker comment from Track H must be GONE — Track I
+    //    replaces it with the actual emission, no stale marker.
+    assert!(
+        !body.contains("<Track I CPI ensures-as-fact splice point>"),
+        "Track H's splice marker must be removed once Track I has emitted; got:\n{}",
+        body
+    );
+
+    // 2. The CPI ensures-as-fact comment + assume line must be present,
+    //    with `amount` substituted to the caller's `amt` expression.
+    assert!(
+        body.contains("// CPI ensures-as-fact (Token.transfer):"),
+        "missing CPI ensures-as-fact comment for Token.transfer; got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("kani::assume(amt > 0)"),
+        "missing substituted kani::assume(amt > 0); got:\n{}",
+        body
+    );
+
+    // 3. Ordering: assume must sit between `if result.is_ok()` and the
+    //    caller's first `assert!`.
+    let is_ok_pos = body
+        .find("if result.is_ok()")
+        .expect("harness must have `if result.is_ok()`");
+    let assume_pos = body
+        .find("kani::assume(amt > 0)")
+        .expect("assume present (just asserted above)");
+    let assert_pos = body[is_ok_pos..]
+        .find("assert!")
+        .map(|i| is_ok_pos + i)
+        .expect("caller's assert! must follow");
+    assert!(
+        is_ok_pos < assume_pos && assume_pos < assert_pos,
+        "CPI assume must sit between is_ok() and assert!; got:\n{}",
+        body
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// v2.26 Track K — impl-targeted variant of the spec-model
+/// `named_return_binder_substitutes_into_kani_assume` test.
+/// `let p = call Oracle.quote(…)` with `-> price : U64` declared
+/// must rewrite `price` to `p` in the emitted `kani::assume`.
+#[test]
+fn named_return_binder_substitutes_in_impl_harness() {
+    let src = r#"spec NamedBinderImpl
+program_id "11111111111111111111111111111111"
+
+interface Oracle {
+  program_id "11111111111111111111111111111111"
+  handler quote (base : U64) -> price : U64 {
+    ensures price > 0
+  }
+}
+
+state { last_price : U64, lp_supply : U64 }
+
+handler refresh (b : U64) {
+  permissionless
+  modifies [last_price, lp_supply]
+  let p = call Oracle.quote(base = b)
+  effect { last_price := b }
+  ensures state.last_price == b
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_track_k_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    assert!(
+        body.contains("// CPI ensures-as-fact (Oracle.quote):"),
+        "missing CPI ensures-as-fact comment for Oracle.quote; got:\n{}",
+        body,
+    );
+    // The callee uses `price` as its return binder; the caller's
+    // `let p = …` makes `p` the substituted form.
+    assert!(
+        body.contains("kani::assume(p > 0)"),
+        "expected `kani::assume(p > 0)` from named binder substitution; got:\n{}",
+        body,
+    );
+    assert!(
+        !body.contains("price > 0"),
+        "binder name `price` must be substituted away; got:\n{}",
+        body,
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// v2.27 Track A — `state_binders { ... }` rewrites
+/// `pre.<callee_field>` / `post.<callee_field>` to the caller's
+/// `pre.<caller_field>` / `post.<caller_field>` in the substituted
+/// `kani::assume`, which then flattens through
+/// `rewrite_pre_post_paths` to the harness-local
+/// `pre_<caller_field>` / `post_<caller_field>` snapshots.
+#[test]
+fn state_binders_rewrite_through_impl_snapshot_locals() {
+    let src = r#"spec StateBindersImpl
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures post.from_balance + amount == pre.from_balance
+  }
+}
+
+state { pool_balance : U64, lp_supply : U64 }
+
+handler deposit (amt : U64) {
+  permissionless
+  requires amt > 0 else InvalidAmount
+  modifies [pool_balance, lp_supply]
+  call Token.transfer(
+    from = 0,
+    to = 0,
+    amount = amt,
+    authority = 0,
+    state_binders { from_balance = state.pool_balance },
+  )
+  effect { pool_balance -=! amt }
+  ensures state.pool_balance == old(state.pool_balance) - amt
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_track_a_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    // The substitution rewrites `pre.from_balance` /
+    // `post.from_balance` → `pre.pool_balance` / `post.pool_balance`
+    // (via state_binders), then `rewrite_pre_post_paths` flattens
+    // those to the snapshot locals `pre_pool_balance` /
+    // `post_pool_balance`.
+    assert!(
+        body.contains("kani::assume(post_pool_balance + amt == pre_pool_balance)"),
+        "expected flat snapshot locals in kani::assume; got:\n{}",
+        body,
+    );
+    // The callee abstract field name must NOT survive.
+    assert!(
+        !body.contains("from_balance"),
+        "abstract callee field `from_balance` must be substituted; got:\n{}",
+        body,
+    );
+    // The snapshot block must capture `pool_balance` (the caller-
+    // side binder field) — otherwise `pre_pool_balance` /
+    // `post_pool_balance` references the assume emits don't compile.
+    assert!(
+        body.contains("let pre_pool_balance"),
+        "snapshot block must capture pre_pool_balance; got:\n{}",
+        body,
+    );
+    assert!(
+        body.contains("let post_pool_balance"),
+        "snapshot block must capture post_pool_balance; got:\n{}",
+        body,
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// Tier-0 callees (interface declares no `ensures`) must not emit any
+/// `kani::assume` lines in the impl harness. Mirrors the spec-model
+/// variant's `tier0_callee_emits_no_kani_assume_lines` test.
+#[test]
+fn tier0_callee_emits_no_kani_assume_lines() {
+    let src = r#"spec Tier0Impl
+program_id "11111111111111111111111111111111"
+
+interface Logger {
+  program_id "11111111111111111111111111111111"
+  handler log (msg : U64) {
+    accounts {
+      sink : writable
+    }
+  }
+}
+
+state { counter : U64 }
+
+handler tick (val : U64) {
+  permissionless
+  requires val > 0 else Bad
+  modifies [counter, shadow]
+  call Logger.log(msg = val)
+  effect { counter += val }
+  ensures state.counter == old(state.counter) + val
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_tier0_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    assert!(
+        !body.contains("CPI ensures-as-fact (Logger.log)"),
+        "Tier-0 callee (no ensures) must not emit any CPI assume block; got:\n{}",
+        body
+    );
+    // Caller's own assert! still emits.
+    assert!(
+        body.contains("assert!("),
+        "caller's own assert! must still emit; got:\n{}",
+        body
+    );
+    // And no `kani::assume(` introduced by Track I — the only assumes
+    // that may appear are the caller's own requires-guard assume (none
+    // here, since `val > 0` is the requires).
+    // (We check by counting: the requires-guard assume is `val > 0`,
+    // so a Logger-derived assume would appear separately.)
+    let assume_count = body.matches("kani::assume(").count();
+    // Exactly one assume — the caller's own requires-guard
+    // (`val > 0 else Bad`).
+    assert_eq!(
+        assume_count, 1,
+        "Tier-0 callee must not add any kani::assume lines; got {} assumes in:\n{}",
+        assume_count, body
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// `let X = call Foo.bar(...)` puts `X` in scope in the substituted
+/// ensures via the `result` convention (v2.24 #11). Mirrors the
+/// spec-model variant's `let_call_binding_participates_in_substitution`
+/// test.
+#[test]
+fn let_binding_participates_in_substitution() {
+    let src = r#"spec LetCallImpl
+program_id "11111111111111111111111111111111"
+
+interface Pool {
+  program_id "11111111111111111111111111111111"
+  handler absorb (amount : U64) -> U64 {
+    accounts {
+      vault : writable
+    }
+    requires amount > 0
+    ensures result <= amount
+  }
+}
+
+state { total_loss : U64 }
+
+handler liquidate (loss : U64) {
+  permissionless
+  requires loss > 0 else Bad
+  modifies [total_loss, shadow]
+  let burned = call Pool.absorb(amount = loss)
+  effect { total_loss += loss }
+  ensures state.total_loss == old(state.total_loss) + loss
+}"#;
+    let spec = parse_str(src).expect("parse");
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_letcall_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    assert!(
+        body.contains("// CPI ensures-as-fact (Pool.absorb):"),
+        "missing CPI ensures-as-fact for Pool.absorb; got:\n{}",
+        body
+    );
+    // `result <= amount` substitutes `amount → loss` and
+    // `result → burned`.
+    assert!(
+        body.contains("kani::assume(burned <= loss)"),
+        "let-binding result must substitute to caller's binder; got:\n{}",
+        body
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// v2.26 Track J — when `multi_cpi_shared_fields` fires for a
+/// handler, the impl harness emits a WARNING breadcrumb comment
+/// above the CPI assume block so a reader of the generated file
+/// sees the over-constraint risk without cross-referencing the lint
+/// output. The breadcrumb sits between the post-snapshot and the
+/// first `kani::assume` from any CPI.
+#[test]
+fn multi_cpi_breadcrumb_emits_above_assume_block() {
+    let src = r#"spec MultiCpiKaniImpl
+program_id "11111111111111111111111111111111"
+
+interface Token {
+  program_id "11111111111111111111111111111111"
+  handler transfer (amount : U64) {
+    accounts {
+      from      : writable
+      to        : writable
+      authority : signer
+    }
+    requires amount > 0
+    ensures state.vault_balance == old(state.vault_balance) - amount
+  }
+}
+
+state { vault_balance : U64 }
+
+handler split (a : U64) (b : U64) {
+  permissionless
+  requires a > 0 else InvalidAmount
+  requires b > 0 else InvalidAmount
+  modifies [vault_balance, shadow]
+  call Token.transfer(from = 0, to = 1, amount = a, authority = 0)
+  call Token.transfer(from = 0, to = 2, amount = b, authority = 0)
+  effect { vault_balance -= a }
+  ensures state.vault_balance == old(state.vault_balance) - a - b
+}"#;
+    let spec = parse_str(src).expect("parse");
+    // LP-shape gap (modifies = {vault_balance, shadow}, effect-LHS =
+    // {vault_balance}) triggers auto-emission.
+    assert!(spec_triggers_impl_harness(&spec));
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_multi_cpi_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ false, Target::Anchor).expect("generate");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+
+    // 1. Two CPI assume lines must be present (one per call).
+    let assume_count = body
+        .matches("// CPI ensures-as-fact (Token.transfer):")
+        .count();
+    assert_eq!(
+        assume_count, 2,
+        "two CPI assume blocks must emit; got {} in:\n{}",
+        assume_count, body
+    );
+
+    // 2. The breadcrumb WARNING must appear in the harness body
+    //    (above the CPI assume block).
+    assert!(
+        body.contains("WARNING: multi-CPI ordering"),
+        "Track J breadcrumb must emit when multi_cpi_shared_fields fires; got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("`multi_cpi_same_field`"),
+        "breadcrumb must reference the lint rule name; got:\n{}",
+        body
+    );
+
+    // 3. Ordering: WARNING sits between the `if result.is_ok()`
+    //    branch open and the first `kani::assume` of the CPI block.
+    let is_ok_pos = body
+        .find("if result.is_ok()")
+        .expect("`if result.is_ok()` must be present");
+    let warn_pos = body
+        .find("WARNING: multi-CPI ordering")
+        .expect("breadcrumb present (just asserted)");
+    let first_cpi_assume = body[is_ok_pos..]
+        .find("// CPI ensures-as-fact")
+        .map(|i| is_ok_pos + i)
+        .expect("CPI assume block must follow is_ok()");
+    assert!(
+        is_ok_pos < warn_pos && warn_pos < first_cpi_assume,
+        "WARNING breadcrumb must sit between is_ok() and the first \
+             CPI ensures-as-fact comment; positions: is_ok={} warn={} cpi={}; got:\n{}",
+        is_ok_pos,
+        warn_pos,
+        first_cpi_assume,
+        body
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// v2.26 fold-in — a spec with no LP-shape handler but a ref_impl
+/// that carries potentially-overflowing arithmetic still auto-triggers
+/// the impl-targeted harness. Lean proves on `Nat`; Kani is the only
+/// verification surface that catches the `u64` overflow.
+#[test]
+fn ref_impl_overflow_risk_auto_triggers_impl_harness() {
+    let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl scaled (a : U64) (b : U64) : U64 = a * b
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+  ensures state.x == scaled(old(state.x), amt)
+}
+"#;
+    let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+    // No handler trips the LP-shape signal (`set` declares no modifies).
+    assert!(
+        !spec.handlers.iter().any(handler_triggers_impl_harness),
+        "no handler should trip the modifies-driven trigger in this fixture"
+    );
+    // But the ref_impl `scaled` has `*` over U64, so the auto-trigger
+    // still fires through the ref_impl overflow-risk predicate.
+    assert!(
+        spec_triggers_impl_harness(&spec),
+        "ref_impl with multiplication over bounded-numeric params \
+             must auto-trigger the impl harness"
+    );
+}
+
+/// Symmetric negative: ref_impl with only division (no overflow risk)
+/// AND no LP-shape handler — auto-trigger stays quiet.
+#[test]
+fn ref_impl_without_overflow_risk_does_not_auto_trigger() {
+    let src = r#"spec Pool
+type Error | InvalidAmount
+type State = { x : U64 }
+
+ref_impl half (a : U64) : U64 = a / 2
+
+handler set (amt : U64) {
+  requires amt > 0 else InvalidAmount
+  effect { x := amt }
+}
+"#;
+    let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+    assert!(
+        !spec_triggers_impl_harness(&spec),
+        "ref_impl with only division must not auto-trigger \
+             (no overflow risk, nothing for Kani to catch)"
+    );
+}
