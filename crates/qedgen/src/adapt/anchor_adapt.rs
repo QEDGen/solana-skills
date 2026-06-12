@@ -93,22 +93,28 @@ impl ProgramAdapter for AnchorAdapter<'_> {
     fn render_spec(&self, model: &ProgramModel) -> Result<String> {
         Ok(render_spec(model))
     }
+
+    fn adapt(&self, root: &Path) -> Result<String> {
+        let model = self.extract(root)?;
+        let rendered = self.render_spec(&model)?;
+
+        // Round-trip: a parse failure here is a renderer bug, not user input.
+        crate::chumsky_adapter::parse_str(&rendered).context(
+            "Generated .qedspec failed to parse — this is a bug in `qedgen adapt`. \
+             Please report at https://github.com/qedgen/solana-skills/issues",
+        )?;
+
+        Ok(rendered)
+    }
 }
 
 /// Generate a starter `.qedspec` for the Anchor program at `program_root`
 /// (the crate dir holding `src/`). `overrides` points unrecognized handlers
 /// at their actual implementation.
+#[allow(dead_code)]
 pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
     let adapter = AnchorAdapter::new(overrides);
-    let rendered = adapter.adapt(program_root)?;
-
-    // Round-trip: a parse failure here is a renderer bug, not user input.
-    crate::chumsky_adapter::parse_str(&rendered).context(
-        "Generated .qedspec failed to parse — this is a bug in `qedgen adapt`. \
-         Please report at https://github.com/qedgen/solana-skills/issues",
-    )?;
-
-    Ok(rendered)
+    adapter.adapt(program_root)
 }
 
 /// Extract an Anchor program into the neutral brownfield adapter model.
@@ -147,6 +153,7 @@ pub fn extract_program_model(
 }
 
 /// Convenience wrapper: write the adapted `.qedspec` to disk.
+#[allow(dead_code)]
 pub fn adapt_to_file(
     program_root: &Path,
     output_path: &Path,

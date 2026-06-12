@@ -84,12 +84,14 @@ impl ProgramAdapter for NativeAdapter<'_> {
 
 /// Structural `.qedspec` skeleton for a Pinocchio program — complete and
 /// parseable, handlers present with empty bodies.
+#[allow(dead_code)]
 pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String> {
     PinocchioAdapter::new(program_name).adapt(project_root)
 }
 
 /// Native variant — no canonical naming prefix, so any `pub fn` is a
 /// candidate handler.
+#[allow(dead_code)]
 pub fn render_skeleton_native(project_root: &Path, program_name: &str) -> Result<String> {
     NativeAdapter::new(program_name).adapt(project_root)
 }

@@ -10,7 +10,6 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ProgramFramework {
     Anchor,
     Pinocchio,
@@ -79,7 +78,6 @@ pub struct ErrorModel {
     pub variants: Vec<String>,
 }
 
-#[allow(dead_code)]
 pub trait ProgramAdapter {
     fn framework(&self) -> ProgramFramework;
     fn detect(&self, root: &Path) -> bool;
