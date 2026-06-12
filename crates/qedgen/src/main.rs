@@ -451,7 +451,8 @@ enum Commands {
     /// Validate a spec — lint, coverage, drift, and verification report
     ///
     /// Default (no flags): runs lint + coverage.
-    /// With --explain: generates a Markdown verification report.
+    /// With --explain: generates a Markdown verification report (add --json
+    /// for the structured verification-status payload the agent renders from).
     /// With --drift: detects code drift in #[qed(verified)] functions.
     Check {
         /// Path to the spec file (.qedspec or a directory of fragments).
@@ -1076,10 +1077,6 @@ enum AristotleCommands {
     },
 }
 
-/// Walk up from `start` looking for a `.git` directory. Returns true if one
-/// is found before hitting the filesystem root. qedgen refuses to write
-/// scaffolding unless the user has a git repo — the safety net for
-/// regeneration is a clean working tree.
 /// Redirect a `…/tests/kani_impl.rs` path to a sibling `…/src/kani_impl.rs`.
 /// Pinocchio Kani harnesses must live in the lib (`src/`) because
 /// `cargo kani` only discovers `#[kani::proof]` there, not in `tests/`
@@ -1100,6 +1097,10 @@ fn redirect_kani_impl_to_src(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Walk up from `start` looking for a `.git` directory. Returns true if one
+/// is found before hitting the filesystem root. qedgen refuses to write
+/// scaffolding unless the user has a git repo — the safety net for
+/// regeneration is a clean working tree.
 fn has_git_repo(start: &std::path::Path) -> bool {
     let mut cur = match start.canonicalize() {
         Ok(p) => p,
@@ -2479,7 +2480,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // Explain report (--explain) — inline markdown generation
+            // Verification report (--explain). `--json` emits the
+            // verification-status data layer for the agent to render; without
+            // it the CLI prints the inline Markdown human fallback.
             if explain {
                 let results = check::check(&spec, &proofs)?;
                 let proven = results
@@ -2496,37 +2499,52 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     .count();
                 let total = results.len();
 
-                let mut md = format!("# {} Verification Report\n\n", spec_name);
-                md.push_str(&format!(
-                    "**{}/{} properties verified** ({} sorry, {} missing)\n\n",
-                    proven, total, sorry, missing
-                ));
-                if proven == total {
-                    md.push_str("> All properties verified (sorry-free).\n\n");
-                }
-                md.push_str("## Properties\n\n");
-                for r in &results {
-                    let (icon, label) = match r.status {
-                        check::Status::Proven => ("✓", "PROVEN"),
-                        check::Status::Sorry => ("✗", "SORRY"),
-                        check::Status::Missing => ("✗", "MISSING"),
-                    };
-                    md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
-                    if let Some(ref intent) = r.intent {
-                        md.push_str(&format!("**Intent:** {}\n\n", intent));
+                let (rendered, what) = if json {
+                    let payload = serde_json::json!({
+                        "spec": spec_name,
+                        "summary": {
+                            "proven": proven,
+                            "sorry": sorry,
+                            "missing": missing,
+                            "total": total,
+                        },
+                        "properties": results,
+                    });
+                    (serde_json::to_string_pretty(&payload)?, "report (JSON)")
+                } else {
+                    let mut md = format!("# {} Verification Report\n\n", spec_name);
+                    md.push_str(&format!(
+                        "**{}/{} properties verified** ({} sorry, {} missing)\n\n",
+                        proven, total, sorry, missing
+                    ));
+                    if proven == total {
+                        md.push_str("> All properties verified (sorry-free).\n\n");
                     }
-                    if r.status != check::Status::Proven {
-                        if let Some(ref suggestion) = r.suggestion {
-                            md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
+                    md.push_str("## Properties\n\n");
+                    for r in &results {
+                        let (icon, label) = match r.status {
+                            check::Status::Proven => ("✓", "PROVEN"),
+                            check::Status::Sorry => ("✗", "SORRY"),
+                            check::Status::Missing => ("✗", "MISSING"),
+                        };
+                        md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
+                        if let Some(ref intent) = r.intent {
+                            md.push_str(&format!("**Intent:** {}\n\n", intent));
+                        }
+                        if r.status != check::Status::Proven {
+                            if let Some(ref suggestion) = r.suggestion {
+                                md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
+                            }
                         }
                     }
-                }
+                    (md, "report")
+                };
 
                 if let Some(ref path) = output {
-                    std::fs::write(path, &md)?;
-                    eprintln!("Wrote verification report to {}", path.display());
+                    std::fs::write(path, &rendered)?;
+                    eprintln!("Wrote verification {} to {}", what, path.display());
                 } else {
-                    print!("{}", md);
+                    print!("{}", rendered);
                 }
             }
 

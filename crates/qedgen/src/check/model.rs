@@ -1,7 +1,7 @@
 //! Parsed-spec data model: the `Parsed*` AST types, their impls, and the
 //! report/diagnostic types shared across the check submodules.
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct PropertyStatus {
     pub name: String,
     pub status: Status,
@@ -10,7 +10,8 @@ pub struct PropertyStatus {
     pub suggestion: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Status {
     Proven,
     Sorry,
