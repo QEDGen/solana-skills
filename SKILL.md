@@ -265,6 +265,8 @@ Use Leanstral for routine sorry filling and Aristotle for harder long-running pr
 
 Always run `lake build` after editing Lean and run `qedgen check` after proofs compile so orphan or missing obligations are reported.
 
+For a verification summary, run `qedgen check --spec <s> --explain --json` and render the report yourself from the structured payload (`summary` counts + per-`properties` status/intent/suggestion). The bare `--explain` Markdown is a human fallback; the agent owns the narrative.
+
 ## Invariants vs Properties
 
 Two related but distinct constructs in `.qedspec`:
