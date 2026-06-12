@@ -1,49 +1,12 @@
-//! Native Rust proto-clause extractor (v2.19 M4.1, preview-quality).
-//!
-//! Native Solana programs (solana-program / pinocchio-free /
-//! anchor-free) have no framework conventions — every check is the
-//! author's responsibility. Detection patterns are looser than
-//! Anchor's because there's no `#[derive(Accounts)]` to scan and no
-//! `_unchecked` suffix to look for.
-//!
-//! v1 detectors:
-//!
-//! 1. **`invoke_signed` / `invoke` calls without an adjacent program-ID
-//!    check** → `CpiProgramPin`. Scans for `invoke_signed(` /
-//!    `invoke(` and asserts that within ~10 lines above the call,
-//!    a `program_id ==` or `check_<program>_program` pattern appears.
-//!    Conservative: false-negative biased (won't surface every issue),
-//!    not false-positive biased.
-//!
-//! 2. **`create_program_address` usage** → `PdaCanonicalDerivation`.
-//!    `create_program_address` accepts a user-supplied bump;
-//!    `find_program_address` derives the canonical one. The
-//!    canonical-bump pattern is `find_program_address` followed by
-//!    storing the bump on the account.
-//!
-//! 3. **Raw arithmetic on numeric fields** → `ArithmeticNoOverflow`.
-//!    Reuses the Anchor extractor's per-line heuristic (skips
-//!    `checked_*` / `saturating_*` / `wrapping_*` family + Anchor-
-//!    attribute false-positives).
-//!
-//! 4. **Direct lamport mutation** (`**account.try_borrow_mut_lamports()
-//!    -= x`) → `ArithmeticNoOverflow` (raw arith subtype) +
-//!    `CpiAccountDirection` (because the mutation pattern can
-//!    redirect rent if `destination` is signer-controlled). v1 only
-//!    flags as `ArithmeticNoOverflow`; close-redirection is a
-//!    SKILL.md/Read+Grep predicate deferred to the agent layer.
-//!
-//! Out of scope for v1 (Native is "preview" per the release notes):
-//! - Manual signer-check absence detection (requires data-flow
-//!   analysis to know which account is "authority").
-//! - Manual owner-check absence detection (same — needs to know
-//!   which account is "token-shaped").
-//! - Discriminator collision detection (cross-handler analysis).
-//!
-//! These are covered by the auditor SKILL.md's per-runtime predicate
-//! set at the agent layer (Read+Grep on the impl); the extractor
-//! complements it for the patterns where syntactic detection is
-//! reliable.
+//! Native (framework-free) proto-clause extractor — no conventions to lean
+//! on, so detection is looser than Anchor's. Detectors: `invoke`/
+//! `invoke_signed` with no program-ID check within ~10 lines above →
+//! CpiProgramPin (false-negative biased); `create_program_address` (accepts a
+//! user-supplied bump; `find_program_address` is canonical) →
+//! PdaCanonicalDerivation; raw arithmetic and direct lamport mutation →
+//! ArithmeticNoOverflow (close-redirection stays an agent-layer predicate).
+//! Signer/owner-check absence and discriminator collisions need data-flow
+//! analysis and stay with the agent-layer predicate set.
 
 use anyhow::Result;
 use regex::Regex;
@@ -57,9 +20,8 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
     let mut out = Vec::new();
     let pat = NativePatterns::new();
 
-    // Map fn name → file location for handler attribution. Native
-    // doesn't have a canonical entry naming convention; we collect
-    // every `pub fn` and assume any non-helper is a handler.
+    // Native has no canonical entry naming; collect every `pub fn` and
+    // assume any non-helper is a handler.
     let handler_set: std::collections::BTreeSet<String> = rs_files
         .iter()
         .filter_map(|f| std::fs::read_to_string(f).ok())
@@ -81,8 +43,7 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
             if !pat.invoke_call.is_match(line) {
                 continue;
             }
-            // Look back up to 10 lines for a program-ID validation
-            // pattern.
+            // Look back up to 10 lines for a program-ID validation.
             let window_start = line_idx.saturating_sub(10);
             let window: Vec<&str> = source
                 .lines()
@@ -134,8 +95,7 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
             });
         }
 
-        // Pass 3: raw arithmetic (reuses Anchor's heuristic with
-        // Native-aware filters: no Anchor attributes to skip).
+        // Pass 3: raw arithmetic.
         let arith_lines = scan_arith_sites(&source, &pat);
         for line in arith_lines {
             let handler = nearest_handler(&source, line, &pat, &handler_set);
@@ -194,16 +154,13 @@ impl NativePatterns {
             // `invoke_signed(` or `invoke(` — direct or via solana_program prefix.
             invoke_call: Regex::new(r"\b(?:solana_program::program::)?invoke(?:_signed)?\s*\(")
                 .unwrap(),
-            // `program_id == &X` or `program_id != &X` or
-            // `account.key == &spl_token::id()` or
-            // `account.key() == &spl_token::id()` — any explicit pubkey
-            // comparison against a program-ID-shaped target. Tolerates
-            // both field access (older SDK) and method call (newer SDK).
+            // Explicit pubkey comparison against a program-ID-shaped target;
+            // tolerates field access (older SDK) and method call (newer SDK).
             program_id_check: Regex::new(
                 r"\bprogram_id\s*(?:==|!=)|\b(?:key|owner)(?:\s*\(\s*\))?\s*(?:==|!=)\s*&?\w+::id\(\)",
             )
             .unwrap(),
-            // Recognizes helper-named patterns like `check_*_program(...)`.
+            // Helper-named checks: `check_*_program(...)`.
             check_program_helper: Regex::new(r"\bcheck_\w+_program\s*\(").unwrap(),
             create_program_address: Regex::new(
                 r"\bPubkey::create_program_address\b|\bcreate_program_address\s*\(",
@@ -222,8 +179,8 @@ impl NativePatterns {
     }
 }
 
-/// Walk the source and find the most-recently-declared `pub fn` at or
-/// before the given line. Best-effort attribution.
+/// Most-recently-declared `pub fn` at or before `site_line` — best-effort
+/// attribution.
 fn nearest_handler(
     source: &str,
     site_line: usize,
@@ -246,9 +203,8 @@ fn nearest_handler(
     }
 }
 
-/// Reused-shape arith scanner. Same heuristic as the Anchor extractor's
-/// minus the Anchor-attribute filter (Native source doesn't have
-/// `#[account(...)]` macros).
+/// Anchor extractor's arith heuristic minus the attribute filter (no
+/// `#[account(...)]` macros in Native source).
 fn scan_arith_sites(source: &str, pat: &NativePatterns) -> Vec<usize> {
     let mut out = Vec::new();
     for (i, line) in source.lines().enumerate() {

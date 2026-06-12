@@ -1,42 +1,19 @@
-//! Pinocchio proto-clause extractor (v2.19 M1.3).
-//!
-//! Walks a slice of `Finding`s emitted by `pinocchio_probe::findings_from_catalogue`
-//! and lifts each one into one or more `ProtoClause`s — the input to M1.4's
-//! clustering algorithm.
-//!
-//! The mapping is intentionally narrow: every Pinocchio `Category` variant
-//! maps to a fixed `ClusterKind` (or to multiple, when a SAFETY-comment
-//! site carries claims about distinct preconditions). Per-runtime
-//! variation lives entirely in this file; downstream clustering and spec
-//! emission are runtime-agnostic.
-//!
-//! SAFETY-comment classification heuristic:
-//!
-//! Pinocchio's SAFETY comments tend to enumerate several preconditions in
-//! one block (e.g. *"the account is guaranteed to be initialized and
-//! different than `source_account_info`; it was also already validated to
-//! be a token account"*). The extractor scans the SAFETY text for keyword
-//! markers and emits one proto-clause per detected claim:
-//!
-//! - `owner`/`owned`/`token program`/`program-owned` → `AccountOwnerCheck`
-//! - `init`/`initialized`/`uninitialized` → `AccountInitCheck`
-//! - `distinct`/`different than`/`not the same` → `AccountDistinct`
-//! - `token account`/`token-account` → `AccountTypeTagCheck`
-//!
-//! Sites without a SAFETY comment default to `AccountOwnerCheck` because
-//! the most common Pinocchio `_unchecked` load delegates owner enforcement
-//! to the runtime gate.
+//! Lift Pinocchio probe `Finding`s into `ProtoClause`s for runtime-agnostic
+//! clustering. Each `Category` maps to a fixed `ClusterKind`; SAFETY comments
+//! enumerating several preconditions emit one clause per keyword claim:
+//! owner/owned/token program/program-owned → AccountOwnerCheck; init* →
+//! AccountInitCheck; distinct/different than/not the same → AccountDistinct;
+//! token account → AccountTypeTagCheck. No-SAFETY sites default to
+//! AccountOwnerCheck — the common `_unchecked` load delegates owner
+//! enforcement to the runtime gate.
 
 use crate::cluster::{ClusterKind, ProtoClause};
 use crate::probe::{Category, Finding, Reproducer};
 
-/// Extract proto-clauses from a Pinocchio finding set. Output feeds M1.4's
-/// `cluster_protos` algorithm.
-///
-/// Filters out findings whose handler name looks like a test fixture
-/// (`test_*`, `*_test_*`, helpers like `create_valid_data`). Tests
-/// aren't the audit surface and would over-fire on byte-slice probes
-/// against round-trip serialization tests.
+/// Extract proto-clauses from a Pinocchio finding set (feeds
+/// `cluster_protos`). Findings whose handler looks like a test fixture are
+/// filtered — tests aren't the audit surface and over-fire on byte-slice
+/// probes against round-trip serialization tests.
 pub fn extract_proto_clauses(findings: &[Finding]) -> Vec<ProtoClause> {
     let mut out = Vec::new();
     for finding in findings {
@@ -46,8 +23,6 @@ pub fn extract_proto_clauses(findings: &[Finding]) -> Vec<ProtoClause> {
         let safety_text = safety_text_from(finding);
         match &finding.category {
             Category::PinocchioUncheckedAccountLoad => {
-                // SAFETY-comment-driven: emit one proto-clause per detected
-                // claim. If no comment, default to AccountOwnerCheck.
                 let kinds = classify_safety_text(safety_text.as_deref());
                 if kinds.is_empty() {
                     out.push(make(
@@ -90,48 +65,32 @@ pub fn extract_proto_clauses(findings: &[Finding]) -> Vec<ProtoClause> {
                 ));
             }
             Category::PinocchioStaleSafetyComment => {
-                // Stale-SAFETY findings are emitted alongside their
-                // primary finding (the `_unchecked` load). The primary
-                // already produced proto-clauses from the SAFETY text;
-                // emitting again would double-count. Skip — the
-                // stale-claim itself is surfaced as a bug-side cluster
-                // outcome via the user's "[ ] bug" choice on the
-                // primary cluster.
+                // Skip: the primary `_unchecked`-load finding already
+                // produced proto-clauses from this SAFETY text; emitting
+                // again would double-count.
             }
             Category::PinocchioOffsetOverrun => {
-                // Each byte-slice site (`data[OFFSET..OFFSET+N]`,
-                // `_.try_into().unwrap()`) carries an implicit
-                // precondition: the input buffer is at least
-                // `OFFSET + N` bytes. Lift to ArithmeticBoundPre —
-                // ratified as a per-program "input-data length is
-                // adequate for all parsers" invariant (or per-handler
-                // when only one handler is doing the slicing).
-                //
-                // The Solana-Foundation rewards program surfaced 252
-                // such sites (all `data[N..M]` patterns in `state/*`
-                // parsers). Without this lift they'd vanish into
-                // <empty clusters>; with it, they collapse to one
-                // High-confidence Program-scope cluster the auditor
-                // can ratify or refine.
+                // Byte-slice sites (`data[OFFSET..OFFSET+N]`) carry an
+                // implicit "buffer is at least OFFSET + N bytes"
+                // precondition. Lift to ArithmeticBoundPre so hundreds of
+                // parser sites collapse into one ratifiable program-scope
+                // cluster instead of vanishing as empty clusters.
                 out.push(make(
                     ClusterKind::ArithmeticBoundPre,
                     finding,
                     finding.category_tag.clone(),
                 ));
             }
-            // Pinocchio-specific categories below are emitted by the
-            // probe but don't classify cleanly into the 14-kind taxonomy.
-            // Re-add as targeted ClusterKind mappings as v2.20 dogfood
-            // reveals demand.
+            // Remaining probe categories don't classify cleanly into the
+            // taxonomy; add targeted mappings as demand appears.
             _ => {}
         }
     }
     out
 }
 
-/// Extract the SAFETY-comment text from a finding's reproducer, if
-/// present. The probe's substitution map carries it under `SAFETY_CLAIM`
-/// when the site had an adjacent `// SAFETY: …` block.
+/// SAFETY-comment text from the reproducer's substitution map
+/// (`SAFETY_CLAIM`), when the site had an adjacent `// SAFETY: …` block.
 fn safety_text_from(finding: &Finding) -> Option<String> {
     let reproducer = finding.reproducer.as_ref()?;
     match reproducer {
@@ -143,17 +102,15 @@ fn safety_text_from(finding: &Finding) -> Option<String> {
     }
 }
 
-/// Run the keyword classifier over a SAFETY-comment text. Returns the set
-/// of cluster kinds the text implicates. A single comment can legitimately
-/// produce multiple kinds when it enumerates several preconditions.
+/// Keyword classifier over SAFETY text; one comment can legitimately
+/// implicate multiple kinds.
 fn classify_safety_text(safety: Option<&str>) -> Vec<ClusterKind> {
     let Some(text) = safety else {
         return Vec::new();
     };
     let lc = text.to_lowercase();
     let mut kinds = Vec::new();
-    // Order is presentation-stable — the same SAFETY string always
-    // produces the same proto-clause order across runs.
+    // Order is presentation-stable across runs.
     if lc.contains("owner")
         || lc.contains("owned")
         || lc.contains("token program")
@@ -186,10 +143,8 @@ fn make(kind: ClusterKind, finding: &Finding, evidence_text: String) -> ProtoCla
     }
 }
 
-/// Heuristic test-handler detector. Filters out findings whose handler
-/// name is a unit-test fn (`test_*`, `*_test`) or an obvious test
-/// helper (`create_valid_data`, `mock_*`). Conservative — any false
-/// negatives surface in dogfood and tighten the rule.
+/// Test-handler heuristic: unit-test fns (`test_*`, `*_test`) and obvious
+/// helpers (`create_valid_data`, `mock_*`, `fixture_*`). Conservative.
 fn is_test_handler(name: &str) -> bool {
     let n = name.to_lowercase();
     n.starts_with("test_")
@@ -261,9 +216,8 @@ mod tests {
 
     #[test]
     fn ptoken_destination_safety_emits_three_proto_clauses() {
-        // This is the actual p-token destination-load SAFETY at transfer.rs:68 —
-        // it claims initialization, distinctness, AND token-account validation.
-        // The extractor should emit one proto-clause per claim.
+        // Real p-token destination-load SAFETY (transfer.rs:68): claims
+        // init, distinctness, AND token-account validation → one clause each.
         let f = finding_with(
             Category::PinocchioUncheckedAccountLoad,
             "process_transfer",

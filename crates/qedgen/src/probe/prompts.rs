@@ -1,32 +1,20 @@
-//! Interview prompts file writer (v2.19 M1.5).
+//! Interview prompts file writer.
 //!
-//! Renders a `Vec<Cluster>` to a markdown file the user edits to ratify
-//! the scaffold-to-spec interview. Per the
-//! `feedback_tactile_tooling`/`feedback_no_anchor_v2_mentions` doctrines:
-//! file-based, reversible via git, harness-agnostic. The user opens
-//! `.qed/audit/<ts>/interview.md`, checks one option per cluster (`[x]`),
-//! optionally adds notes, then re-invokes the auditor to lift accepted
-//! clauses into the spec.
-//!
-//! Layout — one section per cluster, plus a header and footer.
-//! Each cluster's `question_md` field is already pre-rendered by
-//! `cluster::render_template`; this module just stitches them together
-//! with consistent surrounding chrome so the file is reviewable as a
-//! whole.
-//!
-//! M1.6 adds the inverse direction: `read_interview` parses the
-//! user-edited file and returns the ratified choices for each cluster.
+//! Renders a `Vec<Cluster>` to `.qed/audit/<ts>/interview.md` — file-based,
+//! reversible via git, harness-agnostic. The user checks one option per
+//! cluster (`[x]`), optionally adds notes, then re-invokes the auditor to
+//! lift accepted clauses into the spec. Each cluster's `question_md` is
+//! pre-rendered by `cluster::render_template`; this module stitches them
+//! with consistent chrome. `read_interview` parses the edited file back
+//! into per-cluster choices.
 
 use crate::cluster::{Cluster, Confidence};
 use anyhow::{Context, Result};
 use std::path::Path;
 
-/// Render the full interview markdown.
-///
-/// `program_name` appears in the title; pass the spec's canonical name
-/// (or the directory name in spec-less mode). `now_iso` is an ISO-8601
-/// UTC timestamp written into the header — passed in (not read from
-/// `chrono::now`) so tests are deterministic.
+/// Render the full interview markdown. `program_name` is the spec's
+/// canonical name (or directory name in spec-less mode); `now_iso` is
+/// passed in (not read from a clock) so tests are deterministic.
 pub fn render_interview(clusters: &[Cluster], program_name: &str, now_iso: &str) -> String {
     let mut s = String::new();
     write_header(&mut s, program_name, now_iso, clusters.len());
@@ -43,9 +31,8 @@ pub fn render_interview(clusters: &[Cluster], program_name: &str, now_iso: &str)
         return s;
     }
 
-    // High-confidence clusters first (most signal); within a confidence
-    // band, the clusters arrive already sorted by `cluster_protos`
-    // (Program-scope before Handler-scope, then by kind).
+    // High-confidence clusters first (most signal); within a band the
+    // input is already sorted by `cluster_protos`.
     let mut by_conf: [Vec<&Cluster>; 3] = Default::default();
     for c in clusters {
         let idx = match c.confidence {
@@ -122,10 +109,8 @@ fn write_header(s: &mut String, program: &str, now_iso: &str, n_clusters: usize)
 }
 
 fn write_cluster_block(s: &mut String, c: &Cluster) {
-    // The cluster's question_md already has the `## <label>` header and
-    // option checkboxes. Wrap it with a metadata block (cluster id,
-    // evidence count, suggested syntax) for transparency, and inject
-    // the confidence/scope-banner before the prompt body.
+    // question_md already carries the header and option checkboxes; wrap
+    // it with the id anchor, confidence/scope banner, and syntax details.
     s.push_str(&format!("<!-- cluster: {} -->\n", c.id));
     s.push_str(&format!(
         "_confidence: **{:?}** · scope: **{}** · evidence: **{}** finding{}_\n\n",
@@ -163,19 +148,16 @@ fn write_footer(s: &mut String) {
 }
 
 // ============================================================================
-// Reader (M1.6) — parse the user-edited interview.md
+// Reader — parse the user-edited interview.md
 // ============================================================================
 
-/// One ratified-choice record per cluster. `Some(Choice)` if the user
-/// checked exactly one option; `None` if zero or more than one were
-/// checked (the latter logged as a warning).
+/// One ratified-choice record per cluster. `Some(Choice)` iff exactly one
+/// option was checked; zero or multiple checks yield `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ratification {
     pub cluster_id: String,
     pub choice: Option<Choice>,
-    /// User-written rationale captured from the `_notes:_` block. Empty
-    /// when the user left the notes empty (the auditor doesn't require
-    /// notes — they're optional context).
+    /// Rationale from the `_notes:_` block; optional, may be empty.
     pub notes: String,
 }
 
@@ -194,24 +176,20 @@ pub fn read_interview_file(path: &Path) -> Result<Vec<Ratification>> {
     Ok(read_interview(&content))
 }
 
-/// Parse interview markdown content into per-cluster ratifications.
+/// Parse interview markdown into per-cluster ratifications.
 ///
-/// Tolerant parser: accepts `[x]`/`[X]`, `**bold**` variations, and
-/// arbitrary content between cluster sections. Unchecked clusters
-/// produce `Ratification { choice: None, … }` — the auditor's
-/// downstream pass skips these as "deferred."
+/// Tolerant: accepts `[x]`/`[X]`, `**bold**` variations, and arbitrary
+/// content between cluster sections. Unchecked clusters produce
+/// `choice: None` — skipped downstream as "deferred."
 pub fn read_interview(content: &str) -> Vec<Ratification> {
     let mut out = Vec::new();
 
-    // Each cluster block is anchored by an HTML comment of the form
-    // `<!-- cluster: <id> -->`. We split the document at these anchors
-    // and parse each segment as one cluster's content.
+    // Split the document at `<!-- cluster: <id> -->` anchors; each
+    // segment is one cluster's content.
     let mut current: Option<RatificationBuilder> = None;
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(id) = parse_cluster_anchor(trimmed) {
-            // Close out the previous cluster, if any, then start a
-            // fresh one.
             if let Some(prev) = current.take() {
                 out.push(prev.finish());
             }
@@ -253,11 +231,10 @@ impl RatificationBuilder {
     }
 
     fn consume_line(&mut self, line: &str) {
-        // Order matters: notes detection runs before checkbox detection
-        // so that a `[x]` inside a notes block isn't mis-read.
+        // Order matters: notes detection before checkbox detection so a
+        // `[x]` inside a notes block isn't mis-read.
         if self.notes_started && !self.notes_terminated {
-            // Terminate the notes block at the next `<details>`, `---`,
-            // or another markdown section start.
+            // Notes end at the next `<details>`, `---`, or section start.
             let trimmed = line.trim_start();
             if trimmed.starts_with("<details")
                 || trimmed.starts_with("---")
@@ -283,9 +260,8 @@ impl RatificationBuilder {
 
     fn finish(self) -> Ratification {
         let trimmed_notes = self.notes.trim();
-        // If user typed >1 checked option, return None — the orchestrator
-        // logs a warning and treats the cluster as deferred. v2.20 may
-        // upgrade this to a hard error or interactive disambiguation.
+        // >1 checked option → None: the orchestrator warns and treats the
+        // cluster as deferred.
         let choice = if self.checked.len() == 1 {
             Some(self.checked[0])
         } else {
@@ -299,15 +275,13 @@ impl RatificationBuilder {
     }
 }
 
-/// Recognize `- [x] **accept**` / `- [X] **narrow**` / etc. The bold
-/// markers are tolerant — we only require the option keyword to appear
-/// after the checkbox.
+/// Recognize `- [x] **accept**` etc. — only the option keyword after the
+/// checkbox is required; bold markers are tolerated.
 fn parse_checked_option(line: &str) -> Option<Choice> {
     let s = line.trim();
     if !(s.starts_with("- [x]") || s.starts_with("- [X]")) {
         return None;
     }
-    // Strip the `- [x]` prefix and look for the keyword.
     let rest = &s[5..].to_lowercase();
     if rest.contains("accept") {
         Some(Choice::Accept)
@@ -358,14 +332,11 @@ mod tests {
         let clusters = cluster_protos(protos);
         let md = render_interview(&clusters, "ptoken", "2026-05-16T00:00:00Z");
         assert!(md.contains("# Spec interview — ptoken"));
-        // The promoted program-scope cluster appears under "High-confidence"
-        // (5 evidence ≥ HIGH threshold).
+        // Promoted program-scope cluster lands in the High band (5
+        // evidence ≥ HIGH threshold).
         assert!(md.contains("## High-confidence clusters"));
-        // Cluster ID appears as an HTML comment.
         assert!(md.contains("<!-- cluster: c-"), "no cluster id in {}", md);
-        // Suggested syntax block rendered.
         assert!(md.contains("Suggested spec syntax"));
-        // Footer rendered.
         assert!(md.contains("## When done"));
     }
 
@@ -406,11 +377,9 @@ mod tests {
             .collect();
         let clusters = cluster_protos(protos);
         let md = render_interview(&clusters, "p", "ts");
-        // Count "[ ]" occurrences in the program-scope cluster block.
         let bracket_count = md.matches("- [ ]").count();
-        // Program-scope cluster shows 4 options (accept/narrow/reject/bug).
-        // Footer/header options text uses bold list, no brackets, so this
-        // counts only the actionable checkboxes.
+        // Program scope shows 4 options; header/footer option text has no
+        // brackets, so this counts only actionable checkboxes.
         assert!(
             bracket_count >= 4,
             "expected at least 4 actionable checkboxes (got {}). MD:\n{}",
@@ -419,7 +388,7 @@ mod tests {
         );
     }
 
-    // ── Reader tests (M1.6) ─────────────────────────────────────────
+    // ── Reader tests ────────────────────────────────────────────────
 
     #[test]
     fn reader_parses_simple_accept_choice() {
@@ -491,9 +460,8 @@ shouldn't be flagged.
 
     #[test]
     fn reader_round_trips_full_interview_against_writer() {
-        // Render an interview, simulate the user's edit (check `accept`
-        // on every cluster), then parse — every cluster must come back
-        // with Choice::Accept.
+        // Render, simulate the user checking `accept` everywhere, parse —
+        // every cluster must come back Choice::Accept.
         let protos: Vec<_> = (1..=5)
             .map(|i| {
                 proto(
@@ -505,8 +473,6 @@ shouldn't be flagged.
             .collect();
         let clusters = cluster_protos(protos);
         let rendered = render_interview(&clusters, "p", "2026-05-16T00:00:00Z");
-        // Replace every `[ ] **accept**` with `[x] **accept**` to
-        // simulate the user accepting all clusters.
         let edited = rendered.replace("[ ] **accept**", "[x] **accept**");
         let ratifications = read_interview(&edited);
         assert_eq!(ratifications.len(), clusters.len());

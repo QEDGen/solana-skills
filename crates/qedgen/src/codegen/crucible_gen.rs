@@ -1,37 +1,10 @@
-//! Crucible fuzz harness codegen — v2.18.
-//!
-//! Produces a `fuzz/<program>/` directory containing a Crucible
-//! (https://github.com/asymmetric-research/crucible) fuzz harness derived
-//! mechanically from a `.qedspec`. Same backend-codegen pattern as
-//! `kani.rs` and `proptest_gen.rs`: `pub fn generate(spec, output_dir)`
-//! is the entry point.
-//!
-//! ## What gets emitted
-//!
-//! ```text
-//! fuzz/<program>/
-//! ├── Cargo.toml             # workspace=[], Crucible deps pinned, [features] invariant_test
-//! ├── rust-toolchain.toml    # channel = "stable"
-//! ├── .gitignore             # target/, crashes/, .fuzz-cache/
-//! ├── idls/
-//! │   └── README.md          # "drop your IDL here as <name>.json"
-//! └── src/
-//!     └── main.rs            # the harness — fixture + actions + invariants
-//! ```
-//!
-//! ## Spec → harness mapping
-//!
-//! - `state { ... }` (mutable fields)         → `Fixture` struct fields (shadowed from LiteSVM after each action)
-//! - `program_id "..."`                       → `ctx.add_program(...)` in `setup()`
-//! - `handler X { ... }`                      → `pub fn action_x(&mut self, ...) -> bool { ... }`
-//! - handler args + bounds                    → `#[range(lo..hi)]` annotations
-//! - `invariant Foo : <expr>` (rust_expr)     → `fn invariant_foo(fixture: &mut F)` with `fuzz_assert!`
-//! - `property X { ... preserved_by ... }`    → same as invariant (one `invariant_x` fn)
-//!
-//! ## Scope cap (Anchor only in v2.18)
-//!
-//! v2.18 ships Anchor-target emission only. sBPF / Pinocchio / Quasar are
-//! deferred. `generate()` errors early for sBPF specs.
+//! Crucible (https://github.com/asymmetric-research/crucible) fuzz harness
+//! codegen — emits a `fuzz/<program>/` package (Cargo.toml, rust-toolchain,
+//! .gitignore, idls/README.md, src/main.rs) mechanically from a `.qedspec`.
+//! Mapping: mutable state fields → `Fixture` shadow fields; `handler x` →
+//! `action_x`; invariants/properties with Rust-renderable bodies →
+//! `fuzz_assert!` in `invariant_test`.
+//! Anchor targets only — `generate()` errors early for sBPF specs.
 
 use anyhow::{bail, Result};
 use std::path::Path;
@@ -41,23 +14,16 @@ use crate::rust_codegen_util;
 
 /// Which invariant family the emitted harness asserts after each action.
 ///
-/// `Spec` — the v2.18+ default. Emits one `fuzz_assert!` per linked
-/// `invariant` / `property` in the parsed spec. Used when a real
-/// `.qedspec` drives the harness.
+/// `Spec` (default) — one `fuzz_assert!` per linked `invariant` / `property`.
 ///
-/// `Protocol` — v2.21 brownfield mode. Emits an empty `invariant_test`
-/// body so the only checks that fire are Crucible's intrinsic
-/// crash-detectors (panic, `unwrap` on `None`, `BorrowMutError`,
-/// arithmetic overflow / div-by-zero in debug). Used when there's no
-/// spec — the bear-hug entry point for an audit. See
-/// [[feedback_crucible_crash_first]] / PRD-v2.21 §"Slice 1".
+/// `Protocol` — brownfield, no spec: empty `invariant_test` body; only
+/// Crucible's intrinsic crash detectors fire (panic, `unwrap` on `None`,
+/// `BorrowMutError`, arithmetic overflow / div-by-zero in debug).
 ///
-/// `Both` — emit spec assertions AND keep protocol-level crashes
-/// firing. Identical codegen output to `Spec` today because the
-/// protocol crashes don't need any harness instrumentation to fire
-/// (they're caught by the LibAFL host loop). Kept as a distinct
-/// variant so future protocol-invariant codegen (e.g. lamport-
-/// conservation companion module) has a place to dispatch.
+/// `Both` — spec assertions AND protocol crashes. Codegen-identical to
+/// `Spec` today (protocol crashes need no harness instrumentation — the
+/// LibAFL host loop catches them); kept distinct so future
+/// protocol-invariant codegen has a place to dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantMode {
     Spec,
@@ -65,16 +31,10 @@ pub enum InvariantMode {
     Both,
 }
 
-/// Top-level entry point. Writes a `fuzz/<program>/` directory at
-/// `output_dir`. `output_dir` is expected to be the *parent* directory
-/// containing the harness — e.g. `fuzz/` — and the function appends the
-/// spec name as the subdirectory. Caller may also pass the leaf directly
-/// (the function tolerates both — see logic in `harness_dir_for`).
-///
-/// `mode` controls which invariant family the emitted `invariant_test`
-/// asserts after each action. The default `InvariantMode::Spec`
-/// preserves v2.20 behavior; brownfield callers (no spec) pass
-/// `InvariantMode::Protocol`.
+/// Write a `fuzz/<program>/` harness. `output_dir` may be the parent (e.g.
+/// `fuzz/`) or the leaf itself — see `harness_dir_for`. `mode` selects the
+/// invariant family asserted after each action; brownfield callers (no
+/// spec) pass `InvariantMode::Protocol`.
 pub fn generate(spec: &ParsedSpec, output_dir: &Path, mode: InvariantMode) -> Result<()> {
     if spec.handlers.is_empty() {
         bail!("No handlers found in spec — nothing to fuzz");
@@ -129,11 +89,9 @@ fn harness_dir_for(spec: &ParsedSpec, output_dir: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Snake-case program name derived from the spec. Mirrors the convention
-/// used by codegen.rs for the program crate name. `pub(crate)` so the
-/// CLI dispatcher in `main.rs` can use the same conversion when
-/// computing the brownfield harness path (the two derivations have to
-/// agree or the IDL ends up in the wrong subdirectory).
+/// Snake-case program name (same convention as the codegen crate name).
+/// `pub(crate)`: the CLI dispatcher must use the same derivation or the
+/// IDL ends up in the wrong subdirectory.
 pub(crate) fn spec_program_name(spec: &ParsedSpec) -> String {
     let raw: &str = if spec.program_name.is_empty() {
         "program"
@@ -326,22 +284,12 @@ use {prog}::accounts;
     Ok(out)
 }
 
-/// Emit the v2.21 §S1.2 protocol-invariants helpers: a signer-lamport
-/// snapshot/check pair. Inlined into `main.rs` (no separate companion file
-/// — keeps the harness layout single-file). Only emitted for
-/// `InvariantMode::Protocol` / `Both`.
-///
-/// The check is asymmetric: signers may LOSE lamports (fees, rent
-/// reserves moving to PDAs they create) but must not GAIN lamports
-/// during a handler call. A gain means lamports flowed in from outside
-/// the tracked set (drain → signer), which under a sealed fuzz harness
-/// is a strong bug signal. The check tolerates the standard signer fee
-/// (5000 lamports) on first lift; v2.22 can drop that once we wire a
-/// per-account "expected delta" annotation from the spec.
-///
-/// Per [[feedback_crucible_crash_first]] — lamport conservation is the
-/// canonical "protocol invariant" Crucible should fuzz against the
-/// brownfield surface. Discriminator/size checks deferred to v2.22.
+/// Emit the signer-lamport snapshot/check helpers, inlined into `main.rs`
+/// (Protocol / Both only — keeps the harness single-file). The check is
+/// asymmetric: signers may LOSE lamports (fees, rent reserves) but must not
+/// GAIN them during a handler call — a gain means lamports flowed in from
+/// outside the tracked set (drain → signer), a strong bug signal under a
+/// sealed fuzz harness.
 fn emit_protocol_invariants_helpers(out: &mut String) {
     out.push_str("// ── Protocol invariants (v2.21 §S1.2 — lamport conservation) ────────\n");
     out.push_str("// Per-signer asymmetric check: signers may LOSE lamports (fees, rent)\n");
@@ -424,10 +372,8 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
 }
 
 fn fixture_name(spec: &ParsedSpec) -> String {
-    // Run the name through spec_program_name first so kebab-case Cargo
-    // names (`multi-delegator`) get normalised to snake_case before the
-    // PascalCase converter — `to_pascal_case` only splits on `_`, so a
-    // raw kebab name would yield `Multi-delegator` (invalid Rust).
+    // Normalise to snake_case first — `to_pascal_case` only splits on `_`,
+    // so a raw kebab name would yield `Multi-delegator` (invalid Rust).
     let normalised = spec_program_name(spec);
     let pascal = crate::codegen_shared::to_pascal_case(&normalised);
     let head: &str = if pascal.is_empty() {
@@ -449,19 +395,16 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str) {
     out.push_str("    program_id: Pubkey,\n");
 
     if spec_is_brownfield_with_idl_accounts(spec) {
-        // Brownfield path: one Keypair per non-default, non-PDA account
-        // across all handlers (signers AND user-provided writable
-        // accounts). The field ident is snake_cased to satisfy Rust
-        // naming-convention lints — the original camelCase name is kept
-        // on `ParsedHandlerAccount` to match the macro-generated struct
-        // field name; the emitter does the case conversion at use sites.
+        // Brownfield: one Keypair per non-default, non-PDA account (signers
+        // AND user-provided writables). Field idents are snake_cased; the
+        // IDL's camelCase name stays on `ParsedHandlerAccount` to match the
+        // macro-generated struct field, converted at use sites.
         for name in collect_brownfield_keypair_names(spec) {
             let ident = brownfield_keypair_ident(&name);
             out.push_str(&format!("    {ident}: Rc<Keypair>,\n"));
         }
     } else {
-        // Spec-mode path: signing identities derive from auth-cited
-        // handlers + named PDAs (v2.21 behavior).
+        // Spec mode: signing identities from auth-cited handlers + named PDAs.
         let signers = collect_signer_idents(spec);
         for sig in &signers {
             out.push_str(&format!("    {sig}: Rc<Keypair>,\n"));
@@ -479,11 +422,9 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str) {
     out.push_str("}\n");
 }
 
-/// True when at least one handler carries the IDL-derived account
-/// metadata that distinguishes brownfield Pinocchio (Codama IDL) from
-/// spec-mode (where accounts come from the `.qedspec`'s accounts
-/// block). Used to switch the fixture/setup emitters between the two
-/// generation paths.
+/// True when any handler carries IDL-derived account metadata — switches
+/// the fixture/setup emitters between brownfield (Codama IDL) and spec mode
+/// (accounts from the `.qedspec` accounts block).
 fn spec_is_brownfield_with_idl_accounts(spec: &ParsedSpec) -> bool {
     spec.handlers.iter().any(|h| {
         h.accounts
@@ -492,9 +433,8 @@ fn spec_is_brownfield_with_idl_accounts(spec: &ParsedSpec) -> bool {
     })
 }
 
-/// Map a DSL type to its Rust shadow type. v0 handles only primitives + Pubkey;
-/// compound types (records, sum types, Map) fall back to `()` with a TODO so
-/// the user knows the field is unshadowed.
+/// DSL type → Rust shadow type. Primitives + Pubkey only; compound types
+/// fall back to `()` with a TODO marking the field unshadowed.
 fn map_simple_type(dsl_type: &str) -> &'static str {
     match dsl_type {
         "U8" => "u8",
@@ -528,17 +468,11 @@ fn collect_signer_idents(spec: &ParsedSpec) -> Vec<String> {
     seen.into_iter().collect()
 }
 
-/// v2.22 S3.3: collect every account name across all handlers that
-/// needs a fixture-owned `Rc<Keypair>` field. An account qualifies when
-/// it has neither a hardcoded `default_pubkey` (those become
-/// `pubkey!("...")` literals) nor a `pda_seeds` derivation. Both signer
-/// and non-signer "user" accounts pass — Crucible needs the pubkey
-/// tracked for snapshot/restore even when the harness doesn't sign for
-/// it.
-///
-/// Returns names in the IDL's original (camelCase) form. The emitter
-/// builds the fixture field ident via `brownfield_keypair_ident` to
-/// avoid Rust naming convention warnings.
+/// Collect every account name needing a fixture-owned `Rc<Keypair>`:
+/// neither a hardcoded `default_pubkey` (those become `pubkey!` literals)
+/// nor `pda_seeds`. Non-signers qualify too — Crucible tracks the pubkey
+/// for snapshot/restore even when the harness doesn't sign. Returns names
+/// in the IDL's original casing; see `brownfield_keypair_ident`.
 fn collect_brownfield_keypair_names(spec: &ParsedSpec) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     for h in &spec.handlers {
@@ -591,11 +525,9 @@ fn emit_fixture_impl(
     out.push_str("    pub fn setup() -> Self {\n");
     out.push_str("        let mut ctx = TestContext::new();\n");
     out.push_str(&format!("        let program_id = {prog}::ID;\n"));
-    // Spec-mode harness lives at <root>/fuzz/<prog>/ — `../../target/`
-    // walks two levels back to the project root. Brownfield (protocol)
-    // mode harness lives at <root>/.qed/fuzz/<prog>/ — needs one extra
-    // level. Without this, the harness panics at `ctx.add_program`
-    // immediately on startup (No such file or directory).
+    // Spec-mode harness lives at <root>/fuzz/<prog>/; brownfield (protocol)
+    // at <root>/.qed/fuzz/<prog>/ — one extra level. Wrong depth panics at
+    // `ctx.add_program` on startup (No such file or directory).
     let so_path_prefix = match mode {
         InvariantMode::Protocol => "../../..",
         InvariantMode::Spec | InvariantMode::Both => "../..",
@@ -671,15 +603,11 @@ fn emit_action_fn(
     out.push_str("    /// `accounts::X { ... }` literals fall through as todo!() — fill\n");
     out.push_str("    /// via `qedgen codegen --fill` once that hook lands for Crucible.\n");
 
-    // Build param list with #[range] hints when bounds are inferable.
-    // Pubkey-typed args are deliberately *not* exposed as Arbitrary-derived
-    // action params: Crucible's #[fuzz_fixture] macro can't derive
-    // Arbitrary for Solana's Pubkey (its internal `Address` wrapper has no
-    // Arbitrary impl), so passing one through the action signature breaks
-    // the build. The call-literal logic below inlines `Pubkey::default()`
-    // for those fields. Real PDAs / signer pubkeys belong in the
-    // `.accounts(...)` literal which the agent fills, not in the call
-    // payload that gets fuzzed.
+    // Pubkey-typed args are NOT exposed as action params: #[fuzz_fixture]
+    // can't derive Arbitrary for Pubkey (no Arbitrary on its `Address`
+    // wrapper), so one in the signature breaks the build. The call literal
+    // inlines `Pubkey::default()`; real PDAs / signer pubkeys belong in the
+    // agent-filled `.accounts(...)` literal, not the fuzzed payload.
     let mut params = String::new();
     for (pname, ptype) in &op.takes_params {
         if ptype == "Pubkey" {
@@ -698,21 +626,12 @@ fn emit_action_fn(
         op.name, params
     ));
 
-    // Body — the Anchor `.call(...).accounts(...).send()` chain. Account
-    // context comes from the spec's `accounts` block when present; v0
-    // emits `todo!()` for the accounts struct (agent-fill) because the
-    // Anchor accounts struct field naming is richer than we carry.
-    //
-    // `.send()` returns `Result<TxOutcome, ...>`. TxOutcome is Crucible's
-    // per-tx status (Success / ProgramError / panic). We collapse both
-    // layers into a single bool: transport error from `.send()` itself
-    // counts as a failed action for fuzz purposes, same as a program-
-    // side error.
+    // The Anchor `.call(...).accounts(...).send()` chain. `.send()` returns
+    // `Result<TxOutcome, ...>`; both layers collapse into one bool —
+    // transport errors count as failed actions, same as program errors.
     let ix_name = pascal_case(&op.name);
-    // Pubkey-typed fields are *not* declared as action params (Crucible
-    // can't fuzz Pubkey), so inline `Pubkey::default()` for them in the
-    // struct literal. Other params are passed through via field
-    // shorthand — they're declared as fn parameters above.
+    // Pubkey fields get `Pubkey::default()` (see param-list note above);
+    // other params pass through via field shorthand.
     let arg_inits: String = op
         .takes_params
         .iter()
@@ -724,24 +643,18 @@ fn emit_action_fn(
             }
         })
         .collect();
-    // ── v2.21 §S1.2 — snapshot signer lamports before .send() ───────────
-    // Emitted only in Protocol / Both modes. Tracked set = every signer
-    // keypair the fixture knows about; signers may lose lamports (fees,
-    // rent) but must not gain them across a handler call. PDAs are NOT
-    // tracked yet (their pubkeys are derived dynamically at runtime
-    // inside the agent-filled `.accounts(...)` literal — wiring spec
-    // PDAs into the tracked set is v2.22 scope).
+    // Snapshot signer lamports before .send() (Protocol / Both only).
+    // Tracked set = every fixture signer keypair. PDAs are NOT tracked —
+    // their pubkeys are derived at runtime inside the agent-filled
+    // `.accounts(...)` literal.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
     let is_brownfield = spec_is_brownfield_with_idl_accounts(spec);
     let signers = collect_signer_idents(spec);
     if want_protocol && !signers.is_empty() {
         out.push_str("        let __tracked_pubkeys: Vec<Pubkey> = vec![\n");
         for sig in &signers {
-            // Brownfield fixture fields go through `brownfield_keypair_ident`
-            // for snake-case Rust idents (the original camelCase name is
-            // kept on `ParsedHandlerAccount`); the tracker must reference
-            // the same ident form or the emit produces `self.escrowSeed`
-            // while the fixture has `self.escrow_seed`.
+            // Must match the fixture's snake_cased ident — otherwise the
+            // tracker emits `self.escrowSeed` against `self.escrow_seed`.
             let ident = if is_brownfield {
                 brownfield_keypair_ident(sig)
             } else {
@@ -759,25 +672,15 @@ fn emit_action_fn(
     out.push_str(&format!(
         "            .call(instruction::{ix_name} {{ {arg_inits}}})\n"
     ));
-    // v2.22 S3.3: when the handler's `accounts` list is populated (set
-    // from a Codama IR / Anchor 0.30 IDL by the brownfield path), emit a
-    // real `accounts::Foo { ... }` literal. Crucible's generated
-    // `accounts::Foo` struct OMITS accounts with fixed-pubkey defaults
-    // (publicKeyValueNode → auto-filled by the macro) and snake-cases
-    // every remaining field name (`escrowSeed` → `escrow_seed`). So:
-    //
-    //   - Account carries `default_pubkey` → SKIP. Crucible auto-fills it.
-    //   - Account is a PDA (`pda_seeds: Some(...)`) → emit a placeholder
-    //     `Pubkey::find_program_address(&[], &self.program_id).0`. Real
-    //     seed-aware derivation is v2.22.x; the placeholder compiles
-    //     and the program's PDA check rejects the call, which is fine
+    // Populated `accounts` list → real `accounts::Foo { ... }` literal.
+    // Crucible's generated struct OMITS fixed-pubkey accounts (auto-filled
+    // by the macro) and snake-cases the remaining field names. So:
+    //   - `default_pubkey` → SKIP (Crucible auto-fills).
+    //   - PDA (`pda_seeds`) → placeholder `find_program_address(&[], ..).0`;
+    //     it compiles and the program's PDA check rejects the call — fine
     //     signal for a crash-first fuzzer.
     //   - Otherwise → `self.<keypair_ident>.pubkey()`.
-    //
-    // Spec-mode handlers (accounts populated but typically lacking
-    // `default_pubkey` / `pda_seeds`) fall through the same path. When
-    // the list is empty (no IDL, no spec accounts block) fall back to
-    // the v2.21 `todo!()` agent-fill.
+    // Empty list (no IDL, no spec accounts block) → `todo!()` agent-fill.
     if op.accounts.is_empty() {
         out.push_str(&format!(
             "            .accounts::<accounts::{ix_name}>(todo!(\"agent-fill: accounts::{ix_name} {{{{ ... }}}} from spec accounts block\"))\n"
@@ -786,8 +689,7 @@ fn emit_action_fn(
         out.push_str(&format!("            .accounts(accounts::{ix_name} {{\n"));
         for acc in &op.accounts {
             if acc.default_pubkey.is_some() {
-                // Crucible auto-fills fixed-address accounts; the
-                // generated struct doesn't have a field for them.
+                // Crucible auto-fills fixed-address accounts (no struct field).
                 continue;
             }
             let value = if acc.pda_seeds.is_some() {
@@ -795,17 +697,14 @@ fn emit_action_fn(
             } else {
                 format!("self.{}.pubkey()", brownfield_keypair_ident(&acc.name))
             };
-            // Field name on the macro-generated struct is the
-            // snake_case form of the IDL's camelCase name.
             let field = brownfield_keypair_ident(&acc.name);
             out.push_str(&format!("                {field}: {value},\n"));
         }
         out.push_str("            })\n");
     }
 
-    // Signers: prefer the IDL's per-account `isSigner` flags when the
-    // brownfield path populated them; otherwise fall back to the v2.21
-    // `auth X` lift from the spec.
+    // Signers: prefer IDL per-account `isSigner` flags; fall back to the
+    // spec's `auth X` lift.
     let brownfield_signers: Vec<&str> = op
         .accounts
         .iter()
@@ -826,11 +725,9 @@ fn emit_action_fn(
         "        let success = outcome.as_ref().map(|o| o.is_success()).unwrap_or(false);\n",
     );
 
-    // ── v2.21 §S1.2 — assert no signer inflation after .send() ──────────
-    // Only emitted in Protocol / Both modes and only when the handler had
-    // a non-empty tracked set. The check runs whether or not .send()
-    // succeeded — a failed tx can still mutate state (CPI rollback isn't
-    // guaranteed for every error shape).
+    // Assert no signer inflation after .send() (Protocol / Both, non-empty
+    // tracked set). Runs even when .send() failed — a failed tx can still
+    // mutate state (CPI rollback isn't guaranteed for every error shape).
     if want_protocol && !signers.is_empty() {
         out.push_str(&format!(
             "        assert_no_signer_inflation(&self.ctx, &__lamports_before, \"{}\");\n",
@@ -838,9 +735,8 @@ fn emit_action_fn(
         ));
     }
 
-    // Post-call: shadow state sync. v0 emits a structured comment because
-    // syncing requires knowing the on-chain account struct shape — also
-    // agent-fill once the hook lands.
+    // Shadow-state sync needs the on-chain account struct shape — emitted
+    // as a structured comment for agent fill.
     if !op.effects.is_empty() {
         out.push_str("        if success {\n");
         out.push_str("            // TODO: sync shadow state from the on-chain account here.\n");
@@ -860,15 +756,10 @@ fn emit_action_fn(
     Ok(())
 }
 
-/// Infer a `#[range(lo..hi)]` annotation for a handler param when the
-/// spec carries a constant upper bound for the param's type. v0
-/// heuristic: scan declared constants for one whose name matches
-/// `MAX_<TYPE_TAG>` or `<TYPE_TAG>_MAX` and use it as the upper bound.
-/// Falls back to "" (no annotation) — Crucible defaults to the type's
-/// full range with boundary-biased mutation.
+/// `#[range(lo..hi)]` inference — currently none ("" → Crucible defaults
+/// to the type's full range with boundary-biased mutation).
 fn infer_range_attr(_spec: &ParsedSpec, _ptype: &str) -> String {
-    // v0: no inference; the user can add #[range(..)] manually after gen.
-    // v0.1+ can lift bounds from `requires p <= MAX` or `where` clauses.
+    // TODO: lift bounds from `requires p <= MAX` / `where` clauses.
     String::new()
 }
 
@@ -890,12 +781,8 @@ fn pascal_case(s: &str) -> String {
 }
 
 fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
-    // Protocol-only mode: empty body, with a one-line comment naming the
-    // intrinsic detectors. v2.21 ships no companion-module instrumentation
-    // for lamport-conservation / discriminator checks — that's a v2.21.1
-    // polish (PRD-v2.21 §S1.2 sBPF carve-out also applies to the lamport
-    // diff that needs schema info). Today's "protocol" surface is whatever
-    // Crucible's host loop already catches.
+    // Protocol-only: empty body naming the intrinsic detectors — the
+    // "protocol" surface is whatever Crucible's host loop already catches.
     if matches!(mode, InvariantMode::Protocol) {
         out.push_str("#[invariant_test]\n");
         out.push_str(&format!("fn invariant_test(_fixture: &mut {fixture}) {{\n"));
@@ -1092,9 +979,8 @@ handler increment : State.Active -> State.Active {
         assert!(out.contains("#[invariant_test]"));
         assert!(out.contains("fn invariant_test(fixture: &mut CounterFixture)"));
         assert!(out.contains("fuzz_assert!"));
-        // Body is rewritten to fixture-relative — the comment line above
-        // retains the original Lean form for human readability, but the
-        // assertion line itself must reference fixture.
+        // The assertion line must be fixture-relative (the comment line
+        // keeps the original Lean form).
         let fuzz_assert_line = out
             .lines()
             .find(|l| l.contains("fuzz_assert!"))
@@ -1111,9 +997,8 @@ handler increment : State.Active -> State.Active {
 
     #[test]
     fn sbpf_spec_errors_early() {
-        // Any spec with `pragma sbpf` should be refused — Crucible v2.18
-        // ships Anchor-only. We synthesise a minimal ParsedSpec rather
-        // than rely on the parser accepting a stub sBPF spec.
+        // `pragma sbpf` specs are refused (Anchor-only). Synthesise a
+        // ParsedSpec directly rather than parse a stub sBPF spec.
         let mut spec = ParsedSpec {
             program_name: "SbpfProg".into(),
             ..Default::default()
@@ -1156,15 +1041,12 @@ handler increment : State.Active -> State.Active {
         assert!(out.contains("fixture.count"));
     }
 
-    // v2.21 §S1.2 — Protocol/Both modes wrap every `.send()` with a
-    // before/after signer-lamport snapshot and inflation assertion. Spec
-    // mode (the v2.20 default) must NOT emit the wrap so its output stays
-    // byte-identical to v2.20.
+    // Protocol/Both wrap every `.send()` with a signer-lamport snapshot +
+    // inflation assertion; Spec mode must NOT emit the wrap.
     #[test]
     fn protocol_mode_wraps_send_with_lamport_check() {
-        // MINIMAL_SPEC's `increment` has `permissionless` (no auth, no
-        // signers). For the wrap to actually fire we need a handler that
-        // produces a non-empty signer set. Use a spec with `auth`.
+        // MINIMAL_SPEC's handler is permissionless (empty signer set); the
+        // wrap only fires for a handler with `auth`.
         let src = r#"spec Counter
 program_id "11111111111111111111111111111111"
 

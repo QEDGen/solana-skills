@@ -1,30 +1,12 @@
-//! qedgen Kani codegen — the MIR consumer. Sole Kani-codegen path
-//! since v2.32 deleted the legacy `ParsedSpec`-direct `kani.rs`.
-//! Consumes `mir::Mir` + the originating `ParsedSpec` (passed through
-//! to the shared `rust_codegen_util::emit_*` helpers, which still take
-//! `ParsedSpec` fragments). Gated by `tests/kani_snapshot.rs`.
+//! qedgen Kani codegen — the sole Kani path, consuming `mir::Mir` + the
+//! originating `ParsedSpec` (passed through to the shared
+//! `rust_codegen_util::emit_*` helpers). Output pinned by `tests/kani_snapshot.rs`.
 //!
-//! `generate` emits, in order:
-//!   - banner + file header + math helpers + state-model header
-//!   - constants (file-scoped — referenced from per-ADT modules)
-//!   - branches on `account_types.len() > 1`:
-//!     - multi: per-account `mod <lowercase> { use super::*; … }`
-//!     - single: flat `emit_kani_account_section` at file root
-//!   - file-level features (covers / liveness / env) in single mode
-//!   - the `DO NOT EDIT BELOW` footer + stderr summary counts
-//!
-//! Per-account section (`emit_kani_account_section`):
-//!   - user-defined records, unit enum sums, `Status` enum, `State`
-//!     struct, transition fns (pure `bool`-returning mutators)
-//!   - guard enforcement harnesses (one per handler with a guard)
-//!   - property + invariant preservation harnesses
-//!   - effect conformance harnesses (per-effect, per-handler)
-//!   - overflow detection harnesses (auto-add fields)
-//!   - abort condition harnesses (per `requires X else Err`)
-//!
-//! sBPF specs never reach this module — `qedgen codegen --kani` skips
-//! assembly targets (they are verified via Lean proofs + client-side
-//! tests; see the `main.rs` codegen dispatch).
+//! `generate` emits: structural prefix (banner / math helpers / state-model
+//! header / file-scoped constants), per-account sections (multi-account wraps
+//! each in `mod <lowercase>`; covers/liveness/env emit in single mode only),
+//! then the `DO NOT EDIT BELOW` footer. sBPF specs never reach this module —
+//! `qedgen codegen --kani` skips assembly targets (Lean + client tests instead).
 
 use anyhow::Result;
 use std::path::Path;
@@ -32,10 +14,8 @@ use std::path::Path;
 use crate::check::ParsedSpec;
 use crate::mir::Mir;
 
-/// Generate the Kani harness file at `output_path`, consuming a
-/// pre-lowered `Mir` + the originating `ParsedSpec` (the latter is
-/// passed through to the shared `rust_codegen_util` helpers, which take
-/// `ParsedSpec` fragments).
+/// Generate the Kani harness file at `output_path` from a pre-lowered
+/// `Mir` + the originating `ParsedSpec`.
 pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
     if mir.handlers.is_empty() {
         anyhow::bail!("No operations found in the spec — is this a valid qedspec file?");
@@ -50,15 +30,12 @@ pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()
     let content = render_with_progress(mir, parsed);
     std::fs::write(output_path, &content)?;
 
-    // Default Kani-codegen path post v2.30 Phase 3f. The legacy
     eprintln!("Generated Kani harnesses in {}", output_path.display());
     Ok(())
 }
 
-/// Pure render. Emits the deterministic structural prefix (banner /
-/// math helpers / state-model header / constants), then the per-account
-/// body (records / enums / Status / State / predicates / transitions /
-/// harnesses), branching on single- vs multi-account.
+/// Pure render: deterministic structural prefix, then the per-account
+/// body, branching on single- vs multi-account.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn render(mir: &Mir, parsed: &ParsedSpec) -> String {
     render_inner(mir, parsed, false, false)
@@ -87,20 +64,14 @@ fn render_inner(mir: &Mir, parsed: &ParsedSpec, progress: bool, skip_guard_proof
     emit_constants(&mut out, mir);
 
     if parsed.account_types.len() > 1 {
-        // Phase 3e — multi-account: emit `mod <lowercase> { use
-        // super::*; ... }` per account_type, with each block's
-        // sections driven by a per-account scoped `ParsedSpec`.
-        // File-level features (covers / liveness / environment) are
-        // skipped — per-ADT lifting is v2.22 scope per the legacy
-        // comment; spec-level emit only happens in single-mode.
+        // Multi-account: per-account `mod <lowercase>` blocks; file-level
+        // features (covers / liveness / env) emit in single mode only.
         if let Err(e) =
             emit_multi_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
         {
             out.push_str(&format!("// MIR-ERROR: multi-account emit failed: {}\n", e));
         }
     } else {
-        // Single-account path — every section consumes the parsed
-        // ParsedSpec directly.
         if let Err(e) =
             emit_single_account_sections(&mut out, mir, parsed, progress, skip_guard_proofs)
         {
@@ -124,8 +95,7 @@ fn skip_guard_proofs_from_env() -> bool {
     )
 }
 
-/// Single-account dispatch — invokes every section emitter in
-/// legacy order against the parsed spec directly.
+/// Single-account dispatch — every section emitter in snapshot-pinned order.
 fn emit_single_account_sections(
     out: &mut String,
     mir: &Mir,
@@ -157,9 +127,8 @@ fn emit_single_account_sections(
         eprintln!("Rendering Kani section: property preservation proofs");
     }
     emit_property_preservation_harnesses(out, parsed)?;
-    // Order matches legacy: property → ensures → invariant →
-    // effect → overflow. Slotting ensures between property and
-    // invariant is load-bearing for byte-equivalence.
+    // Section order (property → ensures → invariant → effect → overflow)
+    // is load-bearing for snapshot byte-equivalence.
     if progress {
         eprintln!("Rendering Kani section: ensures preservation proofs");
     }
@@ -177,8 +146,7 @@ fn emit_single_account_sections(
     }
     emit_overflow_detection_harnesses(out, mir, parsed)?;
     // File-level features (covers / liveness / environment) —
-    // single-mode only. Multi-account specs skip these entirely
-    // (per-ADT lifting is v2.22 scope per the legacy comment).
+    // single-mode only; multi-account specs skip these entirely.
     if progress {
         eprintln!("Rendering Kani section: cover/liveness/environment proofs");
     }
@@ -186,28 +154,11 @@ fn emit_single_account_sections(
     Ok(())
 }
 
-/// Multi-account dispatch — emit one `mod <lowercase> { use
-/// super::*; ... }` per account_type, with each block's sections
-/// driven by a per-account scoped `ParsedSpec`. Mirrors
-/// `kani::generate` lines ~205–251.
-///
-/// Per-account scope:
-///   * `account_types`: just this account.
-///   * `handlers`: filtered by `op.on_account ==
-///     Some(acct.name)` (strict — no primary fallback).
-///   * `properties`: filtered by field-of-this-account substring
-///     match (legacy line 226–236).
-///   * `invariants`: filtered to those claimed by a handler in
-///     this account.
-///   * `records`, `sum_types`, `constants`, `interfaces`,
-///     `ref_impls`, `lifecycle_states`, `state_fields`,
-///     `error_codes`: kept as the full spec (these are file-scoped).
-///
-/// Sections inside each `mod` follow the same legacy order as
-/// single-mode (structural → guard → abort → property → ensures →
-/// invariant → effect → overflow). File-level features (covers /
-/// liveness / environment) live outside any `mod` block in legacy
-/// and aren't emitted in multi-mode at all.
+/// Multi-account dispatch — one `mod <lowercase> { use super::*; ... }`
+/// per account_type, each driven by a per-account scoped `ParsedSpec`
+/// (see `scope_parsed_to_account`). Sections follow the same order as
+/// single-mode; file-level features (covers / liveness / environment)
+/// are not emitted in multi-mode at all.
 fn emit_multi_account_sections(
     out: &mut String,
     mir: &Mir,
@@ -218,8 +169,6 @@ fn emit_multi_account_sections(
     use crate::rust_codegen_util as util;
 
     for acct in &parsed.account_types {
-        // Skip accounts with no mutable fields (matches legacy line
-        // 210–213).
         let acct_fields_view = util::mutable_fields(&acct.fields);
         if acct_fields_view.is_empty() {
             continue;
@@ -227,8 +176,6 @@ fn emit_multi_account_sections(
 
         let scoped = scope_parsed_to_account(parsed, acct);
 
-        // Skip accounts with no handlers (matches legacy line
-        // 219–221).
         if scoped.handlers.is_empty() {
             continue;
         }
@@ -263,37 +210,26 @@ fn emit_multi_account_sections(
     Ok(())
 }
 
-/// Build a per-account scoped `ParsedSpec` view that the existing
-/// section emitters can consume unchanged. Mirrors legacy
-/// `emit_kani_account_section`'s parameter set (filtered
-/// `handlers` + `properties` + linked-`invariants` derived from
-/// the filter):
+/// Build a per-account scoped `ParsedSpec` view the section emitters can
+/// consume unchanged:
 ///
-///   * `account_types` is rewritten to `vec![acct]` so the
-///     section-emit's "single-account view resolve" picks up the
-///     right fields/lifecycle.
-///   * `handlers` filtered by strict `on_account == Some(acct.name)`.
-///   * `properties` filtered by substring match against any field
-///     in this account (legacy heuristic line 226–236).
-///   * `invariants` filtered to those mentioned by at least one
-///     filtered handler (matches legacy line 427–435 inside
-///     `emit_kani_account_section`).
-///   * Spec-wide collections (records, sum_types, constants,
-///     interfaces, ref_impls, lifecycle_states, state_fields,
-///     error_codes) are cloned verbatim — these are file-scoped
-///     and shared across all `mod` blocks via `use super::*;`.
+///   * `account_types` → `vec![acct]` so the single-account view resolve
+///     picks up this account's fields/lifecycle.
+///   * `handlers` → strict `on_account == Some(acct.name)` (no primary
+///     fallback).
+///   * `properties` → substring match against any field of this account.
+///   * `invariants` → those mentioned by at least one filtered handler.
+///   * Spec-wide collections (records, sum_types, constants, interfaces,
+///     ref_impls, lifecycle_states, state_fields, error_codes) cloned
+///     verbatim — file-scoped, shared across `mod` blocks via `use super::*;`.
 fn scope_parsed_to_account(
     parsed: &ParsedSpec,
     acct: &crate::check::ParsedAccountType,
 ) -> ParsedSpec {
     let mut scoped = parsed.clone();
 
-    // Replace account_types with just this one so the section's
-    // view-resolve picks up this account's fields/lifecycle.
     scoped.account_types = vec![acct.clone()];
 
-    // Filter handlers strictly by on_account (no primary fallback
-    // in multi-mode — matches legacy line 214–218).
     scoped.handlers = parsed
         .handlers
         .iter()
@@ -301,8 +237,6 @@ fn scope_parsed_to_account(
         .cloned()
         .collect();
 
-    // Filter properties by field-substring match (legacy
-    // heuristic line 226–236).
     let acct_field_names: Vec<&str> = acct.fields.iter().map(|(n, _)| n.as_str()).collect();
     scoped.properties = parsed
         .properties
@@ -317,9 +251,6 @@ fn scope_parsed_to_account(
         .cloned()
         .collect();
 
-    // Filter invariants to those claimed by at least one handler
-    // in the scoped handler set. Matches the
-    // `emit_kani_account_section` linked_invs filter (line 427–435).
     let claimed_inv_names: std::collections::HashSet<&str> = scoped
         .handlers
         .iter()
@@ -337,11 +268,10 @@ fn scope_parsed_to_account(
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3a structural prefix
+// Section emitters — structural prefix
 // ----------------------------------------------------------------------
 
-/// File header: banner with the `tests/kani.rs` fingerprint hash +
-/// the legacy docstring. Mirrors `kani::generate` lines ~135–152.
+/// File header: banner with the `tests/kani.rs` fingerprint hash.
 fn emit_header(out: &mut String, parsed: &ParsedSpec) {
     let fp = crate::fingerprint::compute_fingerprint(parsed);
     let hash = fp
@@ -369,18 +299,13 @@ fn emit_header(out: &mut String, parsed: &ParsedSpec) {
     out.push_str("#![cfg(kani)]\n\n");
 }
 
-/// Math helpers (`mul_div_floor_u128` / `mul_div_ceil_u128`). Inlined
-/// only when the spec's guards reference them (same predicate as
-/// `kani.rs` line ~172). Mirrors the inline-when-needed shape so the
-/// standalone harness compiles without depending on `src/math.rs`.
+/// Math helpers (`mul_div_floor_u128` / `mul_div_ceil_u128`), inlined only
+/// when the spec's guards reference them, so the standalone harness
+/// compiles without depending on `src/math.rs`.
 fn emit_math_helpers(out: &mut String, parsed: &ParsedSpec) {
-    // Byte-equivalence note: legacy `kani.rs::generate` uses
-    // backslash-newline continuations whose leading-whitespace consumption
-    // strips the body indentation. The output is technically "wrong"
-    // (no per-line indent inside the fns) but it's the canonical shape
-    // every committed kani.rs fixture was generated against. Mirror
-    // verbatim so Phase 3 stays byte-equivalent until the legacy emit
-    // is intentionally re-indented.
+    // The backslash-continuation strings deliberately drop per-line body
+    // indentation — that un-indented shape is what every committed kani.rs
+    // fixture/snapshot was generated against. Don't re-indent.
     if crate::codegen_shared::guards_use_math_helpers(parsed) {
         out.push_str(
             "#[allow(dead_code)]\n\
@@ -414,9 +339,7 @@ fn mul_bps_floor_u128(a: u128, bps: u128) -> u128 {\n\
     }
 }
 
-/// State model header banner. Always emitted, even when the spec
-/// declares no state (the empty banner is harmless and matches legacy
-/// `kani::generate` line ~191).
+/// State model header banner — always emitted, even with no declared state.
 fn emit_state_model_header(out: &mut String) {
     out.push_str(
         "// ============================================================================\n",
@@ -427,12 +350,9 @@ fn emit_state_model_header(out: &mut String) {
     );
 }
 
-/// File-scoped constants — `pub const NAME: u64 = VALUE;` per
-/// `Mir.constants` entry. Per-ADT modules reference these via
-/// `use super::*`, so they live at file scope rather than being
-/// duplicated. Legacy delegates to `rust_codegen_util::emit_constants`;
-/// MIR carries the same `(name, value)` pair shape so we can call into
-/// the same helper for byte-equivalence.
+/// File-scoped constants, one per `Mir.constants` entry. Per-ADT modules
+/// reference them via `use super::*`, so they live at file scope rather
+/// than being duplicated.
 fn emit_constants(out: &mut String, mir: &Mir) {
     if mir.constants.is_empty() {
         return;
@@ -441,27 +361,18 @@ fn emit_constants(out: &mut String, mir: &Mir) {
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3b per-account structural body
+// Section emitters — per-account structural body
 // ----------------------------------------------------------------------
 
-/// Per-account section structural body — single-account path. Mirrors
-/// `kani::emit_kani_account_section` lines ~369–490 (records /
-/// unit-enum sums / Status / State / property predicates / invariant
-/// predicates / transition fns / ref_impls). Harness emissions stay
-/// at the Phase 3c+ marker.
-///
-/// Multi-account dispatch (`mod <lowercase>`) is Phase 3e — until
-/// then, multi-account specs emit only the primary account's view
-/// here, prefixed by a `MIR-TODO(phase-3e)` marker in `render()`.
+/// Per-account structural body: records / unit-enum sums / Status /
+/// State / property predicates / invariant predicates / transition fns /
+/// ref_impls. Harnesses are emitted by the later sections.
 fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
-    // Resolve state-fields + lifecycle view. Mirrors `kani::generate`
-    // lines ~257–267:
-    //   * single `type Account` block → use its fields + lifecycle
-    //   * otherwise → fall back to `resolve_state_fields` +
-    //     `spec.lifecycle_states`
+    // Resolve view: single `type Account` block → its fields + lifecycle;
+    // none → `resolve_state_fields` + `spec.lifecycle_states`.
     let (state_fields, lifecycle): (&[(String, String)], &[String]) =
         if parsed.account_types.len() == 1 {
             (
@@ -474,19 +385,17 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
                 parsed.lifecycle_states.as_slice(),
             )
         } else {
-            // Multi-account: emit the primary account's view as the
-            // best-effort approximation. Phase 3e replaces this with
-            // proper per-account `mod` wrapping.
+            // Multi-account reaching this path: best-effort primary-account
+            // view (multi-mode dispatch passes a single-account scoped spec).
             (
                 &parsed.account_types[0].fields,
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
 
-    // Issue #67 item 3 — ghosts are spec-only verification-State fields:
-    // present in the Kani State struct + symbolic init + transitions (so the
-    // BMC harness can read them and `emit_transition_fn` can assign them), but
-    // never in the on-chain program. Mirrors the proptest single-account path.
+    // Ghosts are spec-only verification-State fields: present in the Kani
+    // State struct + symbolic init + transitions (BMC can read them,
+    // `emit_transition_fn` can assign them), never in the on-chain program.
     let state_fields_with_ghosts: Vec<(String, String)> = state_fields
         .iter()
         .cloned()
@@ -497,22 +406,18 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
     let mutable = util::mutable_fields(state_fields);
     let has_lifecycle = lifecycle.len() >= 2;
 
-    // 1. User-defined record structs.
     util::emit_record_structs(out, parsed, "Clone, Copy, kani::Arbitrary", |t| {
         map_type(t, parsed)
     })?;
 
-    // 2. Unit enum sums (sum-type variants without payload).
     util::emit_unit_enum_sums(out, parsed, "Clone, Copy, PartialEq, Eq, kani::Arbitrary")?;
 
-    // 3. Status enum (per-account lifecycle).
     util::emit_lifecycle_status_enum_from(
         out,
         lifecycle,
         "Clone, Copy, PartialEq, Eq, kani::Arbitrary",
     );
 
-    // 4. State struct.
     util::emit_state_struct_with_lifecycle(
         out,
         &mutable,
@@ -522,7 +427,6 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
     )?;
     emit_kani_account_env_structs(out, parsed);
 
-    // 5. Property predicates.
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
     let properties: Vec<&crate::check::ParsedProperty> = parsed.properties.iter().collect();
     if !properties.is_empty() {
@@ -533,16 +437,14 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
         out.push_str(
             "// ============================================================================\n\n",
         );
-        // `emit_property_predicates_with` takes &[ParsedProperty] (not
-        // &[&_]); reconstruct an owned Vec view of the filtered slice
-        // (matches the legacy line 415–416 shape).
+        // `emit_property_predicates_with` takes `&[ParsedProperty]`, not
+        // `&[&_]` — rebuild an owned Vec.
         let owned: Vec<crate::check::ParsedProperty> =
             properties.iter().map(|p| (*p).clone()).collect();
         util::emit_property_predicates_with(out, &owned, false, |t| map_type(t, parsed));
     }
 
-    // 6. Invariant predicates (filter to those linked from a handler
-    //    in this section — mirrors legacy line 427–448).
+    // Invariant predicates — only those linked from a handler in this section.
     let linked_invs: Vec<&crate::check::ParsedInvariant> = parsed
         .invariants
         .iter()
@@ -567,7 +469,6 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
         util::emit_invariant_predicates(out, &linked_invs);
     }
 
-    // 7. Transition functions (one per handler).
     out.push_str(
         "// ============================================================================\n",
     );
@@ -582,9 +483,8 @@ fn emit_account_section_structural(out: &mut String, mir: &Mir, parsed: &ParsedS
         util::emit_transition_fn_for_kani(out, mir, op, parsed, false, |t| map_type(t, parsed))?;
     }
 
-    // 8. Reference implementations (v2.25 — pure-expression fns
-    //    callable from ensures-preservation harnesses). Mirrors legacy
-    //    line 470–491.
+    // Reference implementations — pure-expression fns callable from
+    // ensures-preservation harnesses.
     if !parsed.ref_impls.is_empty() {
         out.push_str(
             "// ============================================================================\n",
@@ -685,22 +585,15 @@ fn transition_call_args(op: &crate::check::ParsedHandler, account_var: Option<&s
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c1 guard-enforcement harnesses
+// Section emitters — guard-enforcement harnesses
 // ----------------------------------------------------------------------
 
-/// Emit `#[kani::proof] fn verify_<handler>_rejects_invalid()` for
-/// every handler with a guard or `requires` clause. Mirrors
-/// `kani::emit_kani_account_section` lines ~493–568 (single-account
-/// path; multi-account `mod <name>` wrapping is Phase 3e).
-///
-/// One monolithic harness per handler up to the split threshold, then one
-/// harness per guard term:
-///   * Initialize state symbolically (`emit_state_init_symbolic`)
-///   * `kani::assume(s.status == Status::<pre>)` if the handler is
-///     lifecycle-gated
-///   * Declare every param + abstract-binder as `kani::any()`
-///   * `kani::assume(!(full_guard))` — at least one guard component
-///     is violated
+/// Emit `#[kani::proof] fn verify_<handler>_rejects_invalid()` per handler
+/// with a guard or `requires` clause. One monolithic harness per handler up
+/// to the split threshold, then one harness per guard term:
+///   * symbolic state init (+ pre-status assume if lifecycle-gated)
+///   * every param + abstract binder as `kani::any()`
+///   * `kani::assume(!(full_guard))` — at least one guard component violated
 ///   * `assert!(!<handler>(&mut s, args...))` — handler must reject
 fn emit_guard_enforcement_harnesses(
     out: &mut String,
@@ -753,9 +646,8 @@ fn emit_guard_enforcement_harnesses(
             util::handler_needs_account_env(op).then_some("accounts"),
         );
         if guard_terms.is_empty() {
-            // Handler had `has_guard()` set but no expressible
-            // negation — skip to avoid `kani::assume(!(true))`
-            // vacuous harnesses (matches legacy kani.rs:515–519).
+            // `has_guard()` but no expressible negation — skip to avoid
+            // a vacuous `kani::assume(!(true))` harness.
             continue;
         }
 
@@ -865,9 +757,8 @@ fn emit_guard_rejection_harness(out: &mut String, ctx: GuardRejectionHarness<'_>
         ));
     }
 
-    // v2.29 Slice A (#8) — abstract binders. Legacy kani.rs:537–546
-    // calls `emit_abstract_binders` TWICE in a row with identical args.
-    // Preserve that parity here; cleanup stays deferred to v3.0.
+    // Deliberate double-emit of abstract binders — bug-for-bug parity with
+    // the snapshot-pinned output; cleanup deferred to v3.0.
     util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
     util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
 
@@ -885,9 +776,9 @@ fn emit_guard_rejection_harness(out: &mut String, ctx: GuardRejectionHarness<'_>
     for binding in bindings {
         out.push_str(&format!("    {binding}\n"));
     }
-    // Assume the (i-th) guard component is violated. For the per-term split
-    // path the prefix terms were already assumed true above, so violating
-    // this single term is sufficient to drive the full guard false.
+    // Assume the i-th guard component is violated. On the per-term split
+    // path the prefix terms were already assumed true, so violating this
+    // single term drives the full guard false.
     if direct_negated_assume {
         if let Some(negated) = util::negate_simple_top_level_comparison(&violated_expr) {
             out.push_str(&format!("    kani::assume({negated});\n"));
@@ -967,19 +858,14 @@ fn guard_term_slug(expr: &str) -> String {
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c2 abort-condition harnesses
+// Section emitters — abort-condition harnesses
 // ----------------------------------------------------------------------
 
-/// Emit `#[kani::proof] fn verify_<handler>_aborts_if_<error>()` for
-/// every `requires X else Error` clause across every handler.
-/// Mirrors `kani::emit_kani_account_section` lines ~501–565.
-///
-/// One harness per (handler, abort clause):
-///   * Symbolic state + pre-status assume + symbolic params +
-///     (double-emit) abstract binders (bug-for-bug parity)
-///   * `kani::assume(<abort.rust_expr>)` — the condition that
-///     should trigger abortion
-///   * `assert!(!<handler>(...))` — handler must reject
+/// Emit `#[kani::proof] fn verify_<handler>_aborts_if_<error>()` per
+/// (handler, abort clause): symbolic state + pre-status assume + symbolic
+/// params + (double-emit) abstract binders, `kani::assume(<abort.rust_expr>)`
+/// (the condition that should trigger abortion), then
+/// `assert!(!<handler>(...))` — handler must reject.
 fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -1042,8 +928,7 @@ fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSpec) -> Resu
                     map_type(ptype, parsed)?
                 ));
             }
-            // Bug-for-bug parity: legacy double-calls
-            // `emit_abstract_binders`. See guard-enforcement comment.
+            // Deliberate double-emit — see guard-enforcement comment.
             util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
             util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
 
@@ -1070,26 +955,19 @@ fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSpec) -> Resu
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c3 property-preservation harnesses
+// Section emitters — property-preservation harnesses
 // ----------------------------------------------------------------------
 
-/// Emit `#[kani::proof] fn verify_<handler>_preserves_<property>()`
-/// for every `(property, handler)` pair where `handler` is named in
-/// the property's `preserved_by` list. Mirrors
-/// `kani::emit_kani_account_section` lines ~567–802.
+/// Emit `#[kani::proof] fn verify_<handler>_preserves_<property>()` per
+/// `(property, handler)` pair named in the property's `preserved_by` list.
 ///
-/// Per-pair harness shape:
-///   * Pre-state: zeroed for init handlers (`pre_status ==
-///     Uninitialized`), symbolic for non-init; `let mut post = pre;`
-///   * Non-init: lifecycle pre-status assume, optional per-slot
-///     binder bind, pre-property assumes (unary only — Binary
-///     properties skip), MAX_MEMBERS-derived bound assume
-///   * Symbolic params + abstract binders
-///   * `emit_add_strict_bounds` for add-effect overflow gating
-///   * `if <handler>(&mut post, args) { assert!(<prop>...); }`
-///     dispatched on prop class (Binary → `prop(&pre, &post)`,
-///     per-slot Unary → `prop_at(&post, binder)`, plain Unary →
-///     `prop(&post)`)
+/// Shape: pre-state zeroed for init handlers, symbolic otherwise; non-init
+/// adds pre-status assume, optional per-slot binder, pre-property assumes
+/// (unary only), and bound assumes; symbolic params + abstract binders;
+/// `emit_add_strict_bounds` for add-effect overflow gating; then
+/// `if <handler>(&mut post, args) { assert!(<prop>...); }` dispatched on
+/// prop class (Binary → `prop(&pre, &post)`, per-slot Unary →
+/// `prop_at(&post, binder)`, plain Unary → `prop(&post)`).
 fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -1135,9 +1013,7 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
         }
 
         for op_name in &prop.preserved_by {
-            // Filter to handlers in this section (single-account
-            // mode → all of them; multi-account → only those tied
-            // to the primary account, which Phase 3e closes).
+            // Skip handlers not in this section's scoped view.
             let Some(op) = handlers.iter().copied().find(|o| &o.name == op_name) else {
                 continue;
             };
@@ -1152,9 +1028,8 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
 
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
-            // v2.20 §S1.1: per-slot binder handling — skip the
-            // local binding when the handler param shadows it
-            // (same binder pre & post unifies the value).
+            // Per-slot binder: skip the local binding when the handler
+            // param shadows it (same binder pre & post unifies the value).
             let handler_takes_binder = match &prop.per_slot {
                 Some(slot) => op
                     .takes_params
@@ -1211,9 +1086,8 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                     }
                 }
 
-                // v2.23 Slice 4: assume unary pre-properties hold;
-                // skip Binary (those have a `(pre, post)` shape
-                // that asserts trivially against `(pre, pre)`).
+                // Assume unary pre-properties hold; skip Binary (their
+                // `(pre, post)` shape asserts trivially against `(pre, pre)`).
                 for pre_prop in &properties {
                     if pre_prop.expression.is_none() {
                         continue;
@@ -1234,9 +1108,7 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                     }
                 }
 
-                // MAX_MEMBERS-derived bound assume — derived from
-                // create_vault guard; same shape as legacy
-                // kani.rs:715–728.
+                // Heuristic MAX*/MEMBER* constant bound on member_count.
                 if !parsed.constants.is_empty() {
                     for (cname, _cval) in &parsed.constants {
                         let upper = cname.to_uppercase();
@@ -1255,7 +1127,6 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                 out.push_str("    let mut post = pre;\n");
             }
 
-            // Symbolic params.
             for (pname, ptype) in &op.takes_params {
                 out.push_str(&format!(
                     "    let {}: {} = kani::any();\n",
@@ -1263,13 +1134,10 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                     map_type(ptype, parsed)?
                 ));
             }
-            // v2.29 Slice A (#8) — abstract binders. Single call
-            // here (NOT the double-emit bug of guard/abort
-            // sections) — legacy kani.rs:742–745 calls it once.
+            // Single abstract-binder emit here (not the double-emit of the
+            // guard/abort sections).
             util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
 
-            // `emit_add_strict_bounds` against pre-state — same
-            // owned-Vec workaround as legacy kani.rs:750–752.
             let owned_props: Vec<crate::check::ParsedProperty> =
                 properties.iter().map(|p| (*p).clone()).collect();
             util::emit_add_strict_bounds(
@@ -1279,7 +1147,6 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                 "    kani::assume(pre.{field} < pre.{bound}); // strict bound: {field} increments\n",
             );
 
-            // Transition call + dispatch on prop class.
             emit_kani_account_env_binding(out, op, "accounts", "    ");
             let args = transition_call_args(
                 op,
@@ -1323,38 +1190,26 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c7 ensures-preservation harnesses (v2.25 Phase B)
+// Section emitters — ensures-preservation harnesses
 // ----------------------------------------------------------------------
 
-/// Emit `#[kani::proof] fn verify_<handler>_ensures_<idx>()` for every
-/// `(handler, ensures clause)` pair. Mirrors
-/// `kani::emit_kani_account_section` lines ~804–953 (v2.25 Phase B).
+/// Emit `#[kani::proof] fn verify_<handler>_ensures_<idx>()` per
+/// `(handler, ensures clause)` pair.
 ///
-/// Per-pair harness shape:
-///   * Symbolic state init + pre-status assume
-///   * Symbolic params + abstract binders
-///   * `kani::assume(<full_guard>)` so the harness only explores
-///     pre-states the transition wouldn't reject (otherwise the
-///     ensures clause would pass vacuously).
-///   * `let pre = s.clone();` snapshot AFTER the assumes so it
-///     reflects the constrained pre-state.
-///   * `if <handler>(&mut s, args) { … }`:
-///     - `let post = &s;` binds the `post.x` paths in the rendered
-///       ensures expression.
-///     - **CPI ensures-as-fact** (v2.26 Track G): for every
-///       `call Iface.foo(args)` whose callee declares ensures,
-///       substitute the callee params with the caller's call-site
-///       expressions and emit `kani::assume(<substituted>);` so the
-///       callee's contract becomes a fact in the caller's harness.
-///       Tier-0 callees (no ensures) emit nothing — the
-///       `cpi_no_callee_ensures` lint surfaces this.
-///     - `assert!(<ensures.rust_expr_binary>, "ensures clause N on
-///       <handler> violated ...")`.
+/// Shape: symbolic state + params + binders; `kani::assume(<full_guard>)`
+/// so only pre-states the transition wouldn't reject are explored
+/// (otherwise the ensures passes vacuously); `pre` snapshot AFTER the
+/// assumes; then inside `if <handler>(...)`, `let post = &s;` binds the
+/// ensures' `post.x` paths and the clause is asserted.
 ///
-/// **Position load-bearing**: this section sits between property-
-/// preservation and invariant-preservation in legacy. Putting it
-/// elsewhere breaks byte-equivalence on percolator (which exercises
-/// `ensures` clauses with old(...) bindings).
+/// CPI ensures-as-fact: each `call Iface.foo(args)` whose callee declares
+/// ensures gets the callee contract substituted with caller call-site
+/// expressions and `kani::assume`d as a fact in the caller's harness.
+/// Tier-0 callees (no ensures) emit nothing — the `cpi_no_callee_ensures`
+/// lint surfaces this.
+///
+/// Position load-bearing: must sit between property-preservation and
+/// invariant-preservation for snapshot byte-equivalence.
 fn emit_ensures_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -1433,8 +1288,8 @@ fn emit_ensures_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) ->
                 out.push_str(&format!("    kani::assume({});\n", full_guard));
             }
 
-            // Snapshot AFTER assumes — pre reflects the
-            // constrained pre-state Kani explores.
+            // Snapshot AFTER assumes — pre reflects the constrained
+            // pre-state Kani explores.
             out.push_str("    let pre = s.clone();\n");
 
             let args = transition_call_args(
@@ -1444,7 +1299,7 @@ fn emit_ensures_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) ->
             out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
             out.push_str("        let post = &s;\n");
 
-            // v2.26 Track G — CPI ensures-as-fact propagation.
+            // CPI ensures-as-fact propagation.
             for call in &op.calls {
                 let Some(iface) = parsed
                     .interfaces
@@ -1506,12 +1361,7 @@ fn emit_ensures_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) ->
             out.push_str("    }\n");
             out.push_str("}\n\n");
 
-            // Reference `pre` even when the if-branch isn't taken so
-            // the spec-model `let pre = s.clone();` doesn't trigger
-            // an unused-variable warning. Mirrors the legacy
-            // behavior (kani.rs marks `pre` with `_` only when the
-            // handler has zero calls AND zero references in the
-            // ensures string — too brittle; matching legacy verbatim).
+            // Intentional no-op — see `pre_unused_workaround_needed`.
             let _ = pre_unused_workaround_needed(ensures);
         }
     }
@@ -1519,43 +1369,31 @@ fn emit_ensures_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) ->
     Ok(())
 }
 
-/// Stub placeholder for the `pre`-binding lint workaround. Legacy
-/// doesn't actually emit any extra code here; the call exists only
-/// to mark our intent to match its byte-exact shape. Returns false.
+/// No-op stub for the `pre`-binding lint workaround: deliberately emits
+/// nothing extra (underscoring `pre` conditionally proved too brittle);
+/// the call marks intent to keep the snapshot-pinned byte-exact shape.
 fn pre_unused_workaround_needed(_ensures: &crate::check::ParsedEnsures) -> bool {
     false
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c4 invariant-preservation harnesses
+// Section emitters — invariant-preservation harnesses
 // ----------------------------------------------------------------------
 
 /// Emit `#[kani::proof] fn verify_<handler>_(preserves|establishes)_<invariant>()`
-/// for every handler × invariant-clause pair. Mirrors
-/// `kani::emit_kani_account_section` lines ~956–1063.
-///
-/// Per-pair harness shape:
-///   * Iterate `op.invariants` (preserves, is_establish=false) ∪
-///     `op.establishes` (is_establish=true)
-///   * Skip invariants whose `rust_expr` is missing / unsupported
-///   * Pre-state: zeroed for init handlers, symbolic for non-init
-///   * Non-init preserves: `kani::assume(<inv>(&s))` to scope BMC to
-///     states where the invariant already holds
-///   * Non-init establishes: skip the pre-assume (handler is supposed
-///     to *make* the invariant true regardless of pre-state)
-///   * Symbolic params + abstract binders (single call — matches
-///     property-preservation, not the double-emit bug of guard/abort)
-///   * `if <handler>(&mut s, ...) { assert!(<inv>(&s)); }`
+/// per handler × invariant-clause pair (`op.invariants` ∪ `op.establishes`).
+/// Skips invariants with missing/unsupported `rust_expr`. Pre-state zeroed
+/// for init handlers, else symbolic; preserves assumes `<inv>(&s)` pre to
+/// scope BMC to states where it already holds; establishes deliberately
+/// skips that pre-assume (the handler must *make* it true regardless).
+/// Then `if <handler>(&mut s, ...) { assert!(<inv>(&s)); }`.
 fn emit_invariant_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
 
-    // `linked_invs` — invariants referenced by at least one handler
-    // in this section (matches the section-structural filter for
-    // single-account; the multi-account `mod`-wrapping case is
-    // Phase 3e).
+    // Invariants referenced by at least one handler in this section.
     let linked_invs: Vec<&crate::check::ParsedInvariant> = parsed
         .invariants
         .iter()
@@ -1601,7 +1439,6 @@ fn emit_invariant_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) 
     );
 
     for op in &handlers {
-        // Build the `(invariant_name, is_establish)` pair list.
         let pairs: Vec<(&String, bool)> = op
             .invariants
             .iter()
@@ -1613,8 +1450,7 @@ fn emit_invariant_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) 
             let Some(inv) = linked_invs.iter().find(|i| &i.name == inv_name) else {
                 continue;
             };
-            // Skip invariants whose body is missing or unsupported
-            // (e.g. mentions `QEDGEN_UNSUPPORTED_QUANTIFIER`).
+            // Skip missing/unsupported bodies (e.g. QEDGEN_UNSUPPORTED_QUANTIFIER).
             if inv
                 .rust_expr
                 .as_deref()
@@ -1679,36 +1515,20 @@ fn emit_invariant_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) 
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c5 effect-conformance harnesses
+// Section emitters — effect-conformance harnesses
 // ----------------------------------------------------------------------
 
-/// Emit per-(handler, field) effect-conformance harnesses. Mirrors
-/// `kani::emit_kani_account_section` lines ~1065–1277. The B11 v2.6
-/// split — one proof per `(handler, field)` pair instead of one per
-/// handler — keeps a single stuck mul/div field from blocking sibling
-/// field verification. Solver choice per harness via
-/// `rust_codegen_util::pick_kani_solver_for_effect`:
-///   * cadical — scalar / linear (default)
-///   * minisat — narrow-type (u8/u16/u32) mul/div
-///   * bin="z3" — wide-type (u64/u128/i128) mul/div
+/// Per-(handler, field) effect-conformance harnesses — one proof per pair
+/// so a single stuck mul/div field can't block sibling-field verification.
+/// Solver per harness via `pick_kani_solver_for_effect`: cadical (scalar /
+/// linear, default), minisat (narrow-type mul/div), z3 (wide-type mul/div).
 ///
-/// Per-(handler, field) body:
-///   * Skip if `field`'s base isn't in this section's State
-///     (multi-account safety: effects targeting another account's
-///     field).
-///   * Pre-state: zeroed for init handlers, symbolic for non-init.
-///   * Symbolic params + abstract binders.
-///   * Non-init: MAX_MEMBERS-style assume + `emit_add_strict_bounds`
-///     on pre-state.
-///   * `let pre_<F> = s.<F>;` snapshot for every mutable field
-///     (skip the target field when op_kind == "set" — `set` doesn't
-///     need a pre on its own target).
-///   * `if <handler>(&mut s, args) { assert ... }`:
-///     - set → `s.F == <resolved>`
-///     - add → `s.F == pre_F.wrapping_add(<resolved>)`
-///     - sub → `s.F == pre_F.wrapping_sub(<resolved>)`
-///   * Sibling fields assert `s.G == pre_G` unless another effect in
-///     the same handler mutates them.
+/// Body: skip fields whose base isn't in this section's State (multi-account
+/// safety); zeroed/symbolic pre-state; `pre_<F>` snapshots for every mutable
+/// field (skipping the target of a `set`); then under `if <handler>(...)`:
+/// set → `s.F == <resolved>`, add/sub → `s.F == pre_F.wrapping_{add,sub}(<resolved>)`;
+/// sibling fields assert `s.G == pre_G` unless another effect in the same
+/// handler mutates them.
 fn emit_effect_conformance_harnesses(
     out: &mut String,
     mir: &Mir,
@@ -1767,10 +1587,8 @@ fn emit_effect_conformance_harnesses(
         .collect();
 
     for op in &effect_ops {
-        // #66 — the per-effect harness loop iterates the handler's
-        // lowered MIR body (projected back onto triples by the shared
-        // adaptor), not `op.effects`. Same order/content; the sibling-
-        // frame check reads the same triple list.
+        // Iterate the handler's lowered MIR body projected onto triples
+        // (not `op.effects`); the sibling-frame check reads the same list.
         let body = mir
             .handler_block(&op.name)
             .ok_or_else(|| anyhow::anyhow!("MIR has no handler `{}`", op.name))?;
@@ -1792,13 +1610,12 @@ fn emit_effect_conformance_harnesses(
             )?;
         }
 
-        // #42 — conditional effects: one harness per (arm, effect)
-        // under a `kani::assume(<scrutinee> == <pattern>)` pin, so the
-        // post-state assertions hold under match semantics (exactly one
-        // arm fires). The sibling-frame check is scoped to the arm's
-        // own effects: with the arm pinned, no other arm can mutate.
-        // The wildcard arm pins via negated assumes over every literal
-        // pattern.
+        // Conditional effects: one harness per (arm, effect) under a
+        // `kani::assume(<scrutinee> == <pattern>)` pin, so post-state
+        // assertions hold under match semantics (exactly one arm fires).
+        // The sibling-frame check is scoped to the arm's own effects —
+        // with the arm pinned, no other arm can mutate. The wildcard arm
+        // pins via negated assumes over every literal pattern.
         let branch = body.stmts.iter().find_map(|st| match st {
             crate::mir::Stmt::Branch {
                 scrutinee,
@@ -1878,7 +1695,7 @@ fn emit_effect_conformance_harnesses(
 }
 
 /// One effect-conformance harness: symbolic (or zeroed-init) state,
-/// symbolic params, optional scrutinee-pin assumes (#42 per-arm sites),
+/// symbolic params, optional scrutinee-pin assumes (per-arm sites),
 /// transition call, post-state assertion for the target effect, and the
 /// frame check over `sibling_triples` (the effect set that can legally
 /// fire alongside the target — the whole flat body, or one Branch arm).
@@ -1930,8 +1747,8 @@ fn emit_one_conformance_harness(
     }
     util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
 
-    // #42 — pin the scrutinee to this arm (or away from every literal
-    // pattern, for the wildcard arm) before any state is read.
+    // Pin the scrutinee to this arm (or away from every literal pattern,
+    // for the wildcard arm) before any state is read.
     for line in assume_lines {
         out.push_str(line);
     }
@@ -1969,7 +1786,6 @@ fn emit_one_conformance_harness(
         out.push_str(&format!("    let pre_{} = s.{};\n", fname, fname));
     }
 
-    // Call transition + assertion dispatch.
     emit_kani_account_env_binding(out, op, "accounts", "    ");
     let args = transition_call_args(
         op,
@@ -2038,14 +1854,13 @@ fn emit_one_conformance_harness(
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3c6 overflow-detection harnesses
+// Section emitters — overflow-detection harnesses
 // ----------------------------------------------------------------------
 
-/// Emit `#[kani::proof] fn verify_<handler>_no_overflow()` for every
-/// handler with an `add` effect. Kani's built-in overflow detection
-/// fires on `+=` inside the transition body — no explicit assert
-/// required; the proof exists to drive BMC across the parameter
-/// space. Mirrors `kani::emit_kani_account_section` lines ~1279–1330.
+/// Emit `#[kani::proof] fn verify_<handler>_no_overflow()` per handler
+/// with an `add` effect. No explicit assert — Kani's built-in overflow
+/// detection fires on `+=` inside the transition body; the proof exists
+/// to drive BMC across the parameter space.
 fn emit_overflow_detection_harnesses(
     out: &mut String,
     mir: &Mir,
@@ -2056,11 +1871,10 @@ fn emit_overflow_detection_harnesses(
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
 
-    // #66 — the checked-add filter reads the lowered MIR body
-    // (`Stmt::CheckedAdd` projects to kind `"add"`), not `op.effects`.
-    // Deep walk: a checked add inside a `Stmt::Branch` arm can still
-    // overflow, and the harness just invokes the transition (Kani
-    // explores every match arm).
+    // Checked-add filter reads the lowered MIR body (`Stmt::CheckedAdd`
+    // projects to kind "add"), deep-walked: a checked add inside a
+    // `Stmt::Branch` arm can still overflow, and the harness just invokes
+    // the transition (Kani explores every match arm).
     let overflow_ops: Vec<&crate::check::ParsedHandler> = handlers
         .iter()
         .copied()
@@ -2139,29 +1953,20 @@ fn emit_overflow_detection_harnesses(
 }
 
 // ----------------------------------------------------------------------
-// Section emitters — Phase 3d file-level features (single-mode only)
+// Section emitters — file-level features (single-mode only)
 // ----------------------------------------------------------------------
 
-/// Emit covers / liveness / environment harnesses at file scope.
-/// Mirrors `kani::emit_file_level_features` (lines ~1339–1558).
-/// These reference handlers by name and the per-spec `State`
-/// directly, so they only fire in single-account mode where there's
-/// a unique top-level `fn deposit(...)`. Multi-account specs skip
-/// (per-ADT lifting is v2.22 scope per the legacy comment; Phase 3e
-/// closes the multi-account wrapping).
+/// Covers / liveness / environment harnesses at file scope. These reference
+/// handlers by name and the per-spec `State` directly, so they only fire in
+/// single-account mode; multi-account specs skip them.
 ///
-/// Three sub-sections in order:
-///   1. **Cover properties (reachability)** — per `(cover, trace)`
-///      pair, build a nested `if` chain over the trace handlers and
-///      cap with `kani::cover!(<last_op>(...), "trace is reachable")`.
-///   2. **Liveness properties (bounded reachability)** — per
-///      liveness, assume the from-state, run a `for _ in 0..bound`
-///      loop dispatching to via_ops by non-deterministic `op: u8`,
-///      then `kani::cover!(s.status == Status::<to_state>)`. Skipped
-///      when the spec has no lifecycle (no target predicate to
-///      cover) — emit a structured skip comment instead.
-///   3. **Environment property harnesses** — per `(env, property)`
-///      cross, init symbolic state, assume the property holds pre,
+///   1. Covers (reachability) — per `(cover, trace)` pair, nested `if`
+///      chain over the trace handlers capped with `kani::cover!(<last_op>(...))`.
+///   2. Liveness (bounded reachability) — assume the from-state, loop
+///      `0..bound` dispatching via_ops on a non-deterministic `op: u8`,
+///      then `kani::cover!(s.status == Status::<to_state>)`. Skipped (with
+///      a structured comment) when the spec has no lifecycle.
+///   3. Environment — per `(env, property)` cross: assume the property pre,
 ///      mutate `env.mutates` fields to `kani::any()`, assume the
 ///      constraints, then `assert!(<prop>(&s))`.
 fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
@@ -2210,8 +2015,6 @@ fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) -> Result<()>
 
                 util::emit_state_init_symbolic(out, &mutable, lifecycle);
 
-                // Nested-if chain over trace handlers; the last
-                // step caps with `kani::cover!`.
                 let mut indent = "    ".to_string();
                 for (j, op_name) in trace.iter().enumerate() {
                     let op = parsed.handlers.iter().find(|o| o.name == *op_name);
@@ -2275,8 +2078,7 @@ fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) -> Result<()>
         for liveness in &parsed.liveness_props {
             let bound = liveness.within_steps.unwrap_or(10) as usize;
 
-            // No lifecycle → no target predicate. Skip with a
-            // structured comment (matches legacy line ~1434–1440).
+            // No lifecycle → no target predicate; skip with a structured comment.
             if !has_lifecycle {
                 out.push_str(&format!(
                     "// liveness {}: skipped — spec has no lifecycle, no target predicate to cover\n\n",
@@ -2403,13 +2205,12 @@ mod tests {
     use crate::check;
     use std::path::Path;
 
-    /// #42 — conditional-effect handlers get per-arm conformance
-    /// harnesses: each arm pinned via `kani::assume(<scrutinee> ==
-    /// <pattern>)` with the frame check scoped to that arm's effects;
-    /// the wildcard arm pins via negated assumes over every literal
-    /// pattern. (Flat per-effect harnesses self-skip for Branch
-    /// handlers — their unconditional assertions are invalid under
-    /// match semantics.)
+    /// Conditional-effect handlers get per-arm conformance harnesses:
+    /// each arm pinned via `kani::assume(<scrutinee> == <pattern>)` with
+    /// the frame check scoped to that arm's effects; the wildcard arm
+    /// pins via negated assumes over every literal pattern. Flat
+    /// per-effect harnesses self-skip for Branch handlers — their
+    /// unconditional assertions are invalid under match semantics.
     #[test]
     fn branch_handlers_get_per_arm_conformance_harnesses() {
         let (mir, parsed) = lower_fixture(
@@ -2527,8 +2328,7 @@ mod tests {
 
     #[test]
     fn render_emits_no_pending_phase_marker() {
-        // Post Phase 3e every emit slice has landed; the rendered
-        // file must NOT contain any MIR-TODO(phase-...) marker.
+        // The rendered file must not contain any MIR-TODO(phase-...) marker.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2543,9 +2343,8 @@ mod tests {
 
     #[test]
     fn render_emits_cover_harnesses_single_mode() {
-        // Phase 3d — covers fire in single-account mode. Escrow has
-        // `cover initialize_then_close [initialize, exchange]` so
-        // the section emits.
+        // Covers fire in single-account mode. Escrow has
+        // `cover initialize_then_close [initialize, exchange]`.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2560,10 +2359,8 @@ mod tests {
 
     #[test]
     fn render_skips_file_level_features_for_multi_account() {
-        // Phase 3d — multi-account specs skip file-level features
-        // (matches legacy gating). Lending is multi-account, so
-        // even if it declared covers/liveness/env, the section
-        // headers must NOT emit.
+        // Lending is multi-account, so even if it declared
+        // covers/liveness/env, the section headers must NOT emit.
         let (mir, parsed) = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2584,10 +2381,8 @@ mod tests {
 
     #[test]
     fn render_emits_effect_conformance_harnesses() {
-        // Phase 3c5 — `emit_effect_conformance_harnesses` fires per
-        // `(handler, field)` pair for every handler with effects.
-        // Escrow's `initialize` has `:= deposit_amount` / `:=
-        // receive_amount` / `:= Open` effects so it emits.
+        // Escrow's `initialize` has `:= deposit_amount` /
+        // `:= receive_amount` / `:= Open` effects so it emits.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2620,10 +2415,8 @@ mod tests {
 
     #[test]
     fn render_emits_overflow_detection_harnesses_for_add_effects() {
-        // Phase 3c6 — `emit_overflow_detection_harnesses` fires per
-        // handler with at least one `add` effect.
-        // bundled-stdlib-demo's `deposit` has `total_assets +=
-        // amount`, so the overflow harness emits.
+        // bundled-stdlib-demo's `deposit` has `total_assets += amount`,
+        // so the overflow harness emits.
         let (mir, parsed) = lower_fixture("examples/rust/bundled-stdlib-demo/pool.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2638,9 +2431,8 @@ mod tests {
 
     #[test]
     fn render_emits_ensures_preservation_harnesses() {
-        // Phase 3c7 — `emit_ensures_preservation_harnesses` fires
-        // per (handler, ensures clause). Percolator has handlers
-        // with ensures clauses (e.g. deposit with old(...) bindings).
+        // Percolator has handlers with ensures clauses (e.g. deposit
+        // with old(...) bindings).
         let (mir, parsed) = lower_fixture("examples/rust/percolator/percolator.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2655,11 +2447,9 @@ mod tests {
 
     #[test]
     fn render_emits_no_invariant_preservation_section_when_no_clauses() {
-        // Phase 3c4 — `emit_invariant_preservation_harnesses` only
-        // fires when at least one handler carries `invariant Name`
-        // or `establishes Name` clauses. Current pilots don't use
-        // these (`invariant` declarations exist but aren't claimed
-        // by handlers), so the section header doesn't emit.
+        // The section only fires when a handler carries `invariant Name`
+        // or `establishes Name`. Escrow's `invariant` declarations exist
+        // but aren't claimed by handlers, so the header doesn't emit.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2670,11 +2460,9 @@ mod tests {
 
     #[test]
     fn render_emits_property_preservation_harnesses() {
-        // Multisig declares `property votes_bounded` with
-        // `preserved_by`. The Phase 3c3 emitter fires one
-        // `verify_<handler>_preserves_votes_bounded()` per matched
-        // handler. Section header is constant; the per-pair body is
-        // covered by the byte-equivalence sweep against legacy.
+        // Multisig declares `property votes_bounded` with `preserved_by`;
+        // one `verify_<handler>_preserves_votes_bounded()` per matched
+        // handler. Per-pair bodies are covered by the snapshot suite.
         let (mir, parsed) = lower_fixture("examples/rust/multisig/multisig.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2689,12 +2477,9 @@ mod tests {
 
     #[test]
     fn render_emits_no_abort_section_when_no_aborts_if() {
-        // Phase 3c2 — `emit_abort_condition_harnesses` only fires when
-        // `op.aborts_if` is non-empty, which is the direct
-        // `aborts_if Pred Error` DSL form. Current pilots use
-        // `requires X else Err` which lowers to a different field
-        // (`requires_or_abort`), so the section header doesn't emit.
-        // This asserts the no-op behavior matches legacy.
+        // The section only fires for the direct `aborts_if Pred Error`
+        // DSL form. Escrow uses `requires X else Err`, which lowers to a
+        // different field (`requires_or_abort`), so the header doesn't emit.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2705,10 +2490,8 @@ mod tests {
 
     #[test]
     fn render_emits_guard_enforcement_harnesses() {
-        // Phase 3c1 — emit_guard_enforcement_harnesses fires one
-        // `verify_<handler>_rejects_invalid()` per guard-bearing
-        // handler. Escrow's `initialize` has `requires deposit_amount
-        // > 0 && receive_amount > 0`, so the harness emits.
+        // Escrow's `initialize` has `requires deposit_amount > 0 &&
+        // receive_amount > 0`, so the rejects_invalid harness emits.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(
@@ -2796,11 +2579,8 @@ mod tests {
 
     #[test]
     fn render_emits_state_struct_for_single_account() {
-        // Phase 3b — `emit_account_section_structural` delegates to
-        // `rust_codegen_util::emit_state_struct_with_lifecycle`, which
-        // emits `struct State { ... }` with mutable fields + optional
-        // `status: Status`. Escrow has lifecycle states so it gets the
-        // status field.
+        // Escrow has lifecycle states, so `struct State` carries the
+        // `status: Status` field.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir, &parsed);
         assert!(out.contains("struct State {"), "expected State struct");
@@ -2822,10 +2602,8 @@ mod tests {
 
     #[test]
     fn render_emits_mod_wrapping_for_multi_account() {
-        // Phase 3e — lending declares Pool + Loan account types and
-        // gets one `mod <lowercase>` per account_type with `use
-        // super::*;` brought in. Each account's section emits inside
-        // the wrapper.
+        // Lending declares Pool + Loan account types — one
+        // `mod <lowercase>` per account_type with `use super::*;`.
         let (mir, parsed) = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir, &parsed);
         assert!(

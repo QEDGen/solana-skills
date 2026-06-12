@@ -56,14 +56,9 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         for pda in &spec.pdas {
             c.push_str(&format!("pda={}|{}\n", pda.name, pda.seeds.join(",")));
         }
-        // v2.24 S5i — hash the per-variant payload structure of any
-        // multi-variant ADT account type. Pre-v2.24 the fingerprint
-        // only saw the flat `state_fields` union, so a spec that now
-        // triggers the wrapper-struct + inner-enum emission (S5b)
-        // wouldn't show a fingerprint change between v2.23 and v2.24
-        // output. Hashing the variants here gives users a visible
-        // signal that the on-disk state.rs needs regenerating after
-        // upgrading.
+        // Hash the per-variant payload structure of multi-variant ADT
+        // account types — the flat `state_fields` union alone misses
+        // variant restructuring, so state.rs would never look stale.
         for acct in &spec.account_types {
             if acct.variants.len() <= 1 {
                 continue;
@@ -106,7 +101,6 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         let mut c = String::new();
         c.push_str(&format!("name={}\n", spec.program_name));
         c.push_str(&canonical_handler(handler));
-        // Include accounts from the handler
         c.push_str(&canonical_accounts(handler));
         hashes.insert(
             format!("src/instructions/{}.rs", handler.name),
@@ -202,10 +196,9 @@ fn canonical_handler(handler: &crate::check::ParsedHandler) -> String {
     for (field, kind, val) in &handler.effects {
         c.push_str(&format!("effect={} {} {}\n", field, kind, val));
     }
-    // v2.20 §S1.2 — fold the conditional-effect structure into the
-    // fingerprint so swapping arms in a `match` block is detected by
-    // `qedgen check --frozen`. The flat `effects` line above is the
-    // union and would be identical under arm-reordering.
+    // Conditional-effect structure: the flat `effects` union above is
+    // identical under arm-reordering, so hash the arms explicitly
+    // (`qedgen check --frozen` relies on this).
     if let Some(branches) = &handler.effect_branches {
         c.push_str(&format!("effect_match_on={}\n", branches.scrutinee_lean));
         for (idx, arm) in branches.arms.iter().enumerate() {
@@ -335,13 +328,9 @@ property bounded :
         assert_eq!(fp1.file_hashes, fp2.file_hashes);
     }
 
-    /// v2.24 S5i — adding (or restructuring) a variant on a
-    /// multi-variant ADT must bump the `src/state.rs` fingerprint so
-    /// the on-disk emission gets regenerated. Pre-S5i the fingerprint
-    /// only hashed the flat `state_fields` union, so two specs that
-    /// agreed on the union but disagreed on the per-variant layout
-    /// produced identical hashes. With S5b's wrapper-struct +
-    /// inner-enum emission that's a real divergence at codegen time.
+    /// Adding (or restructuring) a variant on a multi-variant ADT must bump
+    /// the `src/state.rs` fingerprint — specs agreeing on the flat union but
+    /// not the per-variant layout diverge at codegen time.
     #[test]
     fn test_fingerprint_state_changes_on_variant_restructure() {
         let spec_one_variant = r#"
@@ -366,11 +355,9 @@ type State
         );
     }
 
-    /// v2.24 S5i — moving a field between variants (without changing
-    /// the flat union) must still bump the state.rs fingerprint.
-    /// Pre-S5i `balance` lived in `state_fields` either way, so the
-    /// flat hash didn't see the move; the wrapper+enum emission would
-    /// silently flip variant payloads.
+    /// Moving a field between variants (flat union unchanged) must still
+    /// bump the state.rs fingerprint — the wrapper+enum emission would
+    /// otherwise silently flip variant payloads.
     #[test]
     fn test_fingerprint_state_changes_on_variant_field_move() {
         let spec_a = r#"
@@ -420,7 +407,6 @@ handler increment (delta : U64) : State.Active -> State.Active {
 "#;
         let fp_a = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_a).unwrap());
         let fp_b = compute_fingerprint(&crate::chumsky_adapter::parse_str(spec_b).unwrap());
-        // Instruction file hash should differ
         assert_ne!(
             fp_a.file_hashes.get("src/instructions/increment.rs"),
             fp_b.file_hashes.get("src/instructions/increment.rs")

@@ -1,46 +1,22 @@
-//! Walk a user-authored Anchor project (v2.9 M4.1).
-//!
-//! The brownfield adapter (G2) and `--anchor-project` mode (G4) need a
-//! shared parser-side layer that:
-//!
-//!   1. Locates the program crate's `lib.rs`.
-//!   2. Finds its `#[program] pub mod <name>` block — this is the
-//!      Anchor convention's universal source of *which* instruction
-//!      names exist on the program.
-//!   3. Lists each `pub fn` inside the program mod as a discovered
-//!      `Instruction { name, fn_item }`.
-//!
-//! The forwarder-resolution step that maps each instruction to its
-//! *actual* handler body (which may live in a sibling module, an
-//! `impl` block, or inline) is M4.2 and lives in `anchor_resolver.rs`.
-//!
-//! Survey-driven design (`reference_anchor_patterns.md`):
-//!   - The `#[program]` mod's pub fns are the single universal source
-//!     of instruction names. Real Anchor programs vary wildly in
-//!     where the actual handler bodies live, but the `#[program]`
-//!     mod is consistent across all 5 surveyed programs (Marinade,
-//!     Drift, Squads, Raydium, Jito) plus the Anchor scaffold.
-//!   - `lib.rs` always contains the `#[program]` mod when one exists
-//!     (the convention every Anchor program follows).
+//! Locate an Anchor crate's `lib.rs`, find its `#[program] pub mod`, and list
+//! each `pub fn` as a discovered `Instruction`. The `#[program]` mod's pub fns
+//! are the one universal source of instruction names — real programs vary
+//! wildly in where handler bodies live, but `lib.rs` always holds the
+//! `#[program]` mod. Forwarder resolution (instruction → actual handler body)
+//! lives in `anchor_resolver.rs`.
 
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// One discovered instruction in the user's program.
-///
-/// Manual `Debug` impl prints just the name (the `syn::ItemFn` field
-/// doesn't implement `Debug` without the heavy `extra-traits` feature).
+/// One discovered instruction. Manual `Debug` prints just the name —
+/// `syn::ItemFn` lacks `Debug` without the heavy `extra-traits` feature.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Instruction {
-    /// Instruction name as exposed on the program ABI — the pub fn's
-    /// identifier inside the `#[program]` mod. This is what
-    /// off-chain callers use, and what a `.qedspec` handler block
-    /// should match.
+    /// Pub fn ident inside the `#[program]` mod — the ABI name a
+    /// `.qedspec` handler block should match.
     pub name: String,
-    /// The full `pub fn` item from the `#[program]` mod, parsed via
-    /// `syn`. Carries the body that M4.2's forwarder resolver
-    /// inspects to find the actual handler.
+    /// Full `pub fn` item; carries the body the forwarder resolver inspects.
     pub program_fn: syn::ItemFn,
 }
 
@@ -64,16 +40,9 @@ pub struct AnchorProject {
     pub instructions: Vec<Instruction>,
 }
 
-/// Parse a user's Anchor project rooted at `program_root` (the
-/// directory containing the program's own `Cargo.toml`). Looks for
-/// `src/lib.rs`, parses it with `syn`, and extracts the `#[program]`
-/// mod plus its instructions.
-///
-/// Errors with a clear diagnostic when:
-///   - `src/lib.rs` is missing
-///   - the file fails to parse as Rust
-///   - no `#[program]` mod is present (likely not an Anchor program)
-///   - the `#[program]` mod has no pub fns (instruction-less program)
+/// Parse the Anchor project rooted at `program_root` (the dir holding the
+/// program's `Cargo.toml`). Errors clearly on: missing `src/lib.rs`, Rust
+/// parse failure, no `#[program]` mod, or an instruction-less program mod.
 #[allow(dead_code)]
 pub fn parse_anchor_project(program_root: &Path) -> Result<AnchorProject> {
     let lib_rs = program_root.join("src").join("lib.rs");
@@ -88,9 +57,8 @@ pub fn parse_anchor_project(program_root: &Path) -> Result<AnchorProject> {
     parse_lib_rs(&lib_rs, &source)
 }
 
-/// Parse a lib.rs source string. Exposed for tests so we don't need a
-/// real filesystem layout per fixture; production callers go through
-/// `parse_anchor_project`.
+/// Parse a lib.rs source string; exposed for tests (production callers go
+/// through `parse_anchor_project`).
 #[allow(dead_code)]
 pub fn parse_lib_rs(lib_rs_path: &Path, source: &str) -> Result<AnchorProject> {
     let file: syn::File = syn::parse_str(source).map_err(|e| {
@@ -127,11 +95,8 @@ pub fn parse_lib_rs(lib_rs_path: &Path, source: &str) -> Result<AnchorProject> {
     })
 }
 
-/// Find a `#[program] pub mod <name>` item in a parsed file. Anchor's
-/// `#[program]` attribute is a procedural macro from `anchor-lang`; we
-/// match by attribute path (the last segment is `program`) so it works
-/// whether the user wrote `#[program]`, `#[anchor_lang::program]`, or
-/// `#[anchor::program]` (uncommon but legal).
+/// Find `#[program] pub mod <name>`. Matched by the attribute path's last
+/// segment, so qualified forms (`#[anchor_lang::program]`) also work.
 fn find_program_mod(file: &syn::File) -> Option<&syn::ItemMod> {
     for item in &file.items {
         if let syn::Item::Mod(item_mod) = item {
@@ -152,9 +117,8 @@ fn has_program_attr(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// Collect every `pub fn` directly inside the `#[program]` mod. Skips
-/// non-pub fns, nested mods, structs, etc. — Anchor's convention is
-/// strict: instruction handlers are pub fns at the mod's top level.
+/// Every `pub fn` directly inside the `#[program]` mod — Anchor's convention
+/// puts instruction handlers at the mod's top level; all else is skipped.
 fn collect_instructions(item_mod: &syn::ItemMod) -> Vec<Instruction> {
     let Some((_brace, items)) = &item_mod.content else {
         return Vec::new();
@@ -173,10 +137,6 @@ fn collect_instructions(item_mod: &syn::ItemMod) -> Vec<Instruction> {
     instructions
 }
 
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,8 +147,7 @@ mod tests {
 
     #[test]
     fn finds_program_mod_with_pub_fns() {
-        // Anchor scaffold-style: the program mod forwards each
-        // instruction to a handler in `instructions/<name>::handler`.
+        // Anchor scaffold-style forwarders.
         let src = r#"
             use anchor_lang::prelude::*;
 
@@ -252,8 +211,7 @@ mod tests {
 
     #[test]
     fn skips_private_fns_in_program_mod() {
-        // Real-world: programs sometimes have a private helper next
-        // to instructions. We list only pub fns.
+        // Private helpers next to instructions are not listed.
         let src = r#"
             #[program]
             pub mod my_program {
@@ -278,7 +236,6 @@ mod tests {
 
     #[test]
     fn handles_qualified_program_attribute() {
-        // Some programs use the fully-qualified attribute path.
         let src = r#"
             #[anchor_lang::program]
             pub mod qualified {
@@ -293,8 +250,6 @@ mod tests {
 
     #[test]
     fn preserves_full_fn_item_for_body_inspection() {
-        // M4.2 will inspect each instruction's body; M4.1 just needs
-        // to keep the full ItemFn around.
         let src = r#"
             #[program]
             pub mod p {
@@ -308,8 +263,6 @@ mod tests {
         let project = parse(src).unwrap();
         let buy = &project.instructions[0];
         assert_eq!(buy.name, "buy");
-        // The body has at least one statement (the require! macro)
-        // and a tail expression (the handler call).
         assert!(!buy.program_fn.block.stmts.is_empty());
     }
 }

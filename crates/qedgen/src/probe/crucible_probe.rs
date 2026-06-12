@@ -1,42 +1,10 @@
-//! Crucible-as-probe-engine. v2.18 P2.
+//! Crucible-as-probe-engine: coverage-guided fuzzing of the deployed `.so`,
+//! converting each crash into a `Finding` with `Reproducer::Crucible` — the
+//! same surface the static pattern-match engine in `probe.rs` emits into.
 //!
-//! Treats Crucible as another probe engine alongside the pattern-match
-//! engine in `probe.rs`. The pattern-match path runs static predicates
-//! over the `.qedspec`; this path runs coverage-guided fuzzing of the
-//! deployed `.so` and converts each crash into a `Finding` with
-//! `Reproducer::Crucible`. Both engines emit into the same surface.
-//!
-//! ## Pipeline
-//!
-//! 1. **IDL discovery.** Symlink `target/idl/<prog>.json` into
-//!    `<harness>/idls/<prog>.json` when present.
-//! 2. **Build.** `cargo build --features invariant_test` in the harness
-//!    dir. Heavy first-time (LibAFL); incremental thereafter.
-//! 3. **Smoke (~30s).** Short `crucible run` to confirm the harness
-//!    actually fuzzes (Anchor IDL drops, signer wiring, etc.). If
-//!    invariant violations fire at high rate during smoke, surface what
-//!    was found and stop early — burning the full budget to re-discover
-//!    the same class of bug is anti-quality.
-//! 4. **Full run.** `crucible run` for the user budget.
-//! 5. **Per-crash post-processing.** For each `<hash>.meta.json`:
-//!    - `crucible tmin` with 30s cap (PRD §"Auto-tmin every crash")
-//!    - Categorize: invariant violation vs. panic vs. account mismatch
-//!    - Build `Finding` with `Reproducer::Crucible`
-//! 6. **Dedupe** by `(handler, dedupe_key)`. First crash per pair is
-//!    the canonical reproducer; subsequent crashes contribute their
-//!    crash file path to `extra_seeds`.
-//!
-//! ## What's testable in unit tests
-//!
-//! - `parse_crash_metadata` — JSON → struct (no IO)
-//! - `categorize_crash` — meta → (severity, category)
-//! - `dedupe_findings` — list collapsing
-//! - `derive_handler_for_crash` — last-action heuristic
-//! - `dedupe_key_for_crash` — error_code / panic / invariant
-//!
-//! The shell-out fns (build, run, tmin) need `crucible` on PATH; tests
-//! that exercise them are gated behind an `ignored` attribute and run
-//! manually.
+//! Pipeline: IDL discovery → build → smoke pre-flight (stops early when smoke
+//! already surfaces findings; re-finding the same bug class burns budget) →
+//! full run → per-crash tmin → categorize → dedupe by `(handler, dedupe_key)`.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -46,60 +14,48 @@ use std::time::Duration;
 use crate::crucible_gen::InvariantMode;
 use crate::probe::{Category, CrucibleCrashMetadata, Finding, Reproducer, Severity};
 
-/// Per-crash `crucible tmin` cap. Auto-minimization is implicit (PRD
-/// "high-quality reproducible vuln out of the gate") but we cap so that
-/// running tmin on every crash doesn't eat the user's budget after a
-/// productive fuzz run.
+/// Per-crash `crucible tmin` cap — keeps minimization from eating the
+/// user's budget after a productive fuzz run.
 pub const TMIN_BUDGET_PER_CRASH: Duration = Duration::from_secs(30);
 
-/// Smoke pre-flight budget. Long enough to confirm the harness can build
-/// and dispatch a few actions; short enough that broken harnesses fail
-/// fast.
+/// Smoke pre-flight budget: long enough to dispatch a few actions,
+/// short enough that broken harnesses fail fast.
 pub const SMOKE_BUDGET: Duration = Duration::from_secs(30);
 
-/// Threshold for stopping after smoke. If smoke surfaces this many
-/// distinct findings (post-dedupe), we report them and skip the full
-/// run — burning the full budget to find the same class of bug N more
-/// ways is anti-quality.
+/// Stop after smoke if it surfaces this many distinct findings
+/// (post-dedupe) — burning the full budget to re-find the same bug
+/// class is anti-quality.
 pub const SMOKE_FINDING_CAP: usize = 4;
 
-/// Default full-run budget when the user passes `--fuzz` without an
-/// explicit value. Roughly the wall-clock span where a typical small/
-/// medium harness has hit a few k iterations on a laptop M-series chip.
+/// Default full-run budget for `--fuzz` without an explicit value
+/// (~a few k iterations for a small/medium harness on a laptop).
 pub const DEFAULT_FUZZ_BUDGET: Duration = Duration::from_secs(300);
 
-/// Test-fn name emitted by `crucible_gen::emit_invariant_fn`. Crucible
-/// uses this name as both the cargo feature gate and the subcommand
-/// argument: `crucible run <prog> invariant_test`.
+/// Test-fn name emitted by `crucible_gen::emit_invariant_fn`; doubles as
+/// the cargo feature gate and the `crucible run` subcommand argument.
 const HARNESS_TEST_NAME: &str = "invariant_test";
 
-/// Inputs for one fuzz-probe run. Caller assembles paths and budget;
-/// the engine does discovery / build / fuzz / triage.
+/// Inputs for one fuzz-probe run.
 pub struct FuzzProbeContext<'a> {
-    /// Path to the `.qedspec` (used for spec-aware finding context).
-    /// Held so future per-finding enrichment (e.g. linking back to the
-    /// declared invariant name) has the spec to look up.
+    /// Held for future per-finding enrichment (e.g. linking back to the
+    /// declared invariant name).
     #[allow(dead_code)]
     pub spec_path: &'a Path,
     /// Repo root — `target/idl/` lives here.
     pub project_root: PathBuf,
-    /// Harness directory (`fuzz/<prog>/`). Already exists from
-    /// `qedgen codegen --crucible`.
+    /// Harness directory (`fuzz/<prog>/`) from `qedgen codegen --crucible`.
     pub harness_dir: PathBuf,
     /// Per-crash tmin cap; defaults to TMIN_BUDGET_PER_CRASH.
     pub tmin_cap: Duration,
-    /// Smoke pre-flight budget; defaults to SMOKE_BUDGET. Pass
-    /// Duration::ZERO to skip smoke (e.g. via `--no-smoke`).
+    /// Smoke pre-flight budget; defaults to SMOKE_BUDGET. Duration::ZERO
+    /// skips smoke (`--no-smoke`).
     pub smoke_budget: Duration,
     /// Full-run budget after smoke.
     pub fuzz_budget: Duration,
-    /// Stateful mode flag (default false). Crucible's same harness
-    /// compiles for either; `--stateful` is a runtime switch.
+    /// `--stateful` is a runtime switch — the same harness serves both modes.
     pub stateful: bool,
-    /// Which invariant family the emitted harness was built against.
-    /// Carried through to per-finding context so triage can label
+    /// Invariant family the harness was built against — lets triage label
     /// protocol-only crashes distinctly from spec violations.
-    /// Default `InvariantMode::Spec` matches v2.20 callers.
     pub invariant_mode: InvariantMode,
 }
 
@@ -119,12 +75,9 @@ impl<'a> FuzzProbeContext<'a> {
     }
 }
 
-/// Top-level entry — drives the full discovery → build → smoke → run →
-/// triage → dedupe pipeline. Returns the deduplicated finding list.
-///
-/// Shell-outs to `crucible` are gated on `deps::require_crucible()`.
-/// Callers are expected to have already validated the harness directory
-/// exists (run `qedgen codegen --crucible` first).
+/// Top-level entry: discovery → build → smoke → run → triage → dedupe.
+/// Requires `crucible` on PATH and an existing harness directory
+/// (`qedgen codegen --crucible` first).
 pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
     crate::deps::require_crucible()?;
     if !ctx.harness_dir.exists() {
@@ -161,8 +114,8 @@ pub fn run_fuzz_probe(ctx: &FuzzProbeContext) -> Result<Vec<Finding>> {
     Ok(dedupe_findings(findings))
 }
 
-/// One round of: fuzz → harvest crashes → tmin → categorize. Used for
-/// both smoke and full passes; differ only by budget.
+/// One round: fuzz → harvest crashes → tmin → categorize. Smoke and
+/// full passes differ only by budget.
 fn run_crucible_round(
     ctx: &FuzzProbeContext,
     budget: Duration,
@@ -172,13 +125,11 @@ fn run_crucible_round(
         .with_context(|| format!("crucible run ({label}) failed"))?;
     let crashes = collect_crash_files(&crash_dir).unwrap_or_default();
     if !crashes.is_empty() {
-        // tmin best-effort: failure is non-fatal — the raw crashes are
-        // still valid reproducers, we just lose minimization. `--all`
-        // does every crash in a single subprocess.
+        // tmin failure is non-fatal — raw crashes are still valid
+        // reproducers, we just lose minimization.
         let _ = auto_tmin_all(&ctx.harness_dir, ctx.tmin_cap);
     }
-    // Re-scan after tmin — minimization may rewrite the .meta.json
-    // contents in place. Path list is stable; content is what we read.
+    // Read after tmin — minimization may rewrite .meta.json in place.
     let mut findings = Vec::new();
     for crash in crashes {
         let raw = match std::fs::read(&crash) {
@@ -208,21 +159,17 @@ pub fn parse_crash_metadata(json: &[u8]) -> Result<CrucibleCrashMetadata> {
     })
 }
 
-/// Map crash characteristics to (severity, category_tag). Spec
-/// invariants fire when `error_code` is None and the last action was
-/// reported `success: false` *only* because of the post-action assert
-/// — we don't have an in-band signal so the heuristic is "no error
-/// code on last action means assert tripped." Refinement: re-run the
-/// crash via `crucible show --replay` and parse the FUZZ_FINDING line
-/// for the actual assertion. Deferred to v2.18.1.
+/// Map crash characteristics to (severity, category_tag). There is no
+/// in-band signal for a tripped invariant assert, so the heuristic is
+/// "no error code on the last action means the post-action assert fired."
+/// TODO: replay via `crucible show --replay` and parse the FUZZ_FINDING
+/// line for the actual assertion.
 pub fn categorize_crash(meta: &CrucibleCrashMetadata) -> (Severity, &'static str) {
     let last = meta.actions.last();
     match last {
         Some(a) if !a.success && a.error_code.is_some() => {
-            // Handler aborted with an Anchor error code. Could be a
-            // genuine bug (e.g. overflow path returning Custom(N) on a
-            // success path) or a spec-silent error path. Medium until
-            // we know which.
+            // Anchor error-code abort: genuine bug or spec-silent error
+            // path — Medium until we know which.
             (Severity::Medium, "runtime_abort")
         }
         Some(a) if !a.success => {
@@ -231,17 +178,16 @@ pub fn categorize_crash(meta: &CrucibleCrashMetadata) -> (Severity, &'static str
             (Severity::Medium, "runtime_panic")
         }
         _ => {
-            // Last action reported success but a crash was recorded —
-            // the post-action `fuzz_assert!` fired. This is the
-            // canonical "spec invariant violated" path.
+            // Last action succeeded but a crash was recorded — the
+            // post-action `fuzz_assert!` fired. Canonical spec-invariant
+            // violation.
             (Severity::High, "invariant_violation")
         }
     }
 }
 
-/// Best-effort handler name from the crash: the last action's name.
-/// Stateful chains may have the bug latent earlier in the sequence;
-/// the user gets the chain via `action_sequence` for inspection.
+/// Best-effort handler name: the last action's name. Stateful chains may
+/// have the bug latent earlier; the full chain stays in `action_sequence`.
 pub fn derive_handler_for_crash(meta: &CrucibleCrashMetadata) -> String {
     meta.actions
         .last()
@@ -249,16 +195,11 @@ pub fn derive_handler_for_crash(meta: &CrucibleCrashMetadata) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Dedupe key: `(handler, category_tag, error_code-or-zero)`. Same
-/// handler + same category + same error code → same finding class.
-/// v0 over-dedupes when one handler triggers multiple distinct
-/// invariant fires (no in-band assertion-message); v0.1 will use the
-/// re-run assertion message instead.
-/// v0 key used by `dedupe_findings` when it has direct access to the
-/// crash metadata. The Finding-side path uses `finding_dedupe_key`
+/// Dedupe key: `(handler, category_tag, error_code-or-zero)`. Over-dedupes
+/// when one handler trips multiple distinct invariants (no in-band
+/// assertion message). The Finding-side path is `finding_dedupe_key`,
 /// which reconstructs a synthetic crash from `Reproducer::Crucible`.
-/// Kept public for tests + future direct callers (e.g. an incremental
-/// dedupe streaming from `crucible run` stdout).
+/// Kept public for tests + future direct callers.
 #[allow(dead_code)]
 pub fn dedupe_key_for_crash(meta: &CrucibleCrashMetadata) -> (String, &'static str, u32) {
     let (_, tag) = categorize_crash(meta);
@@ -267,9 +208,8 @@ pub fn dedupe_key_for_crash(meta: &CrucibleCrashMetadata) -> (String, &'static s
     (derive_handler_for_crash(meta), tag, err)
 }
 
-/// Collapse same-class findings: first crash becomes the canonical
-/// reproducer; subsequent crashes contribute their `.meta.json` path
-/// to `extra_seeds`.
+/// Collapse same-class findings: first crash is the canonical reproducer;
+/// later crashes contribute their `.meta.json` path to `extra_seeds`.
 pub fn dedupe_findings(findings: Vec<Finding>) -> Vec<Finding> {
     use std::collections::BTreeMap;
     let mut by_key: BTreeMap<(String, String, u32), Finding> = BTreeMap::new();
@@ -293,7 +233,6 @@ pub fn dedupe_findings(findings: Vec<Finding>) -> Vec<Finding> {
     by_key.into_values().collect()
 }
 
-/// (handler, category_tag, error_code) for the finding's reproducer.
 /// Mirrors `dedupe_key_for_crash` but pulls from `Finding` state.
 fn finding_dedupe_key(f: &Finding) -> (String, String, u32) {
     let (tag, err) = match &f.reproducer {
@@ -324,8 +263,8 @@ fn crash_path_from_reproducer(f: &Finding) -> Option<String> {
     }
 }
 
-/// Build a `Finding` from a parsed crash. `harness_dir` and `crash_path`
-/// are persisted on the reproducer so the user can re-run.
+/// `harness_dir` and `crash_path` are persisted on the reproducer so the
+/// user can re-run.
 fn finding_from_crash(
     harness_dir: &Path,
     crash_path: &Path,
@@ -394,10 +333,9 @@ fn stable_finding_id(
 // IO — shells crucible / cargo / fs
 // ============================================================================
 
-/// Symlink `target/idl/<prog>.json` into `<harness>/idls/<prog>.json`
-/// when present. The IDL filename is derived from the harness dir name
-/// (which matches the spec's snake-case program_name). Idempotent — a
-/// pre-existing IDL file is left alone.
+/// Symlink `target/idl/<prog>.json` into `<harness>/idls/<prog>.json` when
+/// present; `<prog>` is the harness dir leaf (= spec's snake-case
+/// program_name). Idempotent — a pre-existing IDL file is left alone.
 pub fn discover_idl(harness_dir: &Path, project_root: &Path) -> Result<()> {
     let prog = harness_dir
         .file_name()
@@ -465,24 +403,19 @@ fn run_crucible(harness_dir: &Path, budget: Duration, stateful: bool) -> Result<
         cmd.arg("--stateful");
     }
     let status = cmd.status().context("spawning `crucible run`")?;
-    // Non-zero exit from crucible can mean "found crashes" rather than
-    // a runtime failure. Don't bail on non-success; harvest the crashes
-    // dir regardless and let the caller decide based on findings count.
+    // Non-zero exit can mean "found crashes", not failure — harvest the
+    // crashes dir regardless.
     let _ = status;
     Ok(harness_dir.join("crashes").join(HARNESS_TEST_NAME))
 }
 
-/// Minimize every crash for this test in one shot via `crucible tmin --all`.
-/// Replaces the per-crash invocation we had before — Crucible's tmin
-/// expects `<CRASH_FILE>` as a filename relative to the crashes dir,
-/// not a full path, and has no `--timeout` flag at all. The `--all`
-/// form sidesteps both issues and runs in a single subprocess.
+/// Minimize every crash in one shot via `crucible tmin --all`. Per-crash
+/// invocation doesn't work: tmin wants `<CRASH_FILE>` relative to the
+/// crashes dir (not a full path) and has no `--timeout` flag.
 ///
-/// `_unused_per_crash_cap` is retained for ABI stability with callers
-/// that pass `TMIN_BUDGET_PER_CRASH` — Crucible's tmin runs to completion
-/// on each crash via forward-pass removal; there is no wall-clock dial
-/// today. If real runs surface a need to cap it, wrap the spawn in a
-/// `tokio::time::timeout` here.
+/// `_unused_per_crash_cap` is kept for callers passing
+/// `TMIN_BUDGET_PER_CRASH` — tmin has no wall-clock dial today; if one is
+/// needed, wrap the spawn in a `tokio::time::timeout` here.
 fn auto_tmin_all(harness_dir: &Path, _unused_per_crash_cap: Duration) -> Result<()> {
     let prog = harness_dir
         .file_name()
@@ -524,20 +457,15 @@ fn crucible_version() -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::probe::{CrucibleActionRecord, CrucibleCrashMetadata};
     use serde_json::json;
 
-    /// Real `.meta.json` captured from `crucible run` on Crucible's own
-    /// bundled escrow example (commit 689e63a). Validates that our parser
-    /// + categorize + handler-derive paths handle real crash output, not
-    ///   just synthetic test data.
+    /// Real `.meta.json` from `crucible run` on Crucible's bundled escrow
+    /// example (commit 689e63a) — exercises real crash output, not just
+    /// synthetic data.
     const REAL_CRASH_META: &str = include_str!("../../test-fixtures/real-crucible-crash.meta.json");
 
     #[test]
@@ -545,9 +473,8 @@ mod tests {
         let meta = parse_crash_metadata(REAL_CRASH_META.as_bytes()).expect("parse");
         assert_eq!(meta.test_name, "invariant_escrow");
         assert_eq!(meta.actions.len(), 6);
-        // Last action: withdraw(amount=3), success=true → seeded
-        // bug-firing case (post-action assert tripped, no error_code
-        // because the handler returned Ok).
+        // Last action succeeded with no error_code → post-action assert
+        // tripped (handler returned Ok).
         let last = meta.actions.last().unwrap();
         assert_eq!(last.name, "withdraw");
         assert!(last.success);
@@ -565,8 +492,8 @@ mod tests {
     #[test]
     fn real_crash_derives_withdraw_as_handler() {
         let meta = parse_crash_metadata(REAL_CRASH_META.as_bytes()).expect("parse");
-        // Action names in real Crucible output don't carry the `action_`
-        // prefix (we strip it defensively anyway).
+        // Real Crucible action names lack the `action_` prefix; the strip
+        // is defensive.
         assert_eq!(derive_handler_for_crash(&meta), "withdraw");
     }
 

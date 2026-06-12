@@ -26,10 +26,8 @@ pub async fn validate_completion(
     std::fs::create_dir_all(&workspace)?;
     ensure_workspace_ready(&workspace, mathlib).await?;
 
-    // Copy Best.lean to validation workspace
     std::fs::copy(output_dir.join("Best.lean"), workspace.join("Best.lean"))?;
 
-    // Run lake build
     let build_result = run_command("lake", &["build", "Best"], &workspace, &[]).await;
 
     match build_result {
@@ -80,13 +78,9 @@ pub async fn setup_workspace(workspace: Option<&Path>, mathlib: bool) -> Result<
     Ok(())
 }
 
-/// Ensure the validation workspace is ready for `lake build Best`.
-///
-/// On first call (no lakefile.lean exists): sets up the full project scaffold,
-/// runs `lake update` to resolve dependencies, and fetches the Mathlib cache.
-///
-/// On subsequent calls: only updates the lean_solana/ files (which may change
-/// when axioms are updated), preserving .lake/ build cache.
+/// Ensure the workspace is ready for `lake build Best`: first call (no
+/// lakefile.lean) scaffolds + `lake update` + Mathlib cache; later calls only
+/// refresh lean_solana/ files, preserving the .lake/ build cache.
 async fn ensure_workspace_ready(workspace: &Path, mathlib: bool) -> Result<()> {
     if !workspace.join("lakefile.lean").exists() {
         crate::project::setup_lean_project(workspace, mathlib)?;
@@ -173,12 +167,9 @@ fn validation_workspace_dir() -> Result<PathBuf> {
     Ok(qedgen_home()?.join("workspace"))
 }
 
-/// Returns the path to the shared Mathlib install inside the global
-/// QEDGen workspace, if present. `qedgen setup --mathlib` populates
-/// this location; `qedgen init --mathlib` reuses it so each project
-/// doesn't re-fetch and re-build Mathlib (8 GB / 15-45 min). Returns
-/// `None` when the workspace hasn't been set up — callers should fall
-/// back to a fresh git-based require.
+/// Shared Mathlib install in the global workspace (populated by `qedgen setup
+/// --mathlib`, reused by `init --mathlib` to skip the 8 GB / 15-45 min build).
+/// `None` if not set up — callers fall back to a fresh git-based require.
 pub fn shared_mathlib_path() -> Option<PathBuf> {
     let home = qedgen_home().ok()?;
     let path = home

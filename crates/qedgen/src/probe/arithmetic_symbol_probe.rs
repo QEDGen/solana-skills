@@ -1,49 +1,14 @@
-//! Arithmetic-symbol catalog probes — v2.22 Slice 1.
+//! Arithmetic-symbol catalog probes.
 //!
-//! Runtime-agnostic source scanners that fire on arithmetic operators
-//! whose *symbol* (not result) is the bug. Closes the subscriptions
-//! bench's two firm-High misses (CAN-H1 `saturating_sub`, CAN-H3
-//! `checked_sub`) — both arithmetic operators that are correct in
-//! isolation; the bug is the failure-mode interaction with the
-//! surrounding control flow.
-//!
-//! ## Rules in this module
-//!
-//! - **`silent_success_arithmetic`** (S1.1, HIGH) — `saturating_sub` /
-//!   `saturating_add` on a timestamp-shape receiver whose result gates
-//!   a non-trivial effect. The 0-or-MAX boundary value silently opens
-//!   a fund-flow gate that should have stayed closed.
-//!
-//! - **`graceful_error_as_dos`** (S1.2, HIGH) — `checked_sub` /
-//!   `checked_add` / `checked_mul` in an init / create path where
-//!   `Err` propagation permanently bricks a deterministic PDA.
-//!   The operator is correct in isolation; the bug is the failure-mode
-//!   interaction with the address's permanence. Closes CAN-H3 on the
-//!   subscriptions bench.
-//!
-//! - **`unchecked_arith_with_fund_flow`** (S1.3, LOW) — unchecked
-//!   `<ident> * <literal>` / `+ <literal>` / `- <literal>` inside a
-//!   function whose body also contains a token / system CPI. The
-//!   arithmetic is locally safe today under upstream bounds but the
-//!   local site makes no explicit invariant claim — preventive
-//!   recommendation (use `checked_*`). Closes CAN-I3 on the
-//!   subscriptions bench.
-//!
-//! ## Why source-scan, not spec
-//!
-//! These bugs fire on the deployed Rust source, not on `.qedspec`
-//! state. Mirrors `pinocchio_probe::scan_program`'s shape — walk
-//! `*.rs` under the project root, regex-match the pattern, emit
-//! `Finding`s into the same envelope as the spec-aware probes.
-//!
-//! ## Reproducers
-//!
-//! Each finding ships a `Reproducer::MolluskPrompt` (same template
-//! mechanism the Pinocchio probes use) pointing at a per-rule markdown
-//! under `references/probes/arithmetic_symbol/<rule>.md`. The agent
-//! fills the litesvm test body using the cited handler, account,
-//! and timestamp source. Time-to-fired-repro target: ≤ 20 min per
-//! finding.
+//! Runtime-agnostic source scanners for arithmetic operators whose *symbol*
+//! (not result) is the bug — correct in isolation, broken by the failure-mode
+//! interaction with surrounding control flow: `silent_success_arithmetic`
+//! (HIGH), `graceful_error_as_dos` (HIGH), `unchecked_arith_with_fund_flow`
+//! (LOW). These bugs live in the deployed Rust source, not `.qedspec` state:
+//! walk `*.rs` under the project root, regex-match, emit `Finding`s into the
+//! same envelope as the spec-aware probes. Each finding ships a
+//! `Reproducer::MolluskPrompt` pointing at a per-rule markdown under
+//! `references/probes/arithmetic_symbol/<rule>.md`.
 
 use anyhow::Result;
 use regex::Regex;
@@ -51,14 +16,12 @@ use std::path::{Path, PathBuf};
 
 use crate::probe::{Category, Finding, Reproducer, Severity};
 
-/// Entry point: walk `<root>/src/**/*.rs` and emit findings. Returns
-/// an empty vec when no matches surface (no errors — the absence of a
-/// match is informational, not a failure).
+/// Entry point: walk `<root>/src/**/*.rs` and emit findings. No matches
+/// is an empty vec, not an error.
 pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     let src_dir = project_root.join("src");
     if !src_dir.exists() {
-        // No `src/` — not a Rust crate root. Defer to the caller's
-        // bootstrap envelope; this probe has nothing to say.
+        // No `src/` — not a Rust crate root; nothing to scan.
         return Ok(Vec::new());
     }
     let rs_files = collect_rust_files(&src_dir)?;
@@ -78,33 +41,23 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
-/// S1.1 — `silent_success_arithmetic` scanner. Pattern criteria:
+/// `silent_success_arithmetic` (HIGH): the 0-or-MAX boundary value of
+/// `saturating_*` silently opens a gate that should have stayed closed.
+/// Pattern criteria:
 ///
 /// 1. A call site of `saturating_sub` or `saturating_add`.
-/// 2. The receiver matches a timestamp-shape pattern (`current_ts`,
-///    `now`, `Clock::get()?.unix_timestamp`, `clock.slot`, `slot`,
-///    `epoch`, `block_height`, or an identifier ending in `_ts` / `_secs`).
-/// 3. The site is inside a function whose body, in the lines AFTER
-///    the call, contains a comparison (`>=`, `>`) gating an
-///    `if`/`else` branch — the canonical "elapsed time opens a gate"
-///    shape.
+/// 2. The receiver is timestamp-shaped (see `is_timestamp_shape`).
+/// 3. The lines AFTER the call contain a `>=` / `>` comparison gating a
+///    branch — the canonical "elapsed time opens a gate" shape.
 ///
-/// False-positive guard: the receiver-type check rejects calls on
-/// counter / amount values that happen to use `saturating_sub` for
-/// fee accounting. Only timestamp-shape receivers fire.
-///
-/// For v2.22 first ship the scanner emits one finding per call site
-/// (not per gated branch). Iteration on bench feedback may tighten
-/// the gate-detection step in v2.22.x.
+/// False-positive guard: only timestamp-shape receivers fire; counter /
+/// amount values using `saturating_sub` for fee accounting are rejected.
+/// Emits one finding per call site (not per gated branch).
 pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> Vec<Finding> {
-    // Receiver pattern: identifier or `Clock::get()?.unix_timestamp` /
-    // `*deref` of one of those. We accept up to ~64 chars of receiver
-    // to keep the regex tractable; longer expressions (chained
-    // method calls) won't match, which is a deliberate
-    // false-negative.
-    //
-    // The body group `(?P<recv>...)` captures the receiver text so we
-    // can re-check the timestamp-shape predicate at filter time.
+    // Receiver: identifier / `Clock::get()?.unix_timestamp` / `*deref`,
+    // capped at ~64 chars to keep the regex tractable — longer chained
+    // expressions are a deliberate false-negative. `recv` is re-checked
+    // by the timestamp-shape predicate at filter time.
     let call_re = Regex::new(
         r"(?m)\b(?P<recv>\*?[\w\.\?\(\)\:]{1,64})\.(?P<op>saturating_sub|saturating_add)\s*\(",
     )
@@ -119,9 +72,8 @@ pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> V
         }
         let line = byte_offset_to_line(source, m.start());
         let fn_name = enclosing_fn_name(source, m.start());
-        // Look at the next ~400 chars of source for the gating
-        // comparison shape. This is the "elapsed >= threshold opens
-        // a non-trivial effect" tell.
+        // The "elapsed >= threshold opens an effect" tell must appear
+        // within the next ~400 chars.
         let window = &source[m.end()..source.len().min(m.end() + 400)];
         if !window_has_gating_comparison(window) {
             continue;
@@ -185,26 +137,21 @@ pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> V
     out
 }
 
-/// S1.2 — `graceful_error_as_dos` scanner. Pattern criteria:
+/// `graceful_error_as_dos` (HIGH): `Err` propagation on a PDA-init path
+/// permanently bricks a deterministic address every caller subsequently
+/// hits. Pattern criteria:
 ///
 /// 1. A call site of `checked_sub` / `checked_add` / `checked_mul`.
 /// 2. The enclosing fn name contains `init` / `create` / `initialize`
-///    (case-insensitive) — the lifecycle handlers that materialise a
-///    deterministic address.
-/// 3. The fn body OR signature signals PDA / seed-driven derivation:
-///    - body contains `find_program_address`, OR
-///    - signature contains `seeds:` / `&[Seed` / `&Seed<`, OR
-///    - body contains `invoke_signed(` (signed CPI implies a PDA
-///      derivation upstream).
-/// 4. The operator's `Err` arm exits the function via `?` (the most
-///    common shape) or `return Err(...)`.
+///    (case-insensitive) — the handlers that materialise a deterministic
+///    address.
+/// 3. The fn signals PDA / seed-driven derivation: `find_program_address`,
+///    `seeds:` / `&[Seed` / `&Seed<`, or `invoke_signed(` (signed CPI
+///    implies a PDA derivation upstream).
+/// 4. The operator's `Err` arm exits via `?` or `return Err(...)`.
 ///
-/// Surfaces as HIGH severity — the failure mode bricks a permanent
-/// address every caller subsequently hits.
-///
-/// False-positive guard: when none of the PDA / seed signals fire, the
-/// arithmetic is treated as user-funded (a user can retry with
-/// corrected inputs) and the finding is suppressed.
+/// False-positive guard: without a PDA / seed signal the arithmetic is
+/// treated as user-funded (retryable with corrected inputs) and suppressed.
 pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<Finding> {
     let call_re = Regex::new(r"\.(?P<op>checked_sub|checked_add|checked_mul)\s*\(")
         .expect("static regex compiles");
@@ -224,9 +171,8 @@ pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<F
         if !body_signals_pda(&fn_body) {
             continue;
         }
-        // Confirm the Err arm exits: look in the ~120 chars after the
-        // call for `?` or `return Err`. The propagation can chain
-        // through `.ok_or(...)` / `.ok_or_else(...)`.
+        // Err arm must exit: `?` or `return Err` within ~160 chars
+        // (propagation may chain through `.ok_or(_else)`).
         let window = &source[m.end()..source.len().min(m.end() + 160)];
         if !window.contains('?') && !window.contains("return Err") {
             continue;
@@ -286,30 +232,25 @@ pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<F
     out
 }
 
-/// S1.3 — `unchecked_arith_with_fund_flow` scanner. Pattern criteria:
+/// `unchecked_arith_with_fund_flow` (LOW): bare arithmetic in a handler
+/// that dispatches a CPI. Pattern criteria:
 ///
-/// 1. A bare `*` / `+` / `-` BinOp shape `<ident_path> <op>
-///    <numeric_literal>` (e.g. `period_hours * 3600`, `slot + 100`).
-///    The literal-on-RHS restriction is the v2.22 first-ship guard
-///    that keeps false-positive volume tractable; the bench's
-///    canonical CAN-I3 site matches this shape exactly.
-/// 2. The enclosing fn body contains a CPI signal: `Transfer`,
-///    `MintTo`, `invoke(`, `invoke_signed(`, `cpi::`, `token::`,
-///    `system_program::`. The signal discriminates "arithmetic that
-///    crosses into fund flow" from "arithmetic on book-keeping
-///    counters" — the former is what the rule targets.
-/// 3. The same line is not already inside a `checked_*` /
-///    `saturating_*` call (those are already correctly defensive).
+/// 1. A bare `*` / `+` / `-` BinOp `<ident_path> <op> <numeric_literal>`
+///    (e.g. `period_hours * 3600`). The literal-on-RHS restriction keeps
+///    false-positive volume tractable.
+/// 2. The enclosing fn body contains a CPI signal — discriminates
+///    "arithmetic that crosses into fund flow" (the target) from
+///    "arithmetic on book-keeping counters".
+/// 3. The site is not already inside a `checked_*` / `saturating_*` call
+///    (those are already correctly defensive).
 ///
-/// Surfaces as LOW severity — the recommendation is preventive
-/// (`checked_*`) and most sites are safe today under upstream
-/// bounds. The bench surfaces the pattern so the audit subagent can
-/// triage and confirm the bound holds.
+/// LOW severity — the recommendation is preventive (`checked_*`); most
+/// sites are safe today under upstream bounds. The audit subagent triages
+/// and confirms the bound holds.
 pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str) -> Vec<Finding> {
-    // `<ident_or_path> <space> [*+-] <space> <int_literal>`. The path
-    // can include dots, indexes, and `_`. We accept up to ~48 chars to
-    // keep matching tractable. Integer literals carry optional
-    // underscores (`3_600`) and optional Rust type suffix (`100u64`).
+    // `<ident_or_path> [*+-] <int_literal>`; path may include dots /
+    // indexes, capped at ~48 chars. Literals may carry underscores
+    // (`3_600`) and a type suffix (`100u64`).
     let bin_re = Regex::new(
         r"(?P<lhs>[A-Za-z_][\w\.\[\]]{0,48})\s*(?P<op>[*+\-])\s*(?P<rhs>\d[\d_]*(?:u\d{1,3}|i\d{1,3}|usize|isize)?)\b",
     )
@@ -322,11 +263,9 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
         let lhs = caps.name("lhs").unwrap().as_str();
         let op = caps.name("op").unwrap().as_str();
         let rhs = caps.name("rhs").unwrap().as_str();
-        // Skip patterns that aren't really arithmetic on user values:
-        // numeric-only LHS (e.g. `1 - 2`), single-character LHS likely
-        // to be `i + 1` index math (deliberate false negative for
-        // v2.22 — bench evidence didn't surface index-arithmetic
-        // findings).
+        // Skip non-user-value arithmetic: numeric-only LHS (`1 - 2`);
+        // short LHS is likely `i + 1` index math (deliberate false
+        // negative).
         if lhs.chars().all(|c| c.is_ascii_digit()) {
             continue;
         }
@@ -337,18 +276,15 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
         if lhs.contains("'") {
             continue;
         }
-        // Skip if the operator is `-` and the LHS looks like a generic
-        // bound (`T -> U`) or a pointer (`&-`); the heuristic is that
-        // `<` or `>` adjacent to the match flags non-arithmetic shapes.
+        // Adjacent `->` / `<-` flags non-arithmetic shapes (return
+        // types, pointer-like patterns).
         let surrounding_start = m.start().saturating_sub(2);
         let surrounding = &source[surrounding_start..m.end()];
         if surrounding.contains("->") || surrounding.contains("<-") {
             continue;
         }
         // Reject sites already inside a `checked_*` / `saturating_*` /
-        // `wrapping_*` call — the operator family is part of the
-        // method name and the literal is a closing paren away. Look
-        // at the ~80 chars preceding the match for any of those.
+        // `wrapping_*` call (check the ~80 preceding chars).
         let before_start = m.start().saturating_sub(80);
         let before = &source[before_start..m.start()];
         if before.contains("checked_")
@@ -359,11 +295,8 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
             continue;
         }
         let line = byte_offset_to_line(source, m.start());
-        // Comment-line guard: if the line starts (after whitespace)
-        // with `//`, or if a `//` precedes the match on the same line,
-        // skip. Comments routinely contain shapes like `// Token-2022`
-        // that match the BinOp regex but are obviously not real
-        // arithmetic.
+        // Skip commented lines — comments routinely contain shapes like
+        // `// Token-2022` that match the BinOp regex.
         if line_is_commented(source, m.start()) {
             continue;
         }
@@ -375,11 +308,8 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
         let Some(fn_name) = enclosing_fn_name(source, m.start()) else {
             continue;
         };
-        // Skip test fns: `fn test_*`, `fn *_tests`, `fn it_*` (the
-        // common test-naming conventions). Inline `#[cfg(test)]
-        // mod tests { ... }` blocks live in the same file as
-        // production code, so the file-level filter in
-        // `collect_rust_files` doesn't catch them.
+        // Skip inline `#[cfg(test)]` test fns — same file as production
+        // code, so `collect_rust_files`'s directory filter misses them.
         if is_test_fn_name(&fn_name) {
             continue;
         }
@@ -451,10 +381,8 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
     out
 }
 
-/// Test-fn name predicate. Skips inline `#[cfg(test)] mod tests {
-/// fn test_* / fn it_* / fn *_test }` patterns that
-/// `collect_rust_files`'s directory filter doesn't catch (those tests
-/// live in the same file as the production code).
+/// Test-fn name predicate, for inline `#[cfg(test)]` fns that
+/// `collect_rust_files`'s directory filter can't catch.
 fn is_test_fn_name(fn_name: &str) -> bool {
     let lower = fn_name.to_ascii_lowercase();
     lower.starts_with("test_")
@@ -463,10 +391,8 @@ fn is_test_fn_name(fn_name: &str) -> bool {
         || lower.ends_with("_tests")
 }
 
-/// Comment-line predicate. Walks backward from the offset to the line
-/// start; returns true when a `//` appears before the offset on the
-/// same line. Stripping block comments (`/* ... */`) is out of scope
-/// for v2.22 — the bench evidence so far doesn't need it.
+/// True when a `//` precedes `offset` on the same line. Block comments
+/// (`/* ... */`) are out of scope.
 fn line_is_commented(source: &str, offset: usize) -> bool {
     let bytes = source.as_bytes();
     let mut i = offset.min(bytes.len());
@@ -475,8 +401,8 @@ fn line_is_commented(source: &str, offset: usize) -> bool {
     }
     let line_prefix = &source[i..offset.min(source.len())];
     if let Some(idx) = line_prefix.find("//") {
-        // Confirm `//` isn't inside a string literal earlier on the
-        // line. Counting double-quotes is a rough approximation.
+        // Rough string-literal guard: even quote count before the `//`
+        // means it isn't inside a string.
         let before = &line_prefix[..idx];
         let quote_count = before.chars().filter(|c| *c == '"').count();
         quote_count % 2 == 0
@@ -485,12 +411,10 @@ fn line_is_commented(source: &str, offset: usize) -> bool {
     }
 }
 
-/// True when the function body invokes a token / system CPI — the
-/// discriminator for "arithmetic that crosses into fund flow." Also
-/// accepts helper-function calls whose name suggests transfer / mint
-/// dispatch (`transfer_with_delegate`, `mint_to_user`, ...) because
-/// the CAN-I3 site dispatches through a `transfer_with_delegate`
-/// helper rather than constructing the CPI directly.
+/// True when the fn body invokes a token / system CPI — the discriminator
+/// for "arithmetic that crosses into fund flow". Also accepts helper calls
+/// named like transfer / mint dispatch (`transfer_with_delegate`, ...) —
+/// programs commonly factor the CPI behind a `<verb>_<descriptor>` helper.
 fn body_signals_cpi(body: &str) -> bool {
     if body.contains("invoke(")
         || body.contains("invoke_signed(")
@@ -507,22 +431,15 @@ fn body_signals_cpi(body: &str) -> bool {
     {
         return true;
     }
-    // Helper-function dispatch: `transfer_with_delegate(...)`,
-    // `mint_to_user(...)`. Anchor / native programs commonly factor
-    // the CPI behind a `<verb>_<descriptor>` helper.
     let helper_re =
         Regex::new(r"\b(?:transfer|mint|burn|withdraw|deposit|approve|revoke)_[a-z_]+\s*\(")
             .expect("static regex compiles");
     helper_re.is_match(body)
 }
 
-/// Walk forward from `offset` to find the body of the enclosing fn —
-/// the text between the next `{` after the fn signature and its
-/// matching `}`. Used by `scan_graceful_error_as_dos` to check
-/// PDA/seed signals across the whole fn, not just the call site.
+/// Body of the enclosing fn (brace-matched), so signals can be checked
+/// across the whole fn rather than just the call site.
 fn enclosing_fn_body(source: &str, offset: usize) -> String {
-    // Locate the enclosing `fn ... (` in source[..offset]; then track
-    // the first `{` after that point and its matching `}`.
     let head = &source[..offset.min(source.len())];
     let fn_re = Regex::new(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*\s*[<\(]").expect("static regex");
     let Some(fn_match) = fn_re.find_iter(head).last() else {
@@ -553,9 +470,8 @@ fn enclosing_fn_body(source: &str, offset: usize) -> String {
     source[body_start..].to_string()
 }
 
-/// True when the fn name suggests a lifecycle-initialisation handler.
-/// Case-insensitive substring match on the canonical naming
-/// conventions (`init`, `create`, `initialize`).
+/// Fn name suggests a lifecycle-init handler (`init` / `create` /
+/// `initialize`, case-insensitive).
 fn is_init_shape(fn_name: &str) -> bool {
     let lower = fn_name.to_ascii_lowercase();
     lower == "init"
@@ -572,9 +488,8 @@ fn is_init_shape(fn_name: &str) -> bool {
         || lower.contains("_initialize_")
 }
 
-/// True when the function body or signature signals PDA / seed-driven
-/// derivation — the discriminator for "the address is deterministic and
-/// nobody holds the private key."
+/// PDA / seed-driven derivation signal — the discriminator for "the
+/// address is deterministic and nobody holds the private key".
 fn body_signals_pda(body: &str) -> bool {
     body.contains("find_program_address")
         || body.contains("invoke_signed")
@@ -590,7 +505,6 @@ fn body_signals_pda(body: &str) -> bool {
 fn is_timestamp_shape(recv: &str) -> bool {
     let r = recv.trim();
     let r = r.strip_prefix('*').unwrap_or(r);
-    // Common identifier patterns.
     let known = [
         "current_ts",
         "current_time",
@@ -608,7 +522,6 @@ fn is_timestamp_shape(recv: &str) -> bool {
     if known.contains(&r) {
         return true;
     }
-    // Suffix shapes: `_ts`, `_secs`, `_at`, `_time`, `_timestamp`.
     let id = r
         .rsplit('.')
         .next()
@@ -625,7 +538,6 @@ fn is_timestamp_shape(recv: &str) -> bool {
     {
         return true;
     }
-    // Clock accessor patterns.
     if r.contains("Clock::get()") && r.contains("unix_timestamp") {
         return true;
     }
@@ -639,13 +551,8 @@ fn is_timestamp_shape(recv: &str) -> bool {
     false
 }
 
-/// Window-after-call check: does the next chunk of source contain a
-/// comparison shape we associate with "elapsed time opens a gate"?
-///
-/// Conservative: looks for `>=` or `>` followed (within a short
-/// window) by `{` (block body) or `return` (early return inverted to
-/// guard). Misses sophisticated re-binding patterns; future bench
-/// evidence tightens this.
+/// "Elapsed time opens a gate" check: `>=` / `>` followed shortly by `{`
+/// or `return`. Conservative — misses re-binding patterns (deliberate).
 fn window_has_gating_comparison(window: &str) -> bool {
     let cmp = Regex::new(r">=|>").expect("static regex");
     if let Some(m) = cmp.find(window) {
@@ -664,11 +571,8 @@ fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
     1 + prefix.chars().filter(|c| *c == '\n').count() as u32
 }
 
-/// Walk backward from the given offset to find the nearest enclosing
-/// `fn <name>(...)` or `fn <name><...>(...)`. Returns the function
-/// name; falls back to `None` when the offset isn't inside a function.
-/// The `[<\(]` terminator captures both bare fns and generic fns
-/// (`fn init<'a, T>`, the CAN-H3 shape).
+/// Nearest enclosing fn name (None when not inside a fn). The `[<\(]`
+/// terminator captures both bare and generic fns (`fn init<'a, T>`).
 fn enclosing_fn_name(source: &str, offset: usize) -> Option<String> {
     let head = &source[..offset.min(source.len())];
     let re = Regex::new(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<\(]").expect("static regex");
@@ -729,8 +633,6 @@ mod tests {
 
     #[test]
     fn fires_on_canonical_subscriptions_can_h1_shape() {
-        // Mirrors transfer_validation.rs:61 from the subscriptions
-        // bench — the CAN-H1 firm-High miss.
         let src = r#"
 fn process_transfer(ctx: Context, current_ts: i64) -> Result<()> {
     let time_since_start = current_ts.saturating_sub(*current_period_start_ts);
@@ -820,15 +722,9 @@ fn log_elapsed(current_ts: i64, start_ts: i64) {
         );
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // S1.2 — graceful_error_as_dos tests
-    // ───────────────────────────────────────────────────────────────
-
     #[test]
     fn fires_on_canonical_subscriptions_can_h3_shape() {
-        // Mirrors the multi_delegator helpers/program.rs:47-49 site —
-        // the CAN-H3 firm-High miss. PDA-init path with `checked_sub`
-        // whose Err propagates via `?`.
+        // PDA-init path with `checked_sub` whose Err propagates via `?`.
         let src = r#"
 fn init<'a, T: Sized>(
     payer: &AccountView,
@@ -887,9 +783,8 @@ fn create_subscription(ctx: Context, amount: u64) -> Result<()> {
 
     #[test]
     fn ignores_checked_sub_outside_init_fn() {
-        // Non-init / non-create fn — even with a PDA signal — shouldn't
-        // fire. The rule is specifically about lifecycle-init paths
-        // whose failure permanently bricks the address.
+        // Non-init fn, even with a PDA signal — the rule is specifically
+        // about init paths whose failure permanently bricks the address.
         let src = r#"
 fn transfer(ctx: Context, amount: u64) -> Result<()> {
     let (_pda, _bump) = Pubkey::find_program_address(&[b"x"], &ctx.program.key);
@@ -938,13 +833,8 @@ fn initialize(payer: &AccountView, pda: &AccountView, bump: u8) -> ProgramResult
         assert_eq!(findings.len(), 1);
     }
 
-    // ───────────────────────────────────────────────────────────────
-    // S1.3 — unchecked_arith_with_fund_flow tests
-    // ───────────────────────────────────────────────────────────────
-
     #[test]
     fn fires_on_canonical_subscriptions_can_i3_shape() {
-        // Mirrors transfer_subscription.rs:61 — the CAN-I3 site.
         let src = r#"
 fn process_transfer(ctx: Context) -> Result<()> {
     let period_length_s = plan.data.period_hours * 3600;
@@ -995,8 +885,7 @@ fn compute_only(period_hours: u32) -> u32 {
 
     #[test]
     fn ignores_short_lhs_index_arithmetic() {
-        // `i + 1` index arithmetic is a deliberate false negative for
-        // v2.22 — short LHS skipped.
+        // `i + 1` index math: short LHS is a deliberate false negative.
         let src = r#"
 fn loop_through(ctx: Context, items: &[u64]) -> Result<()> {
     for i in 0..items.len() {

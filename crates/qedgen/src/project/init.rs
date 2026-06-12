@@ -6,12 +6,8 @@ const LEAN_TOOLCHAIN: &str = "leanprover/lean4:v4.24.0\n";
 const GITIGNORE: &str = ".lake/\nbuild/\nlake-packages/\nlean_solana/.lake/\nlean_solana/build/\n";
 const QED_DIR: &str = ".qed";
 
-/// Persistent project metadata stored in `.qed/config.json`.
-///
-/// `.qed/` pins the project layout: CLI commands resolve the spec path by
-/// walking up from the current directory, finding the nearest `.qed/`, and
-/// reading this file. Users can still pass `--spec <path>` explicitly;
-/// the config is the fallback.
+/// Project metadata in `.qed/config.json`. CLI commands resolve the spec
+/// path by walking up to the nearest `.qed/`; explicit `--spec` overrides.
 #[derive(Serialize, Deserialize)]
 pub struct QedConfig {
     pub name: String,
@@ -19,17 +15,15 @@ pub struct QedConfig {
     /// the directory containing `.qed/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<String>,
-    /// Directory for vendored library interfaces (e.g. SPL Token).
-    /// Relative to the directory containing `.qed/`. Defaults to
-    /// `.qed/interfaces` when written by `qedgen init`.
+    /// Vendored library interfaces dir (e.g. SPL Token), relative to the
+    /// directory containing `.qed/`. `qedgen init` writes `.qed/interfaces`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interfaces_dir: Option<String>,
     pub created_at: String,
 }
 
-/// Walk upward from `start` looking for a `.qed/config.json`. Returns the
-/// discovered `.qed/` directory and the loaded config, or `None` if no
-/// ancestor has one.
+/// Walk up from `start` for a `.qed/config.json`; returns the `.qed/` dir
+/// and loaded config, or `None`.
 pub fn discover_qed_config(start: &Path) -> Option<(std::path::PathBuf, QedConfig)> {
     let mut current: Option<&Path> = Some(start);
     while let Some(dir) = current {
@@ -47,14 +41,9 @@ pub fn discover_qed_config(start: &Path) -> Option<(std::path::PathBuf, QedConfi
     None
 }
 
-/// Resolve the spec path a CLI command should operate on.
-///
-/// Precedence:
-/// 1. `--spec <path>` passed explicitly — returned as-is.
-/// 2. `.qed/config.json spec` field discovered by walking up from `cwd`
-///    (the config's spec is resolved relative to the directory containing
-///    `.qed/`).
-/// 3. Neither — a helpful error pointing at the two options.
+/// Resolve the spec path. Precedence: explicit `--spec` as-is; else the
+/// `spec` field of the nearest `.qed/config.json` (resolved relative to the
+/// directory containing `.qed/`); else error.
 pub fn resolve_spec_path(explicit: Option<&Path>, cwd: &Path) -> Result<std::path::PathBuf> {
     if let Some(p) = explicit {
         return Ok(p.to_path_buf());
@@ -94,20 +83,10 @@ pub fn find_qed_dir(spec_path: &Path) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Initialize `.qed/` in the given directory. Returns error if already initialized.
-/// `dir` should be the program root — the directory where the `.qedspec` lives.
-///
-/// Pick the directory that should own `.qed/` given CLI flags.
-///
-/// v2.6.1 eval (qedgen-bug-report §3, PRD-v2.6.2 G5): when a user runs
-/// `qedgen init --spec x/y.qedspec --output-dir /tmp/z`, they expect `.qed/`
-/// next to the spec file, not next to `/tmp/z`. The pre-v2.6.2 caller
-/// derived `program_root = output_dir.parent()`, which placed `.qed/` at
-/// `/tmp/` — surprising and undocumented.
-///
-/// New rule: if `--spec` is provided, anchor `.qed/` to the spec's parent
-/// directory (resolving against `cwd` when the path is relative). Fall
-/// back to `output_dir.parent()` only when no spec was given.
+/// Pick the directory that owns `.qed/`: with `--spec`, anchor to the spec's
+/// parent (resolved against `cwd` when relative) — users expect `.qed/` next
+/// to the spec, not next to `--output-dir`. Without a spec, fall back to
+/// `output_dir.parent()`.
 pub fn resolve_program_root(
     spec: Option<&Path>,
     output_dir: &Path,
@@ -132,10 +111,9 @@ pub fn resolve_program_root(
     }
 }
 
-/// `spec_rel` is the spec path *relative to `dir`* — the pointer written into
-/// `config.json` so `qedgen check`/`codegen` can resolve it without `--spec`.
-/// Pass `None` to leave the field empty (users will need to pass `--spec`
-/// explicitly until they edit the config).
+/// Initialize `.qed/` in `dir` (errors if present). `spec_rel` is the spec
+/// path relative to `dir`, written into `config.json` so `check`/`codegen`
+/// resolve it without `--spec`; `None` leaves the field empty.
 pub fn init_qed_dir(dir: &Path, name: &str, spec_rel: Option<&str>) -> Result<()> {
     let qed_path = dir.join(QED_DIR);
     if qed_path.exists() {
@@ -151,23 +129,20 @@ pub fn init_qed_dir(dir: &Path, name: &str, spec_rel: Option<&str>) -> Result<()
     let config = QedConfig {
         name: name.to_string(),
         spec: spec_rel.map(|s| s.to_string()),
-        // Vendored library interfaces (e.g. SPL Token) land here when the
-        // user runs `qedgen interface --idl <path> --vendor`.
+        // Populated by `qedgen interface --idl <path> --vendor`.
         interfaces_dir: Some(".qed/interfaces".to_string()),
         created_at: chrono_now(),
     };
     let json = serde_json::to_string_pretty(&config)?;
     std::fs::write(qed_path.join("config.json"), json)?;
 
-    // Add .qed/ gitignore for internal state (config.json is committed)
     std::fs::write(
         qed_path.join(".gitignore"),
         "# .qed/ is project metadata — commit config.json and plan/\n",
     )?;
 
-    // Scaffold .qed/plan/ — agent-maintained ledger of session findings,
-    // gap reports, and reviewer feedback. Committed by default. Subdirs
-    // (findings/, sessions/) are created lazily when first written.
+    // .qed/plan/ — agent-maintained ledger, committed by default; subdirs
+    // created lazily on first write.
     let plan_path = qed_path.join("plan");
     std::fs::create_dir_all(&plan_path)?;
     std::fs::write(plan_path.join("README.md"), PLAN_README)?;
@@ -220,7 +195,7 @@ control what leaves: inspect, edit, or delete any entry before
 uploading. Scrubbing rules above are the contract.
 "#;
 
-/// Simple ISO-8601 timestamp without pulling in chrono.
+/// Timestamp without pulling in chrono.
 fn chrono_now() -> String {
     use std::time::SystemTime;
     let d = SystemTime::now()
@@ -243,11 +218,9 @@ pub fn init(
         "project name must be alphanumeric (underscores allowed)"
     );
 
-    // Detect the nested-layout footgun: if `output_dir` leaf is
-    // `formal_verification` and cwd (the output_dir's canonicalized parent)
-    // already ends in `formal_verification/`, the path resolves to
-    // `.../formal_verification/formal_verification/` — a double layer that
-    // confuses every tool downstream. Ask the user to scope the call.
+    // Nested-layout footgun: output_dir leaf is `formal_verification` AND its
+    // canonicalized parent already ends in `formal_verification/` → a double
+    // layer that confuses every downstream tool. Refuse.
     let leaf_is_fv = output_dir.file_name().and_then(|n| n.to_str()) == Some("formal_verification");
     let parent_is_fv = output_dir
         .parent()
@@ -272,16 +245,12 @@ pub fn init(
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
 
-    // Write lean_solana/ support library (embedded in binary)
     crate::project::update_lean_solana(output_dir, mathlib)?;
 
-    // Lean toolchain
     std::fs::write(output_dir.join("lean-toolchain"), LEAN_TOOLCHAIN)?;
 
-    // .gitignore
     std::fs::write(output_dir.join(".gitignore"), GITIGNORE)?;
 
-    // If --asm, run asm2lean first
     let asm_module = if let Some(asm_path) = asm_source {
         let module_name = "Program".to_string();
         let output_file = output_dir.join("Program.lean");
@@ -292,11 +261,9 @@ pub fn init(
         None
     };
 
-    // lakefile.lean
     let lakefile = generate_lakefile(name, asm_module.as_deref(), mathlib);
     std::fs::write(output_dir.join("lakefile.lean"), lakefile)?;
 
-    // Spec.lean skeleton
     let spec = if program {
         generate_program_spec_skeleton(name)
     } else {
@@ -342,7 +309,6 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
         s.push('\n');
     }
 
-    // asm2lean-generated program module
     if let Some(module) = asm_module {
         s.push_str(&format!(
             "lean_lib {} where\n  roots := #[`{}]\n\n",
@@ -350,11 +316,8 @@ fn generate_lakefile(name: &str, asm_module: Option<&str>, mathlib: bool) -> Str
         ));
     }
 
-    // Spec library: regenerated definitions in Spec.lean, durable
-    // user-owned proofs in Proofs.lean (bootstrapped once by
-    // `qedgen codegen`). Both roots so lake type-checks the proofs
-    // alongside the spec — without `Proofs` here, broken or stale
-    // theorems sit silently undetected (the v2.11.2 multisig miss).
+    // Both roots: regenerated Spec.lean + user-owned Proofs.lean. Without
+    // `Proofs` here, broken or stale theorems sit silently undetected.
     s.push_str("@[default_target]\n");
     s.push_str(&format!(
         "lean_lib {}Spec where\n  roots := #[`Spec, `Proofs]\n",
@@ -462,13 +425,9 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Render the Mathlib `require` line for a generated lakefile.
-///
-/// When `shared` is `Some`, emit a local-path require pointing at the
-/// shared workspace install — subsequent `lake build` reuses the
-/// pre-built Mathlib instead of re-fetching (8 GB / 15-45 min saved).
-/// When `None`, emit a git-based require as a fallback for users who
-/// haven't run `qedgen setup --mathlib` yet.
+/// Mathlib `require` line for a generated lakefile: local-path when a shared
+/// workspace install exists (saves the 8 GB / 15-45 min fetch), git fallback
+/// otherwise.
 pub(crate) fn mathlib_require_line(shared: Option<&Path>) -> String {
     match shared {
         Some(path) => format!("require mathlib from \"{}\"\n", path.display()),
@@ -476,8 +435,7 @@ pub(crate) fn mathlib_require_line(shared: Option<&Path>) -> String {
     }
 }
 
-/// Advise the user about Mathlib shared-workspace state at init time.
-/// Called only when `--mathlib` is in play.
+/// Advise on Mathlib shared-workspace state at init (only with `--mathlib`).
 pub(crate) fn advise_mathlib_mode(shared: Option<&Path>) {
     match shared {
         Some(path) => {
@@ -517,7 +475,6 @@ mod tests {
     #[test]
     fn discover_returns_none_with_no_config() {
         let tmp = tempfile::tempdir().unwrap();
-        // Don't init — no .qed/ anywhere.
         assert!(discover_qed_config(tmp.path()).is_none());
     }
 
@@ -526,7 +483,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         init_qed_dir(root, "demo", Some("from_config.qedspec")).unwrap();
-        // Explicit --spec should win over discovery.
         let explicit = root.join("from_flag.qedspec");
         let resolved = resolve_spec_path(Some(&explicit), root).unwrap();
         assert_eq!(resolved, explicit);
@@ -537,8 +493,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         init_qed_dir(root, "demo", Some("demo.qedspec")).unwrap();
-        // No explicit --spec → discovery resolves via config, relative to
-        // the directory containing .qed/.
         let nested = root.join("src");
         std::fs::create_dir_all(&nested).unwrap();
         let resolved = resolve_spec_path(None, &nested).unwrap();
@@ -642,11 +596,9 @@ mod tests {
 
     #[test]
     fn resolve_program_root_anchors_on_spec_when_given() {
-        // Mirrors the eval's repro:
-        //   cd /home/user/percolator-prog
-        //   qedgen init --spec percolator.qedspec --output-dir /tmp/qedgen_eval
-        // Pre-v2.6.2: .qed/ landed in /tmp (= /tmp/qedgen_eval.parent()).
-        // Post-v2.6.2: .qed/ lands next to the spec (= cwd).
+        // `qedgen init --spec percolator.qedspec --output-dir /tmp/qedgen_eval`
+        // from the project dir: .qed/ must land next to the spec (cwd), not
+        // in /tmp.
         let cwd = std::path::Path::new("/home/user/percolator-prog");
         let spec = std::path::Path::new("percolator.qedspec");
         let output_dir = std::path::Path::new("/tmp/qedgen_eval");

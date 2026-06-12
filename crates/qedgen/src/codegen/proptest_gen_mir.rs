@@ -1,18 +1,11 @@
-//! qedgen proptest codegen — the MIR consumer. Sole proptest path
-//! since v2.32 merged the former `proptest_gen.rs` into this module.
-//! Emits `programs/tests/proptest.rs` — Tier-1 property-based testing
-//! harnesses derived from the spec's state machine (~100ms
-//! counterexamples; lighter-weight than Kani BMC). Gated by
-//! `tests/proptest_snapshot.rs`.
+//! Proptest codegen — emits `programs/tests/proptest.rs`: Tier-1 property
+//! harnesses for the spec's state machine (~100ms counterexamples; lighter
+//! than Kani BMC). Snapshot-gated by `tests/proptest_snapshot.rs`.
 //!
-//! Effect-body lowering is MIR-driven (#66): the transition functions
-//! and the overflow filters/tests iterate the handler's lowered `Stmt`
-//! body via the shared `rust_codegen_util::stmt_effect_triple` adaptor,
-//! so a new `Stmt` variant is a compile error at this backend. The
-//! surrounding harness emission (arb_state strategies / preservation /
-//! invariant / guard / sequence sub-emitters) reads `ParsedSpec`
-//! directly — those derive from account / property / requires surface,
-//! not effect-body IR, the same boundary as `codegen_mir`'s guards.
+//! Effect-body lowering is MIR-driven via `rust_codegen_util::stmt_effect_triple`
+//! (a new `Stmt` variant is a compile error at this backend); the harness
+//! sub-emitters read `ParsedSpec` directly — they derive from the
+//! account/property/requires surface, not effect-body IR.
 
 use anyhow::Result;
 use std::path::Path;
@@ -22,8 +15,7 @@ use crate::codegen_shared::map_type;
 use crate::mir::Mir;
 use crate::rust_codegen_util;
 
-/// Generate the proptest harness file at `output_path`, consuming a
-/// pre-lowered `Mir` + its originating `ParsedSpec`.
+/// Generate the proptest harness file at `output_path`.
 pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()> {
     if parsed.handlers.is_empty() {
         anyhow::bail!("No operations found in the spec — is this a valid qedspec file?");
@@ -31,9 +23,8 @@ pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()
     generate_impl(mir, parsed, output_path)
 }
 
-/// Return the proptest strategy string for a DSL primitive type. For compound
-/// types (`Map[N] T`, records, sum types) use `strategy_for_field` instead —
-/// it dispatches here once it's unwrapped the compound.
+/// Proptest strategy for a DSL primitive type; compound types go through
+/// `strategy_for_field`, which dispatches here once unwrapped.
 fn strategy_for_type(dsl_type: &str) -> &str {
     match dsl_type {
         "U8" => "0u8..=255u8",
@@ -48,17 +39,15 @@ fn strategy_for_type(dsl_type: &str) -> &str {
         "I128" => "any::<i128>()",
         "Bool" => "any::<bool>()",
         "Pubkey" => "prop::array::uniform32(0u8..)",
-        // Fin[N] falls through here after the compound-type detector in
-        // strategy_for_field strips the `Fin[N]` wrapper — it's modelled as
-        // usize with a small range since real usage is as an index.
+        // Fin[N] arrives here with the wrapper stripped; modelled as a small
+        // usize range since real usage is as an index.
         "Fin" => "0usize..=1024usize",
         _ => "0u64..=u64::MAX",
     }
 }
 
-/// Boundary-biased strategy for guard rejection tests. Mixes small values (near 0)
-/// with large values (near MAX) so that guards like `> 0` AND guards like `<= LARGE_CONST`
-/// both have reasonable rejection rates.
+/// Boundary-biased strategy for guard rejection tests: mixes near-0 and
+/// near-MAX values so both `> 0` and `<= LARGE_CONST` guards reject often.
 fn boundary_strategy_for_type(dsl_type: &str) -> &str {
     match dsl_type {
         "U8" => "prop_oneof![0u8..=3u8, 252u8..=255u8]",
@@ -78,15 +67,9 @@ fn boundary_strategy_for_type(dsl_type: &str) -> &str {
     }
 }
 
-/// Dispatch table for per-field strategy rendering. Handles compound types
-/// (`Map[N] T` → fixed-size array via strict-length vec + try_into; records
-/// → `arb_<Name>()`; unit-variant sum types → `arb_<Name>()`) and falls back
-/// to the primitive `strategy_for_type` / `boundary_strategy_for_type`
-/// helpers once the compound layer is peeled off.
-///
-/// v2.6.2 S3 taught `map_type` to resolve record/sum/alias/Fin names. v2.7
-/// G1 teaches the strategy emitter the matching shape so `arb_state()`
-/// doesn't bail into `0u64..=u64::MAX` when a field is `[Account; N]`.
+/// Per-field strategy dispatch: `Map[N] T` → strict-length vec + try_into;
+/// records / unit-variant sums → `arb_<Name>()`; primitives fall through to
+/// `strategy_for_type` / `boundary_strategy_for_type`.
 fn strategy_for_field(
     dsl_type: &str,
     spec: &ParsedSpec,
@@ -117,8 +100,7 @@ fn strategy_for_field(
         );
     }
 
-    // Fin[N] → usize. Bound is informational; use a bounded-ish strategy so
-    // array indices stay within typical ranges.
+    // Fin[N] → usize; bound is informational.
     if dsl_type.starts_with("Fin[") {
         return Ok(match mode {
             StrategyMode::Full => strategy_for_type("Fin").to_string(),
@@ -131,10 +113,9 @@ fn strategy_for_field(
         return Ok(format!("arb_{}()", dsl_type));
     }
 
-    // Unit-variant sum type → arb_<Name>() — emitted by emit_unit_sum_prop_oneofs.
-    // Sum types with payload variants are S3 narrow's flattened-struct case and
-    // don't appear as field types (the flattened struct's own field becomes
-    // the one referenced).
+    // Unit-variant sum type → arb_<Name>() (emit_unit_sum_prop_oneofs).
+    // Payload-variant sums are flattened into the State struct and never
+    // appear as field types.
     if spec.sum_types.iter().any(|s| {
         s.name == dsl_type
             && !s.variants.is_empty()
@@ -148,8 +129,7 @@ fn strategy_for_field(
         return strategy_for_field(rhs, spec, mode, field_bound);
     }
 
-    // Primitive path — apply field bound if one was extracted from
-    // property expressions.
+    // Primitive path — apply any bound extracted from property expressions.
     if let Some(bound) = field_bound {
         let rust_type = map_type(dsl_type, spec)?;
         return Ok(match mode {
@@ -174,28 +154,13 @@ fn strategy_for_field(
     })
 }
 
-/// Render a type-aware default value for a state field used to seed the
-/// initial `State { ... }` literal in init-handler preservation tests and
-/// in `state_machine_sequence`.
-///
-/// Pre-fix every field was initialized to `0`, which broke array fields:
-///
-///     error[E0308]: mismatched types
-///       | rfp_milestone_amounts: 0,
-///       |                        ^ expected `[u64; 8]`, found integer
-///
-/// `Map[N] T` lowers to `[T; N]` in the State struct — so its default has
-/// to be `[<inner-default>; N]`, not `0`. For non-primitive `T` (records
-/// like `Account`, or unit-variant sums) we need `Default::default()`
-/// since the record may not be numeric. Records are detected against
-/// `spec.records`; when matched, we emit `<RecordName>::default()`
-/// (relies on `#[derive(Default)]` on the record struct) and `[ ... ; N]`
-/// for arrays-of-records.
-///
-/// Returns `None` when no sensible default can be derived (e.g. a sum
-/// type with payload variants); the caller should skip the seed-init for
-/// that field and rely on `cargo` to surface the missing field, which
-/// gives a clearer diagnostic than emitting wrong-type code.
+/// Type-aware default for a state field, used to seed `State { ... }`
+/// literals (init preservation tests, `state_machine_sequence`).
+/// `Map[N] T` → `[<default of T>; N]`; records → `<Name>::default()`
+/// (record structs derive `Default`). Returns `None` when no sensible
+/// default exists (e.g. payload-variant sums) — the caller skips the field
+/// so rustc's E0063 missing-field error points at the exact line, a clearer
+/// diagnostic than wrong-type code.
 pub(crate) fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Option<String> {
     let dsl_type = dsl_type.trim();
     // Map[BOUND] T → [<default of T>; N]
@@ -217,18 +182,13 @@ pub(crate) fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Opti
     if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
         return default_value_for_field(rhs, spec);
     }
-    // Record type → <Name>::default() (the matching `emit_record_structs`
-    // call below derives `Default` on every emitted record struct, so
-    // this resolves at the seed-state literal).
+    // Record type → <Name>::default() (emit_record_structs derives Default).
     if spec.records.iter().any(|r| r.name == dsl_type) {
         return Some(format!("{}::default()", dsl_type));
     }
-    // Sum types with payload variants don't have a meaningful zero default
-    // — return None so the caller skips the field and rustc surfaces an
-    // E0063 missing-field at the seed-state literal, pointing at the
-    // exact line that needs attention. Unit-variant sums fall through to
-    // the primitive path below since `emit_unit_enum_sums` derives
-    // Default only when explicitly requested (which it isn't today).
+    // Payload-variant sums: no meaningful zero default → None (see doc).
+    // Unit-variant sums fall through to the primitive path —
+    // `emit_unit_enum_sums` doesn't derive Default.
     if spec
         .sum_types
         .iter()
@@ -240,8 +200,8 @@ pub(crate) fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Opti
     if dsl_type.starts_with("Fin[") {
         return Some("0".to_string());
     }
-    // Pubkey → [0u8; 32] when not filtered (rare — usually filtered upstream
-    // by mutable_fields, but a Map[N] Pubkey makes its way through).
+    // Pubkey → [0u8; 32] (usually filtered by mutable_fields, but a
+    // Map[N] Pubkey gets here).
     if dsl_type == "Pubkey" {
         return Some("[0u8; 32]".to_string());
     }
@@ -249,9 +209,8 @@ pub(crate) fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Opti
     Some("0".to_string())
 }
 
-/// Local copy of codegen::resolve_map_bound (private there) — same rule: bound
-/// is either a numeric literal, a declared spec constant, or a unit-only
-/// enum type (v2.24 #20).
+/// Local copy of codegen::resolve_map_bound (private there): bound is a
+/// numeric literal, a declared spec constant, or a unit-only enum type.
 fn resolve_map_bound_local(bound: &str, spec: &ParsedSpec) -> Result<String> {
     let bound = bound.trim();
     if bound.chars().all(|c| c.is_ascii_digit()) && !bound.is_empty() {
@@ -260,9 +219,8 @@ fn resolve_map_bound_local(bound: &str, spec: &ParsedSpec) -> Result<String> {
     if let Some((_, value)) = spec.constants.iter().find(|(n, _)| n == bound) {
         return Ok(value.clone());
     }
-    // v2.24 #20 — enum-typed Map bound. Use the variant count as the
-    // array size. Stays consistent with the codegen-side resolver so
-    // the proptest model and the Anchor codegen agree on shape.
+    // Enum-typed bound → variant count; must agree with the codegen-side
+    // resolver so the proptest model and Anchor codegen share the shape.
     if let Some(sum) = spec.sum_types.iter().find(|s| s.name == bound) {
         if sum.variants.iter().all(|v| v.fields.is_empty()) {
             return Ok(sum.variants.len().to_string());
@@ -274,19 +232,17 @@ fn resolve_map_bound_local(bound: &str, spec: &ParsedSpec) -> Result<String> {
     )
 }
 
-/// Emit a `prop_compose!` strategy block per spec record — the generator
-/// that lets fields of type `Account` synthesize arbitrary values. Must be
-/// called after `emit_record_structs` (the struct must exist first) and
-/// before `emit_state_strategy` (the strategy references `arb_<Name>()`).
+/// Emit a `prop_compose!` strategy per spec record. Order matters: after
+/// `emit_record_structs`, before `emit_state_strategy` (which references
+/// `arb_<Name>()`).
 fn emit_record_prop_composes(out: &mut String, spec: &ParsedSpec) -> Result<()> {
     for rec in &spec.records {
         if rec.fields.is_empty() {
             continue;
         }
-        // The flat-state `State` record is materialised as the state-machine
-        // struct (with its own `arb_state()`); skip the value-record form so
-        // we don't emit a colliding `arb_State()`. Mirrors the skip in
-        // `rust_codegen_util::emit_record_structs`.
+        // The flat-state `State` record becomes the state-machine struct with
+        // its own `arb_state()`; skip to avoid a colliding `arb_State()`.
+        // Mirrors `rust_codegen_util::emit_record_structs`.
         if rec.name == "State" {
             continue;
         }
@@ -310,10 +266,8 @@ fn emit_record_prop_composes(out: &mut String, spec: &ParsedSpec) -> Result<()> 
     Ok(())
 }
 
-/// Emit a `prop_oneof!` strategy per unit-variant sum type. Sum types with
-/// payload variants are skipped here — they're either flattened into the
-/// State struct (S3 narrow) or become a Rust `enum` with their own strategy
-/// (v2.7 G2).
+/// Emit a `prop_oneof!` strategy per unit-variant sum type. Payload-variant
+/// sums are skipped — they're flattened into the State struct.
 fn emit_unit_sum_prop_oneofs(out: &mut String, spec: &ParsedSpec) -> Result<()> {
     for sum in &spec.sum_types {
         let all_unit = sum.variants.iter().all(|v| v.fields.is_empty());
@@ -395,11 +349,8 @@ fn extract_field_upper_bounds(
     bounds
 }
 
-/// Generate proptest harnesses from a pre-lowered `Mir` + `ParsedSpec`.
-///
-/// Produces property-based tests that exercise the spec's state machine with
-/// random inputs, checking invariants after every transition. Finds
-/// counterexamples in milliseconds — the first tier of the verification waterfall.
+/// Generate proptest harnesses: random-input state-machine tests checking
+/// invariants after every transition.
 fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()> {
     rust_codegen_util::check_effect_targets(spec)?;
 
@@ -418,7 +369,6 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
 
     let mut out = String::new();
 
-    // ── File header ─────────────────────────────────────────────────────
     out.push_str(&crate::banner::banner(None, &hash));
     out.push_str("//\n");
     out.push_str("// Proptest harnesses — property-based testing for the spec's state machine.\n");
@@ -436,23 +386,12 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
         "// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n\n",
     );
 
-    // rustc's default `recursion_limit = 128` is enough for small specs
-    // but not for proptest's deeply nested `TupleValueTree<...>`
-    // instantiations when `arb_state()` composes a State with many
-    // (≳40) fields — layout/normalize queries overflow at typecheck:
-    //
-    //   error: queries overflow the depth limit!
-    //     = help: consider increasing the recursion limit by adding a
-    //       `#![recursion_limit = "256"]` attribute to your crate
-    //
-    // Gate the override emission on field count so small specs (escrow:
-    // 3 fields, lending: 6, multisig: 5) keep the rustc default and only
-    // larger specs pay the higher ceiling. 32 is a comfortable threshold
-    // — well below the empirical 99-field State that needs ≥256.
-    //
-    // Value 512 = 2× rustc's suggested 256, empirically validated against
-    // a 99-field flat State. Specs that genuinely need more will fail
-    // with the same clear diagnostic and can override locally.
+    // proptest's nested `TupleValueTree<...>` instantiations overflow rustc's
+    // default recursion_limit=128 when `arb_state()` composes ≳40 fields
+    // ("queries overflow the depth limit"). Emit a 512 override (validated
+    // against a 99-field flat State) only above 32 fields so small specs
+    // keep the rustc default; bigger specs fail with the same clear
+    // diagnostic and can override locally.
     let total_field_count: usize = rust_codegen_util::mutable_fields(&spec.state_fields).len()
         + spec
             .account_types
@@ -465,18 +404,12 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
 
     out.push_str("use proptest::prelude::*;\n\n");
 
-    // ── Math helpers ─────────────────────────────────────────────────────
-    // The brownfield workflow runs `qedgen codegen --proptest` against an
-    // existing program crate, without `--all`. In that case `src/math.rs`
-    // is never generated, so any `mul_div_floor_u128` / `mul_div_ceil_u128`
-    // calls emitted by chumsky_adapter::expr_to_rust have no definition in
-    // scope. Inline the helpers ONLY when the spec actually uses them —
-    // otherwise we'd ship two sources of truth for every spec that
-    // doesn't need them, with the silent-divergence risk that implies for
-    // any future change to the canonical helper.
-    //
-    // Detection reuses `codegen::guards_use_math_helpers` so this gate
-    // tracks the same predicate as the `--all` math.rs emission.
+    // Brownfield `--proptest` (no `--all`) never generates src/math.rs, so
+    // `mul_div_*_u128` calls emitted by expr_to_rust would be undefined.
+    // Inline the helpers ONLY when the spec uses them — unconditional
+    // inlining would ship a second source of truth with silent-divergence
+    // risk. Detection reuses `codegen::guards_use_math_helpers`, the same
+    // predicate as the `--all` math.rs emission.
     if crate::codegen_shared::guards_use_math_helpers(spec) {
         out.push_str(
             "#[allow(dead_code)]\n\
@@ -495,7 +428,6 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
         );
     }
 
-    // ── Constants ────────────────────────────────────────────────────────
     rust_codegen_util::emit_constants(&mut out, &spec.constants);
 
     if is_multi {
@@ -505,7 +437,6 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             if acct_fields.is_empty() {
                 continue;
             }
-            // Filter handlers targeting this account
             let acct_handlers: Vec<&ParsedHandler> = spec
                 .handlers
                 .iter()
@@ -514,7 +445,6 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             if acct_handlers.is_empty() {
                 continue;
             }
-            // Filter properties whose fields are in this account
             let acct_field_names: Vec<&str> = acct_fields.iter().map(|(n, _)| n.as_str()).collect();
             let acct_props: Vec<&ParsedProperty> = spec
                 .properties
@@ -532,7 +462,6 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             out.push_str(&format!("mod {} {{\n", mod_name));
             out.push_str("    use super::*;\n\n");
 
-            // Build a minimal ParsedSpec view for this account
             emit_account_section(
                 &mut out,
                 mir,
@@ -548,12 +477,10 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             out.push_str(&format!("}} // mod {}\n\n", mod_name));
         }
     } else {
-        // Single-account: generate flat (no module wrapper)
-        // Issue #67 item 3 — ghosts are spec-only *verification*-State fields:
-        // present in the harness State struct + `arb_state` + transitions (so
-        // properties / invariants can read them and the inductive `prop_assume`
-        // ties them down), but NEVER in the on-chain program codegen, which
-        // reads `spec.state_fields` directly.
+        // Single-account: generate flat (no module wrapper).
+        // Ghosts are spec-only verification-State fields: present in the
+        // harness State + `arb_state` + transitions so properties can read
+        // them, but NEVER in on-chain codegen (reads `spec.state_fields`).
         let state_fields_owned: Vec<(String, String)> = spec
             .state_fields
             .iter()
@@ -595,28 +522,18 @@ fn emit_account_section(
     lifecycle_states: &[String],
     spec: &ParsedSpec,
 ) -> Result<()> {
-    // User-defined records/enums referenced by State must be declared first,
-    // then their `arb_<Name>()` strategies so `arb_state` can call into them.
-    // v2.7 G1 finishes what v2.6.2 S3 started: the struct decls were emitted
-    // but the strategy lookup bailed into `0u64..=u64::MAX` for record-typed
-    // fields. emit_record_prop_composes + strategy_for_field below fix that.
-    // `Default` is required by the seed-state init path (commit 3:
-    // `default_value_for_field` emits `<RecordName>::default()` for
-    // record-typed array elements like `[Account; 1024]`). All record
-    // fields in current bundled specs are primitives or fixed-size arrays
-    // of primitives, both of which derive Default automatically; specs
-    // with non-Default field types would surface as a compile error at
-    // the record struct itself, with a clearer pointer than the cascading
-    // E0599 we'd get from `<Name>::default()`.
+    // Records/enums referenced by State are declared first, then their
+    // `arb_<Name>()` strategies so `arb_state` can call into them. `Default`
+    // is required by the seed-state path (`default_value_for_field` emits
+    // `<Name>::default()`); a non-Default field type fails at the record
+    // struct itself — clearer than a cascading E0599 at the call site.
     rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy, Default", |t| {
         map_type(t, spec)
     })?;
     rust_codegen_util::emit_unit_enum_sums(out, spec, "Debug, Clone, Copy, PartialEq, Eq")?;
-    // v2.21 mirror-fix: emit per-account `Status` from `lifecycle_states`
-    // rather than `spec.lifecycle_states`. In multi-ADT mode the caller
-    // passes `&acct.lifecycle`, so each module gets the correct variants
-    // for its ADT. Pre-fix lending's `mod loan` got Pool's `enum Status`
-    // and didn't compile.
+    // Per-account `Status` from the `lifecycle_states` param, NOT
+    // `spec.lifecycle_states` — in multi-ADT mode the caller passes
+    // `&acct.lifecycle` so each module gets its own variants.
     rust_codegen_util::emit_lifecycle_status_enum_from(
         out,
         lifecycle_states,
@@ -671,9 +588,8 @@ fn emit_account_section(
         .collect();
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
-            // Prefer the AST-rendered Rust form (handles `implies`/`forall`
-            // without mojibake); fall back to text-massaging the Lean body
-            // when `rust_expression` is absent (legacy callers).
+            // Prefer the AST-rendered Rust form (handles `implies`/`forall`);
+            // fall back to text-massaging the Lean body for legacy callers.
             let rust_expr = match prop.rust_expression.as_deref() {
                 Some(r) => r.to_string(),
                 None => match prop.expression.as_deref() {
@@ -683,25 +599,19 @@ fn emit_account_section(
             };
             let doc = prop.expression.as_deref().unwrap_or("");
             out.push_str(&format!("/// {}: {}\n", prop.name, doc));
-            // v2.23 Slice 3: binary properties (body contains `old(...)`)
-            // emit `fn p(pre: &State, post: &State) -> bool` and consume
-            // the binary-rendered body (where `state.x` → `post.x` and
-            // `old(state.x)` → `pre.x`, set by the adapter at parse
-            // time per chumsky_adapter `TopItem::Property` arm).
-            // Unary properties keep today's `fn p(s: &State) -> bool`.
-            // The per-handler preservation harness in
-            // `emit_preservation_tests_for` captures `let pre = s.clone()`
-            // and dispatches the assertion arity on `prop.class`.
+            // Binary properties (body contains `old(...)`) emit
+            // `fn p(pre: &State, post: &State)` over the binary-rendered body
+            // (`state.x` → `post.x`, `old(state.x)` → `pre.x`, set by the
+            // adapter at parse time). Unary properties keep `fn p(s: &State)`;
+            // the preservation harness dispatches arity on `prop.class`.
             let is_binary = prop.class == crate::check::PropertyClass::Binary;
             let signature = if is_binary {
                 format!("fn {}(pre: &State, post: &State) -> bool", prop.name)
             } else {
                 format!("fn {}(s: &State) -> bool", prop.name)
             };
-            // Suppress unused-variable warnings on stub bodies (true /
-            // unsupported_quantifier) by underscoring the params. Without
-            // this the binary stub `fn p(pre, post) -> bool { true }`
-            // would emit `unused_variables` warnings.
+            // Underscore params on stub bodies (`true` /
+            // unsupported_quantifier) to avoid unused_variables warnings.
             let unused_signature = if is_binary {
                 format!("fn {}(_pre: &State, _post: &State) -> bool", prop.name)
             } else {
@@ -720,14 +630,11 @@ fn emit_account_section(
                 out.push_str(&format!("    {}\n", rust_expr));
                 out.push_str("}\n\n");
             }
-            // Per-slot form: when the property is `forall <binder> : <T>, body`
-            // and the binder is too wide for proptest exhaustion, emit a
-            // `_at` variant that takes the binder as a Rust param and checks
-            // the body at one slot. Used by preservation tests for handlers
-            // that take that same binder as a handler param — checking at
-            // the modified slot is sufficient for inductive preservation
-            // since handlers only mutate state.<arr>[binder] and the rest
-            // is held fixed by frame condition.
+            // Per-slot form: `forall <binder>` properties too wide for
+            // proptest exhaustion get an `_at` variant checking one slot.
+            // Checking at the modified slot suffices for inductive
+            // preservation — handlers only mutate state.<arr>[binder]; the
+            // rest is held fixed by frame condition.
             if let Some(slot) = &prop.per_slot {
                 let rust_ty = map_type(&slot.binder_type, spec)
                     .ok()
@@ -746,12 +653,8 @@ fn emit_account_section(
         }
     }
 
-    // Invariant predicates — only emit for invariants referenced by at least
-    // one handler's `invariants` list AND that have a rust_expr body (i.e.
-    // not description-only). v2.17 wire-up: prior to this, ParsedInvariant
-    // .rust_expr was populated by the adapter but never consumed by any
-    // backend. QEDGen already had the parser + adapter + handler-clause
-    // path — only the Rust harness consumption was missing.
+    // Invariant predicates — only those referenced by at least one handler
+    // AND carrying a rust_expr body (not description-only).
     let linked_invs: Vec<&ParsedInvariant> = spec
         .invariants
         .iter()
@@ -787,10 +690,9 @@ fn emit_account_section(
         )?;
     }
 
-    // Invariant preservation tests — one per (handler, invariant-it-claims-to-preserve)
-    // pair. Iterates the relationship from the handler side (handler.invariants)
-    // since that's where the spec records it; properties iterate from the
-    // property side (prop.preserved_by). Same logical join, different storage.
+    // Invariant preservation tests — one per (handler, invariant) pair,
+    // iterated from the handler side (handler.invariants) where the spec
+    // records it; properties iterate from prop.preserved_by.
     if !linked_invs.is_empty() {
         emit_invariant_preservation_tests_for(
             out,
@@ -809,11 +711,9 @@ fn emit_account_section(
         emit_guard_tests(out, &guard_refs, mutable_fields, all_fields);
     }
 
-    // Overflow detection tests
-    // #66 — checked-add filter reads the lowered MIR body, not
-    // `op.effects`. Deep walk: adds inside `Stmt::Branch` arms count
-    // (the `>= pre` overflow assertion holds whether or not the arm
-    // fires — an untaken arm leaves the field unchanged).
+    // Overflow detection tests — the checked-add filter reads the lowered
+    // MIR body, not `op.effects`. Deep walk: adds inside `Stmt::Branch` arms
+    // count (the `>= pre` assertion holds even when the arm doesn't fire).
     let overflow_ops: Vec<&&ParsedHandler> = handlers
         .iter()
         .filter(|op| {
@@ -837,11 +737,9 @@ fn emit_account_section(
         )?;
     }
 
-    // Sequence test. Emitted when there are properties to check across a
-    // multi-handler state machine, OR when the spec declares hooks (issue
-    // #67 item 4) — the sequence harness drives random op sequences from
-    // `init`, which is what exercises the `after_store` assertions injected
-    // into the transitions (without a driver the hooks would never fire).
+    // Sequence test — emitted for multi-handler property checks OR when the
+    // spec declares hooks: the harness drives random op sequences from
+    // `init`, which is what fires the injected `after_store` assertions.
     let want_sequence = (!owned_props.is_empty() && handlers.len() > 1) || !mir.hooks.is_empty();
     if want_sequence && !handlers.is_empty() {
         emit_sequence_test_for(
@@ -916,11 +814,8 @@ fn emit_state_strategy_inner(
             out.push_str("/// Proptest strategy for generating arbitrary State values.\n");
         }
     }
-    // Emit via `prop_compose!`. The earlier inline `(strat1, …, stratN).prop_map(…)`
-    // form fails to compile when the State struct has more than 12 fields
-    // (proptest's `Strategy` impl for tuples caps at 12-arity); `prop_compose!`
-    // has no arity limit and produces the same `impl Strategy<Value = State>`
-    // signature.
+    // `prop_compose!` instead of an inline tuple `.prop_map(…)`: proptest's
+    // tuple `Strategy` impl caps at arity 12; `prop_compose!` has no limit.
     let emit_status =
         lifecycle_states.len() >= 2 && !mutable_fields.iter().any(|(n, _)| n == "status");
     out.push_str("prop_compose! {\n");
@@ -957,9 +852,8 @@ fn emit_state_strategy_inner(
     Ok(())
 }
 
-/// Emit transition functions for a slice of handlers. #66 — the effect
-/// block inside each transition iterates the handler's lowered MIR body
-/// (see `rust_codegen_util::stmt_effect_triple`), not `op.effects`.
+/// Emit transition functions. Each effect block iterates the handler's
+/// lowered MIR body (`rust_codegen_util::stmt_effect_triple`), not `op.effects`.
 fn emit_transition_functions_for(
     out: &mut String,
     mir: &Mir,
@@ -972,7 +866,6 @@ fn emit_transition_functions_for(
     Ok(())
 }
 
-/// Emit per-(handler, property) preservation tests.
 /// True iff `rust` references the state field `name` as `s.<name>`,
 /// word-bounded so `s.total` doesn't match `s.total_supply`.
 fn references_field(rust: &str, name: &str) -> bool {
@@ -1005,14 +898,10 @@ fn emit_preservation_tests_for(
             continue;
         }
 
-        // Issue #67 item 3 — a property that reads a ghost (spec-only
-        // accumulator) is validated by the init-seeded `state_machine_sequence`
-        // harness, not the single-step `_preserves_` one. A ghost is a function
-        // of the handler history, so an *arbitrary* pre-state ghost value
-        // rarely satisfies the invariant and `arb_state` rejection sampling
-        // exhausts ("too many global rejects"). The sequence harness drives the
-        // property from `init`, where the ghost/real-state relationship holds
-        // and is maintained inductively — the semantically correct check.
+        // Ghost-reading properties are validated by the init-seeded sequence
+        // harness instead: a ghost is a function of handler history, so an
+        // arbitrary pre-state rarely satisfies the invariant and rejection
+        // sampling exhausts ("too many global rejects").
         if let Some(rust) = &prop.rust_expression {
             if spec.ghosts.iter().any(|g| references_field(rust, &g.name)) {
                 continue;
@@ -1022,9 +911,8 @@ fn emit_preservation_tests_for(
         for op_name in &prop.preserved_by {
             let op = handlers.iter().find(|o| &o.name == op_name).copied();
 
-            // Skip handlers not in the current account section (multi-account:
-            // preserved_by all expands to all handlers, but we only emit tests
-            // for handlers belonging to this account type).
+            // Multi-account: `preserved_by all` expands to all handlers; only
+            // emit for handlers in this account section.
             if op.is_none() {
                 continue;
             }
@@ -1033,9 +921,8 @@ fn emit_preservation_tests_for(
                 .map(|o| o.pre_status.as_deref() == Some("Uninitialized"))
                 .unwrap_or(false);
 
-            // v2.20 §S1.1: when the property is `forall <binder> : <T>, body`
-            // and the handler does NOT take a same-named param, bind
-            // <binder> via a fresh proptest variable so the post-assert
+            // `forall <binder>` with no same-named handler param: bind the
+            // binder via a fresh proptest variable so the post-assert
             // exercises a real value (not the silent `true` stub).
             let handler_takes_binder = match (&prop.per_slot, op) {
                 (Some(slot), Some(op)) => op
@@ -1054,7 +941,6 @@ fn emit_preservation_tests_for(
             out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
             out.push_str("    #[test]\n");
 
-            // Build the parameter list for proptest
             let mut param_parts = Vec::new();
             if is_init {
                 // For init handlers, use fixed zero state
@@ -1067,9 +953,8 @@ fn emit_preservation_tests_for(
                     param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
                 }
             }
-            // Bind the forall <binder> when no handler param shadows it.
-            // Reuse strategy_for_field so the binder's type drives the
-            // strategy (records → arb_<Name>(), primitives → range).
+            // Bind the forall binder when no handler param shadows it;
+            // strategy_for_field lets the binder's type drive the strategy.
             if let Some(slot) = &local_binder {
                 let strategy =
                     strategy_for_field(&slot.binder_type, spec, StrategyMode::Full, None)?;
@@ -1088,48 +973,35 @@ fn emit_preservation_tests_for(
                 param_parts.join(", ")
             ));
 
-            // v2.23 Slice 3: capture pre-state before the handler runs,
-            // then drive the post-assert with both `&pre` (for binary
-            // properties' `old(...)` substitution at codegen time, via
-            // `pre.x`) and `&post` (the mutated state). Pre-Slice-3 the
-            // pre-state was overwritten by `op(&mut s, ...)` before the
-            // assertion fired, so every preservation property with
-            // `old(...)` reported green on a tautology (`s.x cmp s.x`).
-            // The capture below is the load-bearing fix for finding 001.
+            // Capture pre-state before the handler runs so binary properties
+            // assert against real (pre, post) — without the capture,
+            // `old(...)` properties compare post to itself and pass on a
+            // tautology.
             if is_init {
                 out.push_str("        let mut post = State {\n");
                 for (fname, ftype) in mutable_fields {
                     if let Some(default) = default_value_for_field(ftype, spec) {
                         out.push_str(&format!("            {}: {},\n", fname, default));
                     }
-                    // No sensible default: skip — emitting a wrong-type
-                    // value would mask the issue. The struct-init E0063
-                    // diagnostic will point the user at the missing
-                    // field.
+                    // No sensible default: skip — the struct-init E0063
+                    // diagnostic points at the missing field.
                 }
-                // The `status` discriminator is added by emit_state_struct
-                // when has_lifecycle (≥2 states); seed it to the spec's
-                // declared initial state, not a hardcoded "Uninitialized".
+                // Seed `status` to the spec's declared initial state, not a
+                // hardcoded "Uninitialized".
                 if lifecycle_states.len() >= 2 {
                     if let Some(initial) = lifecycle_states.first() {
                         out.push_str(&format!("            status: Status::{},\n", initial));
                     }
                 }
                 out.push_str("        };\n");
-                // Init handlers conceptually have no pre-state; surface a
-                // synthetic `pre` that matches `post` so binary property
-                // assertions (`prop(&pre, &post)`) have a defined shape.
-                // A property with `old(...)` on an init handler is rare
-                // (pre-state is the zero state), but we keep the binding
-                // for codegen symmetry.
+                // Init handlers have no pre-state; bind a synthetic
+                // `pre = post` so binary assertions have a defined shape.
                 out.push_str("        let pre = post;\n");
             } else {
                 out.push_str("        let pre = s.clone();\n");
                 out.push_str("        let mut post = s;\n");
-                // Assume all declared (unary) properties hold pre-handler.
-                // Binary properties are skipped here — their `(pre, post)`
-                // signature has no single-state form, and asserting them
-                // against `(pre, pre)` is trivially true.
+                // Assume unary properties hold pre-handler. Binary ones are
+                // skipped — `(pre, pre)` would be trivially true.
                 for pre_prop in properties {
                     if pre_prop.expression.is_none() {
                         continue;
@@ -1164,7 +1036,6 @@ fn emit_preservation_tests_for(
                 );
             }
 
-            // Call transition and assert.
             let args: String = op
                 .map(|o| {
                     o.takes_params
@@ -1175,15 +1046,12 @@ fn emit_preservation_tests_for(
                 })
                 .unwrap_or_default();
             out.push_str(&format!("        if {}(&mut post{}) {{\n", op_name, args));
-            // v2.23 Slice 3: dispatch assertion arity on `prop.class`.
-            // - Unary, no per_slot: `<prop>(&post)`.
-            // - Unary, per_slot:    `<prop>_at(&post, binder)`.
-            // - Binary:             `<prop>(&pre, &post)` — the binary
-            //   signature emitted by the property predicate above. The
-            //   per_slot path is unary by construction (per_slot bodies
-            //   don't carry `old(...)`); a Binary × per_slot property
-            //   falls through to the non-per-slot binary form for v2.23
-            //   per PRD-v2.23 open question 4 (joint lowering deferred).
+            // Assertion arity dispatches on `prop.class`:
+            //   unary             → <prop>(&post)
+            //   unary + per_slot  → <prop>_at(&post, binder)
+            //   binary            → <prop>(&pre, &post); a Binary × per_slot
+            //   property falls through to the plain binary form (joint
+            //   lowering deferred).
             let is_binary_prop = prop.class == crate::check::PropertyClass::Binary;
             let assert_call = if is_binary_prop {
                 format!("{}(&pre, &post)", prop.name)
@@ -1206,14 +1074,11 @@ fn emit_preservation_tests_for(
     Ok(())
 }
 
-/// Emit one proptest per `(handler, invariant)` where the handler's spec
-/// carries `invariant Name` as a clause. The shape mirrors
-/// `emit_preservation_tests_for` for state-machine properties but
-/// (a) iterates the join from the handler side, since `handler.invariants`
-/// is where the relationship is stored, and (b) only emits when the
-/// invariant has a `rust_expr` body — description-only invariants and those
-/// whose body uses an unsupported quantifier (per
-/// `rust_expr_is_unsupported`) are skipped silently.
+/// One proptest per `(handler, invariant)` clause. Mirrors
+/// `emit_preservation_tests_for` but iterates from the handler side
+/// (`handler.invariants`) and only emits when the invariant has a
+/// `rust_expr` body — description-only / unsupported-quantifier invariants
+/// are skipped silently.
 fn emit_invariant_preservation_tests_for(
     out: &mut String,
     handlers: &[&ParsedHandler],
@@ -1234,11 +1099,8 @@ fn emit_invariant_preservation_tests_for(
             .chain(op.establishes.iter().map(|n| (n, true)))
             .collect();
         for (inv_name, is_establish) in pairs {
-            // Skip if no matching invariant decl (dangling reference)
-            // OR if the invariant has no rust body. The current account
-            // section's `linked_invs` filter ensures we only enter this
-            // branch when at least one handler links to a body-having
-            // invariant, but the per-handler join still needs the lookup.
+            // Skip dangling references — the section-level `linked_invs`
+            // filter doesn't cover the per-handler join.
             let Some(inv) = invariants.iter().find(|i| &i.name == inv_name) else {
                 continue;
             };
@@ -1288,10 +1150,7 @@ fn emit_invariant_preservation_tests_for(
                 out.push_str("        };\n");
             } else {
                 out.push_str("        let mut s = s;\n");
-                // `invariant X` (preserves): assume X pre-state.
-                // `establishes X`: skip the pre-assume — the handler is
-                // expected to establish X at post-state without it
-                // necessarily holding pre-state.
+                // preserves: assume X pre-state; establishes: no pre-assume.
                 if !is_establish {
                     out.push_str(&format!("        prop_assume!({}(&s));\n", inv.name));
                 }
@@ -1325,13 +1184,11 @@ fn emit_guard_tests(
     all_fields: &[(String, String)],
 ) {
     for op in guard_ops {
-        // Skip handlers whose only guards reference handler-account
-        // pubkeys — those clauses are filtered out by
-        // `collect_full_guard` (the proptest's simplified State drops
-        // Pubkey-typed fields), and falling back to `"true"` would
-        // emit `prop_assume!(!(true))` which always rejects → "Too
-        // many global rejects" test failure. Real guard checks still
-        // emit in the runtime Rust handler.
+        // Skip handlers whose only guards reference handler-account pubkeys —
+        // `collect_full_guard` filters those clauses (the simplified State
+        // drops Pubkey fields), and a `"true"` fallback would emit
+        // `prop_assume!(!(true))` → always rejects → "Too many global
+        // rejects". Real guard checks still emit in the runtime handler.
         let Some(rust_guard) = rust_codegen_util::collect_full_guard(op, true) else {
             continue;
         };
@@ -1348,10 +1205,9 @@ fn emit_guard_tests(
             let boundary = boundary_strategy_for_type(ptype);
             param_parts.push(format!("{} in {}", pname, boundary));
         }
-        // v2.29 Slice A (#8) — abstract binders: same strategy
-        // shape as takes_params. The `requires` clauses (which can
-        // reference the binder) are negated in the prop_assume below
-        // so the harness explores values that would reject.
+        // Abstract binders: same strategy shape as takes_params; `requires`
+        // clauses referencing the binder are negated in the prop_assume
+        // below so the harness explores rejecting values.
         for (binder_name, binder_ty) in &op.abstract_binders {
             let boundary = boundary_strategy_for_type(binder_ty);
             param_parts.push(format!("{} in {}", binder_name, boundary));
@@ -1405,10 +1261,8 @@ fn emit_overflow_tests_for(
             if kind != "add" {
                 continue;
             }
-            // v2.24 S5d — strip variant prefix so `Active.balance`
-            // resolves to `balance` for the flat-State proptest model
-            // (both in the generated function name and the field
-            // lookup).
+            // Strip variant prefix so `Active.balance` resolves to `balance`
+            // for the flat-State model (fn name + field lookup).
             let field_owned =
                 rust_codegen_util::strip_variant_prefix_for_flat_state(&field_raw, spec);
             let field = field_owned.as_str();
@@ -1485,7 +1339,6 @@ fn emit_sequence_test_for(
     lifecycle_states: &[String],
     spec: &ParsedSpec,
 ) -> Result<()> {
-    // Emit an Operation enum
     out.push_str("#[derive(Debug, Clone)]\n");
     out.push_str("enum Op {\n");
     for op in handlers {
@@ -1510,7 +1363,6 @@ fn emit_sequence_test_for(
     }
     out.push_str("}\n\n");
 
-    // Strategy for Op
     out.push_str("fn arb_op() -> impl Strategy<Value = Op> {\n");
     out.push_str("    prop_oneof![\n");
     for op in handlers {
@@ -1526,14 +1378,9 @@ fn emit_sequence_test_for(
                 })
                 .collect::<Result<Vec<_>>>()?;
             let names: Vec<&str> = op.takes_params.iter().map(|(n, _)| n.as_str()).collect();
-            // proptest's `Strategy` trait is implemented for tuples up to
-            // arity 12 only. Handlers with >12 args (Anchor handlers
-            // commonly hit this — RfpCreate-style init handlers in
-            // brownfield specs are typical) overflow that bound and emit
-            // E0599 "method `prop_map` exists but trait bounds not
-            // satisfied". Chunk strategies into sub-tuples of ≤12 and
-            // destructure with a nested pattern so any arity stays
-            // well-formed.
+            // proptest's tuple `Strategy` impl caps at arity 12; >12-arg
+            // handlers (common for brownfield init handlers) hit E0599.
+            // Chunk into sub-tuples of ≤12 with nested destructuring.
             const MAX_PROPTEST_TUPLE_ARITY: usize = 12;
             if op.takes_params.len() == 1 {
                 out.push_str(&format!(
@@ -1570,7 +1417,6 @@ fn emit_sequence_test_for(
     out.push_str("    ]\n");
     out.push_str("}\n\n");
 
-    // Apply function
     out.push_str("fn apply_op(s: &mut State, op: &Op) -> bool {\n");
     out.push_str("    match op {\n");
     for op in handlers {
@@ -1595,12 +1441,9 @@ fn emit_sequence_test_for(
     out.push_str("    }\n");
     out.push_str("}\n\n");
 
-    // Assert all properties.
-    // v2.23 Slice 3: only unary properties — binary properties (those
-    // containing `old(...)`) have a `(pre, post)` signature that this
-    // single-state aggregate can't satisfy. Per-handler preservation
-    // tests cover the binary ones via their own `let pre = s.clone()`
-    // capture in `emit_preservation_tests_for`.
+    // assert_all_properties: unary only — binary `(pre, post)` signatures
+    // can't be satisfied by this single-state aggregate; per-handler
+    // preservation tests cover them.
     out.push_str("fn assert_all_properties(s: &State, context: &str) {\n");
     for prop in properties {
         if prop.expression.is_none() {
@@ -1626,7 +1469,6 @@ fn emit_sequence_test_for(
     let has_lifecycle = !lifecycle_states.is_empty();
     let initial_state = lifecycle_states.first().cloned();
 
-    // Emit lifecycle enum if needed
     if has_lifecycle {
         out.push_str("#[derive(Debug, Clone, Copy, PartialEq)]\n");
         out.push_str("enum Lifecycle {\n");
@@ -1635,7 +1477,6 @@ fn emit_sequence_test_for(
         }
         out.push_str("}\n\n");
 
-        // Lifecycle transition function
         out.push_str(
             "fn lifecycle_transition(current: Lifecycle, op: &Op) -> Option<Lifecycle> {\n",
         );
@@ -1661,13 +1502,11 @@ fn emit_sequence_test_for(
         out.push_str("}\n\n");
     }
 
-    // All properties with expressions
     let all_props: Vec<&ParsedProperty> = properties
         .iter()
         .filter(|p| p.expression.is_some())
         .collect();
 
-    // The sequence test
     let seq_len = 20;
     out.push_str("proptest! {\n");
     out.push_str("    #![proptest_config(ProptestConfig::with_cases(256))]\n");
@@ -1677,10 +1516,8 @@ fn emit_sequence_test_for(
         seq_len
     ));
 
-    // Start from a valid initial state. Type-aware defaults: arrays get
-    // [<inner>; N], records get <Name>::default(), primitives get 0. The
-    // status discriminator (if has_lifecycle) seeds to the spec's first
-    // declared lifecycle state.
+    // Seed a valid initial state via type-aware defaults; `status` seeds to
+    // the spec's first declared lifecycle state.
     out.push_str("        let mut s = State {\n");
     for (fname, ftype) in mutable_fields {
         if let Some(default) = default_value_for_field(ftype, spec) {
@@ -1733,7 +1570,6 @@ fn emit_sequence_test_for(
         }
     }
 
-    // Check all properties after each successful transition
     out.push_str("                // Check all properties after each successful transition\n");
     if !all_props.is_empty() {
         for prop in &all_props {
@@ -1792,11 +1628,9 @@ mod tests {
         }
     }
 
-    /// v2.24 S5d — proptest's overflow-detection test name no longer
-    /// embeds the variant prefix. Without the strip, `Active.balance`
-    /// would yield an invalid Rust function identifier
-    /// `deposit_no_overflow_on_Active.balance`. Pre-fix, this was the
-    /// canonical failure mode that surfaced the gap.
+    /// Overflow-test names must strip the variant prefix — `Active.balance`
+    /// would otherwise yield the invalid fn identifier
+    /// `deposit_no_overflow_on_Active.balance`.
     #[test]
     fn overflow_test_name_strips_variant_prefix_for_flat_state() {
         let src = r#"spec Vault
@@ -1866,9 +1700,9 @@ property balance_nonneg :
 
     #[test]
     fn strategy_for_field_map_of_primitive_emits_vec_with_try_into() {
-        // v2.6.2 bug: `Map[4] U64` fell through `strategy_for_type` and emitted
-        // `0[u64; 4]..=u64::MAX[u64; 4]` (pattern-splicing the Rust type into
-        // a range literal). v2.7 G1 routes through vec-with-prop_map.
+        // Regression: `Map[4] U64` once fell through `strategy_for_type` and
+        // emitted `0[u64; 4]..=u64::MAX[u64; 4]`; must route through
+        // vec-with-prop_map.
         let spec = ParsedSpec {
             constants: vec![("N".to_string(), "4".to_string())],
             ..ParsedSpec::default()
@@ -1886,8 +1720,8 @@ property balance_nonneg :
 
     #[test]
     fn strategy_for_field_record_routes_to_arb_name() {
-        // Percolator case: `Map[MAX_ACCOUNTS] Account` should route through
-        // arb_Account() not `0u64..=u64::MAX`.
+        // `Map[N] Account` must route through arb_Account(), not
+        // `0u64..=u64::MAX`.
         let src = r#"spec T
 const N = 4
 type Account = { active : U8, capital : U128 }
@@ -1907,10 +1741,8 @@ handler noop { }
 
     #[test]
     fn strategy_for_field_unit_sum_routes_to_arb_name() {
-        // ParsedSpec fixture because the adapter only populates `sum_types`
-        // for sum types referenced as `Map[N] <SumName>`, not for top-level
-        // unit-variant sums. The strategy logic works off the field, so we
-        // test it in isolation.
+        // ParsedSpec fixture: the adapter only populates `sum_types` for
+        // `Map[N] <SumName>` references, so test the strategy in isolation.
         let spec = spec_with_unit_sum("Status", &["Open", "Closed", "Cancelled"]);
         let s = strategy_for_field("Status", &spec, StrategyMode::Full, None).unwrap();
         assert_eq!(s, "arb_Status()");
@@ -1976,9 +1808,8 @@ handler noop { }
 
     #[test]
     fn emit_unit_sum_skips_payload_variants() {
-        // A sum type with at least one payload-carrying variant isn't eligible
-        // for the unit-enum path — it'd need a real variant-aware strategy
-        // (v2.7 G2). Confirm the skip.
+        // Payload-carrying sums aren't eligible for the unit-enum path —
+        // they'd need a variant-aware strategy. Confirm the skip.
         let spec = ParsedSpec {
             sum_types: vec![ParsedSumType {
                 name: "State".to_string(),
@@ -2012,11 +1843,10 @@ handler noop { }
     }
 
     // ========================================================================
-    // v2.23 Slice 3 — pre/post preservation harness shape
+    // Pre/post preservation harness shape
     // ========================================================================
 
-    /// Helper: parse a spec and emit its full account section to a string.
-    /// Used by Slice 3 tests to verify the generated harness shape.
+    /// Parse a spec and emit its full account section to a string.
     fn emit_test_section(src: &str) -> String {
         let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
         let mir = crate::mir::lower(&spec);
@@ -2066,10 +1896,8 @@ property settled_monotonic :
 
     #[test]
     fn binary_property_fn_has_pre_post_signature() {
-        // The binary property `settled_monotonic` must emit:
-        //   fn settled_monotonic(pre: &State, post: &State) -> bool { ... }
-        // Pre-v2.23 it emitted `fn settled_monotonic(s: &State) -> bool { s.settled >= s.settled }`
-        // — a structural tautology.
+        // Binary property must emit fn(pre: &State, post: &State) — the
+        // single-state form was a structural tautology.
         let out = emit_test_section(BINARY_PROP_SPEC);
         assert!(
             out.contains("fn settled_monotonic(pre: &State, post: &State) -> bool"),
@@ -2085,8 +1913,8 @@ property settled_monotonic :
 
     #[test]
     fn binary_property_body_uses_post_and_pre_not_s() {
-        // The body must reference `post.settled` and `pre.settled`, not
-        // `s.settled >= s.settled` (the pre-v2.23 tautology).
+        // Body must reference `post.settled` and `pre.settled`, not the
+        // `s.settled >= s.settled` tautology.
         let out = emit_test_section(BINARY_PROP_SPEC);
         let body_start = out.find("fn settled_monotonic(pre").unwrap_or(0);
         let body_end = out[body_start..]
@@ -2115,8 +1943,7 @@ property settled_monotonic :
 
     #[test]
     fn unary_property_fn_keeps_single_state_signature() {
-        // Unary properties stay `fn p(s: &State) -> bool` — Slice 3 is
-        // purely additive on the binary path; unary callers see no diff.
+        // Unary properties stay `fn p(s: &State) -> bool`.
         let out = emit_test_section(BINARY_PROP_SPEC);
         assert!(
             out.contains("fn balance_nonneg(s: &State) -> bool"),
@@ -2127,16 +1954,11 @@ property settled_monotonic :
 
     #[test]
     fn assert_all_properties_skips_binary() {
-        // The aggregate predicate `assert_all_properties` is the wrong
-        // shape for binary properties (no single-state form). Slice 3
-        // skips them with a documentation comment.
+        // assert_all_properties is the wrong shape for binary properties.
         let out = emit_test_section(BINARY_PROP_SPEC);
-        // Find the assert_all_properties body (it lives outside
-        // emit_account_section, in emit_sequence_test_for — so it won't
-        // appear in this fragment). We only assert that this section's
-        // body doesn't try to call settled_monotonic with a single arg.
-        // The aggregate fn is exercised separately via the full generate
-        // path; this test pins the section-level shape.
+        // assert_all_properties lives in emit_sequence_test_for, outside this
+        // fragment — only pin that the section never calls settled_monotonic
+        // with a single arg.
         assert!(
             !out.contains("settled_monotonic(s)"),
             "binary property must not be called with single state; got:\n{}",
@@ -2146,9 +1968,8 @@ property settled_monotonic :
 
     #[test]
     fn preservation_test_captures_pre_state() {
-        // Each `<op>_preserves_<prop>` test must emit
-        // `let pre = s.clone();` before the handler call, so the
-        // post-assertion has both states in scope.
+        // Each preservation test must capture `let pre = s.clone();` before
+        // the handler call so the post-assertion has both states in scope.
         let out = emit_test_section(BINARY_PROP_SPEC);
         let test_start = out
             .find("fn bump_preserves_settled_monotonic")
@@ -2182,8 +2003,7 @@ property settled_monotonic :
 
     #[test]
     fn preservation_test_unary_assertion_uses_post() {
-        // Unary property preservation must call `<prop>(&post)`, not
-        // `<prop>(&s)` — the rename keeps the harness consistent.
+        // Unary post-assert must call `<prop>(&post)`, not `<prop>(&s)`.
         let out = emit_test_section(BINARY_PROP_SPEC);
         let test_start = out
             .find("fn bump_preserves_balance_nonneg")

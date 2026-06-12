@@ -1,18 +1,10 @@
-//! qedgen Anchor/Quasar/Pinocchio program codegen — the MIR consumer.
-//! Sole Rust-codegen path since v2.32 deleted the legacy
-//! `codegen::generate`. Highest blast radius of any qedgen codegen —
-//! the output (`lib.rs`, `state.rs`, `errors.rs`, `events.rs`,
-//! `instructions/<handler>.rs`, `guards.rs`, `math.rs`, `Cargo.toml`)
-//! is the actual Solana program users compile and deploy.
-//!
-//! Consumes `mir::Mir` + the originating `ParsedSpec` + spec path. The
-//! effect-body emission is MIR-direct; the account-constraint / guard /
-//! framework-scaffold surface (`generate_guards`, `FrameworkSurface`,
-//! the Pinocchio scaffold, SPL CPI dispatch) is read from `ParsedSpec`
-//! via the shared [`crate::codegen_shared`] helpers — that data is
-//! account/predicate surface, not effect-body `Stmt` IR, so it stays
-//! `ParsedSpec`-based by design. Gated by `tests/codegen_snapshot.rs`
-//! (text) + `tests/codegen_smoke.rs` (the generated crates `cargo build`).
+//! Anchor/Quasar/Pinocchio program codegen — the sole Rust-codegen path,
+//! consuming `mir::Mir` + the originating `ParsedSpec`. Highest blast radius
+//! of any qedgen codegen: the output is the program users compile and deploy.
+//! Effect-body emission is MIR-direct; the account-constraint / guard /
+//! scaffold surface stays `ParsedSpec`-based via [`crate::codegen_shared`]
+//! (account/predicate surface, not effect-body `Stmt` IR). Gated by
+//! `tests/codegen_snapshot.rs` (text) + `tests/codegen_smoke.rs` (build).
 
 use anyhow::Result;
 use std::path::Path;
@@ -21,12 +13,8 @@ use crate::check::ParsedSpec;
 use crate::mir::Mir;
 use crate::Target;
 
-/// Generate the Anchor/Quasar/Pinocchio program code under
-/// `output_dir`, consuming a pre-lowered `Mir` + the originating
-/// `ParsedSpec` + the spec path (the latter needed by the instruction
-/// emitter's drift-stamping logic). Emits each sub-generator MIR-direct,
-/// reading the account-constraint / guard / scaffold surface from the
-/// shared `codegen_shared` helpers.
+/// Generate the program crate under `output_dir`. `spec_path` feeds the
+/// instruction emitter's drift stamping.
 pub fn generate(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -40,8 +28,6 @@ pub fn generate(
 
     crate::rust_codegen_util::check_effect_targets(parsed)?;
 
-    // Project initialization check (mirrors `codegen::generate` line
-    // 5250).
     if crate::init::find_qed_dir(spec_path).is_none() {
         anyhow::bail!(
             "No .qed/ directory found next to {} — run `qedgen init` first.",
@@ -53,36 +39,20 @@ pub fn generate(
 
     let fp = crate::fingerprint::compute_fingerprint(parsed);
 
-    // Sub-generator dispatch — same order as `codegen::generate`
-    // (lines 5261–5280). Each delegated call gets its MIR-direct
-    // port in a later Phase 4 slice.
-    // Phase 4e — MIR-direct port.
     emit_lib(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4f — MIR-direct port.
     emit_state(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4b/3 — MIR-direct port.
     emit_events(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4c/1 — MIR-direct port.
     emit_errors(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4h — MIR-direct port.
     emit_instructions(mir, parsed, &fp, spec_path, output_dir, target)?;
-    // Guards read `ParsedSpec` directly via the shared helper:
-    // `generate_guards` emits per-handler `requires` / `effects` /
-    // `auth` / `status` checks from `ParsedHandler` account-constraint
-    // surface (signer/writable flags, pda_seeds, variant-payload
-    // fields) — that's not effect-body `Stmt` IR, so it stays
-    // ParsedSpec-based by design (see `codegen_shared`).
+    // Guards stay ParsedSpec-based: they render account-constraint surface
+    // (signer/writable flags, pda_seeds, variant-payload fields), not
+    // effect-body `Stmt` IR (see `codegen_shared`).
     crate::codegen_shared::generate_guards(parsed, &fp, output_dir, target)?;
-    // `generate_math` is fully deterministic (no spec read); the
-    // `guards_use_math_helpers` predicate gates whether to emit it.
     if crate::codegen_shared::guards_use_math_helpers(parsed) {
         emit_math(&fp, output_dir)?;
     }
-    // Phase 4c/2 — MIR-direct port.
     emit_ref_impls(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4d — MIR-direct port.
     emit_imported_mirror(mir, parsed, &fp, output_dir, target)?;
-    // Phase 4b/1 — MIR-direct port.
     emit_cargo_toml(mir, &fp, output_dir, target)?;
 
     let file_count = 4
@@ -99,24 +69,9 @@ pub fn generate(
 // Sub-generators — Phase 4b ports
 // ----------------------------------------------------------------------
 
-/// Emit `Cargo.toml` for the generated Anchor/Quasar program crate.
-/// MIR-direct port of `codegen::generate_cargo_toml` +
-/// `render_qedgen_cargo_toml`. The on-disk merge logic
-/// (`merge_cargo_toml`) stays in `codegen.rs` as `pub(crate)` — it's
-/// pure text manipulation with no spec dependency.
-///
-/// Reads from MIR:
-///   * `Mir.name` → `[package] name = "<lowercase-with-dashes>"`
-///   * `needs_spl` predicate (mirrors legacy `render_qedgen_cargo_toml`
-///     line ~4996–5000):
-///     - any handler account with `AccountKind::Token` / `Mint`
-///     - any `Stmt::TokenTransfer` in any handler body
-///     - any `Stmt::Cpi` whose `target` references the `Token`
-///       interface
-///
-/// The Cargo.toml content is byte-identical to legacy output — same
-/// fingerprint hash, same `anchor-lang = "0.32.1"` / `anchor-spl`
-/// pins, same `qedgen-macros` git tag, same `[workspace]` footer.
+/// Emit `Cargo.toml` for the generated program crate. `mir_needs_spl`
+/// gates the SPL dependency; an existing on-disk Cargo.toml is merged
+/// via `merge_cargo_toml` rather than overwritten.
 fn emit_cargo_toml(
     mir: &Mir,
     fp: &crate::fingerprint::SpecFingerprint,
@@ -178,9 +133,9 @@ fn render_cargo_toml(
             }
         }
         Target::Pinocchio => {
-            // Greenfield Pinocchio scaffold (slice 6, §12c). pinocchio
-            // (entrypoint + AccountInfo), pinocchio-pubkey (declare_id!),
-            // zeropod (zero-copy state); pinocchio-token only for Token CPIs.
+            // pinocchio (entrypoint + AccountInfo), pinocchio-pubkey
+            // (declare_id!), zeropod (zero-copy state); pinocchio-token
+            // only for Token CPIs.
             out.push_str("pinocchio = \"0.8\"\n");
             out.push_str("pinocchio-pubkey = \"0.3\"\n");
             out.push_str("zeropod = \"0.1\"\n");
@@ -194,37 +149,18 @@ fn render_cargo_toml(
         qedgen_version
     ));
 
-    // Self-contained workspace footer — mirrors legacy line ~5046–5052.
+    // Empty [workspace] keeps the crate out of any parent workspace.
     out.push_str("\n[workspace]\n");
 
     out
 }
 
-/// Emit `src/lib.rs` — the `#[program] pub mod` entry with one
-/// `pub fn` per handler dispatching to `ctx.accounts.handler(...)`.
-/// Idempotent: if `src/lib.rs` already exists, the call is a no-op
-/// (matches legacy line 714–722) so user-stamped imports / extra
-/// modules survive regeneration. MIR-direct port of
-/// `codegen::generate_lib`.
-///
-/// Reads from MIR:
-///   * `Mir.name` → program mod name (lowercased) + crate root.
-///   * `mir.handlers[*].name` / `.doc` → per-handler fn emission.
-///   * `mir.events.is_empty()` / `mir.errors.variants.is_empty()` /
-///     `mir.ref_impls.is_empty()` → mod re-export gating.
-///   * `mir.imports.values().any(...)` → `pub mod imported;` gate.
-///
-/// Falls back to `parsed` for:
-///   * `program_id` (top-level `Option<String>` not in MIR).
-///   * `type_aliases` (for Fin alias resolution on Quasar param
-///     types).
-///   * `ParsedHandler.has_bumps()` / `.takes_params` / `.accounts`
-///     (the per-handler dispatch + Anchor token/mint detection
-///     walk ParsedHandler fields directly).
-///   * `render_handler_accounts_struct` (600+ LoC Anchor helper
-///     that owns the `#[derive(Accounts)]` struct emission;
-///     promoted to `pub(crate)`, still consumes `ParsedSpec` /
-///     `ParsedHandler` directly).
+/// Emit `src/lib.rs` — the `#[program]` mod with one `pub fn` per handler
+/// dispatching to `ctx.accounts.handler(...)`. No-op if `src/lib.rs`
+/// already exists (user-owned: stamped imports / extra modules survive
+/// regeneration). Falls back to `parsed` for `program_id`, `type_aliases`
+/// (Quasar Fin params), per-handler bumps/params/accounts, and the Anchor
+/// `#[derive(Accounts)]` emission (`render_handler_accounts_struct`).
 fn emit_lib(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -234,10 +170,8 @@ fn emit_lib(
 ) -> Result<()> {
     use crate::codegen_shared::{to_pascal_case, FrameworkSurface};
 
-    // Pinocchio is MIR-only: emit via the dedicated shared helper (NOT
-    // the legacy generate_lib pipeline, which doesn't route Pinocchio).
-    // The helper emits the no_std entrypoint + byte-dispatch from
-    // ParsedSpec (slice 6, §12b).
+    // Pinocchio: dedicated helper emits the no_std entrypoint +
+    // byte-dispatch from ParsedSpec.
     if matches!(target, Target::Pinocchio) {
         return crate::codegen_shared::emit_pinocchio_program_lib(parsed, fp, output_dir);
     }
@@ -316,10 +250,8 @@ fn emit_lib(
     ));
     out.push_str("    use super::*;\n\n");
 
-    // Per-handler fn emission. Iterates `mir.handlers` (typed
-    // structure) but reads `parsed.handlers` by index for the
-    // `has_bumps()` / `takes_params` / `type_aliases` Fin-resolution
-    // details that consume ParsedHandler directly.
+    // Iterate `mir.handlers`; the matching `ParsedHandler` supplies
+    // bumps / params / Fin-resolution details.
     for (i, handler) in mir.handlers.iter().enumerate() {
         let parsed_handler = parsed
             .handlers
@@ -400,10 +332,8 @@ fn emit_lib(
 
     out.push_str("}\n");
 
-    // Anchor: emit `#[derive(Accounts)]` structs at crate root via
-    // legacy `render_handler_accounts_struct` (600+ LoC helper that
-    // consumes ParsedSpec / ParsedHandler extensively — porting it
-    // is a separately-trackable cleanup).
+    // Anchor: `#[derive(Accounts)]` structs at crate root
+    // (`render_handler_accounts_struct` consumes ParsedSpec directly).
     if matches!(target, Target::Anchor) {
         let is_multi = parsed.account_types.len() > 1;
         let default_state_name = format!("{}Account", to_pascal_case(&mir.name));
@@ -427,8 +357,8 @@ fn emit_lib(
         if !imports.is_empty() {
             out.push_str(&imports);
         }
-        // Render the `#[derive(Accounts)]` structs first so we can detect
-        // which Anchor wrapper types they reference.
+        // Render structs first to detect which Anchor wrapper types they
+        // reference.
         let mut structs = String::new();
         for handler in &parsed.handlers {
             structs.push('\n');
@@ -441,16 +371,11 @@ fn emit_lib(
                 target,
             ));
         }
-        // Disambiguate user state types that collide with an Anchor prelude
-        // wrapper name. A spec may declare e.g. `type Account = { … }`
-        // (percolator), which lands as `pub struct Account` in
-        // `crate::state` and — glob-imported here alongside
-        // `anchor_lang::prelude::*` — makes the `Account<'info, _>` wrapper
-        // an ambiguous name (a hard error under `ambiguous_glob_imports`,
-        // which is deny-by-default on current stable). Re-importing the
-        // colliding wrapper(s) explicitly forces the prelude type to win
-        // (an explicit `use` outranks glob imports). Scoped to actual
-        // collisions so non-colliding specs are unaffected.
+        // A user state type (e.g. `type Account = { … }`) glob-imported
+        // alongside `anchor_lang::prelude::*` makes the same-named wrapper
+        // ambiguous (hard error under deny-by-default
+        // `ambiguous_glob_imports`). An explicit `use` outranks globs, so
+        // re-import the colliding wrapper(s); scoped to actual collisions.
         const ANCHOR_WRAPPERS: &[&str] = &[
             "Account",
             "Signer",
@@ -496,19 +421,10 @@ fn emit_lib(
     Ok(())
 }
 
-/// Emit `src/instructions/mod.rs` + per-handler
-/// `src/instructions/<name>.rs` scaffold files. MIR-direct port of
-/// `codegen::generate_instructions` (77L entry — the per-handler
-/// emit body lives in `render_handler_scaffold`, a 600+ LoC helper
-/// promoted to `pub(crate)` and called unchanged).
-///
-/// Per-handler `<name>.rs` files are USER-OWNED — emitted only when
-/// missing. The `mod.rs` re-exporter is always regenerated.
-///
-/// Reads from MIR for iteration (`mir.handlers[*].name`); falls back
-/// to `parsed` for the per-handler scaffold body
-/// (`ParsedHandler` carries the accounts / effects / auth /
-/// transition / takes_params data the scaffold renders).
+/// Emit `src/instructions/mod.rs` + per-handler `<name>.rs` scaffolds.
+/// Per-handler files are USER-OWNED — emitted only when missing; mod.rs
+/// is always regenerated. Scaffold bodies render from the matching
+/// `ParsedHandler`.
 fn emit_instructions(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -549,15 +465,11 @@ fn emit_instructions(
     mod_out.push_str("// ---- END GENERATED ----\n");
     std::fs::write(instr_dir.join("mod.rs"), &mod_out)?;
 
-    // Read spec source once for spec_hash attributes (handles both
-    // single-file and multi-file specs).
+    // Spec source for spec_hash attributes (single- and multi-file specs).
     let spec_src = crate::check::read_spec_source(spec_path).unwrap_or_default();
     let spec_attr = crate::codegen_shared::relative_spec_path(spec_path, output_dir);
 
     // Per-handler scaffold files (user-owned — skipped if existing).
-    // Iteration source is `mir.handlers` for the name; the matching
-    // `ParsedHandler` is what `render_handler_scaffold` actually
-    // consumes (per-handler accounts / effects / requires walk).
     for handler_mir in &mir.handlers {
         let handler = parsed
             .handlers
@@ -584,8 +496,7 @@ fn emit_instructions(
         }
 
         // Pinocchio uses a dedicated scaffold (struct of &AccountInfo +
-        // process_<name> wrapper + .handler()); the Anchor/Quasar
-        // Context-based render_handler_scaffold doesn't apply (slice 6 §12b).
+        // process_<name> wrapper); the Context-based scaffold doesn't apply.
         let out = if matches!(target, Target::Pinocchio) {
             crate::codegen_shared::render_pinocchio_handler_scaffold(handler, parsed)?
         } else {
@@ -605,25 +516,14 @@ fn emit_instructions(
     Ok(())
 }
 
-/// Emit `src/state.rs` — `#[account]` data structures for the
-/// program's persisted state. MIR-direct port of
-/// `codegen::generate_state` (328L).
-///
+/// Emit `src/state.rs` — `#[account]` structs for persisted state.
 /// Dispatches three shapes:
-///   1. **Multi-account** (`mir.account_states.len() > 1`): one
-///      `<Name>Account` `#[account]` struct per account_type, with
-///      optional `<Name>Status` enum.
-///   2. **Multi-variant ADT (Anchor only, WrongState-gated)**:
-///      wrapper-struct + inner-enum pair, with Slice B accessor
-///      methods for fields shared across variants.
-///   3. **Flat single-account**: `<Name>Account` struct from
-///      `spec.state_fields` with optional bump / status fields +
-///      lifecycle `Status` enum.
-///
-/// Reads from MIR for structure (`mir.name`, `mir.account_states`),
-/// from `parsed` for compound shapes not yet lifted into MIR
-/// (`records`, `state_fields`, `lifecycle_states`, `pdas`, per-
-/// account `pda_ref`).
+///   1. **Multi-account**: one `<Name>Account` struct per account_type,
+///      with optional `<Name>Status` enum.
+///   2. **Multi-variant ADT (Anchor only)**: wrapper-struct + inner-enum
+///      pair, with accessors for fields shared across variants.
+///   3. **Flat single-account**: `<Name>Account` from `state_fields` with
+///      optional bump / status fields + lifecycle `Status` enum.
 fn emit_state(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -636,8 +536,7 @@ fn emit_state(
         FrameworkSurface,
     };
 
-    // Pinocchio is MIR-only: emit zeropod zero-copy state via the
-    // dedicated shared helper (NOT the legacy generate_state pipeline).
+    // Pinocchio: zeropod zero-copy state via the dedicated helper.
     if matches!(target, Target::Pinocchio) {
         let src_dir = output_dir.join("src");
         std::fs::create_dir_all(&src_dir)?;
@@ -662,10 +561,9 @@ fn emit_state(
     out.push_str(surface.prelude_import);
     out.push('\n');
 
-    // Records first — emitted as `#[repr(C)]` structs with target-
-    // specific derives. Anchor needs Borsh + InitSpace for the
-    // `#[account]` outer struct's space calculation; Quasar needs
-    // Pod-companion type mapping for zero-copy alignment.
+    // Records first. Anchor needs Borsh + InitSpace for the outer struct's
+    // space calculation; Quasar needs Pod-companion types for zero-copy
+    // alignment.
     for record in &parsed.records {
         out.push_str("#[repr(C)]\n");
         let derives = match target {
@@ -685,9 +583,7 @@ fn emit_state(
     }
 
     if is_multi {
-        // Multi-account: iterate `mir.account_states` for structure;
-        // pda_ref is on ParsedAccountType so look up the matching
-        // parsed entry by name.
+        // pda_ref lives on ParsedAccountType — look up by name.
         for (idx, acct_mir) in mir.account_states.iter().enumerate() {
             let acct = parsed
                 .account_types
@@ -742,8 +638,7 @@ fn emit_state(
             }
         }
     } else if is_multi_variant_adt_state_pub(parsed) && matches!(target, Target::Anchor) {
-        // Multi-variant ADT (Anchor only, WrongState-gated):
-        // wrapper struct + inner enum + Slice B accessors.
+        // Multi-variant ADT: wrapper struct + inner enum + accessors.
         let state_name = format!("{}Account", to_pascal_case(&mir.name));
         let inner_name = format!("{}Inner", state_name);
         let acct = &parsed.account_types[0];
@@ -784,7 +679,7 @@ fn emit_state(
         }
         out.push_str("}\n\n");
 
-        // Slice B accessors for fields shared across variants.
+        // Accessors for fields shared (with consistent type) across variants.
         let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
             std::collections::BTreeMap::new();
         for variant in &acct.variants {
@@ -881,22 +776,10 @@ fn emit_state(
 }
 
 /// Emit `src/imported/<ns>.rs` mirror files + `src/imported/mod.rs`
-/// re-export aggregator. MIR-direct port of
-/// `codegen::generate_imported_mirror`.
-///
-/// Iteration source is `mir.imports: BTreeMap<Symbol,
-/// ImportedSpecMir>` (Phase 1c-7 unified imports). Each
-/// `ImportedSpecMir.account_types` / `.records` is
-/// `Vec<ParsedAccountType>` / `Vec<ParsedRecordType>` directly —
-/// MIR mirrors the parsed shapes verbatim, so iteration is a 1:1
-/// translation. `dep_key` extraction goes through the
-/// `ImportOrigin` enum (`Builtin(k)` / `File(k)` both wrap a key;
-/// `Inline` has no source artifact and never produces a mirror).
-///
-/// Tier-0 stubs (SPL Token, System Program, Metaplex bundled) have
-/// `account_types.is_empty()` and skip both the per-namespace file
-/// and the mod.rs re-export (matches legacy line ~1296–1302 +
-/// 1505–1509 gating).
+/// re-export aggregator. Iterates `mir.imports` (BTreeMap — deterministic
+/// order). `Inline` origins have no source artifact and never produce a
+/// mirror; Tier-0 stubs (bundled SPL/System/Metaplex) have empty
+/// `account_types` and are skipped entirely.
 fn emit_imported_mirror(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -904,7 +787,6 @@ fn emit_imported_mirror(
     output_dir: &Path,
     target: Target,
 ) -> Result<()> {
-    // Early exit when no imported namespace carries account_types.
     if !mir
         .imports
         .values()
@@ -916,9 +798,8 @@ fn emit_imported_mirror(
     let (prelude_import, explicit_account_discriminator): (&str, bool) = match target {
         Target::Anchor => ("use anchor_lang::prelude::*;\n", false),
         Target::Quasar => ("use quasar_lang::prelude::*;\n", true),
-        // Imported account-type mirrors need the zeropod decode shape for
-        // Pinocchio (slice 6 follow-on); not emitted yet. Fail cleanly
-        // instead of panicking. Inline the interface, or use Anchor/Quasar.
+        // Pinocchio mirrors need a zeropod decode shape that isn't emitted
+        // yet; fail cleanly.
         Target::Pinocchio => anyhow::bail!(
             "imported account-type mirrors are not yet supported for the \
              Pinocchio target. Inline the interface's account types into the \
@@ -930,8 +811,6 @@ fn emit_imported_mirror(
     let imported_dir = src_dir.join("imported");
     std::fs::create_dir_all(&imported_dir)?;
 
-    // Per-namespace file emission. BTreeMap order is sorted by
-    // alias for deterministic output.
     for (local_name, imp) in &mir.imports {
         if imp.account_types.is_empty() {
             continue;
@@ -939,10 +818,8 @@ fn emit_imported_mirror(
         let dep_key = match &imp.origin {
             crate::mir::ImportOrigin::Builtin(k) | crate::mir::ImportOrigin::File(k) => k.clone(),
             crate::mir::ImportOrigin::Inline => {
-                // Inline interface — no source artifact + already
-                // gated out by `account_types.is_empty()` above
-                // (inline blocks never declare account_types). Skip
-                // defensively.
+                // No source artifact; already gated by the empty
+                // account_types check above. Skip defensively.
                 continue;
             }
         };
@@ -978,9 +855,8 @@ fn emit_imported_mirror(
             out.push_str("}\n\n");
         }
 
-        // Account types — single-variant flat struct or multi-
-        // variant wrapper+inner enum, mirroring `generate_state`'s
-        // dispatch shape.
+        // Account types — flat struct or multi-variant wrapper+inner enum,
+        // mirroring `emit_state`'s dispatch shape.
         for (idx, acct) in imp.account_types.iter().enumerate() {
             let is_multi_variant = acct.variants.len() > 1;
             let account_attr = if explicit_account_discriminator {
@@ -1048,8 +924,7 @@ fn emit_imported_mirror(
             }
             out.push_str("}\n\n");
 
-            // Slice B accessor pattern — fields that appear with
-            // consistent type across variants get an accessor.
+            // Accessors for fields with consistent type across variants.
             let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
                 std::collections::BTreeMap::new();
             for variant in &acct.variants {
@@ -1102,7 +977,7 @@ fn emit_imported_mirror(
         std::fs::write(imported_dir.join(format!("{}.rs", local_name)), &out)?;
     }
 
-    // mod.rs re-export aggregator. Mirrors legacy line ~1497–1511.
+    // mod.rs re-export aggregator.
     let mut mod_out = String::new();
     mod_out.push_str(&crate::codegen_shared::marker(
         "DO NOT EDIT",
@@ -1123,19 +998,9 @@ fn emit_imported_mirror(
     Ok(())
 }
 
-/// Emit `src/errors.rs` — `#[error_code] pub enum <Name>Error { ... }`
-/// for every declared error variant. MIR-direct port of
-/// `codegen::generate_errors`.
-///
-/// Reads from MIR:
-///   * `Mir.name` → enum prefix `<PascalCase(name)>Error`.
-///   * `Mir.errors.variants` → base list of variants.
-///
-/// The `needs_lifecycle` / `needs_invalid_pda` augmentation
-/// predicates read from `parsed` for now — they walk
-/// `ParsedHandler.accounts.pda_seeds`, `ParsedAccountType.variants[*].fields`,
-/// and other compound shapes that don't have direct MIR equivalents
-/// yet. Future slice: lift the predicates into MIR proper.
+/// Emit `src/errors.rs` — `#[error_code] pub enum <Name>Error`. The
+/// `needs_lifecycle` / `needs_invalid_pda` augmentation predicates walk
+/// `parsed` compound shapes with no direct MIR equivalent yet.
 fn emit_errors(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -1168,23 +1033,16 @@ fn emit_errors(
     out.push_str(prelude_import);
     out.push('\n');
 
-    // R26 augmentation: handlers with non-init lifecycle pre-status
-    // trigger the auto-added `InvalidLifecycle` variant. Walks
-    // `parsed.handlers` for now (the predicate reads pre_status as
-    // raw string — MIR carries it as a `VariantTag` via
-    // `HandlerMir.transition`; replacing the read with the MIR
-    // form is a separately-trackable cleanup).
+    // R26: a non-init lifecycle pre-status auto-adds `InvalidLifecycle`.
     let needs_lifecycle = parsed.handlers.iter().any(|h| {
         let pre = h.pre_status.as_deref().unwrap_or("");
         let is_init = matches!(pre, "Uninitialized" | "Empty");
         !pre.is_empty() && !is_init
     });
 
-    // R28 augmentation: runtime PDA verification triggers
-    // `InvalidPda`. Same complex walk as legacy — the predicate
-    // reads `parsed.handlers[*].accounts.pda_seeds` against
-    // `parsed.account_types.variants[*].fields`, which doesn't have
-    // a single-call MIR equivalent. Use the pub(crate) helper.
+    // R28: runtime PDA verification auto-adds `InvalidPda`. The predicate
+    // walks pda_seeds against variant fields — no single-call MIR
+    // equivalent.
     let needs_invalid_pda = (matches!(target, Target::Quasar)
         || (matches!(target, Target::Anchor)
             && crate::codegen_shared::is_multi_variant_adt_state_pub(parsed)))
@@ -1266,13 +1124,8 @@ fn emit_errors(
 }
 
 /// Emit `src/ref_impls.rs` — one `pub fn` per declared `ref_impl`.
-/// MIR-direct port of `codegen::generate_ref_impls`.
-///
-/// Iteration source is `mir.ref_impls` (shape-identical to
-/// `parsed.ref_impls` since MIR mirrors the fields verbatim). Param +
-/// return type strings still flow through `codegen::map_type_for_target`
-/// against `parsed` — same `Ty → DSL string` gap as `emit_events`,
-/// closes when the shared helper lands.
+/// Param/return types flow through `map_type_for_target` against `parsed`
+/// (it consumes raw DSL strings, not MIR `Ty`).
 fn emit_ref_impls(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -1326,16 +1179,9 @@ fn emit_ref_impls(
     Ok(())
 }
 
-/// Emit `src/events.rs` — one `#[event] pub struct <EventName> {
-/// ... }` per declared event. MIR-direct port of
-/// `codegen::generate_events`.
-///
-/// Iteration source is `mir.events` (typed event structure); the
-/// field-type strings come from a parallel lookup against
-/// `parsed.events` because `map_type_for_target` consumes the raw
-/// DSL string (not the MIR `Ty` enum). Once `Ty → DSL-string`
-/// conversion lands as a shared helper, this can read fields
-/// entirely from MIR.
+/// Emit `src/events.rs` — one `#[event]` struct per declared event.
+/// Field types come from a parallel `parsed.events` lookup because
+/// `map_type_for_target` consumes raw DSL strings, not MIR `Ty`.
 fn emit_events(
     mir: &Mir,
     parsed: &ParsedSpec,
@@ -1349,15 +1195,11 @@ fn emit_events(
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
-    // Per-target framework surface. Hardcoded here for events only
-    // (the full `FrameworkSurface` struct stays module-private in
-    // `codegen.rs`; Phase 4b ports use the minimal slice they need).
     let prelude_import: &str = match target {
         Target::Anchor => "use anchor_lang::prelude::*;\n",
         Target::Quasar => "use quasar_lang::prelude::*;\n",
-        // Pinocchio has no event framework / macro. Events are plain data
-        // structs the program serializes and logs itself (e.g. via the
-        // `sol_log_data` syscall) — no framework prelude to import.
+        // Pinocchio has no event framework — plain data structs the
+        // program serializes and logs itself; no prelude to import.
         Target::Pinocchio => {
             "// Pinocchio has no event macro — these are plain data structs.\n\
              // Serialize + emit them yourself (e.g. via the `sol_log_data` syscall).\n"
@@ -1374,9 +1216,6 @@ fn emit_events(
     out.push('\n');
 
     for (i, event) in mir.events.iter().enumerate() {
-        // Look up the corresponding ParsedEvent for the raw DSL
-        // field-type strings (`map_type_for_target` consumes
-        // String, not MIR `Ty`).
         let parsed_event = parsed
             .events
             .iter()
@@ -1388,9 +1227,6 @@ fn emit_events(
                 )
             })?;
 
-        // Per-target struct attribute: Anchor/Quasar use the framework
-        // `#[event]` macro (Quasar wants an explicit discriminator);
-        // Pinocchio has none, so emit a plain `#[derive(Clone)]` struct.
         match target {
             Target::Anchor => out.push_str("#[event]\n"),
             Target::Quasar => out.push_str(&format!("#[event(discriminator = {})]\n", i + 1)),
@@ -1413,12 +1249,9 @@ fn emit_events(
     Ok(())
 }
 
-/// Emit `src/math.rs` — fixed-point math helpers used by spec-
-/// derived guards / properties. MIR-direct port of
-/// `codegen::generate_math`; body is fully deterministic (no spec
-/// dependency), so the port reproduces the legacy text verbatim.
-/// The only data input is the `tests/math.rs` fingerprint hash via
-/// the marker banner.
+/// Emit `src/math.rs` — fixed-point helpers for spec-derived guards /
+/// properties. Fully deterministic; the only data input is the
+/// fingerprint hash in the marker banner.
 fn emit_math(fp: &crate::fingerprint::SpecFingerprint, output_dir: &Path) -> Result<()> {
     let src_dir = output_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
@@ -1463,14 +1296,11 @@ pub fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     Ok(())
 }
 
-/// MIR predicate for `needs_spl` — true when the program crate's
-/// Cargo.toml needs `anchor-spl` / `quasar-spl` pulled in. Mirrors
-/// the legacy heuristic in `render_qedgen_cargo_toml` (line ~4996).
+/// True when the generated Cargo.toml needs the target's SPL crate.
 fn mir_needs_spl(mir: &Mir) -> bool {
     use crate::mir::{AccountKind, Stmt};
 
     for handler in &mir.handlers {
-        // Any account declared as Token / Mint type.
         if handler
             .accounts
             .iter()
@@ -1478,10 +1308,8 @@ fn mir_needs_spl(mir: &Mir) -> bool {
         {
             return true;
         }
-        // Any TokenTransfer stmt (handles both the `transfers { … }`
-        // sugar and `call Token.transfer(...)` — both lower to
-        // `Stmt::TokenTransfer` per the MIR lowering contract).
-        // Any explicit Cpi targeting the `Token` interface.
+        // Both the `transfers { … }` sugar and `call Token.transfer(...)`
+        // lower to `Stmt::TokenTransfer`.
         for stmt in &handler.body.stmts {
             match stmt {
                 Stmt::TokenTransfer { .. } => return true,
@@ -1528,25 +1356,18 @@ mod tests {
 
     #[test]
     fn phase_4a_scaffold_loads() {
-        // Phase 4a doesn't render to disk — `generate` requires a
-        // .qed/ dir + output_dir. The smoke test here is that the
-        // module compiles and that `lower_fixture` round-trips a
-        // real spec into MIR + parsed without panicking. The
-        // dispatch-level integration test lives in the codegen
-        // sweep (Phase 4i snapshot harness, future slice).
+        // Smoke: a real spec round-trips into MIR + parsed without
+        // panicking; the rendering integration tests live in the
+        // snapshot suite.
         let (mir, parsed) = lower_fixture("examples/rust/escrow/escrow.qedspec");
         assert!(!parsed.handlers.is_empty(), "escrow has handlers");
         assert!(!mir.state.variants.is_empty(), "escrow has state variants");
     }
 
-    /// CI regression: a spec that declares `type Account = { … }`
-    /// (percolator) lands a `pub struct Account` in `crate::state`, which
-    /// — glob-imported alongside `anchor_lang::prelude::*` in the Anchor
-    /// lib.rs — makes the `Account<'info, _>` wrapper an ambiguous name
-    /// (hard error under deny-by-default `ambiguous_glob_imports`).
-    /// `emit_lib` must emit an explicit `use anchor_lang::prelude::Account;`
-    /// to force the wrapper to win. Specs WITHOUT a colliding type get no
-    /// such line (scoped to real collisions).
+    /// Regression: `type Account = { … }` collides with the Anchor
+    /// `Account<'info, _>` wrapper under glob imports; `emit_lib` must emit
+    /// an explicit `use anchor_lang::prelude::Account;` so the wrapper
+    /// wins. Non-colliding specs get no such line.
     #[test]
     fn anchor_lib_disambiguates_state_type_colliding_with_prelude_wrapper() {
         let src = r#"spec Coll

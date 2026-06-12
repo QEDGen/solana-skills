@@ -1,25 +1,9 @@
-//! Brownfield adapter (v2.9 M4.3).
+//! Brownfield adapter: emit a starter `.qedspec` for an existing Anchor crate.
 //!
-//! Given the path to an existing Anchor program crate (the directory
-//! holding `Cargo.toml`, with `src/lib.rs` inside), emit a starter
-//! `.qedspec` covering every discovered instruction. The user fills in
-//! the state machine, guards, and effects — the adapter handles the
-//! mechanical work of listing handlers, extracting argument types,
-//! recording the accounts struct, and leaving a breadcrumb to where
-//! each body lives in source.
-//!
-//! Pipeline:
-//!   1. `anchor_project::parse_anchor_project` finds the `#[program]`
-//!      mod and lists its `pub fn` instructions.
-//!   2. `anchor_resolver::resolve_handler` follows each forwarder to
-//!      the actual handler ItemFn (or reports Unrecognized).
-//!   3. This module renders the result as a parseable `.qedspec`
-//!      skeleton with `// TODO:` markers for the parts that need
-//!      semantic input.
-//!
-//! The output is round-tripped through `chumsky_adapter::parse_str` so
-//! a regression in the renderer surfaces immediately as a parse error
-//! at adapt-time rather than the next `qedgen check`.
+//! Pipeline: `anchor_project` lists `#[program]` instructions; `anchor_resolver`
+//! follows each forwarder to its handler ItemFn (or Unrecognized); this module
+//! renders a parseable skeleton with `// TODO:` markers. Output is round-tripped
+//! through `chumsky_adapter::parse_str` so renderer bugs surface at adapt-time.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -28,11 +12,9 @@ use std::path::{Path, PathBuf};
 use crate::anchor_project::{parse_anchor_project, AnchorProject, Instruction};
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
 
-/// Per-handler override that names where the actual implementation
-/// lives when the classifier can't follow a forwarder automatically.
-/// Drift's custom dispatcher is the canonical case. Path is parsed
-/// the same way as a free-fn forwarder (`module::sub_module::function`
-/// or just `function`), with the function name as the last segment.
+/// Per-handler override naming the real implementation when the classifier
+/// can't follow a forwarder (custom dispatchers). Path parses like a free-fn
+/// forwarder: `module::sub::function`, fn name last.
 #[derive(Debug, Clone)]
 pub struct HandlerOverride {
     pub module_path: Vec<String>,
@@ -40,9 +22,8 @@ pub struct HandlerOverride {
 }
 
 impl HandlerOverride {
-    /// Parse `module::sub::function` → `HandlerOverride`. Bare
-    /// `function` → empty module path. Returns `None` when the input
-    /// is empty or has an empty segment.
+    /// `module::sub::function` → override; bare `function` → empty module
+    /// path. None on empty input or empty segment.
     pub fn parse(rust_path: &str) -> Option<Self> {
         let trimmed = rust_path.trim();
         if trimmed.is_empty() {
@@ -60,10 +41,8 @@ impl HandlerOverride {
     }
 }
 
-/// Parse one `--handler <name>=<rust_path>` CLI value. Returns
-/// `(handler_name, override)`. Errors clearly when the format is
-/// wrong so the user gets a useful message rather than silent
-/// fallback to the unrecognized-handler path.
+/// Parse one `--handler <name>=<rust_path>` CLI value into
+/// `(handler_name, override)`; errors on malformed input.
 pub fn parse_handler_override(value: &str) -> Result<(String, HandlerOverride)> {
     let (name, path) = value.split_once('=').ok_or_else(|| {
         anyhow::anyhow!(
@@ -84,13 +63,9 @@ pub fn parse_handler_override(value: &str) -> Result<(String, HandlerOverride)> 
     Ok((name.to_string(), rust_override))
 }
 
-/// Generate a starter `.qedspec` for an existing Anchor program.
-///
-/// `program_root` is the program crate's directory (sibling of `src/`).
-/// `overrides` lets the caller manually point unrecognized handlers
-/// at their actual implementation (`<handler_name>` → `<rust_path>`).
-/// Returns the rendered source so the caller can choose between
-/// stdout (one-shot inspection) and writing to a file.
+/// Generate a starter `.qedspec` for the Anchor program at `program_root`
+/// (the crate dir holding `src/`). `overrides` points unrecognized handlers
+/// at their actual implementation.
 pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
     let project = parse_anchor_project(program_root).with_context(|| {
         format!(
@@ -113,8 +88,7 @@ pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) 
     let error_enum = discover_error_enum(program_root);
     let rendered = render_spec(&project, &entries, program_root, error_enum.as_ref());
 
-    // Round-trip: a parse failure here is a renderer bug, not user
-    // input — surface it loudly at adapt-time, not on the next check.
+    // Round-trip: a parse failure here is a renderer bug, not user input.
     crate::chumsky_adapter::parse_str(&rendered).context(
         "Generated .qedspec failed to parse — this is a bug in `qedgen adapt`. \
          Please report at https://github.com/qedgen/solana-skills/issues",
@@ -140,25 +114,11 @@ pub fn adapt_to_file(
     Ok(())
 }
 
-/// Resolve a handler with an optional CLI override. The override
-/// always wins when supplied — the user is asserting "treat this
-/// handler as a free-fn forwarder pointing at <rust_path>", which
-/// matters in three cases the classifier can't reach on its own:
-///
-///   1. `Unrecognized` (custom dispatchers, closures, anything the
-///      classifier can't follow — Drift's runtime lookup table is the
-///      canonical example).
-///   2. `Inline` that isn't actually inline — a multi-statement
-///      forwarder where the user's body has a few helper statements
-///      around the actual handler call (`let cfg = …; handler(ctx)?;
-///      emit!(…); Ok(())`). The classifier conservatively treats
-///      multi-stmt bodies as Inline, but the user knows better.
-///   3. `FreeFn` / `Method` where the filesystem walk landed on the
-///      wrong file (e.g. a similarly-named helper in another module).
-///
-/// In every case the override is treated like a hand-supplied free-fn
-/// forwarder: walk the crate's `src/` for `pub fn <name>` matching
-/// the override's module path.
+/// Resolve a handler; a supplied CLI override always wins. Overrides cover
+/// what the classifier can't reach: `Unrecognized` forwarders (custom
+/// dispatchers), multi-stmt forwarders conservatively classified `Inline`,
+/// and walks that landed on the wrong file. The override is treated as a
+/// free-fn forwarder: walk `src/` for `pub fn <name>` at its module path.
 fn resolve_with_override(
     instruction: &Instruction,
     lib_rs_path: &Path,
@@ -177,40 +137,27 @@ fn resolve_with_override(
 }
 
 // ----------------------------------------------------------------------------
-// Attribute mode: `qedgen adapt --program <crate> --spec <path>`
-//
-// Given an existing .qedspec and the user's Anchor source, emit one
-// `#[qed(verified, spec = ..., handler = ..., hash = ..., spec_hash = ...)]`
-// attribute per spec handler so the user can paste them above each
-// handler body. The body hash matches what `qedgen-macros` will
-// recompute at compile time; the spec hash is computed via the shared
-// `spec_hash::spec_hash_for_handler`.
+// Attribute mode (`qedgen adapt --program <crate> --spec <path>`): emit one
+// paste-ready `#[qed(verified, ...)]` attribute per spec handler. Body hash
+// matches what `qedgen-macros` recomputes at compile time.
 // ----------------------------------------------------------------------------
 
 /// One emitted attribute entry, ready for the user to paste.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeEntry {
-    /// Handler name, as it appears in both the spec and the program's
-    /// `#[program]` mod.
+    /// Handler name (same in spec and `#[program]` mod).
     pub handler: String,
-    /// Path to the file holding the actual handler body, relative to
-    /// the program root. Free-fn handlers point at e.g.
-    /// `src/instructions/buy.rs`; inline handlers at `src/lib.rs`.
+    /// File holding the actual handler body, relative to the program root.
     pub source_path: PathBuf,
-    /// The `#[qed(...)]` attribute line ready to paste verbatim above
-    /// the handler `pub fn`.
+    /// `#[qed(...)]` line to paste verbatim above the handler `pub fn`.
     pub attribute: String,
-    /// Why we couldn't emit an attribute, when `attribute` is empty.
-    /// E.g. a method-shape forwarder (impl block — macro doesn't
-    /// handle ImplItemFn yet) or an Unrecognized handler.
+    /// Why no attribute was emitted, when `attribute` is empty.
     pub note: Option<String>,
 }
 
-/// Compute the `#[qed]` attributes for every handler declared in
-/// `spec_path` against the Anchor program at `program_root`. Returns
-/// one entry per spec handler. Handlers that exist in the spec but
-/// aren't in the program show up as a finding from
-/// `anchor_check::check_anchor_coverage` instead.
+/// Compute `#[qed]` attributes for every handler in `spec_path` against the
+/// program at `program_root`; one entry per spec handler. Spec-only handlers
+/// are also reported by `anchor_check::check_anchor_coverage`.
 pub fn compute_attributes(
     program_root: &Path,
     spec_path: &Path,
@@ -228,9 +175,8 @@ pub fn compute_attributes(
     let parsed_spec = crate::chumsky_adapter::parse_str(&spec_source)
         .with_context(|| format!("parsing spec {}", spec_path.display()))?;
 
-    // Spec path written into the attribute is relative to program_root —
-    // the macro resolves it against `CARGO_MANIFEST_DIR`, which is
-    // exactly the program crate's root.
+    // Spec path in the attribute is relative to program_root — the macro
+    // resolves it against `CARGO_MANIFEST_DIR` (the program crate root).
     let spec_rel = spec_path
         .strip_prefix(program_root)
         .map(Path::to_path_buf)
@@ -239,9 +185,7 @@ pub fn compute_attributes(
     let mut out = Vec::new();
     for handler in &parsed_spec.handlers {
         let Some(instruction) = project.instructions.iter().find(|i| i.name == handler.name) else {
-            // Spec handler with no matching `pub fn` in the program —
-            // surface as a note; the user gets a richer diagnostic
-            // from `qedgen check --anchor-project ...`.
+            // No matching `pub fn` in the program — surface as a note.
             out.push(AttributeEntry {
                 handler: handler.name.clone(),
                 source_path: program_root.to_path_buf(),
@@ -270,11 +214,8 @@ pub fn compute_attributes(
                 )
             })?;
 
-        // The accounts struct sits in the user's source somewhere —
-        // the program_fn's `Context<X>` names it; we walk source to
-        // find `pub struct X` and hash it. Optional: when the struct
-        // can't be found we omit the accounts-* fields so the
-        // attribute still works in body-only mode.
+        // Find and hash the `pub struct X` named by `Context<X>`. Optional:
+        // when absent, the attribute still works in body-only mode.
         let accounts_meta = accounts_struct_for_handler(&instruction.program_fn, program_root);
 
         let entry = match location {
@@ -305,10 +246,6 @@ pub fn compute_attributes(
                 source_path,
                 ..
             } => {
-                // v2.9 second-pass: impl methods seal end-to-end via
-                // `FnLike::Impl` in the macro and `body_hash_for_impl_fn`
-                // here. Marinade- and Squads-style handlers ride the
-                // same drift loop as free-fn shapes.
                 let body_hash = crate::spec_hash::body_hash_for_impl_fn(&item_fn);
                 AttributeEntry {
                     handler: handler.name.clone(),
@@ -339,29 +276,21 @@ pub fn compute_attributes(
     Ok(out)
 }
 
-/// Lookup info for the `#[derive(Accounts)]` struct that backs a
-/// handler's `Context<X>` argument. Carries the bytes the macro will
-/// recompute against, plus the relative path it'll resolve via
-/// `CARGO_MANIFEST_DIR`.
+/// The `#[derive(Accounts)]` struct backing a handler's `Context<X>`: what
+/// the macro recomputes against, plus the `CARGO_MANIFEST_DIR`-relative path.
 struct AccountsMeta {
-    /// Type name written in the handler's `Context<X>` (e.g. `Buy`).
+    /// Type name written in `Context<X>`.
     struct_name: String,
-    /// Source file holding `pub struct <struct_name>`, relative to
-    /// `program_root`. Pasted into the attribute's `accounts_file`.
+    /// File holding `pub struct <struct_name>`, relative to `program_root`.
     file_rel: PathBuf,
     /// Sealed hash of the canonicalized struct.
     hash: String,
 }
 
-/// Pull the `Context<X>` type from the program-mod fn signature, walk
-/// the program crate's `src/` for `pub struct X`, and return enough
-/// metadata for the attribute renderer to seal it. None when the
-/// signature has no `Context<X>` or no matching struct exists.
-///
-/// When the handler writes `Context<X>` with a qualifying path —
-/// `Context<crate::accounts::Shared>` or `Context<modules::Shared>` —
-/// the prefix narrows the walk to files whose module path matches,
-/// so two `pub struct Shared`s in different modules don't collide.
+/// Walk `src/` for the `pub struct X` named by the signature's `Context<X>`;
+/// None when there's no `Context<X>` or no match. A qualifying path
+/// (`Context<crate::accounts::Shared>`) narrows the walk to files whose module
+/// path matches, so same-named structs in different modules don't collide.
 fn accounts_struct_for_handler(
     program_fn: &syn::ItemFn,
     program_root: &Path,
@@ -373,11 +302,8 @@ fn accounts_struct_for_handler(
     let src_dir = program_root.join("src");
     let candidates = walk_rust_files(&src_dir);
 
-    // Prefer files whose module path matches the qualifying prefix —
-    // qualified `Context<crate::b::Shared>` always wins over an
-    // alphabetically-earlier `crate::a::Shared` of the same name.
-    // When the handler used a bare `Context<Shared>` the prefix is
-    // empty and the historical first-match-wins ordering applies.
+    // Files matching the qualifying prefix first; bare `Context<Shared>`
+    // (empty prefix) keeps first-match-wins ordering.
     let prioritized = prioritize_candidates(&candidates, &src_dir, &module_prefix);
 
     for path in prioritized {
@@ -400,11 +326,9 @@ fn accounts_struct_for_handler(
     None
 }
 
-/// Drop leading `crate` / `self` segments from the qualifying prefix.
-/// `super` is left in place so the file walk just won't match (and
-/// we fall through to the whole-tree pass) — resolving `super` would
-/// need to know the program-mod fn's source position, which is more
-/// machinery than the symptom warrants today.
+/// Drop a leading `crate`/`self` segment. `super` is left in place — the walk
+/// won't match and falls through to the whole-tree pass; resolving it would
+/// need the program-mod fn's source position.
 fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
     let mut out: Vec<String> = prefix.to_vec();
     if matches!(
@@ -416,10 +340,8 @@ fn normalize_module_prefix(prefix: &[String]) -> Vec<String> {
     out
 }
 
-/// Order `candidates` so files matching `module_prefix` come first,
-/// then everything else (in original sort order). Empty prefix is a
-/// no-op — the historical first-match-wins ordering is preserved for
-/// handlers that don't qualify their accounts type.
+/// Files matching `module_prefix` first, rest in original order. Empty
+/// prefix is a no-op (preserves first-match-wins).
 fn prioritize_candidates(
     candidates: &[PathBuf],
     src_dir: &Path,
@@ -437,11 +359,8 @@ fn prioritize_candidates(
     out
 }
 
-/// `src/foo/bar.rs` → `["foo", "bar"]`; `src/foo/bar/mod.rs` →
-/// `["foo", "bar"]`; `src/lib.rs` → `[]`. Mirrors
-/// `anchor_resolver::file_module_path` (kept private there because
-/// of asymmetric callers; duplicating ten lines is cheaper than
-/// adding a `pub` and a cross-module edge for a private utility).
+/// `src/foo/bar.rs` / `src/foo/bar/mod.rs` → `["foo", "bar"]`; `src/lib.rs`
+/// → `[]`. Duplicates `anchor_resolver::file_module_path` (private there).
 fn file_module_path(file_path: &Path, src_dir: &Path) -> Vec<String> {
     let rel = match file_path.strip_prefix(src_dir) {
         Ok(r) => r,
@@ -468,9 +387,8 @@ fn file_module_path(file_path: &Path, src_dir: &Path) -> Vec<String> {
     segments
 }
 
-/// Render a single `#[qed(verified, ...)]` attribute line. Folds the
-/// optional `accounts*` triplet in when the adapter could lock onto a
-/// struct.
+/// Render one `#[qed(verified, ...)]` line; includes the `accounts*` triplet
+/// when the adapter found the struct.
 fn render_attribute(
     spec_rel: &Path,
     handler_name: &str,
@@ -499,9 +417,8 @@ fn render_attribute(
     }
 }
 
-/// Render the attribute entries as a paste-friendly text report:
-/// per-handler section with the source file pointer + the attribute
-/// line. Skipped handlers carry a `// note: …` block instead.
+/// Paste-friendly text report: per-handler source pointer + attribute line;
+/// skipped handlers carry a `// note: …` instead.
 pub fn render_attributes(entries: &[AttributeEntry]) -> String {
     let mut s = String::new();
     s.push_str("// `qedgen adapt --spec ...` — paste each attribute above the named handler.\n");
@@ -529,21 +446,15 @@ pub fn render_attributes(entries: &[AttributeEntry]) -> String {
 #[derive(Debug)]
 struct HandlerEntry {
     name: String,
-    /// `(arg_name, qedspec_type_or_raw_rust)` — the second slot is None
-    /// when the renderer couldn't map the Rust type to a qedspec type
-    /// (e.g. `Vec<MyStruct>`); we fall back to a TODO comment.
+    /// `(arg_name, qedspec_type)`; None when the Rust type couldn't be
+    /// mapped (e.g. `Vec<MyStruct>`) — renderer falls back to a TODO.
     args: Vec<(String, Option<String>)>,
-    /// Type written in the handler's `Context<X>` (e.g. `Buy`). The
-    /// adapter emits this as a comment so the user can copy
-    /// constraint info from the `#[derive(Accounts)]` struct.
+    /// Type written in the handler's `Context<X>`, emitted as a comment.
     accounts_type: Option<String>,
-    /// Path to the file containing the actual handler body, relative
-    /// to the program root. None when the resolver returned
-    /// Unrecognized.
+    /// File holding the handler body, relative to the program root; None
+    /// when the resolver returned Unrecognized.
     source_breadcrumb: Option<PathBuf>,
-    /// What the resolver classified this handler as. Inline / FreeFn /
-    /// Method / Unrecognized — surfaced in a `// shape:` comment so
-    /// the human reader can see at a glance how the body was reached.
+    /// Resolver classification, surfaced in the rendered doc comment.
     shape: HandlerShape,
 }
 
@@ -601,31 +512,26 @@ fn rel_to(root: &Path, p: &Path) -> PathBuf {
         .unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// Walk `program_fn.sig.inputs` skipping the leading `Context<...>`
-/// and produce `(name, qedspec_type_or_raw_rust)` pairs. Self/receiver
-/// arguments don't appear in `#[program]` mod fns, so we don't handle
-/// them.
+/// `program_fn.sig.inputs` minus the leading `Context<...>`, as
+/// `(name, mapped_type)` pairs.
 fn extract_args(program_fn: &syn::ItemFn) -> Vec<(String, Option<String>)> {
     let mut out = Vec::new();
     let mut skipped_ctx = false;
     for input in &program_fn.sig.inputs {
         let pat_type = match input {
             syn::FnArg::Typed(p) => p,
-            // `&self` / `&mut self` shouldn't appear here, but skip
-            // defensively rather than panic.
+            // Receivers shouldn't appear in `#[program]` fns; skip defensively.
             syn::FnArg::Receiver(_) => continue,
         };
-        // The first typed arg is always the Context<X>; skip exactly
-        // one. Subsequent positional Context-typed args (rare) flow
-        // through to the spec — the user can prune them.
+        // Skip exactly one leading Context<X>; later Context-typed args
+        // (rare) flow into the spec for the user to prune.
         if !skipped_ctx && is_context_type(&pat_type.ty) {
             skipped_ctx = true;
             continue;
         }
         let name = match &*pat_type.pat {
             syn::Pat::Ident(pi) => pi.ident.to_string(),
-            // Destructured / unusual patterns: emit a numbered
-            // placeholder so the spec still parses; the user renames.
+            // Destructured patterns: numbered placeholder so the spec parses.
             _ => format!("arg_{}", out.len()),
         };
         let mapped = map_rust_type(&pat_type.ty);
@@ -644,20 +550,15 @@ fn is_context_type(ty: &syn::Type) -> bool {
         .is_some_and(|s| s.ident == "Context")
 }
 
-/// Pull the `X` out of `Context<X>` (or `Context<'info, X>`). Returns
-/// the bare ident, no generics. None when the first arg isn't a
-/// Context — the adapter still emits the handler, just without the
-/// accounts breadcrumb.
+/// `Context<X>` / `Context<'info, X>` → bare `X`; None when the first arg
+/// isn't a Context (handler is still emitted, sans accounts breadcrumb).
 fn extract_accounts_type(program_fn: &syn::ItemFn) -> Option<String> {
     extract_accounts_path(program_fn)?.pop()
 }
 
-/// Like `extract_accounts_type` but returns every segment of the
-/// qualifying path (including the type ident as the last entry).
-/// `Context<crate::a::Shared>` → `["crate", "a", "Shared"]`;
-/// `Context<Shared>` → `["Shared"]`. Drives the use of the qualifying
-/// prefix to narrow the accounts-struct lookup when two structs in
-/// different modules share a name.
+/// Full qualifying path of the accounts type, ident last:
+/// `Context<crate::a::Shared>` → `["crate", "a", "Shared"]`. Narrows the
+/// struct lookup when same-named structs live in different modules.
 fn extract_accounts_path(program_fn: &syn::ItemFn) -> Option<Vec<String>> {
     let first = program_fn.sig.inputs.first()?;
     let syn::FnArg::Typed(pt) = first else {
@@ -690,14 +591,12 @@ fn extract_accounts_path(program_fn: &syn::ItemFn) -> Option<Vec<String>> {
     None
 }
 
-/// Best-effort Rust → qedspec type translation. Mirrors `idl2spec::map_type`
-/// for primitive types; falls back to `None` (renderer emits a TODO
-/// comment) for shapes we don't yet handle (Vec/Option/arrays/generics).
+/// Best-effort Rust → qedspec type mapping (mirrors `idl2spec::map_type`);
+/// None for unhandled shapes (Vec/Option/arrays/generics) → renderer TODO.
 fn map_rust_type(ty: &syn::Type) -> Option<String> {
     let syn::Type::Path(tp) = ty else { return None };
     let last = tp.path.segments.last()?;
-    // Reject types with generics (Vec<u8>, Option<T>, etc.) — leave
-    // them for the user to model.
+    // Generic types (Vec<u8>, Option<T>) are left for the user to model.
     if !matches!(last.arguments, syn::PathArguments::None) {
         return None;
     }
@@ -715,36 +614,29 @@ fn map_rust_type(ty: &syn::Type) -> Option<String> {
         "bool" => "Bool",
         "Pubkey" => "Pubkey",
         "String" => "String",
-        // Treat unknown bare paths as user-defined types passed by
-        // name. The user will declare them in the spec or the adapter
-        // round-trip will catch a typo at parse-time.
+        // Unknown bare paths pass through as user-defined type names; the
+        // round-trip catches typos at parse-time.
         other if !other.is_empty() => return Some(other.to_string()),
         _ => return None,
     };
     Some(mapped.to_string())
 }
 
-/// What we discovered about the program's `#[error_code]` enum, if any.
-/// Used to seed the spec's `type Error | ...` block with real variant
-/// names rather than a generic `InvalidArgument` placeholder.
+/// Discovered `#[error_code]` enum, used to seed the spec's `type Error`
+/// block with real variant names.
 #[derive(Debug, Clone)]
 struct ErrorEnumInfo {
-    /// Source file containing the `#[error_code] pub enum`. Surfaced
-    /// in a spec comment so the reader can cross-reference.
+    /// File containing the enum, surfaced in a spec comment.
     source_path: PathBuf,
-    /// Name of the enum (`ErrorCode` for Anchor scaffold / Drift /
-    /// Raydium / Jito; `<ProgramName>Error` for Marinade / Squads —
-    /// per `reference_anchor_patterns.md`). Carried as a comment;
-    /// the qedspec's `type Error` is always called `Error`.
+    /// Enum name, carried as a comment only — the qedspec type is always
+    /// called `Error`.
     enum_name: String,
-    /// Variant identifiers, in source order. Empty when the enum has
-    /// no variants (legal but unusual — surfaced as a comment).
+    /// Variant identifiers, in source order; may be empty (legal but unusual).
     variants: Vec<String>,
 }
 
-/// Walk the program crate's `src/` for a `#[error_code] pub enum X { ... }`.
-/// Returns the first one found, in deterministic file-walk order.
-/// `None` when no `#[error_code]` enum exists — common in WIP projects.
+/// First `#[error_code] pub enum` found in `src/` (deterministic walk
+/// order); None when absent.
 fn discover_error_enum(program_root: &Path) -> Option<ErrorEnumInfo> {
     let src_dir = program_root.join("src");
     let mut files = walk_rust_files(&src_dir);
@@ -769,9 +661,8 @@ fn discover_error_enum(program_root: &Path) -> Option<ErrorEnumInfo> {
     None
 }
 
-/// Recursively scan `items` (top-level + nested mods) for a
-/// `#[error_code] pub enum`. The attribute path can be `error_code`,
-/// `anchor_lang::error_code`, etc. — match by last segment ident.
+/// Recursively scan `items` (incl. nested mods) for `#[error_code] pub enum`;
+/// attribute matched by last path segment (handles `anchor_lang::error_code`).
 fn find_error_code_enum(items: &[syn::Item]) -> Option<(String, Vec<String>)> {
     for item in items {
         match item {
@@ -833,8 +724,7 @@ fn render_spec(
 ) -> String {
     let mut s = String::new();
     s.push_str("// Generated by `qedgen adapt`. Fill in the TODOs to make this verifiable.\n");
-    // Use the program-root-relative path so snapshots are stable across
-    // machines (the absolute path includes the user's home directory).
+    // Program-root-relative path keeps snapshots machine-stable.
     let rel_lib_rs = rel_to(program_root, &project.lib_rs_path);
     s.push_str(&format!(
         "// Source: {} (program mod: `{}`)\n\n",
@@ -929,18 +819,16 @@ fn render_handler(s: &mut String, entry: &HandlerEntry) {
         ));
     }
 
-    // Header line: `handler <name> (a: T) (b: T) : State.Init -> State.Init {`
-    // qedspec only accepts `//` line comments (no `/* */`), so any
-    // arg-type fallback notes have to go inside the body, not in the
-    // signature.
+    // qedspec only accepts `//` line comments (no `/* */`), so arg-type
+    // fallback notes go inside the body, not the signature.
     s.push_str(&format!("handler {}", entry.name));
     let mut unknown_args: Vec<&str> = Vec::new();
     for (arg_name, arg_ty) in &entry.args {
         match arg_ty {
             Some(ty) => s.push_str(&format!(" ({} : {})", arg_name, ty)),
             None => {
-                // Unknown type → use U64 as a placeholder so the spec
-                // parses, and surface the fact in a body comment.
+                // Unknown type → U64 placeholder so the spec parses;
+                // surfaced in a body comment.
                 s.push_str(&format!(" ({} : U64)", arg_name));
                 unknown_args.push(arg_name.as_str());
             }
@@ -964,10 +852,8 @@ fn render_handler(s: &mut String, entry: &HandlerEntry) {
     s.push_str("}\n");
 }
 
-/// snake_case → PascalCase. Used to coerce a program mod name like
-/// `my_escrow` into a spec name `MyEscrow`. Same shape as
-/// `idl2spec::map_type`'s passthrough branch — kept private here to
-/// avoid a public dependency.
+/// snake_case → PascalCase (program mod name `my_escrow` → spec name
+/// `MyEscrow`).
 fn to_pascal_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut upper_next = true;
@@ -983,10 +869,6 @@ fn to_pascal_case(s: &str) -> String {
     }
     out
 }
-
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1054,25 +936,20 @@ mod tests {
 
         let rendered = adapt(&root, &HashMap::new()).unwrap();
 
-        // Spec name is PascalCase'd from the program mod ident.
         assert!(
             rendered.contains("spec MyEscrow"),
             "rendered:\n{}",
             rendered
         );
-        // Both handlers appear with their typed arguments.
         assert!(
             rendered.contains("handler initialize (deposit_amount : U64) (receive_amount : U64)")
         );
         assert!(rendered.contains("handler cancel : State.Init -> State.Init"));
-        // Source breadcrumb points at the per-instruction file.
         assert!(rendered.contains("src/instructions/initialize.rs"));
         assert!(rendered.contains("src/instructions/cancel.rs"));
-        // Accounts struct is surfaced as a comment for the user.
         assert!(rendered.contains("accounts struct: `Initialize`"));
         assert!(rendered.contains("accounts struct: `Cancel`"));
-        // Round-trip parsability is enforced inside `adapt()`; if we
-        // got here, the output parses.
+        // Round-trip parsability is enforced inside `adapt()` itself.
     }
 
     #[test]
@@ -1105,10 +982,8 @@ mod tests {
 
     #[test]
     fn adapt_marks_unrecognized_handlers_with_todo() {
-        // The forwarder names a free fn that doesn't exist anywhere
-        // in the program crate. The classifier returns FreeFn, the
-        // resolver fails to find it, the renderer marks the entry
-        // UNRECOGNIZED. The output still has to parse.
+        // Forwarder names a nonexistent free fn: classifier says FreeFn,
+        // resolver fails, renderer marks UNRECOGNIZED; output must still parse.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1135,8 +1010,7 @@ mod tests {
 
     #[test]
     fn adapt_emits_typed_arg_for_user_defined_struct() {
-        // Bare-path type with no generics: passthrough as the name
-        // (user declares the struct in the spec or fixes a typo).
+        // Bare-path type with no generics passes through by name.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1166,7 +1040,6 @@ mod tests {
 
     #[test]
     fn adapt_falls_back_for_generic_arg_types() {
-        // `Vec<u8>` has generics → renderer emits TODO placeholder.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1187,8 +1060,7 @@ mod tests {
         );
 
         let rendered = adapt(&root, &HashMap::new()).unwrap();
-        // Placeholder type lives in the signature; the explanatory
-        // TODO is in the body so the spec parses.
+        // U64 placeholder in the signature; explanatory TODO in the body.
         assert!(rendered.contains("(payload : U64)"));
         assert!(
             rendered.contains("could not map `payload` from Rust source"),
@@ -1222,14 +1094,9 @@ mod tests {
         assert!(contents.contains("handler ping"));
     }
 
-    /// Repo-root-relative snapshot driver. Tests assert that
-    /// `adapt(<repo>/<demo_rel>)` matches `<repo>/<demo_rel>/before.qedspec`
-    /// byte-for-byte. Locks the renderer + classifier output across
-    /// the four shipped fixtures.
-    ///
-    /// To regenerate after an intentional renderer change, run e.g.:
-    ///   cargo run -- adapt --program crates/qedgen/tests/fixtures/anchor-brownfield-demo \
-    ///     --out crates/qedgen/tests/fixtures/anchor-brownfield-demo/before.qedspec
+    /// Asserts `adapt(<repo>/<demo_rel>)` matches `<demo_rel>/before.qedspec`
+    /// byte-for-byte. Regenerate after intentional renderer changes:
+    ///   cargo run -- adapt --program <demo_rel> --out <demo_rel>/before.qedspec
     fn assert_snapshot(demo_rel: &str) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let repo_root = Path::new(manifest_dir)
@@ -1264,15 +1131,15 @@ mod tests {
         );
     }
 
-    /// Anchor-scaffold style: free-fn forwarders into
-    /// `instructions/<name>.rs`. Exercises `FreeFn` classifier.
+    /// Anchor-scaffold style: free-fn forwarders into `instructions/<name>.rs`
+    /// (`FreeFn` classifier).
     #[test]
     fn adapt_matches_brownfield_demo_snapshot() {
         assert_snapshot("crates/qedgen/tests/fixtures/anchor-brownfield-demo");
     }
 
-    /// Marinade style: `ctx.accounts.<method>(...)` forwarder.
-    /// Exercises `AccountsMethod` classifier + impl-method resolution.
+    /// Marinade style: `ctx.accounts.<method>(...)` forwarder
+    /// (`AccountsMethod` classifier + impl-method resolution).
     #[test]
     fn adapt_matches_marinade_style_snapshot() {
         assert_snapshot(
@@ -1280,9 +1147,8 @@ mod tests {
         );
     }
 
-    /// Squads V4 style: `<Type>::<method>(ctx, args)` forwarder.
-    /// Exercises `TypeAssoc` classifier + impl-method resolution
-    /// (impls inline with the program mod, not in a sibling file).
+    /// Squads V4 style: `<Type>::<method>(ctx, args)` forwarder (`TypeAssoc`
+    /// classifier; impls inline with the program mod, not a sibling file).
     #[test]
     fn adapt_matches_squads_style_snapshot() {
         assert_snapshot(
@@ -1292,8 +1158,6 @@ mod tests {
 
     #[test]
     fn discovers_error_code_enum_with_variants() {
-        // The Anchor scaffold convention: `#[error_code] pub enum
-        // ErrorCode` lives in `errors.rs` or beside the handler.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1340,7 +1204,6 @@ mod tests {
         );
         assert!(rendered.contains("| Overflow"));
         assert!(rendered.contains("| NotAuthorized"));
-        // The fallback placeholder should NOT appear.
         assert!(!rendered.contains("(No `#[error_code]` enum found"));
     }
 
@@ -1367,8 +1230,7 @@ mod tests {
 
     #[test]
     fn handles_qualified_error_code_attribute() {
-        // Some programs write `#[anchor_lang::error_code]` instead.
-        // The matcher checks the last path segment, so both work.
+        // `#[anchor_lang::error_code]` matches via the last path segment.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1393,9 +1255,8 @@ mod tests {
         assert!(rendered.contains("| Bad"));
     }
 
-    /// Method-shape handlers (Marinade `ctx.accounts.process(...)`)
-    /// no longer carry a "refactor or wait for v2.10" note — they
-    /// emit a sealed `#[qed]` attribute via `body_hash_for_impl_fn`.
+    /// Method-shape handlers (`ctx.accounts.process(...)`) emit a sealed
+    /// `#[qed]` attribute via `body_hash_for_impl_fn`.
     #[test]
     fn compute_attributes_seals_method_shape_handlers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1468,9 +1329,8 @@ mod tests {
         );
     }
 
-    /// When the adapter can find the `Context<X>` accounts struct, the
-    /// emitted attribute carries `accounts = ..., accounts_file = ...,
-    /// accounts_hash = ...` so the macro can seal the struct too.
+    /// A found `Context<X>` struct adds the `accounts*` triplet so the macro
+    /// can seal the struct too.
     #[test]
     fn compute_attributes_includes_accounts_struct_seal() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1526,9 +1386,8 @@ mod tests {
         assert!(buy.attribute.contains("accounts_hash = \""));
     }
 
-    /// Without a `Context<X>` arg, the adapter falls back to the
-    /// body+spec-only attribute. Ensures backward compat with v2.9
-    /// G2a's original output.
+    /// Without a resolvable `Context<X>` struct, the adapter falls back to
+    /// the body+spec-only attribute.
     #[test]
     fn compute_attributes_omits_accounts_when_struct_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1570,12 +1429,8 @@ mod tests {
         assert!(ping.attribute.contains("hash = \""));
     }
 
-    /// Reviewer-reported: when two `pub struct Shared` exist in
-    /// different modules and the handler writes
-    /// `Context<crate::b::Shared>`, the adapter MUST seal against
-    /// `crate::b::Shared`. Pre-fix, the file walk returned the first
-    /// match by ident name (often `crate::a::Shared`), silently
-    /// binding the macro to the wrong type.
+    /// Two `pub struct Shared` in different modules + `Context<crate::b::Shared>`
+    /// MUST seal against `crate::b::Shared`, not the first ident match.
     #[test]
     fn compute_attributes_respects_qualified_accounts_path() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1674,11 +1529,9 @@ mod tests {
         assert!(bare.module_path.is_empty());
         assert_eq!(bare.fn_name, "handler");
 
-        // Empty input → None
+        // Empty input or empty segments → None
         assert!(HandlerOverride::parse("").is_none());
-        // Empty trailing segment → None
         assert!(HandlerOverride::parse("instructions::buy::").is_none());
-        // Empty leading segment → None
         assert!(HandlerOverride::parse("::handler").is_none());
     }
 
@@ -1690,20 +1543,16 @@ mod tests {
         assert_eq!(parsed.module_path, vec!["instructions", "dispatch"]);
         assert_eq!(parsed.fn_name, "run");
 
-        // Missing `=`: error
+        // Missing `=`, empty name, empty path: all errors
         assert!(parse_handler_override("dispatch").is_err());
-        // Empty handler name: error
         assert!(parse_handler_override("=path::fn").is_err());
-        // Empty rust path: error
         assert!(parse_handler_override("dispatch=").is_err());
     }
 
     #[test]
     fn override_resolves_unrecognized_handler_to_free_fn() {
-        // Drift-style: the program-mod fn body uses a closure-call
-        // shape the classifier can't follow. With a `--handler`
-        // override pointing at the actual free-fn handler, the
-        // adapter resolves it cleanly.
+        // Custom-dispatcher shape the classifier can't follow; a `--handler`
+        // override resolves it cleanly.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_project(
             &tmp,
@@ -1749,13 +1598,11 @@ mod tests {
         );
 
         let rendered = adapt(&root, &overrides).unwrap();
-        // No "UNRECOGNIZED" marker — the override resolved it.
         assert!(
             !rendered.contains("UNRECOGNIZED"),
             "rendered:\n{}",
             rendered
         );
-        // Attribution lands on the override target file.
         assert!(rendered.contains("free-fn forwarder"));
         assert!(rendered.contains("src/instructions/dispatch.rs"));
     }
@@ -1765,7 +1612,6 @@ mod tests {
         assert_eq!(to_pascal_case("my_escrow"), "MyEscrow");
         assert_eq!(to_pascal_case("token_mill"), "TokenMill");
         assert_eq!(to_pascal_case("escrow"), "Escrow");
-        // Idempotent on PascalCase input.
         assert_eq!(to_pascal_case("AlreadyPascal"), "AlreadyPascal");
     }
 }

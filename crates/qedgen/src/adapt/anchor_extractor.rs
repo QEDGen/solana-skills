@@ -1,42 +1,12 @@
-//! Anchor proto-clause extractor (v2.19 M3.1).
-//!
-//! Walks an Anchor program's source tree, surfaces the canonical
-//! escape-hatch patterns the auditor SKILL.md documents, and lifts each
-//! into `ProtoClause`s the runtime-agnostic clustering algorithm
-//! consumes. Same output shape as the Pinocchio extractor; downstream
-//! ratification pipeline doesn't care which runtime contributed.
-//!
-//! Patterns detected (v1):
-//!
-//! 1. **AccountInfo / UncheckedAccount on Accounts struct fields** →
-//!    `AccountTypeTagCheck`. Anchor's typed wrappers (`Account<T>`,
-//!    `Signer`, `Program<T>`, `Sysvar<T>`) close the type-tag question
-//!    by construction; `AccountInfo<'info>` / `UncheckedAccount<'info>`
-//!    are explicit opt-outs.
-//!
-//! 2. **`#[account(seeds = [...])]` without `bump`** →
-//!    `PdaCanonicalDerivation`. Missing `bump` keyword signals the
-//!    seeds aren't constrained to the canonical PDA derivation.
-//!
-//! 3. **Raw arithmetic on u64/u128 in handler bodies** →
-//!    `ArithmeticNoOverflow`. `+ -` `* / %` outside `checked_*` /
-//!    `saturating_*` / `wrapping_*` family.
-//!
-//! 4. **`init_if_needed` constraint** → `LifecycleOneShot`.
-//!    `init_if_needed` opts out of Anchor's default "fresh account
-//!    only" init invariant; without an explicit discriminator guard
-//!    this is replay-vulnerable.
-//!
-//! Out of scope for v1 (defer to v3 polish):
-//! - close-account redirection (`close = receiver`)
-//! - oracle staleness
-//! - account-not-reloaded-after-cpi
-//! - transfer-hook reentrancy
-//!
-//! These categories are well-documented in
-//! `skills/qedgen-auditor/SKILL.md` and the auditor subagent applies
-//! them via Read+Grep — the extractor doesn't need to duplicate the
-//! coverage in v1.
+//! Anchor proto-clause extractor: lifts escape-hatch patterns from an Anchor
+//! source tree into `ProtoClause`s (same shape as the Pinocchio extractor).
+//! Detects: `AccountInfo`/`UncheckedAccount` fields (opt-out of typed-account
+//! validation) → AccountTypeTagCheck; `seeds = [...]` without `bump` →
+//! PdaCanonicalDerivation; raw arithmetic outside `checked_*`/`saturating_*`/
+//! `wrapping_*` → ArithmeticNoOverflow; `init_if_needed` (opt-out of
+//! fresh-account-only init, replay-vulnerable without a discriminator guard)
+//! → LifecycleOneShot. Other classes (close-account, oracle staleness,
+//! reload-after-CPI, transfer-hook) stay with the auditor subagent.
 
 use anyhow::Result;
 use regex::Regex;
@@ -50,18 +20,13 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
     let mut out = Vec::new();
     let pat = AnchorPatterns::new();
 
-    // Pass 1: per-Accounts-struct fingerprinting. Determine which
-    // handler each Accounts struct serves (matches Context<X> in
-    // handler signatures) so the resulting proto-clauses are
-    // handler-scoped.
+    // Pass 1: map each Accounts struct to its handler via Context<X>
+    // signatures so proto-clauses are handler-scoped.
     let accounts_structs = scan_accounts_structs(&rs_files, &pat);
     let handler_context_map = scan_handler_context_map(&rs_files, &pat);
 
     for acc in &accounts_structs {
-        // Map Accounts struct name → handler name via Context<X>
-        // signatures. Fall back to the struct name if no handler is
-        // found (common when the handler is defined in a separate file
-        // we haven't scanned).
+        // Fall back to the struct name when no Context<X> handler matches.
         let handler = handler_context_map
             .iter()
             .find(|(_, ctx)| ctx == &acc.name)
@@ -120,10 +85,7 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
         }
     }
 
-    // Pass 2: raw arithmetic in handler bodies. We've already
-    // identified the handler set via `handler_context_map`; for each
-    // file containing a handler, scan for un-checked arithmetic
-    // patterns.
+    // Pass 2: raw arithmetic in handler bodies.
     let handler_set: std::collections::BTreeSet<String> =
         handler_context_map.iter().map(|(h, _)| h.clone()).collect();
     for file in &rs_files {
@@ -134,10 +96,8 @@ pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
         if arith_sites.is_empty() {
             continue;
         }
-        // Best-effort: attribute the site to the most-recently-seen
-        // handler fn. For lib.rs-style multi-handler files this is
-        // sometimes imprecise; v3 polish refines using the
-        // syn::visit::Visit infrastructure.
+        // Best-effort attribution to the most-recently-seen fn — imprecise
+        // for lib.rs-style multi-handler files.
         let attributed = attribute_arith_to_handlers(&source, &arith_sites, &handler_set, &pat);
         for (handler, line) in attributed {
             out.push(ProtoClause {
@@ -219,17 +179,12 @@ fn scan_accounts_structs(rs_files: &[PathBuf], pat: &AnchorPatterns) -> Vec<Acco
         let Ok(source) = std::fs::read_to_string(file) else {
             continue;
         };
-        // Walk every `#[derive(... Accounts ...)] struct Name` block.
-        // We find the brace-delimited struct body by scanning forward
-        // from the struct declaration. Crude but adequate.
         for caps in pat.accounts_derive.captures_iter(&source) {
             let name = caps.get(2).unwrap().as_str().to_string();
             let start = caps.get(0).unwrap().start();
             let line = source[..start].matches('\n').count() + 1;
-            // Find the body: from `{` after the struct line to the
-            // matching `}`. Simple brace-balanced walk; nesting inside
-            // `#[account(...)]` attributes doesn't use `{}` so this
-            // works for typical Anchor sources.
+            // Brace-balanced walk for the struct body; `#[account(...)]`
+            // attrs don't use `{}`, so this holds for typical Anchor source.
             let after = caps.get(0).unwrap().end();
             let Some(open_brace) = source[after..].find('{') else {
                 continue;
@@ -244,8 +199,7 @@ fn scan_accounts_structs(rs_files: &[PathBuf], pat: &AnchorPatterns) -> Vec<Acco
                 account_info_fields.push(field);
             }
 
-            // PDAs without `bump`: split body into `#[account(...)]` segments,
-            // check each for `seeds =` without `bump`.
+            // Per-`#[account(...)]` block: `seeds =` without `bump`.
             let mut pda_without_bump = Vec::new();
             for attr_block in extract_account_attr_blocks(body) {
                 if pat.seeds_attr.is_match(&attr_block.contents)
@@ -364,14 +318,10 @@ fn scan_handler_context_map(rs_files: &[PathBuf], pat: &AnchorPatterns) -> Vec<(
     out
 }
 
-/// Find lines containing raw arithmetic that isn't part of a
-/// `checked_*`/`saturating_*`/`wrapping_*`/`overflowing_*` call. Returns
-/// 1-based line numbers.
-///
-/// Tracks per-line `#[` attribute depth via byte-level scanning so
-/// arithmetic inside Anchor macros (`#[account(space = 8 + N)]`) is
-/// excluded — those compute account layout at macro-expansion time,
-/// not at runtime.
+/// 1-based line numbers of raw arithmetic outside the
+/// `checked_*`/`saturating_*`/`wrapping_*`/`overflowing_*` family. Lines
+/// inside `#[...]` attribute spans are excluded — `#[account(space = 8 + N)]`
+/// computes layout at macro-expansion time, not runtime.
 fn scan_arith_sites(source: &str, pat: &AnchorPatterns) -> Vec<usize> {
     let inside_attr = compute_inside_attr_lines(source);
     let mut out = Vec::new();
@@ -400,11 +350,8 @@ fn scan_arith_sites(source: &str, pat: &AnchorPatterns) -> Vec<usize> {
     out
 }
 
-/// Walk bytes and compute, per line index, whether the line falls
-/// inside an open `#[ ... ]` attribute span. A line is "inside" if at
-/// the start of the line the attribute-stack depth is > 0, OR if it
-/// contains an `#[` that opens an attribute on this line. Multi-line
-/// `#[account(...)]` blocks are correctly tracked.
+/// Per-line flag: starts inside an open `#[ ... ]` span, or opens one on the
+/// line. Multi-line `#[account(...)]` blocks are tracked.
 fn compute_inside_attr_lines(source: &str) -> Vec<bool> {
     let total_lines = source.lines().count();
     let mut out = vec![false; total_lines];
@@ -449,11 +396,8 @@ fn compute_inside_attr_lines(source: &str) -> Vec<bool> {
     out
 }
 
-/// Recognize Anchor attribute-field assignments (`space = N`,
-/// `payer = X`, `seeds = [...]`, `bump = X`, `address = X`,
-/// `constraint = X`, `has_one = X`, `init`, `init_if_needed`, `mut`,
-/// `close = X`). Any line containing these keywords-with-equals at the
-/// start of the line is treated as macro syntax, not handler code.
+/// Lines starting with an Anchor attr-field assignment (`space =`,
+/// `seeds =`, …) are macro syntax, not handler code.
 fn is_anchor_attr_field(line: &str) -> bool {
     let trimmed = line.trim_start();
     const ANCHOR_FIELDS: &[&str] = &[
@@ -482,9 +426,8 @@ fn is_anchor_attr_field(line: &str) -> bool {
 }
 
 fn contains_assignment(line: &str) -> bool {
-    // True for `x = y`, `x += y`, etc. False for `x == y` or `if a < b`.
-    // We detect by looking for `=` that isn't preceded by `<>!=` and
-    // isn't part of `==`.
+    // `=` not preceded by `<>!=` and not part of `==` — accepts `x = y`,
+    // `x += y`; rejects `x == y`, `a <= b`.
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if b == b'=' {
@@ -505,7 +448,7 @@ fn contains_assignment(line: &str) -> bool {
 }
 
 fn has_arith_operator(s: &str) -> bool {
-    // Look for `+`, `-`, `*`, `/` outside of `+=`/`-=`/`*=`/`/=` and `//` comments.
+    // `+ - * /` outside compound assignments, `//` comments, and `->`.
     let bytes = s.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
         if matches!(b, b'+' | b'-' | b'*' | b'/') {
@@ -531,9 +474,8 @@ fn has_arith_operator(s: &str) -> bool {
     false
 }
 
-/// Attribute arithmetic-site line numbers to the most recently-declared
-/// fn name in that file. Imprecise but adequate when handlers are
-/// physically separated.
+/// Attribute arith-site lines to the most recently-declared fn — imprecise
+/// but adequate when handlers are physically separated.
 fn attribute_arith_to_handlers(
     source: &str,
     sites: &[usize],
@@ -549,25 +491,18 @@ fn attribute_arith_to_handlers(
 
     let mut out = Vec::new();
     for &site_line in sites {
-        // Find the most recent fn declaration at or before site_line.
+        // Most recent fn declaration at or before site_line.
         let attribution = fn_lines
             .iter()
             .rfind(|(_, l)| *l <= site_line)
             .map(|(name, _)| name.clone());
         if let Some(name) = attribution {
-            // Only attribute to handlers we know about (filter out
-            // helpers like `pub fn handler` inside instructions/*.rs
-            // forwarders).
+            // Only attribute to known handlers (filters helper fns).
             if handler_set.contains(&name) || name == "handler" {
-                // If the immediate enclosing fn is `handler`, walk back
-                // to the nearest module-level handler — the brownfield
-                // demo pattern is `instructions::initialize::handler`
-                // forwarded from `pub fn initialize`. We approximate by
-                // mapping `handler` to the first handler in
-                // handler_set whose name appears in the file path or
-                // surrounding context.
+                // `handler` is the forwarder convention
+                // (`instructions::<x>::handler`); approximate by mapping it
+                // to the handler whose module path appears in the source.
                 let attributed_name = if name == "handler" {
-                    // Look for the file name as a handler hint.
                     handler_set
                         .iter()
                         .find(|h| source.contains(&format!("instructions::{}::", h)))
@@ -813,7 +748,6 @@ pub struct Increment<'info> {
             "expected an ArithmeticNoOverflow clause attributed to `increment`. Got: {:?}",
             arith
         );
-        // `safe_inc` uses checked_add and should NOT trigger.
         assert!(
             !arith.iter().any(|p| p.handler == "safe_inc"),
             "safe_inc uses checked_add — should not trigger an ArithmeticNoOverflow clause. Got: {:?}",

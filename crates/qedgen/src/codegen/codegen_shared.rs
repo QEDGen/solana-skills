@@ -1,11 +1,9 @@
-//! Shared Rust-codegen helper library for `codegen_mir`. Was `codegen.rs`
-//! until v2.32 deleted the legacy `generate()` orchestration and renamed
-//! the remainder. Holds the per-target `FrameworkSurface`, `generate_guards`,
-//! the Pinocchio scaffold emitters, the SPL CPI dispatch (`try_emit_cpi` /
-//! `emit_spl_*`), and helpers (`map_type`, `to_pascal_case`, `mechanize_effect`,
-//! …). These read `ParsedSpec` directly — they emit account-constraint /
-//! guard-predicate / framework-scaffold surface, not effect-body `Stmt` IR,
-//! so they're correctly `ParsedSpec`-based.
+//! Shared Rust-codegen helper library for `codegen_mir`: the per-target
+//! `FrameworkSurface`, `generate_guards`, the Pinocchio scaffold emitters,
+//! the SPL CPI dispatch (`try_emit_cpi` / `emit_spl_*`), and helpers
+//! (`map_type`, `to_pascal_case`, `mechanize_effect`, …). These read
+//! `ParsedSpec` directly — account-constraint / guard-predicate /
+//! framework-scaffold surface, not effect-body `Stmt` IR.
 
 use anyhow::Result;
 use std::path::Path;
@@ -15,25 +13,17 @@ use crate::fingerprint::SpecFingerprint;
 use crate::spec_hash;
 use crate::Target;
 
-/// Placeholder string spliced into the `hash = "..."` field of the
-/// `#[qed(verified, ...)]` attribute during scaffold rendering. The
-/// fixup pass at the end of `render_handler_scaffold` parses the
-/// rendered impl method, computes the real body hash via
-/// `body_hash_for_impl_fn`, and string-replaces this placeholder.
-/// Picked to be obviously not a SHA-hex value so a missed fixup is
-/// caught by the macro's "expected hash format" error rather than
-/// silently shipping a placeholder.
+/// Placeholder spliced into the `hash = "..."` field of `#[qed(verified)]`
+/// during scaffold rendering; the fixup pass at the end of
+/// `render_handler_scaffold` replaces it with the real body hash. Obviously
+/// not SHA-hex, so a missed fixup trips the macro's "expected hash format"
+/// error instead of shipping silently.
 const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
 
-/// Per-framework strings for the surface that differs between Anchor
-/// and Quasar codegen (imports, ctx type, return type, lifetime,
-/// program-mod visibility, discriminator attribute).
-///
-/// All other generated content (`#[derive(Accounts)]` shape, account
-/// constraints, `ctx.accounts.handler(...)` forwarder pattern, guard
-/// module shape) is identical across the two — both frameworks support
-/// the accounts-method forwarder idiom that the rest of the emitter
-/// produces.
+/// Per-framework strings for the surface that differs between targets
+/// (imports, ctx type, return type, lifetime, program-mod visibility,
+/// discriminator attribute). All other generated content is identical —
+/// the frameworks share the accounts-method forwarder idiom.
 #[derive(Clone, Copy)]
 pub(crate) struct FrameworkSurface {
     pub(crate) target: Target,
@@ -74,12 +64,10 @@ impl FrameworkSurface {
         match target {
             Target::Anchor => FrameworkSurface {
                 target,
-                // Anchor's `#[program]` macro expands to references to
-                // unstable `cfg(feature = "anchor-debug")` etc. that
-                // aren't declared in the generated `Cargo.toml`. The
-                // warnings come from anchor itself, not qedgen, and
-                // they drown out actual diagnostics on the rendered
-                // scaffold. Suppress at the crate root.
+                // Anchor's `#[program]` macro references cfgs (e.g.
+                // `anchor-debug`) undeclared in the generated Cargo.toml;
+                // the warnings are Anchor's, not qedgen's, and drown out
+                // real diagnostics. Suppress at the crate root.
                 crate_attrs: "#![allow(unexpected_cfgs)]\n\n",
                 prelude_import: "use anchor_lang::prelude::*;\n",
                 context_type: "Context",
@@ -91,20 +79,12 @@ impl FrameworkSurface {
             },
             Target::Quasar => FrameworkSurface {
                 target,
-                // `no_std` only for the on-chain (Solana/BPF) build. Host
-                // builds (`cargo check`/`cargo test`) keep std so the host
-                // gets a panic_handler / global_allocator from the standard
-                // library. Quasar provides solana-target panic_handler /
-                // global_allocator below via `panic_handler!()` / `no_alloc!()`.
-                //
-                // The `unexpected_cfgs` allow suppresses cfg warnings
-                // from quasar's `no_alloc` / `panic_handler` macros,
-                // which gate on `target_os = "solana"` / `feature =
-                // "alloc"` — values that aren't declared in the
-                // generated Cargo.toml. Same shape as Anchor's
-                // anchor-debug noise; treat both as external framework
-                // diagnostics so genuine warnings on the rendered
-                // scaffold stay visible.
+                // `no_std` only on-chain; host builds keep std for the
+                // panic_handler / global_allocator (Quasar supplies the
+                // solana-target ones via `panic_handler!()` / `no_alloc!()`).
+                // `unexpected_cfgs` suppresses cfg warnings from quasar's
+                // macros (undeclared `target_os = "solana"` / `feature =
+                // "alloc"`) — external framework noise, same as Anchor's.
                 crate_attrs:
                     "#![allow(unexpected_cfgs)]\n#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import: "use quasar_lang::prelude::*;\n",
@@ -123,19 +103,16 @@ impl FrameworkSurface {
             },
             Target::Pinocchio => FrameworkSurface {
                 target,
-                // Same host-std / on-chain-no_std split as Quasar: host
-                // builds (cargo test / cargo kani) keep std; the BPF build
-                // is no_std. pinocchio's `entrypoint!` macro supplies the
-                // on-chain panic handler + allocator. (slice 6, §12)
+                // Same host-std / on-chain-no_std split as Quasar;
+                // pinocchio's `entrypoint!` supplies the on-chain panic
+                // handler + allocator.
                 crate_attrs:
                     "#![allow(unexpected_cfgs)]\n#![cfg_attr(any(target_os = \"solana\", target_arch = \"bpf\"), no_std)]\n\n",
                 prelude_import:
                     "use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};\n",
-                // Pinocchio has no `Context`/`Ctx` wrapper and no
-                // `#[program]` mod — it uses a free `process_instruction`
-                // entrypoint that byte-dispatches to per-handler
-                // `process_<name>` fns. These two fields are unused for
-                // Pinocchio; generators gate their use on the target.
+                // Pinocchio has no `Context` wrapper and no `#[program]`
+                // mod (free `process_instruction` byte-dispatch instead);
+                // these two fields are unused and gated on the target.
                 context_type: "",
                 handler_result_type: "Result<(), ProgramError>",
                 accounts_lifetime: "'a",
@@ -166,25 +143,17 @@ impl FrameworkSurface {
         matches!(self.target, Target::Pinocchio)
     }
 
-    /// Pinocchio account-field type: every `#[derive(Accounts)]`-equivalent
-    /// field is a raw `&'a AccountInfo` (interior-mutable; no typed wrapper).
-    /// Typing happens via `zeropod` decode inside `.handler()` (slice 6, §12).
-    /// Shared by all the `*_type` helpers below.
+    /// Pinocchio account-field type: every field is a raw `&'a AccountInfo`
+    /// (no typed wrapper); typing happens via `zeropod` decode inside
+    /// `.handler()`. Shared by all the `*_type` helpers below.
     fn pinocchio_account_type(&self) -> String {
         format!("&{} AccountInfo", self.accounts_lifetime)
     }
 
-    /// Per-target import line for SPL token / mint types. Selects only
-    /// the names the caller has flagged as needed so unused-import
-    /// warnings don't pile up on the rendered scaffold:
-    ///
-    /// - `has_token`: any handler has a token account or a `token_program`
-    ///   account (needs `Token` for the program type; needs `TokenAccount`
-    ///   on Anchor for the typed account wrapper).
-    /// - `has_mint`: any handler has a mint account (needs `Mint`).
-    ///
-    /// Returns `String` rather than `&'static str` because the import
-    /// list is composed at call time. Empty when neither flag is set.
+    /// Per-target import line for SPL token / mint types. Selects only the
+    /// names the caller flagged as needed (`has_token` → `Token` +
+    /// Anchor's `TokenAccount`; `has_mint` → `Mint`) so unused-import
+    /// warnings don't pile up on the rendered scaffold.
     pub(crate) fn token_imports(&self, has_token: bool, has_mint: bool) -> String {
         if !has_token && !has_mint {
             return String::new();
@@ -247,11 +216,9 @@ impl FrameworkSurface {
 
     fn program_type(&self, name: &str, account_type: Option<&str>, mutable: bool) -> String {
         let lt = self.accounts_lifetime;
-        // Token-program detection is shared between targets: a `program`
-        // account named `token_program` (the convention) or carrying the
-        // `type token` annotation (explicit) needs `Program<Token>` so the
-        // generated handler can call `.transfer()` / `.mint_to()` etc.
-        // Anything else stays `Program<System>`.
+        // A `program` account named `token_program` (convention) or marked
+        // `type token` (explicit) needs `Program<Token>` so the handler can
+        // call `.transfer()` etc.; anything else stays `Program<System>`.
         let is_token = name == "token_program" || account_type == Some("token");
         if self.is_pinocchio() {
             return self.pinocchio_account_type();
@@ -293,8 +260,7 @@ impl FrameworkSurface {
     fn state_account_type(&self, state_name: &str, mutable: bool) -> String {
         let lt = self.accounts_lifetime;
         if self.is_pinocchio() {
-            // Raw &AccountInfo; state decoded from the data bytes via
-            // zeropod inside .handler() (slice 6 step 3/4).
+            // Raw &AccountInfo; state decoded via zeropod inside .handler().
             return self.pinocchio_account_type();
         }
         if self.is_quasar() {
@@ -304,9 +270,8 @@ impl FrameworkSurface {
         }
     }
 
-    /// v2.29 Slice G — imported account type via the local mirror at
-    /// `crate::imported::<ns>::<source_type>`. Anchor target only;
-    /// Quasar imported-namespace support is reserved for v2.30.
+    /// Imported account type via the local mirror at
+    /// `crate::imported::<ns>::<source_type>`. Anchor target only.
     fn imported_account_type(&self, ns: &str, source_type: &str, _mutable: bool) -> String {
         let lt = self.accounts_lifetime;
         if self.is_pinocchio() {
@@ -339,9 +304,7 @@ impl FrameworkSurface {
     }
 
     /// Generic "predicate violated, no specific error code" expression for
-    /// bare `requires` clauses (no `else <Error>`). Pre-v2.14 emitted
-    /// `debug_assert!` (silent no-op in release); v2.14+ emits a real
-    /// runtime check that returns this error. Each surface needs the
+    /// bare `requires` clauses (no `else <Error>`); each surface needs the
     /// type-correct form for its `Result<(), _>` return shape.
     fn generic_error_expr(&self) -> &'static str {
         match self.target {
@@ -354,7 +317,7 @@ impl FrameworkSurface {
         match self.target {
             Target::Anchor => "use crate::*;\n\n",
             // Pinocchio keeps the per-handler accounts struct in
-            // `instructions/<name>.rs` like Quasar (slice 6, §12).
+            // `instructions/<name>.rs` like Quasar.
             Target::Quasar | Target::Pinocchio => "use crate::instructions::*;\n\n",
         }
     }
@@ -372,10 +335,9 @@ impl FrameworkSurface {
         match self.target {
             Target::Anchor => format!("ctx.{}.owner", token_account_name),
             Target::Quasar => format!("(*ctx.{}.owner())", token_account_name),
-            // Pinocchio reads the SPL token-account owner from the account
-            // DATA (not AccountInfo::owner, which is the owning program).
-            // The zeropod-decode form lands with guard codegen (slice 6
-            // step 4); not reached until then (init bails until step 2).
+            // Pinocchio must read the SPL token-account owner from the
+            // account DATA (not AccountInfo::owner, which is the owning
+            // program); the zeropod-decode form isn't emitted yet.
             Target::Pinocchio => {
                 unreachable!("pinocchio token-owner read lands with guard codegen — slice 6 step 4")
             }
@@ -399,18 +361,11 @@ fn mut_prefix(mutable: bool) -> &'static str {
     }
 }
 
-/// Render the Rust type for a `#[derive(Accounts)]` field for the
-/// given target framework.
-///
-/// `is_state_account` is true when this account is the handler's
-/// writable state holder (per `find_state_account`); in that case we
-/// emit `Account<{state_name}>` (Quasar) or `Account<'info,
-/// {state_name}>` (Anchor) so the field-access path
-/// `self.<acct>.<field>` resolves through the typed inner data. For
-/// non-state accounts we fall back to the framework's neutral
-/// placeholder — `Account<()>` / `Signer` / `Program<()>` for Quasar,
-/// `AccountInfo<'info>` / `Signer<'info>` / `Program<'info, System>`
-/// for Anchor.
+/// Render the Rust type for a `#[derive(Accounts)]` field. When
+/// `is_state_account` (the handler's writable state holder per
+/// `find_state_account`) emit the typed `Account<…, {state_name}>` so
+/// `self.<acct>.<field>` resolves through the inner data; other accounts
+/// get the framework's neutral placeholder types.
 fn render_account_field_type(
     acct: &crate::check::ParsedHandlerAccount,
     surface: &FrameworkSurface,
@@ -426,13 +381,9 @@ fn render_account_field_type(
     } else if acct.account_type.as_deref() == Some("mint") {
         surface.mint_account_type(acct.is_writable)
     } else if let (Some(ns), Some(ty)) = (&acct.imported_namespace, &acct.account_type) {
-        // v2.29 Slice G — imported account type. Routes through the
-        // local mirror at `src/imported/<ns>.rs` so the wrapper's
-        // field layout matches the foreign program's on-chain
-        // representation. `is_writable` flips between `Account<'info,
-        // T>` (read-only) and the same — Anchor doesn't have a
-        // separate read-only Account type; the macro's writability
-        // is driven by the `#[account(mut)]` attribute, not the
+        // Imported account type — routes through the local mirror at
+        // `src/imported/<ns>.rs` so the wrapper layout matches the foreign
+        // program. Writability is driven by `#[account(mut)]`, not the
         // wrapper choice.
         surface.imported_account_type(ns, ty, acct.is_writable)
     } else if is_state_account {
@@ -459,7 +410,6 @@ pub(crate) fn relative_spec_path(spec_path: &Path, manifest_dir: &Path) -> Strin
     let spec_components: Vec<_> = spec.components().collect();
     let manifest_components: Vec<_> = manifest.components().collect();
 
-    // Find common prefix length.
     let common = spec_components
         .iter()
         .zip(manifest_components.iter())
@@ -487,25 +437,15 @@ enum TypeMapContext {
     Quasar,
 }
 
-/// Map a DSL type to its standalone Rust equivalent.
+/// Map a DSL type to its standalone Rust equivalent: primitives,
+/// `Map[N] T` → `[T; N]` (N = literal or declared constant; inner T
+/// recurses), `Fin[N]` → `usize`, transitive type aliases, and record /
+/// sum-type names returned as-is (the generator emits the matching
+/// struct/enum declarations).
 ///
-/// Handles:
-///   - primitives (U8..U128, I8..I128, Bool, Pubkey),
-///   - `Map[N] T` fixed-size containers (N = numeric literal or declared
-///     constant; inner T recurses through this function) → `[T; N]`,
-///   - `Fin[N]` → `usize` (index type with a bound; bound is informational),
-///   - type aliases declared via `type Name = RHS` — resolved transitively,
-///   - record type names (`type Foo = { ... }`) — returned as-is; the
-///     generated Rust emits a corresponding `struct Foo { ... }` declaration
-///     (see `emit_record_decls` in rust_codegen_util.rs),
-///   - sum type names (`type Error | A | B | C`) — returned as-is; the
-///     generated Rust emits a corresponding Rust enum (unit variants only;
-///     payload variants are S3 narrow: name resolves but enum is flattened).
-///
-/// Returns an error for anything else, rather than silently passing it
-/// through — the fall-through in v2.6.1 was the root cause of the codegen-
-/// bug class where types like `U16` or `Map[N] UserAccount` leaked verbatim
-/// into generated Rust (see docs/prds/PRD-v2.6.2.md G1).
+/// Errors on anything else rather than silently passing it through —
+/// fall-through was the root cause of the bug class where types like
+/// `U16` or `Map[N] UserAccount` leaked verbatim into generated Rust.
 pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     map_type_standalone(dsl_type, spec)
 }
@@ -530,9 +470,9 @@ pub(crate) fn map_type_for_target(
     match target {
         Target::Anchor => map_type_anchor(dsl_type, spec),
         Target::Quasar => map_type_quasar(dsl_type, spec),
-        // Instruction params decode from raw bytes into plain Rust scalars
-        // (u64, etc.) — the same standalone mapping. State-field pod types
-        // (PodU64, …) are a separate generate_state concern (slice 6 step 3).
+        // Instruction params decode from raw bytes into plain Rust scalars —
+        // the standalone mapping. State-field pod types are a separate
+        // state-emission concern.
         Target::Pinocchio => map_type_standalone(dsl_type, spec),
     }
 }
@@ -651,22 +591,10 @@ fn primitive_pod_map(dsl_type: &str) -> Option<&'static str> {
 /// base case can share it.
 fn primitive_map(dsl_type: &str, context: TypeMapContext) -> Option<&'static str> {
     Some(match dsl_type {
-        // v2.21 Slice 3: lower Pubkey to `[u8; 32]` for Standalone
-        // harnesses (proptest, kani, unit tests). This is "Option B"
-        // from PRD-v2.20 §S1.3 / PRD-v2.21 §"Slice 3" — the in-state
-        // workaround the P6 lint used to recommend, now applied
-        // automatically. The 32-byte array is structurally compatible
-        // with Solana's Pubkey (which is a `[u8; 32]` newtype), and
-        // proptest's existing `prop::array::uniform32(0u8..)` strategy
-        // already produces this shape.
-        //
-        // The Anchor user-facing program target keeps the real
-        // `solana_program::Pubkey` so on-chain accounts work normally.
-        // Quasar uses `Pubkey` from `quasar-lang::prelude` for the same
-        // reason — both are 32-byte newtypes downstream of `[u8; 32]`.
-        // The `Address` alias that v2.20 emitted for Quasar/Standalone
-        // contexts is retired; unit-test scaffolds drop the
-        // `type Address = [u8; 32];` line.
+        // Standalone harnesses (proptest/kani/unit tests) lower Pubkey to
+        // `[u8; 32]` — structurally compatible with Solana's Pubkey
+        // newtype, and proptest's uniform32 strategy already produces it.
+        // Anchor/Quasar program targets keep the real `Pubkey` type.
         "Pubkey" => match context {
             TypeMapContext::Anchor | TypeMapContext::Quasar => "Pubkey",
             TypeMapContext::Standalone => "[u8; 32]",
@@ -686,15 +614,10 @@ fn primitive_map(dsl_type: &str, context: TypeMapContext) -> Option<&'static str
     })
 }
 
-/// Resolve the bound expression inside `Map[BOUND] T`. Accepts either a
-/// numeric literal (e.g. `Map[16] U64`), a constant declared in the spec
-/// (e.g. `Map[MAX_ACCOUNTS] U64`), or — v2.24 #20 — a unit-only sum type
-/// (e.g. `Map[AddressField] ProposalSlot` where every variant has no
-/// payload). The enum-bounded form lowers to a fixed-size array whose
-/// length equals the variant count; downstream readers index into it
-/// using the variant's source-declared ordinal (Owner = 0, Manager = 1,
-/// …). Mixed-variant sums (some unit, some payload) are still rejected
-/// at the lint side; the codegen never sees them.
+/// Resolve the bound inside `Map[BOUND] T`: a numeric literal, a declared
+/// constant, or a unit-only sum type (array length = variant count;
+/// readers index by the variant's source-declared ordinal). Mixed-variant
+/// sums are rejected at the lint side; codegen never sees them.
 fn resolve_map_bound(bound: &str, spec: &ParsedSpec) -> Result<String> {
     let bound = bound.trim();
     if bound.chars().all(|c| c.is_ascii_digit()) && !bound.is_empty() {
@@ -703,9 +626,9 @@ fn resolve_map_bound(bound: &str, spec: &ParsedSpec) -> Result<String> {
     if let Some((_, value)) = spec.constants.iter().find(|(n, _)| n == bound) {
         return Ok(value.clone());
     }
-    // v2.24 #20 — enum-typed Map bound. Use the variant count as the
-    // array size. Unit-only check mirrors the lint at check.rs so the
-    // codegen never silently widens what the lint accepts.
+    // Enum-typed bound: variant count = array size. Unit-only check
+    // mirrors the lint at check.rs so codegen never silently widens what
+    // the lint accepts.
     if let Some(sum) = spec.sum_types.iter().find(|s| s.name == bound) {
         if sum.variants.iter().all(|v| v.fields.is_empty()) {
             return Ok(sum.variants.len().to_string());
@@ -718,14 +641,8 @@ fn resolve_map_bound(bound: &str, spec: &ParsedSpec) -> Result<String> {
 }
 
 /// Sanitize a field-path string (e.g. `accounts[i].active`) into a legal
-/// Rust identifier stem suitable for interpolation into `fn verify_*` names
-/// and similar. Non-identifier characters become `_`; consecutive and
-/// trailing `_` are collapsed.
-///
-/// Motivated by the v2.6.1 eval (percolator-prog, qedgen-bug-report §2):
-/// subscripted effect targets like `accounts[i].active` landed verbatim
-/// inside `format!("fn verify_{}_effect_{}", op.name, field)`, producing
-/// Rust-illegal identifiers such as `verify_init_user_effect_accounts[i].active`.
+/// Rust identifier stem for `fn verify_*` names: non-identifier characters
+/// become `_`; consecutive and trailing `_` collapse.
 pub fn sanitize_ident(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     let mut prev_underscore = false;
@@ -773,14 +690,9 @@ pub(crate) fn marker(label: &str, fp: &SpecFingerprint, file_key: &str) -> Strin
 // File generators
 // ============================================================================
 
-/// Self-contained Pinocchio `src/lib.rs` emitter — a shared helper called
-/// by `codegen_mir::emit_lib` for the Pinocchio target (slice 6, §12b).
-/// Pinocchio is MIR-only: the legacy `generate_lib` pipeline does NOT route
-/// Pinocchio. This helper survives the v3.0 legacy-pipeline deletion.
-///
-/// Emits the no_std crate root + module decls + `declare_id!` +
-/// `entrypoint!` + the byte-dispatch `process_instruction`. Idempotent: a
-/// pre-existing `src/lib.rs` is left untouched (user-owned).
+/// Pinocchio `src/lib.rs` emitter: no_std crate root + module decls +
+/// `declare_id!` + `entrypoint!` + the byte-dispatch `process_instruction`.
+/// Idempotent: a pre-existing `src/lib.rs` is left untouched (user-owned).
 pub(crate) fn emit_pinocchio_program_lib(
     spec: &ParsedSpec,
     fp: &SpecFingerprint,
@@ -843,16 +755,11 @@ pub(crate) fn emit_pinocchio_program_lib(
     Ok(())
 }
 
-/// Emit the Pinocchio `lib.rs` tail: program ID, the `entrypoint!` macro,
-/// and a `process_instruction` dispatcher that reads the leading
-/// discriminant byte and routes to each handler's `process_<name>`
-/// wrapper (declared in `instructions/<name>.rs`, slice 6 step 4).
-/// Replaces the Anchor/Quasar `#[program]` mod entirely (§12b).
-///
-/// `entrypoint!` expands to `program_entrypoint!` + `default_allocator!` +
-/// `default_panic_handler!`; all three are internally `target_os =
-/// "solana"`-gated (host builds link std's allocator/panic handler), so
-/// the invocation is emitted unconditionally.
+/// Emit the Pinocchio `lib.rs` tail: program ID, `entrypoint!`, and the
+/// `process_instruction` dispatcher (leading discriminant byte → each
+/// handler's `process_<name>` wrapper). `entrypoint!` expands to
+/// allocator/panic-handler macros that are internally `target_os =
+/// "solana"`-gated, so the invocation is emitted unconditionally.
 fn emit_pinocchio_lib_tail(out: &mut String, spec: &ParsedSpec, program_id: &str) {
     out.push_str(&format!(
         "pinocchio_pubkey::declare_id!(\"{}\");\n\n",
@@ -885,17 +792,14 @@ fn emit_pinocchio_lib_tail(out: &mut String, spec: &ParsedSpec, program_id: &str
     out.push_str("}\n");
 }
 
-/// Emit `src/state.rs` for the Pinocchio target (slice 6 step 3, §12a).
-///
-/// zeropod zero-copy: each persisted struct is the *schema* — declared
-/// with plain Rust field types (`u64`, `[u8; 32]`, nested records) — and
+/// Emit `src/state.rs` for the Pinocchio target. zeropod zero-copy: each
+/// persisted struct is the *schema* (plain Rust field types) and
 /// `#[derive(ZeroPod)]` generates the alignment-1 `<Struct>Zc` companion
-/// that handlers mutate in place via `from_bytes_mut`. Lifecycle / sum-type
-/// State lowers to a `u8` discriminant field + a `#[repr(u8)]` enum of
-/// named constants (the same `status: u8` + `enum` shape the Anchor/Quasar
-/// path uses, so the delegated guard codegen stays consistent). Sum-type
-/// variant payloads are flattened into one superset struct; the tag byte
-/// selects the live variant.
+/// mutated in place via `from_bytes_mut`. Lifecycle / sum-type State
+/// lowers to a `u8` discriminant + `#[repr(u8)]` enum (same shape as
+/// Anchor/Quasar, keeping the delegated guard codegen consistent);
+/// variant payloads flatten into one superset struct, tag byte selecting
+/// the live variant.
 pub(crate) fn emit_pinocchio_state(
     spec: &ParsedSpec,
     fp: &SpecFingerprint,
@@ -1055,22 +959,12 @@ fn numeric_param_width(dsl_type: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-/// Emit one Pinocchio `instructions/<name>.rs` scaffold (slice 6 step 4a).
-/// Shared helper; `codegen_mir::emit_instructions` calls it for the
-/// Pinocchio target. USER-OWNED (emitted only when the file is missing).
-///
-/// Shape: a `struct <Pascal><'a>` of `&AccountInfo` fields + an
-/// `impl { fn handler(&mut self, …) -> ProgramResult }` (calls
-/// `crate::guards::<name>`, then applies effects) + a free
-/// `process_<name>(accounts, data)` wrapper the entrypoint dispatcher
-/// calls — it binds the account slice positionally, parses params from
-/// `instruction_data` (LE, offset-tracked), builds the struct, and calls
-/// `.handler()`.
-///
-/// step 4a scope: the account-binding + param-parse + dispatch shape. The
-/// `.handler()` effect body (zeropod state read/write + SPL CPI) + the
-/// Pinocchio `guards.rs` path are step 4b — the body is a `todo!()`
-/// breadcrumb for now.
+/// Emit one Pinocchio `instructions/<name>.rs` scaffold. USER-OWNED
+/// (emitted only when the file is missing). Shape: a `struct <Pascal><'a>`
+/// of `&AccountInfo` fields + `fn handler` (calls `crate::guards::<name>`,
+/// then applies effects) + a free `process_<name>(accounts, data)` wrapper
+/// that binds the account slice positionally, parses params from
+/// `instruction_data` (LE, offset-tracked), and calls `.handler()`.
 pub(crate) fn render_pinocchio_handler_scaffold(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
@@ -1095,8 +989,7 @@ pub(crate) fn render_pinocchio_handler_scaffold(
     }
     out.push('\n');
 
-    // Accounts struct — every field is a raw &AccountInfo (zeropod decode
-    // happens inside .handler()).
+    // Every field is a raw &AccountInfo (zeropod decode in .handler()).
     out.push_str(&format!("pub struct {}<'a> {{\n", pascal));
     for acct in &handler.accounts {
         out.push_str(&format!("    pub {}: &'a AccountInfo,\n", acct.name));
@@ -1201,21 +1094,14 @@ pub(crate) fn render_pinocchio_handler_scaffold(
     Ok(out)
 }
 
-/// Emit the `.handler()` effect body for a Pinocchio handler (slice 6 4b).
-/// Mechanical SCALAR state effects (`field := v`, `field += / -= / +=! /
-/// +=? n`) lower to a one-time mutable zeropod decode of the state account
-/// plus per-field `.get()`-based arithmetic (universally safe — native int
-/// op then `.into()` back to the Pod field). RHS expressions route through
-/// `bind_pinocchio_expr` so param + scalar-state reads resolve.
-///
-/// SPL Token CPIs from explicit `call Interface.handler(...)` sites lower
-/// via `try_emit_cpi(_, Target::Pinocchio)` (slice 6 step 5b) — the handler
-/// struct's `&'a AccountInfo` fields match `pinocchio_token`'s CPI struct
-/// fields directly.
-///
-/// Deferred (emit a documented breadcrumb): non-scalar effects (array /
-/// nested / variant-payload writes), events, `transfers { … }` sugar
-/// (agent-fill on every target), and generic non-SPL CPI (slice 7).
+/// Emit the `.handler()` effect body for a Pinocchio handler. Mechanical
+/// SCALAR state effects lower to a one-time mutable zeropod decode plus
+/// per-field `.get()` arithmetic (native int op, then `.into()` back to
+/// the Pod field); RHS expressions route through `bind_pinocchio_expr`.
+/// SPL Token CPIs lower via `try_emit_cpi` — the handler struct's
+/// `&'a AccountInfo` fields match `pinocchio_token`'s CPI struct fields
+/// directly. Deferred surfaces (non-scalar effects, events, `transfers`
+/// sugar, generic non-SPL CPI) emit documented breadcrumbs.
 fn emit_pinocchio_effect_body(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     let prog = to_pascal_case(&spec.program_name);
     let err = format!("{}Error", prog);
@@ -1303,11 +1189,8 @@ fn emit_pinocchio_effect_body(out: &mut String, handler: &ParsedHandler, spec: &
     if complex_effects {
         out.push_str("        // TODO(slice 6 4b-cont): non-scalar effects (array / nested /\n        // variant-payload writes) + multi-account state.\n");
     }
-    // SPL Token CPIs from explicit `call Interface.handler(...)` sites
-    // (slice 6 step 5b). The handler struct's `&'a AccountInfo` fields
-    // are exactly what `pinocchio_token::instructions::*` takes, so the
-    // emitter's `self.<acct>` resolves directly. Non-SPL (generic invoke)
-    // call sites return `None` (slice 7) and fall through to a breadcrumb.
+    // Explicit `call Interface.handler(...)` sites. Non-SPL (generic
+    // invoke) call sites return `None` and fall through to a breadcrumb.
     let mut any_unmechanized_call = false;
     for c in &handler.calls {
         match try_emit_cpi(c, handler, spec, Target::Pinocchio) {
@@ -1325,41 +1208,20 @@ fn emit_pinocchio_effect_body(out: &mut String, handler: &ParsedHandler, spec: &
         out.push_str("        // TODO(slice 7): generic (non-SPL) CPI call sites are not yet\n        // mechanized for Pinocchio (raw invoke_signed + Borsh).\n");
     }
 
-    // `transfers { … }` stays agent-fill on every target — codegen owns
-    // deterministic translation, the agent owns the CPI/authority business
-    // logic. Events likewise carry no payload binding in the spec.
+    // `transfers { … }` stays agent-fill on every target (CPI/authority
+    // business logic); events carry no payload binding in the spec.
     if !handler.emits.is_empty() || !handler.transfers.is_empty() {
         out.push_str("        // TODO(slice 6 4b-cont): events / transfers.\n");
     }
 }
 
-/// v2.24 S5b — `true` when the spec's state is a multi-variant ADT
-/// (two or more variants in a single account type) AND the spec has
-/// declared the `WrongState` error variant that the new emission
-/// path needs for its variant-mismatch fallthroughs.
-///
-/// `WrongState` works as the **migration signal**: a spec author
-/// opts into the wrapper-struct + inner-enum emission by declaring
-/// it in `type Error`, alongside flipping bare-field effect LHS to
-/// `Variant.field` syntax. Without that declaration, codegen falls
-/// back to the legacy flat-fields struct + parallel `Status` enum
-/// emission — which keeps unmigrated bundled examples (escrow,
-/// multisig, lending, percolator) compiling on Anchor target until
-/// they migrate at their own pace.
-///
-/// v2.24.x follow-up: pre-fix the predicate only checked variant
-/// count, which meant every multi-variant ADT spec routed through
-/// the wrapper+enum path regardless of whether it had been migrated.
-/// That exposed downstream emission gaps (lib.rs pda seeds
-/// referencing variant-payload fields, guards.rs requires bodies
-/// reaching `wrapper.X` where X moved into the inner enum) that
-/// don't show up on Quasar (which stays on the flat path) but
-/// break Anchor cargo check.
-///
-/// Single-record account types, single-variant ADTs, multi-account
-/// specs, and any spec lacking `WrongState` all stay on the flat path.
-/// Public re-export of `is_multi_variant_adt_state` for callers in
-/// other modules (check.rs's seeds-suppression logic).
+/// `true` when the spec's state is a multi-variant ADT (≥2 variants in a
+/// single account type) opted into the wrapper-struct + inner-enum
+/// emission (`pragma state_repr = adt` via `state_repr_is_adt`).
+/// Single-record account types, single-variant ADTs, multi-account specs,
+/// and non-opted specs all stay on the flat-fields + `Status`-enum path.
+/// Public re-export of `is_multi_variant_adt_state` for check.rs's
+/// seeds-suppression logic.
 pub fn is_multi_variant_adt_state_pub(spec: &ParsedSpec) -> bool {
     is_multi_variant_adt_state(spec)
 }
@@ -1374,31 +1236,16 @@ fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
             .unwrap_or(false)
 }
 
-/// v2.29 Slice H — generate `src/imported/<ns>.rs` per imported
-/// namespace plus a `src/imported/mod.rs` re-exporter. The handler's
-/// accounts block can then name `<ns>::<Type>` as the account type
-/// without depending on the foreign crate at compile time: the
-/// mirror struct carries the same field layout, so an `Account<'info,
-/// <ns>::<Type>>` deserializes the foreign bytes exactly the way the
-/// foreign program would.
-///
-/// The mirror is fully regenerated on every `qedgen codegen`; users
-/// should not hand-edit anything under `src/imported/`. Drift
-/// detection (`qedgen check --regen-drift`) treats these files as
-/// generated, same shape as `state.rs` / `errors.rs` / `events.rs`.
-///
-/// Single-variant account types lower to plain `pub struct`s.
-/// Multi-variant ADTs (the `WrongState`-gated wrapper + inner enum
-/// pattern) reuse the wrapper-struct + inner-enum shape so an
-/// `Account<'info, Wrapper>` matches the foreign program's
-/// account discriminator. The same accessor-method emission from
-/// `generate_state` runs here so consumer-side reads via
-/// `imported_acct.inner.<field>()` work identically to local
-/// multi-variant state.
-///
-/// Plain record types referenced by the imported account types are
-/// emitted in the same file so the mirror is self-contained — no
-/// cross-file `use crate::imported::<other>::*;` chasing.
+/// Generate `src/imported/<ns>.rs` per imported namespace plus a
+/// `src/imported/mod.rs` re-exporter, so the accounts block can name
+/// `<ns>::<Type>` without a compile-time dep on the foreign crate — the
+/// mirror carries the same field layout, so `Account<'info, <ns>::<Type>>`
+/// deserializes foreign bytes exactly as the foreign program would.
+/// Fully regenerated on every `qedgen codegen` (never hand-edit).
+/// Single-variant account types lower to plain structs; multi-variant
+/// ADTs reuse the wrapper + inner-enum shape (with accessors) so the
+/// discriminator and consumer reads match local multi-variant state.
+/// Referenced record types are emitted in the same file (self-contained).
 #[allow(dead_code)]
 pub(crate) fn generate_imported_mirror(
     spec: &ParsedSpec,
@@ -1406,11 +1253,9 @@ pub(crate) fn generate_imported_mirror(
     output_dir: &Path,
     target: Target,
 ) -> Result<()> {
-    // v2.30 (mir / unified imports): every imported source registers
-    // in `imported_namespaces`, but only those with non-empty
-    // `account_types` produce a mirror file. Tier-0 interface stubs
-    // (SPL Token / System Program / Metaplex) carry no `type`
-    // declarations — skip them.
+    // Only namespaces with non-empty `account_types` produce a mirror;
+    // Tier-0 interface stubs (SPL Token / System / Metaplex) carry no
+    // `type` declarations.
     if !spec
         .imported_namespaces
         .values()
@@ -1423,12 +1268,8 @@ pub(crate) fn generate_imported_mirror(
     let imported_dir = src_dir.join("imported");
     std::fs::create_dir_all(&imported_dir)?;
 
-    // Per-namespace file emission. The BTreeMap iteration order is
-    // sorted by local name so the generated mod.rs re-exports stay
-    // deterministic across runs.
+    // BTreeMap iteration order keeps output deterministic.
     for (local_name, ns) in &spec.imported_namespaces {
-        // Skip Tier-0 stubs whose `account_types` is empty —
-        // no Rust mirror to emit.
         if ns.account_types.is_empty() {
             continue;
         }
@@ -1447,11 +1288,9 @@ pub(crate) fn generate_imported_mirror(
         out.push_str(surface.prelude_import);
         out.push('\n');
 
-        // Plain record types first (account types may reference them).
-        // Anchor-only: Quasar's zero-copy/Pod path needs a different
-        // derive set + `#[repr(C)]` discipline that v2.29 doesn't
-        // wire for imports — flagged as future work alongside the
-        // larger Quasar import story.
+        // Record types first (account types may reference them).
+        // Anchor-only: Quasar's zero-copy/Pod path isn't wired for
+        // imports.
         for record in &ns.records {
             out.push_str("#[repr(C)]\n");
             let derives = match target {
@@ -1467,14 +1306,9 @@ pub(crate) fn generate_imported_mirror(
             out.push_str("}\n\n");
         }
 
-        // Account types. Two shapes mirror `generate_state`:
-        //   1. Single-variant (no `WrongState`): plain `#[account]`
-        //      struct with fields at the top level.
-        //   2. Multi-variant ADT (wrapper + inner enum): only emit
-        //      when there's more than one variant. Inner enum gets
-        //      the accessor-impl block from `generate_state`'s
-        //      Slice B work so consumer reads through
-        //      `imported_acct.inner.<field>()` resolve.
+        // Account types: single-variant → plain `#[account]` struct;
+        // multi-variant ADT → wrapper + inner enum with accessors so
+        // `imported_acct.inner.<field>()` reads resolve.
         for (idx, acct) in ns.account_types.iter().enumerate() {
             let is_multi_variant = acct.variants.len() > 1;
             let account_attr = if surface.explicit_account_discriminator {
@@ -1483,10 +1317,9 @@ pub(crate) fn generate_imported_mirror(
                 "#[account]\n".to_string()
             };
             if !is_multi_variant {
-                // Flat struct path. Lifecycle status field follows the
-                // same convention as `generate_state` — without it the
-                // consumer's `requires` clauses that reference
-                // `<acct>.status` wouldn't compile against the mirror.
+                // Flat struct path. The lifecycle status field is needed
+                // so consumer `requires` referencing `<acct>.status`
+                // compile against the mirror.
                 out.push_str(&format!("{}pub struct {} {{\n", account_attr, acct.name));
                 for (fname, ftype) in &acct.fields {
                     let rust_ty = map_type_for_target(ftype, spec, target)?;
@@ -1513,10 +1346,9 @@ pub(crate) fn generate_imported_mirror(
                 continue;
             }
 
-            // Multi-variant ADT — same wrapper + inner enum shape as
-            // generate_state's `is_multi_variant_adt_state` path so
-            // the mirror deserializes the foreign account exactly
-            // the way the foreign program does.
+            // Multi-variant ADT — same wrapper + inner enum shape as the
+            // local-state path so the mirror deserializes the foreign
+            // account exactly as the foreign program does.
             let inner_name = format!("{}Inner", acct.name);
             out.push_str(&format!("{}pub struct {} {{\n", account_attr, acct.name));
             out.push_str(&format!("    pub inner: {},\n", inner_name));
@@ -1547,12 +1379,9 @@ pub(crate) fn generate_imported_mirror(
             }
             out.push_str("}\n\n");
 
-            // Reuse the Slice B accessor pattern (fields that appear
-            // across variants with a consistent type get an accessor
-            // method on the inner enum). Consumer-side reads like
-            // `imported_acct.inner.balance()` then resolve through
-            // the same shape used for locally-declared multi-variant
-            // ADT state.
+            // Fields appearing across variants with a consistent type get
+            // an accessor on the inner enum, same shape as local
+            // multi-variant ADT state.
             let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
                 std::collections::BTreeMap::new();
             for variant in &acct.variants {
@@ -1604,21 +1433,15 @@ pub(crate) fn generate_imported_mirror(
         std::fs::write(imported_dir.join(format!("{}.rs", local_name)), &out)?;
     }
 
-    // `mod.rs` re-exports each namespace as `pub mod <ns>;`. Slice G
-    // (the parser+codegen for `Ident.Ident` type refs) consumes this
-    // to resolve `<ns>::<Type>` references in the consumer's spec
-    // against the local mirror. `#![allow(non_snake_case)]` covers
-    // the common case where the imported spec's bound name is
-    // PascalCase (e.g. `import Config from "config_program"` keeps
-    // the module name `Config`); rustc otherwise warns on every
-    // module-decl line.
+    // `mod.rs` re-exports each namespace as `pub mod <ns>;` so
+    // `<ns>::<Type>` refs resolve against the local mirror.
+    // `#![allow(non_snake_case)]` covers PascalCase bound names
+    // (`import Config from …` keeps module name `Config`).
     let mut mod_out = String::new();
     mod_out.push_str(&marker("DO NOT EDIT", fp, "src/imported/mod.rs"));
     mod_out.push_str("//! v2.29 Slice H — re-exports for imported namespace mirrors.\n\n");
     mod_out.push_str("#![allow(non_snake_case)]\n\n");
-    // v2.30: only re-export namespaces that actually produced a
-    // mirror file (account_types non-empty). Tier-0 stubs registered
-    // in `imported_namespaces` are silent on the codegen side.
+    // Only re-export namespaces that produced a mirror file.
     for (local_name, ns) in &spec.imported_namespaces {
         if ns.account_types.is_empty() {
             continue;
@@ -1631,26 +1454,16 @@ pub(crate) fn generate_imported_mirror(
     Ok(())
 }
 
-/// Render the initial scaffold for a single user-owned handler file.
-/// Identify the writable state-holding account in a handler. A handler's
-/// accounts include user signers, token/mint accounts, programs, and
-/// PDA-derived state holders; only the last category can receive a `self.X.field = ...`
-/// effect expansion. Returns None when the handler has zero or multiple
-/// plausible state accounts — in which case the caller must fall back to
-/// `todo!()` and let a human (or M4 agent) disambiguate.
-/// Identifier-character predicate for the `bind_state` word-bounded
-/// rewrite: ASCII alphanumerics plus underscore mark the inside of a
-/// Rust identifier.
+/// Identifier-character predicate for the word-bounded rewrites: ASCII
+/// alphanumerics plus underscore.
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// v2.29 Slice B — word-boundary substring search. Returns `true`
-/// when `needle` appears in `haystack` as a complete identifier
-/// (i.e. neither neighbouring byte is an identifier character). Used
-/// to detect whether a `requires` rust expression actually references
-/// an `abstract` binder by name without false-matching on
-/// `<binder>_x` / `prefix<binder>` substrings.
+/// Word-boundary substring search: `needle` appears in `haystack` as a
+/// complete identifier. Detects whether a `requires` expression
+/// references an `abstract` binder without false-matching `<binder>_x` /
+/// `prefix<binder>` substrings.
 fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
@@ -1731,25 +1544,15 @@ fn lifecycle_check_line(
         return String::new();
     };
 
-    // v2.24 S5c — multi-variant ADT state has no `status: u8` byte; the
-    // variant IS the discriminator. Pre-check rewrites to a
-    // `matches!(inner, Inner::<pre> { .. })` test against the wrapper's
-    // `inner` field. Post-write is a no-op — the effect lowering's
-    // match arm (or set_inner for cross-variant promotion) is what
-    // moves the variant.
-    //
-    // v2.24.0 follow-up: gate on Anchor target. Quasar emits the
-    // legacy flat-struct `pub struct X { … status: u8, … }` shape
-    // even for multi-variant ADT specs (the wrapper-struct + inner-
-    // enum rewrite is Anchor-only — Quasar's zero-copy `#[account]`
-    // is incompatible with enum payloads). Emitting the `matches!
-    // (ctx.X.inner, …)` check on Quasar produces uncompilable code:
-    // there's no `inner` field on the Quasar wrapper. Quasar specs
-    // keep the legacy `status` byte check below.
+    // Multi-variant ADT state has no `status: u8` byte; the variant IS
+    // the discriminator. Pre-check rewrites to `matches!(inner,
+    // Inner::<pre> { .. })`; post-write is a no-op (the effect lowering
+    // moves the variant). Anchor-only: Quasar's zero-copy `#[account]`
+    // can't carry enum payloads, so Quasar stays on the flat shape and
+    // the legacy `status` byte check below (its wrapper has no `inner`
+    // field).
     if is_multi_variant_adt_state(spec) && matches!(surface.target, Target::Anchor) {
         if write {
-            // The effect lowering handles variant transitions inline;
-            // no separate post-write needed.
             return String::new();
         }
         let pre = handler.pre_status.as_deref().unwrap_or("");
@@ -1780,12 +1583,9 @@ fn lifecycle_check_line(
         );
     }
 
-    // Resolve the Status enum name. Mirrors `generate_state`'s naming:
-    //   - `is_multi` (account_types.len() > 1): emit `<ADT>Status` per
-    //     lifecycle (lending: `PoolStatus`, `LoanStatus`).
-    //   - Otherwise: emit a single `Status` enum.
-    // Important: `account_types` can contain ONE entry (e.g. multisig's
-    // `type State | …`) and still be "single-state" for naming purposes.
+    // Status enum naming mirrors state emission: multi-account →
+    // `<ADT>Status` per lifecycle; otherwise a single `Status`. Note: one
+    // `account_types` entry (`type State | …`) is still "single-state".
     let is_multi = spec.account_types.len() > 1;
     let (enum_name, lifecycle): (String, &Vec<String>) = if is_multi {
         let Some(adt) = handler.on_account.as_deref() else {
@@ -1799,10 +1599,8 @@ fn lifecycle_check_line(
         }
         (format!("{}Status", at.name), &at.lifecycle)
     } else {
-        // Single-state: the spec may declare its lifecycle either via a
-        // single ADT (then `account_types[0].lifecycle` carries the
-        // variants) or via the legacy flat `state {}` form (then they
-        // live on `spec.lifecycle_states`). Prefer the ADT slot.
+        // Lifecycle lives on `account_types[0].lifecycle` (ADT form) or
+        // `spec.lifecycle_states` (flat `state {}` form); prefer the ADT.
         let lifecycle: &Vec<String> = spec
             .account_types
             .first()
@@ -1860,13 +1658,10 @@ fn lifecycle_check_line(
 }
 
 fn find_state_account(handler: &ParsedHandler) -> Option<&crate::check::ParsedHandlerAccount> {
-    // Try writable-only first — matches lifecycle-mutation handlers and is
-    // the original behavior. If the writable-filtered search comes up empty,
-    // fall back to all non-signer/non-program/non-token candidates so
-    // read-only handlers (view-style reads, pre-flight checks, claim
-    // handlers that mutate a sibling account) still get `s.field` rewritten
-    // to `ctx.<acct>.field` in guards.rs. Without the fallback the guard
-    // body emits bare `s.field` references that don't compile.
+    // Writable-only first; fall back to all non-signer/non-program/
+    // non-token candidates so read-only handlers still get `s.field`
+    // rewritten to `ctx.<acct>.field` in guards.rs (bare `s.field`
+    // wouldn't compile).
     if let Some(found) = find_state_account_filtered(handler, true) {
         return Some(found);
     }
@@ -1900,12 +1695,10 @@ fn find_state_account_filtered(
     if candidates.len() == 1 {
         return Some(candidates[0]);
     }
-    // Multi-state spec disambiguator: when the handler declares
-    // `on_account = "Loan"` (parsed from `: Loan.Pre -> Loan.Post`), pick
-    // the handler-account whose name matches the ADT (lowercase). Without
-    // this, lending::liquidate has both `loan` and `pool` as writable
-    // PDA candidates and `find_state_account` returned None, leaving
-    // `s.amount > s.collateral` un-rewritten in guards.rs.
+    // Multi-state disambiguator: when the handler declares `on_account`
+    // (`: Loan.Pre -> Loan.Post`), pick the handler-account whose name
+    // matches the ADT (lowercase) — otherwise two writable PDA candidates
+    // would return None and leave guard refs un-rewritten.
     if let Some(adt) = handler.on_account.as_deref() {
         let lower = adt.to_lowercase();
         if let Some(matched) = candidates
@@ -1933,34 +1726,20 @@ const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 /// pin's `binary_hash` stays all-zero (see `data/interfaces/system.qedspec`).
 const SYSTEM_PROGRAM_ID: &str = "11111111111111111111111111111111";
 
-/// Try to emit a real Anchor CPI invocation for one `call Interface.handler(...)`
-/// site. Returns `None` when the interface isn't recognized OR when the
-/// target framework isn't Anchor (caller falls back to a comment +
-/// `todo!()` so the user / an LLM fills the body).
-///
-/// All five SPL Token handlers — `transfer`, `mint_to`, `burn`,
-/// `initialize_account`, `close_account` — get an `anchor_spl::token::*`
-/// shape; non-SPL-Token interfaces ship a generic
-/// `solana_program::program::invoke` shape. The canonical SPL handlers
-/// cover the bulk of CPI traffic in deployed programs, which is what
-/// keeps `todo!()` out of the typical escrow / lending / vault shape.
-///
-/// Per-target dispatch: emits the right CPI shape per
-/// `(target, is_spl_token)`.
+/// Try to emit a real CPI invocation for one `call Interface.handler(...)`
+/// site. Dispatch on `(target, is_spl_token, is_system)`:
 ///
 /// - Anchor    + SPL Token → `anchor_spl::token::*` builder shape
 /// - Anchor    + System    → `anchor_lang::system_program::*` builder shape
 /// - Anchor    + generic   → `solana_program::program::invoke` shape
 /// - Quasar    + SPL Token → `quasar_spl::TokenCpi` method chain
 /// - Quasar    + System    → `Program<SystemProgram>` method chain
-/// - Quasar    + generic   → not implemented (spike scope; §8 slice 3)
 /// - Pinocchio + SPL Token → `pinocchio_token::instructions::*` struct + invoke
 /// - Pinocchio + System    → `pinocchio_system::instructions::*` struct + invoke
-/// - Pinocchio + generic   → not implemented (spike scope; §8 slice 7)
 ///
-/// Returns `None` for any branch that isn't implemented yet — the
-/// caller falls back to a structured comment + `todo!()` so the agent
-/// fills the body.
+/// Returns `None` for unrecognized interfaces/handlers and unimplemented
+/// branches (Quasar/Pinocchio generic) — the caller falls back to a
+/// structured comment + `todo!()` for the agent to fill.
 fn try_emit_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -1980,13 +1759,11 @@ fn try_emit_cpi(
         (Target::Anchor, false, false) => emit_generic_cpi_anchor(call, handler, iface, spec),
         (Target::Quasar, true, _) => emit_spl_token_cpi_quasar(call, handler, spec),
         (Target::Quasar, false, true) => emit_system_cpi_quasar(call, handler, spec),
-        // Quasar generic (non-SPL, non-System) CPI — follow-on slice
-        // (uses `BufCpiCall`).
+        // Quasar generic CPI not implemented (would use `BufCpiCall`).
         (Target::Quasar, false, false) => None,
         (Target::Pinocchio, true, _) => emit_spl_token_cpi_pinocchio(call, handler, spec),
         (Target::Pinocchio, false, true) => emit_system_cpi_pinocchio(call, handler, spec),
-        // Pinocchio generic (non-SPL, non-System) CPI — follow-on slice
-        // (raw invoke_signed).
+        // Pinocchio generic CPI not implemented (raw invoke_signed).
         (Target::Pinocchio, false, false) => None,
     }
 }
@@ -2022,10 +1799,8 @@ fn emit_spl_token_cpi_anchor(
             &[
                 ("mint", "mint"),
                 ("to", "to"),
-                // anchor_spl's MintTo uses `authority`; the canonical
-                // qedspec interface names it `mint_authority` to match the
-                // SPL Token instruction docs. Map between them at the
-                // codegen boundary.
+                // anchor_spl's MintTo says `authority`; the qedspec
+                // interface says `mint_authority` (SPL docs). Map here.
                 ("authority", "mint_authority"),
             ],
             Some("amount"),
@@ -2054,9 +1829,8 @@ fn emit_spl_token_cpi_anchor(
             &[
                 ("account", "account"),
                 ("mint", "mint"),
-                // anchor_spl's InitializeAccount uses `authority` for the
-                // owner slot; the canonical qedspec interface names it
-                // `owner` to match SPL Token instruction docs.
+                // anchor_spl's InitializeAccount says `authority`; the
+                // qedspec interface says `owner` (SPL docs). Map here.
                 ("authority", "owner"),
                 ("rent", "rent"),
             ],
@@ -2147,10 +1921,8 @@ fn find_program_account_for_interface<'a>(
         })
 }
 
-/// Convert PascalCase to snake_case. Used to map an interface name
-/// (`MyAmm`) to its conventional handler-side program account name
-/// (`my_amm_program`). Single-pass — adds an underscore before each
-/// uppercase letter (except the first) and lowercases the result.
+/// Convert PascalCase to snake_case — maps an interface name (`MyAmm`) to
+/// its conventional program account name (`my_amm_program`).
 pub(crate) fn to_snake_case(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, c) in s.chars().enumerate() {
@@ -2162,33 +1934,12 @@ pub(crate) fn to_snake_case(s: &str) -> String {
     out
 }
 
-/// Emit a generic `solana_program::program::invoke` CPI shape for any
-/// Anchor program that isn't SPL Token. Returns None when:
-/// - the called handler isn't declared in the interface (unknown name);
-/// - no program account is reachable in the calling handler (caller
-///   falls back to comment + `todo!()` so the user can wire it manually).
-///
-/// Emitted shape:
-///
-/// ```rust
-/// {
-///     let mut ix_data: Vec<u8> = vec![<sighash bytes>];
-///     <BorshSerialize each value arg>::serialize(&mut ix_data)?;
-///     let ix = solana_program::instruction::Instruction {
-///         program_id: solana_program::pubkey!("<iface_program_id>"),
-///         accounts: vec![
-///             AccountMeta::new(self.<acct>.key(), <is_signer>),
-///             AccountMeta::new_readonly(self.<acct>.key(), <is_signer>),
-///             // ... per the interface's accounts block, in declared order
-///         ],
-///         data: ix_data,
-///     };
-///     solana_program::program::invoke(&ix, &[
-///         self.<acct>.to_account_info(),
-///         // ... + the program account
-///     ])?;
-/// }
-/// ```
+/// Emit a generic `solana_program::program::invoke` CPI shape (sighash +
+/// Borsh-serialized args + AccountMeta vec in interface-declared order)
+/// for any Anchor program that isn't SPL Token. Returns None when the
+/// called handler isn't declared in the interface or no program account
+/// is reachable in the calling handler (caller falls back to comment +
+/// `todo!()`).
 fn emit_generic_cpi_anchor(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2265,11 +2016,9 @@ fn emit_generic_cpi_anchor(
     out.push_str("            ];\n\n");
 
     out.push_str("            let ix = Instruction {\n");
-    // v2.24.0 follow-up: use `Pubkey::from_str` instead of the
-    // `pubkey!` macro. The macro lives at different paths across
-    // Anchor versions (and isn't reexported under
-    // `anchor_lang::solana_program` in 0.32.x); `from_str` is
-    // stable on the `Pubkey` type itself.
+    // `Pubkey::from_str`, not the `pubkey!` macro — the macro lives at
+    // different paths across Anchor versions; `from_str` is stable on
+    // the `Pubkey` type itself.
     out.push_str(&format!(
         "                program_id: <anchor_lang::prelude::Pubkey as std::str::FromStr>::from_str(\"{}\").unwrap(),\n",
         program_id,
@@ -2513,15 +2262,12 @@ fn emit_system_anchor(
     Some(out)
 }
 
-/// Quasar SPL Token dispatcher. Routes to the right `quasar_spl::TokenCpi`
-/// method per the called handler's name. Returns None on unrecognized
-/// handlers so the caller falls back to comment + `todo!()`.
-///
-/// Coverage (slice 2): `transfer`, `mint_to`, `burn`, `close_account`.
-/// `initialize_account` stays `None` — `quasar-spl` exposes only
-/// `initialize_account3`, whose `owner: &Address` positional is a raw key
-/// (not an account view) and which omits the rent sysvar, so it doesn't
-/// fit the uniform `emit_quasar_method_chain` helper (see the match arm).
+/// Quasar SPL Token dispatcher: `transfer`, `mint_to`, `burn`,
+/// `close_account` via `quasar_spl::TokenCpi`. `initialize_account` stays
+/// `None` — `quasar-spl` exposes only `initialize_account3`, whose
+/// `owner: &Address` positional is a raw key (not an account view) and
+/// which omits the rent sysvar, so it doesn't fit the uniform
+/// `emit_quasar_method_chain` helper.
 fn emit_spl_token_cpi_quasar(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2577,12 +2323,8 @@ fn emit_spl_token_cpi_quasar(
             &["account", "destination", "authority"],
             None,
         ),
-        // `initialize_account` has no uniform Quasar shape: `quasar-spl`
-        // exposes only `initialize_account3`, whose third positional is
-        // `owner: &Address` (a raw key, not an account view) and which
-        // omits the rent sysvar. That divergent signature doesn't fit the
-        // positional-account-view `emit_quasar_method_chain` helper, so it falls
-        // through to the caller's `todo!()`.
+        // `initialize_account` has no uniform Quasar shape (see doc);
+        // falls through to the caller's `todo!()`.
         _ => None,
     }
 }
@@ -2626,13 +2368,10 @@ fn emit_quasar_method_chain(
 }
 
 /// Dispatch a `call System.<handler>(...)` site to its Quasar
-/// `Program<SystemProgram>` method-chain shape
-/// (`self.<system_program>.transfer(&self.<from>, &self.<to>,
-/// <lamports>).invoke()?;`). Only `transfer` is mechanized — the same
-/// slice boundary as the Anchor / Pinocchio System emitters:
-/// `create_account` / `assign` take an `&Address` owner whose
-/// resolution from a spec `Pubkey` arg is a follow-on, so they return
-/// `None` and the caller keeps the breadcrumb.
+/// `Program<SystemProgram>` method-chain shape. Only `transfer` is
+/// mechanized (same boundary as the Anchor / Pinocchio System emitters):
+/// `create_account` / `assign` take an `&Address` owner whose resolution
+/// from a spec `Pubkey` arg is a follow-on, so they return `None`.
 fn emit_system_cpi_quasar(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2656,23 +2395,12 @@ fn emit_system_cpi_quasar(
     }
 }
 
-/// Pinocchio SPL Token dispatcher. Routes to the right
-/// `pinocchio_token::instructions::*` struct per the called handler's
-/// name. Returns None on unrecognized handlers so the caller falls
-/// back to comment + `todo!()`.
-///
-/// Coverage (slice 2b): all five canonical SPL handlers — `transfer`,
-/// `mint_to`, `burn`, `initialize_account`, `close_account`. Field-name
-/// divergences from canonical SPL naming (`MintTo.account` for the
-/// recipient, `MintTo.mint_authority`, `Burn.account` for the source,
-/// `InitializeAccount.rent_sysvar`) are handled per-arm in the
-/// `(pinocchio_field, spec_arg)` map.
-///
-/// **Note on dead-code-ness**: `--target pinocchio` codegen currently
-/// skips the Rust scaffold (`main.rs:3132`), so this emitter is never
-/// reached from the CLI today. It still gets unit-tested directly via
-/// `try_emit_cpi(_, _, _, Target::Pinocchio)`. When Pinocchio scaffold
-/// (§8 slice 6) lands, this emitter is already wired.
+/// Pinocchio SPL Token dispatcher — all five canonical SPL handlers via
+/// `pinocchio_token::instructions::*`. Field-name divergences from
+/// canonical SPL naming (`MintTo.account`, `MintTo.mint_authority`,
+/// `Burn.account`, `InitializeAccount.rent_sysvar`) are handled per-arm
+/// in the `(pinocchio_field, spec_arg)` map. Returns None on
+/// unrecognized handlers (caller falls back to comment + `todo!()`).
 fn emit_spl_token_cpi_pinocchio(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2747,16 +2475,9 @@ fn emit_spl_token_cpi_pinocchio(
 }
 
 /// Emit one `pinocchio_token::instructions::<Struct> { … }.invoke()?;`
-/// CPI. Field assignments use
-/// the pinocchio-token struct field names (passed in
-/// `field_to_arg.0`), resolved against the call site's argument list
-/// (`field_to_arg.1`).
-///
-/// Note: pinocchio_token's struct field names diverge from the
-/// canonical SPL naming for some handlers (`MintTo.account` vs SPL's
-/// `to`; `MintTo.mint_authority` vs SPL's `authority`). The
-/// `field_to_arg` map handles the translation at the codegen boundary,
-/// mirroring how `emit_spl_anchor` handles the Anchor variants.
+/// CPI. `field_to_arg` maps pinocchio-token struct field names to
+/// call-site arg names, absorbing the naming divergences from canonical
+/// SPL at the codegen boundary (mirroring `emit_spl_anchor`).
 fn emit_spl_pinocchio(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2800,14 +2521,9 @@ fn emit_spl_pinocchio(
 
 /// Dispatch a `call System.<handler>(...)` site to its
 /// `pinocchio_system::instructions::*` shape. Only `transfer` is
-/// mechanized this slice — it covers the lamport-movement path that the
-/// generic CPI breadcrumb previously left as a `todo!()` on Pinocchio
-/// (the System Program's lamport `Transfer` is the code class behind the
-/// over-funded-PDA / lamport-transfer-DoS findings the bench corpus
-/// surfaced). `create_account` and `assign` take a `&Pubkey` `owner`,
-/// whose resolution from a spec `Pubkey` arg (e.g. the program's own ID)
-/// is a follow-on; they return `None` so the caller keeps the existing
-/// breadcrumb rather than emit code that may not type-check.
+/// mechanized; `create_account` / `assign` take a `&Pubkey` `owner`
+/// whose resolution from a spec `Pubkey` arg is a follow-on, so they
+/// return `None` rather than emit code that may not type-check.
 fn emit_system_cpi_pinocchio(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
@@ -2823,8 +2539,6 @@ fn emit_system_cpi_pinocchio(
             &[("from", "from"), ("to", "to")],
             &[("lamports", "amount")],
         ),
-        // create_account / assign: see doc comment — `owner: &Pubkey`
-        // resolution is a follow-on.
         _ => None,
     }
 }
@@ -2880,14 +2594,12 @@ fn emit_system_pinocchio(
     Some(out)
 }
 
-/// v2.29.2 — resolve the state-bearing account for a handler with a
-/// spec-wide canonical fallback. `find_state_account(handler)` returns
-/// `None` when multiple writable candidates exist and no PDA /
-/// `on_account` disambiguator picks one (real-world specs often declare
-/// the state account `readonly` in handlers that only read it, leaving
-/// the per-handler resolver stuck among unrelated token / mint
-/// accounts). When that happens, fall back to the spec-wide canonical
-/// state account name and re-find it in this handler.
+/// Resolve the state-bearing account for a handler with a spec-wide
+/// canonical fallback: `find_state_account` returns `None` when multiple
+/// writable candidates exist and no PDA / `on_account` disambiguator
+/// picks one (real-world specs often mark the state account `readonly`
+/// in read-only handlers); fall back to the spec-wide canonical name and
+/// re-find it in this handler.
 fn resolve_handler_state_account<'a>(
     handler: &'a ParsedHandler,
     spec: &ParsedSpec,
@@ -2899,28 +2611,13 @@ fn resolve_handler_state_account<'a>(
     handler.accounts.iter().find(|a| a.name == canon)
 }
 
-/// v2.29.2 — pick the most-likely state-bearing account name across the
-/// whole spec. Used as a fallback when a handler's accounts block has
-/// multiple writable candidates and no PDA/`on_account` disambiguator
-/// (real-world specs frequently mark the state account `readonly` in
-/// handlers that only read it, leaving the per-handler resolver stuck
-/// among unrelated token / mint accounts).
-///
-/// Heuristic: count, for each non-signer / non-program / non-token /
-/// non-mint account name across the whole spec:
-///   1. how many handlers list it `writable`, then
-///   2. how many handlers list it at all (writable or readonly).
-///
-/// The pair `(writable, total)` is compared lexicographically with the
-/// highest pair winning; ties broken alphabetically (earlier name
-/// first) for determinism. Returns `None` when no name accumulates a
-/// non-zero pair.
-///
-/// The total-mentions tiebreaker is what makes the heuristic robust
-/// against specs where the canonical state account is `readonly` in
-/// most handlers (read-heavy programs): an account that's mentioned
-/// in every handler is almost certainly the shared state, even when
-/// individual writable counts tie with unrelated per-handler accounts.
+/// Pick the most-likely state-bearing account name across the whole
+/// spec. Heuristic over non-signer / non-program / non-token / non-mint
+/// account names: compare `(writable-handler count, total-mention
+/// count)` lexicographically, ties broken alphabetically for
+/// determinism; `None` when nothing is ever writable. The total-mentions
+/// tiebreaker keeps the heuristic robust for read-heavy programs where
+/// the state account is `readonly` in most handlers.
 fn find_canonical_state_account_name(spec: &ParsedSpec) -> Option<String> {
     let mut writable: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut total: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -2952,32 +2649,16 @@ fn find_canonical_state_account_name(spec: &ParsedSpec) -> Option<String> {
 }
 
 /// Rewrite `s.<field>` patterns in a pre-rendered Rust expression so it
-/// compiles inside the user-owned handler `impl` block (where the state
-/// binder is `self`, not `ctx`). Mirrors the Step-2 logic from
-/// `generate_guards::bind_state` but with `self.<state_acct>` as the
-/// prefix.
-///
-/// Multi-variant ADT state fields route through the v2.29 Slice B
-/// accessor (`(*self.<state>.inner.<field>())`); flat-state fields take
-/// the bare `self.<state>.<field>` path. Word-bounded so identifiers
-/// like `accounts[i].fee_credits` don't get corrupted.
-///
-/// v2.29.2 (friction-report follow-up, #12 deep): the existing
-/// `resolve_call_arg_for_amount` only handles top-level CPI argument
-/// expressions. Handler-body `let X = ref_impl(state.f, ...)` sites
-/// emit pre-rendered RHS strings whose `s.<field>` references stayed
-/// raw — `rustc` then rejected with `cannot find value 's'`. This
-/// helper closes that gap for any in-`impl` emission site.
+/// compiles inside the user-owned handler `impl` block (state binder is
+/// `self`, not `ctx`) — mirrors `generate_guards::bind_state` with
+/// `self.<state_acct>` as the prefix. Multi-variant ADT fields route
+/// through the accessor (`(*self.<state>.inner.<field>())`); flat-state
+/// fields take `self.<state>.<field>`. Word-bounded so identifiers like
+/// `accounts[i].fee_credits` aren't corrupted. Covers in-`impl` sites
+/// (e.g. `let X = ref_impl(state.f, …)`) that
+/// `resolve_call_arg_for_amount` doesn't reach — otherwise `s.<field>`
+/// stays unbound and rustc rejects with `cannot find value 's'`.
 fn rewrite_state_refs_for_self(expr: &str, handler: &ParsedHandler, spec: &ParsedSpec) -> String {
-    // v2.29.2 — when this handler has multiple writable candidates and
-    // no PDA or `on_account` disambiguator (real-world shape: state
-    // account declared `readonly` here while several token / mint
-    // accounts are writable in this handler), `find_state_account
-    // (handler)` bails with `None` and the rewrite would no-op leaving
-    // `s.<field>` unbound. Fall back to the spec-wide canonical state
-    // account: the non-signer / non-program / non-token / non-mint
-    // account name that's writable in the most handlers, then look it
-    // up by name in THIS handler's accounts.
     let Some(sa) = resolve_handler_state_account(handler, spec) else {
         return expr.to_string();
     };
@@ -3039,26 +2720,20 @@ fn rewrite_state_refs_for_self(expr: &str, handler: &ParsedHandler, spec: &Parse
     out
 }
 
-/// Resolve a numeric / value argument's rust_expr to a form that's in
-/// scope inside the handler `impl` block. Bare identifiers that match a
-/// state field get the `self.<state_acct>.` prefix; handler params and
-/// literals pass through unchanged. Multi-variant ADT state fields
-/// route through the v2.29 Slice B accessor (`.inner.<field>()`)
-/// since the wrapper struct only exposes `inner`, not the variant
-/// payload fields directly.
+/// Resolve a numeric / value argument's rust_expr to a form in scope
+/// inside the handler `impl` block. Bare identifiers matching a state
+/// field get the `self.<state_acct>.` prefix; handler params and
+/// literals pass through. Multi-variant ADT fields route through the
+/// `.inner.<field>()` accessor (the wrapper exposes only `inner`).
 fn resolve_call_arg_for_amount(
     rust_expr: &str,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
 ) -> String {
-    // v2.29 — handle `s.<field>` shape coming from `expr_to_rust`
-    // on `state.<field>` paths (Ctx::Guard lowers `state` → `s`).
-    // The CPI emission contexts don't have an `s` binding in scope,
-    // so route directly to the runtime `self.<state_acct>.<field>`
-    // form — the same shape the `bind_state` closure produces in
-    // guards.rs. Without this, `call Token.transfer(amount =
-    // state.total_deposits)` lowered to a bare `s.total_deposits`
-    // reference and rustc rejected with `cannot find value 's'`.
+    // `s.<field>` (Ctx::Guard lowers `state` → `s`): CPI emission
+    // contexts have no `s` binding, so route to the runtime
+    // `self.<state_acct>.<field>` form — otherwise rustc rejects with
+    // `cannot find value 's'`.
     if let Some(field) = rust_expr.strip_prefix("s.") {
         if field.chars().all(|c| c.is_alphanumeric() || c == '_') {
             if let Some(sa) = find_state_account(handler) {
@@ -3088,12 +2763,9 @@ fn resolve_call_arg_for_amount(
     }
     if let Some(sa) = find_state_account(handler) {
         if is_multi_variant_adt_state(spec) {
-            // v2.29 Slice B (#12 deep): variant-payload field reads
-            // route through the accessor emitted in generate_state.
-            // Bail to the bare form when the field isn't a known
-            // variant payload — flat-state-like access against the
-            // wrapper's own non-inner fields stays valid (e.g.
-            // `bump`).
+            // Variant-payload reads route through the accessor; bare form
+            // when the field isn't a known variant payload (wrapper's own
+            // fields like `bump` stay valid).
             if let Some(acct) = spec.account_types.first() {
                 let is_variant_field = acct
                     .variants
@@ -3114,11 +2786,9 @@ fn resolve_call_arg_for_amount(
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
 /// LLM or human fills the body.
 ///
-/// `on_error` is the v2.24 §S1a per-site override (`pool += amount or X`).
-/// When `Some(name)`, the generated `checked_add` / `checked_sub` uses
-/// `Name` as the error variant. When `None`, the lowering falls back to
-/// (in priority order) the `pragma checked_overflow_error =` /
-/// `pragma checked_underflow_error =` default, then the built-in
+/// `on_error` is the per-site override (`pool += amount or X`) for the
+/// `checked_add` / `checked_sub` error variant; when `None`, fall back to
+/// the `pragma checked_{over,under}flow_error =` default, then built-in
 /// `MathOverflow` / `MathUnderflow`. Always `None` for non-checked ops.
 fn mechanize_effect(
     effect: &(String, String, String),
@@ -3139,35 +2809,17 @@ fn mechanize_effect(
     if !simple_rhs {
         return None;
     }
-    // v2.24 S5c — under multi-variant ADT state on the Anchor
-    // target, the flat `self.<acct>.<field>` lowering doesn't apply.
-    // The wrapper-struct + inner-enum emission from S5b means the
-    // wrapper carries only `inner` (the variant payload) and `bump`
-    // — there's no top-level `<field>` to write. Bail so the
-    // per-effect path surfaces a `// Spec effect (needs fill)` line
-    // + a trailing `todo!()` rather than a silent miscompile like
-    // `self.escrow.initializer_amount = …`.
-    //
-    // Two cases trigger:
-    //   1. Variant-prefixed LHS (`Active.balance := …`): cross-
-    //      variant emitter `emit_variant_state_handler_body` handles
-    //      same-variant + cross-variant when it can; this path is
-    //      the bail-out for cases it can't (missing post-variant
-    //      fields, payload-carrying pre, etc.).
-    //   2. Bare-field LHS (`balance := …`): a pre-v2.24 spec
-    //      hasn't been migrated to `Variant.field` syntax yet. The
-    //      `bare_field_on_multi_variant_state` lint (S5c) surfaces
-    //      this as guidance; the codegen bails so the migration
-    //      need is unmissable.
+    // Multi-variant ADT state on Anchor: the wrapper carries only
+    // `inner` + `bump`, so the flat `self.<acct>.<field>` lowering
+    // doesn't apply. Bail so the per-effect path surfaces a `todo!()`
+    // instead of a silent miscompile — `emit_variant_state_handler_body`
+    // owns the cases it can mechanize.
     if is_multi_variant_adt_state(spec) && matches!(target, Target::Anchor) {
         return None;
     }
-    // v2.24.0 follow-up: single-variant ADT specs also accept the
-    // `Variant.field` LHS form for forward-compat. The flat-struct
-    // emission has no `Variant.` prefix in the actual struct, so
-    // strip it here. Without this, `Active.total_burned := X`
-    // would lower to `self.acct.Active.total_burned = X` which
-    // doesn't compile (Active isn't a field on the wrapper).
+    // Single-variant ADT specs also accept the `Variant.field` LHS form;
+    // the flat struct has no `Variant.` prefix, so strip it (otherwise
+    // `Active.total_burned := X` lowers to a non-compiling path).
     let field = strip_variant_prefix(field, spec);
     let field = field.as_str();
 
@@ -3184,33 +2836,18 @@ fn mechanize_effect(
     // applied here so the Lean output stays untouched.
     let field = rewrite_index_to_usize(field);
     let field = field.as_str();
-    // v2.7 G3: `+=` default lowers to `checked_add(...).ok_or(err)?` — the
-    // pattern deployed Anchor programs use. Pre-v2.7 this lowered to
-    // `wrapping_add` which produced Kani false-positives and didn't match
-    // production behavior. Explicit `+=!` / `+=?` opt into saturating /
-    // wrapping.
-    //
-    // v2.8 F8: thread the user-declared Error sum through. Pre-F8 the
-    // generated code referenced a non-existent `ErrorCode::MathOverflow`,
-    // which only worked when no effect actually exercised checked
-    // arithmetic. Now we emit `<ProgramName>Error::MathOverflow`, which
-    // matches the Anchor `#[error_code]` enum generated alongside.
-    //
-    // v2.24 §S1a/b/c: variant-name resolution becomes three-tiered:
-    //   1. Per-site override:    `pool += amount or MintOverflow`
-    //   2. Pragma default:       `pragma checked_overflow_error = …`
-    //   3. Built-in default:     `MathOverflow` (for `+=`),
-    //                            `MathUnderflow` (for `-=`).
-    // S1c back-compat: specs declaring `MathOverflow` but not
-    // `MathUnderflow` keep the pre-v2.24 behavior of `-=` raising
-    // `MathOverflow`. The lint at check.rs surfaces missing declarations.
+    // `+=` defaults to `checked_add(...).ok_or(err)?` (the pattern
+    // deployed Anchor programs use); explicit `+=!` / `+=?` opt into
+    // saturating / wrapping. Error-variant resolution is three-tiered:
+    //   1. per-site `or <Variant>` override,
+    //   2. `pragma checked_{over,under}flow_error =` default,
+    //   3. built-in `MathOverflow` / `MathUnderflow`.
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let pragma_overflow = spec.pragma_value("checked_overflow_error");
     let pragma_underflow = spec.pragma_value("checked_underflow_error");
-    // Built-in underflow default with back-compat: if MathOverflow is
-    // declared but MathUnderflow isn't, treat `-=` as raising MathOverflow
-    // (matches pre-v2.24 behavior). This keeps existing specs building.
+    // Back-compat: MathOverflow declared without MathUnderflow keeps `-=`
+    // raising MathOverflow so existing specs build.
     let builtin_underflow = if has_decl("MathUnderflow") || !has_decl("MathOverflow") {
         "MathUnderflow"
     } else {
@@ -3218,14 +2855,12 @@ fn mechanize_effect(
     };
     let overflow_variant = on_error.or(pragma_overflow).unwrap_or("MathOverflow");
     let underflow_variant = on_error.or(pragma_underflow).unwrap_or(builtin_underflow);
-    // Quasar's `#[account]` macro auto-wraps integer state fields in their
-    // Pod companions (u64 → PodU64). Plain `=` and `wrapping_*` between a
-    // `u64` rhs and a `PodU64` lhs fail to type-check, so on Quasar:
-    //   - `set` lhs gets `.into()` on the rhs (PodU64: From<u64>).
-    //   - `checked_*` / `saturating_*` work as-is — PodU64 ships them.
-    //   - `wrapping_*` is unwound to `<lhs>.get().wrapping_*(rhs).into()`
-    //     because PodU64 doesn't expose `wrapping_*` directly.
-    // Anchor uses native ints, so its branch matches the previous output.
+    // Quasar's `#[account]` auto-wraps integer fields in Pod companions
+    // (u64 → PodU64). Plain `=` / `wrapping_*` between u64 and PodU64
+    // don't type-check, so on Quasar: `set` rhs gets `.into()`;
+    // `checked_*` / `saturating_*` work as-is (PodU64 ships them);
+    // `wrapping_*` unwinds to `<lhs>.get().wrapping_*(rhs).into()`.
+    // Anchor uses native ints.
     let is_quasar = matches!(target, Target::Quasar);
     let line = match op_kind.as_str() {
         "set" => {
@@ -3274,12 +2909,9 @@ fn mechanize_effect(
     Some(line)
 }
 
-/// v2.24 S5c — strip a leading `Variant.` prefix from an effect LHS
-/// when the root matches a known variant on the spec's single state
-/// account. `Active.pool` → `pool`; `accounts[i].cap` → unchanged;
-/// `pool` → unchanged. Pure string transform — the lint side keeps
-/// `variant_fields` indexed for validation; this just normalizes
-/// for downstream emission.
+/// Strip a leading `Variant.` prefix from an effect LHS when the root
+/// matches a known variant (`Active.pool` → `pool`; `accounts[i].cap` /
+/// `pool` unchanged). Pure normalization; the lint side validates.
 fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
     if let Some(dot) = lhs.find('.') {
         let head = &lhs[..dot];
@@ -3294,14 +2926,11 @@ fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
     lhs.to_string()
 }
 
-/// v2.24 S5c — emit one effect line in destructured-variant context.
 /// `mechanize_effect`'s sibling for the multi-variant ADT path: the
-/// state binder is a destructured local (e.g. `pool: &mut u64` from
+/// state binder is a destructured local (`pool: &mut u64` from
 /// `match &mut self.<acct>.inner { Inner::Active { pool, .. } => …`),
-/// not `self.<acct>.<field>`. Emit `*pool = …` or `pool[i] = …`
-/// instead of `self.<acct>.pool = …`. Falls back to `None` for
-/// non-scalar / non-indexed shapes the caller can route to a fresh
-/// per-effect `todo!()`.
+/// so emit `*pool = …` / `pool[i] = …`. `None` for shapes the caller
+/// routes to a per-effect `todo!()`.
 fn mechanize_effect_destructured(
     effect: &(String, String, String),
     on_error: Option<&str>,
@@ -3315,10 +2944,8 @@ fn mechanize_effect_destructured(
     if !simple_rhs {
         return None;
     }
-    // Strip variant prefix (`Active.pool` → `pool`) and normalize
-    // indexed-access form. The destructured binding is the bare
-    // field root — `pool[i]` keeps the indexing in place; scalar
-    // bindings carry an extra `*` deref to write through `&mut T`.
+    // The destructured binding is the bare field root — `pool[i]` keeps
+    // the indexing; scalars need a `*` deref to write through `&mut T`.
     let field = strip_variant_prefix(field_raw, spec);
     let field = rewrite_index_to_usize(&field);
     let is_indexed = field.contains('[');
@@ -3370,10 +2997,8 @@ fn mechanize_effect_destructured(
     Some(line)
 }
 
-/// v2.24 S5c — drop `[<idx>]` from a destructured field reference so
-/// the RHS-side read uses the bare binding name. `voted[i as usize]`
-/// → `voted`. Pure substring chop; safe for the simple shapes the
-/// destructured emitter accepts.
+/// Drop `[<idx>]` from a destructured field reference so the RHS-side
+/// read uses the bare binding name (`voted[i as usize]` → `voted`).
 fn strip_array_index_suffix(field: &str) -> String {
     match field.find('[') {
         Some(i) => field[..i].to_string(),
@@ -3381,37 +3006,14 @@ fn strip_array_index_suffix(field: &str) -> String {
     }
 }
 
-/// v2.24 S5c — emit the complete handler body block for a
-/// multi-variant ADT state. Wraps the per-effect lines in a
-/// destructure-and-mutate (same-variant) or destructure-and-promote
-/// (cross-variant) match block. Returns `None` when the handler
-/// shape isn't yet supported by this lowering pass — callers fall
-/// back to the per-effect loop (which emits `todo!()` for any
-/// unmechanized effect).
-///
-/// Same-variant pattern:
-///
-/// ```ignore
-/// match &mut self.<acct>.inner {
-///     <Inner>::<Variant> { f1, f2, .. } => {
-///         *f1 = …;
-///         f2[i as usize] = …;
-///     }
-///     _ => return Err(<Err>::WrongState.into()),
-/// }
-/// ```
-///
-/// Cross-variant (init / promote) is deferred — the wrapping
-/// `set_inner(Inner::Post { … })` requires picking a payload for
-/// every field of the post variant, which often needs spec data
-/// the agent fills in (CPI return values, event-binding sources).
-/// Today that lands as a `todo!()` line; v2.24.1 / v2.25 may grow
-/// a richer codegen path.
-/// v2.26 Slice 2 — return shape of the multi-variant ADT handler-body
-/// emitter. `needs_fill_tail` is true when at least one `modifies`
-/// field landed as an agent-fill `todo!()` site; the caller propagates
-/// this into `any_unmechanized` so the tail `todo!("fill non-mechanical …")`
-/// fires even when every effect line mechanized cleanly.
+/// Return shape of the multi-variant ADT handler-body emitter
+/// (`emit_variant_state_handler_body`, below): wraps per-effect lines in
+/// a destructure-and-mutate (same-variant) or destructure-and-promote
+/// (cross-variant) match on `self.<acct>.inner`, with a `WrongState`
+/// fallthrough arm. `needs_fill_tail` is true when at least one
+/// `modifies` field landed as an agent-fill `todo!()` site — the caller
+/// propagates it so the tail `todo!("fill non-mechanical …")` fires even
+/// when every effect line mechanized cleanly.
 struct VariantHandlerBody {
     body: String,
     needs_fill_tail: bool,
@@ -3552,11 +3154,9 @@ fn emit_variant_state_handler_body(
         out.push_str(&line);
     }
 
-    // v2.26 Slice 2 — emit modifies-driven agent-fill sites inside
-    // the same match arm so the destructured binding is in scope.
-    // Mirrors the flat-fields template at the codegen `if
-    // !variant_body_emitted && !is_multi_variant_adt_state(spec)` site
-    // (indented 12 spaces, `*field` deref instead of `self.X.field`).
+    // Modifies-driven agent-fill sites inside the same match arm so the
+    // destructured binding is in scope (mirrors the flat-fields template,
+    // with `*field` deref instead of `self.X.field`).
     let mut needs_fill_tail = false;
     for field in &modifies_only_fields {
         let mut referencing: Vec<&str> = Vec::new();
@@ -3612,22 +3212,17 @@ fn emit_variant_state_handler_body(
     })
 }
 
-/// v2.24 S5c — render an effect RHS for the cross-variant promotion
-/// emitter. The legal RHS shapes are restricted to ones the emitter
-/// can lower deterministically:
+/// Render an effect RHS for the cross-variant promotion emitter. Legal
+/// shapes (deterministically lowerable only):
 ///
-///   - bare param (handler `takes_params`) → bare identifier
-///   - bare const (spec `constants`) → bare identifier (Rust resolves)
-///   - integer literal → bare integer
-///   - `<account>.pubkey` where `<account>` is bound on the handler
-///     and is a signer / writable account → `self.<account>.key()`
-///   - bare pre-variant field name (v2.29 Slice C, payload→payload):
-///     the destructured local shadowing `<field>` is in scope inside
-///     the emitter's preamble → bare identifier
+///   - bare param / bare const / integer literal → bare identifier
+///   - `<account>.pubkey` (account bound on the handler) →
+///     `self.<account>.key()`
+///   - bare pre-variant field name → bare identifier (the destructure
+///     preamble binds it as a local)
 ///
-/// Anything else returns `None`, which bails the whole cross-variant
-/// emitter back to the per-effect `todo!()` path so the agent fills
-/// the gap manually instead of getting a silent miscompile.
+/// Anything else returns `None`, bailing the whole cross-variant emitter
+/// back to the per-effect `todo!()` path instead of a silent miscompile.
 fn resolve_cross_variant_rhs(
     raw: &str,
     handler: &ParsedHandler,
@@ -3650,18 +3245,14 @@ fn resolve_cross_variant_rhs(
         if spec.constants.iter().any(|(n, _)| n == raw) {
             return Some(raw.to_string());
         }
-        // v2.29 Slice C — pre-variant field captured by the
-        // destructure preamble. The emitter binds `<field>` as a
-        // local before the assignment, so a bare reference resolves
-        // directly. render_effect strips `state.` for bare paths
-        // (chumsky_adapter.rs::render_effect line 1356), so the raw
-        // form here is the bare field name.
+        // Pre-variant field: the destructure preamble binds it as a
+        // local, so a bare reference resolves (render_effect strips
+        // `state.` for bare paths).
         if pre_fields.iter().any(|n| n == raw) {
             return Some(raw.to_string());
         }
-        // Unknown bare ident — could be a param shadowed by a state
-        // field of the same name; that's a spec smell. Bail loud
-        // (via `None`) rather than guess.
+        // Unknown bare ident — possibly a param shadowed by a state
+        // field; bail rather than guess.
         return None;
     }
     // `<account>.pubkey` shape — map to the Anchor key() accessor on
@@ -3674,20 +3265,13 @@ fn resolve_cross_variant_rhs(
     None
 }
 
-/// v2.24 S5c — emit cross-variant promotion (init / promote) for a
-/// multi-variant ADT state. Assembles every post-variant field
-/// from the handler's effect lines and assigns the new variant via
-/// `self.<acct>.inner = <Inner>::<Post> { … };`.
+/// Emit cross-variant promotion (init / promote) for a multi-variant ADT
+/// state: assembles every post-variant field from the handler's effect
+/// lines and assigns `self.<acct>.inner = <Inner>::<Post> { … };`.
 ///
-/// Bail-out conditions (each falls back to the per-effect
-/// `todo!()` path):
-///   - Pre is a payload-carrying variant (the destructure would
-///     need to capture pre fields that may flow into post; for
-///     v2.24 we keep cross-variant scoped to unit-style pre).
-///   - Any post-variant field has no matching effect line (we don't
-///     guess defaults for unspecified fields).
-///   - Any effect RHS can't be resolved by `resolve_cross_variant_rhs`
-///     (complex shapes — match / record / arith — fall through).
+/// Bail-outs (each falls back to the per-effect `todo!()` path): a
+/// post-variant field with no matching effect line (we don't guess
+/// defaults), or an effect RHS `resolve_cross_variant_rhs` can't lower.
 fn emit_cross_variant_promotion(
     handler: &ParsedHandler,
     spec: &ParsedSpec,
@@ -3697,12 +3281,9 @@ fn emit_cross_variant_promotion(
     inner_name: &str,
     err_enum: &str,
 ) -> Option<String> {
-    // v2.24.0: three baseline cross-variant promotion patterns are
-    // valid (unit→payload init, payload→unit terminate, unit→unit).
-    // v2.29 Slice C lifts the last restriction — payload→payload now
-    // emits a destructure preamble that captures pre fields as
-    // locals, then assembles the post variant referencing those
-    // locals where the spec carries `state.<pre_field>` reads.
+    // All four promotion patterns supported; payload→payload emits a
+    // destructure preamble capturing the pre fields referenced by post
+    // RHSs as locals.
     let pre_variant = spec
         .account_types
         .first()?
@@ -3712,10 +3293,9 @@ fn emit_cross_variant_promotion(
 
     let pre_field_names: Vec<String> = pre_variant.fields.iter().map(|(n, _)| n.clone()).collect();
 
-    // Build a {field → RHS-rust} map from the handler's effects.
-    // For cross-variant we only accept the `:= <rhs>` form (effect
-    // op kind "set"); checked-arith ops don't make sense in a
-    // promotion (no pre value to read).
+    // {field → RHS-rust} from the handler's effects. Cross-variant only
+    // accepts `:=` ("set"); checked-arith makes no sense in a promotion
+    // (no pre value to read).
     let mut field_rhs: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for (lhs, op_kind, rhs) in &handler.effects {
@@ -3732,21 +3312,17 @@ fn emit_cross_variant_promotion(
         field_rhs.insert(bare, resolved);
     }
 
-    // Every post-variant field must have an RHS. We don't fill
-    // defaults — silent defaults hide bugs (a zeroed pubkey is a
-    // famously bad bug). For unit-style post variants, this loop
-    // iterates zero times — the assignment lands as a bare
-    // variant constructor with no braces.
+    // Every post-variant field must have an RHS — silent defaults hide
+    // bugs (a zeroed pubkey is a famously bad one). Unit-style post
+    // variants iterate zero times.
     for (fname, _) in &post_variant.fields {
         if !field_rhs.contains_key(fname) {
             return None;
         }
     }
 
-    // v2.29 Slice C — collect the pre-variant fields referenced by
-    // any post-variant RHS. Only these need to be bound by the
-    // destructure preamble; binding the rest would produce
-    // `unused variable` warnings.
+    // Only pre fields referenced by a post RHS get bound by the
+    // destructure preamble; binding the rest would warn as unused.
     let referenced_pre_fields: Vec<String> = pre_field_names
         .iter()
         .filter(|f| field_rhs.values().any(|rhs| rhs == *f))
@@ -3757,9 +3333,8 @@ fn emit_cross_variant_promotion(
     let mut out = String::new();
 
     if pre_variant.fields.is_empty() {
-        // Unit pre — emit the bare matches! gate (unchanged from v2.24).
-        // Init handlers skip the gate: `#[account(init, …)]` zeroes
-        // the account, so there's no prior payload to mismatch on.
+        // Unit pre — bare matches! gate. Init handlers skip it:
+        // `#[account(init, …)]` zeroes the account.
         if !is_init_pre {
             out.push_str(&format!(
                 "        if !matches!(self.{}.inner, {}::{}) {{ return Err({}::WrongState.into()); }}\n",
@@ -3768,9 +3343,6 @@ fn emit_cross_variant_promotion(
         }
     } else if referenced_pre_fields.is_empty() {
         // Payload pre, no fields read by post — variant check only.
-        // (Same shape as v2.24 payload-pre + unit-post; covers the
-        // rare payload-pre + payload-post where post is fully
-        // populated from params / consts / literals.)
         if !is_init_pre {
             out.push_str(&format!(
                 "        if !matches!(self.{}.inner, {}::{} {{ .. }}) {{ return Err({}::WrongState.into()); }}\n",
@@ -3778,14 +3350,10 @@ fn emit_cross_variant_promotion(
             ));
         }
     } else {
-        // Payload pre + at least one field is read by post — emit a
-        // `match` that doubles as the variant-gate and the field
-        // capture step. Bind only referenced fields via the
-        // destructure pattern; ignore the rest with `..` so Rust
-        // doesn't warn on unused bindings. The inner enum derives
-        // Clone (codegen.rs:1053), so calling `.clone()` per field
-        // works uniformly for both Copy and non-Copy field types
-        // (e.g. `Map[N] Pubkey`).
+        // Payload pre with fields read by post — one `match` doubles as
+        // variant-gate and field capture (referenced fields only, rest
+        // via `..`). The inner enum derives Clone, so `.clone()` per
+        // field works for Copy and non-Copy types alike.
         let bind_pat = referenced_pre_fields.join(", ");
         let local_pat = if referenced_pre_fields.len() == 1 {
             referenced_pre_fields[0].clone()
@@ -3816,9 +3384,8 @@ fn emit_cross_variant_promotion(
         out.push_str("        };\n");
     }
 
-    // Unit-style post: emit `... = Inner::Closed;` without the
-    // empty `{}` braces. Payload post: emit the brace-wrapped
-    // field-by-field initializer in declared order.
+    // Unit post: bare constructor (no `{}`); payload post: field-by-field
+    // initializer.
     if post_variant.fields.is_empty() {
         out.push_str(&format!(
             "        self.{}.inner = {}::{};\n",
@@ -3829,10 +3396,8 @@ fn emit_cross_variant_promotion(
             "        self.{}.inner = {}::{} {{\n",
             acct_binder, inner_name, post_variant.name
         ));
-        // Emit fields in the variant's declared order so the
-        // assembled initializer reads the way a user would write
-        // it. The map is sorted by name for lookup; iterating the
-        // variant's `fields` here preserves source-declared order.
+        // Iterate the variant's `fields` (not the name-sorted map) to
+        // preserve source-declared order.
         for (fname, _) in &post_variant.fields {
             let rhs = &field_rhs[fname];
             out.push_str(&format!("            {}: {},\n", fname, rhs));
@@ -3842,22 +3407,16 @@ fn emit_cross_variant_promotion(
     Some(out)
 }
 
-/// v2.24 S5c — emit a destructure-then-compare auth guard for a
-/// handler whose `auth X` field lives in a variant payload. Returns
-/// the empty string when the conditions don't apply (single-variant
-/// state, no `auth X`, X is on the wrapper not in a variant payload,
-/// no matching signer account, or `Unauthorized` not declared in
-/// `type Error`). The guard fires after the lifecycle pre-check, so
-/// the destructure is guaranteed to bind.
+/// Emit a destructure-then-compare auth guard for a handler whose
+/// `auth X` field lives in a variant payload. Empty string when the
+/// conditions don't apply (single-variant state, no `auth X`, X on the
+/// wrapper, no matching signer account, or `Unauthorized` undeclared).
+/// Fires after the lifecycle pre-check, so the destructure is
+/// guaranteed to bind.
 fn emit_variant_auth_guard(handler: &ParsedHandler, spec: &ParsedSpec, target: Target) -> String {
-    // v2.24.0 follow-up: gate on Anchor target. Quasar keeps the
-    // flat-struct shape even for multi-variant ADT specs, so
-    // emitting a `let <Inner>::<Pre> { auth: auth_field, .. } = …`
-    // destructure references a type that doesn't exist on Quasar.
-    // The `has_one = X` suppression in check.rs::account_attr is
-    // also target-gated below — Quasar specs keep firing `has_one`
-    // (the flat-struct field IS accessible) and don't need the
-    // replacement destructure-check guard.
+    // Anchor-only: Quasar keeps the flat-struct shape (no inner enum to
+    // destructure) and keeps firing `has_one` instead — the check.rs
+    // `has_one` suppression is target-gated to match.
     if !matches!(target, Target::Anchor) {
         return String::new();
     }
@@ -3936,25 +3495,17 @@ pub(crate) fn render_handler_accounts_struct(
     let lifetime_params = surface.lifetime_params();
     let mut out = String::new();
     out.push_str("#[derive(Accounts)]\n");
-    // v2.29 — drop the `<'info>` lifetime parameter when the handler
-    // declares no accounts AND no implicit signer is added below.
-    // Anchor's `#[derive(Accounts)]` still validates a unit struct,
-    // but rustc rejects the empty `<'info>` since no field references
-    // it. Pre-fix the empty-accounts case (e.g. permissionless
-    // handlers without account binds) emitted `pub struct
-    // Initialize<'info> {}` and tripped E0392.
+    // Drop `<'info>` when no field references it (zero accounts and no
+    // implicit signer) — rustc rejects an unused lifetime (E0392).
     let needs_lifetime = !handler.accounts.is_empty() || handler.who.is_some();
     let struct_lifetime: &str = if needs_lifetime { &lifetime_params } else { "" };
     out.push_str(&format!("pub struct {}{} {{\n", pascal, struct_lifetime));
 
     if !handler.accounts.is_empty() {
-        // v2.29.2 — use the canonical-fallback resolver so multi-
-        // writable handlers whose state account is declared `readonly`
-        // (or otherwise ambiguous) still get the state account typed
-        // as `Account<'info, <StateStruct>>` rather than falling
-        // through to `AccountInfo<'info>`. Without this, downstream
-        // `self.<acct>.<field>` reads in let-bindings / guards / CPI
-        // args fail with `no field on type __AccountInfo`.
+        // Canonical-fallback resolver: an ambiguous / readonly state
+        // account must still type as `Account<'info, <StateStruct>>`,
+        // not `AccountInfo<'info>` — otherwise downstream
+        // `self.<acct>.<field>` reads fail.
         let state_acct = resolve_handler_state_account(handler, spec);
         for acct in &handler.accounts {
             let inferred_name = if is_multi {
@@ -3962,15 +3513,10 @@ pub(crate) fn render_handler_accounts_struct(
             } else {
                 default_state_name.to_string()
             };
-            // An account is "state-bearing" if either:
-            //   1. `find_state_account` picked it as the unique writable
-            //      non-token PDA (single-state-ADT specs), or
-            //   2. `infer_state_name` matched its name to a declared state
-            //      ADT in this multi-state spec (e.g., `loan` ↔ `Loan` ADT
-            //      → `LoanAccount`). Without this, a multi-PDA handler like
-            //      lending's `borrow` (loan + pool both writable PDAs)
-            //      drops `loan` to `UncheckedAccount` even though it's the
-            //      lifecycle target.
+            // State-bearing if `find_state_account` picked it OR
+            // `infer_state_name` matched it to a declared ADT (multi-PDA
+            // handlers would otherwise drop the lifecycle target to
+            // `UncheckedAccount`).
             let inferred_match = is_multi && inferred_name != default_state_name;
             let is_state =
                 state_acct.map(|sa| sa.name == acct.name).unwrap_or(false) || inferred_match;
@@ -4004,21 +3550,17 @@ pub(crate) fn render_handler_scaffold(
     let pascal = to_pascal_case(&handler.name);
     let bumps_name = format!("{}Bumps", pascal);
     let any_mut = handler.accounts.iter().any(|a| a.is_writable);
-    // v2.29 — drop `<'info>` from the impl + guard sigs when the
-    // Accounts struct itself dropped it (zero accounts AND no
-    // implicit signer). Keeps the impl / guard fn signatures
-    // consistent with `render_handler_accounts_struct`'s decision.
+    // Drop `<'info>` from the impl + guard sigs when the Accounts struct
+    // itself dropped it (must match render_handler_accounts_struct).
     let handler_needs_lifetime = !handler.accounts.is_empty() || handler.who.is_some();
     let lifetime_params: String = if handler_needs_lifetime {
         surface.lifetime_params()
     } else {
         String::new()
     };
-    // Anchor puts the `#[derive(Accounts)]` struct at crate root (in
-    // lib.rs) so the `#[program]` macro can find it; Quasar keeps
-    // struct + impl together in `instructions/<name>.rs`. The flag
-    // also flips the imports — Anchor's instructions file pulls the
-    // struct in via `use crate::<Pascal>;`.
+    // Anchor's `#[derive(Accounts)]` struct lives at crate root so
+    // `#[program]` can find it; Quasar keeps struct + impl together
+    // here. The flag also flips the imports.
     let render_struct = matches!(target, Target::Quasar);
 
     let mut out = String::new();
@@ -4028,11 +3570,9 @@ pub(crate) fn render_handler_scaffold(
     out.push_str("// handler block and the `spec_hash` below fires a compile_error!\n");
     out.push_str("// via the `#[qed(verified, ...)]` macro.\n\n");
     out.push_str(surface.prelude_import);
-    // Token / Mint live in a separate crate per framework. Only Quasar
-    // handler files need a per-handler SPL import — the local Accounts
-    // struct references `Account<Token>` / `Account<Mint>` directly.
-    // Anchor handler files re-export the struct from lib.rs, which
-    // already imports SPL types at crate root.
+    // Only Quasar handler files need a per-handler SPL import (local
+    // Accounts struct); Anchor's struct lives in lib.rs which already
+    // imports SPL types.
     if matches!(target, Target::Quasar) {
         let has_token = handler
             .accounts
@@ -4047,18 +3587,11 @@ pub(crate) fn render_handler_scaffold(
             out.push_str(&imports);
         }
     }
-    // Quasar's Accounts struct is defined locally in this file, so its
-    // fields (`Account<MyState>`) need state types in scope. Anchor's
-    // struct lives in lib.rs (already imports state); the handler
-    // scaffold body only references guards + bumps, so the import would
-    // be flagged unused until the agent fills the body.
-    //
-    // v2.29 (#15) — Anchor needs `use crate::state::*;` too whenever
-    // any handler param's type names a user-defined record or sum
-    // type (so the scaffold body's `fn handler(&mut self, snap:
-    // Snapshot, …)` resolves). The pre-v2.29 path skipped the
-    // import on Anchor and emitted `pub fn handler(&mut self, snap:
-    // Snapshot, …)` with `Snapshot` unresolved.
+    // Quasar's local Accounts struct needs state types in scope; Anchor
+    // only needs `use crate::state::*;` when a handler param's type
+    // names a user-defined record / sum type (so the signature
+    // resolves) — otherwise the import would sit unused until the agent
+    // fills the body.
     let handler_param_uses_user_type = handler.takes_params.iter().any(|(_, ty)| {
         let bare = ty.trim();
         spec.records.iter().any(|r| r.name == bare)
@@ -4068,28 +3601,18 @@ pub(crate) fn render_handler_scaffold(
     if render_struct || handler_param_uses_user_type {
         out.push_str("use crate::state::*;\n");
     }
-    // v2.29 (#13) — handler body may reference `ref_impl` fns by name
-    // (the spec's `let scaled = scale(snap.total, factor)` lowers to
-    // a bare `scale(...)` call). Without this import the call doesn't
-    // resolve. Spec declares no ref_impls → no import → no unused-
-    // import warning.
+    // Handler bodies may call `ref_impl` fns by bare name; import only
+    // when the spec declares any (avoids unused-import warnings).
     if !spec.ref_impls.is_empty() {
         out.push_str("use crate::ref_impls::*;\n");
     }
     out.push_str("use crate::guards;\n");
     out.push_str("use qedgen_macros::qed;\n");
-    // Checked-arith effects (`+=` / `-=`) lower to
-    // `<Pascal>Error::MathOverflow`. Bring the error enum into scope so
-    // the rendered scaffold body compiles. Saturating / wrapping
-    // (`+=!` / `+=?`) don't reference the enum.
-    //
-    // v2.24.0 follow-up: variant-state cross-variant promotion also
-    // emits `MiniEscrowError::WrongState` (the pre-variant gate)
-    // even when the handler has no checked-arith effects. Bring the
-    // enum in whenever the spec is multi-variant ADT on Anchor and
-    // the handler has a non-init pre — the same condition under
-    // which `emit_cross_variant_promotion` emits the `matches!`
-    // check that references the error variant.
+    // The error enum must be in scope for checked-arith effects
+    // (`MathOverflow`) and for the variant-state `WrongState` gate
+    // (multi-variant ADT on Anchor with a non-init pre — the same
+    // condition under which `emit_cross_variant_promotion` emits the
+    // `matches!` check).
     let uses_wrong_state_check = is_multi_variant_adt_state(spec)
         && matches!(target, Target::Anchor)
         && handler
@@ -4105,20 +3628,9 @@ pub(crate) fn render_handler_scaffold(
     if body_uses_error_enum {
         out.push_str("use crate::errors::*;\n");
     }
-    // v2.24 S5c — variant-state lowering references `<Name>AccountInner`
-    // directly inside the handler body (`match &mut self.<acct>.inner {
-    // <Name>AccountInner::<post> { … } => … }`). Without an explicit
-    // `use`, Rust's name resolution can't find the inner enum from
-    // inside the per-handler module — `state::*` is already imported
-    // when `render_struct` is true, but Anchor's handler scaffold
-    // (the `!render_struct` branch) skips that import to keep the
-    // common case lint-clean. Bring the inner enum in by name when
-    // the spec actually uses variant-state lowering.
-    // v2.24.0 follow-up: only emit the inner-enum import when the
-    // wrapper-struct + inner-enum emission actually fires (Anchor
-    // target). Quasar specs stay on the flat-struct path; no
-    // `<Name>AccountInner` type exists, so importing it would
-    // fail to resolve.
+    // Variant-state lowering references `<Name>AccountInner` by name in
+    // the body; import it explicitly (Anchor scaffolds skip `state::*`).
+    // Anchor-only: no such type exists on Quasar's flat path.
     if is_multi_variant_adt_state(spec) && matches!(target, Target::Anchor) {
         let inner_name = format!("{}AccountInner", to_pascal_case(&spec.program_name));
         out.push_str(&format!("use crate::state::{};\n", inner_name));
@@ -4156,20 +3668,12 @@ pub(crate) fn render_handler_scaffold(
     }
 
     // Emit the spec-bound #[qed(...)] attribute with a body-hash
-    // sentinel. The fixup pass at the bottom of this function parses
-    // the rendered impl method, computes the real body hash, and
-    // splices it into the placeholder. Both `qedgen::spec_hash` and
-    // `qedgen-macros::FnLike::content_hash` normalize via
-    // `proc_macro2::TokenStream::from_str` before hashing, so the
-    // codegen-emitted `hash` agrees with the macro's compile-time
-    // recomputation.
-    // Match-arm-derived handlers (`liquidate_case_0`, `..._case_1`,
-    // `..._otherwise`) don't appear in the source by their split name —
-    // look them up under the parent handler's name. Both the `handler`
-    // attribute and the `spec_hash` reference the parent so the qedgen
-    // macro can resolve the block at compile time and every arm shares
-    // the same drift-tracking key. (The split is purely a codegen
-    // artifact; the spec contract is one block.)
+    // sentinel; the fixup pass at the bottom splices in the real hash
+    // (both sides normalize via `proc_macro2::TokenStream::from_str`,
+    // so codegen-time and compile-time agree). Match-arm-derived
+    // handlers (`x_case_0`, `x_otherwise`) don't appear in the source by
+    // their split name — attribute + spec_hash reference the parent so
+    // every arm shares one drift-tracking key.
     let parent_name: &str = if let Some(stripped) = handler.name.strip_suffix("_otherwise") {
         stripped.strip_suffix('_').unwrap_or(stripped)
     } else if let Some(idx) = handler.name.rfind("_case_") {
@@ -4227,12 +3731,10 @@ pub(crate) fn render_handler_scaffold(
         out.push_str("        let _ = bumps;\n");
     }
 
-    // v2.29 Slice A (#8) — `abstract <name> : <Type>` clauses become
-    // user-fillable `todo!()` bindings in the Rust scaffold. The
-    // structured prompt strings list the active `requires` clauses
-    // so the agent / human knows what the concrete value must
-    // satisfy. Emitted BEFORE let_bindings so any spec-level `let`
-    // that references the binder resolves.
+    // `abstract <name> : <Type>` clauses become user-fillable `todo!()`
+    // bindings whose prompt lists the active `requires` constraints.
+    // Emitted BEFORE let_bindings so spec-level `let`s can reference
+    // them.
     for (binder_name, binder_ty_str) in &handler.abstract_binders {
         let ty = map_type_for_target(binder_ty_str, spec, target)?;
         let requires_summary: Vec<String> = handler
@@ -4254,25 +3756,19 @@ pub(crate) fn render_handler_scaffold(
         ));
     }
 
-    // Spec-level `let` bindings (e.g. `let total_fee = amount * 125 / 10000`)
-    // must be emitted BEFORE the effect block — effect RHSs reference them.
-    // Pre-fix: they were dropped on the Rust side, leaving undefined-variable
-    // errors on `cargo build`.
-    //
-    // v2.29.2 — RHS is rendered with the spec's `s.<field>` shorthand
-    // (the in-spec lowering of `state.<field>`), which is unbound in the
-    // handler-body context. Rewrite through the same accessor logic the
-    // CPI-arg path uses so multi-variant ADT state reads compile.
+    // Spec-level `let` bindings emit BEFORE the effect block (effect
+    // RHSs reference them). The RHS carries the spec's `s.<field>`
+    // shorthand, unbound here — rewrite through the same accessor logic
+    // the CPI-arg path uses.
     for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
         let rewritten = rewrite_state_refs_for_self(rust_expr, handler, spec);
         out.push_str(&format!("        let {} = {};\n", binding_name, rewritten));
     }
 
-    // v2.24 #11 — `let X = call …` bindings must be in scope when
-    // subsequent effects / requires reference them. Emit bound calls
-    // BEFORE the effect block. Unbound calls keep firing at the
-    // tail (after effects) per the pre-v2.24 convention. Track
-    // emitted-here calls so the tail emission skips them.
+    // `let X = call …` bindings must be in scope for subsequent effects
+    // / requires, so bound calls emit BEFORE the effect block; unbound
+    // calls fire at the tail. Track emitted indices so the tail skips
+    // them.
     let mut emitted_call_indices = std::collections::HashSet::new();
     let mut any_unmechanized_call_pre = false;
     for (idx, c) in handler.calls.iter().enumerate() {
@@ -4310,19 +3806,13 @@ pub(crate) fn render_handler_scaffold(
         }
     }
 
-    // Mechanical-effect expansion (v2.4-M3). For each spec effect we try to
-    // emit a real Rust statement; anything non-mechanical stays as a comment
-    // and forces a trailing `todo!()` so the user / an LLM (M4) fills it in.
+    // Mechanical-effect expansion: emit a real Rust statement per spec
+    // effect; anything non-mechanical stays as a comment and forces a
+    // trailing `todo!()`. Multi-variant ADT specs try the variant-aware
+    // emitter first (effects must run inside the `match … inner` block);
+    // on `None`, fall through to the per-effect path.
     let state_acct = find_state_account(handler);
     let mut any_unmechanized = false;
-    // v2.24 S5c — multi-variant ADT specs need a different lowering
-    // shape: the wrapper-struct + inner-enum emission from S5b means
-    // `self.<acct>.<field>` no longer resolves; effects must run
-    // inside a `match &mut self.<acct>.inner { Inner::<post> { … }
-    // => …, _ => Err(WrongState) }` block. Try the variant-aware
-    // emitter first; on `None`, fall through to the per-effect
-    // path (which will emit `// Spec effect (needs fill)` + the
-    // trailing `todo!()` for cross-variant / non-mechanical shapes).
     let variant_body =
         state_acct.and_then(|sa| emit_variant_state_handler_body(handler, spec, target, sa));
     let variant_body_emitted = variant_body.is_some();
@@ -4337,9 +3827,8 @@ pub(crate) fn render_handler_scaffold(
         }
     } else {
         for (idx, effect) in handler.effects.iter().enumerate() {
-            // v2.24 §S1a — per-site error-variant override, indexed parallel
-            // to `effects`. Missing entry = `None` (silent fallback to pragma
-            // / built-in default inside mechanize_effect).
+            // Per-site error-variant override, indexed parallel to
+            // `effects`; missing entry falls back inside mechanize_effect.
             let on_error = handler.effect_on_error.get(idx).and_then(|o| o.as_deref());
             let mechanized = state_acct
                 .and_then(|sa| mechanize_effect(effect, on_error, sa, handler, spec, target));
@@ -4357,17 +3846,11 @@ pub(crate) fn render_handler_scaffold(
         }
     }
 
-    // v2.24.x Phase A.2 — `modifies [X, Y]` declared, but X/Y not
-    // written in `effect { ... }`: emit a structured agent-fill
-    // site for each unwritten field. This is the "Kani checks impl
-    // against spec" pattern — the spec author declares the write
-    // set + an ensures contract, codegen leaves the math as todo,
-    // the agent fills it against the quoted ensures, and the
-    // verification harnesses check the impl satisfies the contract.
-    //
-    // Restricted to the legacy flat-fields path (matches `mechanize_effect`
-    // gating above). Multi-variant ADT specs route through
-    // `emit_variant_state_handler_body` and need their own treatment.
+    // `modifies [X, Y]` declared but unwritten in `effect { … }`: emit a
+    // structured agent-fill site per field — spec declares write set +
+    // ensures, agent fills the math, harnesses check the contract.
+    // Flat-fields path only; multi-variant ADT specs route through
+    // `emit_variant_state_handler_body`.
     if !variant_body_emitted && !is_multi_variant_adt_state(spec) {
         if let (Some(modifies), Some(sa)) = (handler.modifies.as_ref(), state_acct) {
             let mut effect_fields: std::collections::BTreeSet<String> =
@@ -4382,9 +3865,8 @@ pub(crate) fn render_handler_scaffold(
                 if effect_fields.contains(field) {
                     continue;
                 }
-                // Find every ensures clause that references this field
-                // (textual match — `rust_expr` carries `post.<field>` for
-                // post-state refs and `pre.<field>` for `old(...)` refs).
+                // Textual match: `rust_expr` carries `post.<field>` /
+                // `pre.<field>` for state refs.
                 let mut referencing: Vec<&str> = Vec::new();
                 for e in &handler.ensures {
                     if e.rust_expr.contains(field) {
@@ -4428,16 +3910,15 @@ pub(crate) fn render_handler_scaffold(
         }
     }
 
-    // Events are always agent-fill for now (M4): the spec declares the event
-    // name but not the payload binding.
+    // Events are agent-fill: the spec declares the event name but not
+    // the payload binding.
     for emit in &handler.emits {
         out.push_str(&format!("        // Spec: emit!({})\n", emit));
     }
     let has_events = !handler.emits.is_empty();
 
-    // Token transfers (CPI calls) are also agent-fill: building the CPI
-    // context from the handler accounts is mechanical-ish but involves
-    // framework-specific helpers that differ per Quasar/Anchor/raw.
+    // Token transfers are agent-fill: building the CPI context involves
+    // framework-specific helpers that differ per target.
     let has_transfers = !handler.transfers.is_empty();
     for t in &handler.transfers {
         out.push_str(&format!(
@@ -4448,19 +3929,13 @@ pub(crate) fn render_handler_scaffold(
         ));
     }
 
-    // `call Interface.handler(name = expr, ...)` sites — the uniform CPI
-    // surface. SPL Token calls get a real `anchor_spl::token::*` builder;
-    // other interfaces fall through to a generic `invoke` shape, with
-    // unmechanized cases emitting a structured comment + `todo!()` so an
-    // LLM / human fills the body. The boolean tracks whether any call
-    // site remained unmechanized so the tail `todo!()` only fires for
-    // those.
+    // `call Interface.handler(...)` sites: mechanized via try_emit_cpi
+    // where possible; unmechanized cases emit a structured comment and
+    // set the flag so the tail `todo!()` fires.
     let mut any_unmechanized_call = false;
     for (idx, c) in handler.calls.iter().enumerate() {
-        // v2.24 #11 — bound calls (result_binding = Some(_)) were
-        // already emitted before the effect block so the binding
-        // would be in scope for subsequent effects / requires.
-        // Skip them here so we don't double-emit.
+        // Bound calls already emitted before the effect block; skip to
+        // avoid double-emitting.
         if emitted_call_indices.contains(&idx) {
             continue;
         }
@@ -4501,13 +3976,10 @@ pub(crate) fn render_handler_scaffold(
     out.push_str("    }\n");
     out.push_str("}\n");
 
-    // Fixup: parse the rendered scaffold, find the impl method,
-    // compute the body hash, and splice it into the
-    // `hash = "QEDGEN_FIXUP_BODY_HASH"` placeholder.
-    // `qedgen::spec_hash::body_hash_for_*` and
-    // `qedgen-macros::FnLike::content_hash` both normalize via
-    // `proc_macro2::TokenStream::from_str` so codegen-time and
-    // compile-time agree on the hash; first `cargo build` is clean.
+    // Fixup: compute the impl method's body hash and splice it into the
+    // placeholder. Both sides normalize via
+    // `proc_macro2::TokenStream::from_str`, so codegen-time and
+    // compile-time agree and the first `cargo build` is clean.
     if let Some(body_hash) = precompute_body_hash(&out) {
         out = out.replace(BODY_HASH_PLACEHOLDER, &body_hash);
     }

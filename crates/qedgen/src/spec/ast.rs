@@ -1,31 +1,15 @@
-//! Typed AST for `.qedspec` files.
+//! Typed AST for `.qedspec` files — produced by the chumsky parser, then
+//! translated to `ParsedSpec` by the adapter for downstream consumers.
 //!
-//! This replaces the string-rendered `ParsedSpec` IR as we migrate from pest
-//! to chumsky. The typed AST is the intermediate form produced by the new
-//! parser; an adapter translates it into the legacy `ParsedSpec` so downstream
-//! consumers (check, lean_gen, kani, …) don't change during the transition.
+//! Design: guard expressions are a real algebraic type (enables scope
+//! checking, exhaustiveness, match-in-handler, target-specific codegen);
+//! every node carries a `Span` for diagnostics; no backend concerns leak in
+//! (no Lean unicode, no Rust identifiers).
 //!
-//! Design goals:
-//!   - Guard expressions are a real algebraic type — not pre-rendered strings.
-//!     This is the single enabler for scope checking, exhaustiveness,
-//!     match-in-handler, and cheaper target-specific codegen.
-//!   - Every node carries a `Span` so diagnostics can point at source.
-//!   - No backend concerns leak in: no Lean unicode, no Rust identifiers.
-//!
-//! Scope of this file:
-//!   - Core declarative constructs used by percolator.qedspec:
-//!     records, ADTs, handlers, properties, covers, liveness.
-//!   - Subset deliberately omitted in phase 1 (pest still handles these):
-//!     sBPF instruction blocks, schemas, environments, PDAs, events.
-//!
-//! NOTE on `#![allow(dead_code)]`: several AST fields (`span`, variant
-//! payloads like `TypeRef::Param`, `MatchBody::Noop`, doc strings) are parsed
-//! and carried through the typed form but not yet consumed by every downstream
-//! adapter/backend. They are intentional scaffolding for the pest→chumsky
-//! migration and for planned diagnostics (span-based error reporting, Param
-//! types like `Vec U64` in handler signatures, doc preservation in generated
-//! artifacts). Removing them would lose information the parser already
-//! recovers. Revisit per-field once the corresponding backend consumer lands.
+//! `#![allow(dead_code)]`: some fields (`span`, `TypeRef::Param`,
+//! `MatchBody::Noop`, doc strings) are parsed but not yet consumed by every
+//! backend — intentional scaffolding for planned diagnostics and doc
+//! preservation. Removing them would lose information the parser recovers.
 
 #![allow(dead_code)]
 
@@ -59,14 +43,9 @@ pub struct Spec {
 
 #[derive(Debug, Clone)]
 pub enum TopItem {
-    /// `const NAME = VALUE` — top-level integer constant.
-    /// v2.29 Slice A (#3): widened to `i128` so `const N6 = -6` parses
-    /// into a single negative-valued constant rather than forcing
-    /// authors to inline `0 - 6` workarounds throughout the spec.
-    /// Const consumers in `chumsky_adapter` and the codegen backends
-    /// format via `value.to_string()`, which handles the negative
-    /// sign correctly; `infer_const_type` in `rust_codegen_util` picks
-    /// a signed Rust type for negative values.
+    /// `const NAME = VALUE` — top-level integer constant. `i128` so negative
+    /// constants parse directly; consumers format via `to_string()` and
+    /// `infer_const_type` picks a signed Rust type for negatives.
     Const {
         name: String,
         value: i128,
@@ -105,72 +84,61 @@ pub enum TopItem {
     /// Declares a callee's public contract so a caller can `call Name.h(...)`
     /// with backend-appropriate artifacts. See docs/design/spec-composition.md §2.
     Interface(InterfaceDecl),
-    /// `import Name from "key"` — bind a local name to an interface declared in
-    /// a dependency. The `from` string is a key into `qed.toml`'s
-    /// `[dependencies]` table; the resolver fetches the source (github / path)
-    /// and merges the imported `interface` declarations into this spec's
-    /// namespace under the given local `name`. See docs/design/spec-composition.md §3.
+    /// `import Name from "key"` — bind a local name to an interface declared
+    /// in a dependency. `from` keys into `qed.toml`'s `[dependencies]`; the
+    /// resolver fetches the source (github / path) and merges the imported
+    /// `interface` declarations under the local `name`. See
+    /// docs/design/spec-composition.md §3.
     Import {
         name: String,
         from: String,
-        /// v2.8 fold-in F5: optional `as Alias` clause renames the
-        /// imported interface in the consumer's namespace.
+        /// Optional `as Alias` — renames the import in the consumer's namespace.
         as_name: Option<String>,
     },
-    /// `pragma <name> { <top_item>* }` — platform-specific namespace.
-    ///
-    /// Keeps the core DSL platform-agnostic while letting target-specific
-    /// constructs (sBPF `instruction`/`pubkey`/layouts, eventually Anchor
-    /// or Quasar extensions) live in clearly scoped blocks. Target
-    /// inference reads `ParsedSpec.pragmas` — presence of `sbpf` selects
-    /// the assembly target with no explicit `target` keyword.
+    /// `pragma <name> { <top_item>* }` — platform-specific namespace. Keeps
+    /// the core DSL platform-agnostic; target inference reads
+    /// `ParsedSpec.pragmas` — presence of `sbpf` selects the assembly target
+    /// with no explicit `target` keyword.
     Pragma(PragmaDecl),
-    /// `pragma <name> = <ident>` — top-level key=value assignment. v2.24
-    /// introduces this for `checked_overflow_error = MintOverflow` /
-    /// `checked_underflow_error = BurnUnderflow`, which override the
-    /// built-in `MathOverflow` / `MathUnderflow` defaults that
-    /// `mechanize_effect` lowers `+=` / `-=` against. Per-effect `or
-    /// <Variant>` (see `EffectStmt.on_error`) still wins over the pragma.
+    /// `pragma <name> = <ident>` — top-level key=value assignment, e.g.
+    /// `checked_overflow_error = MintOverflow` overriding the built-in
+    /// `MathOverflow` / `MathUnderflow` defaults that `mechanize_effect`
+    /// lowers `+=` / `-=` against. Per-effect overrides
+    /// (`EffectStmt.on_error`) still win over the pragma.
     PragmaAssign {
         name: String,
         value: String,
     },
-    /// `schema name { requires expr else Err … }` — v2.24 #1. Reusable
-    /// cross-cutting guard set. Handlers reference it via `uses name`
-    /// (HandlerClause::Uses) and the adapter expands every requires
-    /// in the schema into the handler's requires list.
+    /// `schema name { requires expr else Err … }` — reusable cross-cutting
+    /// guard set. Handlers reference it via `uses name`; the adapter expands
+    /// each schema requires into the handler's requires list.
     Schema(SchemaDecl),
-    /// `ref_impl name (state : State) (params...) : T = <expr>` — v2.25
-    /// reference implementation. Names an intermediate expression that
-    /// `ensures` clauses can call. Lowers to a Lean `def` and inlines
-    /// at Kani-harness assertion sites; Rust codegen skips it entirely
-    /// (it's a verification-only construct, not part of the impl
-    /// contract). Distinct from `Ghost`: `ref_impl` is a *stateless* pure
-    /// function the real Rust impl is checked against, whereas a `ghost`
-    /// is *stateful* spec-only auxiliary state updated per-handler.
+    /// `ref_impl name (state : State) (params...) : T = <expr>` — reference
+    /// implementation `ensures` clauses can call. Lowers to a Lean `def`,
+    /// inlines at Kani assertion sites; Rust codegen skips it (verification-
+    /// only). Distinct from `Ghost`: `ref_impl` is a *stateless* pure
+    /// function the real impl is checked against; a `ghost` is *stateful*
+    /// spec-only state updated per-handler.
     RefImpl(RefImplDecl),
-    /// Issue #67 item 3 — `ghost <name> : <Ty> { init {…} on H(…) {…} }`.
-    /// Spec-only auxiliary state field: participates in invariants /
-    /// properties / `requires` / `ensures` (as `state.<name>`), updated
-    /// per-handler, omitted from the on-chain program codegen.
+    /// `ghost <name> : <Ty> { init {…} on H(…) {…} }` — spec-only auxiliary
+    /// state field: participates in invariants / properties / `requires` /
+    /// `ensures` (as `state.<name>`), updated per-handler, omitted from
+    /// on-chain codegen.
     Ghost(GhostDecl),
-    /// Issue #67 item 4 — `hook <kind> { assert … }`. Cross-cutting
-    /// assertion fired at a MIR-statement boundary; enforced in the
-    /// Kani / proptest harnesses.
+    /// `hook <kind> { assert … }` — cross-cutting assertion fired at a
+    /// MIR-statement boundary; enforced in the Kani / proptest harnesses.
     Hook(HookDecl),
 }
 
-/// v2.24 #1 — top-level `schema` block. Body carries a list of
-/// `requires expr else Err` clauses. No state effects or ensures —
-/// schemas are *only* for cross-cutting guards.
+/// Top-level `schema` block. No state effects or ensures — schemas are
+/// *only* for cross-cutting guards.
 #[derive(Debug, Clone)]
 pub struct SchemaDecl {
     pub name: String,
     pub doc: Option<String>,
-    /// Each entry is one `requires <expr> [else <ErrorName>]` clause,
-    /// keeping the same `(body, on_fail)` shape that
-    /// `HandlerClause::Requires` carries so the adapter can reuse
-    /// the same lowering path.
+    /// One `requires <expr> [else <ErrorName>]` per entry — same
+    /// `(body, on_fail)` shape as `HandlerClause::Requires` so the adapter
+    /// reuses the same lowering path.
     pub requires: Vec<(Node<Expr>, Option<String>)>,
 }
 
@@ -217,14 +185,8 @@ pub enum InstructionItem {
     Discriminant(String),
     /// `entry N` — byte offset of instruction entry point in the program.
     Entry(u64),
-    /// `const NAME = VALUE` — instruction-local constant.
-    /// v2.29 Slice A (#3): widened to `i128` so `const N6 = -6` parses
-    /// into a single negative-valued constant rather than forcing
-    /// authors to inline `0 - 6` workarounds throughout the spec.
-    /// Const consumers in `chumsky_adapter` and the codegen backends
-    /// format via `value.to_string()`, which handles the negative
-    /// sign correctly; `infer_const_type` in `rust_codegen_util` picks
-    /// a signed Rust type for negative values.
+    /// `const NAME = VALUE` — instruction-local constant. `i128` for
+    /// negative constants; see `TopItem::Const`.
     Const { name: String, value: i128 },
     /// `errors [...]` inside an instruction — per-instruction error list.
     Errors(Vec<ErrorEntry>),
@@ -332,10 +294,8 @@ pub struct TypedField {
     pub ty: TypeRef,
 }
 
-/// v2.25 — `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>`.
-/// Reference implementation that ensures clauses can call. The body
-/// is a pure expression over the typed parameters; no state mutation,
-/// no side effects.
+/// `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>` — body is a pure
+/// expression over the typed parameters; no state mutation, no side effects.
 #[derive(Debug, Clone)]
 pub struct RefImplDecl {
     pub name: String,
@@ -345,13 +305,10 @@ pub struct RefImplDecl {
     pub body: Node<Expr>,
 }
 
-/// Issue #67 item 3 — `ghost <name> : <Ty> { init { <expr> } on
-/// <handler>(<params>) { <name> := <expr> } … }`. A spec-only auxiliary
-/// state field: it participates in invariants, properties and `requires`/
-/// `ensures` (referenced as `state.<name>`), is updated per-handler by its
-/// `on` clauses, but never appears in the on-chain program codegen. Scalar
-/// types only (`U64`/`U128`/`I64`/`I128`/`Bool`); a ghost over a `Map`/
-/// record is rejected at lint time.
+/// `ghost <name> : <Ty> { init { <expr> } on <handler>(<params>) { <name>
+/// := <expr> } … }`. See `TopItem::Ghost`. Scalar types only
+/// (`U64`/`U128`/`I64`/`I128`/`Bool`); a ghost over a `Map`/record is
+/// rejected at lint time.
 #[derive(Debug, Clone)]
 pub struct GhostDecl {
     pub name: String,
@@ -376,10 +333,9 @@ pub struct GhostUpdate {
     pub stmt: EffectStmt,
 }
 
-/// Issue #67 item 4 — `hook <kind> { assert <expr> … }`. A cross-cutting
-/// instrumentation point: its assertions fire wherever a matching MIR
-/// statement occurs in any handler. v1 enforces hooks in the runtime
-/// backends (Kani / proptest); the Lean enforcement path lands with qedsvm.
+/// `hook <kind> { assert <expr> … }` — assertions fire wherever a matching
+/// MIR statement occurs in any handler. Enforced in the runtime backends
+/// (Kani / proptest); Lean enforcement lands with qedsvm.
 #[derive(Debug, Clone)]
 pub struct HookDecl {
     pub doc: Option<String>,
@@ -446,8 +402,7 @@ pub enum HandlerClause {
         name: String,
         value: Node<Expr>,
     },
-    /// v2.20 §S1.2 — effect body items can be unconditional statements
-    /// or `match` blocks.
+    /// Effect body items: unconditional statements or `match` blocks.
     Effect(Vec<Node<EffectBlock>>),
     /// `transfers { from A to B amount X authority Y; ... }` — token transfer intents.
     Transfers(Vec<TransferClause>),
@@ -461,31 +416,24 @@ pub enum HandlerClause {
     Match(MatchClause),
     Emits(String),
     AbortsTotal,
-    /// v2.29 Slice A (#8) — `abstract <name> : <Type>` binds an
-    /// existentially-quantified value the handler can refer to in
-    /// its `requires` / `effect` / `ensures` clauses without the
-    /// DSL needing to express how the value was computed. Lowers to
-    /// `kani::any()` + `kani::assume(<requires>)` in Kani harnesses,
-    /// a proptest `Arbitrary` source + `prop_assume!` in proptest
-    /// harnesses, an existential quantifier in Lean theorem
-    /// statements, and a `let <name>: T = todo!(...)` in the Rust
-    /// handler scaffold (agent fills the body once it picks the
-    /// concrete library / math).
+    /// `abstract <name> : <Type>` — existentially-quantified value usable in
+    /// `requires` / `effect` / `ensures` without expressing how it's
+    /// computed. Lowers to `kani::any()` + `assume` (Kani), `Arbitrary` +
+    /// `prop_assume!` (proptest), an existential in Lean, and
+    /// `let <name>: T = todo!(...)` in the Rust scaffold (agent-filled).
     Abstract {
         name: String,
         ty: TypeRef,
     },
     Invariant(String),
-    /// `establishes Name` — this handler establishes the named invariant
-    /// at post-state. Unlike `invariant Name` (which means "preserves"),
-    /// the harness/proof does NOT assume the invariant holds pre-transition.
-    /// Use for handlers that bring the system from an uninitialized state
-    /// into one where the invariant becomes true, or for one-shot
-    /// transitions that elevate an invariant after the fact.
+    /// `establishes Name` — handler establishes the named invariant at
+    /// post-state. Unlike `invariant Name` ("preserves"), the harness/proof
+    /// does NOT assume the invariant pre-transition. For init-style or
+    /// one-shot transitions that make the invariant true.
     Establishes(String),
-    /// `permissionless` — marks the handler as deliberately-unauthenticated.
-    /// Opts out of the `no_access_control` P1 lint (v2.7 G4). Mutually
-    /// exclusive with `auth X`; check.rs rejects both appearing together.
+    /// `permissionless` — deliberately-unauthenticated; opts out of the
+    /// `no_access_control` P1 lint. Mutually exclusive with `auth X`
+    /// (check.rs rejects both together).
     Permissionless,
     /// `include schema_name` — forward-compat; phase 1 rejects.
     Include(String),
@@ -505,22 +453,17 @@ pub struct CallExpr {
     pub target: QualifiedPath,
     /// Keyword arguments, in source order. Positional args are not allowed.
     pub args: Vec<CallArg>,
-    /// v2.24 #11 — optional `let <name> = call …` binding. When `Some`,
-    /// the call's return value is bound to the given identifier so
-    /// downstream effects / requires can reference it. The interface
-    /// handler's return-type declaration is what gives the binding a
-    /// real semantics; without it the binding is opaque.
+    /// Optional `let <name> = call …` binding. The interface handler's
+    /// return-type declaration gives the binding semantics; without it the
+    /// binding is opaque.
     pub result_binding: Option<String>,
-    /// v2.27 Track A — optional `state_binders { callee_field = state.X,
-    /// ... }` block. Maps each callee-side abstract State field (the
-    /// callee declares its `ensures` as predicates over abstract field
-    /// names — see SPL Token `from_balance` / `to_balance`) to a
-    /// caller-side state path. Backends thread the binders through to
-    /// extend the Lean axiom signature with `(field : State → Nat)`
-    /// accessor params and to substitute `pre.<callee_field>` /
-    /// `post.<callee_field>` → `pre.<caller_field>` / `post.<caller_field>`
-    /// in the Kani harness assume splice. Empty (default) preserves the
-    /// v2.26 callee-frame, param-only axiom shape.
+    /// Optional `state_binders { callee_field = state.X, ... }` block —
+    /// maps each callee-side abstract State field (e.g. SPL Token
+    /// `from_balance`) to a caller-side state path. Backends extend the Lean
+    /// axiom signature with `(field : State → Nat)` accessor params and
+    /// substitute `pre/post.<callee_field>` → `pre/post.<caller_field>` in
+    /// the Kani assume splice. Empty (default) keeps the callee-frame,
+    /// param-only axiom shape.
     pub state_binders: Vec<StateBinder>,
 }
 
@@ -530,25 +473,18 @@ pub struct CallArg {
     pub value: Node<Expr>,
 }
 
-/// v2.27 Track A — one entry inside `state_binders { ... }`. Binds a
-/// callee-side abstract field name (the LHS) to a caller-side state path
-/// (the RHS).
-///
-/// Restriction in Track A: the RHS must be a `state.<ident>` field path.
-/// The adapter extracts the trailing identifier; backends combine it
-/// with `pre.` / `post.` to form the substituted form, or wrap it as a
-/// Lean accessor lambda `(·.<caller_field>)` at axiom application.
-/// Richer RHS forms (let-bindings, computed paths) are v3.0 work; until
-/// then the adapter rejects them at lower time.
+/// One entry inside `state_binders { ... }`: callee-side abstract field
+/// (LHS) → caller-side state path (RHS). The RHS must be a `state.<ident>`
+/// field path — richer forms (let-bindings, computed paths) are rejected at
+/// lower time. Backends combine the extracted field with `pre.` / `post.`,
+/// or wrap it as a Lean accessor lambda `(·.<caller_field>)`.
 #[derive(Debug, Clone)]
 pub struct StateBinder {
-    /// LHS — the callee's abstract field name. Matches an identifier in
-    /// the callee's `ensures` text. Word-boundary substitution finds
-    /// every occurrence.
+    /// Callee's abstract field name; word-boundary substitution finds every
+    /// occurrence in the callee's `ensures` text.
     pub callee_field: String,
-    /// RHS — the caller-side expression (parsed as a generic `Expr`).
-    /// The adapter validates the shape (`state.<ident>`) and extracts
-    /// the trailing field name.
+    /// Caller-side expression; the adapter validates the `state.<ident>`
+    /// shape and extracts the trailing field name.
     pub caller_expr: Node<Expr>,
 }
 
@@ -574,13 +510,11 @@ pub struct InterfaceDecl {
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<UpstreamDecl>,
-    /// v2.27 Phase 0 — abstract callee-state vocabulary. Optional `state { name : Type, ... }`
-    /// block declares the types of the abstract State accessors referenced by
-    /// handler ensures. When absent, accessors default to `Nat` for back-compat
-    /// with v2.26/v2.27 Track A specs. The declared type chooses the Lean
-    /// codomain of `(X : State → T)` in the emitted axiom signature: `Nat` for
-    /// the `U*` family, `Int` for the `I*` family, `Bool` for `Bool`, `Pubkey`
-    /// for `Pubkey`.
+    /// Optional `state { name : Type, ... }` — types of the abstract State
+    /// accessors referenced by handler ensures; defaults to `Nat` when
+    /// absent (back-compat). The type picks the Lean codomain of
+    /// `(X : State → T)` in the axiom signature: `U*` → `Nat`, `I*` → `Int`,
+    /// `Bool` → `Bool`, `Pubkey` → `Pubkey`.
     pub state_fields: Vec<TypedField>,
     pub handlers: Vec<InterfaceHandlerDecl>,
 }
@@ -610,19 +544,15 @@ pub struct InterfaceHandlerDecl {
     pub name: String,
     pub doc: Option<String>,
     pub params: Vec<TypedField>,
-    /// v2.24 #11 — optional `-> Type` return-type declaration. When
-    /// `Some`, callers can write `let x = call Foo.handler(...)` and
-    /// the codegen lowers to `let x = T::try_from_slice(&ret_bytes)?`
-    /// after the CPI via Solana's `get_return_data` syscall. `None`
-    /// keeps the existing terminal-statement shape.
+    /// Optional `-> Type` return type. When `Some`, `let x = call
+    /// Foo.handler(...)` lowers to `T::try_from_slice(&ret_bytes)?` after
+    /// the CPI via `get_return_data`; `None` keeps the terminal-statement
+    /// shape.
     pub return_type: Option<TypeRef>,
-    /// v2.26 Track K — optional named binder for the return value, used
-    /// inside the handler's own `ensures` clauses. When the spec writes
-    /// `-> result : U64` (or any identifier in place of `result`) the
-    /// identifier becomes a free name in scope of the ensures; the CPI
-    /// substitution helper rewrites it to the caller's `let X = …`
-    /// binder at each call site. Defaults to the conventional `"result"`
-    /// when only `-> Type` is written (no named binder).
+    /// Optional named binder for the return value (`-> result : U64`) —
+    /// a free name in scope of the handler's own `ensures`; the CPI
+    /// substitution helper rewrites it to the caller's `let X = …` binder
+    /// per call site. Defaults to `"result"` when only `-> Type` is written.
     pub result_binder: Option<String>,
     pub clauses: Vec<Node<InterfaceHandlerClause>>,
 }
@@ -674,12 +604,9 @@ pub enum MatchBody {
     Effect(Vec<Node<EffectStmt>>),
     /// Empty body — case is a no-op (state unchanged, no error).
     Noop,
-    /// v2.24 #9 — `call Interface.handler(...)` — case maps to a
-    /// synthetic handler that issues this CPI (and nothing else).
-    /// Used for outcome-conditional CPI patterns where the match
-    /// arm picks between different external calls instead of
-    /// different state mutations. Optional effect block alongside
-    /// the call for cases that do both.
+    /// `call Interface.handler(...)` — case maps to a synthetic handler
+    /// issuing this CPI (outcome-conditional CPI patterns). Optional effect
+    /// block alongside the call for cases that do both.
     Call(CallExpr, Vec<Node<EffectStmt>>),
 }
 
@@ -706,25 +633,21 @@ pub struct EffectStmt {
     pub lhs: Path,
     pub op: EffectOp,
     pub rhs: Node<Expr>,
-    /// v2.24 §S1a — per-site error-variant override on checked `+=` / `-=`.
-    /// `pool += amount else MintOverflow` parses with `on_error =
-    /// Some("MintOverflow")`. The keyword is `else` (same as `requires X
-    /// else Err`), not `or` — `or` would collide with the boolean infix
-    /// `or` already parsed by `expr()`. None means "fall back to the
-    /// `pragma checked_overflow_error` / `pragma checked_underflow_error`
-    /// default, then the built-in `MathOverflow` / `MathUnderflow`."
-    /// Always None for saturating (`+=!`) / wrapping (`+=?`) / `Set` —
-    /// those can't fail, so the adapter drops any override even if the
-    /// parser captured one.
+    /// Per-site error-variant override on checked `+=` / `-=`:
+    /// `pool += amount else MintOverflow`. Keyword is `else` (as in
+    /// `requires X else Err`), not `or` — `or` would collide with the
+    /// boolean infix parsed by `expr()`. `None` falls back to the
+    /// `pragma checked_*_error` default, then built-in `MathOverflow` /
+    /// `MathUnderflow`. Always `None` for saturating / wrapping / `Set` —
+    /// those can't fail, so the adapter drops any captured override.
     pub on_error: Option<String>,
 }
 
-/// v2.20 §S1.2 — a single statement inside `effect { … }`. Either a leaf
-/// `EffectStmt` (the historical unconditional form, `x += y`) or a
-/// `match`-shape conditional that branches over a scrutinee expression.
+/// A single statement inside `effect { … }`: a leaf `EffectStmt`
+/// (`x += y`) or a `match`-shape conditional over a scrutinee expression.
 #[derive(Debug, Clone)]
 pub enum EffectBlock {
-    /// Unconditional effect statement — the only form pre-v2.20.
+    /// Unconditional effect statement.
     Stmt(EffectStmt),
     /// `match <scrutinee> { 0 => <effect>, 1 => <effect>, _ => <effect> }`.
     Match {
@@ -733,8 +656,8 @@ pub enum EffectBlock {
     },
 }
 
-/// One arm of an effect-level `match`. v2.20 supports literal-integer
-/// patterns and a `_` wildcard.
+/// One arm of an effect-level `match`. Literal-integer patterns and `_`
+/// wildcard only.
 #[derive(Debug, Clone)]
 pub struct EffectMatchArm {
     pub pattern: EffectPattern,
@@ -775,19 +698,9 @@ pub fn flatten_effect_blocks(blocks: &[Node<EffectBlock>]) -> Vec<&EffectStmt> {
     out
 }
 
-/// Per-effect arithmetic semantics. v2.7 G3 introduced the distinction —
-/// prior versions always lowered `+=` to wrapping in the transition model,
-/// but that produced false-positive overflow hits in Kani for specs whose
-/// deployed implementation uses `checked_add`.
-///
-/// - `Add` / `Sub` = **checked** (default; matches deployed Anchor
-///   `checked_add(..).ok_or(err)?` — overflow short-circuits the transition).
-/// - `AddSat` / `SubSat` = **saturating** (`pool +=! net`) — clamps to
-///   `{u8,u64,…}::MAX` or `::MIN` on over/underflow.
-/// - `AddWrap` / `SubWrap` = **wrapping** (`pool +=? net`) — the pre-v2.7
-///   default; still valid opt-in for specs that deliberately use modular
-///   arithmetic.
-/// - `Set` = assignment (`:=` or `=`).
+/// Per-effect arithmetic semantics. Checked is the default — it matches
+/// deployed `checked_add(..).ok_or(err)?` patterns (overflow short-circuits
+/// the transition); wrapping is an explicit opt-in for modular arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectOp {
     /// `+=` — checked add (default, matches `checked_add` in deployed programs)
@@ -964,11 +877,10 @@ pub enum Expr {
         value: Box<Node<Expr>>,
         body: Box<Node<Expr>>,
     },
-    /// `if cond then a else b` — full conditional in expression position
-    /// (v2.8 fold-in F9). Lowers to Lean's `if … then … else …` and to a
-    /// Rust `if … { … } else { … }` block. Both branches must produce a
-    /// value of the same type — Lean's elaborator and Rust's type checker
-    /// enforce this; qedgen just plumbs the structure through.
+    /// `if cond then a else b` — conditional in expression position. Lowers
+    /// to Lean `if … then … else …` and a Rust `if` block. Branch types
+    /// must agree — Lean's elaborator and rustc enforce it; qedgen just
+    /// plumbs the structure through.
     IfThenElse {
         cond: Box<Node<Expr>>,
         then_branch: Box<Node<Expr>>,
@@ -1035,10 +947,8 @@ pub struct PropertyDecl {
 pub enum PreservedBy {
     All,
     Some(Vec<String>),
-    /// v2.24 #3 — `preserved_by all except [h1, h2, ...]` shorthand
-    /// for "every handler other than the listed ones". The adapter
-    /// expands this against the spec's full handler list, producing
-    /// a concrete `Some(Vec<String>)` for downstream consumers.
+    /// `preserved_by all except [h1, h2, ...]` — the adapter expands this
+    /// against the full handler list into a concrete `Some(Vec<String>)`.
     AllExcept(Vec<String>),
 }
 

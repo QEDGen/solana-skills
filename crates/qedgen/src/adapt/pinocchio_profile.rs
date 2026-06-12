@@ -1,11 +1,9 @@
-//! Source-derived Pinocchio proof profile.
-//!
-//! This module is the extraction side of the Pinocchio `--kani-impl`
-//! profile layer. It reads the user's committed Pinocchio source and
-//! recovers facts the generic Kani emitter needs: dispatcher tags,
-//! account slice order, numeric instruction-data fields, and PDA derivation
-//! seeds. Richer ABI schema integration can extend this profile without
-//! teaching the Kani backend about any specific program.
+//! Source-derived Pinocchio proof profile — the extraction side of the
+//! Pinocchio `--kani-impl` layer. Reads committed Pinocchio source and
+//! recovers what the generic Kani emitter needs: dispatcher tags, account
+//! slice order, numeric instruction-data fields, and PDA derivation seeds.
+//! ABI schemas can extend the profile without teaching the Kani backend
+//! about any specific program.
 
 use anyhow::Result;
 use quote::ToTokens;

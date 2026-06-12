@@ -24,14 +24,12 @@ pub struct VerifiedEntry {
     pub status: DriftStatus,
 }
 
-/// Compute content hash for a function. MUST match the proc-macro's
-/// recomputation byte-for-byte — pre-v2.11.3 this used
-/// `to_token_stream().to_string()` directly, which subtly diverges from
-/// the macro's `canonical_token_string` walker (rustc-vs-`from_str`
-/// spacing). The result was that `qedgen check --update-hashes` wrote
-/// hashes that the proc-macro then immediately rejected as drifted.
-/// Delegate to the shared `spec_hash::body_hash_for_fn` so both sides
-/// agree by construction.
+/// Content hash for a function. MUST match the proc-macro's recomputation
+/// byte-for-byte: `to_token_stream().to_string()` subtly diverges from the
+/// macro's `canonical_token_string` walker (rustc-vs-`from_str` spacing),
+/// which made `qedgen check --update-hashes` write hashes the proc-macro
+/// immediately rejected as drifted. Delegating to the shared
+/// `spec_hash::body_hash_for_fn` keeps both sides agreeing by construction.
 fn content_hash(func: &ItemFn) -> String {
     spec_hash::body_hash_for_fn(func)
 }
@@ -49,10 +47,9 @@ struct VerifiedAttr {
     pub accounts_hash: Option<String>,
 }
 
-/// Extract every `key = "value"` pair inside a `#[qed(verified, ...)]`
-/// attribute. Returns `None` when the attribute is not `qed(verified,
-/// ...)` shaped. Returns `Some(VerifiedAttr::default())` when the
-/// attribute is `#[qed(verified)]` with no key/value pairs.
+/// Every `key = "value"` pair inside a `#[qed(verified, ...)]` attribute.
+/// `None` = not `qed(verified, ...)`-shaped; `Some(default())` = bare
+/// `#[qed(verified)]`.
 fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
     let path = attr.path();
     if !path.is_ident("qed") {
@@ -110,18 +107,14 @@ fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
     Some(out)
 }
 
-/// Backward-compat wrapper used by `scan_file`. Returns `Some(Option)`
-/// matching the pre-v2.15 signature: outer Some = "this is a
-/// `#[qed(verified)]` attribute", inner Option = the body `hash` value.
+/// `scan_file` wrapper: outer Some = "is a `#[qed(verified)]` attribute",
+/// inner Option = the body `hash` value.
 fn extract_hash_from_attr(attr: &syn::Attribute) -> Option<Option<String>> {
     parse_verified_attr(attr).map(|a| a.hash)
 }
 
-/// Walk parents of `start` looking for the named file. Returns the
-/// absolute path of the first hit. Used by `--update-hashes` to resolve
-/// `spec = "X.qedspec"` relative paths the same way the proc-macro
-/// resolves them via `CARGO_MANIFEST_DIR` — the macro's resolution dir
-/// is whichever ancestor the spec lives in, matching this walk.
+/// Walk parents of `start` for the named file (first hit wins). Matches the
+/// proc-macro's `CARGO_MANIFEST_DIR`-relative resolution of `spec = "..."`.
 fn find_relative_file(start: &Path, rel: &str) -> Option<PathBuf> {
     let mut dir = start.parent();
     while let Some(d) = dir {
@@ -350,32 +343,14 @@ fn collect_all_fns_from_items(items: &[syn::Item], map: &mut HashMap<String, Ite
 }
 
 /// Scan a file for transitive drift: verified functions whose verified
-/// callees have themselves drifted directly. (GH issue #28.)
+/// callees have themselves drifted directly (GH issue #28).
 ///
-/// The pre-v2.15 implementation built a transitive hash from `(body +
-/// sorted(callee_name:callee_hash))` and compared it against the stored
-/// `hash = "..."` — which seals only the function body, not the
-/// transitive closure. The two hash semantics never match when any
-/// callee exists, producing a false drift on every function with
-/// non-trivial body. Without per-callee stored hashes (a new attribute
-/// shape that does not exist today), the only sound transitive signal
-/// available is "one of my verified callees is itself drifted."
-///
-/// Algorithm:
-/// 1. Gather every `#[qed(verified)]` function in the file with its
-///    expected hash.
-/// 2. Compute each function's current direct hash; a function is
-///    "directly drifted" when current ≠ expected.
-/// 3. For every function whose direct hash IS OK, walk its callees;
-///    surface a transitive entry naming the verified callees that are
-///    themselves directly drifted. Non-verified callees can't drift —
-///    they have no anchor.
-///
-/// Net effect: `--deep` becomes a directly-drifted aggregator showing
-/// the upward fan-out of a primitive drift event. No false positives;
-/// trade-off is non-verified callee changes do not surface (matches
-/// the existing v2.14 test `deep_no_false_positive_when_callee_unchanged`'s
-/// stated semantics).
+/// The stored `hash = "..."` seals only the function body, so without
+/// per-callee stored hashes the only sound transitive signal is "one of my
+/// verified callees is itself drifted". For each function whose direct hash
+/// is OK, surface the verified callees that drifted directly; non-verified
+/// callees have no anchor and can't drift. No false positives; the trade-off
+/// is non-verified callee changes do not surface.
 fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -386,7 +361,7 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let mut scanned = Vec::new();
     collect_from_items(&syntax.items, &mut scanned);
 
-    // Step 1: which `#[qed(verified)]` functions have drifted directly?
+    // Which `#[qed(verified)]` functions have drifted directly?
     let mut directly_drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (fn_name, expected_hash, func) in &scanned {
         let Some(expected) = expected_hash else {
@@ -398,9 +373,8 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
         }
     }
 
-    // Step 2: for each function whose direct hash IS OK, find verified
-    // callees that drifted directly. Those callees are the transitive
-    // signal.
+    // For each function whose direct hash IS OK, surface verified callees
+    // that drifted directly.
     let mut results = Vec::new();
     for (fn_name, expected_hash, func) in &scanned {
         let Some(expected) = expected_hash else {
@@ -485,26 +459,17 @@ pub fn check(input: &Path) -> Result<Vec<VerifiedEntry>> {
 }
 
 /// A `#[qed(verified, ...)]` stamp whose `hash`, `spec_hash`, or
-/// `accounts_hash` no longer matches what `qedgen check --drift X
-/// --update-hashes` would compute. Surfaced by `check_stamped_drift` so
-/// `qedgen codegen` can warn users immediately after regenerating
-/// artifacts, rather than waiting for the next `cargo build` to fire
-/// `compile_error!` from the proc-macro side.
+/// `accounts_hash` is stale. Surfaced by `check_stamped_drift` so
+/// `qedgen codegen` can warn right after regen instead of waiting for the
+/// proc-macro's `compile_error!` on the next build.
 #[derive(Debug)]
 pub struct StampedDriftEntry {
     pub file: PathBuf,
     pub fn_name: String,
 }
 
-/// Walk `input` for `#[qed(verified, ...)]`-stamped functions whose
-/// `hash`, `spec_hash`, or `accounts_hash` is stale relative to the
-/// current spec / accounts / function body. Returns one entry per stale
-/// stamp; an empty Vec means every stamp is current.
-///
-/// This is the read-only complement to `update`: same staleness logic,
-/// no in-place rewrites. `qedgen codegen` calls this after regenerating
-/// artifacts so users see actionable next-step guidance instead of
-/// waiting for the proc-macro's `compile_error!` on the next build.
+/// Read-only complement to `update`: same staleness logic across all three
+/// hash legs, no rewrites. One entry per stale stamp; empty = all current.
 pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
     let files = collect_rs_files(input)?;
     let mut entries = Vec::new();
@@ -629,22 +594,13 @@ pub fn print_report(entries: &[VerifiedEntry]) {
     );
 }
 
-/// Update `#[qed(verified, ...)]` in source files with computed hashes.
+/// Update `#[qed(verified, ...)]` stamps in-place, refreshing all three hash
+/// legs (`hash`, `spec_hash`, `accounts_hash`) — refreshing only `hash` leaves
+/// the proc-macro rejecting the build on the other legs.
 ///
-/// v2.15 (GH issue #27): refreshes all three hash legs — `hash`,
-/// `spec_hash`, and `accounts_hash` — not just `hash`. Pre-v2.15 only
-/// `hash` was updated; users who ran `--update-hashes` expecting drift
-/// to be fully fixed found the proc-macro still rejecting their build
-/// with a stale `spec_hash` or `accounts_hash`. This walks every
-/// `#[qed(verified, ...)]` attribute, recomputes whichever hash legs
-/// are present, and replaces stale values in-place.
-///
-/// Resolution: `spec` and `accounts_file` paths are resolved by walking
-/// parent directories from the source file (matching the proc-macro's
-/// `CARGO_MANIFEST_DIR`-relative behavior). When the referenced file
-/// can't be located, that hash leg is skipped with a warning rather
-/// than failing — users may run `--update-hashes` against a partial
-/// tree.
+/// `spec` / `accounts_file` paths resolve by walking parent dirs (matching
+/// the proc-macro's `CARGO_MANIFEST_DIR`-relative behavior); an unresolvable
+/// file skips that leg with a warning so partial trees still work.
 pub fn update(input: &Path) -> Result<usize> {
     let files = collect_rs_files(input)?;
     let mut updated = 0;
@@ -662,9 +618,8 @@ pub fn update(input: &Path) -> Result<usize> {
         let mut scanned = Vec::new();
         collect_from_items(&syntax.items, &mut scanned);
 
-        // Re-extract the full attribute alongside each scanned function.
-        // The pre-v2.15 path stored only the body hash; we now need the
-        // full key/value set to know which legs to refresh.
+        // Full attribute (not just body hash) per scanned function, to know
+        // which legs to refresh.
         let attrs = collect_verified_attrs(&syntax.items);
 
         if scanned.is_empty() {
@@ -675,8 +630,7 @@ pub fn update(input: &Path) -> Result<usize> {
         let mut changed = false;
 
         for ((_fn_name, _expected_body, func), attr) in scanned.iter().zip(attrs.iter()) {
-            // Body hash (hash = "..."): same logic as before, plus the
-            // `#[qed(verified)]` → stamped form.
+            // Body hash leg; bare `#[qed(verified)]` gets stamped.
             let actual_body = content_hash(func);
             match &attr.hash {
                 Some(expected) if expected != &actual_body => {
@@ -690,9 +644,7 @@ pub fn update(input: &Path) -> Result<usize> {
                 }
                 Some(_) => {} // body hash already correct
                 None => {
-                    // `#[qed(verified)]` with no `hash` field at all —
-                    // stamp it with the computed hash. (Stays compatible
-                    // with the v2.14 NoHash → stamped flow.)
+                    // No `hash` field — stamp with the computed hash.
                     let patterns = [
                         "qed(verified)",
                         "qed( verified )",
@@ -711,8 +663,7 @@ pub fn update(input: &Path) -> Result<usize> {
                 }
             }
 
-            // spec_hash leg: present only when `spec` + `handler` are
-            // also set. Resolve the spec path, compute, replace if stale.
+            // spec_hash leg: needs `spec` + `handler` set.
             if let (Some(spec_path), Some(handler_name), Some(expected_spec)) =
                 (&attr.spec, &attr.handler, &attr.spec_hash)
             {
@@ -742,11 +693,9 @@ pub fn update(input: &Path) -> Result<usize> {
                 }
             }
 
-            // accounts_hash leg: present only when `accounts` +
-            // `accounts_file` are also set. Issue #29 already enforces
-            // all-or-nothing at the macro side, so partial configs
-            // surface as compile errors rather than silently skipping
-            // here.
+            // accounts_hash leg: needs `accounts` + `accounts_file` set.
+            // The macro enforces all-or-nothing (#29), so partial configs are
+            // compile errors, not silent skips here.
             if let (Some(struct_name), Some(accounts_file), Some(expected_acct)) =
                 (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
             {
@@ -785,8 +734,7 @@ pub fn update(input: &Path) -> Result<usize> {
     Ok(updated)
 }
 
-/// Parallel collector to `collect_from_items` that captures the full
-/// attribute (not just the body hash) for each verified function.
+/// Parallel collector to `collect_from_items` capturing the full attribute.
 /// Indices match `collect_from_items` so callers can zip the two.
 fn collect_verified_attrs(items: &[syn::Item]) -> Vec<VerifiedAttr> {
     let mut out = Vec::new();
@@ -967,13 +915,8 @@ mod tests {
 
     #[test]
     fn deep_detects_verified_callee_drift() {
-        // v2.15 fix for issue #28: --deep now flags transitive drift only
-        // when a *verified* callee has itself drifted directly. Without
-        // per-callee stored hashes (a new attribute shape that does not
-        // exist), this is the only sound transitive signal — comparing a
-        // body+callees transitive hash against the body-only stored hash
-        // produced false positives on every function with non-trivial
-        // body. Non-verified callees can't drift; they have no anchor.
+        // --deep flags transitive drift only when a *verified* callee has
+        // itself drifted directly (the only sound signal; see scan_file_deep).
         let source = r#"
             #[qed(verified)]
             fn helper() -> u64 { 42 }
@@ -1057,12 +1000,8 @@ mod tests {
 
     #[test]
     fn deep_silent_on_non_verified_callee_change() {
-        // The complement to issue #28: changes to *non-verified* callees
-        // do NOT surface as transitive drift. This is intentional —
-        // non-verified callees have no anchor to compare against. The
-        // pre-v2.15 code falsely reported every non-trivial function as
-        // drifted; v2.15 reports nothing here, which is the correct
-        // floor.
+        // Non-verified callee changes intentionally do NOT surface — they
+        // have no anchor to compare against.
         let source = r#"
             fn helper() -> u64 { 42 }
 
@@ -1099,13 +1038,7 @@ mod tests {
 
     #[test]
     fn deep_no_false_positive_when_callee_unchanged() {
-        // v2.15 fix for #28: when nothing has drifted, --deep emits
-        // nothing. Pre-v2.15 the assertion was discarded (`let _ =
-        // deep_entries`) because the implementation always reported
-        // false drift on functions with non-trivial bodies — comparing
-        // a body+callee transitive hash against a body-only stored
-        // hash. The new implementation only flags verified-callee
-        // direct drift, so this case correctly returns empty.
+        // Nothing drifted → --deep emits nothing.
         let source = r#"
             fn helper() -> u64 { 42 }
 
@@ -1138,8 +1071,7 @@ mod tests {
 
     #[test]
     fn content_hash_matches_macro() {
-        // Ensure the CLI hash algorithm matches what the proc macro computes.
-        // This test uses the same function and checks for 16-char hex output.
+        // CLI hash must be the 16-char hex shape the proc macro produces.
         use quote::quote;
         let func: ItemFn = syn::parse2(quote! {
             pub fn deposit(amount: u64) -> u64 {
@@ -1154,12 +1086,10 @@ mod tests {
 
     #[test]
     fn content_hash_equals_spec_hash_body_hash() {
-        // drift.rs's content_hash MUST agree with spec_hash::body_hash_for_fn,
-        // which in turn agrees with qedgen-macros::verified::content_hash.
-        // Pre-v2.11.3 these diverged (drift used to_token_stream().to_string,
-        // spec_hash uses canonical_token_string), causing
-        // `qedgen check --update-hashes` to write hashes the proc-macro
-        // immediately rejected. Lock the alignment as a regression test.
+        // Regression lock: drift::content_hash MUST agree with
+        // spec_hash::body_hash_for_fn (and thus the proc-macro). They once
+        // diverged (to_token_stream().to_string vs canonical_token_string),
+        // making --update-hashes write hashes the proc-macro rejected.
         use quote::quote;
         for tokens in [
             quote! { pub fn deposit(amount: u64) -> u64 { amount + 1 } },
@@ -1179,16 +1109,9 @@ mod tests {
 
     #[test]
     fn check_stamped_drift_flags_stale_spec_hash() {
-        // v2.29 Slice E (#16) regression test: `check_stamped_drift`
-        // surfaces a stamped function whose `spec_hash` no longer
-        // matches the live spec, so `qedgen codegen` can warn the
-        // user before the proc-macro's `compile_error!` fires.
         let dir = tempfile::tempdir().unwrap();
 
-        // Write a spec, compute its real `spec_hash` for handler `foo`,
-        // then write a sibling .rs file stamped with a deliberately
-        // stale `spec_hash` value. Body hash matches; only the
-        // `spec_hash` leg is stale.
+        // Body hash matches; only the `spec_hash` leg is deliberately stale.
         let spec_src = r#"program foo
 
 handler foo (n : U64) : Active -> Active {
@@ -1199,9 +1122,7 @@ handler foo (n : U64) : Active -> Active {
         std::fs::write(&spec_path, spec_src).unwrap();
         let real_spec_hash = spec_hash::spec_hash_for_handler(spec_src, "foo").unwrap();
 
-        // Compute the body hash so only `spec_hash` is stale.
-        // `scan_file` needs the `#[qed(verified)]` marker to recognize
-        // the fn — without it, the entries Vec is empty.
+        // Compute the body hash via scan_file (needs the `#[qed(verified)]` marker).
         let body_only = r#"
             #[qed(verified)]
             pub fn foo(n: u64) -> u64 { n + 1 }

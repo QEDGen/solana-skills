@@ -1,8 +1,6 @@
-// The `verify` subcommand runs the generated harnesses against the generated
-// implementation. It closes the loop that `check` opens: check validates the
-// spec; verify validates the code the spec produced.
-//
-// Backends: proptest (cargo test), kani (cargo kani — M2), lean (lake build).
+// `verify` runs the generated harnesses against the generated implementation
+// (check validates the spec; verify validates the code it produced).
+// Backends: proptest (cargo test), kani (cargo kani), lean (lake build).
 // Each runner returns a BackendReport; they roll up into a VerifyReport.
 
 use anyhow::{Context, Result};
@@ -29,35 +27,25 @@ pub struct BackendReport {
     pub duration_ms: u128,
     pub detail: Option<String>,
     pub log_path: Option<PathBuf>,
-    /// Structured counterexamples extracted by the per-backend parser
-    /// (PLAN-v2.16 D1/D2). Empty for `Passed` / `Skipped` backends, and
-    /// for `Failed` backends whose parser couldn't extract structured
-    /// data (in which case `detail` still carries the human summary).
-    /// Serialized `omitempty` so consumers pinning the v2.15 shape
-    /// continue to work.
+    /// Structured counterexamples from the per-backend parser. Empty for
+    /// `Passed` / `Skipped`, and for `Failed` where parsing found nothing
+    /// (`detail` still carries the human summary). `omitempty` for JSON
+    /// back-compat.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub counterexamples: Vec<Counterexample>,
-    /// v2.28 — for the `lean` backend, the unverified axioms each
-    /// top-level theorem in Spec.lean / Proofs.lean depends on. Surfaces
-    /// the trust surface (`*.ensures_axiom_*` from bundled callees +
-    /// any `sorryAx` from incomplete proofs) as a first-class artifact.
-    /// Empty when the backend isn't `lean`, when the build failed,
-    /// when no top-level theorems were found, or when every theorem
-    /// only depends on Lean built-ins. `omitempty` so v2.27 JSON
-    /// consumers continue to work.
+    /// `lean` backend only: unverified axioms each top-level theorem in
+    /// Spec.lean / Proofs.lean depends on — the trust surface
+    /// (`*.ensures_axiom_*` from bundled callees + `sorryAx`). Empty for
+    /// other backends, failed builds, no theorems, or builtin-only closures.
+    /// `omitempty` for JSON back-compat.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub axioms: Vec<AxiomDependency>,
 }
 
-/// One theorem's dependence on unverified axioms (v2.28).
-///
-/// Lean built-ins (`propext`, `Classical.choice`, `Quot.sound`, the
-/// `Lean.ofReduceBool` / `Lean.trustCompiler` pair used by
-/// `native_decide`) are filtered out before this is constructed —
-/// they're part of every Lean program's trust base and not actionable.
-/// What remains is the user-meaningful trust surface: bundled-callee
-/// `*.ensures_axiom_*` axioms (Stance-1 codegen module or Stance-2
-/// bundled package) and `sorryAx` from incomplete proofs.
+/// One theorem's dependence on unverified axioms. Lean built-ins
+/// (`LEAN_BUILTIN_AXIOMS`) are filtered before construction — what remains is
+/// the user-meaningful trust surface: bundled-callee `*.ensures_axiom_*`
+/// axioms and `sorryAx` from incomplete proofs.
 #[derive(Debug, Clone, Serialize)]
 pub struct AxiomDependency {
     /// Fully-qualified theorem name (`Namespace.theoremName`).
@@ -89,10 +77,9 @@ pub struct VerifyOpts {
     pub lean: bool,
     pub lean_dir: PathBuf,
     pub fail_fast: bool,
-    /// v2.19: run Miri repros under `.qed/probes/pinocchio/*/repro_miri.rs`.
+    /// Run Miri repros under `.qed/probes/pinocchio/*/repro_miri.rs`.
     pub miri: bool,
-    /// Project root for Miri repro discovery (typically the spec's
-    /// parent dir).
+    /// Project root for Miri repro discovery (typically the spec's parent dir).
     pub project_root: PathBuf,
 }
 
@@ -171,9 +158,7 @@ fn run_proptest(harness: &Path) -> BackendReport {
         };
     }
 
-    // The harness is generated into `tests/proptest.rs` at the program root;
-    // its containing crate is whatever cargo finds walking up. Run from the
-    // harness's nearest Cargo.toml ancestor.
+    // Run from the harness's nearest Cargo.toml ancestor.
     let crate_dir = match nearest_cargo_dir(harness) {
         Some(dir) => dir,
         None => {
@@ -189,7 +174,6 @@ fn run_proptest(harness: &Path) -> BackendReport {
         }
     };
 
-    // `cargo test --release --test proptest` runs just the generated harness.
     // Release because proptest cases can be slow under debug.
     let test_name = harness
         .file_stem()
@@ -216,12 +200,9 @@ fn run_proptest(harness: &Path) -> BackendReport {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);
-            // PLAN-v2.16 D2: parse libtest's failure block into structured
-            // (harness, var, value) tuples. Then attach the persisted
-            // proptest-regressions seed for deterministic re-run. If
-            // parsing yields nothing (output shape changed, or failure
-            // happened before any property fired), `detail` still carries
-            // the existing human summary so nothing regresses.
+            // Parse libtest failures into structured tuples + attach the
+            // persisted regression seed. If parsing yields nothing, `detail`
+            // still carries the human summary.
             let mut cxs = crate::verify_proptest_parse::parse_failures(&stdout);
             for cx in cxs.iter_mut() {
                 cx.seed =
@@ -267,9 +248,8 @@ fn run_kani(harness: &Path) -> BackendReport {
         };
     }
 
-    // Point-of-use dep check. `require_kani` returns Err with install text
-    // when cargo-kani is missing; surface that as a Failed backend so the
-    // user sees the install hint instead of a spawn error.
+    // Surface a missing cargo-kani as a Failed backend with the install hint,
+    // not an opaque spawn error.
     if let Err(e) = crate::deps::require_kani() {
         return BackendReport {
             name: "kani",
@@ -282,9 +262,8 @@ fn run_kani(harness: &Path) -> BackendReport {
         };
     }
 
-    // If the harness routes any effect to `bin = "z3"` (wide-type mul/div),
-    // preflight that z3 is installed. Without this the Kani run fails with
-    // an opaque cbmc spawn error; surface the install hint up front.
+    // Harnesses routing effects to `bin = "z3"` (wide-type mul/div) need z3
+    // preflighted — otherwise Kani dies with an opaque cbmc spawn error.
     if let Err(e) = crate::deps::require_z3_if_kani_harness_needs_it(harness) {
         return BackendReport {
             name: "kani",
@@ -312,10 +291,8 @@ fn run_kani(harness: &Path) -> BackendReport {
         }
     };
 
-    // Run the spec-model Kani harness in an isolated crate. The harness is
-    // framework-neutral; tying it to the generated program package means
-    // unrelated Anchor/Pinocchio scaffold compile errors can prevent Kani
-    // from checking the model at all.
+    // Run in an isolated crate: the harness is framework-neutral, and tying it
+    // to the program package lets unrelated scaffold compile errors block Kani.
     let output = Command::new("cargo")
         .args(["kani", "--tests"])
         .current_dir(kani_crate.path())
@@ -336,12 +313,8 @@ fn run_kani(harness: &Path) -> BackendReport {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            // PLAN-v2.16 D1: parse CBMC counterexample output into
-            // structured (harness, var, value, line) tuples. The human
-            // `detail` summary stays for backward compat / pretty-print.
-            // Counterexamples come exclusively from stdout (cargo-kani
-            // routes verdicts there); stderr carries build noise we
-            // fold into `detail` only.
+            // Counterexamples come exclusively from stdout (cargo-kani routes
+            // verdicts there); stderr is build noise folded into `detail` only.
             let cxs = crate::verify_kani_parse::parse_failures(&stdout);
             BackendReport {
                 name: "kani",
@@ -392,10 +365,8 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
 
     match output {
         Ok(out) if out.status.success() => {
-            // v2.28 — surface the unverified trust surface alongside the
-            // pass. Soft-failing: if the axiom query can't run (file IO,
-            // `lake env lean` not on PATH, regex misses), we silently
-            // return an empty list rather than failing the verify.
+            // Soft-failing: if the axiom query can't run, report an empty
+            // list rather than failing the verify.
             let axioms = collect_axiom_report(lean_dir).unwrap_or_default();
             BackendReport {
                 name: "lean",
@@ -485,8 +456,7 @@ fn summarize_cargo_failure(stdout: &str, stderr: &str) -> String {
 }
 
 fn summarize_kani_pass(stdout: &str) -> String {
-    // On success, Kani prints "VERIFICATION:- SUCCESSFUL" per harness and a
-    // summary line. Count them for a tight report.
+    // Kani prints "VERIFICATION:- SUCCESSFUL" per harness plus a summary line.
     let successful = stdout.matches("VERIFICATION:- SUCCESSFUL").count();
     let summary_line = stdout
         .lines()
@@ -512,9 +482,8 @@ fn summarize_kani_failure(stdout: &str, stderr: &str) -> String {
         .take(20)
         .collect();
     if lines.is_empty() {
-        // Failure before any harness ran (toolchain missing, cargo metadata
-        // refused, etc). `cargo kani` writes some of these to stdout and some
-        // to stderr; return whichever has content.
+        // Failure before any harness ran; cargo kani splits such errors across
+        // stdout and stderr — return whichever has content.
         let tail_err = tail_lines(stderr, 20);
         if !tail_err.trim().is_empty() {
             return tail_err;
@@ -553,15 +522,11 @@ fn tail_lines(s: &str, n: usize) -> String {
     lines[start..].join("\n")
 }
 
-// ---- v2.28 — `#print axioms` trust-surface report ---------------------
+// ---- `#print axioms` trust-surface report ---------------------
 
-/// Lean built-ins that appear in every program's axiom closure. We
-/// filter these out before reporting so the user-actionable list isn't
-/// drowned in noise. `propext`, `Classical.choice`, `Quot.sound` are
-/// the classical-logic trio every Mathlib-using proof transitively
-/// pulls in; `Lean.ofReduceBool` + `Lean.trustCompiler` are the pair
-/// behind `native_decide` and `decide`-on-reducible-Props, both of
-/// which are part of Lean's compiler-trust base, not the user's.
+/// Lean built-ins filtered out of the report: the classical-logic trio every
+/// Mathlib proof pulls in, plus the `native_decide` compiler-trust pair —
+/// Lean's trust base, not the user's.
 const LEAN_BUILTIN_AXIOMS: &[&str] = &[
     "propext",
     "Classical.choice",
@@ -570,11 +535,9 @@ const LEAN_BUILTIN_AXIOMS: &[&str] = &[
     "Lean.trustCompiler",
 ];
 
-/// Discover top-level theorems in Spec.lean / Proofs.lean and query
-/// their axiom closure via `lake env lean`. Soft-fails: returns None
-/// when file IO breaks, the lake invocation can't spawn, or no
-/// theorems are found. `Some(vec![])` means "queried successfully, no
-/// theorem depends on a non-builtin axiom" — the all-proven case.
+/// Query the axiom closure of Spec.lean / Proofs.lean theorems via
+/// `lake env lean`. `None` = query couldn't run (soft-fail);
+/// `Some(vec![])` = queried fine, nothing non-builtin (all-proven).
 fn collect_axiom_report(lean_dir: &Path) -> Option<Vec<AxiomDependency>> {
     let theorems = collect_theorem_names(lean_dir);
     if theorems.is_empty() {
@@ -583,8 +546,8 @@ fn collect_axiom_report(lean_dir: &Path) -> Option<Vec<AxiomDependency>> {
     run_axiom_query(lean_dir, &theorems)
 }
 
-/// Parse Spec.lean + Proofs.lean for top-level `theorem` declarations.
-/// Tracks namespace nesting to produce fully-qualified names.
+/// Top-level `theorem` declarations in Spec.lean + Proofs.lean,
+/// fully qualified via namespace tracking.
 fn collect_theorem_names(lean_dir: &Path) -> Vec<String> {
     let mut result = Vec::new();
     for fname in ["Spec.lean", "Proofs.lean"] {
@@ -671,11 +634,9 @@ fn run_axiom_query(lean_dir: &Path, theorems: &[String]) -> Option<Vec<AxiomDepe
     Some(parse_axiom_output(&stdout))
 }
 
-/// Parse Lean's `#print axioms` output. Two output shapes per theorem:
-///   `'<name>' depends on axioms: [a, b, c]`   → captured here
-///   `'<name>' does not depend on any axioms`  → silently skipped
-/// (the second shape means the theorem's trust closure is empty after
-/// our built-in filter; nothing to surface).
+/// Parse Lean's `#print axioms` output. Two shapes per theorem:
+///   `'<name>' depends on axioms: [a, b, c]`   → captured
+///   `'<name>' does not depend on any axioms`  → skipped (nothing to surface)
 fn parse_axiom_output(stdout: &str) -> Vec<AxiomDependency> {
     let re =
         regex::Regex::new(r"'([^']+)' depends on axioms:\s*\[([^\]]*)\]").expect("static regex");
@@ -698,9 +659,8 @@ pub fn print_human(report: &VerifyReport) {
     eprint!("{}", format_human(report));
 }
 
-/// Format the full human-readable verify report. Separated from `print_human`
-/// so tests can pin the exact rendering without stderr capture; `print_human`
-/// is the side-effecting thin wrapper. Returns a string ending in a newline.
+/// Full human-readable verify report (newline-terminated). Separate from
+/// `print_human` so tests can pin the rendering without stderr capture.
 pub fn format_human(report: &VerifyReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("qedgen verify — {}\n", report.spec.display()));
@@ -730,11 +690,8 @@ pub fn format_human(report: &VerifyReport) -> String {
     out
 }
 
-/// Render each backend's structured counterexamples below its status line,
-/// one block per failing harness with the spec-named `var = value` pairs the
-/// per-backend parser extracted. Both the kani parser (CBMC state blocks)
-/// and the proptest parser already preserve spec binder names from the
-/// generated harness — this fn is just the human surface for that data.
+/// Render structured counterexamples below the backend's status line —
+/// one block per failing harness with spec-named `var = value` pairs.
 /// JSON consumers see the same data via `BackendReport.counterexamples`.
 fn format_counterexamples(out: &mut String, cxs: &[Counterexample]) {
     for cx in cxs {
@@ -767,12 +724,8 @@ fn format_counterexamples(out: &mut String, cxs: &[Counterexample]) {
     }
 }
 
-/// v2.28 — render the unverified trust surface below the backend's
-/// status block. Groups by theorem; one axiom per indented line. Lean
-/// built-ins (propext / Classical.choice / Quot.sound / native_decide
-/// kernel pair) are filtered upstream so they don't appear here.
-/// Empty `axioms` → no section emitted; "all proven" surfaces as
-/// silent pass, same as today.
+/// Render the unverified trust surface (grouped by theorem). Built-ins are
+/// filtered upstream; empty `axioms` emits no section (silent pass).
 fn format_axioms(out: &mut String, axioms: &[AxiomDependency]) {
     if axioms.is_empty() {
         return;
@@ -880,9 +833,7 @@ mod tests {
             }],
         };
         let out = format_human(&report);
-        // Named-value assignments render in human output, not just JSON
-        // (this is the v2.17 fix — the kani parser already extracted them,
-        // print_human just wasn't rendering them).
+        // Named-value assignments must render in human output, not just JSON.
         assert!(out.contains("counterexample: probe_overflow_transfer"));
         assert!(out.contains("at tests/kani.rs:42:5"));
         assert!(out.contains("pre    = 18446744073709551615ul"));
@@ -992,8 +943,6 @@ mod tests {
         assert!(!out.contains("counterexample"));
         assert!(out.ends_with("OK\n"));
     }
-
-    // ---- v2.28 axiom-report tests --------------------------------------
 
     #[test]
     fn collects_top_level_theorems_with_namespace_prefix() {
@@ -1123,7 +1072,6 @@ end Outer
     }
 }
 
-// Submodules (v2.35 src/ reorg).
 pub(crate) mod drift;
 pub(crate) mod miri_verify;
 pub(crate) mod ratchet;

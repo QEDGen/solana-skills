@@ -630,18 +630,13 @@ fn wrap_arithmetic_atom(atom: &str) -> String {
 }
 
 fn wrap_arith_expr(expr: &str) -> String {
-    // Split on the RIGHTMOST top-level (paren-depth-0) ` + ` / ` - ` and
-    // recurse on the LHS, so a chained expression lowers left-associatively:
-    //   `cap - used - reserved`
-    //     → `cap.saturating_sub(used).saturating_sub(reserved)`
-    // This matches Lean's left-associative `Nat` subtraction. The previous
-    // `rfind` form was both non-recursive (it left the inner operator as a
-    // bare infix, e.g. `cap - used.wrapping_sub(reserved)`, mis-grouping the
-    // expression) and used `wrapping_sub`, which diverged from the Lean tier
-    // on underflow — issue #79 Bug B. Subtraction lowers to `saturating_sub`
-    // because Lean models guard/property arithmetic over `Nat`, whose `-`
-    // truncates at 0; the proptest predicate must test the same relation the
-    // Lean proof discharges. Addition keeps `wrapping_add` (grouping fixed).
+    // Split on the RIGHTMOST top-level ` + ` / ` - ` and recurse on the LHS
+    // so chains lower left-associatively (`cap - used - reserved` →
+    // `cap.saturating_sub(used).saturating_sub(reserved)`), matching Lean's
+    // left-associative `Nat` subtraction. Subtraction is `saturating_sub`
+    // because Lean models guard/property arithmetic over `Nat` (`-`
+    // truncates at 0) — the predicate must test the same relation the Lean
+    // proof discharges. Addition keeps `wrapping_add`.
     let bytes = expr.as_bytes();
     let mut depth: i32 = 0;
     let mut split: Option<(usize, u8)> = None;
@@ -739,10 +734,8 @@ pub fn emit_add_strict_bounds(
 /// Infer a Rust integer type from a constant's value magnitude.
 pub fn infer_const_type(value: &str) -> &'static str {
     let clean_val = value.replace('_', "");
-    // v2.29 Slice A (#3): try unsigned first so positive literals
-    // keep their pre-v2.29 type (u8 / u16 / …). Fall through to
-    // signed only when the leading `-` rules out the unsigned path,
-    // matching the smallest signed type that fits.
+    // Try unsigned first; fall through to signed only when a leading `-`
+    // rules out the unsigned path, picking the smallest type that fits.
     if let Ok(v) = clean_val.parse::<u128>() {
         if v <= u8::MAX as u128 {
             "u8"
@@ -798,9 +791,6 @@ fn pick_arith_solver(dsl_field_type: &str, rhs_is_arithmetic: bool) -> &'static 
     }
     let is_wide = matches!(dsl_field_type, "U64" | "U128" | "I128");
     if is_wide {
-        // CBMC / Kani accepts an external SMT solver via `bin = "<path>"`.
-        // Z3 solves bit-vector arithmetic (especially nested mul/div on 64/128
-        // bit types) far faster than any SAT backend here.
         "bin = \"z3\""
     } else {
         "minisat"
@@ -824,11 +814,8 @@ pub fn pick_kani_solver_for_effect(
     rhs: &str,
     op: &ParsedHandler,
 ) -> &'static str {
-    // Compute the set of "arith-tainted" let bindings — bindings whose
-    // (transitive) RHS contains a `*` or `/`. Fixed-point iteration: start
-    // from direct syntactic hits, then propagate by whole-word containment
-    // of an already-tainted name in another binding's RHS. Bounded by the
-    // binding count (each pass adds at least one or converges).
+    // Fixed-point taint propagation: a binding is "arith-tainted" when its
+    // (transitive) RHS contains `*` or `/`. Bounded by the binding count.
     let mut tainted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (name, _, bound_rhs) in &op.let_bindings {
         if bound_rhs.contains('*') || bound_rhs.contains('/') {
@@ -851,8 +838,6 @@ pub fn pick_kani_solver_for_effect(
         }
     }
 
-    // An effect RHS is arithmetic if it directly contains `*`/`/` OR it
-    // mentions any tainted binding.
     let rhs_is_arith = rhs.contains('*')
         || rhs.contains('/')
         || tainted.iter().any(|t| contains_whole_word(rhs, t));
@@ -887,24 +872,14 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Resolve an effect value to a Rust expression: handler param name,
-/// declared constant, state field (rebound to `<state_binder>X` when
-/// provided), or pass-through literal.
+/// declared constant, `let … = call` binding, state field (rebound to
+/// `<state_binder>X` when provided), or pass-through literal.
 ///
-/// Why state fields need a binder: by the time effect-value rendering
-/// reaches this fn, upstream effect-RHS rendering has already stripped
-/// the `state.` prefix (see chumsky_adapter::render_effect — it unwraps
-/// `Expr::FieldAccess { base: state, .. }` to the bare field name so each
-/// backend can apply its own state binder). Different targets bind state
-/// differently:
-///
-///   - proptest fn body binds state as `s` (`fn op(s: &mut State, ...)`)
-///   - Anchor handler body accesses state via `self.<acct>.<field>`
-///   - Lean / Kani may bind differently again
-///
-/// Without a target-aware binder, a bare `X` for a state field becomes
-/// E0425 "cannot find value `X` in this scope" at compile time. Each
-/// caller passes the binder appropriate to its emission target; pass
-/// `None` to keep the legacy pass-through behavior (bare identifier).
+/// State fields need a binder because upstream effect-RHS rendering already
+/// stripped the `state.` prefix (chumsky_adapter::render_effect) and each
+/// target binds state differently (proptest `s`, Anchor `self.<acct>`, …);
+/// a bare field name would be E0425 at compile time. Pass `None` for
+/// pass-through (bare identifier).
 pub fn resolve_value(
     value: &str,
     op: &ParsedHandler,
@@ -920,9 +895,8 @@ pub fn resolve_value(
         .iter()
         .any(|c| c.result_binding.as_deref() == Some(value))
     {
-        // v2.24 #11 — `let <name> = call …` binding is in scope for
-        // subsequent effects / requires. Render as the bare ident
-        // so the generated Rust references the let-bound local.
+        // `let <name> = call …` binding is in scope for subsequent
+        // effects / requires; render as the bare let-bound local.
         value.to_string()
     } else if let Some(binder) = state_binder {
         if is_state_field(value, spec) {
@@ -979,14 +953,9 @@ pub fn resolve_state_fields(spec: &ParsedSpec) -> &[(String, String)] {
     }
 }
 
-/// Filter state fields to mutable-only.
-///
-/// v2.21 Slice 3: Pubkey fields used to be filtered out (the v2.20 P6
-/// workaround) because the proptest / Kani State struct couldn't carry
-/// them. With Standalone context now lowering `Pubkey → [u8; 32]`, the
-/// fields are first-class and stay in the mutable set — proptest's
-/// existing 32-byte-array strategy generates them. The "mutable" naming
-/// is historical; today every declared state field flows through here.
+/// Every declared state field flows through here (the "mutable" naming is
+/// historical; Pubkey fields are first-class since they lower to
+/// `[u8; 32]`).
 pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
     fields.iter().collect()
 }
@@ -997,9 +966,8 @@ pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
 /// (callers default to "not Pubkey" — emit normally) so unknown fields
 /// surface as compile errors at the right line, not as silent skips.
 pub fn field_type_is_pubkey(field: &str, op: &ParsedHandler, spec: &ParsedSpec) -> bool {
-    // v2.24 S5d — variant-prefixed paths (`Active.owner`) resolve
-    // against the variant's payload, not the wrapper. Look up the
-    // type there first; fall through to the flat schema otherwise.
+    // Variant-prefixed paths (`Active.owner`) resolve against the variant's
+    // payload first; fall through to the flat schema otherwise.
     if let Some(dot) = field.find('.') {
         let head = &field[..dot];
         let rest = &field[dot + 1..];
@@ -1036,14 +1004,10 @@ pub fn effect_target_base(path: &str) -> &str {
     &path[..end]
 }
 
-/// v2.24 S5d — strip a leading `<Variant>.` prefix from an effect path
-/// when the root names a multi-variant ADT variant on the spec's state.
-/// Returns the path unchanged otherwise. Used by proptest / Kani /
-/// integration_test harnesses whose flat-`State` model carries fields
-/// in their union form (not under variant constructors), so
-/// `Active.balance := …` must lower to `s.balance = …`. Owned-string
-/// return so callers can pass the result through `&str`-only APIs
-/// without lifetime juggling.
+/// Strip a leading `<Variant>.` prefix when the root names a multi-variant
+/// ADT variant; unchanged otherwise. Harness `State` models carry fields in
+/// union form, so `Active.balance := …` must lower to `s.balance = …`.
+/// Owned return so callers can pass through `&str`-only APIs.
 pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> String {
     if let Some(dot) = path.find('.') {
         let head = &path[..dot];
@@ -1059,12 +1023,11 @@ pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> Str
 }
 
 /// Project an effect-shaped MIR `Stmt` back onto the `(field, op_kind,
-/// value)` triple the string templates below consume. This is the #66
-/// adaptor that makes `Stmt` the iteration source for the Kani/proptest
-/// transition bodies while keeping their output byte-identical:
-/// `mir::lower_body` builds effect stmts from `ParsedHandler.effects` in
-/// order, `Path` round-trips the dotted field via `split('.')`/`join(".")`,
-/// and `Expr::from_raw` carries the RHS string verbatim in `.rust`.
+/// value)` triple the string templates below consume — the #66 adaptor
+/// that makes `Stmt` the iteration source for the Kani/proptest transition
+/// bodies while keeping output byte-identical (`lower_body` preserves spec
+/// order, `Path` round-trips the dotted field, `Expr::from_raw` carries
+/// the RHS verbatim in `.rust`).
 ///
 /// Returns `None` for every non-effect variant — each with the reason it
 /// renders as *nothing* in the pure spec-model transition. The match is
@@ -1105,10 +1068,8 @@ pub fn stmt_effect_triple(stmt: &crate::mir::Stmt) -> Option<(String, &'static s
         // Lifecycle surface: the transition body drives variant changes
         // through the pre/post-status writes, not a promote statement.
         Stmt::VariantPromote { .. } => None,
-        // Conditional effects render from `op.effect_branches` until the
-        // Phase-5 Branch lowering lands (`lower_body` step 7 emits a
-        // stub `Abort` and the *union* of arm effects today — walking
-        // arms here would double-emit against the branch path).
+        // Branch arms are rendered by the per-arm match path; walking
+        // them here would double-emit.
         Stmt::Branch { .. } => None,
         // Abort clauses are harnessed from the `aborts_if` predicate
         // surface; in the body they carry no state mutation.
@@ -1153,9 +1114,8 @@ pub fn block_effect_triples_deep(body: &crate::mir::Block) -> Vec<(String, &'sta
 }
 
 /// Render a single `(field, op_kind, value)` triple into Rust at the given
-/// indent. Shared between unconditional effect lowering and v2.20's
-/// match-arm lowering. The helper writes the trailing newline; the caller
-/// controls where the statement sits relative to its surrounding block.
+/// indent. The helper writes the trailing newline; the caller controls
+/// where the statement sits relative to its surrounding block.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_one_effect(
     out: &mut String,
@@ -1182,20 +1142,13 @@ fn emit_one_effect_inner(
     indent: &str,
     account_binder: Option<&str>,
 ) {
-    // v2.24 S5d — proptest / Kani / integration_test all run against a
-    // flat `State` struct (the spec's union-of-variant-fields view). A
-    // `Variant.field := …` effect from a multi-variant ADT spec must
-    // strip the variant prefix here so the body emits `s.field = …`
-    // instead of `s.Variant.field = …` (which doesn't compile). The
-    // proptest model tracks the variant via `s.status: u8`, set by
-    // `emit_transition_fn`'s post-status write — no enum needed in
-    // this harness layer.
+    // Harnesses run against a flat `State` (union-of-variant-fields view):
+    // strip the variant prefix so `Variant.field := …` emits `s.field = …`;
+    // the variant itself is tracked via `s.status`.
     let field_owned = strip_variant_prefix_for_flat_state(field, spec);
     let field = field_owned.as_str();
-    // proptest / kani body binds state as `s` — pass that binder so a
-    // bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
-    // upstream strips `state.`) renders as `s.rfp_buyer`. (PR #45 fix #2,
-    // generalized to all callers via emit_one_effect rather than per-arm.)
+    // Body binds state as `s` — pass that binder so a bare state-field RHS
+    // renders as `s.<field>`.
     let rust_value = resolve_value_with_account_env(value, op, spec, Some("s."), account_binder);
     match op_kind {
         "set" => {
@@ -1282,18 +1235,10 @@ pub fn emit_one_effect_with_account_env(
     );
 }
 
-/// Verify that every field referenced as an effect target in any handler is
-/// declared somewhere in the state schema — either `state_fields` (flat) or
-/// one of the per-account `account_types[*].fields` (multi-account) or any
-/// sum-type variant payload. Returns a clear error naming the handler and
-/// field when a mismatch is found.
-///
-/// Motivated by v2.6.1 eval (qedgen-bug-report §2, PRD-v2.6.2 G3): the
-/// `init_market` handler wrote `admin := p_admin` but `admin` only appeared
-/// in a sum-type variant payload that the flat-state renderer didn't see,
-/// so codegen emitted `s.admin = …` referencing an undeclared struct field.
-/// Catching this at codegen time beats a `cargo check` error 1000 lines
-/// into the generated harness.
+/// Verify every effect-target field is declared somewhere in the state
+/// schema (`state_fields`, per-account fields, or a sum-variant payload).
+/// Errors name the handler and field — catching this at codegen time beats
+/// a `cargo check` error 1000 lines into the generated harness.
 pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
     use std::collections::HashSet;
 
@@ -1320,11 +1265,8 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
         }
     }
 
-    // v2.24 S5c — variant-prefixed effect targets (`Active.balance`) are
-    // legal under the wrapper-struct + inner-enum codegen. The base
-    // matches a variant name on a multi-variant ADT account; the second
-    // segment is the actual field. Build a variant-fields index so the
-    // check can re-target at the field beneath the variant prefix
+    // Variant-prefixed targets (`Active.balance`) are legal: index variant
+    // fields so the check re-targets at the field beneath the prefix
     // instead of false-positive-bailing on the variant name.
     let mut variant_fields: std::collections::HashMap<&str, HashSet<&str>> =
         std::collections::HashMap::new();
@@ -1360,17 +1302,12 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
                 continue;
             }
             if !declared.contains(base) {
-                // v2.29 Slice C — `state := .Variant { … }` whole-state
-                // assignment desugars to per-field variant-prefixed
-                // effects at the adapter (chumsky_adapter.rs::
-                // render_effect_or_expand_variant_promotion), but
-                // non-RecordLit RHS shapes (e.g. `state := .Active some_var`)
-                // and unit-variant shapes that survive into codegen
-                // still surface a single bare-state effect tuple here.
-                // Accept `state` as a base whenever the spec has any
-                // multi-variant ADT account type — the cross-variant
-                // promotion path either handles it (RecordLit) or
-                // bails to a `todo!()` (other shapes) downstream.
+                // `state := .Variant { … }` desugars to per-field effects
+                // at the adapter, but non-RecordLit / unit-variant shapes
+                // can survive here as a single bare-`state` effect. Accept
+                // `state` whenever the spec has a multi-variant ADT —
+                // downstream either handles it (RecordLit) or bails to a
+                // `todo!()`.
                 if base == "state" && spec.account_types.iter().any(|a| !a.variants.is_empty()) {
                     continue;
                 }
@@ -1386,18 +1323,12 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Collect all guard conditions from a handler (guard_str + requires clauses)
-/// as a single Rust expression. Returns None if no guards exist.
-///
-/// Skips `requires` clauses whose body references `<handler-account>.pubkey`.
-/// The proptest / Kani / integration-test models use a simplified `State`
-/// struct that drops Pubkey-typed fields (they're not exercisable from a
-/// property strategy), so a `requires acct.pubkey == state.pubkey_field`
-/// references a state field the model doesn't carry, producing a compile
-/// error in the generated harness. The runtime-side check still emits in
-/// the real Rust handler via `codegen.rs`; only the property-test
-/// projection drops it. Same shape as the lean_gen drop for handler-
-/// account pubkey refs.
+/// Collect guard_str + requires clauses as a single Rust expression; None
+/// if no guards. Skips `requires` bodies referencing
+/// `<handler-account>.pubkey` — the harness `State` model doesn't carry
+/// handler accounts, so they'd be compile errors. The runtime-side check
+/// still emits in the real handler; only the property-test projection
+/// drops it (same shape as the lean_gen drop).
 pub fn collect_full_guard(op: &ParsedHandler, wrapping: bool) -> Option<String> {
     collect_full_guard_with_account_env(op, wrapping, None)
 }
@@ -1534,11 +1465,8 @@ pub fn split_top_level_and(expr: &str) -> Vec<String> {
     parts
 }
 
-/// True when `expr` mentions `<handler_account>.pubkey` (or `.key()`)
-/// anywhere in its body — used to suppress `requires` clauses from
-/// property-test guard collection when they reference a handler account
-/// (no scope in the simplified State model). The runtime-side check
-/// still emits in the real Rust handler.
+/// True when `expr` mentions `<handler_account>.pubkey` (or `.key()`) —
+/// used to suppress such `requires` from property-test guard collection.
 fn mentions_handler_account_pubkey(
     expr: &str,
     accounts: &[crate::check::ParsedHandlerAccount],
@@ -1554,17 +1482,10 @@ fn mentions_handler_account_pubkey(
 // Shared emitters
 // ============================================================================
 
-/// Emit constant declarations from spec constants.
-/// v2.29 Slice A (#8) — emit `let <name>: <T> = <source>;` lines for
-/// each `abstract <name> : <T>` clause on a handler, mapping the
-/// DSL type through the caller-supplied resolver. `indent` lets
-/// callers match their surrounding block (4 / 8 / 12 spaces);
-/// `source` is the per-backend symbolic-input expression
-/// (`kani::any()` for Kani, `todo!("...")` for Rust scaffolds, etc.).
-///
-/// Call this after the equivalent takes_params emission so the
-/// abstract binders are in scope when the following
-/// `kani::assume(<requires>)` / `prop_assume!(...)` reads them.
+/// Emit `let <name>: <T> = <source>;` for each `abstract <name> : <T>`
+/// binder. `source` is the per-backend symbolic-input expression
+/// (`kani::any()`, `todo!("…")`, …). Call after takes_params emission so
+/// the binders are in scope for the following assume/prop_assume reads.
 pub fn emit_abstract_binders(
     out: &mut String,
     handler: &crate::check::ParsedHandler,
@@ -1583,11 +1504,6 @@ pub fn emit_abstract_binders(
 /// `kani::any()`. When the per-account lifecycle has ≥2 states, the
 /// synthetic `status` field is also `kani::any()` so callers can layer
 /// `kani::assume(s.status == Status::<X>)` on top.
-///
-/// Promoted to `rust_codegen_util` in v2.30 Phase 3c1 so both
-/// `kani::generate` and `kani_mir::generate` call the same emitter
-/// (byte-equivalence guarantee). Behavior is unchanged from the
-/// original `kani.rs`-local copy.
 pub fn emit_state_init_symbolic(
     out: &mut String,
     mutable_fields: &[&(String, String)],
@@ -1603,13 +1519,10 @@ pub fn emit_state_init_symbolic(
     out.push_str("    };\n");
 }
 
-/// Emit `let mut s = State { ... };` with every mutable field zeroed and the
-/// `status` field set to the section's initial lifecycle state. Used by init-
-/// handler harnesses (effect/preservation), where the pre-state is the
-/// canonical "before initialization" state. Type-aware defaults via
-/// `proptest_gen::default_value_for_field`. Promoted to
-/// `rust_codegen_util` alongside `emit_state_init_symbolic` so kani.rs +
-/// kani_mir.rs share a single source of truth.
+/// Emit `let mut s = State { ... };` zeroed, with `status` set to the
+/// initial lifecycle state — the canonical pre-state for init-handler
+/// harnesses. Type-aware defaults via
+/// `proptest_gen_mir::default_value_for_field`.
 pub fn emit_state_init_zeroed(
     out: &mut String,
     mutable_fields: &[&(String, String)],
@@ -1631,11 +1544,10 @@ pub fn emit_state_init_zeroed(
 }
 
 /// Append `kani::assume(s.status == Status::<pre>);` when the handler has a
-/// pre-status declaration AND this section has a lifecycle. No-op otherwise.
-/// Without this, guard-rejection / abort harnesses for lifecycle-gated
-/// handlers can pass for the wrong reason — the handler rejects because the
-/// symbolic status didn't match the pre-state, not because the requires/
-/// guard fired. Promoted from `kani.rs` for kani.rs + kani_mir.rs sharing.
+/// pre-status declaration AND this section has a lifecycle; no-op otherwise.
+/// Without this, guard-rejection / abort harnesses can pass for the wrong
+/// reason — the handler rejects on a mismatched symbolic status, not
+/// because the requires/guard fired.
 pub fn emit_pre_status_assume(
     out: &mut String,
     op: &crate::check::ParsedHandler,
@@ -1660,16 +1572,10 @@ pub fn emit_constants(out: &mut String, constants: &[(String, String)]) {
     }
 }
 
-/// Emit Rust struct declarations for every user-defined record type in the
-/// spec. Called before `emit_state_struct` so the record types are in scope
-/// when the State struct references them (e.g. `accounts: [Account; N]`).
-///
-/// `derives` is the `#[derive(...)]` list to apply to each record. Kani
-/// harnesses want `Clone, Copy, kani::Arbitrary`; proptest harnesses want
-/// `Debug, Clone, Copy`; unit_test harnesses want `Debug, Clone, PartialEq`.
-///
-/// Empty-record edge case (records with no fields) are skipped — they're
-/// degenerate and not something our specs produce.
+/// Emit struct declarations for user-defined record types. Called before
+/// `emit_state_struct` so records are in scope when State references them.
+/// `derives` is the per-backend `#[derive(...)]` list. Empty records are
+/// skipped.
 pub fn emit_record_structs(
     out: &mut String,
     spec: &crate::check::ParsedSpec,
@@ -1680,11 +1586,9 @@ pub fn emit_record_structs(
         if rec.fields.is_empty() {
             continue;
         }
-        // The `state { … }` / `type State = { … }` flat forms produce a
-        // record literally named `State`, which the adapter keeps in
-        // `records` for other consumers. The state-machine `struct State`
-        // is emitted separately (with lifecycle + ghost fields), so skip
-        // the value-record here to avoid a duplicate `struct State`.
+        // Flat `state { … }` forms produce a record literally named
+        // `State`; the state-machine `struct State` (lifecycle + ghost
+        // fields) is emitted separately, so skip to avoid a duplicate.
         if rec.name == "State" {
             continue;
         }
@@ -1698,15 +1602,10 @@ pub fn emit_record_structs(
     Ok(())
 }
 
-/// Emit Rust enum declarations for every sum-type in the spec whose variants
-/// are ALL unit (no payload). Classic example: `type Error | NotAdmin | …`
-/// becomes `enum Error { NotAdmin, … }`.
-///
-/// Sum-types with at least one payload-carrying variant (like `type State |
-/// Active of { … }`) are intentionally skipped here — the existing codegen
-/// path flattens those into a single `struct State { … }` using the first
-/// variant's fields, and emitting a conflicting `enum State` would collide.
-/// Full enum-State modeling is v2.7 scope.
+/// Emit enums for sum-types whose variants are ALL unit (`type Error |
+/// NotAdmin | …` → `enum Error { NotAdmin, … }`). Payload-carrying sums
+/// (`type State | Active of { … }`) are skipped — codegen flattens those
+/// into a `struct State`, and an `enum State` would collide.
 pub fn emit_unit_enum_sums(
     out: &mut String,
     spec: &crate::check::ParsedSpec,
@@ -1727,31 +1626,19 @@ pub fn emit_unit_enum_sums(
     Ok(())
 }
 
-/// True when the spec declares a multi-state lifecycle that the harness layer
-/// should model as a `Status` enum + `status: Status` field on the State
-/// struct. A single-state lifecycle (or no lifecycle at all) doesn't need a
-/// discriminator — the State struct's user fields are the entire model.
+/// True when the spec declares a multi-state lifecycle the harness layer
+/// should model as a `Status` enum + `status` field; single-state / no
+/// lifecycle needs no discriminator.
 pub fn has_lifecycle(spec: &crate::check::ParsedSpec) -> bool {
     spec.lifecycle_states.len() >= 2
 }
 
-/// Emit the synthetic `Status` enum derived from `spec.lifecycle_states`.
-/// Idempotent: no-op when the spec lacks a multi-state lifecycle.
-///
-/// The enum is *synthetic* — it isn't declared by the user as `type Status |
-/// ...`; it's derived from the variants of the State sum-type (via
-/// `lifecycle_states`). This is what lets cover/liveness/effect harnesses
-/// actually constrain reachable behavior: without a status field, a
-/// lifecycle-only handler's transition function has nothing to write, so
-/// every harness against it is vacuous.
-/// Emit a Status enum from a per-account or per-spec lifecycle slice.
-/// Used by per-account codegen (kani + proptest multi-ADT modes) where
-/// each `mod <acct> { ... }` needs its own Status enum populated from
-/// `acct.lifecycle` rather than the (single-ADT-flavored) spec-level
-/// lifecycle. Fixes a v2.21 regression where multi-ADT specs (lending)
-/// emitted `enum Status` with Pool's variants inside both `mod pool` AND
-/// `mod loan`, breaking compilation when Loan's transitions referenced its
-/// own variant names.
+/// Emit the synthetic `Status` enum from a per-account or per-spec
+/// lifecycle slice; no-op below two states. Synthetic: derived from the
+/// State sum-type's variants, not user-declared — without a status field,
+/// lifecycle-only handlers have nothing to write and every harness against
+/// them is vacuous. Multi-ADT codegen must pass `acct.lifecycle` so each
+/// `mod <acct>` gets its own variants, not the spec-level ones.
 pub fn emit_lifecycle_status_enum_from(
     out: &mut String,
     lifecycle_states: &[String],
@@ -1768,17 +1655,11 @@ pub fn emit_lifecycle_status_enum_from(
     out.push_str("}\n\n");
 }
 
-/// Emit a State struct with configurable `#[derive(...)]` attributes.
-/// `map_type_fn` converts DSL types (U64, Pubkey, etc.) to Rust types; it
-/// returns an error on unrecognized types so codegen fails loudly rather
-/// than emitting broken Rust.
-///
-/// `has_lifecycle` is the multi-state-lifecycle discriminator. Multi-ADT
-/// codegen threads the per-account lifecycle (`acct.lifecycle.len() >= 2`)
-/// rather than the spec-level one, so each module's State struct gets a
-/// `status: Status` field iff that ADT actually has a lifecycle. Callers
-/// must have already emitted the `Status` enum via
-/// `emit_lifecycle_status_enum_from`.
+/// Emit a State struct with configurable derives. `map_type_fn` errors on
+/// unrecognized DSL types so codegen fails loudly. `has_lifecycle` gates
+/// the `status: Status` field — multi-ADT codegen threads the per-account
+/// lifecycle, not the spec-level one. Callers must have already emitted
+/// the `Status` enum via `emit_lifecycle_status_enum_from`.
 pub fn emit_state_struct_with_lifecycle(
     out: &mut String,
     fields: &[&(String, String)],
@@ -1786,10 +1667,6 @@ pub fn emit_state_struct_with_lifecycle(
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
     has_lifecycle: bool,
 ) -> anyhow::Result<()> {
-    // v2.21 Slice 3: Pubkey state fields are now lowered to `[u8; 32]`
-    // by `primitive_map` (Standalone context). The v2.20 belt-and-
-    // suspenders bail is gone; the field flows through `map_type_fn`
-    // and lands as a 32-byte array in the emitted struct.
     out.push_str(&format!("#[derive({})]\n", derives));
     out.push_str("struct State {\n");
     for (fname, ftype) in fields {
@@ -1802,16 +1679,10 @@ pub fn emit_state_struct_with_lifecycle(
     Ok(())
 }
 
-/// Emit property predicate functions from spec properties.
-/// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
-/// Emit `fn {inv_name}(s: &State) -> bool { <rust_expr> }` for each invariant
-/// that has a Rust body and is referenced by at least one handler. v2.17.x
-/// wire-up: prior to this, `ParsedInvariant.rust_expr` was populated by the
-/// adapter but never consumed by any backend; only the Lean theorem path
-/// emitted. Description-only invariants (no `rust_expr`) and unsupported
-/// quantifier bodies are skipped silently. The caller is expected to
-/// pre-filter to invariants that are actually relevant for the current
-/// account section / state shape; this fn just emits what it's given.
+/// Emit `fn {inv_name}(s: &State) -> bool { <rust_expr> }` per invariant
+/// with a Rust body. Description-only invariants and unsupported
+/// quantifier bodies are skipped silently; callers pre-filter to the
+/// invariants relevant for the current account section / state shape.
 pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::ParsedInvariant]) {
     for inv in invariants {
         let Some(rust_expr) = inv.rust_expr.as_deref() else {
@@ -1832,21 +1703,17 @@ pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::
     }
 }
 
-/// Emit property predicate functions. Threads a `map_type` closure so the
-/// per-slot `<prop>_at(s, <binder>)` predicate (v2.20 §S1.1) can render a
-/// target-specific binder type — Quasar Pod vs native Rust differ for
-/// non-primitive binders.
+/// Emit property predicate functions. `map_type_fn` lets the per-slot
+/// `<prop>_at(s, <binder>)` predicate render a target-specific binder type
+/// (Quasar Pod vs native Rust differ for non-primitive binders).
 ///
-/// v2.20 emission shape:
-///   - Always emit `fn <prop>(s: &State) -> bool` — body is the real
-///     expression when there's no quantifier (legacy path), or `true` when
-///     the body has a quantifier (the harness layer now drives the check
+/// Emission shape:
+///   - Always `fn <prop>(s: &State) -> bool` — the real expression, or
+///     `true` when the body has a quantifier (the harness drives the check
 ///     via `<prop>_at` instead).
-///   - When `prop.per_slot` is Some, additionally emit
-///     `fn <prop>_at(s: &State, <binder>: <ty>) -> bool` — body is the
-///     `forall` inner expression with the binder kept free. Harnesses
-///     declare `<binder>` symbolically and call this predicate, giving the
-///     non-vacuous check that was missing pre-v2.20.
+///   - When `prop.per_slot` is Some, also `fn <prop>_at(s: &State,
+///     <binder>: <ty>) -> bool` — the `forall` inner expression with the
+///     binder free; harnesses bind it symbolically for a non-vacuous check.
 pub fn emit_property_predicates_with(
     out: &mut String,
     properties: &[ParsedProperty],
@@ -1854,11 +1721,9 @@ pub fn emit_property_predicates_with(
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) {
     for prop in properties {
-        // Prefer the AST-rendered Rust form (handles implies/forall correctly,
-        // embeds the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker when a body can't
-        // lower to a boolean-valued fn). Fall back to the Lean form through
-        // `translate_property_to_rust` for callers constructing ParsedProperty
-        // without an AST (legacy / tests).
+        // Prefer the AST-rendered Rust form (handles implies/forall, embeds
+        // the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker); fall back to
+        // translating the Lean form for callers without an AST.
         let rendered = prop
             .rust_expression
             .as_deref()
@@ -1871,30 +1736,26 @@ pub fn emit_property_predicates_with(
         let Some(rust_expr) = rendered else { continue };
         let doc = prop.expression.as_deref().unwrap_or("");
         out.push_str(&format!("/// {}: {}\n", prop.name, doc));
-        // v2.23 Slice 4: binary properties (body contains `old(...)`)
-        // emit `fn p(pre: &State, post: &State) -> bool` — the rust_expression
-        // is rendered with `state.x` → `post.x` and `old(state.x)` → `pre.x`
-        // by the adapter (see chumsky_adapter `TopItem::Property` arm). Unary
-        // properties keep today's single-state signature. Kani's
-        // preservation harness (kani.rs::emit_preservation_proofs) captures
-        // pre-state and dispatches the assertion arity on `prop.class`.
+        // Binary properties (body contains `old(...)`) take `(pre, post)`;
+        // the adapter renders `state.x` → `post.x`, `old(state.x)` →
+        // `pre.x`. Kani's preservation harness dispatches assertion arity
+        // on `prop.class`.
         let is_binary = prop.class == crate::check::PropertyClass::Binary;
         let sig = if is_binary {
             format!("fn {}(pre: &State, post: &State) -> bool", prop.name)
         } else {
             format!("fn {}(s: &State) -> bool", prop.name)
         };
-        // Stubs (unsupported quantifier path) underscore the params so the
-        // body `true` doesn't trip `unused_variables`.
+        // Stubs underscore the params so the body `true` doesn't trip
+        // `unused_variables`.
         let stub_sig = if is_binary {
             format!("fn {}(_pre: &State, _post: &State) -> bool", prop.name)
         } else {
             format!("fn {}(_s: &State) -> bool", prop.name)
         };
         if crate::check::rust_expr_is_unsupported(&rust_expr) {
-            // Body contains `forall`/`exists`. Emit the function with a
-            // `unimplemented!()` that cites the limitation — the harness
-            // preamble (see kani.rs) skips calling into these predicates.
+            // Quantifier body: emit a `true` stub; the harness preamble
+            // skips calling into these predicates.
             out.push_str(&format!("{} {{\n", stub_sig));
             out.push_str(&format!(
                 "    // {} — property uses a quantifier; lower at the harness level.\n",
@@ -1907,12 +1768,9 @@ pub fn emit_property_predicates_with(
             out.push_str(&format!("    {}\n", rust_expr));
             out.push_str("}\n\n");
         }
-        // v2.20 §S1.1: per-slot predicate. The chumsky_adapter populates
-        // `per_slot` whenever the property is `forall <binder> : <ty>, body`
-        // and the binder type is mechanically lowerable. The harness layer
-        // binds `<binder>` symbolically (kani::any / proptest any) and calls
-        // `<prop>_at(&s, <binder>)` — sidestepping the "predicate must be
-        // bool-valued" constraint that produced the silent `true` stub.
+        // Per-slot predicate: the adapter populates `per_slot` for
+        // mechanically-lowerable `forall <binder> : <ty>, body` properties;
+        // harnesses bind `<binder>` symbolically and call `<prop>_at`.
         if let Some(slot) = &prop.per_slot {
             let rust_ty =
                 map_type_fn(&slot.binder_type).unwrap_or_else(|_| slot.binder_type.clone());
@@ -1931,14 +1789,10 @@ pub fn emit_property_predicates_with(
     }
 }
 
-/// Emit transition functions for handlers. Each returns true if guard passes.
-/// `wrapping` controls whether add/sub effects use wrapping arithmetic.
-/// Issue #67 item 4 — emit any `hook after_store(<field>)` assertions that
-/// fire after a store to `field`. Anchored right after the field's effect in
-/// the runtime transition, so the assertion sees the post-store state. A
-/// failed assertion panics, which both the proptest and Kani harnesses
-/// surface as a failure / verification violation. On-chain codegen doesn't
-/// use this transition emitter, so hooks never reach the program.
+/// Emit `hook after_store(<field>)` assertions, anchored right after the
+/// field's effect so they see the post-store state. A failed assertion
+/// panics, which proptest/Kani surface as a failure. On-chain codegen
+/// never uses this emitter, so hooks don't reach the program.
 fn emit_after_store_hooks(
     out: &mut String,
     hooks: &[crate::mir::HookMir],
@@ -1960,12 +1814,10 @@ fn emit_after_store_hooks(
     }
 }
 
-/// Both transition emitters require the handler's lowered MIR body —
-/// the effect block iterates `Stmt` (via `stmt_effect_triple`), not
-/// `ParsedHandler.effects` (#66: a new `Stmt` variant is a compile
-/// error at the adaptor, covering the Kani + proptest backends). The
-/// guard / status / let-binding / ghost scaffold around the effects
-/// stays `ParsedHandler`-fed by design — that's predicate/account
+/// Both transition emitters iterate the handler's lowered MIR body for
+/// effects (`stmt_effect_triple`; #66 — a new `Stmt` variant is a compile
+/// error at the adaptor). The guard / status / let-binding / ghost
+/// scaffold stays `ParsedHandler`-fed by design — predicate/account
 /// surface, same boundary as `codegen_mir`'s guards.
 pub fn emit_transition_fn(
     out: &mut String,
@@ -2030,12 +1882,8 @@ fn emit_transition_fn_inner(
             .collect::<anyhow::Result<Vec<_>>>()?
             .concat(),
     );
-    // v2.29 Slice A (#8) — abstract binders ride alongside the
-    // real handler params in the spec-model transition signature.
-    // Callers (Kani / proptest harnesses, integration tests) pass
-    // a symbolic / arbitrary value for each binder, and the
-    // transition body references it the same way it would
-    // reference a real param.
+    // Abstract binders ride alongside real handler params; callers pass a
+    // symbolic / arbitrary value for each.
     out.push_str(&format!(
         "fn {}(s: &mut State{}) -> bool {{\n",
         op.name, params
@@ -2090,41 +1938,27 @@ fn emit_transition_fn_inner(
         }
     }
 
-    // Spec-level `let` bindings (`let total_fee = amount * 125 / 10000`)
-    // declared in the handler body. Emit them as Rust `let` statements BEFORE
-    // the effect block — without this the effect RHS (e.g. `pool += net`)
-    // would reference an undefined `net`.
+    // Spec-level `let` bindings emit BEFORE the effect block so effect
+    // RHSs can reference them.
     for (binding_name, _lean_expr, rust_expr) in &op.let_bindings {
         out.push_str(&format!("    let {} = {};\n", binding_name, rust_expr));
     }
 
-    // Apply effects.
+    // Apply effects. Per-effect arithmetic semantics: `+=` → checked_add
+    // (short-circuit via `return false`, matching deployed
+    // `checked_add(..).ok_or(err)?`), `+=!` → saturating, `+=?` → wrapping
+    // (same tiers for `-=`). The `wrapping` flag forces default `+=`/`-=`
+    // to wrap (proptest full-state-space mode); explicit `+=!`/`+=?`
+    // always honor their declared semantics.
     //
-    // v2.7 G3 introduces per-effect arithmetic semantics:
-    //   `+=`  ("add")       → checked_add, short-circuit via `return false`
-    //                         (matches deployed `checked_add(..).ok_or(err)?`)
-    //   `+=!` ("add_sat")   → saturating_add
-    //   `+=?` ("add_wrap")  → wrapping_add
+    // Effects targeting `Pubkey` fields are skipped when there's no
+    // account env: accounts aren't carried into the pure model, and pubkey
+    // identity is validated by the accounts struct at handler entry.
     //
-    // (same three tiers for `-=` / `-=!` / `-=?`).
-    //
-    // The `wrapping` flag is kept for backward compatibility with proptest's
-    // "explore the full state space" mode — when set, default `+=` / `-=`
-    // still use wrapping instead of checked. Explicit `+=!` / `+=?` always
-    // honor their declared semantics regardless of the caller's mode.
-    //
-    // Skip effects targeting `Pubkey` fields: `mutable_fields` (the State
-    // struct's source of truth) filters them out, and the spec-level
-    // RHS (`maker.pubkey` etc.) doesn't have a value in proptest's pure
-    // model — accounts aren't carried into the predicate layer. Pubkey
-    // identity is validated by the Anchor accounts struct at handler
-    // entry, not in the random-state machine. Matches v2.11 brownfield
-    // findings on token-fundraiser.
-    // v2.20 §S1.2 / Phase-5 #42: when the spec uses `match` inside
-    // `effect { … }`, lowering produces a `Stmt::Branch` (and suppresses
-    // the flat union that `op.effects` still carries for back-compat
-    // readers). Emit a real Rust `match` block from the Branch when
-    // present; otherwise fall through to the flat list as before.
+    // `match` inside `effect { … }` lowers to `Stmt::Branch` (suppressing
+    // the flat union `op.effects` still carries for back-compat readers).
+    // Emit a real Rust `match` when present; else fall through to the flat
+    // list.
     if let Some((scrutinee, arms, default)) = body.stmts.iter().find_map(|st| match st {
         crate::mir::Stmt::Branch {
             scrutinee,
@@ -2182,25 +2016,18 @@ fn emit_transition_fn_inner(
             emit_arm_block(out, default_block);
             out.push_str("        }\n");
         } else {
-            // Without a `_` arm Rust requires exhaustive match. Spec
-            // patterns are literal-only in v2.20, so we synthesize a
-            // wildcard that no-ops — codegen guarantees the harness
-            // compiles even if the spec author forgot the catch-all.
-            // The drift hash still records the spec's actual arms.
+            // Spec patterns are literal-only, so synthesize a no-op
+            // wildcard to keep the match exhaustive even if the spec
+            // forgot the catch-all. The drift hash still records the
+            // spec's actual arms.
             out.push_str("        _ => {}\n");
         }
         out.push_str("    }\n");
     } else {
-        // PR #45 fix #2: `emit_one_effect` resolves state-field idents
-        // via `resolve_value(..., Some("s."))` so a bare state-field RHS
-        // (e.g. `bid_buyer := state.rfp_buyer` after upstream strips
-        // `state.`) renders as `s.rfp_buyer` in the proptest body.
-        //
-        // #66 — iterate the handler's lowered MIR body, not
-        // `op.effects`: `stmt_effect_triple` projects each effect-shaped
-        // `Stmt` back onto the triple these templates consume
-        // (byte-identical; see its doc) and skips the non-effect
-        // variants in-stream without reordering.
+        // #66 — iterate the lowered MIR body, not `op.effects`:
+        // `stmt_effect_triple` projects effect-shaped stmts onto the
+        // triple these templates consume (byte-identical; see its doc)
+        // and skips non-effect variants in-stream without reordering.
         for (field, op_kind, value) in block_effect_triples(body) {
             let field = field.as_str();
             if account_env_struct.is_none() && field_type_is_pubkey(field, op, spec) {
@@ -2227,13 +2054,11 @@ fn emit_transition_fn_inner(
         }
     }
 
-    // Issue #67 item 3 — ghost (spec-only) field updates. A ghost with an
-    // `on <this handler>` clause assigns its new value after the normal
-    // effects; ghosts without a clause are left unchanged (frame). The
-    // value reads `s.<ghost>` + handler params, matching the Lean
-    // transition. Arithmetic wraps under `cargo test --release` (the
-    // `verify --proptest` path), so an arbitrary-state aggregate never
-    // panics on model overflow.
+    // Ghost (spec-only) field updates: a ghost with `on <this handler>`
+    // assigns after the normal effects; others are framed (unchanged).
+    // Values read `s.<ghost>` + params, matching the Lean transition.
+    // Arithmetic wraps in release (the `verify --proptest` path), so an
+    // arbitrary-state aggregate never panics on model overflow.
     for ghost in &spec.ghosts {
         for u in &ghost.updates {
             if u.handler == op.name {
@@ -2438,12 +2263,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn chained_subtraction_lowers_left_assoc_saturating() {
-        // Issue #79 Bug B: `cap - used - reserved` is left-associative
-        // `Nat` subtraction in the Lean tier. The proptest guard must
-        // lower it as `cap.saturating_sub(used).saturating_sub(reserved)`
-        // — recursive, correctly grouped, and saturating (not the old
-        // `cap - used.wrapping_sub(reserved)`, which both mis-grouped and
-        // diverged from Lean on underflow).
+        // `cap - used - reserved` is left-associative `Nat` subtraction in
+        // the Lean tier; the guard must lower recursive, correctly
+        // grouped, and saturating.
         let got =
             translate_guard_to_rust("amount <= state.cap - state.used - state.reserved", true);
         assert_eq!(
@@ -2459,9 +2281,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn emit_transition_fn_default_add_emits_checked() {
-        // v2.7 G3: `pool += amount` defaults to checked semantics — overflow
-        // short-circuits the transition via `return false`. Matches deployed
-        // `checked_add(..).ok_or(err)?` in Anchor programs.
+        // `pool += amount` defaults to checked semantics — overflow
+        // short-circuits via `return false`, matching deployed
+        // `checked_add(..).ok_or(err)?`.
         let src = r#"spec T
 state { pool : U64 }
 handler buy (amount : U64) { effect { pool += amount } }
@@ -2804,9 +2626,8 @@ handler deposit (amount : U64) {
 
     #[test]
     fn check_effect_targets_errors_on_undeclared_target() {
-        // Effect writes `phantom` but the state declares only `balance` —
-        // mirrors the v2.6.1 eval's "writes s.admin but admin not declared"
-        // class of bugs. The error must name the handler and the bad field.
+        // Effect writes `phantom` but the state declares only `balance`;
+        // the error must name the handler and the bad field.
         let src = r#"spec T
 state { balance : U64 }
 handler bogus (amount : U64) {

@@ -1,11 +1,7 @@
-//! Tier-0 interface generator — Anchor IDL → `.qedspec` interface block.
-//!
-//! Emits a shape-only `interface Name { ... }` block: program ID, per-handler
-//! discriminators, account roles (signer/writable), and argument types. No
-//! `requires`/`ensures`/`effect` — those require semantic understanding that
-//! an IDL alone cannot give. The upstream block is left as a TODO for humans
-//! to fill in after they've verified the deployed program.
-//!
+//! Tier-0 interface generator — Anchor IDL → shape-only `interface` block:
+//! program ID, per-handler discriminators, account roles, argument types.
+//! No `requires`/`ensures`/`effect` (an IDL carries no semantics); the
+//! upstream block is a TODO for humans who've verified the deployed program.
 //! See docs/design/spec-composition.md §2 "Tier 0 — shape from IDL."
 
 use anyhow::{Context, Result};
@@ -115,7 +111,6 @@ fn render(idl: &Idl) -> String {
 fn render_handler(out: &mut String, ix: &IdlInstruction) {
     let name = &ix.name;
 
-    // Doc comment — each line becomes `/// ...`.
     for line in &ix.docs {
         writeln!(out, "  /// {}", line.trim()).unwrap();
     }
@@ -128,9 +123,8 @@ fn render_handler(out: &mut String, ix: &IdlInstruction) {
     }
     writeln!(out, " {{").unwrap();
 
-    // discriminant: 8-byte Anchor discriminators render as a hex literal
-    // (0x + 16 hex chars) so they match the format used in hand-authored
-    // interfaces.
+    // 8-byte Anchor discriminators render as 0x + 16 hex chars — same
+    // format as hand-authored interfaces.
     if !ix.discriminator.is_empty() {
         let mut hex = String::from("0x");
         for b in &ix.discriminator {
@@ -145,7 +139,6 @@ fn render_handler(out: &mut String, ix: &IdlInstruction) {
         .unwrap();
     }
 
-    // accounts { ... }
     if !ix.accounts.is_empty() {
         writeln!(out, "    accounts {{").unwrap();
         for acc in &ix.accounts {
@@ -167,9 +160,8 @@ fn render_account(out: &mut String, acc: &IdlAccount) {
     } else {
         attrs.push("readonly");
     }
-    // PDA seeds aren't rendered declaratively yet — keep the shape honest
-    // and emit a comment pointing at them so humans can lift them if they
-    // want the caller to check derivation.
+    // PDA seeds aren't rendered declaratively yet — emit a pointer comment
+    // so humans can lift them if callers should check derivation.
     write!(out, "      {:<24} : {}", acc.name, attrs.join(", ")).unwrap();
     writeln!(out).unwrap();
     if acc.pda.is_some() {

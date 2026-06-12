@@ -1,9 +1,6 @@
-// IDL → .qedspec generator
-//
-// Generates a valid .qedspec scaffold from an Anchor IDL JSON file.
-// Structural elements (state, accounts, handlers, contexts, PDAs, errors) are
-// auto-derived. Semantic elements (guards, effects, properties) are stubbed with
-// TODO comments for agent or human completion.
+// IDL → .qedspec scaffold generator. Structural elements (state, accounts,
+// handlers, contexts, PDAs, errors) are auto-derived; semantic elements
+// (guards, effects, properties) are stubbed with TODOs for agent completion.
 
 use anyhow::{Context, Result};
 use std::collections::HashSet;
@@ -11,8 +8,6 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::idl::{self, Idl, IdlInstruction, InstructionAnalysis};
-
-// ── Type mapping ──────────────────────────────────────────────────────────
 
 fn map_type(value: &serde_json::Value) -> String {
     match value {
@@ -31,7 +26,7 @@ fn map_type(value: &serde_json::Value) -> String {
             "publicKey" | "pubkey" => "Pubkey".into(),
             "string" => "String".into(),
             other => {
-                // PascalCase passthrough for unknown types
+                // Unknown types: snake_case → PascalCase passthrough
                 let mut result = String::new();
                 let mut upper_next = true;
                 for ch in other.chars() {
@@ -60,8 +55,6 @@ fn map_type(value: &serde_json::Value) -> String {
     }
 }
 
-// ── Lifecycle inference ───────────────────────────────────────────────────
-
 fn infer_lifecycle(analyses: &[InstructionAnalysis]) -> Vec<String> {
     let has_init = analyses
         .iter()
@@ -75,8 +68,6 @@ fn infer_lifecycle(analyses: &[InstructionAnalysis]) -> Vec<String> {
         (false, false) => vec!["Active".into()],
     }
 }
-
-// ── When/then inference for a single instruction ──────────────────────────
 
 fn infer_when(ix_name: &str, _analysis: &InstructionAnalysis) -> Option<&'static str> {
     if ix_name.contains("init") || ix_name.contains("create") {
@@ -95,8 +86,6 @@ fn infer_then(ix_name: &str, analysis: &InstructionAnalysis) -> Option<&'static 
         None // self-transition, omit `then`
     }
 }
-
-// ── PDA seed rendering ───────────────────────────────────────────────────
 
 fn render_pda_seeds(pda: &idl::IdlPda) -> Vec<String> {
     pda.seeds
@@ -122,8 +111,6 @@ fn render_pda_seeds(pda: &idl::IdlPda) -> Vec<String> {
         .collect()
 }
 
-// ── Context attribute inference ──────────────────────────────────────────
-
 fn render_account_entry(
     acct: &idl::IdlAccount,
     _is_init_ix: bool,
@@ -133,7 +120,6 @@ fn render_account_entry(
 ) -> String {
     let mut attrs = Vec::new();
 
-    // Type inference — emit v2 grammar attributes
     if acct.signer && acct.pda.is_none() {
         attrs.push("signer".to_string());
     } else if acct.name.contains("token_program")
@@ -148,7 +134,7 @@ fn render_account_entry(
     {
         attrs.push("token".to_string());
     } else {
-        // Try to infer type from relations or type name matching
+        // Infer type from relations or type-name matching
         let inner = acct
             .relations
             .first()
@@ -172,12 +158,10 @@ fn render_account_entry(
         }
     }
 
-    // Modifier flags
     if acct.writable {
         attrs.push("writable".to_string());
     }
 
-    // PDA seeds — v2 uses `pda [seed1, seed2]` inline
     if let Some(pda_name) = pda_names.get(&acct.name) {
         attrs.push(format!("pda [{}]", pda_name));
     }
@@ -194,15 +178,13 @@ fn render_account_entry(
         }
     }
 
-    // Ensure at least one attribute — grammar requires `ident : acct_attr+`
+    // Grammar requires `ident : acct_attr+` — ensure at least one attribute
     if attrs.is_empty() {
         attrs.push("readonly".to_string());
     }
 
     format!("    {} : {}", acct.name, attrs.join(", "))
 }
-
-// ── Main renderer ────────────────────────────────────────────────────────
 
 pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     let mut s = String::new();
@@ -249,9 +231,8 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     writeln!(s).unwrap();
 
     // ── spec header ──────────────────────────────────────────────────────
-    //
-    // No `target quasar` — Anchor/Quasar is the default; the sBPF target is
-    // opted into with `pragma sbpf { ... }`. See v2.5 spec-composition.
+    // No `target quasar` — Anchor/Quasar is the default; sBPF is opted into
+    // with `pragma sbpf { ... }`.
     writeln!(s, "spec {}", program_name).unwrap();
     writeln!(s).unwrap();
     writeln!(s, "// TODO: Replace with deployed program ID").unwrap();
@@ -373,18 +354,14 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
 
         writeln!(s, "handler {}{}{} {{", ix.name, params, transition).unwrap();
 
-        // auth
         if let Some(signer) = analysis.signers.first() {
             writeln!(s, "  auth {}", signer).unwrap();
         }
 
-        // guard stub
         writeln!(s, "  // TODO: Add guard clause").unwrap();
 
-        // effect stub
         writeln!(s, "  // TODO: Add effect block").unwrap();
 
-        // transfers hint (if token program present)
         if analysis.has_token_program {
             let writable_token: Vec<&idl::IdlAccount> = ix
                 .accounts
@@ -401,7 +378,6 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
             }
         }
 
-        // accounts
         let is_init_ix = ix.name.contains("init") || ix.name.contains("create");
         let first_signer = analysis.signers.first().map(|s| s.as_str());
         writeln!(s, "  accounts {{").unwrap();
@@ -437,10 +413,8 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
     s
 }
 
-// ── Target account inference (multi-account) ─────────────────────────────
-
 fn infer_target_account(ix: &IdlInstruction, type_names: &HashSet<String>) -> Option<String> {
-    // Find the first writable PDA account whose name matches a type
+    // First writable PDA account whose name matches a type
     for acct in &ix.accounts {
         if acct.writable && acct.pda.is_some() {
             let name_lower = acct.name.to_lowercase();
@@ -465,8 +439,6 @@ fn infer_target_account(ix: &IdlInstruction, type_names: &HashSet<String>) -> Op
     None
 }
 
-// ── Public API ────────────────────────────────────────────────────────────
-
 pub fn generate_qedspec(idl_path: &Path, output_path: &Path) -> Result<()> {
     let (idl, analyses) = idl::parse_idl(idl_path)?;
     let content = render(&idl, &analyses);
@@ -485,8 +457,6 @@ pub fn generate_qedspec(idl_path: &Path, output_path: &Path) -> Result<()> {
 
     Ok(())
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -621,8 +591,6 @@ mod tests {
         (idl, analyses)
     }
 
-    // ── Type mapping ─────────────────────────────────────────────────────
-
     #[test]
     fn map_type_primitives() {
         assert_eq!(map_type(&serde_json::json!("u64")), "U64");
@@ -648,8 +616,6 @@ mod tests {
         assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "U64");
     }
 
-    // ── Lifecycle inference ──────────────────────────────────────────────
-
     #[test]
     fn lifecycle_init_and_close() {
         let (_, analyses) = parse_test_idl(ESCROW_IDL);
@@ -663,8 +629,6 @@ mod tests {
         let lc = infer_lifecycle(&analyses);
         assert_eq!(lc, vec!["Uninitialized", "Active"]);
     }
-
-    // ── Round-trip: escrow ────────────────────────────────────────────────
 
     #[test]
     fn round_trip_escrow() {
@@ -694,8 +658,6 @@ mod tests {
         assert!(!spec.lifecycle_states.is_empty());
     }
 
-    // ── Round-trip: multi-account (lending) ──────────────────────────────
-
     #[test]
     fn round_trip_multi_account() {
         let (idl, analyses) = parse_test_idl(LENDING_IDL);
@@ -715,21 +677,16 @@ mod tests {
         assert_eq!(spec.handlers.len(), 2);
     }
 
-    // ── Accounts generation ─────────────────────────────────────────────
-
     #[test]
     fn accounts_has_signer_and_program() {
         let (idl, analyses) = parse_test_idl(ESCROW_IDL);
         let content = render(&idl, &analyses);
 
-        // Verify key accounts attributes appear
         assert!(content.contains("signer"));
         assert!(content.contains("program"));
         assert!(content.contains("writable"));
         assert!(content.contains("pda [escrow]"));
     }
-
-    // ── PDA extraction ───────────────────────────────────────────────────
 
     #[test]
     fn pda_seeds_extracted() {

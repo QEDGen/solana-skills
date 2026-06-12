@@ -1,21 +1,8 @@
-//! Chumsky-based parser for `.qedspec` files — Phase 1.
-//!
-//! Strangler pattern: pest remains the default. This module parses the spec
-//! into the typed AST (`ast::Spec`) defined alongside. Downstream consumers
-//! still expect the legacy `ParsedSpec`; an adapter in `chumsky_adapter.rs`
-//! translates typed AST → `ParsedSpec` for backward compatibility.
-//!
-//! Coverage in Phase 1: enough to parse `examples/rust/percolator/percolator.qedspec`.
-//!   - spec header, const, record, ADT (state + error)
-//!   - handler blocks: auth, accounts, requires, ensures, effect
-//!   - property, cover, liveness, invariant
-//!   - expressions: arithmetic, comparisons, and/or/implies/not,
-//!     forall/exists, sum, old(), subscripts, parenthesized groups
-//!
-//! Deliberately not in Phase 1: sBPF instruction blocks, schemas,
-//! environments, PDAs, events. pest continues to handle specs that use those.
+//! Chumsky-based parser for `.qedspec` files: source → typed AST
+//! (`ast::Spec`). `chumsky_adapter.rs` translates the typed AST into the
+//! `ParsedSpec` consumed downstream.
 
-#![allow(dead_code)] // scaffolding; consumers land in subsequent phases
+#![allow(dead_code)] // parsed-but-unconsumed scaffolding; see ast.rs note
 
 use chumsky::prelude::*;
 
@@ -114,18 +101,12 @@ const KEYWORDS: &[&str] = &[
     "pragma",
     "let",
     "in",
-    // v2.7 G4: handler-level opt-out of the no_access_control lint.
     "permissionless",
-    // v2.24 #1: top-level reusable guard block.
     "schema",
-    // v2.17 follow-up: handler-side clause asserting the named invariant
-    // holds at POST-state without assuming it pre-state.
     "establishes",
-    // v2.8 G1: top-level `import Name from "key"`. The trailing `from` is
-    // contextual (matched via `kw("from")` only inside `import_decl`), not a
-    // global keyword — handlers still use `from = expr` in call args.
+    // The trailing `from` is contextual (matched via `kw("from")` only
+    // inside `import_decl`) — handlers still use `from = expr` in call args.
     "import",
-    // v2.25: reference-implementation declaration — `ref_impl name (...) : T = <expr>`.
     "ref_impl",
 ];
 
@@ -159,22 +140,11 @@ fn integer<'a>() -> impl Parser<'a, &'a str, u128, Err<'a>> + Clone {
         })
 }
 
-/// Double-quoted string literal.
-///
-/// Escapes: `\\`, `\"`, `\n`, `\t`, plus v2.21 `\<newline>` line
-/// continuation (the backslash + newline pair is consumed and produces
-/// no output, so long invariant descriptions like
-///
-/// ```text
-/// invariant solvent "total deposits never exceed \
-///                    the configured ceiling"
-/// ```
-///
-/// concatenate into a single logical line. Any whitespace immediately
-/// following the consumed newline is preserved verbatim, which means
-/// callers writing indented continuations get their leading whitespace
-/// in the joined string; spec authors typically put no indent (or pad
-/// alignment intentionally). PRD-v2.21 §S2.6.
+/// Double-quoted string literal. Escapes: `\\`, `\"`, `\n`, `\t`, plus
+/// `\<newline>` line continuation (consumed, emits nothing) so long
+/// descriptions join into one logical line. Whitespace after the consumed
+/// newline is preserved verbatim — indented continuations keep their
+/// leading whitespace in the joined string.
 fn string_lit<'a>() -> impl Parser<'a, &'a str, String, Err<'a>> + Clone {
     #[derive(Clone, Copy)]
     enum CharOrEmpty {
@@ -300,15 +270,10 @@ fn qualified_path<'a>() -> impl Parser<'a, &'a str, QualifiedPath, Err<'a>> + Cl
 
 fn path<'a>() -> impl Parser<'a, &'a str, Path, Err<'a>> + Clone {
     let field_seg = just('.').ignore_then(ident()).map(PathSeg::Field);
-    // v2.24 #4: allow dotted-path index expressions
-    // (e.g. `lsts[state.lst_count].mint`). Pre-fix the index slot
-    // only accepted a bare identifier, forcing spec authors to
-    // bind a state-field read into a local before the indexing
-    // step. The dotted form joins segments with `.` and stores the
-    // result as a single `PathSeg::Index(String)`; downstream
-    // codegen handles `state.X` index expressions the same way it
-    // handles bare-ident indices via the existing
-    // `rewrite_index_to_usize` + state-binder resolution pass.
+    // Dotted-path index expressions (`lsts[state.lst_count].mint`): joined
+    // with `.` into a single `PathSeg::Index(String)`; codegen handles
+    // `state.X` indices via `rewrite_index_to_usize` + state-binder
+    // resolution, same as bare-ident indices.
     let dotted_index = ident()
         .then(
             just('.')
@@ -346,21 +311,12 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
     recursive(|expr| {
         let int = integer().map_with(|v, e| Node::new(Expr::Int(v), e.span().into_range()));
 
-        // v2.29 Slice A (#2) — unary minus on integer literals.
-        // Lowers to `Arith { Sub, Int(0), Int(v) }` so no AST change
-        // is needed: downstream renderers and lints already handle
-        // `0 - 6` as a subtraction expression, which evaluates to
-        // `-6` in signed contexts (Lean Int, Rust signed integers).
-        // For unsigned contexts the user is doing something wrong
-        // (negative value in an unsigned field) and existing arith
-        // lints will catch it.
-        //
-        // Limited to immediate integer literals (`-6`, not `-x` or
-        // `-(a + b)`) to keep the prefix-vs-infix `-` disambiguation
-        // trivial: this atom only fires at atom-start position, so
-        // binary subtraction (`a - 6`) is unaffected — `a` is
-        // parsed as an atom, then `-` is consumed by `add_op`, then
-        // the second atom parses `6` (no leading `-`).
+        // Unary minus on integer literals only (`-6`, not `-x` or
+        // `-(a + b)`). Lowers to `Arith { Sub, Int(0), Int(v) }` — no AST
+        // change; renderers handle `0 - 6` as subtraction. Restricting to
+        // immediate literals keeps prefix-vs-infix `-` disambiguation
+        // trivial: this atom only fires at atom-start, so binary `a - 6`
+        // is unaffected (`-` is consumed by `add_op`).
         let neg_int = just('-').ignore_then(integer()).map_with(|v, e| {
             let span = e.span().into_range();
             Node::new(
@@ -507,14 +463,11 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
         let mul_div_floor_atom = mdf_args("mul_div_floor", false);
         let mul_div_ceil_atom = mdf_args("mul_div_ceil", true);
 
-        // v2.21 S2.5: `now()` — zero-arg builtin returning a fresh
-        // symbolic `u64` timestamp. Lowers per-backend:
-        // - Rust:   `(solana_program::clock::Clock::get().unwrap().unix_timestamp as u64)`
-        // - Lean:   axiomatized `QEDGen.Solana.Valid.now` (a `Nat`)
-        // - Kani:   `kani::any::<u64>()`
-        // - Proptest: `any::<u64>()`
-        // Parses to `Expr::App { func: "now", args: [] }`, special-cased
-        // in `chumsky_adapter::expr_to_rust` / `expr_to_lean`.
+        // `now()` — zero-arg builtin: fresh symbolic `u64` timestamp.
+        // Lowers per-backend: Rust `Clock::get().unwrap().unix_timestamp`,
+        // Lean axiomatized `QEDGen.Solana.Valid.now`, Kani/proptest
+        // `any::<u64>()`. Parses to `Expr::App { func: "now", args: [] }`,
+        // special-cased in `chumsky_adapter::expr_to_rust` / `expr_to_lean`.
         let now_atom = just("now")
             .then(
                 any::<&'a str, Err<'a>>()
@@ -536,14 +489,9 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
                 )
             });
 
-        // v2.24 #19: `current_epoch()` — zero-arg builtin returning a
-        // fresh symbolic `u64` epoch. Lowers per-backend identically
-        // to `now()` except the Rust form reads `Clock::get().unwrap().epoch`
-        // instead of `unix_timestamp`. Lean axiomatizes
-        // `QEDGen.Solana.Valid.current_epoch : Nat`. Solana protocols
-        // use epoch for stake / vote / commission scheduling — having
-        // to thread `current_epoch : U64` as a handler param to every
-        // epoch-gated check was the v2.22 friction the gist called out.
+        // `current_epoch()` — like `now()` but Rust reads
+        // `Clock::get().unwrap().epoch`; Lean axiomatizes
+        // `QEDGen.Solana.Valid.current_epoch : Nat`.
         let current_epoch_atom = just("current_epoch")
             .then(
                 any::<&'a str, Err<'a>>()
@@ -954,18 +902,11 @@ fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
 // ----------------------------------------------------------------------------
 
 fn const_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    // v2.29 Slice A (#3) — accept any const-foldable expression on the
-    // RHS, not just an immediate `[-]integer`. The expression grammar
-    // is the full `expr()` parser; `try_const_fold` then walks the AST
-    // and either reduces to a single `i128` or fails with a clear
-    // error that names the non-const subterm. Supported shapes:
-    // integer literals (positive via `Int`, negative via the desugared
-    // `Sub(Int(0), Int(N))`), arithmetic operators (+, -, *, /, %),
-    // and parenthesised sub-expressions. Bare ident references to
-    // other consts and shifts are deferred — the friction-report's
-    // primary use case (`const N6 = 0 - 6` for fixed-point exponents,
-    // `const FP_SCALE = 1000 * 1000` for fixed-point scales) is
-    // covered by the literal + arithmetic + paren subset.
+    // RHS is any const-foldable expression: the full `expr()` grammar,
+    // then `try_const_fold` reduces to a single `i128` or fails naming the
+    // non-const subterm. Supported: integer literals (negatives via the
+    // desugared `Sub(Int(0), Int(N))`), `+ - * / %`, parens. Bare ident
+    // references to other consts and shifts are deferred.
     kw("const")
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
@@ -982,12 +923,10 @@ fn const_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|(name, value)| TopItem::Const { name, value })
 }
 
-/// v2.29 Slice A (#3) — fold a `const NAME = <expr>` body into an
-/// `i128`. Accepts integer literals, paren, and arithmetic over
-/// constants; rejects any subterm that depends on runtime state
-/// (paths, function calls, quantifiers, etc.). Used from
-/// `const_decl::try_map` so the error message carries the parse span
-/// and points at the unsupported subterm.
+/// Fold a `const NAME = <expr>` body into an `i128`: integer literals,
+/// paren, arithmetic over constants; rejects anything runtime-dependent
+/// (paths, calls, quantifiers). Called from `const_decl::try_map` so the
+/// error carries the parse span of the unsupported subterm.
 fn try_const_fold(e: &Expr) -> std::result::Result<i128, String> {
     match e {
         Expr::Int(v) => {
@@ -1185,15 +1124,11 @@ fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a>> + Clone 
         .then_ignore(wsc())
         .then_ignore(just(']'))
         .map(AccountAttr::Pda);
-    // v2.29 Slice G — accept dotted type refs like `Foreign.State`
-    // alongside the bare `token` / `mint` / `State` shapes. The
-    // first ident is either a built-in (`token`, `mint`), a local
-    // `account_type` name, or an imported namespace; the optional
-    // second ident is the type name inside that namespace. The
-    // adapter splits on `.` to populate
-    // `ParsedHandlerAccount::imported_namespace` so downstream
-    // codegen routes through `src/imported/<ns>.rs` for imported
-    // types.
+    // Dotted type refs (`Foreign.State`) alongside bare `token` / `mint` /
+    // `State`: first ident is a built-in, local `account_type`, or imported
+    // namespace; optional second ident is the type inside it. The adapter
+    // splits on `.` to populate `ParsedHandlerAccount::imported_namespace`
+    // so codegen routes imported types through `src/imported/<ns>.rs`.
     let type_attr = just("type")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1249,13 +1184,10 @@ fn effect_stmt<'a>() -> impl Parser<'a, &'a str, EffectStmt, Err<'a>> + Clone {
         just(":=").to(EffectOp::Set),
         just('=').to(EffectOp::Set),
     ));
-    // v2.24 §S1a — optional `else <Variant>` suffix on checked `+=` / `-=`.
-    // Saturating / wrapping variants reject this at the AST-build stage
-    // (they can't fail). The keyword is `else` — same shape as `requires
-    // <expr> else <Err>` — chosen over the gist's suggested `or` because
-    // `or` conflicts with the boolean infix `or` inside `expr()`. Adapter
-    // / lint enforce per-op applicability; parser stays permissive so the
-    // error message points at the postfix, not at `else`.
+    // Optional `else <Variant>` suffix on checked `+=` / `-=` (same shape
+    // as `requires <expr> else <Err>`; `or` would collide with the boolean
+    // infix in `expr()`). Adapter / lint enforce per-op applicability —
+    // the parser stays permissive so errors point at the postfix, not `else`.
     let on_error = just("else")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1276,8 +1208,8 @@ fn effect_stmt<'a>() -> impl Parser<'a, &'a str, EffectStmt, Err<'a>> + Clone {
         })
 }
 
-/// v2.20 §S1.2 — one item inside an `effect { … }` body: either a leaf
-/// statement (`x += y`) or a `match`-shape branch.
+/// One item inside an `effect { … }` body: a leaf statement (`x += y`) or
+/// a `match`-shape branch.
 fn effect_block<'a>() -> impl Parser<'a, &'a str, EffectBlock, Err<'a>> + Clone {
     recursive(|effect_block| {
         let wildcard_pat = just('_')
@@ -1327,13 +1259,11 @@ fn effect_block<'a>() -> impl Parser<'a, &'a str, EffectBlock, Err<'a>> + Clone 
 }
 
 fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Clone {
-    // v2.29.1 — accept dotted form `auth <acct>.<field>` so the
-    // signing identity can live on an imported program's account
-    // (the cross-program-vault shape). The adapter splits on `.`
-    // and, when the dotted form is present, synthesizes a
-    // `requires <acct>.<field> == <signer>.pubkey else Unauthorized`
-    // clause against the handler's lone signer. Bare `auth <name>`
-    // keeps the pre-v2.29.1 state-field lookup behavior.
+    // Dotted form `auth <acct>.<field>` lets the signing identity live on
+    // an imported program's account: the adapter splits on `.` and
+    // synthesizes `requires <acct>.<field> == <signer>.pubkey else
+    // Unauthorized` against the lone signer. Bare `auth <name>` keeps the
+    // state-field lookup behavior.
     let auth = just("auth")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1393,12 +1323,10 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then_ignore(just(']'))
         .map(HandlerClause::Modifies);
 
-    // v2.24 #11 — `let <ident> = call Foo.handler(...)` binds the
-    // call's return value, OR `let <ident> = <expr>` is the existing
-    // handler-level let. The two forms diverge after the `=`; the
-    // call form is tried first so the parser doesn't commit to an
-    // expression and then choke on `call`. Local enum (anonymous via
-    // the closure capture) carries the disambiguated RHS form.
+    // `let <ident> = call Foo.handler(...)` binds the call's return value;
+    // `let <ident> = <expr>` is the handler-level let. They diverge after
+    // `=` — the call form is tried first so the parser doesn't commit to
+    // an expression and then choke on `call`.
     enum LetRhs {
         Expr(Node<Expr>),
         Call(QualifiedPath, Vec<CallArg>),
@@ -1439,15 +1367,13 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
                 target,
                 args,
                 result_binding: Some(name),
-                // v2.27 Track A — `let X = call …` (the legacy bound
-                // form) doesn't yet accept a `state_binders { ... }`
-                // block. Tracked as a v2.27 follow-up; for now the
-                // bound form preserves v2.26 callee-frame semantics.
+                // The bound `let X = call …` form doesn't yet accept a
+                // `state_binders { ... }` block (callee-frame semantics).
                 state_binders: Vec::new(),
             }),
         });
 
-    // v2.20 §S1.2 — `effect { … }` admits leaf stmts and `match` blocks.
+    // `effect { … }` admits leaf stmts and `match` blocks.
     let effect = just("effect")
         .then_ignore(wsc())
         .ignore_then(just('{'))
@@ -1470,17 +1396,10 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .ignore_then(non_keyword_ident())
         .map(HandlerClause::Emits);
 
-    // branch {
-    //   case <expr>: abort ErrName
-    //   case <expr>: effect { ... }
-    //   otherwise:   abort ErrName
-    // }
-    // v2.24 #9 — `call Interface.handler(args, ...)` inside a match
-    // arm body. Captured as `MatchBody::Call`, expanded into a
-    // synthetic handler issuing the CPI just like `MatchBody::Effect`
-    // expands to a per-arm effect handler. Closes the gist's
-    // "outcome-conditional CPI" modeling gap — pre-fix the only
-    // workaround was splitting the parent handler per outcome.
+    // `call Interface.handler(args, ...)` inside a match-arm body:
+    // captured as `MatchBody::Call`, expanded into a synthetic handler
+    // issuing the CPI just like `MatchBody::Effect` expands to a per-arm
+    // effect handler (outcome-conditional CPI).
     let match_call_args = non_keyword_ident()
         .then_ignore(wsc())
         .then_ignore(just('='))
@@ -1506,10 +1425,8 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
                     target,
                     args,
                     result_binding: None,
-                    // v2.27 Track A — match-arm CPI doesn't accept a
-                    // `state_binders { ... }` block yet. Same v2.26
-                    // callee-frame fallback as the legacy `let =`
-                    // bound form above. Follow-up tracked.
+                    // Match-arm CPI doesn't accept `state_binders { ... }`
+                    // yet — same callee-frame fallback as the bound form.
                     state_binders: Vec::new(),
                 },
                 Vec::new(),
@@ -1521,7 +1438,7 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         kw("abort")
             .ignore_then(non_keyword_ident())
             .map(MatchBody::Abort),
-        // call Interface.handler(...)  (v2.24 #9)
+        // call Interface.handler(...)
         match_call,
         // effect { ... }
         kw("effect")
@@ -1652,7 +1569,7 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .map(HandlerClause::Transfers);
 
     let aborts_total = just("aborts_total").to(HandlerClause::AbortsTotal);
-    // `permissionless` — deliberate opt-out of no_access_control P1 (v2.7 G4).
+    // `permissionless` — deliberate opt-out of the no_access_control P1 lint.
     let permissionless = just("permissionless").to(HandlerClause::Permissionless);
     let invariant = just("invariant")
         .then_ignore(wsc())
@@ -1675,12 +1592,10 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then(expr())
         .map(|(name, value)| CallArg { name, value });
 
-    // v2.27 Track A — `state_binders { callee_field = state.X, ... }`
-    // sub-block. Maps each callee-side abstract field (LHS) to a
-    // caller-side state path (RHS). The block is contextual — the
-    // `state_binders` token is only recognized inside a `call(...)`
-    // argument list, not at the top level (so spec authors can still
-    // name a handler param `state_binders` if they really want to).
+    // `state_binders { callee_field = state.X, ... }` sub-block: maps each
+    // callee-side abstract field (LHS) to a caller-side state path (RHS).
+    // Contextual — the token is only recognized inside a `call(...)` arg
+    // list, so spec authors can still name a handler param `state_binders`.
     let state_binder_entry = non_keyword_ident()
         .then_ignore(wsc())
         .then_ignore(just('='))
@@ -1712,8 +1627,6 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
 
     // Mixed-arg sequence: each item in the call's arg list is either a
     // `name = expr` keyword arg or the `state_binders { ... }` sub-block.
-    // Multiple binder blocks in one call are rejected at the adapter
-    // boundary (last wins would be confusing; we hard-error instead).
     #[derive(Debug, Clone)]
     enum CallArgItem {
         Kw(CallArg),
@@ -1724,11 +1637,9 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         call_kw_arg.map(CallArgItem::Kw),
     ));
 
-    // v2.24 #11 — optional `let <ident> = ` prefix binds the call's
-    // return value. Without the prefix the call remains a terminal
-    // statement (existing shape). Interface handlers can declare a
-    // return type; without it the binding is opaque and downstream
-    // backends emit a placeholder until full lowering lands.
+    // Optional `let <ident> = ` prefix binds the call's return value;
+    // without it the call is a terminal statement. The interface handler's
+    // return type gives the binding semantics — without one it's opaque.
     let call_let_prefix = kw("let")
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
@@ -1745,10 +1656,8 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
             for item in items {
                 match item {
                     CallArgItem::Kw(a) => args.push(a),
-                    // Multiple `state_binders { ... }` blocks in one
-                    // call concatenate. v2.27 Track A's expected usage
-                    // is a single block, but concatenating is the
-                    // friendliest semantics and the adapter dedups by
+                    // Multiple `state_binders { ... }` blocks concatenate —
+                    // friendliest semantics; the adapter dedups by
                     // callee_field anyway.
                     CallArgItem::Binders(mut b) => binders.append(&mut b),
                 }
@@ -1786,11 +1695,10 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         }),
     ));
 
-    // v2.29 Slice A (#8) — `abstract <name> : <Type>` declares an
-    // existentially-quantified value the handler can refer to in
-    // `requires` / `effect` / `ensures` clauses. Lowers per-backend
-    // (Kani `kani::any()` + `kani::assume`, proptest `prop_assume!`,
-    // Lean `∃ name : Type,`, Rust `let name: T = todo!(...)`).
+    // `abstract <name> : <Type>` — existentially-quantified value usable
+    // in `requires` / `effect` / `ensures`. Lowers per-backend: Kani
+    // `kani::any()` + `assume`, proptest `prop_assume!`, Lean `∃`, Rust
+    // `let name: T = todo!(...)`.
     let abstract_c = just("abstract")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1858,11 +1766,9 @@ fn handler_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
 
 // property name : expr preserved_by all | [a, b, ...]
 fn property_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    // v2.24 #3 — `preserved_by all except [h1, h2, ...]` shorthand
-    // for "every handler other than the listed ones". The bare `all`
-    // form is unchanged; the `except` clause expands at adapt time
-    // against the full handler list. Try the longer form first so
-    // bare `all` doesn't greedy-match and leave `except` hanging.
+    // `preserved_by all except [h1, h2, ...]` expands at adapt time
+    // against the full handler list. Try the longer form first so bare
+    // `all` doesn't greedy-match and leave `except` hanging.
     let list = just('[')
         .then_ignore(wsc())
         .ignore_then(
@@ -1968,22 +1874,13 @@ fn liveness_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
-/// v2.25 — top-level `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>`.
-///
-/// Reference implementation. Names an intermediate expression that
-/// `ensures` clauses can call. Pure: no state mutation, no side
-/// effects, no calls to other ref_impls (yet). Lowers to a Lean
-/// `def`; Kani harnesses inline the body at the assertion site.
-/// Rust codegen skips it entirely — the construct is a verification
-/// fixture, not part of the impl contract.
-///
-/// Replaces the original `ghost` proposal — `ref_impl` is more
-/// honest: the construct *is* a reference implementation against
-/// which the user's real Rust impl is verified.
+/// Top-level `ref_impl name (p1 : T1) (p2 : T2) : R = <expr>` — reference
+/// implementation `ensures` clauses can call. Pure: no state mutation, no
+/// side effects, no calls to other ref_impls (yet). Lowers to a Lean `def`;
+/// Kani inlines the body at assertion sites; Rust codegen skips it.
 fn ref_impl_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    // Each parameter is `(name : Type)`. Parens are required so a
-    // multi-param signature reads naturally and the parser can
-    // disambiguate from the return-type `: R` that follows.
+    // Parens around each `(name : Type)` are required so the parser can
+    // disambiguate params from the return-type `: R` that follows.
     let param = just('(')
         .then_ignore(wsc())
         .ignore_then(typed_field())
@@ -2014,12 +1911,10 @@ fn ref_impl_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
-/// Issue #67 item 3 — `ghost <name> : <Ty> { init { <expr> } on <handler>
-/// { <name> := <expr> } … }`. Spec-only auxiliary state. The block holds a
-/// single `init` clause followed by zero or more `on <handler>` update
-/// clauses. Each update reuses `effect_stmt()`, so the same `:=` / `+=` /
-/// `-=` operators (and `state.<ghost>` RHS references) work as in a real
-/// handler effect.
+/// `ghost <name> : <Ty> { init { <expr> } on <handler> { <name> := <expr> }
+/// … }` — one `init` clause then zero or more `on <handler>` updates. Each
+/// update reuses `effect_stmt()`, so `:=` / `+=` / `-=` (and `state.<ghost>`
+/// RHS references) work as in a real handler effect.
 fn ghost_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     let init_clause = kw("init")
         .then_ignore(wsc())
@@ -2070,8 +1965,8 @@ fn ghost_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
-/// Issue #67 item 4 — `hook after_store(<field>) { assert <expr> … }` /
-/// `hook before_cpi[(<Iface>)] { assert <expr> … }`. Cross-cutting
+/// `hook after_store(<field>) { assert <expr> … }` /
+/// `hook before_cpi[(<Iface>)] { assert <expr> … }` — cross-cutting
 /// assertion(s) checked at a MIR-statement boundary.
 fn hook_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     let assert_clause = kw("assert")
@@ -2118,14 +2013,10 @@ fn hook_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|((doc, kind), asserts)| TopItem::Hook(HookDecl { doc, kind, asserts }))
 }
 
-// invariant name : expr  OR  invariant name "description"
-/// v2.24 #1 — top-level `schema name { requires expr else Err … }`.
-/// Reusable cross-cutting guard set. Pre-fix the parser rejected the
-/// whole construct, forcing spec authors to inline the same
-/// `requires not state.protocol_paused else ProtocolPaused` into
-/// every gated handler. Handlers reference a schema via the existing
-/// `include <name>` clause (no new keyword); the adapter expands
-/// every requires in the schema into the handler's requires list.
+/// Top-level `schema name { requires expr else Err … }` — reusable
+/// cross-cutting guard set. Handlers reference a schema via the existing
+/// `include <name>` clause; the adapter expands every requires in the
+/// schema into the handler's requires list.
 fn schema_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     let req = just("requires")
         .then_ignore(wsc())
@@ -2155,6 +2046,7 @@ fn schema_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         })
 }
 
+// invariant name : expr  OR  invariant name "description"
 fn invariant_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     kw("invariant")
         .ignore_then(non_keyword_ident())
@@ -2643,9 +2535,8 @@ fn instruction_item<'a>() -> impl Parser<'a, &'a str, InstructionItem, Err<'a>> 
         .then_ignore(just('='))
         .then_ignore(wsc())
         .then(
-            // v2.29 Slice A (#3) — mirror the top-level const_decl
-            // widening to accept an optional `-` so per-instruction
-            // const declarations also support negative literals.
+            // Mirror top-level const_decl: optional `-` so per-instruction
+            // consts also support negative literals.
             just('-')
                 .or_not()
                 .then(integer())
@@ -2817,12 +2708,8 @@ fn interface_handler_clause<'a>(
         .ignore_then(choice((string_lit(), non_keyword_ident())))
         .map(InterfaceHandlerClause::Discriminant);
 
-    // v2.24 #14 — interface accounts now accept optional commas
-    // between descriptors, matching the top-level `accounts { … }`
-    // grammar. Pre-fix the interface form only allowed
-    // newline-separated descriptors, which was inconsistent and
-    // surprised authors copying top-level patterns into an
-    // `interface { … }` block.
+    // Interface accounts accept optional commas between descriptors,
+    // matching the top-level `accounts { … }` grammar.
     let accounts = just("accounts")
         .then_ignore(wsc())
         .ignore_then(just('{'))
@@ -2861,17 +2748,11 @@ fn interface_handler_clause<'a>(
 
 // handler h(params)* { discriminant, accounts, requires, ensures }  — inside an interface block.
 fn interface_handler_decl<'a>() -> impl Parser<'a, &'a str, InterfaceHandlerDecl, Err<'a>> + Clone {
-    // v2.24 #11 — optional `-> Type` return-type after the params.
-    // When present, callers can write `let x = call Foo.handler(...)`
-    // and the codegen lowers the binding to a `get_return_data` read.
-    //
-    // v2.26 Track K — the return-type slot now optionally accepts a
-    // named binder: `-> <ident> : <Type>`. The identifier is the name
-    // the callee's `ensures` uses to refer to the return value; the
-    // CPI substitution helper maps it to the caller's `let X = …`
-    // binder at each call site. Plain `-> <Type>` (no binder) stays
-    // accepted unchanged and defaults the binder to the literal
-    // `"result"` downstream (the existing convention).
+    // Optional return after the params: `-> <Type>` (binding lowers to a
+    // `get_return_data` read) or `-> <ident> : <Type>` where the ident is
+    // the name the callee's `ensures` uses for the return value (CPI
+    // substitution maps it to the caller's `let X = …` binder). Plain
+    // `-> <Type>` defaults the binder to `"result"` downstream.
     let named_return = just("->")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -2934,12 +2815,9 @@ fn interface_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .ignore_then(string_lit())
         .map(InterfaceItem::ProgramId);
     let upstream = upstream_block().map(InterfaceItem::Upstream);
-    // v2.27 Phase 0 — interface-level `state { name : Type, ... }` block
-    // declaring abstract callee-state vocabulary. Entries may be separated
-    // by commas, newlines, or both (consistent with how interface item
-    // separation is forgiving). Empty block is rejected by the field list
-    // requiring at least one entry; explicit empties offer no value over
-    // omitting the block.
+    // Interface-level `state { name : Type, ... }` — abstract callee-state
+    // vocabulary. Entries separated by commas, newlines, or both. Empty
+    // block rejected (at_least(1)); omit the block instead.
     let state_block = kw("state")
         .ignore_then(just('{'))
         .then_ignore(wsc())
@@ -3031,14 +2909,10 @@ fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
         .map(|((doc, name), items)| TopItem::Pragma(PragmaDecl { name, doc, items }))
 }
 
-/// v2.24 §S1b — `pragma <key> = <value>` top-level assignment.
-///
-/// Currently used for `checked_overflow_error` / `checked_underflow_error`
-/// to override the built-in `MathOverflow` / `MathUnderflow` defaults that
-/// `mechanize_effect` lowers `+=` / `-=` against. Distinct grammar from
-/// the existing `pragma <name> { … }` namespace form — disambiguated by
-/// lookahead on `=` vs `{` at the call site. Unknown keys parse but are
-/// flagged at lint time so we can add new keys without breaking specs.
+/// `pragma <key> = <value>` top-level assignment (e.g.
+/// `checked_overflow_error`). Distinct from the `pragma <name> { … }`
+/// namespace form — disambiguated by `=` vs `{` at the call site. Unknown
+/// keys parse but are flagged at lint time, so new keys don't break specs.
 fn pragma_assign_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     kw("pragma")
         .ignore_then(non_keyword_ident())
@@ -3049,13 +2923,9 @@ fn pragma_assign_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clon
         .map(|(name, value)| TopItem::PragmaAssign { name, value })
 }
 
-// ----------------------------------------------------------------------------
-// import <Name> from "<dep_key>" — manifest-based import (v2.8 G1).
-//
-// `Name` is the local bound name; `dep_key` is a key into qed.toml's
-// `[dependencies]` table. Resolution (git fetch / path read / cache) lives in
+// import <Name> from "<dep_key>" — `Name` is the local bound name;
+// `dep_key` keys into qed.toml's `[dependencies]`. Resolution lives in
 // `import_resolver.rs` and runs after parse, before lint.
-// ----------------------------------------------------------------------------
 fn import_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     let as_clause = kw("as").ignore_then(wsc()).ignore_then(non_keyword_ident());
     kw("import")
@@ -3138,10 +3008,7 @@ pub fn parse(src: &str) -> Result<Spec, Vec<Rich<'_, char>>> {
     spec_parser().parse(src).into_result()
 }
 
-/// Convert a byte offset into a 1-indexed `line:col` pair for error messages.
-/// v2.6.1 eval (qedgen-bug-report §1.2): the reporter had to write an awk
-/// one-liner to map byte offsets back to source lines because we rendered
-/// errors as `found ':' at 3204..3205`. Everyone else does `line:col`.
+/// Byte offset → 1-indexed `line:col` for error messages.
 fn byte_offset_to_line_col(src: &str, offset: usize) -> (usize, usize) {
     let clamped = offset.min(src.len());
     let before = &src[..clamped];
@@ -3182,10 +3049,8 @@ mod tests {
         }
     }
 
-    /// v2.24 #4 — index expressions inside a Map slot reference now
-    /// accept dotted state-field paths. Pre-fix `lsts[state.lst_count]`
-    /// parse-errored at the `.`, forcing spec authors to bind the
-    /// state field into a local var first.
+    /// Index expressions inside a Map slot reference accept dotted
+    /// state-field paths (`lsts[state.lst_count]`).
     #[test]
     fn map_index_accepts_dotted_state_field() {
         let src = r#"spec MapIndex
@@ -3214,9 +3079,8 @@ handler register : State.Active -> State.Active {
         let _ = parse_ok(src);
     }
 
-    /// v2.24 #4 — also accept deep dotted index expressions
-    /// (`accounts[a.b.c].field`). Defensive: the parser shouldn't
-    /// special-case depth-1 vs depth-N.
+    /// Deep dotted index expressions (`accounts[a.b.c].field`) — the
+    /// parser shouldn't special-case depth-1 vs depth-N.
     #[test]
     fn map_index_accepts_deep_dotted_path() {
         let src = r#"spec DeepIndex
@@ -3276,8 +3140,7 @@ handler t : State.Active -> State.Active {
                     msg.contains("line 1, col"),
                     "error should start with `line X, col Y:` — got: {msg}"
                 );
-                // The raw byte-offset `at N..M` form should NOT appear since
-                // it's the v2.6.1 UX that the eval complained about.
+                // The raw byte-offset `at N..M` form should NOT appear.
                 assert!(
                     !msg.contains(" at ") || msg.contains("line "),
                     "should not render raw byte offsets without a line:col prefix: {msg}"
@@ -3288,10 +3151,8 @@ handler t : State.Active -> State.Active {
 
     #[test]
     fn string_lit_supports_backslash_newline_continuation() {
-        // v2.21 S2.6 — long invariant descriptions like
-        //   invariant foo "first part \
-        //                  second part"
-        // join across lines into a single logical string.
+        // Long invariant descriptions with `\<newline>` join across lines
+        // into a single logical string.
         let src = "spec T\ninvariant foo \"first \\\nsecond\"";
         let s = parse_ok(src);
         match &s.items[0].node {
@@ -3448,9 +3309,6 @@ handler foo {
         }
     }
 
-    // v2.25 — `ref_impl name (p : T) ... : R = <expr>` parses as a
-    // top-level item and captures the body for downstream Lean def
-    // emission / Kani inlining.
     #[test]
     fn parses_ref_impl_with_multiple_params_and_if_body() {
         let src = "spec T\n\
@@ -3536,8 +3394,8 @@ handler deposit (i : AccountIdx) (amount : U128) : State.Active -> State.Active 
         assert_eq!(handler.params[0].name, "i");
         assert!(handler.pre.is_some());
 
-        // One effect clause with two stmts (v2.20: effect items are
-        // EffectBlock — drill into the leaf via collect_leaves).
+        // One effect clause with two stmts (effect items are EffectBlock —
+        // drill into the leaves via flatten_effect_blocks).
         let effect_clauses: Vec<_> = handler
             .clauses
             .iter()
@@ -3943,8 +3801,8 @@ type Size = U128
 
     #[test]
     fn parses_effect_block_match_v220() {
-        // v2.20 §S1.2 — `match` inside `effect { … }` (not the handler-
-        // level `match` clause). Issue #42 wedge case.
+        // `match` inside `effect { … }` (not the handler-level `match`
+        // clause).
         let src = r#"spec T
 type State | Active of { a : U64, b : U64, c : U64, }
 type Error | E
@@ -4059,7 +3917,7 @@ liveness drain : State.Draining ~> State.Active via [a, b] within 2"#;
     }
 
     // ------------------------------------------------------------------
-    // interface block (v2.5 slice 1)
+    // interface block
     // ------------------------------------------------------------------
 
     #[test]
@@ -4175,7 +4033,7 @@ interface Token {
         }
     }
 
-    // v2.26 Track K — `-> <ident> : <Type>` named-result-binding.
+    // `-> <ident> : <Type>` named-result-binding.
     #[test]
     fn interface_handler_with_explicit_result_binding_parses() {
         let src = r#"spec Demo
@@ -4279,7 +4137,7 @@ interface Token {
     }
 
     // ------------------------------------------------------------------
-    // call clause (v2.5 slice 2)
+    // call clause
     // ------------------------------------------------------------------
 
     fn first_handler_clauses(spec: &Spec) -> &Vec<Node<HandlerClause>> {
@@ -4352,7 +4210,7 @@ handler h : State.A -> State.A {
     }
 
     // ------------------------------------------------------------------
-    // pragma sbpf { ... } (v2.5 slice — platform-specific namespace)
+    // pragma sbpf { ... }
     // ------------------------------------------------------------------
 
     #[test]
@@ -4409,7 +4267,7 @@ pragma sbpf {
     }
 
     // ------------------------------------------------------------------
-    // ML-style `let x = v in body` in expressions (v2.5)
+    // ML-style `let x = v in body` in expressions
     // ------------------------------------------------------------------
 
     #[test]
@@ -4447,7 +4305,7 @@ handler withdraw (amount : U64) : State.A -> State.A {
 
     #[test]
     fn parses_if_then_else_in_expression_position() {
-        // v2.8 fold-in F9. Use an `ensures` clause to exercise expr-position parsing.
+        // Use an `ensures` clause to exercise expr-position parsing.
         let src = r#"spec T
 type State | A of { x : U64, y : U64 }
 
@@ -4519,7 +4377,7 @@ handler h (amount : U64) : State.A -> State.A {
         parse_ok(src);
     }
 
-    // ----- v2.8 G1: import statements -----
+    // ----- import statements -----
 
     #[test]
     fn parses_single_import() {
@@ -4593,8 +4451,8 @@ handler h (a : U64) : State.A -> State.A {
         parse_ok(src);
     }
 
-    /// v2.27 Track A — `call X.y(state_binders { ... })` parses, with
-    /// the binders surfacing on the lowered `CallExpr.state_binders`.
+    /// `call X.y(state_binders { ... })` parses, with the binders
+    /// surfacing on the lowered `CallExpr.state_binders`.
     #[test]
     fn call_accepts_state_binders_block() {
         let src = r#"spec S
@@ -4676,8 +4534,7 @@ handler deposit (amount : U64) : State.A -> State.A {
         assert_eq!(call.args[0].name, "amount");
     }
 
-    /// v2.27 Track A — empty `state_binders { }` block parses (and
-    /// lowers to an empty binder list).
+    /// Empty `state_binders { }` block parses (empty binder list).
     #[test]
     fn call_accepts_empty_state_binders_block() {
         let src = r#"spec S

@@ -1,20 +1,16 @@
-//! Scaffold-to-spec ratification (v2.19 M1.8).
+//! Scaffold-to-spec ratification — inverse of
+//! `qedgen probe --emit-spec-candidates`. Reads the audit working set
+//! (`interview.md`, `clusters.json`, `skeleton.qedspec`) and produces:
 //!
-//! Inverse of `qedgen probe --emit-spec-candidates`. Reads the audit
-//! working set (`interview.md`, `clusters.json`, `skeleton.qedspec`) and
-//! produces:
-//!
-//! - `<program>.qedspec` — skeleton with the user's accepted clauses
-//!   merged into the appropriate handler bodies / top-level invariants.
-//! - `.qed/plan/scoping.md` — rejected clusters with user rationale,
-//!   capturing the non-fit decisions per the
-//!   `project_capture_non_fit_decisions` memory.
+//! - `<program>.qedspec` — skeleton with accepted clauses merged into
+//!   handler bodies / top-level invariants.
+//! - `.qed/plan/scoping.md` — rejected clusters with user rationale
+//!   (captures non-fit decisions).
 //! - `.qed/findings/scaffold-to-spec-<cluster_id>.md` — bug-flagged
-//!   clusters (the user identified the implicit precondition as a real
-//!   missing-enforcement bug, not a spec clause).
+//!   clusters (real missing-enforcement bug, not a spec clause).
 //!
-//! Schema v3 envelope (probe's clusters.json) is the source of truth
-//! for cluster metadata; ratification only adds user choices on top.
+//! `clusters.json` (v3 envelope) is the source of truth for cluster
+//! metadata; ratification only adds user choices on top.
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
@@ -23,9 +19,8 @@ use std::path::{Path, PathBuf};
 use crate::cluster::{Cluster, ClusterScope};
 use crate::prompts::{read_interview_file, Choice, Ratification};
 
-/// Where to write the ratification outputs. Defaults are convention-driven
-/// so users running `qedgen ratify --audit-dir <X>` with no other flags
-/// get the expected files in the expected places.
+/// Output destinations; `None`s fall back to convention-driven defaults
+/// relative to the audit dir.
 pub struct RatifyOpts {
     pub audit_dir: PathBuf,
     pub spec_out: Option<PathBuf>,
@@ -65,7 +60,6 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
         .with_context(|| format!("parsing clusters.json at {}", clusters_path.display()))?;
     let skeleton = std::fs::read_to_string(&skeleton_path)?;
 
-    // ── Index clusters by id ───────────────────────────────────────
     let cluster_by_id: BTreeMap<&str, &Cluster> =
         clusters.iter().map(|c| (c.id.as_str(), c)).collect();
 
@@ -83,9 +77,8 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
             continue;
         };
         let Some(cluster) = cluster_by_id.get(r.cluster_id.as_str()) else {
-            // The interview references a cluster id not in the
-            // clusters.json — likely the user edited interview.md or
-            // the cluster IDs drifted. Treat as deferred but warn.
+            // Cluster id missing from clusters.json (user edit or ID
+            // drift) — warn and treat as deferred.
             eprintln!(
                 "warning: interview mentions cluster id {} not present in clusters.json — skipping",
                 r.cluster_id
@@ -102,18 +95,12 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
                     .push(cluster),
             },
             Choice::Narrow => {
-                // Program-scope clusters can be "narrowed" into per-handler
-                // requires. For Handler-scope clusters that the user
-                // narrowed (which is the same as accept), classify as
-                // narrowed for digest accuracy and emit identically.
+                // Program-scope narrow currently emits the same
+                // suggested_syntax as accept (per-handler `writes_on_narrow`
+                // templating awaits the AST round-trip). Handler-scope
+                // narrow ≡ accept, but counted separately for the digest.
                 match &cluster.scope {
                     ClusterScope::Program => {
-                        // For v1: narrowing is annotated but emits the same
-                        // suggested_syntax. M2 (AST round-trip) will use
-                        // the cluster's per-handler `writes_on_narrow`
-                        // template — until then we surface narrow as an
-                        // accepted program-scope clause and note it in the
-                        // ratification's notes.
                         accepted_program.push(cluster);
                     }
                     ClusterScope::Handler(h) => narrowed_by_handler
@@ -187,10 +174,9 @@ pub fn run(opts: &RatifyOpts) -> Result<RatifyReport> {
 
 // ── Spec emission ─────────────────────────────────────────────────────
 
-/// Merge accepted clauses into the skeleton. Program-scope clauses
-/// append at the end of the spec; handler-scope clauses inject into the
-/// matching handler's body, replacing the `// filled by interview`
-/// placeholder line.
+/// Merge accepted clauses into the skeleton: program-scope clauses append
+/// at the end; handler-scope clauses replace the matching handler's
+/// `// filled by interview` placeholder line.
 fn merge_into_skeleton(
     skeleton: &str,
     program_clauses: &[&Cluster],
@@ -205,7 +191,6 @@ fn merge_into_skeleton(
     let mut placeholder_seen_for_current = false;
 
     for line in skeleton.lines() {
-        // Detect entry into a new handler block.
         if let Some(caps) = handler_open.captures(line) {
             current_handler = Some(caps[1].to_string());
             placeholder_seen_for_current = false;
@@ -214,14 +199,10 @@ fn merge_into_skeleton(
             continue;
         }
 
-        // Detect the placeholder comment inside a handler — that's
-        // where we inject accepted clauses for the current handler.
-        // Two placeholder shapes are recognized:
-        //   - Pinocchio skeleton: `// accounts, requires, effect,
-        //     transfers — filled by interview`
-        //   - Anchor (from anchor_adapt::adapt): `// TODO: requires`
-        //     (we inject just above the requires-style TODO so the
-        //     clauses appear before any other handler-body placeholder)
+        // Placeholder inside a handler = injection point. Two shapes:
+        //   - Pinocchio skeleton: `// … — filled by interview`
+        //   - Anchor (anchor_adapt::adapt): `// TODO: requires` (inject
+        //     above it so clauses precede other body placeholders)
         let is_placeholder =
             line.contains("filled by interview") || line.trim() == "// TODO: requires";
         if is_placeholder && !placeholder_seen_for_current {
@@ -229,25 +210,21 @@ fn merge_into_skeleton(
             if let Some(h) = &current_handler {
                 let merged = collect_handler_clauses(h, handler_clauses, narrowed_handler_clauses);
                 if !merged.is_empty() {
-                    // M2.3: handler-scope templates emit ` // TODO ratified`
-                    // comments directly (templates carry their own structure).
-                    // Just stream the suggested_syntax verbatim — no extra
-                    // wrapping.
+                    // Templates carry their own structure — stream
+                    // suggested_syntax verbatim, no extra wrapping.
                     for c in &merged {
                         out.push_str(&c.suggested_syntax);
                         if !c.suggested_syntax.ends_with('\n') {
                             out.push('\n');
                         }
                     }
-                    // Drop the placeholder once we've injected real
-                    // clauses — clauses replace, not augment, the
+                    // Injected clauses replace, not augment, the
                     // placeholder.
                     continue;
                 }
             }
         }
 
-        // Detect closing brace of a handler block.
         if current_handler.is_some() && line.trim() == "}" {
             current_handler = None;
         }
@@ -265,10 +242,9 @@ fn merge_into_skeleton(
         out.push_str("// below uses the description form (parser-valid). Refine bodies\n");
         out.push_str("// into expression form (`forall i : T, …`) as the spec matures.\n\n");
         for c in program_clauses {
-            // M2.3: program-scope templates emit valid description-form
-            // invariants (e.g. `invariant N "desc"`). Emit verbatim —
-            // the spec parses, the invariant is active in the document
-            // tree, and the user refines into expression form later.
+            // Program-scope templates are parser-valid description-form
+            // invariants — emit verbatim; the user refines into
+            // expression form later.
             out.push_str(&c.suggested_syntax);
             if !c.suggested_syntax.ends_with('\n') {
                 out.push('\n');
@@ -403,9 +379,8 @@ fn render_bug_finding(cluster: &Cluster, ratification: &Ratification) -> String 
 // ── Defaults ──────────────────────────────────────────────────────────
 
 fn default_spec_path(audit_dir: &Path) -> PathBuf {
-    // <project_root>/<project_name>.qedspec — derived from the audit
-    // dir grandparent.  `.qed/audit/<ts>/` → project root is two
-    // levels up. Fall back to cwd if the path doesn't conform.
+    // <project_root>/<project_name>.qedspec; `.qed/audit/<ts>/` → project
+    // root is two levels up. Fall back to cwd if non-conforming.
     let project_root = audit_dir
         .parent()
         .and_then(|p| p.parent())
@@ -602,10 +577,8 @@ mod tests {
             "placeholder should be replaced. spec:\n{}",
             spec
         );
-        // M2.3: handler-scope ratifications emit `// TODO ratified (...)`
-        // markers carrying the cluster kind + the target form the user
-        // should convert to. The emission is parser-irrelevant
-        // (comments only) but the user can read off the intent.
+        // Handler-scope ratifications emit `// TODO ratified (...)`
+        // markers (parser-irrelevant) carrying the kind + target form.
         assert!(
             spec.contains("TODO ratified (account_init_check"),
             "expected `// TODO ratified (account_init_check …)` marker. spec:\n{}",
@@ -644,10 +617,8 @@ mod tests {
         Ok(())
     }
 
-    /// M2.4: every emitted spec from ratify must parse cleanly. Builds a
-    /// synthetic audit-dir per cluster kind × scope, runs ratify, parses
-    /// the result. If any combination produces unparseable output, this
-    /// test surfaces it before the user does.
+    /// Every spec ratify emits must parse cleanly: synthetic audit-dir
+    /// per cluster kind × scope, run ratify, parse the result.
     #[test]
     fn every_ratified_spec_parses() -> Result<()> {
         use crate::cluster::{ClusterKind, ProtoClause};
@@ -725,10 +696,9 @@ mod tests {
         Ok(())
     }
 
-    /// M2.5: re-running ratify against the same audit dir must produce
-    /// byte-identical output. Without this guarantee, edits the user
-    /// makes between runs (e.g., refining handler bodies) would
-    /// silently regress on the next interview pass.
+    /// Re-running ratify on the same audit dir must be byte-identical —
+    /// otherwise user edits between runs silently regress on the next
+    /// interview pass.
     #[test]
     fn ratify_is_byte_idempotent() -> Result<()> {
         use crate::cluster::{ClusterKind, ProtoClause};

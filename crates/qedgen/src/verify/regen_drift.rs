@@ -17,20 +17,11 @@ pub enum DriftKind {
     MissingGeneratedCounterpart,
 }
 
-/// v2.21 §"Slice 5": whether `check_examples` only detects drift or
-/// also writes the freshly-regenerated content back into the repo.
-///
-/// `Check` is the v2.20 behavior — comparison only. `Write` copies the
-/// temp-regenerated file to its repo path for every detected
-/// `DriftKind::Changed` entry, then returns the same `drift` list so
-/// the caller can report which files were rewritten. Files reported as
-/// `MissingGeneratedCounterpart` are *not* rewritten — those need
-/// manual attention because the regen pipeline didn't produce a
-/// counterpart at all (e.g. spec lost the relevant declaration).
-///
-/// `Write` is invoked via `qedgen check --regen-drift --write` and is
-/// the maintainer's path for rebasing PR commits across codegen-
-/// touching releases.
+/// `Check` = comparison only. `Write` (`qedgen check --regen-drift --write`)
+/// copies the temp-regenerated file back for every `DriftKind::Changed` entry
+/// and returns the same `drift` list. `MissingGeneratedCounterpart` entries
+/// are never rewritten — regen produced no counterpart, so they need manual
+/// attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteMode {
     Check,
@@ -42,8 +33,7 @@ pub struct RegenDriftReport {
     pub checked_examples: usize,
     pub missing_manifests: Vec<PathBuf>,
     pub drift: Vec<DriftEntry>,
-    /// Populated in `WriteMode::Write` — the absolute paths the writer
-    /// rewrote. Empty in `Check` mode.
+    /// Absolute paths rewritten in `WriteMode::Write`; empty in `Check`.
     pub wrote: Vec<PathBuf>,
 }
 
@@ -230,10 +220,9 @@ fn copy_interfaces(repo_root: &Path, temp_repo_root: &Path) -> Result<()> {
         &repo_root.join("interfaces"),
         &temp_repo_root.join("interfaces"),
     )
-    // Per-example import targets (e.g. cross-program-vault's `admin_config`
-    // dep) are co-located under the example's own `imports/` subdir, so
-    // `copy_spec_inputs`'s recursive qedspec copy already carries them into
-    // the temp tree — no separate top-level `examples/imports` copy needed.
+    // Per-example import targets live under the example's own `imports/`
+    // subdir, so `copy_spec_inputs`'s recursive qedspec copy already carries
+    // them — no separate top-level `examples/imports` copy needed.
 }
 
 fn copy_qedspec_tree(base: &Path, current: &Path, dst_root: &Path) -> Result<()> {
@@ -352,9 +341,8 @@ fn target_from_text(body: &str) -> Option<Target> {
 }
 
 fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) -> Result<()> {
-    // Kani + Lean regen go through the MIR path (the sole path after the
-    // v2.32 legacy deletion). Parse + lower once if any such artifact is
-    // present on disk.
+    // Kani + Lean regen go through the MIR path; parse + lower once if any
+    // such artifact is present on disk.
     let kani_lean_present = root.join("tests/kani.rs").is_file()
         || root.join("programs/tests/kani.rs").is_file()
         || root.join("formal_verification/Spec.lean").is_file();
@@ -373,17 +361,12 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
             crate::kani_mir::generate(mir, parsed, &temp_root.join("programs/tests/kani.rs"))?;
         }
     }
-    // v2.26 — impl-targeted Kani harness. Regenerated against the spec
-    // only when the file already exists at that path (i.e. a prior codegen
-    // emitted it via `--kani-impl` or auto-trigger). Calling `generate`
-    // with `explicit_flag=true` matches the file-present semantics — even
-    // if the spec no longer auto-triggers, regen produces fresh output
-    // (the file was committed once, so it's user-elected).
-    // `kani_impl` is Anchor-only — non-Anchor targets no-op in
-    // `generate_from_spec`. Regen runs only if the file already exists
-    // on disk, so prior emission must have been Anchor (other targets
-    // never write the file). Passing Target::Anchor matches that
-    // invariant and keeps the regen comparator stable.
+    // Impl-targeted Kani harness: regenerated only when the file already
+    // exists (prior `--kani-impl` or auto-trigger). `explicit_flag=true`
+    // matches file-present semantics — a committed file is user-elected even
+    // if the spec no longer auto-triggers. `kani_impl` is Anchor-only and
+    // other targets never write the file, so passing Target::Anchor matches
+    // the only emission path and keeps the comparator stable.
     if root.join("tests/kani_impl.rs").is_file() {
         crate::kani_impl::generate(
             spec_path,
@@ -470,14 +453,11 @@ fn comparable_paths(root: &Path, generated_root: &Path) -> Result<Vec<PathBuf>> 
         "programs/src/tests.rs",
         "src/integration_tests.rs",
         "programs/src/integration_tests.rs",
-        // Spec.lean is intentionally NOT compared. Codegen emits it
-        // with `sorry` placeholders as TODOs; the agent fills those
-        // (and any auxiliary lemmas) directly in the file. Once
-        // filled, the file is user-owned — same lifecycle as
-        // `instructions/<name>.rs` handler bodies. Drift would
-        // otherwise flag every committed proof as a regression.
-        // (User-owned proofs may also live alongside in a
-        // `Proofs.lean` sibling per `lean_gen.rs:3725`.)
+        // Spec.lean is intentionally NOT compared: codegen emits `sorry`
+        // placeholders the agent fills in-file, after which it's user-owned
+        // (like `instructions/<name>.rs` handler bodies) — drift would flag
+        // every committed proof. User proofs may also live in a `Proofs.lean`
+        // sibling.
     ] {
         if root.join(rel).is_file() {
             paths.insert(PathBuf::from(rel));

@@ -4,16 +4,13 @@ use std::path::Path;
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
 use crate::codegen_shared::{map_type, to_pascal_case};
 
-/// Generate QuasarSVM integration test scaffolds from a spec file (.qedspec).
-///
-/// These tests run against a compiled program binary via QuasarSVM — a lightweight
-/// in-process Solana VM. Unlike unit tests (which test effects on a plain struct),
-/// integration tests exercise the full instruction flow: account validation,
-/// deserialization, handler execution, and state persistence.
+/// Generate QuasarSVM integration test scaffolds: tests run the compiled
+/// binary in an in-process Solana VM, exercising the full instruction flow
+/// (account validation, deserialization, handler execution, state
+/// persistence) — unlike unit tests, which run effects on a plain struct.
 pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
 
-    // Only Quasar targets make sense for integration tests
     if spec.is_assembly_target() {
         anyhow::bail!("Integration tests are only supported for Quasar targets, not assembly/sBPF");
     }
@@ -186,7 +183,6 @@ fn emit_account_helpers(
         out.push_str("}\n\n");
     }
 
-    // Token helpers (if needed)
     if needs_token {
         out.push_str(TOKEN_HELPERS);
     }
@@ -220,7 +216,6 @@ fn emit_happy_path_test(
         .iter()
         .any(|a| a.is_program && a.name.contains("system"));
 
-    // Emit Pubkey declarations for each account
     out.push_str("    // Account addresses\n");
     if has_system {
         out.push_str("    let system_program = quasar_svm::system_program::ID;\n");
@@ -275,7 +270,6 @@ fn emit_happy_path_test(
     }
     out.push('\n');
 
-    // Emit instruction parameters
     if !handler.takes_params.is_empty() {
         out.push_str("    // Instruction parameters\n");
         for (name, ty) in &handler.takes_params {
@@ -289,7 +283,6 @@ fn emit_happy_path_test(
         out.push('\n');
     }
 
-    // Emit instruction builder
     out.push_str(&format!(
         "    let instruction: Instruction = {} {{\n",
         instr_struct
@@ -312,7 +305,6 @@ fn emit_happy_path_test(
     }
     out.push_str("    }\n    .into();\n\n");
 
-    // Emit account array for process_instruction
     out.push_str("    let result = svm.process_instruction(\n");
     out.push_str("        &instruction,\n");
     out.push_str("        &[\n");
@@ -326,7 +318,6 @@ fn emit_happy_path_test(
     out.push_str("        ],\n");
     out.push_str("    );\n\n");
 
-    // Assertions
     out.push_str(&format!(
         "    assert!(result.is_ok(), \"{} failed: {{:?}}\", result.raw_result);\n",
         handler.name
@@ -420,7 +411,6 @@ fn emit_unauthorized_test(
     }
     out.push('\n');
 
-    // Emit instruction with wrong signer
     out.push_str(&format!(
         "    let instruction: Instruction = {} {{\n",
         instr_struct
@@ -447,7 +437,6 @@ fn emit_unauthorized_test(
     }
     out.push_str("    }\n    .into();\n\n");
 
-    // Account array — use wrong signer
     out.push_str("    let result = svm.process_instruction(\n");
     out.push_str("        &instruction,\n");
     out.push_str("        &[\n");
@@ -480,7 +469,6 @@ fn emit_lifecycle_sequence_test(out: &mut String, spec: &ParsedSpec) {
     out.push_str("#[test]\nfn test_lifecycle_sequence() {\n");
     out.push_str("    let mut svm = setup();\n\n");
 
-    // Group handlers by lifecycle transitions
     let lifecycle_handlers: Vec<&ParsedHandler> = spec
         .handlers
         .iter()
@@ -652,14 +640,12 @@ mod tests {
 
     #[test]
     fn integration_test_rejects_assembly_target() {
-        // Assembly specs should not generate integration tests
         let dir = std::env::temp_dir().join("qedgen_integration_test_asm");
         let spec_path = dir.join("test.qedspec");
         let out_path = dir.join("out.rs");
         std::fs::create_dir_all(&dir).unwrap();
-        // Minimal assembly-targeted spec — generate() must refuse before
-        // looking at the handler body because integration tests only apply
-        // to the Quasar (Rust) target.
+        // generate() must refuse assembly-targeted specs before looking at
+        // the handler body.
         std::fs::write(
             &spec_path,
             "spec Test\n\npragma sbpf {}\n\ntype State | Idle\n\nhandler noop : State.Idle -> State.Idle { }\n",

@@ -1,18 +1,10 @@
-//! `qedgen reconcile` — unified drift report for coding agents.
+//! `qedgen reconcile` — unified drift report for coding agents. Report-only.
 //!
-//! Consolidates two independent drift signals into a single report:
-//!
-//! 1. **Rust-side drift** — scans user-owned handler files for
-//!    `#[qed(verified, spec = "...", handler = "...", spec_hash = "...")]`
-//!    attributes, recomputes the spec fragment hash, and reports mismatches.
-//!    This is the CLI-side complement to the compile-time proc-macro check:
-//!    same hashing algorithm, but reports instead of failing the build.
-//!
-//! 2. **Lean-side drift** — delegates to
-//!    `proofs_bootstrap::check_orphans` to find orphan theorems (handler
-//!    dropped from spec) and missing theorems (new obligation added).
-//!
-//! Report-only. Never modifies files.
+//! Two signals: (1) Rust-side — rescans `#[qed(verified, ...)]` attributes
+//! and recomputes the spec fragment hash (same algorithm as the compile-time
+//! proc-macro check, but reports instead of failing the build); (2)
+//! Lean-side — `proofs_bootstrap::check_orphans` for orphan / missing
+//! theorems.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -139,7 +131,6 @@ fn scan_qed_attrs(source: &str) -> Vec<QedAttr> {
                 while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                // Match literal "qed"
                 if j + 3 <= bytes.len() && &bytes[j..j + 3] == b"qed" {
                     let after_qed = j + 3;
                     let mut k = after_qed;
@@ -579,14 +570,12 @@ pub fn {}(amount: u64) -> u64 {{
     fn clean_state_no_drift() {
         let (_dir, spec_path, code_dir, proofs_dir) = fake_project(SPEC);
 
-        // Compute the real spec hash for `deposit` and stamp it.
         let spec_src = std::fs::read_to_string(&spec_path).unwrap();
         let deposit_hash = spec_hash::spec_hash_for_handler(&spec_src, "deposit").unwrap();
         let withdraw_hash = spec_hash::spec_hash_for_handler(&spec_src, "withdraw").unwrap();
         write_handler(&code_dir, "deposit", "demo.qedspec", &deposit_hash);
         write_handler(&code_dir, "withdraw", "demo.qedspec", &withdraw_hash);
 
-        // Also write a Proofs.lean that has both expected theorems.
         std::fs::write(
             proofs_dir.join("Proofs.lean"),
             "theorem count_bounded_preserved_by_deposit : True := trivial\n\
@@ -669,7 +658,6 @@ pub fn {}(amount: u64) -> u64 {{
 
         let report = reconcile(&spec_path, &code_dir, &proofs_dir).unwrap();
         let json = serde_json::to_string_pretty(&report).unwrap();
-        // Round-trip.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(parsed.get("rust_drift").is_some());
         assert!(parsed.get("lean_orphans").is_some());
@@ -708,7 +696,6 @@ pub fn h() {}
 
     #[test]
     fn scan_ignores_legacy_qed_without_verified() {
-        // `#[qed(something_else)]` should not be parsed as a spec-bound attr.
         let src = r#"
 #[qed(experimental)]
 pub fn h() {}

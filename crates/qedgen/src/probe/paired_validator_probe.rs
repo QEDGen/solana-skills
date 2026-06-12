@@ -1,48 +1,16 @@
-//! Paired-validator asymmetry probe — v2.22 Slice 2.
+//! Paired-validator asymmetry probe.
 //!
-//! Detects validator-shape sites across multiple files / handlers that
-//! apply distinct accept-domains to the same logical field. The
-//! canonical bench miss (subscriptions CAN-M1 / M2 / L2 / L3) is
-//! `expiry_ts` being treated as "past expiry" by one validator and
-//! "never expires" by another. Users following the docs for one path
-//! get a hard rejection on the other — the mismatch is a sentinel-
-//! semantics drift across handlers.
-//!
-//! ## Rule shape
-//!
-//! Two-stage:
-//!
-//! 1. **Per-file validator extraction.** Walk every `*.rs` under
-//!    `<root>/src/**`; for each `if <cond> { return Err(...) }`
-//!    pattern in the file, capture the condition text and identify
-//!    every "field-like" identifier referenced inside it. A
-//!    "field-like" ident matches a suffix pattern (`_ts`, `_secs`,
-//!    `_amount`, `_id`, `_count`, ...) or is prefixed by `self.`.
-//!
-//! 2. **Cross-file pairwise comparison.** Group validator sites by
-//!    field name. When a field appears in 2+ sites with distinct
-//!    *normalized* condition shapes (whitespace-stripped, `self.`-
-//!    stripped), emit a `PairedValidatorInputDomainMismatch` finding
-//!    listing all distinct shapes and the sites they appear at.
-//!
-//! Severity is MEDIUM (a sentinel mismatch is rarely a one-shot
-//! drain; usually a usability bug or a sentinel-semantics drift the
-//! audit subagent triages into HIGH / suppress per the PRD's
-//! escalation rules).
-//!
-//! ## False-positive guards
-//!
-//! - **Test-fn filter** (reuses `is_test_fn_name` from
-//!   `arithmetic_symbol_probe`): inline `#[cfg(test)] mod tests` fns
-//!   don't contribute validator sites.
-//! - **Comment guard** (reuses `line_is_commented`): `//` comments
-//!   on the same line are skipped.
-//! - **Field name allowlist**: only fields whose name matches a
-//!   suffix list (typically time / amount / id / count / status
-//!   shapes) contribute. Drops the noise from generic ident-references
-//!   in conditions (`let`, `mut`, etc.).
-//!
-//! See PRD-v2.22 §S2.1.
+//! Detects validators across files / handlers that apply distinct
+//! accept-domains to the same logical field — sentinel-semantics drift,
+//! e.g. `expiry_ts == 0` rejected as "past expiry" by one validator,
+//! honored as "never expires" by another. Stage 1 extracts
+//! `if <cond> { return Err(...) }` sites and the field-like idents in each
+//! condition; stage 2 groups by field and emits one finding per field with
+//! 2+ distinct *normalized* condition shapes. Severity is MEDIUM — a
+//! sentinel mismatch is rarely a one-shot drain; the audit subagent triages
+//! into HIGH / suppress. False-positive guards: test fns, commented lines,
+//! and idents outside the field-like suffix allowlist (time / amount / id /
+//! count / status shapes) don't contribute.
 
 use anyhow::Result;
 use regex::Regex;
@@ -60,16 +28,14 @@ struct ValidatorSite {
     normalized_cond: String,
 }
 
-/// Entry point: walk `<root>/src/**/*.rs`, collect validator sites,
-/// then run the pairwise comparison. Returns one `Finding` per field
-/// that has 2+ distinct validator shapes.
+/// Entry point: walk `<root>/src/**/*.rs`, collect validator sites, emit
+/// one `Finding` per field with 2+ distinct validator shapes.
 pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     let src_dir = project_root.join("src");
     if !src_dir.exists() {
         return Ok(Vec::new());
     }
     let rs_files = collect_rust_files(&src_dir)?;
-    // (field_name -> list of validator sites that reference it).
     let mut by_field: BTreeMap<String, Vec<ValidatorSite>> = BTreeMap::new();
     for file in &rs_files {
         let Ok(source) = std::fs::read_to_string(file) else {
@@ -86,15 +52,11 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     Ok(emit_findings(&by_field))
 }
 
-/// Pure text scan, isolated for unit-testability. Returns `(field,
-/// site)` pairs — a single condition can register under multiple
-/// field names (`expiry_ts != 0 && current_ts > expiry_ts`
-/// contributes both `expiry_ts` and `current_ts`).
+/// Pure text scan, isolated for unit-testability. Returns `(field, site)`
+/// pairs — one condition can register under multiple field names.
 fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, ValidatorSite)> {
-    // The `(?s)` flag lets `.` match newlines so multi-line conditions
-    // resolve in one shot. The lookahead-style `\s*\{[^{]*?return\s+Err`
-    // ties the `if` to a Err-returning body (filtering out
-    // non-validator if-chains).
+    // `(?s)` lets multi-line conditions match in one shot; requiring the
+    // body to open with `return Err` filters non-validator if-chains.
     let validator_re = Regex::new(r"(?s)\bif\s+(?P<cond>[^{]+?)\s*\{\s*return\s+Err")
         .expect("static regex compiles");
 
@@ -119,11 +81,9 @@ fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, Valida
         if has_cfg_kani_attr_before(source, fn_start) {
             continue;
         }
-        // Skip plain "early return" patterns that aren't validator
-        // shapes — e.g. `if balance == 0 { return Err(...) }` where
-        // `balance` doesn't match a field-like name (the rule is
-        // bench-tuned to time / amount / id / count fields, where the
-        // mismatch surface lives).
+        // No field-like ident → plain early return, not a validator
+        // shape (the mismatch surface lives in time / amount / id /
+        // count fields).
         let fields = field_like_idents_in(cond);
         if fields.is_empty() {
             continue;
@@ -146,16 +106,15 @@ fn extract_validator_sites(rel_file: &Path, source: &str) -> Vec<(String, Valida
     out
 }
 
-/// Group validator sites by field, then for each field with 2+
-/// distinct shapes emit a single finding listing the shape set and
-/// every site participating in the mismatch.
+/// Per field with 2+ distinct shapes, emit a single finding listing the
+/// shape set and every participating site.
 fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding> {
     let mut out = Vec::new();
     for (field, sites) in by_field {
         if sites.len() < 2 {
             continue;
         }
-        // Distinct shapes via BTreeSet for stable ordering.
+        // BTreeMap for stable shape ordering across runs.
         let mut shapes: std::collections::BTreeMap<String, Vec<&ValidatorSite>> =
             std::collections::BTreeMap::new();
         for s in sites {
@@ -167,10 +126,6 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
         if shapes_are_base_guard_refinements(&shapes) {
             continue;
         }
-        // Skip cases where every "shape" is a near-trivial echo —
-        // e.g. the same field tested against `0` in multiple places.
-        // The v2.22 first ship is conservative: emit one finding per
-        // field, narrative listing each distinct shape and its sites.
         let summary = render_shape_summary(field, &shapes);
 
         let primary = sites.first().expect("non-empty per outer check");
@@ -179,9 +134,8 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FIELD".to_string(), field.clone());
         subs.insert("SHAPES".to_string(), summary.clone());
-        // Pick the first two distinct shapes as the headline sites
-        // for the markdown template — the agent reads the full list
-        // out of `subs["SHAPES"]`.
+        // First two distinct shapes headline the markdown template; the
+        // agent reads the full list from `subs["SHAPES"]`.
         let mut shape_iter = shapes.values();
         if let Some(first) = shape_iter.next() {
             if let Some(s) = first.first() {
@@ -263,10 +217,8 @@ fn shapes_are_base_guard_refinements(
     })
 }
 
-/// Render a human-readable summary of the shape set: one line per
-/// distinct shape, with the sites it appears at. Goes into
-/// `spec_silent_on` so the finding speaks for itself even without the
-/// markdown template.
+/// One line per distinct shape with its sites. Goes into `spec_silent_on`
+/// so the finding speaks for itself without the markdown template.
 fn render_shape_summary(
     field: &str,
     shapes: &std::collections::BTreeMap<String, Vec<&ValidatorSite>>,
@@ -286,16 +238,14 @@ fn render_shape_summary(
     s.trim_end().to_string()
 }
 
-/// Tokenize the condition and return every field-like identifier.
-/// "Field-like" matches one of the canonical state-shape suffixes;
-/// generic locals (`x`, `tmp`, `result`) are filtered out.
+/// Every field-like identifier in the condition. "Field-like" matches a
+/// canonical state-shape suffix; generic locals (`x`, `tmp`) filter out.
 fn field_like_idents_in(cond: &str) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
-    // Identifier-or-path; accept `self.` and `*` prefix.
     let ident_re = Regex::new(r"(?:self\.)?[A-Za-z_][A-Za-z0-9_]*").expect("static regex");
     for m in ident_re.find_iter(cond) {
         let raw = m.as_str().trim_start_matches("self.");
-        // Take the rightmost segment in case of nested paths.
+        // Rightmost segment of nested paths.
         let last = raw.rsplit('.').next().unwrap_or(raw);
         if is_field_like(last) {
             seen.insert(last.to_string());
@@ -305,14 +255,11 @@ fn field_like_idents_in(cond: &str) -> Vec<String> {
 }
 
 fn is_field_like(name: &str) -> bool {
-    // Denylist of well-known time-source / clock idents. These match
-    // the `_ts` suffix but are validator *arguments* (the clock value
-    // the validator compares against), not the *field* whose accept-
-    // domain we're checking for drift. Without this filter, `current_ts`
-    // surfaces as a high-noise "8 distinct shapes" finding because it
-    // appears on the RHS of nearly every time-comparison in the
-    // program. The bench evidence on subscriptions confirms it's
-    // pure noise.
+    // Denylist of clock / time-source idents: they match the `_ts`
+    // suffix but are validator *arguments* (the clock value compared
+    // against), not fields whose accept-domain can drift. Without this,
+    // `current_ts` fires as a high-noise multi-shape finding — it sits
+    // on the RHS of nearly every time comparison.
     let denylist = [
         "current_ts",
         "current_time",
@@ -359,15 +306,11 @@ fn is_field_like(name: &str) -> bool {
     suffixes.iter().any(|s| name.ends_with(s))
 }
 
-/// Normalize a condition for shape comparison: strip whitespace,
-/// strip `self.`, collapse `&& ` chains into a sorted set of atoms so
-/// that `a && b` and `b && a` compare equal. Keeps the result
-/// deterministic across runs.
+/// Normalize a condition for shape comparison: strip whitespace and
+/// `self.`, sort `&&` clauses so `a && b` == `b && a`. Deterministic
+/// across runs.
 fn normalize_condition(cond: &str) -> String {
     let stripped = cond.trim().replace("self.", "");
-    // Split on `&&` first so multi-clause validators (`expiry_ts != 0
-    // && current_ts > expiry_ts`) compare as sets rather than as
-    // ordered sequences.
     let mut clauses: Vec<String> = stripped
         .split("&&")
         .map(|c| c.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -377,12 +320,8 @@ fn normalize_condition(cond: &str) -> String {
     clauses.join(" && ")
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Shared helpers (copied from arithmetic_symbol_probe; v2.22 keeps
-// them duplicated so the two modules can evolve independently. v2.23
-// may factor them into a `probe_text_utils` shim once a third
-// source-scanner module joins them).
-// ─────────────────────────────────────────────────────────────────────
+// Shared helpers — deliberately duplicated across the source-scanner
+// probes so the modules can evolve independently.
 
 fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
     let prefix = &source[..offset.min(source.len())];
@@ -514,11 +453,9 @@ mod tests {
 
     #[test]
     fn fires_on_canonical_subscriptions_expiry_ts_mismatch() {
-        // Mirrors the subscriptions CAN-M1 shape across two files.
-        // `create_fixed_delegation::validate` REJECTS expiry_ts == 0
-        // (it's less than `current_time - drift`).
-        // `transfer_validation::validate_fixed_transfer` carves out
-        // expiry_ts == 0 as "never expires".
+        // Opposite sentinel semantics across two files: one validator
+        // REJECTS expiry_ts == 0 (less than `current_time - drift`),
+        // the other carves out 0 as "never expires".
         let create_src = r#"
 impl CreateFixedDelegationData {
     pub fn validate(&self, current_time: i64) -> Result<(), Error> {
@@ -767,9 +704,6 @@ fn validate_b(expiry_ts: i64, current_ts: i64) -> Result<(), Error> {
             by_field.entry(f).or_default().push(s);
         }
         let findings = emit_findings(&by_field);
-        // expiry_ts gets a finding (2 shapes), current_ts also (2
-        // shapes — `current_ts` appears in both with different
-        // condition contexts).
         let expiry = findings
             .iter()
             .find(|f| f.spec_silent_on.contains("`expiry_ts`"));

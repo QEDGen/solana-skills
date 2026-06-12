@@ -1,48 +1,29 @@
-//! Upstream binary diff — `qedgen verify --check-upstream` (v2.8 G5).
+//! Upstream binary diff — `qedgen verify --check-upstream`.
 //!
-//! Walks `qed.lock`, fetches the on-chain `.so` for every dependency
-//! that carries an `upstream_binary_hash` pin, hashes it, and reports
-//! mismatches. Per `feedback_dispatch_over_reimplement.md`, the on-chain
-//! fetch shells out to the user's `solana` CLI (`solana program dump
-//! --url <rpc> <program-id> <tmpfile>`) instead of pulling in
-//! `solana-client` — same RPC config the user already has, no new
-//! dependency added to qedgen.
+//! Walks `qed.lock`, fetches the on-chain `.so` for every dep with an
+//! `upstream_binary_hash` pin, hashes it, and reports mismatches. The fetch
+//! shells out to the user's `solana` CLI (`solana program dump`) rather than
+//! pulling in `solana-client` — same RPC config, no new dependency.
 //!
-//! Per-dependency outcome is one of:
-//! - **Match**: on-chain SHA matches the pinned hash.
-//! - **Mismatch**: hashes differ — likely a redeploy, a tag pointing
-//!   at a different commit, or a tampered lock file.
-//! - **Skipped**: dep has no `upstream_binary_hash` (path source, peer
-//!   spec, or library entry that hasn't been pinned yet) or is missing
-//!   a `program_id` to fetch by.
-//! - **Error**: the `solana` CLI failed (network, auth, missing CLI).
+//! Per-dep outcome: **Match**, **Mismatch** (redeploy / retagged commit /
+//! tampered lock), **Skipped** (no pin or no `program_id`), or **Error**
+//! (`solana` CLI failed).
 //!
-//! v2.26 Slice 4c — severity routing. A mismatched pin is no longer a
-//! plain stderr warning; it surfaces as a structured [`Finding`] with a
-//! severity that depends on the [`Gate`] the call was made from:
+//! Severity routing — a mismatch surfaces as a [`Finding`] whose severity
+//! depends on the [`Gate`]:
+//! - `verify --check-upstream` → `Crit`, exits non-zero
+//! - `check --frozen` → `P2`, exits zero (warning)
+//! - `check --frozen --strict` → `Crit`, exits non-zero
+//! - `verify --check-upstream --upstream-stale-ok` → `Info` (suppressed),
+//!   exits zero; for offline dev
 //!
-//! - `qedgen verify --check-upstream` → mismatch = `Crit`, exits non-zero
-//! - `qedgen check --frozen` → mismatch = `P2`, exits zero (warning)
-//! - `qedgen check --frozen --strict` → mismatch = `Crit`, exits non-zero
-//! - `qedgen verify --check-upstream --upstream-stale-ok` → mismatch
-//!   demoted to `Info` (suppressed); exits zero. Intended for offline dev.
+//! Network/CLI errors stay non-blocking (`P2`) under every gate so a missing
+//! `solana` CLI never silently passes nor falsely gates CI.
 //!
-//! Network/CLI errors stay non-blocking under every gate — they surface
-//! as `P2` so a missing `solana` CLI never silently passes nor falsely
-//! gates CI. Only `Mismatch` is severity-routed.
-//!
-//! ### Test seam — `QEDGEN_UPSTREAM_FAKE_BYTES`
-//!
-//! v2.26 Track M — `SolanaCliFetcher::fetch` honors the
-//! `QEDGEN_UPSTREAM_FAKE_BYTES` env var: when set, the value's UTF-8 bytes
-//! are returned in place of the `solana program dump` payload (no shell
-//! out). Lets the end-to-end CLI test exercise the full
-//! `verify --check-upstream` dispatch path — including the
-//! `std::process::exit` codes that the routing layer can't observe — on
-//! hosts without the Solana CLI. Production callers never set this env
-//! var, so behavior outside tests is unchanged. The value goes through
-//! `format_hash` like any other byte payload, so tests compute their
-//! pinned hash from the same `format_hash` they're asserting against.
+//! Test seam: `QEDGEN_UPSTREAM_FAKE_BYTES` makes `SolanaCliFetcher::fetch`
+//! return the var's UTF-8 bytes instead of shelling out, so E2E tests can
+//! drive the full dispatch path (including exit codes) without the Solana
+//! CLI. The payload goes through `format_hash` like any other bytes.
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -51,9 +32,8 @@ use std::process::Command;
 
 use crate::qed_lock::{self, LockEntry, LockFile};
 
-/// Env var that overrides `solana program dump` in the production
-/// `SolanaCliFetcher`. Used only by `tests/upstream_check_e2e.rs` and the
-/// in-process E2E test below. See the module docs for details.
+/// Env var overriding `solana program dump` in `SolanaCliFetcher`;
+/// test-only (see module docs).
 #[allow(dead_code)]
 pub const FAKE_BYTES_ENV: &str = "QEDGEN_UPSTREAM_FAKE_BYTES";
 
@@ -70,14 +50,10 @@ pub enum DepCheckOutcome {
         pinned: String,
         on_chain: String,
     },
-    /// v2.27 Track D1 — proof_hash drift between the on-disk lock and the
-    /// content of the provider's proof package on disk. No network fetch:
-    /// the "on-chain" side is `qed_lock::compute_proof_hash` walking the
-    /// provider's `.qed/proofs/` directory. Routed through the same
-    /// [`Gate`]-aware severity layer as [`DepCheckOutcome::Mismatch`] so
-    /// `check --frozen` warns (P2) while `--strict` and `verify` block
-    /// (CRIT). Surfaces when a provider's proof package was edited
-    /// without re-running `qedgen check` to refresh the lockfile.
+    /// proof_hash drift between the lock and the provider's `.qed/proofs/`
+    /// content (`qed_lock::compute_proof_hash`; no network). Same
+    /// [`Gate`]-aware severity routing as `Mismatch`. Surfaces when a
+    /// provider's proof package changed without re-running `qedgen check`.
     ProofHashMismatch {
         pinned: String,
         computed: String,
@@ -99,11 +75,11 @@ pub struct DepCheckResult {
 }
 
 // ----------------------------------------------------------------------------
-// v2.26 Slice 4c — severity routing
+// Severity routing
 // ----------------------------------------------------------------------------
 
-/// Verification gate the upstream check is running under. Determines how
-/// `Mismatch` outcomes map onto [`FindingSeverity`].
+/// Verification gate the upstream check runs under; maps `Mismatch` outcomes
+/// onto [`FindingSeverity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Gate {
@@ -130,9 +106,8 @@ pub enum FindingSeverity {
     Info,
 }
 
-/// Structured finding the verify / check command rolls up. One per
-/// dependency that had a `Mismatch` or `Error` outcome; clean matches
-/// and unpinned skips are summarized separately.
+/// One finding per `Mismatch` / `Error` dep; matches and skips are
+/// summarized separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct Finding {
@@ -161,8 +136,8 @@ impl RoutedReport {
             .any(|f| matches!(f.severity, FindingSeverity::Crit))
     }
 
-    /// True if any finding is at least P2 — the caller renders the
-    /// "warnings present" tail line but does not exit non-zero.
+    /// True if any finding is P2 — caller renders the warnings tail line
+    /// but exits zero.
     #[allow(dead_code)]
     pub fn any_warning(&self) -> bool {
         self.findings
@@ -171,9 +146,8 @@ impl RoutedReport {
     }
 }
 
-/// Pure routing step. Takes the per-dep outcomes and the [`Gate`] and
-/// produces a [`RoutedReport`]. No I/O — the network call already
-/// happened in `check_lock_with_fetcher`. Unit-tested below.
+/// Pure routing step (no I/O — fetching already happened in
+/// `check_lock_with_fetcher`).
 #[allow(dead_code)]
 pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport {
     let mut findings = Vec::new();
@@ -199,11 +173,7 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
                 });
             }
             DepCheckOutcome::ProofHashMismatch { pinned, computed } => {
-                // Track D1 — same severity routing as binary_hash
-                // Mismatch. Drift between the on-disk lock and the
-                // provider's proof package content is the legible signal
-                // that a Stance-2 callee's proofs changed without the
-                // consumer rerunning `qedgen check`.
+                // Same severity routing as binary_hash Mismatch.
                 let severity = match gate {
                     Gate::Verify | Gate::CheckFrozenStrict => FindingSeverity::Crit,
                     Gate::CheckFrozen => FindingSeverity::P2,
@@ -219,10 +189,8 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
                 });
             }
             DepCheckOutcome::Error { message } => {
-                // Network / CLI errors are never CRIT; we don't want a
-                // missing `solana` CLI to gate CI silently. P2 under
-                // every gate; demoted to Info under VerifyStaleOk so
-                // offline dev runs stay green.
+                // Network / CLI errors are never CRIT (a missing `solana` CLI
+                // must not gate CI): P2 everywhere, Info under VerifyStaleOk.
                 let severity = match gate {
                     Gate::VerifyStaleOk => FindingSeverity::Info,
                     _ => FindingSeverity::P2,
@@ -244,9 +212,8 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
     }
 }
 
-/// True if `lock` has at least one entry with a populated
-/// `upstream_binary_hash`. `qedgen verify` uses this to auto-enable
-/// `--check-upstream` when any pin is present (v2.26 Slice 4c).
+/// True if `lock` has any populated `upstream_binary_hash`; `qedgen verify`
+/// uses this to auto-enable `--check-upstream`.
 #[allow(dead_code)]
 pub fn lock_has_pinned_hash(lock: &LockFile) -> bool {
     lock.dependencies.iter().any(|e| {
@@ -257,16 +224,12 @@ pub fn lock_has_pinned_hash(lock: &LockFile) -> bool {
     })
 }
 
-/// Read `qed.lock` from `spec_dir` and check every dependency that
-/// carries an `upstream_binary_hash`. Returns one result per dep so the
-/// caller can render a complete report (rather than failing on the first
-/// mismatch).
+/// Read `qed.lock` from `spec_dir` and check every pinned dependency.
+/// One result per dep (full report, not fail-fast).
 ///
-/// `rpc_url` (if set) is passed through to `solana program dump --url`.
-/// `None` lets the Solana CLI use its own configured cluster. `offline`
-/// (v2.8 fold-in F6): when true, any dep that would require an RPC fetch
-/// returns `Error { offline-blocked }` instead of shelling out — useful
-/// for CI gates that should never reach external network.
+/// `rpc_url` flows to `solana program dump --url`; `None` uses the CLI's
+/// configured cluster. `offline`: deps needing an RPC fetch return
+/// `Error { offline-blocked }` instead of shelling out (for network-free CI).
 #[allow(dead_code)]
 pub fn check_lock(
     spec_dir: &Path,
@@ -291,10 +254,9 @@ pub fn check_lock(
     }
 }
 
-/// `--offline` fetcher: unconditionally errors with a clear "offline mode"
-/// message. Skipped entries (no hash / no program_id) bypass `fetch`
-/// entirely and remain skipped, so an offline run still distinguishes
-/// "couldn't reach RPC" from "nothing to verify."
+/// `--offline` fetcher: always errors with an "offline mode" message.
+/// Skipped entries never reach `fetch`, so offline runs still distinguish
+/// "couldn't reach RPC" from "nothing to verify".
 struct OfflineFetcher;
 
 impl BinaryFetcher for OfflineFetcher {
@@ -306,14 +268,12 @@ impl BinaryFetcher for OfflineFetcher {
     }
 }
 
-/// Test-friendly seam: the `BinaryFetcher` trait separates the side-effecting
-/// "go fetch the on-chain `.so`" step from the pure "compare hashes and
-/// build a report" logic. Production uses `SolanaCliFetcher`; tests inject
-/// an in-memory fake.
+/// Test seam separating the side-effecting fetch from the pure hash-compare
+/// logic. Production uses `SolanaCliFetcher`; tests inject an in-memory fake.
 #[allow(dead_code)]
 pub trait BinaryFetcher {
-    /// Return the raw bytes of the deployed program (the `.so` payload).
-    /// Implementations should error cleanly when the network or CLI fails.
+    /// Raw bytes of the deployed program (`.so` payload); error cleanly on
+    /// network/CLI failure.
     fn fetch(&mut self, program_id: &str) -> Result<Vec<u8>>;
 }
 
@@ -324,12 +284,9 @@ struct SolanaCliFetcher<'a> {
 
 impl<'a> BinaryFetcher for SolanaCliFetcher<'a> {
     fn fetch(&mut self, program_id: &str) -> Result<Vec<u8>> {
-        // v2.26 Track M — the env-var seam lets the E2E test inject a
-        // canned payload without shelling out to `solana`. Honored before
-        // the temp-file / Command setup so the test path doesn't depend
-        // on the Solana CLI being on $PATH. Empty string is treated as
-        // "unset" (defensive: `std::env::set_var("X", "")` should not
-        // silently mute the production fetcher in test runners).
+        // Test seam: checked before any temp-file / Command setup so the test
+        // path never needs the Solana CLI. Empty string = "unset" (defensive
+        // against set_var("X", "") muting the production fetcher).
         if let Ok(payload) = std::env::var(FAKE_BYTES_ENV) {
             if !payload.is_empty() {
                 let _ = program_id; // intentionally unused under the seam
@@ -391,16 +348,11 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
         }
     };
 
-    // v2.27 Track C3 — `sha256:00…00` is the recognized sentinel for
-    // "no payload to pin against". Native programs like the System
-    // Program live inside the validator binary itself and aren't
-    // returned by `solana program dump` — there's nothing to fetch and
-    // nothing to hash. Treating the sentinel as a real pin would
-    // produce a confusing Error ("11111111111111111111111111111111 is
-    // not an SBF program") instead of a clean skip. Bundled-stdlib
-    // interfaces that ship with the sentinel are intentionally Stance-1
-    // tautology axioms with no on-chain counterpart; the trust anchor
-    // is the runtime, not a content hash.
+    // `sha256:00…00` = "no payload to pin against" sentinel. Native programs
+    // (e.g. System) live in the validator binary and aren't dumpable;
+    // treating the sentinel as a real pin would yield a confusing "not an SBF
+    // program" Error instead of a clean skip. Sentinel-shipping bundled
+    // interfaces trust the runtime, not a content hash.
     if is_sentinel_hash(pinned) {
         return DepCheckOutcome::Skipped {
             reason: "binary_hash sentinel (sha256:00…00) — native program or unverified pin"
@@ -408,11 +360,9 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
         };
     }
 
-    // program_id flows from the imported interface's
-    // `program_id "..."` declaration into qed.lock at resolution time
-    // (v2.8 fold-in F1). Only `None` when the imported interface itself
-    // omits the field — purely shape-only Tier 0 imports with no
-    // deployed counterpart to verify against.
+    // program_id flows from the imported interface's `program_id "..."` into
+    // qed.lock at resolution time; `None` = shape-only Tier 0 import with no
+    // deployed counterpart.
     let program_id = match resolve_program_id(entry) {
         Some(pid) => pid,
         None => {
@@ -446,11 +396,8 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
     }
 }
 
-/// Pull the program_id from a lock entry. v2.8 fold-in F1: the lock
-/// schema now carries `program_id` directly, copied from the imported
-/// interface's `program_id "..."` declaration at resolution time. None
-/// only when the imported interface itself omits `program_id` (purely
-/// shape-only Tier 0 imports without a deployed counterpart).
+/// program_id from a lock entry (copied from the imported interface at
+/// resolution time); `None` = shape-only Tier 0 import.
 fn resolve_program_id(entry: &LockEntry) -> Option<String> {
     entry.program_id.clone()
 }
@@ -461,20 +408,15 @@ fn format_hash(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// v2.27 Track C3 — recognize the "no payload to pin" sentinel.
-/// Accepts `sha256:` prefix, any case, and either 64 zero characters
-/// (the standard form qedgen emits) or fewer (a degenerate shorthand a
-/// user might hand-write). Defensive: stricter matching would let the
-/// production fetcher attempt `solana program dump` on entries the
-/// author marked as native, producing confusing "not an SBF program"
-/// errors instead of a clean skip.
+/// Recognize the "no payload to pin" sentinel. Accepts `sha256:`/`SHA256:`
+/// prefix and any all-zero body (64 zeros standard, fewer as hand-written
+/// shorthand) — stricter matching would send native-marked entries to the
+/// real fetcher and surface "not an SBF program" errors.
 ///
-/// v2.27 Track D2 fold-in: also called by
-/// `check::collect_require_verified_findings` to exempt sentinel-pinned
-/// native programs (System) from `--require-verified` — their `ensures`
-/// clauses are validated by the validator runtime itself, not by a
-/// Lake-buildable proof package. Made `pub(crate)` so the lint reuses the
-/// same definition the runtime fetcher trusts.
+/// Also used by `check::collect_require_verified_findings` to exempt
+/// sentinel-pinned native programs from `--require-verified` (their `ensures`
+/// are validated by the runtime, not a proof package); `pub(crate)` so the
+/// lint reuses the same definition.
 #[allow(dead_code)]
 pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
     let body = pinned
@@ -488,15 +430,11 @@ pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
 // Reporting
 // ----------------------------------------------------------------------------
 
-/// v2.26 Slice 4c — render a [`RoutedReport`] with severity-tagged
-/// findings. Matches stay informational, mismatches / errors carry the
-/// gate-derived severity. Returns true if the caller should exit non-zero
-/// (any CRIT finding); otherwise the caller surfaces warnings without
-/// gating exit.
+/// Render a [`RoutedReport`]: per-dep outcomes first (skip / match context),
+/// then the severity-tagged findings tail. Returns true if the caller should
+/// exit non-zero (any CRIT).
 #[allow(dead_code)]
 pub fn print_routed_report(report: &RoutedReport) -> bool {
-    // First render the original per-dep outcomes so the operator sees the
-    // skip / match context, then the severity-tagged findings tail.
     for r in &report.raw {
         match &r.outcome {
             DepCheckOutcome::Match { program_id, hash } => {
@@ -646,14 +584,9 @@ mod tests {
         }
     }
 
-    // ----- v2.27 Track C3: sentinel-hash skip -----
-
     #[test]
     fn skips_entries_with_zero_sentinel_hash() {
-        // Native programs (e.g. the System Program) have no on-chain
-        // SBF payload to fetch. The sentinel `sha256:00…00` marks that
-        // case; check_one returns Skipped with a sentinel-explaining
-        // reason instead of trying to fetch and erroring.
+        // Sentinel-pinned native programs are Skipped, never fetched.
         let zero = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
         let mut e = entry_with_hash("system", Some(zero));
         e.program_id = Some("11111111111111111111111111111111".to_string());
@@ -661,9 +594,7 @@ mod tests {
             version: LOCK_VERSION,
             dependencies: vec![e],
         };
-        // Fetcher is never called for sentinel entries; assert that by
-        // leaving it empty — a fetch attempt would error and propagate
-        // through as DepCheckOutcome::Error.
+        // Empty fetcher: any fetch attempt would surface as Error.
         let mut fetcher = FakeFetcher::new();
         let results = check_lock_with_fetcher(&lock, &mut fetcher);
         match &results[0].outcome {
@@ -679,10 +610,6 @@ mod tests {
 
     #[test]
     fn sentinel_detection_accepts_prefix_and_short_form() {
-        // Defensive matching: both `sha256:` and `SHA256:` prefixes,
-        // and shorthand of fewer than 64 zeros, still classify as
-        // sentinel. Stricter matching risks running the real fetcher
-        // on intentionally-unpinned entries.
         assert!(is_sentinel_hash(
             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         ));
@@ -691,19 +618,14 @@ mod tests {
         assert!(!is_sentinel_hash(
             "sha256:8190d3f7ceb6cb7a7a8d8924bff89f9f611e15ce1f806f2b6237f3311a98f697"
         ));
-        // Empty body shouldn't be classified as sentinel — that case
-        // is the "no hash pinned" branch.
+        // Empty body = "no hash pinned" branch, not sentinel.
         assert!(!is_sentinel_hash("sha256:"));
         assert!(!is_sentinel_hash(""));
     }
 
-    // ----- end Track C3 -----
-
     #[test]
     fn skips_when_imported_interface_omits_program_id() {
-        // Lock entry has a hash pin but the imported interface didn't
-        // declare `program_id "..."` — pure shape-only Tier 0 import
-        // with no deployed counterpart. Skipped honestly.
+        // Hash pin but no `program_id` (shape-only Tier 0 import) → Skipped.
         let hash = format_hash(b"some bytes");
         let mut e = entry_with_hash("pinned", Some(&hash));
         e.program_id = None; // imported interface had no program_id
@@ -815,10 +737,6 @@ mod tests {
         assert!(hash.starts_with("sha256:"));
     }
 
-    // ----------------------------------------------------------------------
-    // v2.26 Slice 4c — severity-routing unit tests
-    // ----------------------------------------------------------------------
-
     #[test]
     fn lock_has_pinned_hash_detects_populated_entries() {
         let empty = LockFile {
@@ -836,8 +754,7 @@ mod tests {
         };
         assert!(lock_has_pinned_hash(&with_pin));
 
-        // Empty-string hash counts as not-pinned (defensive against
-        // serde defaulting to "").
+        // Empty-string hash = not pinned (defensive against serde "" default).
         let with_empty = LockFile {
             version: LOCK_VERSION,
             dependencies: vec![entry_with_hash("empty", Some(""))],
@@ -891,9 +808,7 @@ mod tests {
 
     #[test]
     fn fetch_errors_stay_p2_under_verify_and_check() {
-        // A missing solana CLI never gates CI silently — it surfaces as
-        // P2 under both verify (where it would otherwise be tempting to
-        // CRIT it) and check --frozen.
+        // A missing solana CLI never gates CI — P2 under every blocking gate.
         for gate in [Gate::Verify, Gate::CheckFrozen, Gate::CheckFrozenStrict] {
             let routed = route_findings(vec![error_result()], gate);
             assert_eq!(routed.findings.len(), 1);
@@ -922,12 +837,7 @@ mod tests {
         assert!(!routed.any_blocking());
     }
 
-    // ----------------------------------------------------------------------
-    // v2.27 Track D1 — proof_hash drift severity routing. Same shape as
-    // the binary_hash Mismatch routing: P2 under `check --frozen`, CRIT
-    // under `verify` and `--frozen --strict`, Info under
-    // `--upstream-stale-ok`.
-    // ----------------------------------------------------------------------
+    // proof_hash drift routes identically to binary_hash Mismatch.
 
     #[test]
     fn proof_hash_drift_routes_crit_under_verify() {
@@ -974,27 +884,19 @@ mod tests {
         assert!(!routed_p2.any_blocking());
     }
 
-    // ----------------------------------------------------------------------
-    // v2.26 Track M — end-to-end test through `check_lock` + the env-var
-    // seam. Drives the full lock-read → fetch → hash → route → render
-    // pipeline that the CLI dispatch path uses, without shelling out to
-    // `solana program dump`. Complements the pure routing unit tests
-    // above (which feed synthetic `DepCheckResult`s) and the CLI-level
-    // exit-code test in `tests/upstream_check_e2e.rs`.
-    // ----------------------------------------------------------------------
+    // E2E through `check_lock` + the env-var seam: full lock-read → fetch →
+    // hash → route pipeline without `solana program dump`. Complements the
+    // pure routing tests above and `tests/upstream_check_e2e.rs`.
 
-    /// Serialize tests that touch `QEDGEN_UPSTREAM_FAKE_BYTES`. `cargo
-    /// test` runs cases in parallel by default; env-var mutation is
-    /// process-global, so without this mutex one test could observe
-    /// another's fake payload (or set/unset race).
+    /// Serialize tests touching `QEDGEN_UPSTREAM_FAKE_BYTES` — env-var
+    /// mutation is process-global and cargo test runs in parallel.
     fn env_lock() -> &'static std::sync::Mutex<()> {
         static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         M.get_or_init(|| std::sync::Mutex::new(()))
     }
 
-    /// RAII guard: install `QEDGEN_UPSTREAM_FAKE_BYTES=payload` for the
-    /// duration of the test, unset on drop. Acquires `env_lock` so
-    /// parallel test cases don't trample each other.
+    /// RAII guard: sets `QEDGEN_UPSTREAM_FAKE_BYTES`, unsets on drop;
+    /// holds `env_lock`.
     struct FakeBytesGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
@@ -1011,10 +913,8 @@ mod tests {
         }
     }
 
-    /// Write a minimal `qed.lock` with one pinned dep into `dir` and
-    /// return the program_id used. The pinned hash is `format_hash` of
-    /// the supplied `pinned_payload`; the caller controls whether the
-    /// fetcher's response (via the env var) matches or differs.
+    /// Minimal `qed.lock` with one dep pinned to `format_hash(pinned_payload)`;
+    /// returns the program_id. The env var controls whether the fetch matches.
     fn write_lock_with_pin(dir: &Path, pinned_payload: &[u8]) -> String {
         let program_id = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string();
         let pinned_hash = format_hash(pinned_payload);
@@ -1039,10 +939,7 @@ mod tests {
         program_id
     }
 
-    /// Mismatch under `Gate::Verify` produces a CRIT finding that gates
-    /// exit (`any_blocking()` is true). The pinned payload differs from
-    /// the env-var-injected on-chain payload, so the fetcher reports a
-    /// hash that doesn't match the lock.
+    /// Mismatch under `Gate::Verify` → CRIT finding that gates exit.
     #[test]
     fn e2e_verify_mismatch_is_crit_and_blocks() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1060,9 +957,7 @@ mod tests {
         assert!(routed.any_blocking(), "CRIT must gate exit");
     }
 
-    /// Same mismatch under `Gate::CheckFrozen` lowers severity to P2 —
-    /// surfaces in the report but does not gate exit. This is the
-    /// non-strict `check --frozen` behavior.
+    /// Same mismatch under `Gate::CheckFrozen` → P2, no exit gating.
     #[test]
     fn e2e_check_frozen_mismatch_is_p2_and_does_not_block() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1091,9 +986,8 @@ mod tests {
         assert!(routed.any_blocking(), "--strict must gate exit");
     }
 
-    /// `--upstream-stale-ok` demotes the mismatch finding to Info; the
-    /// report still records it but neither blocks nor counts as a
-    /// warning. Offline-dev escape hatch.
+    /// `--upstream-stale-ok` demotes the mismatch to Info — recorded, but
+    /// neither blocks nor warns.
     #[test]
     fn e2e_verify_stale_ok_demotes_to_info() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1108,9 +1002,8 @@ mod tests {
         assert!(!routed.any_warning(), "stale-ok suppresses warnings too");
     }
 
-    /// When the on-chain bytes hash to the pinned value, no finding is
-    /// produced under any gate and the run exits clean. Sanity-check
-    /// that the env var doesn't manufacture findings out of thin air.
+    /// Matching bytes → no finding under any gate (the env var doesn't
+    /// manufacture findings).
     #[test]
     fn e2e_match_under_any_gate_produces_no_finding() {
         let bytes = b"matching-bytes";

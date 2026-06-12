@@ -1,15 +1,11 @@
-//! Shared helper: extract a `handler <name> { ... }` block from a `.qedspec`
-//! source and compute its SHA-256-hex16 hash. Also: compute the body hash
-//! of a `syn::ItemFn` using the same canonicalization as `qedgen-macros`.
+//! Handler-block extraction + SHA-256-hex16 spec/body hashing.
 //!
-//! The two algorithms here MUST match `qedgen-macros`:
+//! The algorithms here MUST match `qedgen-macros` (which recomputes the
+//! emitted `hash = "..."` / `spec_hash = "..."` values at compile time):
 //!   - `spec_hash_for_handler` ↔ `qedgen-macros/src/spec_bind.rs`
 //!   - `body_hash_for_fn`      ↔ `qedgen-macros/src/verified.rs::content_hash`
 //!
-//! Codegen + `qedgen adapt --spec ...` emit the `hash = "..."` /
-//! `spec_hash = "..."` attribute values; the proc-macro recomputes both
-//! at compile time. Any divergence yields a spurious drift error — treat
-//! any change here as a breaking change of both crates.
+//! Any divergence yields spurious drift — a change here breaks both crates.
 
 use quote::ToTokens;
 use sha2::{Digest, Sha256};
@@ -21,34 +17,27 @@ fn sha256_hex16(input: &str) -> String {
     full[..16].to_string()
 }
 
-/// Compute the body hash of a `syn::ItemFn`. MUST match
-/// `qedgen-macros::verified::content_hash` byte-for-byte: strip every
-/// outer attribute (doc comments, `#[qed(...)]`, `#[inline]`, etc.),
-/// normalize via `to_token_stream()`, then sha256-hex16.
-///
-/// Used by `qedgen adapt --spec ...` to compute the `hash = "..."`
-/// value the macro will recompute and check at compile time.
+/// Body hash of a `syn::ItemFn`. MUST match
+/// `qedgen-macros::verified::content_hash` byte-for-byte: strip all outer
+/// attributes, normalize via `to_token_stream()`, sha256-hex16.
 pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
     sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
 }
 
-/// Body hash for an impl method (`syn::ImplItemFn`). Same algorithm
-/// as `body_hash_for_fn`. Mirrors `qedgen-macros::verified::FnLike`'s
-/// Impl-arm hash so v2.9's method-shape `#[qed]` annotations can be
-/// emitted by the adapter and recomputed by the macro.
+/// Body hash for an impl method; same algorithm as `body_hash_for_fn`.
+/// Mirrors `qedgen-macros::verified::FnLike`'s Impl-arm hash (method-shape
+/// `#[qed]` annotations).
 pub fn body_hash_for_impl_fn(func: &syn::ImplItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
     sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
 }
 
-/// Walk a `TokenStream` and emit a canonical string by visiting each
-/// token in order with a single-space separator. MUST mirror
-/// `qedgen-macros::canonical_token_string` byte-for-byte. See that
-/// function's comment for the rationale (rustc-vs-from_str spacing
-/// divergence forces a hand-rolled traversal).
+/// Canonical token string: each token in order, single-space separated.
+/// MUST mirror `qedgen-macros::canonical_token_string` byte-for-byte —
+/// rustc-vs-from_str spacing divergence forces this hand-rolled traversal.
 fn canonical_token_string(stream: &proc_macro2::TokenStream) -> String {
     use proc_macro2::{Delimiter, TokenTree};
     let mut out = String::new();
@@ -91,20 +80,14 @@ fn canonical_token_string(stream: &proc_macro2::TokenStream) -> String {
     out
 }
 
-/// Hash a `pub struct <name>` from a Rust source file. MUST match
-/// `qedgen-macros::spec_bind::accounts_struct_hash_in`. Used by
-/// `qedgen adapt --spec` to seal each handler's accompanying
-/// `#[derive(Accounts)]` struct so edits to the constraints there
-/// (e.g. `#[account(mut)]`, `has_one = ...`, `seeds = [...]`) trip
-/// `compile_error!` the same way handler body edits do.
+/// Hash a `pub struct <name>` from Rust source. MUST match
+/// `qedgen-macros::spec_bind::accounts_struct_hash_in`. Seals the handler's
+/// `#[derive(Accounts)]` struct so constraint edits (`#[account(mut)]`,
+/// `has_one`, `seeds`) trip `compile_error!` like body edits do.
 ///
-/// Walks the file's top-level items first, then descends into any
-/// inline `pub mod foo { ... }` blocks (e.g. `pub mod accounts {
-/// pub struct Buy { ... } }`). First match wins.
-///
-/// Returns `None` when:
-///   - the source isn't valid Rust
-///   - no `struct <name>` exists anywhere in the file
+/// Walks top-level items, then descends into inline `pub mod` blocks;
+/// first match wins. `None` if the source isn't valid Rust or the struct
+/// doesn't exist.
 pub fn accounts_struct_hash(source: &str, struct_name: &str) -> Option<String> {
     let file: syn::File = syn::parse_str(source).ok()?;
     accounts_struct_hash_in_items(&file.items, struct_name)
@@ -116,15 +99,11 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
             syn::Item::Struct(s) if s.ident == struct_name => {
                 let mut stripped = s.clone();
                 stripped.attrs.clear();
-                // v2.15: same canonicalization as `body_hash_for_fn` so
-                // the qedgen-side computation here agrees byte-for-byte
-                // with `qedgen-macros::spec_bind::accounts_struct_hash_in_items`
-                // regardless of how the file was tokenized
-                // (rustc-vs-from_str). Pre-v2.15 used raw
-                // `to_token_stream().to_string()` which carries
-                // per-`Punct` `Spacing` info reflecting source spacing —
-                // a hidden source of drift between the binary and the
-                // proc-macro on the same input file.
+                // Same canonicalization as `body_hash_for_fn` so this agrees
+                // byte-for-byte with the proc-macro regardless of tokenization
+                // (rustc vs from_str). Raw `to_token_stream().to_string()`
+                // carries per-`Punct` `Spacing` from source spacing — hidden
+                // drift between the binary and the macro on the same file.
                 let canonical = canonical_token_string(&stripped.to_token_stream());
                 return Some(sha256_hex16(&canonical));
             }
@@ -251,19 +230,11 @@ pub fn extract_handler_block(source: &str, handler_name: &str) -> Option<String>
     None
 }
 
-/// Normalize a spec handler block before hashing so cosmetic edits
-/// (reformatting, comment changes, blank-line shuffling) don't fire
-/// drift while semantic edits still do. Rules:
-///
-///   - `// ...` line comments and `/* ... */` block comments are stripped.
-///   - Runs of whitespace outside strings collapse to a single space.
-///   - Leading and trailing whitespace are trimmed.
-///   - String literals (`"..."`, including `\"` escapes) pass through
-///     verbatim — `"Hello   World"` stays `"Hello   World"` because the
-///     spaces inside the literal carry semantic meaning.
-///
-/// MUST match `qedgen-macros::spec_bind::normalize_spec_block`. Any
-/// divergence yields a spurious spec-hash drift.
+/// Normalize a handler block before hashing so cosmetic edits don't fire
+/// drift while semantic edits do: strip `//` and `/* */` comments, collapse
+/// whitespace runs outside strings to one space, trim; string literals
+/// (incl. `\"` escapes) pass through verbatim — interior spaces are
+/// semantic. MUST match `qedgen-macros::spec_bind::normalize_spec_block`.
 pub fn normalize_spec_block(block: &str) -> String {
     let bytes = block.as_bytes();
     let mut out = String::with_capacity(block.len());
@@ -332,32 +303,17 @@ pub fn normalize_spec_block(block: &str) -> String {
     out.trim().to_string()
 }
 
-/// Build a digest of every top-level item in `source` *except* handler
-/// blocks. (GH issue #31.) Handler blocks are sealed individually by
-/// `spec_hash_for_handler`; everything else (`type`, `const`, `pda`,
-/// `event`, `errors`, `interface`, `import`, `invariant`, `property`,
-/// `environment`, top-level `spec` declaration) is shared context that
-/// changes the *effective contract* of every handler when it shifts.
+/// Digest of everything in `source` *except* handler blocks. Handler blocks
+/// are sealed individually by `spec_hash_for_handler`; all other top-level
+/// items are shared context that changes every handler's effective contract,
+/// so this digest is folded into each handler's spec_hash.
 ///
-/// Pre-v2.15 the spec_hash sealed only the handler's own braced block,
-/// so a `const FEE_BPS = 50` change at the top of the file would not
-/// invalidate any handler's spec_hash even when handler bodies
-/// referenced `FEE_BPS`. The fix is to fold a digest of "everything
-/// outside any handler block" into each handler's hash.
+/// Algorithm: balanced-brace scan (as `extract_handler_block`, collecting
+/// all ranges), remove handler ranges, normalize, sha256-hex16.
 ///
-/// Algorithm: walk `source`; find each `handler <name> {...}` block
-/// via balanced-brace scanning (same logic as `extract_handler_block`,
-/// just collect ranges instead of returning the first match). Build a
-/// string of the source with those ranges removed. Normalize +
-/// sha256-hex16. The resulting digest is included as a suffix of every
-/// handler's spec_hash so any top-level change propagates.
-///
-/// Conservative-by-design: a change to a top-level item that NO
-/// handler references still invalidates every handler's hash. This
-/// over-invalidates compared to a precise dataflow analysis but is
-/// simple, deterministic, and matches the
-/// "treat-shared-context-as-load-bearing" stance the broader sealing
-/// model already takes elsewhere.
+/// Conservative-by-design: a top-level change NO handler references still
+/// invalidates every hash — over-invalidates vs. dataflow analysis, but
+/// simple and deterministic.
 ///
 /// MUST mirror `qedgen-macros::spec_bind::spec_context_digest`.
 pub fn spec_context_digest(source: &str) -> String {
@@ -473,16 +429,11 @@ pub fn spec_context_digest(source: &str) -> String {
     sha256_hex16(&normalize_spec_block(&out))
 }
 
-/// Compute the spec hash for a handler. Returns `None` if the handler block
-/// is absent or a handler declared with no body (e.g. `handler foo : A -> B`
-/// with no braces — treated as an empty contract so codegen emits an empty
-/// placeholder hash that the macro side will also compute as `None`).
-///
-/// The block is run through `normalize_spec_block` before hashing so
-/// cosmetic edits (whitespace, comments) don't fire drift. v2.15 (GH
-/// issue #31): the hash also folds in `spec_context_digest(source)` so
-/// changes to top-level shared declarations (consts, types, imports,
-/// interfaces, etc.) propagate into every handler's hash.
+/// Spec hash for a handler. `None` if the block is absent or the handler is
+/// bodyless (`handler foo : A -> B` with no braces — an empty contract; the
+/// macro side also computes `None`). The block is normalized before hashing,
+/// and `spec_context_digest(source)` is folded in so top-level shared
+/// declarations propagate into every handler's hash.
 pub fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
     let block = extract_handler_block(source, handler_name)?;
     let normalized = normalize_spec_block(&block);
@@ -531,11 +482,9 @@ handler bar : State.A -> State.B {
         assert!(spec_hash_for_handler(SAMPLE, "nonexistent").is_none());
     }
 
-    /// v2.15 (GH issue #31): top-level changes (consts, types, etc.)
-    /// outside any handler block must invalidate every handler's
-    /// spec_hash, even when the handler block itself is byte-identical.
-    /// Pre-v2.15 this slipped through and could leave handler contracts
-    /// effectively changed without drift detection firing.
+    /// Top-level changes (consts, types, etc.) outside any handler block
+    /// must invalidate every handler's spec_hash, even when the handler
+    /// block itself is byte-identical.
     #[test]
     fn spec_hash_changes_when_top_level_const_edited() {
         let v1 = r#"spec Demo
@@ -562,10 +511,9 @@ handler foo (x : U64) : State.A -> State.A {
         );
     }
 
-    /// Companion to the above: re-ordering or editing OTHER handlers
-    /// in the same file must NOT invalidate this handler's spec_hash.
-    /// Each handler is sealed against its own block + the shared
-    /// top-level context; sibling handler edits don't change either.
+    /// Editing OTHER handlers must NOT invalidate this handler's spec_hash:
+    /// each handler is sealed against its own block + shared top-level
+    /// context only.
     #[test]
     fn spec_hash_stable_when_sibling_handler_edited() {
         let v1 = r#"spec Demo
@@ -596,8 +544,6 @@ handler bar : State.A -> State.B {
         );
     }
 
-    /// `spec_context_digest` should be empty-string-stable: the digest
-    /// of an empty source is well-defined and reproducible.
     #[test]
     fn spec_context_digest_deterministic() {
         let src = r#"spec Demo
@@ -610,9 +556,8 @@ type Account = | Active of { x : U64 }
         assert_eq!(d1.len(), 16);
     }
 
-    /// Mirrors `qedgen-macros::verified::tests::hash_deterministic`. If
-    /// either side's algorithm drifts, this test breaks alongside the
-    /// macro test — same input, same expected length.
+    /// Mirrors `qedgen-macros::verified::tests::hash_deterministic` — drift
+    /// on either side breaks both tests.
     #[test]
     fn body_hash_is_deterministic_and_16_hex() {
         let func: syn::ItemFn = syn::parse_quote! {
@@ -654,8 +599,7 @@ type Account = | Active of { x : U64 }
         assert_ne!(body_hash_for_fn(&v1), body_hash_for_fn(&v2));
     }
 
-    /// v2.9 second-pass: cosmetic edits don't fire drift; semantic
-    /// edits still do.
+    /// Cosmetic edits don't fire drift; semantic edits still do.
     #[test]
     fn spec_hash_is_whitespace_tolerant() {
         let h = spec_hash_for_handler(SAMPLE, "foo").unwrap();
@@ -696,8 +640,6 @@ type Account = | Active of { x : U64 }
     }
 
     /// Mirrors `qedgen-macros::verified::tests::fn_like_handles_method_shape_input`.
-    /// Same impl-method body run through both sides should produce
-    /// identical 16-hex hashes.
     #[test]
     fn body_hash_for_impl_fn_handles_self_receiver() {
         let func: syn::ImplItemFn = syn::parse_quote! {
@@ -747,10 +689,8 @@ type Account = | Active of { x : U64 }
         assert!(accounts_struct_hash(src, "DoesNotExist").is_none());
     }
 
-    /// Nested-mod discovery: `pub struct Buy` declared inside
-    /// `pub mod accounts { ... }` resolves the same as a top-level
-    /// declaration. Hash bytes are identical (the mod wrapper is
-    /// stripped — only the struct's own tokens go into the hash).
+    /// A struct inside `pub mod accounts { ... }` resolves and hashes the
+    /// same as top-level — only the struct's own tokens are hashed.
     #[test]
     fn accounts_struct_hash_descends_into_nested_mods() {
         let nested = r#"
@@ -773,8 +713,6 @@ type Account = | Active of { x : U64 }
         "#;
         let h_nested = accounts_struct_hash(nested, "Buy").unwrap();
         let h_top = accounts_struct_hash(top_level, "Buy").unwrap();
-        // Both find the struct; both produce the same hash because
-        // the mod wrapper isn't part of the hashed token stream.
         assert_eq!(h_nested, h_top);
     }
 
@@ -793,12 +731,9 @@ type Account = | Active of { x : U64 }
 
     #[test]
     fn accounts_struct_hash_ignores_outer_attrs() {
-        // The `#[derive(Accounts)]` and any other outer attributes
-        // are stripped before hashing — the macro recomputes after
-        // stripping too, so adding/removing derives without changing
-        // fields shouldn't fire drift. Constraint edits inside fields
-        // (the inner `#[account(...)]` attrs) WILL fire because
-        // those are part of the Field, not the outer struct.
+        // Outer attrs are stripped before hashing on both sides, so derive
+        // changes don't fire drift; inner field `#[account(...)]` attrs WILL
+        // fire — they're part of the Field, not the outer struct.
         let with_attrs = r#"
             #[derive(Accounts, Debug, Clone)]
             pub struct Buy {

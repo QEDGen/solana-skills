@@ -1,39 +1,24 @@
-//! Param-substitution helper for CPI ensures discharge / propagation.
+//! Param substitution for CPI ensures discharge / propagation.
 //!
-//! When a handler `H` does `call Iface.foo(args)` and `Iface.foo` declares
-//! `ensures <expr>`, two backends need to propagate that contract into the
-//! caller's verification:
+//! When a handler does `call Iface.foo(args)` and `Iface.foo` declares
+//! `ensures`, two backends propagate the contract into the caller:
+//! 1. **Lean** (`render_cpi_theorems`) — per-call-site theorem stating the
+//!    callee's `ensures` with call-site args substituted; Tier-1 closes via
+//!    the bundled `ensures_axiom_<idx>`, Tier-0 emits `:= by sorry`.
+//! 2. **Kani** ensures-preservation harness — `kani::assume(<substituted>)`
+//!    after the transition call, before the caller's own `assert!`s.
 //!
-//! 1. **Lean** (`lean_gen.rs::render_cpi_theorems`) — emits a per-call-site
-//!    theorem whose statement is the callee's `ensures` substituted with the
-//!    call-site arguments. Tier-1 interfaces close the theorem via the bundled
-//!    `Iface.foo.ensures_axiom_<idx>` axiom; Tier-0 emits `:= by sorry`.
-//! 2. **Kani** (`kani.rs`, v2.26 Batch 2 Track G — ensures-preservation
-//!    harness) — emits `kani::assume(<substituted_rust_binary>)` lines AFTER
-//!    the spec-translated transition call and BEFORE the caller's own
-//!    `assert!(post_ensures)` lines. The assume turns the callee's contract
-//!    into a hypothesis the caller can rely on while verifying its own
-//!    ensures.
-//!
-//! Both backends share the same substitution shape: map each callee
-//! parameter name to the caller's expression at the call site, then
-//! word-boundary replace. The Lean form uses `ParsedCallArg.lean_expr`;
-//! the Kani form uses `ParsedCallArg.rust_expr` (the binary `pre`/`post`
-//! split is handled by the callee's `ParsedEnsures.rust_expr_binary` field
-//! before it reaches this module).
-//!
-//! v2.26 Batch 2 Track G extracted this from `lean_gen.rs::substitute_callee_ensures`
-//! so `kani.rs` can reuse it without duplicating the substitution logic.
+//! Both share the same shape: map callee param name → caller expression,
+//! then word-boundary replace. Lean uses `ParsedCallArg.lean_expr`; Kani uses
+//! `ParsedCallArg.rust_expr` (the binary `pre`/`post` split happens upstream
+//! in `ParsedEnsures.rust_expr_binary`).
 
 use std::collections::HashMap;
 
 use crate::check::{ParsedCall, ParsedCallArg, ParsedStateBinder};
 
-/// Word-boundary regex substitution. Replaces every occurrence of each
-/// formal-param identifier in `expr` with its caller-side replacement.
-///
-/// `\b<param>\b` matching prevents `amount` from clobbering substrings of
-/// other identifiers (`amount_squared`, `taker_amount`).
+/// Word-boundary regex substitution of formal params for caller expressions —
+/// `\b<param>\b` so `amount` can't clobber `amount_squared` / `taker_amount`.
 pub fn substitute_word_boundary(expr: &str, subst: &HashMap<&str, &str>) -> String {
     let mut out = expr.to_string();
     for (param, replacement) in subst {
@@ -46,10 +31,8 @@ pub fn substitute_word_boundary(expr: &str, subst: &HashMap<&str, &str>) -> Stri
     out
 }
 
-/// Build the param-name → caller-Lean-expr substitution table from a
-/// `ParsedCall`. Missing params (callee declared a param the caller
-/// didn't bind) fall through unchanged; Lean would surface them as free
-/// variables — that's the spec author's bug, not a substitution bug.
+/// Param-name → caller-Lean-expr table. Params the caller didn't bind fall
+/// through unchanged (Lean surfaces them as free variables — spec author's bug).
 pub fn lean_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
     call.args
         .iter()
@@ -57,11 +40,9 @@ pub fn lean_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
         .collect()
 }
 
-/// Build the param-name → caller-Rust-expr substitution table from a
-/// `ParsedCall`. The Rust form is what Kani harnesses and proptest
-/// translations consume. Uses `rust_expr` (not `rust_expr_pod`) because
-/// the Kani spec-model harness lives in the same target as the
-/// transition functions — both render with the same primitive widths.
+/// Param-name → caller-Rust-expr table (Kani / proptest). Uses `rust_expr`,
+/// not `rust_expr_pod`: the Kani spec-model harness renders with the same
+/// primitive widths as the transition functions.
 pub fn rust_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
     call.args
         .iter()
@@ -69,21 +50,14 @@ pub fn rust_subst_table(call: &ParsedCall) -> HashMap<&str, &str> {
         .collect()
 }
 
-/// Substitute the caller's call-site Lean arguments into a callee's
-/// Lean-rendered `ensures` expression. The result is the form the
-/// caller proves at the call site.
+/// Substitute call-site Lean args into a callee's Lean `ensures` — the form
+/// the caller proves at the call site. Unmatched params keep their formal
+/// name (Lean free variable; the lint catches it).
 ///
-/// `callee_params` are the formal parameter names declared on the
-/// interface handler. Unmatched params (no corresponding caller arg)
-/// keep their formal name, which Lean flags as a free variable; the
-/// spec-author lint catches this.
-///
-/// `callee_result_binder` (v2.26 Track K) is the identifier the callee's
-/// `ensures` uses to refer to its own return value, as declared by
-/// `handler foo (…) -> <ident> : Type`. When the caller binds the
-/// result via `let X = call …`, the identifier is rewritten to `X`.
-/// `None` falls back to the conventional `"result"` literal for
-/// back-compat with v2.24 #11 specs that don't declare a binder.
+/// `callee_result_binder` is the identifier the callee's `ensures` uses for
+/// its return value (`handler foo (…) -> <ident> : Type`); when the caller
+/// binds via `let X = call …` it rewrites to `X`. `None` falls back to the
+/// conventional `"result"` literal for specs without a declared binder.
 pub fn substitute_callee_ensures_lean(
     callee_ensures_lean: &str,
     call: &ParsedCall,
@@ -91,63 +65,38 @@ pub fn substitute_callee_ensures_lean(
     callee_result_binder: Option<&str>,
 ) -> String {
     let mut subst: HashMap<&str, &str> = lean_subst_table(call);
-    // Defensive: ensure every callee param has *some* entry (default to
-    // formal name) so the substitution walks every binder, even when
-    // the caller omitted a non-positional arg.
+    // Defensive: every callee param gets an entry (defaulting to its formal
+    // name) even when the caller omitted a non-positional arg.
     for (pn, _) in callee_params {
         subst.entry(pn.as_str()).or_insert(pn.as_str());
     }
-    // v2.24 #11 `let X = call ...` — bind the caller's result identifier
-    // into the substitution table so a callee `ensures` referencing the
-    // return-value position resolves to the caller's binder.
+    // `let X = call ...` — a callee `ensures` referencing the return-value
+    // binder resolves to the caller's binder.
     if let Some(ref result_name) = call.result_binding {
-        // The binder name on the callee side comes from the interface
-        // declaration (`-> <ident> : Type`); `None` defaults to the
-        // historical literal `"result"`.
         let binder = callee_result_binder.unwrap_or("result");
         subst.entry(binder).or_insert(result_name.as_str());
     }
     let after_params = substitute_word_boundary(callee_ensures_lean, &subst);
-    // v2.27 Track A — state-binder substitution. The callee's Lean
-    // ensures references abstract fields as `<callee_field> pre` /
-    // `<callee_field> post` (function application against accessor
-    // params). At the caller site we lower each application to a
-    // direct field projection on the caller's State snapshot:
-    //   `<callee_field> pre`  → `pre.<caller_field>`
-    //   `<callee_field> post` → `post.<caller_field>`
-    // The Lean axiom signature still carries `<callee_field> : State →
-    // Nat` as an accessor param; the axiom-application path (in
-    // `render_cpi_theorems`) passes `(·.<caller_field>)` for that
-    // slot, so β-reduction produces exactly the substituted form
-    // above. The text-level substitution here is what the caller's
-    // theorem *statement* reads.
+    // State-binder substitution. The Lean axiom signature keeps
+    // `<callee_field> : State → Nat` accessor params; `render_cpi_theorems`
+    // applies it with `(·.<caller_field>)`, so β-reduction matches the
+    // text-level substitution produced here (the caller's theorem statement).
     substitute_state_binders_lean(&after_params, &call.state_binders)
 }
 
-/// v2.27 Track A — apply the Lean state-binder substitution. The
-/// callee's `ensures` lean_expr lowers `state.X` as `s'.X` (post,
-/// `Ctx::Ensures`) and `old(state.X)` as `s.X` (pre, the
-/// `path_or_expr_to_lean_old` branch). Each binder `(callee_field,
-/// caller_field)` rewrites:
+/// Lean state-binder substitution. The callee's lean_expr lowers `state.X`
+/// to `s'.X` (post) and `old(state.X)` to `s.X` (pre); each binder rewrites
 ///   `s'.<callee_field>` → `post.<caller_field>`
 ///   `s.<callee_field>`  → `pre.<caller_field>`
-///
-/// The caller's theorem statement carries `(pre post : State)` as
-/// binders, and the axiom is applied with `(·.<caller_field>)` for
-/// each accessor slot — β-reduction matches the substituted text
-/// produced here, so the application typechecks against the
-/// substituted statement.
+/// matching the `(pre post : State)` binders on the caller's theorem.
 fn substitute_state_binders_lean(expr: &str, binders: &[ParsedStateBinder]) -> String {
     let mut out = expr.to_string();
     for b in binders {
-        // Post-state: `s'.<callee_field>` → `post.<caller_field>`.
-        // The `s'.` token is unambiguous in the Lean ensures lowering
-        // (only `Ctx::Ensures` produces it), so a literal replace is
-        // safe — no need for full regex word-boundary matching.
+        // `s'.` is unambiguous in the Lean ensures lowering (only
+        // `Ctx::Ensures` produces it), so a literal needle is safe.
         let post_needle = format!("s'.{}", b.callee_field);
         let post_replacement = format!("post.{}", b.caller_field);
         out = replace_word(&out, &post_needle, &post_replacement);
-        // Pre-state: `s.<callee_field>` → `pre.<caller_field>`.
         let pre_needle = format!("s.{}", b.callee_field);
         let pre_replacement = format!("pre.{}", b.caller_field);
         out = replace_word(&out, &pre_needle, &pre_replacement);
@@ -155,10 +104,8 @@ fn substitute_state_binders_lean(expr: &str, binders: &[ParsedStateBinder]) -> S
     out
 }
 
-/// Replace `needle` in `haystack` only at word boundaries. Used by
-/// the v2.27 Track A Lean state-binder substitution so a longer
-/// callee field name (`from_balance_total`) doesn't accidentally match
-/// a prefix (`from_balance`).
+/// Replace `needle` only at word boundaries so a longer callee field
+/// (`from_balance_total`) can't match its prefix (`from_balance`).
 fn replace_word(haystack: &str, needle: &str, replacement: &str) -> String {
     let pattern = format!(r"{}\b", regex::escape(needle));
     let re = regex::Regex::new(&pattern).expect("regex compiles for word-boundary state replace");
@@ -166,22 +113,14 @@ fn replace_word(haystack: &str, needle: &str, replacement: &str) -> String {
         .into_owned()
 }
 
-/// Substitute the caller's call-site Rust arguments into a callee's
-/// `rust_expr_binary`-rendered `ensures` expression. Used by the
-/// v2.26 Batch 2 ensures-preservation Kani harness to propagate
-/// callee contracts as `kani::assume` facts.
+/// Substitute call-site Rust args into a callee's `rust_expr_binary`
+/// `ensures`; the ensures-preservation Kani harness propagates the result as
+/// `kani::assume` facts.
 ///
-/// The callee's `rust_expr_binary` form already renders `state.x` as
-/// `post.x` and `old(state.x)` as `pre.x`. For interface handlers,
-/// callees typically don't reference state at all — only their declared
-/// `params` — so the substitution is purely a param swap. The
-/// `state.x`/`pre.x`/`post.x` forms pass through unchanged and bind to
-/// the caller's own pre/post snapshots at the assume site.
-///
-/// `callee_result_binder` (v2.26 Track K) is the identifier the callee's
-/// `ensures` uses to refer to its own return value, as declared by
-/// `handler foo (…) -> <ident> : Type`. `None` falls back to the
-/// literal `"result"` for back-compat.
+/// `rust_expr_binary` already renders `state.x` as `post.x` and `old(state.x)`
+/// as `pre.x`; those pass through unchanged and bind to the caller's own
+/// pre/post snapshots at the assume site. `callee_result_binder` as in
+/// [`substitute_callee_ensures_lean`].
 pub fn substitute_callee_ensures_rust_binary(
     callee_ensures_rust_binary: &str,
     call: &ParsedCall,
@@ -197,13 +136,9 @@ pub fn substitute_callee_ensures_rust_binary(
         subst.entry(binder).or_insert(result_name.as_str());
     }
     let after_params = substitute_word_boundary(callee_ensures_rust_binary, &subst);
-    // v2.27 Track A — state-binder substitution. The callee's
-    // `rust_expr_binary` ensures references abstract fields through
-    // the `pre.<callee_field>` / `post.<callee_field>` projection
-    // convention. Rewrite each occurrence to the caller's field name
-    // so the substituted form composes with `rewrite_pre_post_paths`
-    // (kani_impl.rs) — that helper then flattens to the harness-local
-    // `pre_<caller_field>` / `post_<caller_field>` snapshots.
+    // Rewrite `pre.<callee_field>` / `post.<callee_field>` to the caller's
+    // field names so the result composes with `rewrite_pre_post_paths`
+    // (kani_impl.rs), which flattens to `pre_<field>` / `post_<field>`.
     substitute_state_binders_rust_binary(&after_params, &call.state_binders)
 }
 
@@ -244,20 +179,14 @@ fn scan_prefixed_fields(expr: &str, pattern: &str) -> Vec<String> {
     out
 }
 
-/// v2.27 Track A — apply the Rust binary state-binder substitution.
-/// Each binder `(callee_field, caller_field)` rewrites
-/// `pre.<callee_field>` → `pre.<caller_field>` and
-/// `post.<callee_field>` → `post.<caller_field>`. The trailing
-/// `rewrite_pre_post_paths` step (caller of this helper, in
-/// kani_impl.rs) is what produces the harness-local `pre_X` /
-/// `post_X` form.
+/// Rust binary state-binder substitution: `pre.<callee_field>` →
+/// `pre.<caller_field>` (and `post.`). The caller (kani_impl.rs
+/// `rewrite_pre_post_paths`) then flattens to harness-local `pre_X` / `post_X`.
 fn substitute_state_binders_rust_binary(expr: &str, binders: &[ParsedStateBinder]) -> String {
     let mut out = expr.to_string();
     for b in binders {
         for state_kw in ["pre", "post"] {
-            // Match `pre.<callee_field>` or `post.<callee_field>` —
-            // anchor the `<state>.` prefix so a substring match like
-            // `nested.from_balance` doesn't fire spuriously.
+            // Anchor the `<state>.` prefix so `nested.from_balance` can't fire.
             let pattern = format!(r"\b{}\.{}\b", state_kw, regex::escape(&b.callee_field));
             let re = regex::Regex::new(&pattern)
                 .expect("regex compiles for Rust state-binder substitution");
@@ -354,10 +283,7 @@ mod tests {
 
     #[test]
     fn substitute_rust_defaults_to_result_when_unspecified() {
-        // v2.26 Track K back-compat: `None` for `callee_result_binder`
-        // makes the substitution fall back to the literal `"result"`,
-        // matching pre-Track-K behavior (and the existing
-        // `substitute_rust_let_binding_result` test above).
+        // `None` for `callee_result_binder` falls back to the literal "result".
         let mut call = mk_call("Foo", "bar", &[("amount", "amount")]);
         call.result_binding = Some("out".to_string());
         let params = vec![("amount".to_string(), "U64".to_string())];
@@ -372,10 +298,8 @@ mod tests {
 
     #[test]
     fn substitute_rust_uses_declared_binder_name() {
-        // v2.26 Track K — the callee declared `-> price : U64`, so its
-        // ensures uses the identifier `price` to refer to the return.
-        // The caller's `let X = call …` binder substitutes for `price`
-        // (NOT the literal `result`).
+        // Callee declared `-> price : U64`: the caller's `let X = call …`
+        // binder substitutes for `price`, NOT the literal `result`.
         let mut call = mk_call("Oracle", "quote", &[("base", "base"), ("quote", "qmint")]);
         call.result_binding = Some("p".to_string());
         let params = vec![
@@ -405,8 +329,6 @@ mod tests {
 
     #[test]
     fn substitute_lean_with_state_binders() {
-        // v2.27 Track A — state_binders rewrites `<callee_field> pre`
-        // → `pre.<caller_field>` and similarly for `post`.
         let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
         call.state_binders = vec![
             ParsedStateBinder {
@@ -419,10 +341,8 @@ mod tests {
             },
         ];
         let params = vec![("amount".to_string(), "U64".to_string())];
-        // Lean lowering form: `state.X` → `s'.X` (Ctx::Ensures) and
-        // `old(state.X)` → `s.X`. The state_binders substitution targets
-        // those exact patterns and rewrites them to the caller's State
-        // field projection.
+        // Lean lowering: `state.X` → `s'.X`, `old(state.X)` → `s.X`; binders
+        // rewrite those to the caller's State field projections.
         let out = substitute_callee_ensures_lean(
             "s'.from_balance + amount = s.from_balance \u{2227} s'.to_balance = s.to_balance + amount",
             &call,
@@ -437,11 +357,6 @@ mod tests {
 
     #[test]
     fn substitute_rust_binary_with_state_binders() {
-        // v2.27 Track A — the Rust binary form references abstract
-        // fields as `pre.<callee_field>` / `post.<callee_field>`; the
-        // binder substitution rewrites the field name in place. The
-        // downstream `rewrite_pre_post_paths` (in kani_impl.rs) does
-        // the final flatten to `pre_<caller_field>` / `post_<caller_field>`.
         let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
         call.state_binders = vec![
             ParsedStateBinder {
@@ -496,10 +411,8 @@ mod tests {
 
     #[test]
     fn binders_do_not_affect_param_only_ensures() {
-        // v2.27 back-compat: a callee ensures that only references
-        // params (no abstract State fields) passes through unchanged
-        // even when binders are declared. This is the v2.26-and-prior
-        // shape (e.g., the bundled SPL Token interface's `amount > 0`).
+        // A param-only ensures (no abstract State fields, e.g. bundled SPL
+        // Token's `amount > 0`) passes through unchanged despite binders.
         let mut call = mk_call("Token", "transfer", &[("amount", "amount")]);
         call.state_binders = vec![ParsedStateBinder {
             callee_field: "from_balance".to_string(),
@@ -514,8 +427,7 @@ mod tests {
 
     #[test]
     fn empty_binders_match_v226_behaviour() {
-        // Explicit empty state_binders list — the substitution helper
-        // must produce the exact same output as a v2.26-shape callsite.
+        // Empty state_binders must be a no-op.
         let call = mk_call("Token", "transfer", &[("amount", "amount")]);
         let params = vec![("amount".to_string(), "U64".to_string())];
         let with_binders_lean = substitute_callee_ensures_lean("amount > 0", &call, &params, None);

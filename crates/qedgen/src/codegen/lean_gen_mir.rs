@@ -1,55 +1,27 @@
-//! qedgen Lean codegen — the MIR consumer. Sole Lean-codegen path
-//! since v2.32 deleted the legacy `ParsedSpec`-direct `lean_gen.rs`.
-//! Consumes `mir::Mir` and writes `Spec.lean` (plus interface sidecars
-//! via [`crate::lean_sidecars`]). Gated by `tests/mir_snapshot.rs`.
+//! qedgen Lean codegen — the sole Lean path. Consumes `mir::Mir` and writes
+//! `Spec.lean` (+ interface sidecars via [`crate::lean_sidecars`]). Output
+//! pinned by `tests/mir_snapshot.rs`.
 //!
-//! `render` dispatches on spec shape:
-//! - sBPF (`mir.is_assembly`) → `render_sbpf` (handled in `generate`,
-//!   reads `ParsedSpec` directly — assembly proofs over `Program.lean`).
-//! - Indexed (records or `Map[N] T`) → `render_indexed_state`.
-//! - Multi-account (`account_states.len() > 1`) → `render_multi_account`.
-//! - Multi-variant ADT (`type State | A | B of { … }`) →
-//!   `render_single_account_adt`.
-//! - Single-account → `render_single_account`.
-//!
-//! The single-account renderer emits these sections in order:
-//! 1. `import QEDGen.Solana.{Account, Cpi, State, Valid}`.
-//! 2. `namespace <ProgramName>` + `open QEDGen.Solana`.
-//! 3. Uninterpreted helpers + ref-impls.
-//! 4. Constants (`abbrev NAME : Nat := VALUE`).
-//! 5. `inductive Status` if ≥2 lifecycle states.
-//! 6. `structure State` with all state fields.
-//! 7. Transition functions — one `def <handler>_transition (s : State)
-//!    … : Option State` per handler.
-//! 8. CPI theorems — per-handler `theorem <handler>_cpi_correct` for
-//!    Tier-1/2 callees.
-//! 9. Invariant theorems.
-//! 10. `inductive Operation` + `def applyOp` — union of all handlers.
-//! 11. Property theorems.
-//! 12. Abort theorems.
-//! 13. Ensures theorems.
-//! 14. Frame conditions.
-//! 15. Cover / liveness / environment / overflow theorems.
-//! 16. `end <ProgramName>`.
+//! `render` dispatches on spec shape: sBPF (`mir.is_assembly`, dispatched in
+//! `generate`) → `render_sbpf`; indexed (records / `Map[N] T`) →
+//! `render_indexed_state`; multi-account → `render_multi_account`;
+//! multi-variant ADT → `render_single_account_adt`; else
+//! `render_single_account`, whose fixed section order is: imports →
+//! namespace → helpers/ref-impls → constants → Status → State → transitions
+//! → CPI theorems → invariants → Operation/applyOp → properties → aborts →
+//! ensures → frame → covers/liveness/env/overflow → end.
 
 use crate::mir::Mir;
 use anyhow::Result;
 use std::path::Path;
 
-/// Top-level entry. Renders the `Spec.lean` body from MIR, then
-/// delegates the sidecar work (import injection, sibling axiom modules,
-/// lakefile updates, verified-callee require directives) to
-/// `lean_sidecars::write_spec_with_sidecars` — the renderer-agnostic
-/// sidecar writer. The snapshot suite (`tests/mir_snapshot.rs`) gates
-/// the emitted `Spec.lean` against checked-in references.
+/// Top-level entry: render the `Spec.lean` body from MIR, then delegate
+/// sidecar work to `lean_sidecars::write_spec_with_sidecars`.
 pub fn generate(mir: &Mir, parsed: &crate::check::ParsedSpec, output_path: &Path) -> Result<()> {
-    // sBPF assembly specs render a wholly different shape (Program.lean
-    // import + per-instruction guard/property theorem stubs over
-    // `executeFn`/`wp_exec`) that has nothing to do with the
-    // state-machine `Stmt` IR. Dispatch on the MIR-lifted `is_assembly`
-    // flag; the renderer reads instruction/layout/guard data straight
-    // from `ParsedSpec` (the single consumer means MIR carries only the
-    // dispatch signal, not the data — see `Mir::is_assembly`).
+    // sBPF assembly specs render a wholly different shape (guard/property
+    // theorem stubs over `executeFn`/`wp_exec`) with no state-machine
+    // `Stmt` representation; the renderer reads `ParsedSpec` directly —
+    // MIR carries only the `is_assembly` dispatch signal.
     let content = if mir.is_assembly {
         render_sbpf(parsed)
     } else {
@@ -58,16 +30,10 @@ pub fn generate(mir: &Mir, parsed: &crate::check::ParsedSpec, output_path: &Path
     crate::lean_sidecars::write_spec_with_sidecars(content, parsed, output_path)
 }
 
-/// Pure render. Dispatches based on the MIR shape and emits the full
-/// Spec.lean as a String.
-///
-/// Phase 1 stub: emits header + namespace + state struct only. Other
-/// sections land iteratively as Phase 1c progresses.
+/// Pure render. Dispatches on MIR shape and emits the full Spec.lean.
 pub fn render(mir: &Mir) -> String {
-    // Dispatch by spec shape — indexed, multi-account, single. sBPF
-    // assembly specs are dispatched earlier in `generate` (they read
-    // `ParsedSpec` directly via `render_sbpf`), so `render` only sees
-    // state-machine shapes here.
+    // sBPF is dispatched earlier in `generate`; only state-machine
+    // shapes reach here.
     if is_indexed(mir) {
         return render_indexed_state(mir);
     }
@@ -81,12 +47,10 @@ pub fn render(mir: &Mir) -> String {
 }
 
 // ----------------------------------------------------------------------
-// Shape detection — mirrors lean_gen.rs predicates
+// Shape detection
 // ----------------------------------------------------------------------
 
 fn is_indexed(mir: &Mir) -> bool {
-    // Indexed spec: declares records (modeled as `Custom` types in MIR)
-    // or uses `Map[N]` fields. Detect by scanning state-field types.
     mir.state.variants.iter().any(|v| {
         v.fields
             .iter()
@@ -95,23 +59,12 @@ fn is_indexed(mir: &Mir) -> bool {
 }
 
 fn is_multi_account(mir: &Mir) -> bool {
-    // v2.30 Phase 2: multi-account specs declare > 1 `type Account`
-    // block. MIR carries the full list in `account_states`;
-    // `render_multi_account` walks them and emits per-account
-    // `<Name>State`, `<Name>Status`, `<Name>Operation`, `apply<Name>Op`.
-    // Single-account specs route through `render_single_account` /
-    // `render_single_account_adt` as before. Indexed-state specs are
-    // dispatched earlier in `render` and skip this gate.
     mir.account_states.len() > 1
 }
 
-/// True iff the single-account spec opts into the multi-variant ADT
-/// shape (real `inductive State` with per-variant payload):
-///   * declares `pragma state_repr = adt` (lifted to `Mir::adt_state` via
-///     `ParsedSpec::state_repr_is_adt`) — the explicit opt-in that
-///     replaced the pre-v2.33 `WrongState`-error footgun;
-///   * has ≥ 2 state variants;
-///   * is not indexed (Map / record fields route elsewhere).
+/// True iff the single-account spec opts into the multi-variant ADT shape:
+/// declares `pragma state_repr = adt` (lifted to `Mir::adt_state`), has ≥ 2
+/// state variants, and is not indexed (Map / record fields route elsewhere).
 fn is_multi_variant_adt(mir: &Mir) -> bool {
     mir.adt_state && mir.state.variants.len() > 1 && !is_indexed(mir)
 }
@@ -130,11 +83,9 @@ fn render_single_account(mir: &Mir) -> String {
     emit_lifecycle_marker(&mut out, mir);
     emit_state_struct(&mut out, mir);
     emit_transitions(&mut out, mir);
-    // §8 CPI theorems — emitted after transitions for section ordering.
-    // This emits the in-`Spec.lean` half (per-handler CPI theorems); the
-    // sibling `<Iface>.lean` axiom modules + lakefile wiring are written
-    // separately by `lean_sidecars::write_spec_with_sidecars`, which
-    // recomputes the pinned set, so the returned value is unused here.
+    // In-`Spec.lean` CPI theorems only; sibling axiom modules + lakefile
+    // wiring are written by `lean_sidecars::write_spec_with_sidecars`,
+    // which recomputes the pinned set — the returned value is unused.
     let _pinned = emit_cpi_theorems(&mut out, mir);
     emit_invariants(&mut out, mir);
     emit_operation_inductive(&mut out, mir);
@@ -150,19 +101,10 @@ fn render_single_account(mir: &Mir) -> String {
     out
 }
 
-/// v2.24 §S5 multi-variant ADT path — port of
-/// `lean_gen::render_single_account_adt`. The state lowers as a real
-/// `inductive State where | V1 | V2 …` block (with payload per
-/// variant); transitions pattern-match on the pre-variant; covers
-/// build per-variant witnesses; properties / aborts / overflow take
-/// the ADT-flavored emitter pair.
-///
-/// Phase A scope (this commit): state ADT block + status accessor +
-/// per-field accessor bridges. Section ordering matches the legacy
-/// emitter so the file boundary diffs are localized to the state
-/// shape itself. Subsequent phases port the remaining `_adt`-
-/// flavored emitters (transitions, properties, aborts, frame,
-/// covers, liveness, overflow).
+/// Multi-variant ADT path: state lowers as a real `inductive State where
+/// | V1 | V2 …` block (payload per variant); transitions pattern-match on
+/// the pre-variant; covers build per-variant witnesses; properties /
+/// aborts / overflow take the ADT-flavored emitter pair.
 fn render_single_account_adt(mir: &Mir) -> String {
     let mut out = String::new();
     emit_header(&mut out, mir);
@@ -176,13 +118,11 @@ fn render_single_account_adt(mir: &Mir) -> String {
     emit_state_status_accessor_adt(&mut out, mir);
     emit_state_field_accessors_adt(&mut out, mir);
 
-    // Phase B — match-based transitions over the inductive State.
     emit_transitions_adt(&mut out, mir);
-    // Phase C — ADT-flavored emitters (aborts / frame / overflow)
-    // emit `:= by sorry` and the True-placeholder frame, matching
-    // `lean_gen::render_*_adt`. Other sections (ensures, properties,
-    // covers, liveness, environments) share the flat-shape emitters
-    // — their statements are independent of the State carrier.
+    // ADT-flavored emitters (aborts / frame / overflow) emit `:= by sorry`
+    // and the True-placeholder frame. Other sections (ensures, properties,
+    // covers, liveness, environments) share the flat-shape emitters —
+    // their statements are independent of the State carrier.
     let _pinned = emit_cpi_theorems(&mut out, mir);
     emit_invariants(&mut out, mir);
     emit_operation_inductive(&mut out, mir);
@@ -198,11 +138,10 @@ fn render_single_account_adt(mir: &Mir) -> String {
     out
 }
 
-/// Emit `inductive Status where | V1 | V2 …`. Mirrors the v2.24 ADT
-/// `emit_status_inductive` (no per-constructor `: Status` annotation,
-/// `deriving Repr, DecidableEq, BEq`). Distinct from the
-/// pre-v2.24 flat-state `emit_lifecycle_marker` which emits the
-/// `: Status` annotation and `deriving DecidableEq, Repr` order.
+/// Emit `inductive Status where | V1 | V2 …` (no per-constructor `: Status`
+/// annotation, `deriving Repr, DecidableEq, BEq`). Distinct from the
+/// flat-state `emit_lifecycle_marker`, which emits the `: Status`
+/// annotation and the `deriving DecidableEq, Repr` order.
 fn emit_status_inductive_adt(out: &mut String, mir: &Mir) {
     let lifecycle: Vec<&str> = mir.state.variants.iter().map(|v| v.tag.as_str()).collect();
     if lifecycle.len() < 2 {
@@ -215,11 +154,9 @@ fn emit_status_inductive_adt(out: &mut String, mir: &Mir) {
     out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 }
 
-/// Emit the `inductive State where | V1 | V2 (f : T) …` block plus
-/// the `Inhabited State` instance. Mirrors
-/// `lean_gen::emit_inductive_state`. The first variant supplies the
-/// Inhabited default — qedgen specs canonically declare the initial
-/// state first (e.g. `Uninitialized`), so this preserves intent.
+/// Emit the `inductive State where | V1 | V2 (f : T) …` block plus the
+/// `Inhabited State` instance. The first variant supplies the Inhabited
+/// default — specs canonically declare the initial state first.
 fn emit_inductive_state_adt(out: &mut String, mir: &Mir) {
     out.push_str("inductive State where\n");
     for v in &mir.state.variants {
@@ -253,8 +190,7 @@ fn emit_inductive_state_adt(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit `def State.status : State → Status` with one match arm per
-/// variant. Mirrors `lean_gen::emit_state_status_accessor`.
+/// Emit `def State.status : State → Status` with one match arm per variant.
 fn emit_state_status_accessor_adt(out: &mut String, mir: &Mir) {
     out.push_str("def State.status : State \u{2192} Status\n");
     for v in &mir.state.variants {
@@ -269,10 +205,9 @@ fn emit_state_status_accessor_adt(out: &mut String, mir: &Mir) {
     out.push('\n');
 }
 
-/// Emit per-field `def State.<field> : State → <Type>` accessors
-/// across the union of variant fields. Each arm returns the bound
-/// field when the variant carries it; type defaults otherwise.
-/// Mirrors `lean_gen::emit_state_field_accessors`.
+/// Emit per-field `def State.<field> : State → <Type>` accessors across
+/// the union of variant fields. Each arm returns the bound field when the
+/// variant carries it; the type default otherwise.
 fn emit_state_field_accessors_adt(out: &mut String, mir: &Mir) {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut fields: Vec<(String, crate::mir::Ty)> = Vec::new();
@@ -320,9 +255,8 @@ fn emit_state_field_accessors_adt(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Return the Lean literal for the type's default value, used when
-/// a variant doesn't carry a field referenced through an accessor.
-/// Mirrors `lean_gen::default_value_for` against MIR's typed enum.
+/// Lean literal for the type's default value, used when a variant doesn't
+/// carry a field referenced through an accessor.
 fn ty_default_literal(ty: &crate::mir::Ty) -> &'static str {
     use crate::mir::Ty;
     match ty {
@@ -333,10 +267,9 @@ fn ty_default_literal(ty: &crate::mir::Ty) -> &'static str {
     }
 }
 
-/// Return the Lean literal for the type's maximum value, used by the
-/// ADT transition emitter to synthesize overflow bound checks on
-/// `Stmt::CheckedAdd` sites. Mirrors `lean_gen::type_max_const`.
-/// `None` for non-numeric / signed types.
+/// Lean literal for the type's maximum value, used to synthesize overflow
+/// bound checks on `Stmt::CheckedAdd` sites. `None` for non-numeric /
+/// signed types.
 fn ty_max_const(ty: &crate::mir::Ty) -> Option<&'static str> {
     use crate::mir::Ty;
     match ty {
@@ -350,9 +283,8 @@ fn ty_max_const(ty: &crate::mir::Ty) -> Option<&'static str> {
 }
 
 /// Strip a leading `Variant.` prefix from a `Path` so an effect like
-/// `Open.pool_balance := initial` resolves to the bare field name
-/// for variant-arm binding. Mirrors
-/// `rust_codegen_util::strip_variant_prefix_for_flat_state`.
+/// `Open.pool_balance := initial` resolves to the bare field name for
+/// variant-arm binding.
 fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String {
     if path.segments.len() >= 2 {
         let head = &path.segments[0];
@@ -364,15 +296,11 @@ fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String {
     path.segments.join(".")
 }
 
-/// Emit a transition function for each handler under the multi-variant
-/// ADT shape. Body: `match s with | .Pre <bindings> => … | _ => none`,
-/// where the arm constructs a `.Post <args>` from the effects + the
-/// pre-variant bindings.
-///
-/// Mirrors `lean_gen::render_transition_adt`. Cross-variant transitions
-/// whose post-variant has fields not derivable from the spec (effects,
-/// auth, pre-variant carry-over) fall back to type defaults with a
-/// `todo!()` comment, matching legacy behavior.
+/// Emit a transition per handler under the multi-variant ADT shape:
+/// `match s with | .Pre <bindings> => … | _ => none`, the arm constructing
+/// `.Post <args>` from effects + pre-variant bindings. Post-variant fields
+/// not derivable from the spec (effects, auth, carry-over) fall back to
+/// type defaults with a `todo!()` comment.
 fn emit_transitions_adt(out: &mut String, mir: &Mir) {
     for h in &mir.handlers {
         emit_handler_transition_adt(out, mir, h);
@@ -441,12 +369,10 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
         }
     }
 
-    // User-declared requires (both `pre` and `requires_or_abort`
-    // — combined here so the original spec ordering survives).
-    // Filter out clauses that mention a handler-account `.pubkey` /
-    // `.key()` projection: those identifiers have no Lean scope, so
-    // including them produces theorem statements with free
-    // variables. Mirrors `lean_gen::render_transition_adt:316-321`.
+    // User-declared requires (`pre` + `requires_or_abort`, combined so the
+    // original spec ordering survives). Clauses mentioning a handler-account
+    // `.pubkey` / `.key()` projection are filtered: those identifiers have
+    // no Lean scope and would leave free variables in the statement.
     for p in &h.pre {
         if mentions_handler_account_pubkey(&p.0.lean, &h.accounts) {
             continue;
@@ -460,17 +386,14 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
         cond_parts.push(r.pred.0.lean.clone());
     }
 
-    // Effect-derived bound checks. Only `CheckedAdd` / `CheckedSub`
-    // gain bounds — `Wrap*` / `Sat*` handle the boundary without
-    // aborting. Lookup the field's type in the pre-variant so the
-    // bound is correctly typed (unsigned add → overflow; unsigned sub
-    // → underflow; signed types skip the check).
+    // Effect-derived bound checks: only `CheckedAdd`/`CheckedSub` gain
+    // bounds (`Wrap*`/`Sat*` handle the boundary without aborting); the
+    // field's pre-variant type picks the bound (unsigned add → overflow,
+    // unsigned sub → underflow, signed skips).
     //
-    // `Stmt::Branch` arms are flattened to their union here — the ADT
-    // renderer predates conditional-effect rendering and keeps the
-    // pre-Phase-5 union semantics; real per-arm ADT rendering is a
-    // follow-up (the flat-state renderer at `emit_handler_transition`
-    // already renders a true Lean `match`).
+    // `Stmt::Branch` arms flatten to their union here — the ADT renderer
+    // keeps union semantics; per-arm ADT rendering is a follow-up (the
+    // flat-state `emit_handler_transition` already emits a true Lean `match`).
     for stmt in stmts_with_branch_union(&h.body.stmts) {
         match stmt {
             Stmt::CheckedAdd { path, delta, .. } => {
@@ -508,8 +431,7 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
                     }
                 }
             }
-            // `Wrap*` / `Sat*` handle the boundary without aborting;
-            // non-arithmetic stmts carry no bound to check.
+            // No bound to check.
             Stmt::Assign { .. }
             | Stmt::WrapAdd { .. }
             | Stmt::WrapSub { .. }
@@ -525,10 +447,8 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
         }
     }
 
-    // Build an effect map keyed by stripped field name. Account-
-    // binding `.pubkey` assignments (no Lean scope) are skipped
-    // — matches `lean_gen::render_transition_adt:355`. Branch arms
-    // flatten to their union (see the bound-check walk above).
+    // Effect map keyed by stripped field name. Account-binding `.pubkey`
+    // assignments (no Lean scope) are skipped. Branch arms flatten to union.
     let mut effect_map: std::collections::HashMap<String, (&'static str, String)> =
         std::collections::HashMap::new();
     for stmt in stmts_with_branch_union(&h.body.stmts) {
@@ -636,22 +556,17 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
 }
 
 // ----------------------------------------------------------------------
-// sBPF assembly renderer — ported verbatim from `lean_gen::render_sbpf`
-// (v2.32 sBPF workstream). Reads `ParsedSpec` directly: the assembly
-// domain (instructions / input_layout / insn_layout / guards over
-// `executeFn`) has no representation in the state-machine `Stmt` IR, and
-// Lean is the only backend that renders sBPF (Kani/proptest skip it), so
-// there is no cross-codegen divergence for MIR to prevent. Output is
-// byte-identical to the legacy renderer (gated by `tests/sbpf_lean_parity.rs`).
+// sBPF assembly renderer. Reads `ParsedSpec` directly: the assembly domain
+// (instructions / layouts / guards over `executeFn`) has no representation
+// in the state-machine `Stmt` IR, and Lean is the only backend rendering
+// sBPF (Kani/proptest skip it). Output gated by `tests/sbpf_lean_parity.rs`.
 // ----------------------------------------------------------------------
 fn render_sbpf(spec: &crate::check::ParsedSpec) -> String {
     let mut out = String::new();
 
-    // Derive Prog module name from spec program_name.
-    // E.g., spec Slippage → "SlippageProg", spec Transfer → "TransferProg"
+    // E.g. spec Slippage → "SlippageProg".
     let prog_module = format!("{}Prog", spec.program_name);
 
-    // Header
     out.push_str(&format!(
         "-- Generated by qedgen from {}.qedspec\n\
          -- Source of truth: the .qedspec file. Regenerate with:\n\
@@ -764,7 +679,6 @@ fn render_sbpf(spec: &crate::check::ParsedSpec) -> String {
             }
         }
 
-        // Entry point
         let entry = instr.entry.unwrap_or(0);
         let has_insn_reg = !instr.insn_layout.is_empty();
         // qedsvm's initState takes a RegionTable; accesses outside it trap
@@ -778,7 +692,6 @@ fn render_sbpf(spec: &crate::check::ParsedSpec) -> String {
             "initState inputAddr mem rt".to_string()
         };
 
-        // Guard theorem stubs
         if !instr.guards.is_empty() {
             out.push_str("-- Guard theorem stubs\n");
             out.push_str(
@@ -828,7 +741,6 @@ fn render_sbpf(spec: &crate::check::ParsedSpec) -> String {
                 }
             }
 
-            // Spec completeness structure
             out.push_str(
                 "-- Completeness structure: fill all fields to prove every guard is covered\n",
             );
@@ -876,7 +788,6 @@ fn render_sbpf(spec: &crate::check::ParsedSpec) -> String {
             out.push('\n');
         }
 
-        // Property theorem stubs
         if !instr.properties.is_empty() {
             out.push_str("-- Property theorem stubs\n\n");
             for prop in &instr.properties {
@@ -934,8 +845,7 @@ fn derive_guard_hypotheses(
         };
     };
 
-    // Parse checks expression: "field == CONST" or "field >= CONST"
-    // Support patterns: X == Y, X >= Y, X == Y (pubkey 4-chunk comparison)
+    // Parse checks expression: "field == CONST" / "field >= CONST".
     let parts: Vec<&str> = checks.split_whitespace().collect();
 
     if parts.len() == 3 {
@@ -943,7 +853,6 @@ fn derive_guard_hypotheses(
         let op = parts[1];
         let const_name = parts[2];
 
-        // Look up the field in layouts
         if let Some((_, ftype, offset, is_insn)) = all_offsets
             .iter()
             .find(|(name, _, _, _)| *name == field_name)
@@ -964,15 +873,14 @@ fn derive_guard_hypotheses(
                 format!("({} - {})", base_reg, offset.unsigned_abs())
             };
 
-            // Variable name: derive from field name
             let var_name = field_name_to_var(field_name);
 
-            // Check if const_name is also a layout field (field-vs-field comparison)
+            // const_name may itself be a layout field (field-vs-field comparison).
             let rhs_is_field = all_offsets
                 .iter()
                 .find(|(name, _, _, _)| *name == const_name);
 
-            // Build RHS: if it's a field, introduce a variable and read hypothesis for it
+            // Field RHS gets its own variable + read hypothesis.
             let (rhs_var, rhs_bindings) = if let Some((_, rtype, roffset, r_is_insn)) = rhs_is_field
             {
                 let rhs_read = match *rtype {
@@ -1106,7 +1014,7 @@ fn error_to_lean_name(name: &str) -> String {
 
 /// Convert layout field name to a Lean variable name.
 fn field_name_to_var(name: &str) -> String {
-    // Convert snake_case to camelCase for variable names
+    // snake_case → camelCase.
     let parts: Vec<&str> = name.split('_').collect();
     if parts.len() <= 1 {
         return name.to_string();
@@ -1128,16 +1036,13 @@ fn offset_to_lean_name(name: &str) -> String {
     name.to_ascii_uppercase()
 }
 
-/// `(root_field, idx)` → `Vec<(inner_field, op_kind, value)>`.
-/// Indexed-effect grouping used by `emit_indexed_transition` to
-/// collapse multiple writes to the same `Map` slot into a single
-/// `Function.update` call. Mirrors `lean_gen::IndexedEffectsByRoot`.
+/// `(root_field, idx)` → `Vec<(inner_field, op_kind, value)>` — groups
+/// multiple writes to the same `Map` slot into one `Function.update`.
 type IndexedEffectsByRoot =
     std::collections::BTreeMap<(String, String), Vec<(String, String, String)>>;
 
-/// Map a scalar DSL type string to its Lean type. Mirrors
-/// `lean_gen::map_scalar_type` (record fields carry string types, not the
-/// typed `Ty`, so the indexed renderer needs this string-form mapper).
+/// Map a scalar DSL type string to its Lean type (record fields carry
+/// string types, not the typed `Ty`).
 fn map_scalar_type(t: &str) -> String {
     match t.trim() {
         "U8" | "U16" | "U32" | "U64" | "U128" => "Nat".to_string(),
@@ -1148,8 +1053,7 @@ fn map_scalar_type(t: &str) -> String {
     }
 }
 
-/// Default value for a record field's `Inhabited` instance. Mirrors
-/// `lean_gen::default_value_for`.
+/// Default value for a record field's `Inhabited` instance.
 fn default_value_for(t: &str) -> &'static str {
     match t.trim() {
         "U8" | "U16" | "U32" | "U64" | "U128" => "0",
@@ -1159,12 +1063,9 @@ fn default_value_for(t: &str) -> &'static str {
     }
 }
 
-/// Indexed-state Lean renderer — port of `lean_gen::render_indexed_state`.
-///
-/// Fires when any state field is `Ty::Map { .. }`. Indexed-state specs
-/// (multisig, etc.) need Mathlib's `Fin`/`Function.update` machinery,
-/// so the output shape diverges substantially from the flat /
-/// ADT-State renderers:
+/// Indexed-state Lean renderer — fires when any state field is
+/// `Ty::Map { .. }`. Needs Mathlib's `Fin`/`Function.update` machinery,
+/// so the output shape diverges from the flat / ADT-State renderers:
 ///
 ///   * imports `Mathlib.Algebra.BigOperators.Fin` + the
 ///     `QEDGenMathlib.IndexedState` slice (defines `Map N α := Fin N → α`).
@@ -1221,13 +1122,11 @@ fn render_indexed_state(mir: &Mir) -> String {
 
     // -- Record structures (e.g. Account) --
     //
-    // Skip a record literally named "State": v2.26's `type State = { ... }`
-    // record-form lowering deposits the State record into `mir.records`
-    // AND the State variant. The dedicated `structure State where` emission
-    // below is the canonical source; emitting it twice produces a Lean
-    // `redeclaration of State` error. The Account-style records this loop
-    // targets are auxiliary records (Map value types). Mirrors
-    // `lean_gen::render_indexed_state`'s record loop.
+    // Skip a record literally named "State": the `type State = { ... }`
+    // record-form lowering deposits it into `mir.records` AND the State
+    // variant; the dedicated `structure State where` emission below is
+    // canonical, and emitting twice is a Lean `redeclaration of State`
+    // error. This loop targets auxiliary records (Map value types).
     for rec in &mir.records {
         if rec.name == "State" {
             continue;
@@ -1344,12 +1243,8 @@ fn render_ty_indexed(ty: &crate::mir::Ty) -> String {
         Ty::Pubkey => "Pubkey".to_string(),
         Ty::Custom(name) => name.clone(),
         Ty::Map { capacity, value } => {
-            // Legacy emits the inner unchanged (e.g. `U8`, not `Nat`)
-            // since indexed-state struct fields preserve the surface
-            // type for the codegen's downstream Rust-side mirror.
-            // Matches `render_indexed_state`'s state-field branch
-            // which calls `map_scalar_type` for non-Map fields but
-            // leaves the Map's inner type literal.
+            // The Map's inner type stays the literal surface type (e.g.
+            // `U8`, not `Nat`) for the downstream Rust-side mirror.
             let inner = match value.as_ref() {
                 Ty::U8 => "U8".to_string(),
                 Ty::U16 => "U16".to_string(),
@@ -1368,11 +1263,9 @@ fn render_ty_indexed(ty: &crate::mir::Ty) -> String {
     }
 }
 
-/// Pick the constant name used to bound `AccountIdx`. Mirrors
-/// `lean_gen::pick_account_idx_bound` — first `MAX_*` constant
-/// declared, falling back to `MAX*`, then the literal `1024`. (The
-/// `type AccountIdx = Fin[N]` alias path isn't lifted into MIR yet;
-/// add when a fixture needs it.)
+/// Pick the constant bounding `AccountIdx`: first `MAX_*` constant, else
+/// `MAX*`, else the literal `1024`. (The `type AccountIdx = Fin[N]` alias
+/// path isn't lifted into MIR yet; add when a fixture needs it.)
 fn pick_account_idx_bound_mir(mir: &Mir) -> String {
     for (n, _) in &mir.constants {
         if n.starts_with("MAX_") && !n.contains("TVL") {
@@ -1404,9 +1297,8 @@ fn collect_map_roots(mir: &Mir) -> std::collections::BTreeMap<String, String> {
 }
 
 /// Parse an indexed effect LHS (`voted[member_index]` or
-/// `members[i].field`) into `(root, idx, inner_field)`. `inner_field`
-/// is empty when the LHS targets the whole entry. Returns `None` if
-/// the LHS lacks brackets. Mirrors `lean_gen::parse_indexed_lhs`.
+/// `members[i].field`) into `(root, idx, inner_field)`. `inner_field` is
+/// empty when the LHS targets the whole entry; `None` if no brackets.
 fn parse_indexed_lhs(lhs: &str) -> Option<(&str, &str, &str)> {
     let bracket = lhs.find('[')?;
     let root = &lhs[..bracket];
@@ -1419,7 +1311,7 @@ fn parse_indexed_lhs(lhs: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// Infer Fin-bound promotions for a handler's scalar params used as
-/// Map indexes. Mirrors `lean_gen::infer_idx_promotions`.
+/// Map indexes.
 fn infer_idx_promotions_mir(
     h: &crate::mir::HandlerMir,
     map_roots: &std::collections::BTreeMap<String, String>,
@@ -1482,9 +1374,9 @@ fn infer_idx_promotions_mir(
     result
 }
 
-/// Walk `expr` for `<root>[<idx>]` patterns. `record` is invoked once
-/// per match with the bare root identifier (last `.` segment) and the
-/// trimmed index string. Mirrors `lean_gen::scan_indexed_in_expr`.
+/// Walk `expr` for `<root>[<idx>]` patterns. `record` is invoked once per
+/// match with the bare root identifier (last `.` segment) and the trimmed
+/// index string.
 fn scan_indexed_in_expr(expr: &str, record: &mut dyn FnMut(&str, &str)) {
     let bytes = expr.as_bytes();
     let mut i = 0;
@@ -1517,10 +1409,8 @@ fn scan_indexed_in_expr(expr: &str, record: &mut dyn FnMut(&str, &str)) {
 }
 
 /// Subscript rewriter — `state.members[i] = approver` →
-/// `(s.members i) = approver`. Mirrors
-/// `lean_gen::rewrite_subscripts_lean` byte-for-byte. Operates on a
-/// pre-rendered Lean expression string (the opaque-expression
-/// discipline applies here too).
+/// `(s.members i) = approver`. Operates on a pre-rendered Lean expression
+/// string (the opaque-expression discipline applies here too).
 fn rewrite_subscripts_lean(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     let mut it = s.char_indices().peekable();
@@ -1568,10 +1458,9 @@ fn rewrite_subscripts_lean(s: &str) -> String {
 }
 
 /// Render an effect RHS for the indexed-state transition body. Bare
-/// numeric literals and bare param refs pass through; pre-rendered
-/// Lean compounds (starting with `s.`, `(`, `match`, etc.) get
-/// subscript rewriting only. Bare field names take an `s.` prefix
-/// plus subscript rewriting. Mirrors `lean_gen::effect_value_to_lean`.
+/// numeric literals and bare param refs pass through; pre-rendered Lean
+/// compounds (starting with `s.`, `(`, `match`, etc.) get subscript
+/// rewriting only; bare field names take an `s.` prefix + rewriting.
 fn effect_value_to_lean_mir(
     value: &str,
     params: &[(crate::mir::Symbol, crate::mir::Ty)],
@@ -1647,15 +1536,12 @@ fn emit_indexed_transition(
             conds.push(format!("s.status = .{}", safe_name(pre)));
         }
     }
-    // Requires clauses — emitted in ORIGINAL spec order via
-    // `requires_in_order` (both `requires X else Err` and bare
-    // `requires X`), matching legacy `render_indexed_state`'s
-    // single-list iteration of `ParsedHandler.requires`. Iterating the
-    // split `body RequireOrAbort` then `h.pre` instead reorders an
-    // interleaved bare/with-err sequence (e.g. percolator's
-    // match-arm-abort: the arm condition is bare, the abort marker
-    // carries an error). Parenthesized as wholes; subscript-rewritten
-    // so `state.members[i]` → `(s.members i)`.
+    // Requires clauses in ORIGINAL spec order via `requires_in_order`
+    // (bare `requires X` interleaved with `requires X else Err`).
+    // Iterating the split body-RequireOrAbort then `h.pre` instead would
+    // reorder an interleaved sequence (e.g. match-arm-abort: bare arm
+    // condition + error-carrying abort marker). Parenthesized as wholes;
+    // subscript-rewritten so `state.members[i]` → `(s.members i)`.
     for pred in &h.requires_in_order {
         if mentions_handler_account_pubkey(&pred.0.lean, &h.accounts) {
             continue;
@@ -1692,11 +1578,10 @@ fn emit_indexed_transition(
         }
         // Reconstruct the full dotted LHS: an indexed-record-field write
         // lowers to a multi-segment path (`accounts[i].active` →
-        // `["accounts[i]", "active"]`). Using only the first segment drops
-        // the `.active` field, so `parse_indexed_lhs` would see an empty
-        // inner-field and emit a whole-entry `Function.update … (val)`
-        // instead of `{ (s.accounts i) with active := val }` (issue: the
-        // record-field write would be silently lost / mis-typed).
+        // `["accounts[i]", "active"]`). Using only the first segment would
+        // drop `.active` and emit a whole-entry `Function.update … (val)`
+        // instead of `{ (s.accounts i) with active := val }`, silently
+        // losing / mis-typing the record-field write.
         let lhs = path.segments.join(".");
         if let Some((root, idx, inner_field)) = parse_indexed_lhs(&lhs) {
             if map_roots.contains_key(root) {
@@ -1805,9 +1690,8 @@ fn indexed_param_sig(
         .join("")
 }
 
-/// Emit `inductive Operation where | ctor (params) …` + the
-/// `def applyOp` dispatcher for the indexed-state shape. The
-/// Operation enum doesn't carry a `deriving` clause (matches legacy).
+/// Emit `inductive Operation where | ctor (params) …` + the `def applyOp`
+/// dispatcher for the indexed-state shape (no `deriving` clause).
 fn emit_indexed_operation_inductive(
     out: &mut String,
     mir: &Mir,
@@ -1852,28 +1736,19 @@ fn emit_indexed_operation_inductive(
     out.push('\n');
 }
 
-/// v2.30 Phase 2 — multi-account renderer. Mirrors
-/// `lean_gen::render_multi_account` (`crates/qedgen/src/lean_gen.rs`).
+/// Multi-account renderer. Per `type <Account>`: `<Account>State` struct,
+/// `<Account>Status` inductive, transitions, `<Account>Operation` +
+/// `apply<Account>Op`, with CPI theorems interleaved in the owning
+/// account's block. Invariants lower as structured comments (variant-typed
+/// binders need a richer lowering — v3.0). Properties group by the account
+/// whose fields they touch; aborts / ensures / overflow emit per account;
+/// covers / liveness / environments bind to the primary account
+/// (cross-account cover traces emit skip-comments).
 ///
-/// For each `type <Account>` declared in the spec, emits a separate
-/// `<Account>State` structure, `<Account>Status` lifecycle inductive,
-/// per-account transition functions, a per-account `<Account>Operation`
-/// inductive + `apply<Account>Op` dispatcher. CPI theorems for handlers
-/// owned by the account are interleaved with that account's block (same
-/// ordering as the legacy renderer). Invariants are lowered as
-/// structured comments (multi-account variant-typed binders need a
-/// richer lowering — v3.0). Properties group by which account's fields
-/// they touch; aborts / ensures / overflow emit per account. Covers /
-/// liveness / environments bind to the primary account (covers whose
-/// traces span accounts emit skip-comments).
-///
-/// Implementation strategy: build a per-account *scoped Mir* whose
-/// `state` and `handlers` are filtered to that account, call the
-/// existing single-account section emitters, then rewrite the bare
-/// type/function identifiers (`State`, `Status`, `Operation`,
-/// `applyOp`, `applyOps`) to their per-account form via
-/// `rename_state_idents`. This keeps the multi-account port small
-/// without duplicating every emitter.
+/// Strategy: build a per-account *scoped Mir*, call the existing
+/// single-account section emitters, then rewrite the bare identifiers
+/// (`State`, `Status`, `Operation`, `applyOp`, `applyOps`) to per-account
+/// form via `rename_state_idents` — avoids duplicating every emitter.
 fn render_multi_account(mir: &Mir) -> String {
     let mut out = String::new();
     emit_header(&mut out, mir);
@@ -1883,8 +1758,7 @@ fn render_multi_account(mir: &Mir) -> String {
     emit_constants(&mut out, mir);
 
     // Pass 1 — per-account: Status, State, Transitions, CPI theorems,
-    // Operation + applyOp. Mirrors the first `for acct in &spec.account_types`
-    // loop in `lean_gen::render_multi_account` lines 1334–1387.
+    // Operation + applyOp.
     for acct in &mir.account_states {
         let scoped = scope_mir_to_account(mir, acct);
         if scoped.handlers.is_empty() {
@@ -1899,17 +1773,13 @@ fn render_multi_account(mir: &Mir) -> String {
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
 
-    // Invariants — multi-account translation deferred. Emit as
-    // structured comments to match `lean_gen::render_invariants_as_comments`
-    // (lines 2390–2406).
+    // Invariants — multi-account translation deferred; emit as
+    // structured comments.
     emit_invariants_as_comments(&mut out, mir);
 
-    // Properties grouped by account ownership. Mirrors
-    // `lean_gen::render_properties_multi` lines 2521–2601.
     emit_properties_multi(&mut out, mir);
 
     // Pass 2 — per-account: aborts_if, ensures, frame, overflow.
-    // Mirrors `lean_gen::render_multi_account` lines 1405–1428.
     // Overflow needs each account's properties on the scoped Mir so the
     // `h_inv_<prop>` hypothesis threads correctly.
     let prop_groups = group_properties_by_account(mir);
@@ -1929,8 +1799,7 @@ fn render_multi_account(mir: &Mir) -> String {
         out.push_str(&rename_state_idents(&block, &acct.name));
     }
 
-    // Spec-level covers: emit the section header when any covers
-    // exist (matches legacy). Cross-account traces become skip-comments;
+    // Spec-level covers: cross-account traces become skip-comments;
     // single-account traces emit through the regular cover-witness
     // machinery scoped to the primary account.
     let primary = &mir.account_states[0];
@@ -1941,10 +1810,8 @@ fn render_multi_account(mir: &Mir) -> String {
         out.push_str(&rename_state_idents(&tail, &primary.name));
     }
 
-    // Liveness — each `liveness <name> : <from> ~> <to> via [op1, ...]`
-    // binds to the account that owns the via-ops (resolved via
-    // `via_ops[0].on_account`). Matches `lean_gen::render_liveness`
-    // line ~3910.
+    // Liveness binds to the account owning the via-ops (resolved via
+    // `via_ops[0].on_account`).
     emit_liveness_multi(&mut out, mir);
 
     // Environments — each property × environment cross emits its
@@ -2048,9 +1915,8 @@ fn emit_liveness_inner_body(
     emitted_helpers: &mut std::collections::BTreeSet<String>,
     account_name: &str,
 ) {
-    // Buffer raw output (still using bare identifiers) so we can rename
-    // before pushing into the caller's `out`. The applyOps helper is
-    // emitted at most once per account.
+    // Buffer raw output (bare identifiers) so we can rename before pushing
+    // to the caller. The applyOps helper emits at most once per account.
     let mut buf = String::new();
     let helper_key = format!("apply{}Ops", account_name);
     if !emitted_helpers.contains(&helper_key) {
@@ -2064,24 +1930,18 @@ fn emit_liveness_inner_body(
         emitted_helpers.insert(helper_key);
     }
 
-    // Reuse the existing liveness theorem emitter via a temporary
-    // header-stripped wrapper. emit_liveness_inner emits its own
-    // section header which we've already written, so we render to a
-    // throwaway buffer and slice off the header lines.
+    // `emit_liveness_inner_no_header` skips both the section header (already
+    // written by the caller) and the applyOps helper (managed above).
     let mut tmp = String::new();
     emit_liveness_inner_no_header(&mut tmp, scoped, /* adt_form */ false);
-    // emit_liveness_inner_no_header skips both the section header AND
-    // the always-emitted applyOps helper; we manage the helper above.
     buf.push_str(&tmp);
 
     out.push_str(&rename_state_idents(&buf, account_name));
 }
 
 /// Body of `emit_liveness_inner` minus the section header and the
-/// helper-emit (those are handled by `emit_liveness_multi` /
-/// `emit_liveness_inner_body`). Inline copy of the per-theorem block
-/// from `emit_liveness_inner` (line ~3844). When the legacy auto-
-/// discharge script lands, this stays in sync.
+/// helper-emit (handled by `emit_liveness_multi` /
+/// `emit_liveness_inner_body`). Keep in sync with `emit_liveness_inner`.
 fn emit_liveness_inner_no_header(out: &mut String, mir: &Mir, adt_form: bool) {
     for liveness in &mir.liveness_props {
         let bound = liveness.within_steps.unwrap_or(10);
@@ -2130,12 +1990,8 @@ fn emit_liveness_inner_no_header(out: &mut String, mir: &Mir, adt_form: bool) {
 }
 
 /// Multi-account environment emit. Each property × environment cross
-/// emits a preservation theorem against the property's owning account.
-/// Mirrors the structure of `emit_environments` but groups by the
-/// account whose fields the property touches; the legacy single-call
-/// `render_environments(out, spec, primary)` works for lending only
-/// because `pool_solvency` happens to bind to the primary, but the
-/// shape generalizes.
+/// emits a preservation theorem against the property's owning account
+/// (grouped by the account whose fields the property touches).
 fn emit_environments_multi(out: &mut String, mir: &Mir) {
     if mir.environments.is_empty() || mir.properties.is_empty() {
         return;
@@ -2164,11 +2020,10 @@ fn emit_environments_multi(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Body of `emit_environments` minus the section header (already
-/// written by `emit_environments_multi`). Keeps the rest of the
-/// per-theorem rendering in lockstep with the single-account path,
-/// including the bare-field-name rewrite that the spec's `constraint
-/// <field> > 0` form needs.
+/// Body of `emit_environments` minus the section header (written by
+/// `emit_environments_multi`). Per-theorem rendering stays in lockstep
+/// with the single-account path, including the bare-field-name rewrite
+/// the spec's `constraint <field> > 0` form needs.
 fn emit_environments_no_header(out: &mut String, mir: &Mir) {
     for env in &mir.environments {
         for prop in &mir.properties {
@@ -2336,11 +2191,10 @@ fn rename_state_idents(text: &str, account_name: &str) -> String {
     out
 }
 
-/// Emit declared invariants as structured comments — matches
-/// `lean_gen::render_invariants_as_comments`. Multi-account variant-
-/// typed invariant bodies (e.g. `forall l : Loan.Active, …`) need a
-/// richer lowering pass (v3.0); comments preserve the declared name +
-/// body for visibility.
+/// Emit declared invariants as structured comments. Multi-account
+/// variant-typed invariant bodies (e.g. `forall l : Loan.Active, …`) need
+/// a richer lowering pass (v3.0); comments preserve name + body for
+/// visibility.
 fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
     for inv in &mir.invariants {
         out.push_str(&format!(
@@ -2360,8 +2214,7 @@ fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
 }
 
 /// Group properties by which account's fields they reference, then
-/// emit each group through the per-account scoped path. Mirrors
-/// `lean_gen::render_properties_multi`.
+/// emit each group through the per-account scoped path.
 fn emit_properties_multi(out: &mut String, mir: &Mir) {
     use std::collections::BTreeMap;
 
@@ -2403,12 +2256,9 @@ fn emit_properties_multi(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit cover trace theorems, skipping any whose handler sequence
-/// targets more than one account. The skipped traces emit a structured
-/// comment so the spec author can see the obligation was dropped.
-/// Matches the multi-account skip behavior of
-/// `lean_gen::render_covers` (which sees `state_type = primary` and
-/// the legacy multi-account skip-comment).
+/// Emit cover trace theorems, skipping any whose handler sequence targets
+/// more than one account; skipped traces emit a structured comment so the
+/// spec author can see the obligation was dropped.
 fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mir) {
     if mir.covers.is_empty() {
         return;
@@ -2421,8 +2271,8 @@ fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mir) {
         .collect();
     let primary_name = mir.account_states.first().map(|a| a.name.clone());
 
-    // Section header always written when any covers exist (legacy emits
-    // the same header even if every trace ends up as a skip-comment).
+    // Section header always written when any covers exist, even if every
+    // trace ends up as a skip-comment.
     out.push_str(
         "-- ============================================================================\n",
     );
@@ -2511,7 +2361,6 @@ fn emit_namespace_close(out: &mut String, mir: &Mir) {
 }
 
 /// Emit `abbrev NAME : Nat := VALUE` lines for top-level constants.
-/// Mirrors `lean_gen::render_single_account` line ~1203.
 fn emit_constants(out: &mut String, mir: &Mir) {
     if mir.constants.is_empty() {
         return;
@@ -2522,12 +2371,8 @@ fn emit_constants(out: &mut String, mir: &Mir) {
     out.push('\n');
 }
 
-/// Emit uninterpreted-helper declarations.
-/// Mirrors `lean_gen::emit_uninterpreted_helpers`.
-///
-/// Each helper becomes a Lean `opaque <name> : T1 → T2 → ... → R`
-/// declaration. `opaque` (not `axiom`) so transition functions stay
-/// computable.
+/// Emit uninterpreted helpers as Lean `opaque <name> : T1 → … → R`
+/// declarations (`opaque`, not `axiom`, so transitions stay computable).
 fn emit_uninterpreted_helpers(out: &mut String, mir: &Mir) {
     if mir.uninterpreted_helpers.is_empty() {
         return;
@@ -2554,16 +2399,10 @@ fn emit_uninterpreted_helpers(out: &mut String, mir: &Mir) {
     out.push('\n');
 }
 
-/// Emit `def`-style reference-implementation declarations.
-/// Mirrors `lean_gen::emit_ref_impls`.
-///
-/// `ref_impl` bodies are emitted as Lean `def`s. Map-indexed subscripts
-/// (`m[i]`) in the Lean body get rewritten to function-application
-/// form (`(m i)`) since `Map N T = Fin N → T` doesn't have a GetElem
-/// instance — handled by a small rewrite pass that lean_gen.rs ships
-/// as `rewrite_subscripts_lean`. For Phase 1c-4 we emit the body
-/// verbatim; the subscript-rewrite port lands in a follow-up if any
-/// pilot fixture trips on it.
+/// Emit `ref_impl` bodies as Lean `def`s. Bodies are emitted verbatim:
+/// Map-indexed subscripts (`m[i]` → `(m i)`; `Map N T = Fin N → T` has no
+/// GetElem instance) aren't rewritten here — apply
+/// `rewrite_subscripts_lean` if a fixture trips on it.
 fn emit_ref_impls(out: &mut String, mir: &Mir) {
     if mir.ref_impls.is_empty() {
         return;
@@ -2582,9 +2421,6 @@ fn emit_ref_impls(out: &mut String, mir: &Mir) {
             .collect::<Vec<_>>()
             .join(" ");
         let ret = map_dsl_ty(&r.return_type);
-        // Phase 1c-4 emits the lean_body verbatim. lean_gen.rs runs a
-        // `rewrite_subscripts_lean` pass over Map-indexed expressions
-        // (`m[i]` → `(m i)`); port when a pilot fixture needs it.
         let body = &r.lean_body;
         if params.is_empty() {
             out.push_str(&format!(
@@ -2606,12 +2442,9 @@ fn emit_ref_impls(out: &mut String, mir: &Mir) {
     out.push('\n');
 }
 
-/// Map a DSL type-string to its Lean form. Mirrors
-/// `lean_gen::map_type_with_compound` for the common cases used by
-/// `ref_impl` parameter / return types. Unknown forms pass through
-/// unchanged — Phase 1c-4 doesn't try for compound-type support
-/// (`Map[N] T`, `Fin[N]`, ...). A future slice can port the legacy's
-/// compound-aware mapper when a fixture demands it.
+/// Map a DSL type-string to its Lean form (scalar cases only). Unknown
+/// forms — including compounds like `Map[N] T`, `Fin[N]` — pass through
+/// unchanged; add compound support when a fixture demands it.
 fn map_dsl_ty(s: &str) -> String {
     match s.trim() {
         "U8" | "U16" | "U32" | "U64" | "U128" => "Nat".to_string(),
@@ -2621,16 +2454,9 @@ fn map_dsl_ty(s: &str) -> String {
 }
 
 fn emit_lifecycle_marker(out: &mut String, mir: &Mir) {
-    // lean_gen.rs:1216 — emit `inductive Status` if the lifecycle has
-    // ≥ 2 states. Issue #43: a single-state lifecycle is no
-    // discriminator; emitting Status for it collides with user-declared
-    // `status` fields.
-    //
-    // Flat-path shape: bare variant tags (no `: Status` annotation) and
-    // `deriving Repr, DecidableEq, BEq` to match `lean_gen::render_single_account`.
-    // Distinct from the multi-variant ADT path's `emit_status_inductive_adt`
-    // — same shape (deriving order) but the flat path doesn't need to share
-    // the helper since the State block itself differs.
+    // Emit `inductive Status` only when the lifecycle has ≥ 2 states: a
+    // single-state lifecycle is no discriminator, and emitting Status for
+    // it collides with user-declared `status` fields (issue #43).
     let states = &mir.state.lifecycle_states;
     if states.len() < 2 {
         return;
@@ -2646,8 +2472,7 @@ fn emit_lifecycle_marker(out: &mut String, mir: &Mir) {
     out.push_str("  deriving Repr, DecidableEq, BEq, Inhabited\n\n");
 }
 
-/// Emit one transition function per handler. Mirrors
-/// `lean_gen::render_transitions` for the pilot scope:
+/// Emit one transition function per handler:
 ///
 /// ```text
 /// def <name>Transition (s : State) (signer : Pubkey) <params> : Option State :=
@@ -2658,11 +2483,9 @@ fn emit_lifecycle_marker(out: &mut String, mir: &Mir) {
 ///     none
 /// ```
 ///
-/// Pilot scope: lowers `Stmt::RequireOrAbort` into the if-condition;
-/// `Stmt::Assign` / `CheckedAdd` / `CheckedSub` / `WrapAdd` / etc. into
-/// the `{ s with ... }` record update. `TokenTransfer` and `Cpi`
-/// don't affect local state — they're discharged by separate CPI
-/// theorems (Phase 1c-later slice).
+/// `Stmt::RequireOrAbort` lowers into the if-condition; the Assign / Add /
+/// Sub family into the `{ s with ... }` record update. `TokenTransfer` and
+/// `Cpi` don't affect local state — separate CPI theorems discharge them.
 fn emit_transitions(out: &mut String, mir: &Mir) {
     for h in &mir.handlers {
         emit_handler_transition(out, mir, h);
@@ -2675,7 +2498,6 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
     let trans_name = safe_name(&format!("{}Transition", h.name));
     let param_sig = param_sig_str(&h.params);
 
-    // Signature.
     out.push_str(&format!(
         "def {} (s : State) (signer : Pubkey){} : Option State :=\n",
         trans_name, param_sig
@@ -2683,9 +2505,9 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
 
     let conds = build_guard_cond_parts(mir, h);
 
-    // Auth alias: `let <who> := signer` only when `who` is NOT a state
-    // field (legacy behavior; otherwise the conjunct above already
-    // pins the relationship and an alias would shadow the field name).
+    // Auth alias `let <who> := signer` only when `who` is NOT a state
+    // field (otherwise the guard conjunct already pins the relationship
+    // and an alias would shadow the field name).
     if let Some(who) = handler_auth_name(h) {
         let state_fields = flat_state_fields(mir);
         let who_is_state_field = state_fields.iter().any(|(n, _)| n == &who);
@@ -2698,22 +2520,18 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
     // (appended to the flat `{ s with … }` parts, or to every arm of a
     // conditional-effect `match`).
     let mut common_parts: Vec<String> = Vec::new();
-    // Lifecycle promotion: `state := .NextVariant` lowers as
-    // `status := .NextVariant` on the lifecycle marker field. For
-    // pilot fixtures, the transition arrow on HandlerMir.transition
-    // captures this; emit the post-status set when present.
+    // Lifecycle promotion: emit `status := .<post>` when the handler
+    // declares a transition arrow — but only when the lifecycle is real
+    // (≥ 2 states); single-lifecycle specs skip the marker (issue #43).
     if let Some((_, post)) = &h.transition {
-        // Only emit the `status :=` part when lifecycle is real
-        // (≥2 states); single-lifecycle specs skip the marker per
-        // issue #43.
         if mir.state.lifecycle_states.len() >= 2 {
             common_parts.push(format!("status := .{}", safe_name(post)));
         }
     }
-    // Issue #67 item 3 — ghost field updates. A ghost with an `on <this
-    // handler>` clause assigns its new value alongside the normal effects;
-    // ghosts without a clause are left unchanged (the `{ s with … }`
-    // record update preserves unmentioned fields — the frame condition).
+    // Ghost field updates: a ghost with an `on <this handler>` clause
+    // assigns alongside the normal effects; ghosts without one stay
+    // unchanged (the `{ s with … }` update preserves unmentioned fields —
+    // the frame condition).
     for ghost in &mir.ghosts {
         if let Some(val) = ghost.updates.get(&h.name) {
             common_parts.push(format!("{} := {}", safe_name(&ghost.name), val.lean));
@@ -2732,10 +2550,9 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
         }
     };
 
-    // Conditional effects (Phase 5, issue #42) — `effect { match … }`
-    // lowers to a `Stmt::Branch`; render a real Lean `match` so the
-    // model applies exactly one arm (the pre-Phase-5 renderer applied
-    // the *union* of every arm unconditionally — semantically wrong).
+    // Conditional effects: `effect { match … }` lowers to `Stmt::Branch`;
+    // render a real Lean `match` so the model applies exactly one arm
+    // (applying the *union* of arms unconditionally is semantically wrong).
     let branch = h.body.stmts.iter().find_map(|st| match st {
         Stmt::Branch {
             scrutinee,
@@ -2824,9 +2641,8 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
     }
 }
 
-/// Body statements with `Stmt::Branch` arms flattened in (the union
-/// view). Used by the ADT transition renderer, which predates
-/// conditional-effect rendering and keeps pre-Phase-5 union semantics.
+/// Body statements with `Stmt::Branch` arms flattened in (the union view).
+/// Used by the ADT transition renderer, which keeps union semantics.
 fn stmts_with_branch_union(stmts: &[crate::mir::Stmt]) -> Vec<&crate::mir::Stmt> {
     let mut out = Vec::new();
     for s in stmts {
@@ -2854,19 +2670,16 @@ fn flat_effect_with_parts(h: &crate::mir::HandlerMir, stmts: &[crate::mir::Stmt]
     for stmt in stmts {
         match stmt {
             Stmt::Assign { path, rhs } => {
-                // Drop `<field> := <account_binding>.pubkey` — the
-                // mirror behavior from lean_gen.rs:1839; account-binding
-                // pubkey refs have no Lean scope.
+                // Drop `<field> := <account_binding>.pubkey` — account-
+                // binding pubkey refs have no Lean scope.
                 if is_account_pubkey_ref(&rhs.rust) {
                     continue;
                 }
                 // Re-qualify the RHS: a bare state-field ref (e.g.
-                // `reserved := state.cap`, which upstream strips to `cap`)
-                // must render as `s.cap`, while handler params and literals
-                // pass through unchanged. The indexed-state path already
-                // routes through this helper; the flat path used to emit
-                // `rhs.lean` verbatim, producing `reserved := cap`
-                // (unknown identifier `cap`) — issue #79 Bug A.
+                // `reserved := state.cap`, stripped upstream to `cap`)
+                // must render as `s.cap` — emitting `rhs.lean` verbatim
+                // yields an unknown identifier. Handler params and
+                // literals pass through unchanged.
                 with_parts.push(format!(
                     "{} := {}",
                     safe_name(&path_field_name(path)),
@@ -2990,14 +2803,11 @@ fn flat_effect_bound_conds(
     conds
 }
 
-/// Build the if-condition conjuncts for a handler's flat-state
-/// transition function. Mirrors `lean_gen::build_guard_cond_parts`
-/// exactly; emit-site users (transition body, aborts theorem proof
-/// indexing) share the same conjunct list.
-///
-/// Order (and content) matches legacy so the resulting `if` line,
-/// `cond_parts.iter().position(...)` lookups, and conjunction-
-/// projection paths are byte-equivalent:
+/// Build the if-condition conjuncts for a handler's flat-state transition.
+/// Emit-site users (transition body, aborts theorem proof indexing) share
+/// this conjunct list, so order and content are load-bearing — the `if`
+/// line, `cond_parts.iter().position(...)` lookups, and conjunction-
+/// projection paths must agree:
 ///   1. `signer = s.<who>`  (only if `who` names a state field)
 ///   2. `s.status = .<pre>` (lifecycle gate)
 ///   3. sub-effect underflow guards (`<delta> ≤ s.<field>`, unsigned only)
@@ -3127,35 +2937,27 @@ fn flat_state_fields(mir: &Mir) -> Vec<(String, crate::mir::Ty)> {
     out
 }
 
-/// Emit CPI theorems — Phase 1c-7 port of
-/// `lean_gen::render_cpi_theorems`. Two halves:
+/// Emit CPI theorems, two halves:
 ///
-/// 1. **Transfer-envelope theorems** — per `Stmt::TokenTransfer`,
-///    emit a `def build_<handler>_transfer<suffix>` CPI constructor
-///    over the SPL Token Transfer envelope (program ID, account
-///    metas, discriminator) and a sibling `_correct` theorem that
-///    closes by `rfl`. Authorityless transfers (no `authority`
-///    clause in the `transfers` block) skip the theorem and emit a
-///    tracked-obligation comment — the 3-account envelope shape
-///    doesn't apply.
+/// 1. **Transfer-envelope theorems** — per `Stmt::TokenTransfer`, a
+///    `def build_<handler>_transfer<suffix>` CPI constructor over the SPL
+///    Token Transfer envelope plus a sibling `_correct` theorem closing by
+///    `rfl`. Authorityless transfers skip the theorem and emit a
+///    tracked-obligation comment — the 3-account envelope doesn't apply.
 ///
-/// 2. **Call-site ensures-as-axiom theorems** — per `Stmt::Cpi`,
-///    look up the callee in `Mir.imports`, then emit one theorem per
-///    declared `ensures` clause. Tier-1/2 callees (those with
-///    `upstream.binary_hash` non-empty AND non-empty ensures) close
-///    via `<Iface>.<method>.ensures_axiom_<idx>`. Tier-0 callees
-///    keep the `:= by sorry` shape — the P1 lint
-///    `cpi_no_callee_ensures` surfaces them at check time.
+/// 2. **Call-site ensures-as-axiom theorems** — per `Stmt::Cpi`, one
+///    theorem per declared `ensures` clause. Tier-1/2 callees (non-empty
+///    `upstream.binary_hash` AND ensures) close via
+///    `<Iface>.<method>.ensures_axiom_<idx>`; Tier-0 callees keep `:= by
+///    sorry` — the `cpi_no_callee_ensures` lint surfaces them at check time.
 ///
-/// Substitution still flows through
-/// `cpi_substitute::substitute_callee_ensures_lean`, which takes a
-/// `&ParsedCall`. The emitter constructs a synthetic `ParsedCall`
-/// from `Stmt::Cpi`'s data on the fly — Phase 3's `cpi_substitute`
-/// MIR→MIR pass will eliminate that bridge.
+/// Substitution flows through `cpi_substitute::substitute_callee_ensures_lean`
+/// via a synthetic `ParsedCall` (a MIR→MIR substitute pass would retire
+/// that bridge).
 ///
-/// Returns the set of pinned interface names referenced by call sites
-/// — the caller uses this to decide which sibling `<Iface>.lean`
-/// modules to write and which lakefile `require` directives to inject.
+/// Returns the pinned interface names referenced by call sites — the
+/// caller decides which sibling `<Iface>.lean` modules to write and which
+/// lakefile `require` directives to inject.
 fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<String> {
     use crate::mir::Stmt;
 
@@ -3170,7 +2972,6 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
         .unwrap_or_default();
 
     for h in &mir.handlers {
-        // Skip handlers whose body declares no CPI activity at all.
         let has_any_cpi = h
             .body
             .stmts
@@ -3307,17 +3108,12 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
                 pinned_interfaces.insert(target.0.clone());
             }
 
-            // Synthesize a `ParsedCall` for the substitution helper.
-            // The MIR carries the same data — this is a one-line
-            // marshalling step that Phase 3's `cpi_substitute` MIR→MIR
-            // pass will eliminate.
+            // Marshal MIR data into a `ParsedCall` for the substitution helper.
             let synthetic_call =
                 synthesize_parsed_call(target, method, args, state_binders, result_binding);
 
-            // Callee params for the substitute. The type half is
-            // ignored inside the helper (only the names matter for the
-            // default-substitution loop), so we render an empty string
-            // for the type slot.
+            // Only callee param names matter to the substitution helper;
+            // the type slot renders empty.
             let callee_param_names: Vec<(String, String)> = callee
                 .params
                 .iter()
@@ -3334,7 +3130,7 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
                     callee.result_binder.as_deref(),
                 );
 
-                // v2.27 Track A — same skip-path logic as legacy.
+                // Skip when state_binders are missing for abstract fields.
                 let abstract_fields =
                     crate::cpi_substitute::scan_lean_abstract_fields(&ensures.0.lean);
                 if !abstract_fields.is_empty() {
@@ -3394,10 +3190,9 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
                         apply_args.push("pre".to_string());
                         apply_args.push("post".to_string());
                     }
-                    // Sourced from the legacy emitter's `subst` table
-                    // — for each callee param, prefer the caller's
-                    // substituted argument; fall back to the formal
-                    // name otherwise. Parens around compound forms.
+                    // Per callee param: prefer the caller's substituted
+                    // argument, else the formal name. Parens around
+                    // compound forms.
                     let subst: std::collections::HashMap<&str, &str> = args
                         .iter()
                         .map(|a| (a.name.as_str(), a.value.lean.as_str()))
@@ -3483,7 +3278,7 @@ fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections::BTreeSet<
 }
 
 /// True iff the callee has a non-empty `upstream.binary_hash` pin AND
-/// at least one `ensures` clause. Mirrors `lean_gen::handler_is_pinned`.
+/// at least one `ensures` clause.
 fn handler_is_pinned_mir(
     import: &crate::mir::ImportedSpecMir,
     callee: &crate::mir::InterfaceMethod,
@@ -3518,10 +3313,8 @@ fn caller_projection_to_field(p: &crate::mir::Path) -> String {
     p.segments.last().cloned().unwrap_or_default()
 }
 
-/// Synthesize a `ParsedCall` from `Stmt::Cpi` data so the
-/// `cpi_substitute` helper (which still consumes parse-layer types)
-/// can run unchanged. Phase 3 ports the substitution to MIR and
-/// retires this bridge.
+/// Synthesize a `ParsedCall` from `Stmt::Cpi` data so the `cpi_substitute`
+/// helper (which consumes parse-layer types) can run unchanged.
 fn synthesize_parsed_call(
     target: &crate::mir::InterfaceRef,
     method: &crate::mir::MethodRef,
@@ -3552,27 +3345,23 @@ fn synthesize_parsed_call(
     }
 }
 
-/// Emit property declarations + preservation theorems. Mirrors
-/// `lean_gen::render_properties_inner` for the structural shape:
+/// Emit property declarations + preservation theorems:
 ///
 /// ```text
 /// def <name> (s : State) : Prop := <body>
 ///
 /// theorem <name>_preserved_by_<handler> (s s' : State) (signer : Pubkey) <params>
 ///     (h_inv : <name> s) (h : <handler>Transition s signer <args> = some s') :
-///     <name> s' := sorry
+///     <name> s' <proof>
 ///
-/// /-- <name> is preserved by every operation. Auto-proven by case split. -/
 /// theorem <name>_inductive (s s' : State) (signer : Pubkey) (op : Operation)
 ///     (h_inv : <name> s) (h : applyOp s signer op = some s') :
-///     <name> s' := sorry
+///     <name> s' <proof>
 /// ```
 ///
-/// Phase 1c-5: emits the theorem statements with `sorry` bodies for
-/// every preservation sub-lemma. lean_gen.rs's `preservation_proof_script`
-/// generates discharged proofs via `if_neg` / `dsimp + omega`
-/// projection; that's a follow-up. Properties with no
-/// `expression` body emit a structured comment only.
+/// Proof bodies come from `preservation_proof_script` /
+/// `master_inductive_proof_script`. Properties with no `expression` body
+/// emit a structured comment only.
 fn emit_properties(out: &mut String, mir: &Mir) {
     if mir.properties.is_empty() {
         return;
@@ -3581,10 +3370,9 @@ fn emit_properties(out: &mut String, mir: &Mir) {
     for prop in &mir.properties {
         // Predicate def (when body is present).
         if let Some(expr) = &prop.expression {
-            // lean_gen.rs:2716-2737 strips a leading `∀ s : State,`
-            // binder since the surrounding def already introduces
-            // `(s : State)`. Mirror that — but only when the binder
-            // ident is exactly `s`.
+            // Strip a leading `∀ s : State,` binder (only when the binder
+            // ident is exactly `s`) — the surrounding def already
+            // introduces `(s : State)`.
             let body = strip_state_forall(&expr.lean);
             out.push_str(&format!(
                 "def {} (s : State) : Prop := {}\n\n",
@@ -3645,8 +3433,7 @@ fn emit_properties(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Mechanical proof body for `<prop>_preserved_by_<handler>`. Mirrors
-/// `lean_gen::preservation_proof_script`.
+/// Mechanical proof body for `<prop>_preserved_by_<handler>`.
 ///
 /// Strategy depends on:
 ///   1. Quantified-property check (∀/∃ in the property body) — fall back
@@ -3740,8 +3527,7 @@ fn preservation_proof_script(
     }
 }
 
-/// Auto-proof body for the master `<prop>_inductive` theorem. Mirrors
-/// `lean_gen::render_properties_inner`'s `cases op with` block.
+/// Auto-proof body for the master `<prop>_inductive` theorem.
 ///
 /// For each Operation constructor:
 ///   - When the handler is in `preserved_by`: delegate to the per-
@@ -3822,8 +3608,7 @@ fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> S
     proof
 }
 
-/// Owned-string variant of `lean_gen::fields_referenced_in_expr`.
-/// Scans `s.<ident>` occurrences and returns each unique field name.
+/// Scan `s.<ident>` occurrences and return each unique field name.
 fn fields_referenced_in_expr_owned(expr: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (i, _) in expr.match_indices("s.") {
@@ -3845,7 +3630,7 @@ fn fields_referenced_in_expr_owned(expr: &str) -> Vec<String> {
 /// If `expr` starts with `∀ s : T,` or `forall s : T,`, strip the
 /// quantifier prefix and return the body — the surrounding `def
 /// <prop> (s : State)` already binds `s`. Other quantified bodies
-/// (value binders) pass through unchanged. Mirrors lean_gen.rs:2716.
+/// (value binders) pass through unchanged.
 fn strip_state_forall(expr: &str) -> String {
     let trimmed = expr.trim();
     let rest = trimmed
@@ -3863,17 +3648,15 @@ fn strip_state_forall(expr: &str) -> String {
     trimmed.to_string()
 }
 
-/// Emit invariant theorems. Mirrors `lean_gen::render_invariants_theorem_form`.
-///
-/// Per invariant with a predicate body:
+/// Emit invariant theorems. Per invariant with a predicate body:
 /// ```text
 /// /-- Invariant: <name> — <doc> -/
 /// theorem <name> (s : State) : <prefixed-pred> := by sorry
 /// ```
 ///
-/// Bare bodies (description-only invariants from pre-v2.14) emit a
-/// structured comment instead — no `theorem ... := True` tautology.
-/// The `bare_invariant` lint surfaces these as P3.
+/// Bare bodies (description-only invariants) emit a structured comment
+/// instead — no `theorem ... := True` tautology. The `bare_invariant`
+/// lint surfaces these as P3.
 fn emit_invariants(out: &mut String, mir: &Mir) {
     if mir.invariants.is_empty() {
         return;
@@ -3926,19 +3709,10 @@ fn emit_invariants(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit frame condition theorems. Mirrors
-/// `lean_gen::render_frame_conditions`.
-///
-/// For each handler with a `modifies` clause, emit a theorem proving
-/// that every field NOT in `modifies` stays equal across the
-/// transition. Lifecycle-transitioning handlers implicitly modify the
-/// `status` field.
-/// ADT-shape frame condition emitter. Mirrors
-/// `lean_gen::render_frame_conditions_adt`: emits per-handler
-/// theorems with a `True := by sorry` placeholder body, since the
-/// inductive State requires variant-aware case analysis the flat-
-/// shape `s'.f = s.f` form can't express. The per-pre-variant
-/// reasoning is on the v3.0 roadmap.
+/// ADT-shape frame-condition emitter: per-handler theorems with a
+/// `True := trivial` placeholder body — the inductive State needs
+/// variant-aware case analysis the flat `s'.f = s.f` form can't express
+/// (per-pre-variant reasoning is v3.0 roadmap).
 fn emit_frame_conditions_adt(out: &mut String, mir: &Mir) {
     let has_modifies = mir.handlers.iter().any(|h| h.modifies.is_some());
     if !has_modifies {
@@ -3977,6 +3751,9 @@ fn emit_frame_conditions_adt(out: &mut String, mir: &Mir) {
     }
 }
 
+/// Flat-shape frame conditions: per handler with a `modifies` clause,
+/// prove every field NOT in `modifies` stays equal across the transition.
+/// Lifecycle-transitioning handlers implicitly modify `status`.
 fn emit_frame_conditions(out: &mut String, mir: &Mir) {
     let has_modifies = mir.handlers.iter().any(|h| h.modifies.is_some());
     if !has_modifies {
@@ -4057,52 +3834,30 @@ fn prefix_state_fields(expr: &str, fields: &std::collections::HashSet<String>) -
         let pattern = format!(r"\b{}\b", regex::escape(field));
         let re = regex::Regex::new(&pattern).expect("regex compiles for state-field name");
         let replacement = format!("s.{}", field);
-        // Skip if already prefixed somewhere — avoid double-prefix on
-        // re-passes. The simple way: check `s.<field>` literal presence
-        // before applying.
-        if out.contains(&replacement) {
-            // Already partly prefixed — fall back to a non-greedy
-            // single-pass apply that won't double-prefix because the
-            // `\b` regex doesn't match after `.` (word boundary
-            // already broken by the dot).
-            out = re
-                .replace_all(&out, regex::NoExpand(&replacement))
-                .into_owned();
-        } else {
-            out = re
-                .replace_all(&out, regex::NoExpand(&replacement))
-                .into_owned();
-        }
+        // Re-passes can't double-prefix: `\b` doesn't match after `.`.
+        out = re
+            .replace_all(&out, regex::NoExpand(&replacement))
+            .into_owned();
     }
     out
 }
 
-/// Emit abort theorems. Mirrors `lean_gen::render_aborts_if`.
-///
-/// For each handler with abort surface (`aborts_if` clauses or
-/// `requires X else Err`), emits per-clause theorems:
+/// Emit abort theorems — per (handler, abort clause):
 ///
 /// ```text
 /// theorem <h>_aborts_if_<Err> (s : State) (signer : Pubkey) <params>
 ///     (h : <pred>) : <h>Transition s signer <args> = none := sorry
 /// ```
 ///
-/// For `requires X else Err` the hypothesis is negated form
-/// `¬(<requires-expr>)`. When `aborts_total` is set on the handler,
-/// emits a single `<h>_aborts_iff` theorem with the disjunction of
-/// every abort condition.
-///
-/// Phase 1c approximation: emits the theorem statements with
-/// `:= sorry` bodies for every case. lean_gen.rs has a finer
-/// `abort_requires_proof` path that auto-discharges via `if_neg`
-/// projection on requires-derived aborts; porting that lands later.
+/// For `requires X else Err` the hypothesis is the negated form
+/// `¬(<requires-expr>)`. `aborts_total` instead emits a single
+/// `<h>_aborts_iff` theorem with the disjunction of every abort condition.
 fn emit_aborts_if(out: &mut String, mir: &Mir) {
     emit_aborts_if_with_sorry(out, mir, "sorry");
 }
 
-/// Count top-level `∧` conjuncts in a Lean expression. Respects
-/// parenthesis nesting (`(a ∧ b) ∧ c` returns 2, not 3). Mirrors
-/// `lean_gen::count_top_level_conjuncts`.
+/// Count top-level `∧` conjuncts in a Lean expression, respecting
+/// parenthesis nesting (`(a ∧ b) ∧ c` returns 2, not 3).
 fn count_top_level_conjuncts(expr: &str) -> usize {
     let mut depth: i32 = 0;
     let mut count = 0usize;
@@ -4117,8 +3872,7 @@ fn count_top_level_conjuncts(expr: &str) -> usize {
     count + 1
 }
 
-/// Projection path into a right-associative `∧` chain. Mirrors
-/// `lean_gen::conjunction_projection`.
+/// Projection path into a right-associative `∧` chain.
 fn conjunction_projection(flat_index: usize, total_atoms: usize) -> String {
     let mut path = String::from("hg");
     for _ in 0..flat_index {
@@ -4130,10 +3884,9 @@ fn conjunction_projection(flat_index: usize, total_atoms: usize) -> String {
     path
 }
 
-/// Build the tactic body for a flat-path requires-based abort theorem.
-/// Mirrors `lean_gen::abort_requires_proof`: the hypothesis
-/// `h : ¬(req_lean_expr)` contradicts the matching conjuncts in the
-/// transition's guard, so the proof closes by `if_neg` projection.
+/// Tactic body for a flat-path requires-based abort theorem: the
+/// hypothesis `h : ¬(req_lean_expr)` contradicts the matching conjuncts
+/// in the transition's guard, so the proof closes by `if_neg` projection.
 fn abort_requires_proof(
     trans_name: &str,
     cond_parts: &[String],
@@ -4166,10 +3919,9 @@ fn abort_requires_proof(
     )
 }
 
-/// ADT-shape variant — emits `:= by sorry` for every clause, matching
-/// `lean_gen::render_aborts_if_adt`. The structural difference is
-/// confined to the proof body's tactic / term form; the theorem
-/// statements are identical.
+/// ADT-shape variant — emits `:= by sorry` for every clause. Only the
+/// proof body's tactic / term form differs; theorem statements are
+/// identical to the flat path.
 fn emit_aborts_if_adt(out: &mut String, mir: &Mir) {
     emit_aborts_if_with_sorry(out, mir, "by sorry");
 }
@@ -4199,8 +3951,7 @@ fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
         let param_sig = param_sig_str(&h.params);
         let param_args = param_args_str(&h.params);
 
-        // `aborts_total` collapses all abort conditions into a single
-        // iff theorem. Mirror lean_gen.rs:4396.
+        // `aborts_total` collapses all abort conditions into one iff theorem.
         let all_abort_lean: Vec<String> = h
             .aborts_if
             .iter()
@@ -4227,8 +3978,8 @@ fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
             continue;
         }
 
-        // Per-clause theorems. Disambiguate when the same error name
-        // appears multiple times on a single handler (issue #8 #3).
+        // Per-clause theorems; disambiguate when the same error name
+        // appears multiple times on a single handler.
         let mut error_total: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for a in &h.aborts_if {
@@ -4268,19 +4019,15 @@ fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
             ));
         }
 
-        // requires-else clauses: hypothesis is ¬(predicate). Skip
-        // clauses that reference a handler account's `.pubkey` /
-        // `.key()` — those identifiers aren't in Lean scope, so the
-        // theorem would mention free variables. Mirrors
-        // lean_gen.rs:4467. Skipping here keeps the Lean compilable;
-        // the runtime-side check still fires in Rust.
+        // requires-else clauses: hypothesis is ¬(predicate). Clauses
+        // referencing a handler account's `.pubkey` / `.key()` are skipped
+        // — those identifiers aren't in Lean scope and the theorem would
+        // carry free variables; the runtime-side check still fires in Rust.
         //
-        // For the flat path (`sorry_form == "sorry"`), the proof
-        // mechanically closes via `if_neg`-with-projection — mirror
-        // `lean_gen::abort_requires_proof`. The ADT path
-        // (`"by sorry"`) keeps the sorry placeholder; per-variant
-        // pattern matching makes the same script ill-formed and the
-        // legacy ADT renderer is itself sorry-bodied today.
+        // Flat path (`sorry_form == "sorry"`): proof mechanically closes
+        // via `if_neg`-with-projection. ADT path (`"by sorry"`) keeps the
+        // sorry placeholder — per-variant pattern matching makes that
+        // script ill-formed.
         let cond_parts = build_guard_cond_parts(mir, h);
         let flat_path = sorry_form == "sorry";
         for r in &h.requires_or_abort {
@@ -4329,9 +4076,7 @@ fn emit_aborts_if_with_sorry(out: &mut String, mir: &Mir, sorry_form: &str) {
     }
 }
 
-/// Emit ensures theorems. Mirrors `lean_gen::render_ensures`.
-///
-/// Per handler, one theorem per `ensures` clause:
+/// Emit ensures theorems — per handler, one theorem per `ensures` clause:
 ///
 /// ```text
 /// theorem <h>_ensures_<i> (s s' : State) (signer : Pubkey) <params>
@@ -4371,11 +4116,9 @@ fn emit_ensures(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Detect whether an expression references a handler-account's
-/// `.pubkey` or `.key()`. Account-binding pubkey refs aren't in Lean
-/// scope; emitting theorems that mention them yields unprovable
-/// statements with free identifiers. Mirrors
-/// `lean_gen::mentions_handler_account_pubkey`.
+/// Detect whether an expression references a handler-account's `.pubkey`
+/// or `.key()`. Account-binding pubkey refs aren't in Lean scope; theorems
+/// mentioning them would carry free identifiers.
 fn mentions_handler_account_pubkey(
     expr: &str,
     accounts: &[crate::mir::AccountBindingShape],
@@ -4404,7 +4147,6 @@ fn param_args_str(params: &[(crate::mir::Symbol, crate::mir::Ty)]) -> String {
 }
 
 /// Emit the `inductive Operation` enum + `def applyOp` dispatcher.
-/// Mirrors `lean_gen::render_operation_inductive`.
 fn emit_operation_inductive(out: &mut String, mir: &Mir) {
     if mir.handlers.is_empty() {
         return;
@@ -4426,7 +4168,6 @@ fn emit_operation_inductive(out: &mut String, mir: &Mir) {
     }
     out.push_str("  deriving Repr, DecidableEq, BEq\n\n");
 
-    // applyOp dispatcher.
     out.push_str("def applyOp (s : State) (signer : Pubkey) : Operation \u{2192} Option State\n");
     for h in &mir.handlers {
         let ctor = safe_name(&h.name);
@@ -4451,13 +4192,9 @@ fn emit_operation_inductive(out: &mut String, mir: &Mir) {
 }
 
 fn emit_state_struct(out: &mut String, mir: &Mir) {
-    // For multi-variant ADTs (e.g., State | Uninitialized | Open of
-    // {...} | Closed), the flat-state form unions every variant's
-    // fields into one struct, keyed by name. The status field carries
-    // the lifecycle discriminator. Mirrors lean_gen.rs's flat-state
-    // shape — variants don't get separate constructors here; that's
-    // the `render_single_account_adt` (multi-variant ADT) path landing
-    // later in Phase 1c.
+    // Flat-state form: union every variant's fields into one struct keyed
+    // by name; `status` carries the lifecycle discriminator. Per-variant
+    // constructors are the `render_single_account_adt` path.
     if mir.state.variants.is_empty() {
         return;
     }
@@ -4487,9 +4224,9 @@ fn emit_state_struct(out: &mut String, mir: &Mir) {
     if has_lifecycle {
         out.push_str("  status : Status\n");
     }
-    // Issue #67 item 3 — ghost (spec-only) fields, appended LAST so the
-    // non-ghost field prefix keeps a stable order for any positional
-    // `⟨…⟩` State construction (e.g. cover witnesses).
+    // Ghost (spec-only) fields, appended LAST so the non-ghost field
+    // prefix keeps a stable order for any positional `⟨…⟩` State
+    // construction (e.g. cover witnesses).
     for ghost in &mir.ghosts {
         out.push_str(&format!(
             "  {} : {}\n",
@@ -4504,12 +4241,10 @@ fn emit_state_struct(out: &mut String, mir: &Mir) {
 }
 
 // ----------------------------------------------------------------------
-// Cover-witness machinery — port of `lean_gen::WitnessState` + helpers
-//
-// Builds concrete state witnesses for cover-trace proofs by symbolically
-// evaluating each handler in a trace. Used by `emit_covers` to replace
-// `:= sorry` with a real `exact ⟨…, by decide, …⟩` discharge when every
-// step of the trace is symbolically computable.
+// Cover-witness machinery — builds concrete state witnesses for
+// cover-trace proofs by symbolically evaluating each handler in a trace.
+// `emit_covers` uses it to replace `:= sorry` with a real
+// `exact ⟨…, by decide, …⟩` discharge when every step is computable.
 // ----------------------------------------------------------------------
 
 /// Concrete state used for cover-trace proof synthesis. Field values
@@ -4523,11 +4258,8 @@ struct WitnessState {
 
 impl WitnessState {
     fn new(state: &crate::mir::StateAdt) -> Self {
-        // For multi-variant ADT specs, the union of all variant fields
-        // forms the witness's flat-field view. The mirrors of
-        // `lean_gen.rs::WitnessState::new` plus `spec.state_fields`'s
-        // de-duplicated union behavior — first variant defines the order
-        // and any new fields from later variants append.
+        // Union of all variant fields forms the witness's flat-field view;
+        // the first variant defines order, later variants append.
         let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut fields: Vec<(String, String)> = Vec::new();
         for v in &state.variants {
@@ -4560,9 +4292,8 @@ impl WitnessState {
     }
 
     /// Walk `handler.body.stmts` and update field values + lifecycle
-    /// status. Mirrors `lean_gen::WitnessState::apply` against MIR's
-    /// `Stmt` shape. Saturating arithmetic for sub so witnesses don't
-    /// underflow when the proof has unsatisfiable conditions.
+    /// status. Saturating arithmetic so witnesses don't underflow when
+    /// the proof has unsatisfiable conditions.
     fn apply(
         &mut self,
         h: &crate::mir::HandlerMir,
@@ -4670,8 +4401,7 @@ fn witness_state_to_adt(
     Some(format!("(.{} {} : State)", variant.tag, args.join(" ")))
 }
 
-/// Choose concrete witness values for a handler's parameters.
-/// Mirrors `lean_gen::choose_param_values`:
+/// Choose concrete witness values for a handler's parameters:
 ///   * Pubkey  → `pk`
 ///   * Bool    → `false`
 ///   * Index-like numeric params (`param < s.X` without bound) → `0`
@@ -4715,9 +4445,7 @@ fn choose_param_values(h: &crate::mir::HandlerMir) -> Vec<(String, String)> {
 /// resolve — the caller falls back to `:= sorry`.
 ///
 /// `adt_form` switches the witness rendering between the flat-state
-/// struct literal and the ADT variant-constructor form. Mirrors
-/// `lean_gen::cover_trace_proof` (flat) and `cover_trace_proof_adt`
-/// (ADT).
+/// struct literal and the ADT variant-constructor form.
 fn cover_trace_proof(mir: &Mir, trace: &[crate::mir::Symbol], adt_form: bool) -> Option<String> {
     if trace.is_empty() {
         return None;
@@ -4839,9 +4567,8 @@ fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
                 cover.name, suffix
             ));
 
-            // Build the nested `∃ s_{j+1}, <trans> s_j signer args =
-            // some s_{j+1} ∧ ...` chain. The terminal step uses
-            // `≠ none` to keep with the legacy emission shape.
+            // Nested `∃ s_{j+1}, <trans> s_j signer args = some s_{j+1}
+            // ∧ ...` chain; the terminal step uses `≠ none`.
             let mut indent = "    ".to_string();
             for (j, op_name) in trace.iter().enumerate() {
                 let handler = mir.handlers.iter().find(|h| h.name == *op_name);
@@ -4860,13 +4587,8 @@ fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
                     })
                     .unwrap_or_default();
 
-                // Rename param refs in the call site to the existentially-
-                // bound `v{j}_{k}` form. We keep `param_args` as the
-                // declared names because the legacy emits raw names too,
-                // and the binders match by position once `extra_exists`
-                // shadows them in the inner scope. For the MIR pilot we
-                // simply reuse the declared names without renaming —
-                // mirrors `render_covers` line ~3699.
+                // Call sites use the existentially-bound `v{j}_{k}` names;
+                // the declared-name `param_args` is unused here.
                 let _ = param_args;
                 let positional_args = handler
                     .map(|h| {
@@ -4976,24 +4698,17 @@ fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
     }
 }
 
-/// Emit `liveness` (bounded leads-to) theorems. Mirrors
-/// `lean_gen::render_liveness` in shape but always emits the
-/// existential `∃ ops s', ... := by sorry` form. The legacy emits
-/// a stronger universal-form theorem when the lifecycle-graph walk
-/// auto-discovers a path; porting `find_liveness_path` +
-/// `liveness_proof_script` is a separately-tracked deferred item.
+/// Emit `liveness` (bounded leads-to) theorems — see `emit_liveness_inner`.
 fn emit_liveness(out: &mut String, mir: &Mir) {
     emit_liveness_inner(out, mir, false);
 }
 
-/// ADT-shape liveness emitter. Mirrors `lean_gen::render_liveness_adt`
-/// — the theorem statement uses `∃ ops, ... ∧ ∀ s', applyOps … = some
-/// s' → s'.status = .Target` (existence of a bounded-length sequence
-/// such that any successful evaluation reaches the target), whereas
-/// the flat-state form uses `∃ ops s', ... ∧ applyOps … = some s' ∧
-/// s'.status = ...` (existential over both the ops sequence and the
-/// resulting state). Both are valid liveness statements; the legacy
-/// split is preserved so MIR + legacy output stays byte-identical.
+/// ADT-shape liveness emitter. Statement form: `∃ ops, … ∧ ∀ s',
+/// applyOps … = some s' → s'.status = .Target` (any successful
+/// evaluation reaches the target), whereas the flat-state form is
+/// `∃ ops s', …` (existential over both the ops sequence and the
+/// resulting state). Both are valid liveness statements; the split is
+/// snapshot-pinned.
 fn emit_liveness_adt(out: &mut String, mir: &Mir) {
     emit_liveness_inner(out, mir, true);
 }
@@ -5010,9 +4725,8 @@ fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         "-- ============================================================================\n\n",
     );
 
-    // Emit one shared `applyOps` helper (matches the legacy single-
-    // account / single-operation-type pilot scope). Indexed and
-    // multi-account variants are deferred.
+    // One shared `applyOps` helper; indexed and multi-account variants
+    // manage their own.
     let needs_helper = mir.handlers.iter().any(|_| true);
     if needs_helper {
         out.push_str(
@@ -5054,12 +4768,10 @@ fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
             continue;
         }
 
-        // Flat-state path: try to find a concrete via-op path through
-        // the lifecycle. When one exists, emit the universal-
-        // implication form + auto-proof script (legacy
-        // `render_liveness` ~line 3994). Otherwise fall back to the
-        // existential form with sorry (non-vacuous obligation, issue
-        // #38).
+        // Flat-state path: when a concrete via-op path through the
+        // lifecycle exists, emit the universal-implication form +
+        // auto-proof script; else fall back to the existential form
+        // with sorry (non-vacuous obligation).
         let path = find_liveness_path(
             &liveness.from_state,
             &liveness.leads_to_state,
@@ -5083,10 +4795,9 @@ fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
 }
 
 /// BFS through the lifecycle graph defined by `via_ops`'
-/// `(pre_status, post_status)` arrows, returning the first sequence
-/// that gets from `from_state` to `to_state`. Mirrors
-/// `lean_gen::find_liveness_path` byte-for-byte (single-step shortcut
-/// + bounded BFS by `via_ops.len()`).
+/// `(pre_status, post_status)` arrows, returning the first sequence from
+/// `from_state` to `to_state` (single-step shortcut + BFS bounded by
+/// `via_ops.len()`).
 fn find_liveness_path(
     from_state: &str,
     to_state: &str,
@@ -5130,8 +4841,7 @@ fn find_liveness_path(
 }
 
 /// Generate the Lean tactic body for a liveness theorem along an
-/// already-found `ops_path`. Mirrors `lean_gen::liveness_proof_script`;
-/// shape:
+/// already-found `ops_path`. Shape:
 ///   1. Optional `let pk : Pubkey := ⟨0,0,0,0⟩` when any constructor
 ///      takes a Pubkey witness.
 ///   2. `refine ⟨[<ops>], by decide, fun s' h_apply => ?_⟩`
@@ -5140,8 +4850,7 @@ fn find_liveness_path(
 ///      special-cased).
 ///
 /// `needs_split[i]` is true when handler i's if-guard is non-trivial
-/// (has a `who`, a requires clause, or a lifecycle gate). MIR's
-/// proxy: `build_guard_cond_parts` produces a non-empty conjunct list.
+/// (auth, requires clause, or lifecycle gate).
 fn liveness_proof_script(ops_path: &[String], handlers: &[crate::mir::HandlerMir]) -> String {
     let n = ops_path.len();
 
@@ -5177,10 +4886,8 @@ fn liveness_proof_script(ops_path: &[String], handlers: &[crate::mir::HandlerMir
         .collect();
     let ops_literal = format!("[{}]", ops_list.join(", "));
 
-    // Per-step "guard is non-trivial" flag. Mirrors legacy
-    // `h.who.is_some() || h.guard_str.is_some() || !h.requires.is_empty()`.
-    // For MIR pilot scope: `auth.is_some() || any RequireOrAbort ||
-    // transition lifecycle gate present`.
+    // Per-step "guard is non-trivial": auth, any RequireOrAbort,
+    // lifecycle gate, or pre clauses.
     let needs_split: Vec<bool> = ops_path
         .iter()
         .map(|name| {
@@ -5242,9 +4949,8 @@ fn liveness_proof_script(ops_path: &[String], handlers: &[crate::mir::HandlerMir
     proof
 }
 
-/// Recursive nested-split builder for multi-step liveness. Mirrors
-/// `lean_gen::liveness_multi_step_proof`. Indentation grows by two
-/// spaces per nesting depth so the emitted Lean is readable.
+/// Recursive nested-split builder for multi-step liveness. Indentation
+/// grows by two spaces per nesting depth so the emitted Lean is readable.
 #[allow(clippy::only_used_in_recursion)]
 fn liveness_multi_step_proof(
     proof: &mut String,
@@ -5292,17 +4998,14 @@ fn liveness_multi_step_proof(
     }
 }
 
-/// Emit `environment` preservation theorems. Mirrors
-/// `lean_gen::render_environments` for the pilot scope. For each
-/// (property × environment) pair, emit
-/// `theorem <prop>_under_<env> (s : State) <new-field params>
-///     <constraint hyps> (h_inv : <prop> s) :
-///     <prop> { s with <field := new_field>... } := <proof>`.
+/// Emit `environment` preservation theorems. Per (property × environment)
+/// pair: `theorem <prop>_under_<env> (s : State) <new-field params>
+/// <constraint hyps> (h_inv : <prop> s) :
+/// <prop> { s with <field := new_field>... } := <proof>`.
 ///
 /// Proof body auto-discharges with `unfold <prop> at h_inv ⊢; dsimp;
 /// exact h_inv` when the mutated fields don't appear in the property
-/// expression (legacy trivial-preservation shortcut). Otherwise
-/// emits `:= sorry`.
+/// expression; otherwise emits `:= sorry`.
 fn emit_environments(out: &mut String, mir: &Mir) {
     if mir.environments.is_empty() {
         return;
@@ -5322,7 +5025,6 @@ fn emit_environments(out: &mut String, mir: &Mir) {
                 None => continue,
             };
 
-            // Build new_<field> param signature.
             let param_sig: String = env
                 .mutates
                 .iter()
@@ -5330,8 +5032,7 @@ fn emit_environments(out: &mut String, mir: &Mir) {
                 .collect();
 
             // Rewrite `s.<field>` / `state.<field>` in each constraint
-            // to refer to the new value. Mirrors legacy field-by-field
-            // substitution at lean_gen.rs:4296.
+            // to refer to the new value.
             let constraint_hyps: String = env
                 .constraints
                 .iter()
@@ -5383,27 +5084,20 @@ fn emit_environments(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Emit overflow-safety obligations. Mirrors
-/// `lean_gen::render_overflow_obligations` for the pilot scope.
+/// Emit overflow-safety obligations: for every handler whose body issues
+/// `CheckedAdd`, a theorem that all numeric state fields stay within their
+/// declared type bounds across the transition (`valid_<T>` asserted on
+/// each numeric field pre and post).
 ///
-/// For every handler whose body issues `CheckedAdd` (an `add` effect
-/// in the legacy spec model), emit a theorem stating that all numeric
-/// state fields stay within their declared type bounds across the
-/// transition. The pre-condition asserts inbound `valid_<T>` on each
-/// numeric field; the post-condition asserts the same after.
-///
-/// Flat-state proofs auto-discharge via `unfold + split + cases +
-/// refine + simp/omega` — same shape as `lean_gen::overflow_proof_script`
-/// (see Phase 1c-10 handoff). ADT-shape proofs remain `:= by sorry`
-/// until the pattern-match scrutinee form lands.
+/// Flat-state proofs auto-discharge via `unfold + split + cases + refine +
+/// simp/omega` (`overflow_proof_script`); ADT-shape proofs remain
+/// `:= by sorry` until the pattern-match scrutinee form lands.
 fn emit_overflow(out: &mut String, mir: &Mir) {
     emit_overflow_inner(out, mir, /* adt_form = */ false);
 }
 
-/// ADT-shape variant — closes overflow theorems with `:= by sorry`
-/// matching `lean_gen::render_overflow_obligations_adt`. The
-/// statement is identical to the flat shape; the difference is the
-/// proof body's tactic vs term form.
+/// ADT-shape variant — closes overflow theorems with `:= by sorry`; the
+/// statement is identical to the flat shape.
 fn emit_overflow_adt(out: &mut String, mir: &Mir) {
     emit_overflow_inner(out, mir, /* adt_form = */ true);
 }
@@ -5423,9 +5117,8 @@ fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         return;
     }
 
-    // Collect numeric state-field names + their MIR Ty, unioned across
-    // every variant in declaration order. Mirrors the union pass in
-    // `emit_state_struct`.
+    // Numeric state fields unioned across variants in declaration order
+    // (same union pass as `emit_state_struct`).
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut numeric_fields: Vec<(String, Ty)> = Vec::new();
     for v in &mir.state.variants {
@@ -5482,14 +5175,12 @@ fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
             .map(|(n, t)| format!("{} s'.{}", valid_fn(t), safe_name(n)))
             .collect();
 
-        // Unary invariant hypotheses: properties this handler is
-        // declared to preserve. Binary properties carry an `s s'`
-        // shape and don't fit as single-state hypotheses; the MIR
-        // lift doesn't yet carry the binary/unary tag (it lives on
-        // `ParsedProperty.class`), so we conservatively include every
-        // preserved-by entry whose expression exists. Pilot fixtures
-        // don't tickle the binary case in their overflow theorems
-        // today; revisit when that distinction lands on PropertyMir.
+        // Invariant hypotheses: properties this handler preserves. Binary
+        // properties (an `s s'` shape) don't fit as single-state
+        // hypotheses, but MIR doesn't carry the binary/unary tag (it lives
+        // on `ParsedProperty.class`) — conservatively include every
+        // preserved-by entry with an expression; revisit when the tag
+        // lands on PropertyMir.
         let inv_hyps: Vec<&str> = mir
             .properties
             .iter()
@@ -5529,8 +5220,7 @@ fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
     }
 }
 
-/// Generate the mechanical proof script for a flat-state overflow
-/// theorem. Mirrors `lean_gen::overflow_proof_script`.
+/// Generate the mechanical proof script for a flat-state overflow theorem.
 ///
 /// Strategy:
 ///   1. `unfold <Handler>Transition at h`.
@@ -5554,15 +5244,11 @@ fn overflow_proof_script(
 
     let trans_name = safe_name(&format!("{}Transition", h.name));
 
-    // Determine per-field whether this handler does an `add` on it
-    // (only `CheckedAdd` qualifies; `WrapAdd` / `SatAdd` don't fire an
-    // overflow obligation — matches legacy semantics, which keys on the
-    // `"add"` op-kind only).
+    // Only `CheckedAdd` fires an overflow obligation on a field;
+    // `WrapAdd` / `SatAdd` and non-arithmetic stmts don't abort.
     let is_add_field = |field: &str| -> bool {
         h.body.stmts.iter().any(|s| match s {
             Stmt::CheckedAdd { path, .. } => path_field_name(path) == field,
-            // Only checked adds gate the overflow proof shape here;
-            // wrap/sat arithmetic and non-arithmetic stmts don't abort.
             Stmt::RequireOrAbort { .. }
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
@@ -5581,9 +5267,8 @@ fn overflow_proof_script(
 
     let n = numeric_fields.len();
 
-    // Build refine tuple parts: `h_valid` projections for unchanged
-    // fields, `?_` placeholder for changed ones. Collect the changed
-    // field types in order to emit one `simp; omega` line each.
+    // Refine tuple: `h_valid` projections for unchanged fields, `?_` for
+    // changed ones (one `simp; omega` line each).
     let mut refine_parts: Vec<String> = Vec::with_capacity(n);
     let mut changed_types: Vec<&Ty> = Vec::new();
     for (i, (name, ty)) in numeric_fields.iter().enumerate() {
@@ -5642,10 +5327,9 @@ fn overflow_proof_script(
     proof
 }
 
-/// h_valid projection path for position `i` in `n` numeric fields.
-/// Mirrors `lean_gen::h_valid_projection` — right-associative ∧ chain
-/// with `.2` for "drop the head" and `.1` for "take the head of the
-/// remainder" (except the last position).
+/// h_valid projection path for position `i` in `n` numeric fields —
+/// right-associative ∧ chain: `.2` drops the head, `.1` takes the head
+/// of the remainder (except the last position).
 fn h_valid_projection_mir(i: usize, n: usize) -> String {
     let mut path = "h_valid".to_string();
     for _ in 0..i {
@@ -5707,10 +5391,8 @@ fn valid_max_for(ty: &crate::mir::Ty) -> &'static str {
 // Helpers
 // ----------------------------------------------------------------------
 
-/// Render a MIR `Ty` to its Lean form. Mirrors the encoding used by
-/// `lean_gen::render_ty_for_field` for compatibility — every numeric
-/// type widens to `Nat` since proofs run in Nat, and Pubkey is an
-/// opaque Lean abbreviation.
+/// Render a MIR `Ty` to its Lean form — unsigned numerics widen to `Nat`
+/// (proofs run in Nat), signed to `Int`; Pubkey is an opaque abbreviation.
 fn render_ty(ty: &crate::mir::Ty) -> String {
     use crate::mir::Ty;
     match ty {
@@ -5720,17 +5402,15 @@ fn render_ty(ty: &crate::mir::Ty) -> String {
         Ty::Pubkey => "Pubkey".to_string(),
         Ty::Custom(name) => name.clone(),
         Ty::Map { capacity: _, value } => {
-            // Phase 1 stub: indexed-state has its own renderer; this
-            // codepath shouldn't fire for single-account pilot specs.
+            // Indexed-state has its own renderer; this codepath shouldn't
+            // fire for single-account specs.
             format!("Map /* {} */", render_ty(value))
         }
     }
 }
 
 /// Build a parameter signature string for transition function
-/// declarations: `" (p1 : T1) (p2 : T2) ..."`. Empty string when
-/// `params` is empty. Mirrors `lean_gen::param_sig_str` for the
-/// MIR-typed parameter list.
+/// declarations: `" (p1 : T1) (p2 : T2) ..."`; empty when `params` is.
 fn param_sig_str(params: &[(crate::mir::Symbol, crate::mir::Ty)]) -> String {
     if params.is_empty() {
         return String::new();
@@ -5742,11 +5422,9 @@ fn param_sig_str(params: &[(crate::mir::Symbol, crate::mir::Ty)]) -> String {
         .join("")
 }
 
-/// Extract the auth-account name for the alias-let, if any. For the
-/// pilot scope, `auth <name>` lowers to `Some(AccountOrField::Account(ByBinding(name)))`.
-/// Returns `None` for permissionless handlers and dotted-auth shapes
-/// (which were desugared into a synthetic `requires` clause upstream
-/// and don't need a separate alias).
+/// Extract the auth-account name for the alias-let, if any. `None` for
+/// permissionless handlers and dotted-auth shapes (desugared upstream
+/// into a synthetic `requires` clause — no separate alias needed).
 fn handler_auth_name(h: &crate::mir::HandlerMir) -> Option<crate::mir::Symbol> {
     use crate::mir::{AccountOrField, AccountRef};
     match &h.auth {
@@ -5755,10 +5433,8 @@ fn handler_auth_name(h: &crate::mir::HandlerMir) -> Option<crate::mir::Symbol> {
     }
 }
 
-/// Extract the field name from a Path. For Phase 1c we accept dotted
-/// paths but emit only the trailing segment (matches lean_gen.rs's
-/// `strip_variant_prefix_for_flat_state` behavior on the flat-state
-/// path).
+/// Trailing segment of a Path — dotted paths collapse to the last
+/// segment on the flat-state path.
 fn path_field_name(path: &crate::mir::Path) -> String {
     path.segments
         .last()
@@ -5766,12 +5442,9 @@ fn path_field_name(path: &crate::mir::Path) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// Detect whether the RHS string references an account-binding's
-/// `.pubkey` field — `lean_gen.rs:1839` drops these from the record
-/// update since they have no Lean scope.
+/// True iff the RHS is exactly `<identifier>.pubkey` — account-binding
+/// pubkey refs have no Lean scope and are dropped from record updates.
 fn is_account_pubkey_ref(rust: &str) -> bool {
-    // Heuristic matching lean_gen.rs::is_account_binding_pubkey_ref:
-    // the RHS is exactly `<identifier>.pubkey`.
     let trimmed = rust.trim();
     trimmed
         .strip_suffix(".pubkey")
@@ -5780,10 +5453,8 @@ fn is_account_pubkey_ref(rust: &str) -> bool {
 }
 
 /// Wrap an expression in parens if it contains low-precedence operators
-/// that would re-group when joined under `∧`. Mirrors
-/// `lean_gen::paren_if_low_prec` — defensive parens at concat sites
-/// (the mitigation for divergence class C3 in
-/// `docs/design/codegen-divergence.md`).
+/// that would re-group when joined under `∧` — defensive parens at concat
+/// sites (divergence class C3 in `docs/design/codegen-divergence.md`).
 fn paren_low_prec(expr: &str) -> String {
     let trimmed = expr.trim();
     // Already-parenthesized at the top level: leave alone.
@@ -5834,15 +5505,11 @@ fn has_top_level_op(expr: &str, ops: &[&str]) -> bool {
     false
 }
 
-/// Quote Lean reserved names. Today minimal — extend as fixtures
-/// surface collisions. `lean_gen.rs::safe_name` uses `«name»` quoting
-/// for the same purpose; keep the contract identical.
+/// Quote Lean reserved names as `«name»`. Extend as fixtures surface
+/// collisions; keep in sync with `lean_sidecars::safe_name`.
 fn safe_name(name: &str) -> String {
-    // Lean reserved words / keywords that collide with common qedspec
-    // identifiers (notably `initialize`, used as a canonical handler
-    // name across the pilot fixtures). Kept byte-identical to
-    // `lean_gen.rs::safe_name` so MIR + legacy emit the same `«name»`
-    // quoting.
+    // Reserved words that collide with common qedspec identifiers
+    // (notably `initialize`).
     const LEAN_RESERVED: &[&str] = &[
         "open",
         "close",
@@ -5878,11 +5545,10 @@ mod tests {
     use super::*;
     use std::path::Path as FsPath;
 
-    /// Phase-5 #42 — the flat-state transition renders `Stmt::Branch` as
-    /// a real Lean `match` with per-arm semantics: checked-add bounds
-    /// gate only their own arm, and the model applies exactly one arm
-    /// (the pre-Phase-5 renderer applied the *union* of every arm
-    /// unconditionally — semantically wrong).
+    /// The flat-state transition renders `Stmt::Branch` as a real Lean
+    /// `match` with per-arm semantics: checked-add bounds gate only their
+    /// own arm, and the model applies exactly one arm (applying the
+    /// *union* of every arm unconditionally is semantically wrong).
     #[test]
     fn flat_transition_renders_branch_as_lean_match() {
         let src = r#"spec CondFee
@@ -5950,17 +5616,13 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         );
     }
 
-    /// sBPF Lean codegen regression gate. The 5 bundled `examples/sbpf/*`
-    /// specs use modern `handler` syntax with no `instruction` blocks, so
-    /// they only exercise `render_sbpf`'s header path. The old-syntax
-    /// `Dropset` fixture exercises the full renderer: per-instruction
-    /// namespaces, offset/`ea_*` lemmas, guard theorem stubs (`==`, `>=`,
-    /// field-vs-field RHS, no-`checks`), the completeness `structure
-    /// Spec`, and property `True := trivial` stubs.
-    ///
-    /// The golden was captured from the v2.32 port, which was proven
-    /// byte-identical to the (now-deleted) legacy `lean_gen::render_sbpf`
-    /// before deletion. Regenerate intentionally if `render_sbpf` changes:
+    /// sBPF Lean codegen regression gate. The bundled `examples/sbpf/*`
+    /// specs use modern `handler` syntax with no `instruction` blocks and
+    /// only exercise `render_sbpf`'s header path; this old-syntax `Dropset`
+    /// fixture exercises the full renderer: per-instruction namespaces,
+    /// offset/`ea_*` lemmas, guard theorem stubs (`==`, `>=`,
+    /// field-vs-field RHS, no-`checks`), the completeness `structure Spec`,
+    /// and property stubs. Regenerate intentionally:
     /// `UPDATE_SBPF_GOLDEN=1 cargo test sbpf_render_matches_golden`.
     const DROPSET_SBPF_SPEC: &str = include_str!("../../tests/fixtures/dropset_sbpf.qedspec");
     const DROPSET_SBPF_GOLDEN: &str =
@@ -6021,9 +5683,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         crate::mir::lower(&parsed)
     }
 
-    /// v2.33 — the inductive multi-variant State representation is opted
-    /// into via `pragma state_repr = adt`, decoupled from the incidental
-    /// `WrongState` error variant that keyed it pre-v2.33 (the footgun:
+    /// The inductive multi-variant State representation is opted into via
+    /// `pragma state_repr = adt`, decoupled from the incidental
+    /// `WrongState` error variant that once keyed it (footgun:
     /// adding/removing a lifecycle error silently flipped flat↔ADT).
     /// Same State shape + same `WrongState` error ⇒ flat by default,
     /// `inductive State` only when the pragma is present.
@@ -6076,12 +5738,10 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn flat_effect_rhs_field_ref_is_qualified() {
-        // Issue #79 Bug A: a `set` effect copying one state field into
-        // another (`reserved := state.cap`) is stored bare (`cap`) by the
-        // adapter. The flat-state transition emitter used to emit it
-        // verbatim — `reserved := cap` — which is an unknown identifier in
-        // Lean. It must re-qualify to `s.cap` (as the indexed path and the
-        // proptest backend already do), while a handler param stays bare.
+        // A `set` effect copying one state field into another
+        // (`reserved := state.cap`) is stored bare (`cap`) by the adapter;
+        // emitted verbatim it's an unknown Lean identifier. It must
+        // re-qualify to `s.cap` while a handler param stays bare.
         let src = "spec BudgetRepro\n\
             type State\n\
             \x20 | Uninitialized\n\
@@ -6138,14 +5798,10 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_lifecycle_marker_threshold() {
-        // escrow has 3 lifecycle states (Uninitialized | Open | Closed)
-        // so Status inductive is emitted.
+        // escrow has 3 lifecycle states (Uninitialized | Open | Closed);
+        // verify the <2 no-Status-marker boundary.
         let mir = lower_fixture("examples/rust/escrow/escrow.qedspec");
         let out = render(&mir);
-        // Lifecycle is the lifecycle_states vec on StateAdt; for the
-        // multi-variant ADT path of escrow, lifecycle_states is
-        // populated by `lower_state`. If the count is < 2, no Status
-        // marker — verify the boundary.
         let lifecycle_count = mir.state.lifecycle_states.len();
         if lifecycle_count >= 2 {
             assert!(out.contains("inductive Status"));
@@ -6294,11 +5950,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_emits_properties_with_preservation() {
-        // Lending declares `property pool_solvency : ...` and names
-        // handlers it's preserved by. v2.30 Phase 2: lending is
-        // multi-account (Pool + Loan), so the property predicate and
-        // master theorem both bind to `PoolState` / `PoolOperation`
-        // (the property's fields live on the Pool account).
+        // Lending is multi-account (Pool + Loan), so the pool_solvency
+        // predicate and master theorem both bind to `PoolState` /
+        // `PoolOperation` (the property's fields live on Pool).
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir);
 
@@ -6317,9 +5971,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_emits_invariant_theorems() {
-        // Lending declares `invariant collateral_backing`. v2.30
-        // Phase 2: multi-account specs emit invariants as structured
-        // comments (matches legacy `render_invariants_as_comments`);
+        // Multi-account specs emit invariants as structured comments;
         // variant-typed binder lowering is a v3.0 item.
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir);
@@ -6353,13 +6005,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_emits_cover_theorems() {
-        // Lending declares two cover blocks whose traces span both
-        // accounts (Pool init_pool/deposit + Loan borrow/repay or
-        // borrow/liquidate). v2.30 Phase 2 emits skip-comments for
-        // cross-account traces and still writes the cover section
-        // header (matches legacy multi-account behavior). Cover-
-        // theorem auto-discharge for single-account traces is
-        // covered by the escrow snapshot.
+        // Lending's two cover traces span both accounts → skip-comments,
+        // with the section header still written. Single-account
+        // auto-discharge is covered by the escrow snapshot.
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir);
         assert!(
@@ -6382,15 +6030,11 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_emits_liveness_theorems() {
-        // Lending: `liveness loan_settles : Loan.Active ~> Loan.Empty
-        // via [repay] within 1`. v2.30 Phase 2 resolves the per-
-        // liveness state type from `via_ops[0].on_account` → the
-        // `repay` handler is qualified `Loan.Active -> Loan.Empty` so
-        // the theorem binds to `LoanState` + `applyLoanOps` /
-        // `applyLoanOp` / `LoanOperation`. The legacy auto-discharge
-        // script fires when `find_liveness_path` succeeds, yielding
-        // the universal-implication form with a closed proof — no
-        // trailing `sorry` for the lending pilot.
+        // Lending: `liveness loan_settles : Loan.Active ~> Loan.Empty via
+        // [repay] within 1`. The per-liveness state type resolves from
+        // `via_ops[0].on_account` → the theorem binds to `LoanState` +
+        // `applyLoanOps`. `find_liveness_path` succeeds, so the
+        // universal-implication form closes with no trailing `sorry`.
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir);
         assert!(
@@ -6448,10 +6092,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_emits_overflow_theorems() {
-        // Lending: `deposit` issues a `+=` effect against numeric
-        // pool fields, which MIR lowers to `CheckedAdd` (the default
-        // arithmetic mode post-v2.7 G3). The overflow emitter picks
-        // it up and produces a `deposit_overflow_safe` theorem.
+        // Lending: `deposit` issues a `+=` effect, which MIR lowers to
+        // `CheckedAdd` (checked is the default arithmetic mode); the
+        // overflow emitter produces `deposit_overflow_safe`.
         let mir = lower_fixture("examples/rust/lending/lending.qedspec");
         let out = render(&mir);
         assert!(
@@ -6468,10 +6111,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             out.contains("= some s'"),
             "expected `= some s'` hypothesis on transition"
         );
-        // Overflow theorem now auto-discharges via the ported
-        // `overflow_proof_script`: `unfold + split + cases + refine +
-        // simp/omega`. The `:= sorry` form is reserved for the ADT
-        // path (`emit_overflow_adt`) until that variant lands.
+        // Overflow theorems auto-discharge via `overflow_proof_script`;
+        // the `:= sorry` form is reserved for the ADT path.
         assert!(
             out.contains("simp only [valid_u64, Valid.valid_u64, Valid.U64_MAX]; omega"),
             "expected overflow proof to discharge the changed-field obligation via `simp; omega`"

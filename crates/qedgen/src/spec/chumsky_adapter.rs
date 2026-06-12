@@ -1,14 +1,9 @@
-//! Adapter: typed AST (`ast::Spec`) → legacy `ParsedSpec`.
-//!
-//! Bridge layer that lets downstream consumers (`check.rs`, `lean_gen.rs`,
-//! `kani.rs`, `proptest_gen.rs`, ...) keep reading the string-rendered
-//! `ParsedSpec` while the parser produces a typed AST. Next migration step:
-//! rewrite consumers against the typed AST directly, then delete this module
-//! and `ParsedSpec`'s pre-rendered-string fields.
+//! Adapter: typed AST (`ast::Spec`) → string-rendered `ParsedSpec` for
+//! downstream consumers (check, lean_gen, kani, proptest_gen, …).
 //!
 //! Guard expressions are rendered to Lean-form (unicode operators, pre/post
 //! state prefixes) and Rust-form (ASCII) strings here. The typed AST keeps
-//! structure; the string forms are lossy projections for legacy consumers.
+//! structure; the string forms are lossy projections.
 
 use crate::ast::{self as a, Expr, Node, TopItem};
 use crate::check::{
@@ -382,11 +377,8 @@ impl<'a> TypeEnv<'a> {
 fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String {
     match e {
         Expr::Int(v) => v.to_string(),
-        // Bool literal in Lean 4 is lowercase `true`/`false` (the `Bool`
-        // inductive). `True`/`False` are *Props*, so an effect RHS like
-        // `flag := True` would type-error when `flag : Bool`. This was
-        // the latent half of issue #8 finding #6 (the cover-witness
-        // side used `"0"` for Bool; this side used Prop).
+        // Lean 4 Bool literals are lowercase `true`/`false`; `True`/`False`
+        // are *Props*, so `flag := True` would type-error when `flag : Bool`.
         Expr::Bool(b) => b.to_string(),
         Expr::Path(p) => path_to_lean(p, ctx, /*inside_old=*/ false, consts),
         Expr::Old(inner) => path_or_expr_to_lean_old(&inner.node, ctx, consts, env),
@@ -560,19 +552,14 @@ fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv) -> String
             )
         }
         Expr::App { func, args } => {
-            // v2.21 S2.5: `now()` is an axiomatized symbolic timestamp.
-            // The Lean support library (lean_solana/QEDGen/Solana/Valid.lean)
-            // declares `axiom now : Nat`; spec authors can compare `now()`
-            // against bounds but proofs about specific values discharge by
-            // axiom — same shape as any other oracle-derived value. The
-            // axiom must already be in scope wherever the spec's Lean form
-            // is elaborated; lean_gen.rs imports QEDGen.Solana so it is.
+            // `now()` is an axiomatized symbolic timestamp: the support
+            // library declares `axiom now : Nat` (in scope because
+            // lean_gen.rs imports QEDGen.Solana).
             if func == "now" && args.is_empty() {
                 return "now".to_string();
             }
-            // v2.24 #19: `current_epoch()` resolves the same way —
-            // axiomatized at `QEDGen.Solana.Valid.current_epoch : Nat`,
-            // not a per-spec uninterpreted helper.
+            // `current_epoch()` resolves the same way — axiomatized at
+            // `QEDGen.Solana.Valid.current_epoch : Nat`.
             if func == "current_epoch" && args.is_empty() {
                 return "current_epoch".to_string();
             }
@@ -742,13 +729,9 @@ fn strip_state_prefix(s: &str) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
-/// v2.23 Slice 1: walk a property body AST looking for any `Expr::Old(_)`
-/// node. Used both by `classify_property_body` and (in Slice 5) by the
-/// `vacuous_property_lowering` lint to gate its codegen-induced tautology
-/// rule on the temporal-marker being present in the source.
-///
-/// Mirrors the shape of `quantifier::find_nested_quantifier` — same set of
-/// AST nodes, different predicate.
+/// Any `Expr::Old(_)` in the tree? Used by `classify_property_body` and the
+/// `vacuous_property_lowering` lint. Mirrors the shape of
+/// `quantifier::find_nested_quantifier` — same node set, different predicate.
 pub(crate) fn expr_contains_old(node: &Node<Expr>) -> bool {
     match &node.node {
         Expr::Old(_) => true,
@@ -786,9 +769,8 @@ pub(crate) fn expr_contains_old(node: &Node<Expr>) -> bool {
     }
 }
 
-/// v2.23 Slice 1: classify a property body's temporal shape. Body contains
-/// `Expr::Old(_)` anywhere ⇒ `Binary`; otherwise `Unary`. Drives codegen
-/// dispatch downstream (see [`crate::check::PropertyClass`]).
+/// Temporal shape of a property body: contains `Expr::Old(_)` ⇒ `Binary`,
+/// else `Unary`. Drives codegen dispatch ([`crate::check::PropertyClass`]).
 pub(crate) fn classify_property_body(node: &Node<Expr>) -> crate::check::PropertyClass {
     if expr_contains_old(node) {
         crate::check::PropertyClass::Binary
@@ -797,41 +779,26 @@ pub(crate) fn classify_property_body(node: &Node<Expr>) -> crate::check::Propert
     }
 }
 
-/// v2.23 Slice 2: lowering mode for state-path rendering in property
-/// bodies. `Unary` keeps today's behavior (`state.x` → `s.x`, no pre/post
-/// distinction). `Binary` is set by `proptest_gen` / `kani` when rendering
-/// a `PropertyClass::Binary` property's body: `state.x` → `post.x` and
-/// `old(state.x)` → `pre.x`, matching the per-handler preservation harness
-/// shape that captures pre-state before the handler call.
-///
-/// Mirrors the Lean side's `Ctx::Ensures` + `inside_old` distinction at
-/// `path_to_lean` (line 598), which has always done this correctly. The
-/// Rust side was the gap.
+/// Lowering mode for state-path rendering in property bodies. `Binary` is
+/// set by `proptest_gen` / `kani` when rendering a `PropertyClass::Binary`
+/// body, matching the per-handler preservation harness that captures
+/// pre-state before the handler call. Mirrors the Lean side's
+/// `Ctx::Ensures` + `inside_old` distinction in `path_to_lean`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StateMode {
-    /// Today's behavior — `state.x` and `old(state.x)` both render to
-    /// `s.x`. Correct for guards / requires / ensures bodies that already
-    /// emit against a single-state context. Default on every callsite
-    /// that doesn't explicitly opt into Binary.
+    /// `state.x` and `old(state.x)` both render to `s.x` — correct for
+    /// single-state contexts. Default on every callsite.
     Unary,
-    /// Slice 2 binary mode — `state.x` renders to `post.x`,
-    /// `old(state.x)` to `pre.x`. Used only by Slices 3-4 when emitting
-    /// `PropertyClass::Binary` property fn bodies.
-    // v2.23 Slices 3-4 + v2.25 Phase B (ensures-preservation Kani harness).
+    /// `state.x` → `post.x`, `old(state.x)` → `pre.x`. Used only when
+    /// emitting `PropertyClass::Binary` property fn bodies.
     Binary,
 }
 
-/// Per-render options for `expr_to_rust`. `pod_aware` is set when the
-/// containing codegen target is Quasar — that's where state/record
-/// integer fields are lowered to Pod companions and need `.get()` on
-/// access plus a Nat→Int promotion for mixed-kind binops. `env` carries
-/// the `TypeEnv` used to infer kinds and detect Pod fields.
-///
-/// v2.23 Slice 2: `state_mode` selects unary vs binary state-path
-/// lowering (see [`StateMode`]); `inside_old` tracks recursive descent
-/// into an `old(...)` subexpression so nested state refs render against
-/// pre-state. Both fields default to the unary/no-old shape that
-/// preserves every existing callsite.
+/// Per-render options for `expr_to_rust`. `pod_aware` is set for the Quasar
+/// target, where state/record integer fields lower to Pod companions and
+/// need `.get()` on access. `state_mode` selects unary vs binary state-path
+/// lowering ([`StateMode`]); `inside_old` tracks descent into an `old(...)`
+/// subexpression so nested state refs render against pre-state.
 #[derive(Copy, Clone)]
 struct RustOpts<'a, 'env> {
     pod_aware: bool,
@@ -851,10 +818,8 @@ impl<'a, 'env> RustOpts<'a, 'env> {
         }
     }
 
-    /// Return a copy with the given `state_mode`. Used by Slices 3-4 to
-    /// switch from Unary (default) to Binary when rendering a
-    /// `PropertyClass::Binary` property body.
-    // v2.23 Slices 3-4 + v2.25 Phase B (ensures-preservation Kani harness).
+    /// Copy with the given `state_mode` (Binary when rendering a
+    /// `PropertyClass::Binary` property body).
     fn with_state_mode(self, state_mode: StateMode) -> Self {
         RustOpts { state_mode, ..self }
     }
@@ -889,12 +854,10 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) 
         Expr::Int(v) => v.to_string(),
         Expr::Bool(b) => b.to_string(),
         Expr::Path(p) => render_path_with_pod(p, ctx, consts, opts),
-        // v2.23 Slice 2: route `old(...)` through `inside_old` on opts.
-        // For `Path`, the path renderer consults `opts.inside_old` and
-        // (in Binary mode) emits `pre.x` instead of the default `post.x`.
-        // For non-Path inner exprs, recursively render with the flag set —
-        // this avoids the pre-Slice-2 comment-form lowering (`/*old(e)*/`)
-        // which produced invalid Rust in expression position.
+        // `old(...)` routes through `opts.inside_old`: the path renderer
+        // emits `pre.x` (Binary mode) instead of `post.x`; non-Path inner
+        // exprs render recursively with the flag set (a comment-form
+        // lowering would be invalid Rust in expression position).
         Expr::Old(inner) => expr_to_rust(&inner.node, ctx, consts, opts.with_inside_old()),
         Expr::Sum {
             binder,
@@ -924,16 +887,12 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) 
             };
             let body_rust = expr_to_rust(&body.node, ctx, consts, opts);
             // `exists` over a bounded index domain (`Fin[N]`, directly or via
-            // an alias such as `AccountIdx`): iterate `0..N` with `.any(…)`.
-            // This is the collection-existence case — `exists i : AccountIdx,
-            // accounts[i]…` — and lowers to a real, non-vacuous predicate
-            // usable anywhere a bool is expected (requires / ensures /
-            // property body). `forall` over `Fin[N]` deliberately does NOT
-            // take this path: it keeps the v2.20 per-slot lowering
-            // (`{prop}_at`) so a preserved-property assertion checks the one
-            // modified slot rather than unwinding a whole-array loop in Kani.
-            // Existence has no per-slot analogue, so the bounded `.any`
-            // iteration is the correct and only mechanical lowering.
+            // an alias): iterate `0..N` with `.any(…)` — a real, non-vacuous
+            // predicate usable wherever a bool is expected. `forall` over
+            // `Fin[N]` deliberately does NOT take this path: it keeps the
+            // per-slot lowering (`{prop}_at`) so a preserved-property
+            // assertion checks the one modified slot rather than unwinding a
+            // whole-array loop in Kani. Existence has no per-slot analogue.
             if matches!(kind, a::Quantifier::Exists) {
                 if let Some(bound) = opts.env.fin_bound(binder_ty) {
                     return format!("(0..({} as usize)).any(|{}| {})", bound, binder, body_rust);
@@ -1065,21 +1024,17 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) 
             format!("matches!({}, {}::{}(..))", sc, "/* ty */", variant)
         }
         Expr::App { func, args } => {
-            // v2.21 S2.5: `now()` lowers to the on-chain clock read.
-            // `unwrap()` rather than `?` so the expression is valid in
-            // assertion / property bodies (where the surrounding fn may
-            // not return Result). Inside a Result-returning handler the
-            // unwrap-on-Ok is a no-op; outside, it panics — but Clock
-            // is a system var that always succeeds in practice. The
-            // returned i64 cast to u64 is a sign-bit-preserving copy;
-            // negative unix_timestamp doesn't happen on chain.
+            // `now()` lowers to the on-chain clock read. `unwrap()` rather
+            // than `?` so the expression is valid in assertion / property
+            // bodies (the surrounding fn may not return Result); Clock is a
+            // sysvar that always succeeds in practice. The i64→u64 cast is
+            // sign-bit-preserving; negative unix_timestamp doesn't happen
+            // on chain.
             if func == "now" && args.is_empty() {
                 return "(solana_program::clock::Clock::get().unwrap().unix_timestamp as u64)"
                     .to_string();
             }
-            // v2.24 #19: `current_epoch()` reads `.epoch` (already u64)
-            // off the same Clock sysvar. No cast needed — `epoch` is
-            // u64 in solana_program::clock::Clock.
+            // `current_epoch()` reads `.epoch` (already u64) — no cast.
             if func == "current_epoch" && args.is_empty() {
                 return "solana_program::clock::Clock::get().unwrap().epoch".to_string();
             }
@@ -1116,15 +1071,9 @@ fn expr_to_rust(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) 
     }
 }
 
-/// Render a Path expression, applying a `.get()` postfix when the path
-/// resolves to a Pod-flavored field on Quasar (`pod_aware`). Non-Pod
-/// fields (`u8`/`i8`/`Bool` already alignment 1, plus paths into
-/// non-state types) pass through unchanged.
-///
-/// v2.23 Slice 2: the `inside_old` / state-mode signaling moved into
-/// `RustOpts` (see `opts.inside_old`, `opts.state_mode`). This wrapper
-/// no longer threads `inside_old` as a separate argument — `path_to_rust`
-/// reads it from opts.
+/// Render a Path, applying a `.get()` postfix when it resolves to a
+/// Pod-flavored field on Quasar (`pod_aware`). Non-Pod fields (`u8`/`i8`/
+/// `Bool` already alignment 1, paths into non-state types) pass through.
 fn render_path_with_pod(
     p: &a::Path,
     ctx: Ctx,
@@ -1169,17 +1118,11 @@ fn is_mul_div_let_rhs(e: &Expr) -> bool {
     }
 }
 
-/// Render both sides of a binary op, applying a `... as i128` cast on
-/// whichever side is `Nat` when the other is `Int`. Mirrors the Lean-side
-/// `render_binary_with_coercion`.
-///
-/// The Nat→Int cast is target-independent: Rust rejects `u128 + i128` on
-/// any target (no implicit mixed-sign arithmetic). Pre-v2.11.1 this was
-/// gated on `opts.pod_aware`, which is only set for Quasar — the gate
-/// silently broke Anchor scaffolds whose specs mixed U128 + I128 (e.g.
-/// percolator's `state.accounts[i].capital + state.accounts[i].pnl`).
-/// The `pod_aware` flag stays for `.get()` lowering on Pod fields; it
-/// has no business gating signed/unsigned coercion.
+/// Render both sides of a binary op, casting to `i128` when kinds mix.
+/// Mirrors the Lean-side `render_binary_with_coercion`. The Nat→Int cast is
+/// target-independent (Rust rejects `u128 + i128` everywhere) — do NOT gate
+/// it on `pod_aware`, which is Quasar-only and would silently break Anchor
+/// scaffolds mixing U128 + I128.
 fn render_rust_binary_with_coercion(
     lhs: &Node<Expr>,
     rhs: &Node<Expr>,
@@ -1191,10 +1134,9 @@ fn render_rust_binary_with_coercion(
     let rk = rust_infer_kind(opts.env, &rhs.node);
     let l = expr_to_rust(&lhs.node, ctx, consts, opts);
     let r = expr_to_rust(&rhs.node, ctx, consts, opts);
-    // When widening Nat → Int we must cast BOTH sides to the same wide
-    // type. Pre-fix only the Nat side was cast, leaving comparisons like
-    // `i64 >= i128` that don't typecheck. Symmetric widening to i128 keeps
-    // operands aligned without losing precision on either side.
+    // Widening Nat → Int must cast BOTH sides to the same wide type —
+    // casting only the Nat side leaves `i64 >= i128`, which doesn't
+    // typecheck. Symmetric i128 widening loses no precision.
     match (lk, rk) {
         (Kind::Nat, Kind::Int) => (format!("(({}) as i128)", l), format!("(({}) as i128)", r)),
         (Kind::Int, Kind::Nat) => (format!("(({}) as i128)", l), format!("(({}) as i128)", r)),
@@ -1202,17 +1144,10 @@ fn render_rust_binary_with_coercion(
     }
 }
 
-/// `mul_div_floor_u128` / `mul_div_ceil_u128` accept `u128` arguments.
-/// Spec operands may be U64 / I64 / I128 / native handler params — all of
-/// which fail the `u128` parameter check. Cast unconditionally so the
-/// helper signature is honored uniformly on every target. (`as u128`
-/// from u64 is widening; from i128 it's saturating-by-truncation, which
-/// matches the spec's Int → u128 lowering used by the Lean side.)
-///
-/// Pre-v2.11.1 this was gated on `opts.pod_aware`, which is only set for
-/// Quasar — the gate silently broke Anchor scaffolds that called the
-/// helpers (e.g. percolator's `mul_div_floor_u128(size_q, exec_price,
-/// 1000000)` with mixed `i128`/`u64` args).
+/// `mul_div_{floor,ceil}_u128` take `u128` args; spec operands may be
+/// U64 / I64 / I128 / native params. Cast unconditionally on every target
+/// (gating on `pod_aware` would break Anchor) — `as u128` from u64 widens;
+/// from i128 it truncates, matching the Lean side's Int → u128 lowering.
 fn render_helper_arg(e: &Expr, ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '_>) -> String {
     let rendered = expr_to_rust(e, ctx, consts, opts);
     format!("(({}) as u128)", rendered)
@@ -1226,21 +1161,12 @@ fn path_to_rust(p: &a::Path, _ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '
             return v.clone();
         }
     }
-    // B12 (v2.6.1): `state.X` lowers to `s.X` — every Rust consumer (property
-    // fn bodies, transition-fn assume predicates, abort.rust_expr, etc.) binds
-    // state to a parameter named `s`. Previously we emitted `state` as-is and
-    // relied on a post-hoc `translate_guard_to_rust` string replace to fix it,
-    // which covered `requires` but missed property bodies consumed raw via
-    // `prop.rust_expression`.
-    //
-    // v2.23 Slice 2: when `state_mode == Binary` (set by Slices 3-4 for
-    // `PropertyClass::Binary` property bodies), the state prefix splits
-    // by `inside_old`:
-    //   - inside_old=true  → `pre.<field>`   (old(state.x))
-    //   - inside_old=false → `post.<field>`  (state.x)
-    // Mirrors `path_to_lean` at line 598 which has always done this.
-    // `Unary` callers (every existing site) keep the legacy `s.<field>`
-    // prefix regardless of inside_old.
+    // `state.X` lowers to `s.X` — every Rust consumer (property fn bodies,
+    // transition-fn assume predicates, abort.rust_expr) binds state to `s`.
+    // In Binary state_mode the prefix splits by `inside_old`:
+    //   inside_old=true  → `pre.<field>`   (old(state.x))
+    //   inside_old=false → `post.<field>`  (state.x)
+    // Mirrors `path_to_lean`. Unary callers keep `s.<field>` regardless.
     if p.root == "state" {
         let prefix = match (opts.state_mode, opts.inside_old) {
             (StateMode::Unary, _) => "s",
@@ -1282,17 +1208,14 @@ fn path_to_rust(p: &a::Path, _ctx: Ctx, consts: ConstTable, opts: RustOpts<'_, '
 /// in any record or state ADT variant anywhere in `spec`. Sum types that
 /// qualify get inductive Lean codegen; other ADTs stay on the flatten path.
 fn is_map_value_sum_type(name: &str, spec: &a::Spec) -> bool {
-    // Check all record fields and ADT variant fields for `Map[N] <name>`,
-    // OR — v2.24 #20 — `Map[<name>] T` (enum used as key).
+    // Check record and ADT variant fields for `Map[N] <name>` (value) OR
+    // `Map[<name>] T` (enum used as key).
     fn type_ref_mentions(t: &a::TypeRef, name: &str) -> bool {
         match t {
             a::TypeRef::Map { inner, bound } => {
-                // Used as the Map's VALUE (pre-fix sole condition)
                 let value_match = matches!(inner.as_ref(), a::TypeRef::Named(n) if n == name);
-                // v2.24 #20 — used as the Map's KEY (the bound). The
-                // bound is stored as a raw ident string; resolution
-                // happens later, so a bare name match is the
-                // routing signal.
+                // Key match: the bound is a raw ident string, resolved
+                // later — a bare name match is the routing signal.
                 let key_match = bound == name;
                 value_match || key_match
             }
@@ -1339,10 +1262,10 @@ fn type_ref_to_string(t: &a::TypeRef) -> String {
 // ============================================================================
 
 /// Render an `EffectStmt` to the `(field, op, value)` triple consumed by
-/// every backend, plus the per-site error-variant override (v2.24 §S1a)
-/// that codegen reads when lowering checked `+=` / `-=`. Override is
-/// always `None` for non-checked ops — the parser permits `or X` on those
-/// permissively for nicer error positioning, and the adapter normalizes.
+/// every backend, plus the per-site error-variant override codegen reads
+/// when lowering checked `+=` / `-=`. Override is always `None` for
+/// non-checked ops — the parser is permissive for error positioning; the
+/// adapter normalizes.
 fn render_effect(
     stmt: &a::EffectStmt,
     params: &[(String, String)],
@@ -1369,7 +1292,7 @@ fn render_effect(
         }
         s
     };
-    // Per-effect semantic tag (v2.7 G3):
+    // Per-effect semantic tag:
     //   - "add" / "sub"               = checked (default)
     //   - "add_sat" / "sub_sat"       = saturating (`+=!` / `-=!`)
     //   - "add_wrap" / "sub_wrap"     = wrapping   (`+=?` / `-=?`)
@@ -1446,10 +1369,9 @@ fn render_effect(
             expr_to_lean(other, Ctx::Guard, consts, &env)
         }
     };
-    // v2.24 §S1a — only keep the per-site override for ops that can fail
-    // (checked Add / Sub). Saturating / wrapping / Set can never trigger
-    // an error variant; the parser still accepts `or X` on those for
-    // positioning, but we drop it here so codegen never sees it.
+    // Keep the per-site override only for ops that can fail (checked
+    // Add / Sub); saturating / wrapping / Set can't trigger an error
+    // variant, so drop any parser-captured override here.
     let on_error = match stmt.op {
         a::EffectOp::Add | a::EffectOp::Sub => stmt.on_error.clone(),
         _ => None,
@@ -1463,10 +1385,9 @@ fn string_to_typeref_best_effort(s: &str) -> a::TypeRef {
     a::TypeRef::Named(s.trim().to_string())
 }
 
-/// Render an effect RHS expression to the same string form `render_effect`
-/// uses. Factored out so the v2.29 Slice C variant-promotion desugaring
-/// can emit per-field synthetic effects without duplicating the
-/// rendering logic. Mirrors `render_effect`'s value branch exactly.
+/// Render an effect RHS to the same string form `render_effect` uses —
+/// factored out for the variant-promotion desugaring. Mirrors
+/// `render_effect`'s value branch exactly.
 fn render_effect_rhs_value(rhs: &Expr, params: &[(String, String)], consts: ConstTable) -> String {
     match rhs {
         Expr::Int(v) => v.to_string(),
@@ -1518,24 +1439,13 @@ fn render_effect_rhs_value(rhs: &Expr, params: &[(String, String)], consts: Cons
     }
 }
 
-/// v2.29 Slice C — desugar the `state := .Variant { f := e, ... }`
-/// whole-state-assignment shape into per-field effects with
-/// variant-prefixed LHS (e.g. `Variant.f`). The cross-variant
-/// promotion path in `codegen.rs::emit_cross_variant_promotion`
-/// already understands variant-prefixed LHS; the desugaring routes
-/// the new top-level shape through that existing emitter without
-/// needing a parallel codegen pathway.
-///
-/// Returns the expanded effect list for the `state := .Variant`
-/// shape; for every other shape, returns a single-element Vec
-/// holding the unmodified `render_effect` output (so call sites
-/// can iterate uniformly).
-///
-/// Unit-variant promotion (`state := .Closed` — no payload) drops
-/// to an empty Vec: the wrapper assignment in
-/// `emit_cross_variant_promotion` handles the variant transition
-/// from `handler.post_status`, so the per-field effect list is
-/// expected to be empty for unit-post handlers.
+/// Desugar `state := .Variant { f := e, ... }` whole-state assignment into
+/// per-field effects with variant-prefixed LHS (`Variant.f`), routing the
+/// shape through the existing `emit_cross_variant_promotion` emitter. Other
+/// shapes return a single-element Vec of `render_effect` output (uniform
+/// iteration). Unit-variant promotion (`state := .Closed`) returns an empty
+/// Vec — the wrapper assignment handles the transition from
+/// `handler.post_status`.
 fn render_effect_or_expand_variant_promotion(
     stmt: &a::EffectStmt,
     params: &[(String, String)],
@@ -1844,17 +1754,14 @@ pub fn parse_str(src: &str) -> anyhow::Result<ParsedSpec> {
     Ok(parsed)
 }
 
-/// Walk every guard / ensures / effect-RHS / property body in the spec
-/// and collect every `Expr::App` call site as an uninterpreted helper.
-/// First-encounter wins for the signature; duplicates (same name, same
-/// arity) are skipped. Issue #8 finding #5.
+/// Walk every guard / ensures / effect-RHS / property body and collect
+/// every `Expr::App` call site as an uninterpreted helper. First encounter
+/// wins for the signature; duplicates (same name + arity) are skipped.
 ///
-/// Return type is always `Prop` — in practice every App call in the
-/// DSL lives in a boolean-valued position (guard, invariant, ensures,
-/// or a boolean-valued let binding). If a user puts a call in an
-/// arithmetic position (e.g. `effect { x := foo(y) + 1 }`), the emitted
-/// `axiom foo : T → Prop` won't typecheck; richer context-sensitive
-/// inference is a v2.8 candidate.
+/// Return type is always boolean — every App call in the DSL lives in a
+/// boolean-valued position. A call in an arithmetic position (`effect
+/// { x := foo(y) + 1 }`) won't typecheck against the emitted axiom; richer
+/// context-sensitive inference is future work.
 fn collect_uninterpreted_helpers(
     spec: &a::Spec,
     parsed: &ParsedSpec,
@@ -1880,7 +1787,7 @@ fn collect_uninterpreted_helpers(
                             walk_apps(&e.node, &field_types, &param_types, &mut out, &mut seen);
                         }
                         a::HandlerClause::Effect(blocks) => {
-                            // v2.20 §S1.2 — flatten through `match` arms.
+                            // Flatten through `match` arms.
                             for stmt in a::flatten_effect_blocks(blocks) {
                                 walk_apps(
                                     &stmt.rhs.node,
@@ -1904,14 +1811,10 @@ fn collect_uninterpreted_helpers(
                     &mut seen,
                 );
             }
-            // v2.26 Slice 3a — walk ref_impl bodies too. Without this,
-            // a helper called only from a ref_impl body (e.g.
-            // `mul_div_floor`-like names that aren't builtins or other
-            // ref_impls) never enters the uninterpreted-helper bag, and
-            // Lean fails elaboration on the unresolved name. The
-            // post-walk ref_impl-name filter (`out.uninterpreted_helpers
-            // .retain(...)`) strips out names that are themselves
-            // ref_impls so the `def`/`opaque` declarations don't
+            // Walk ref_impl bodies too: a helper called only from a
+            // ref_impl body must enter the uninterpreted-helper bag or Lean
+            // fails on the unresolved name. The post-walk filter strips
+            // names that are themselves ref_impls so declarations don't
             // collide.
             TopItem::RefImpl(r) => {
                 let param_types: std::collections::HashMap<String, String> = r
@@ -1942,16 +1845,13 @@ fn walk_apps(
 ) {
     match expr {
         Expr::App { func, args } => {
-            // v2.21 S2.5: skip the `now()` builtin — it resolves via
-            // the support-library axiom `QEDGen.Solana.Valid.now : Nat`,
-            // not via a per-spec uninterpreted helper. Without this guard
-            // walk_apps emits `axiom now : Bool` which collides with the
-            // support-library declaration at elaboration.
+            // Skip the `now()` builtin — it resolves via the support-library
+            // axiom `QEDGen.Solana.Valid.now : Nat`; emitting `axiom now :
+            // Bool` here would collide at elaboration.
             if func == "now" && args.is_empty() {
                 return;
             }
-            // v2.24 #19: `current_epoch()` resolves via the support
-            // library, same shape as `now`.
+            // `current_epoch()` — same support-library shape as `now`.
             if func == "current_epoch" && args.is_empty() {
                 return;
             }
@@ -1961,16 +1861,11 @@ fn walk_apps(
                     .iter()
                     .map(|n| infer_lean_type(&n.node, field_types, param_types))
                     .collect();
-                // Bool, not Prop. The original v2.7.1 F5 emission used
-                // `→ Prop`, which lands at codegen but breaks `lake build`
-                // — `requires` / `ensures` clauses lower to a transition
-                // function's `if`-guard, which Lean requires to be
-                // `Decidable`. `axiom foo : T → Prop` is opaque and
-                // noncomputable, so the transition fails to compile.
-                // `Bool` is auto-`Decidable` and lifts cleanly into
-                // `Prop` positions via the standard `b = true` coercion
-                // that the call-site renderer already produces. See
-                // issue #12.
+                // Bool, not Prop: requires/ensures lower to a transition
+                // `if`-guard, which Lean needs `Decidable` — `axiom foo : T
+                // → Prop` is opaque and fails to compile. `Bool` is
+                // auto-`Decidable` and lifts into Prop via the `b = true`
+                // coercion the call-site renderer already produces.
                 out.push((func.clone(), arg_types, "Bool".to_string()));
             }
             for n in args {
@@ -2027,18 +1922,11 @@ fn is_signed_int(t: &str) -> bool {
     matches!(t, "I8" | "I16" | "I32" | "I64" | "I128")
 }
 
-/// Narrow check-time type guard for Pubkey-vs-numeric-literal mismatches
-/// in effect RHS and `requires` / `ensures` comparisons. Issue #8
-/// findings #7 and #8: the DSL has no Pubkey literal syntax, so
-/// `state.key := 0` (or `state.key != 0`) is always a category error,
-/// but qedgen v2.7.0 accepted both and the mismatch only surfaced at
-/// `lake build` — the exact failure mode v2.6.2 was refactored to
-/// avoid.
-///
-/// Scope is deliberately narrow: we only fail when one side is a
-/// resolved Pubkey field and the other side is a bare integer literal.
-/// Richer type inference can land later; the goal here is "don't let
-/// Pubkey = 0 pass silently."
+/// Narrow check-time guard for Pubkey-vs-numeric-literal mismatches in
+/// effect RHS and `requires` / `ensures` comparisons — the DSL has no
+/// Pubkey literal syntax, so `state.key := 0` is always a category error.
+/// Deliberately narrow: only fail when one side resolves to a Pubkey field
+/// and the other is a bare integer literal.
 pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()> {
     let field_types = collect_field_types(parsed);
     let const_literals = collect_numeric_consts(spec);
@@ -2054,12 +1942,9 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
         }
     }
 
-    // v2.26 Slice 3a — reject recursive `ref_impl`s (direct or mutual).
-    // Termination + Lean `def` lowering for recursive ref_impls becomes
-    // a meta-question we don't need to answer for the LP-shape sweet
-    // spot. Lean would emit a non-terminating `def` and fail
-    // elaboration; better to surface this at adapt time with a clear
-    // fix-it pointing at structural decomposition.
+    // Reject recursive `ref_impl`s (direct or mutual): Lean would emit a
+    // non-terminating `def` and fail elaboration — surface at adapt time
+    // with a fix-it pointing at structural decomposition.
     check_no_recursive_ref_impls(spec)?;
 
     Ok(())
@@ -2139,12 +2024,9 @@ fn collect_app_funcs(expr: &Expr, out: &mut std::collections::HashSet<String>) {
     }
 }
 
-/// v2.26 Slice 3a — reject recursive `ref_impl`s. Walks the spec's
-/// ref_impl bodies, builds the call graph restricted to ref_impl names,
-/// and DFS-detects any cycle. Direct (`r calls r`) and mutual
-/// (`r → s → r`) recursion both fail with a fix-it pointing at
-/// structural decomposition (split into a non-recursive helper +
-/// state-bearing handler).
+/// Reject recursive `ref_impl`s: build the call graph restricted to
+/// ref_impl names and DFS-detect cycles. Direct (`r calls r`) and mutual
+/// (`r → s → r`) recursion both fail with a fix-it.
 fn check_no_recursive_ref_impls(spec: &a::Spec) -> anyhow::Result<()> {
     // Gather ref_impl names + their bodies.
     let mut ref_impls: Vec<(String, &Node<Expr>)> = Vec::new();
@@ -2286,7 +2168,7 @@ fn typecheck_handler(
     for Node { node, .. } in &h.clauses {
         match node {
             a::HandlerClause::Effect(blocks) => {
-                // v2.20 §S1.2 — typecheck every leaf, including under match.
+                // Typecheck every leaf, including under match.
                 for stmt in a::flatten_effect_blocks(blocks) {
                     check_effect_typed(&h.name, stmt, field_types, param_types, const_literals)?;
                 }
@@ -2479,10 +2361,9 @@ fn numeric_literal_value(
     const_literals: &std::collections::HashMap<String, i128>,
 ) -> Option<i128> {
     match expr {
-        // v2.29 Slice A: integer literals stay non-negative at the
-        // AST (`Expr::Int(u128)`); negative literals desugar to
-        // `Arith { Sub, Int(0), Int(v) }` so they're recognized here
-        // via the explicit Sub branch below.
+        // Integer literals stay non-negative at the AST (`Expr::Int(u128)`);
+        // negative literals desugar to `Arith { Sub, Int(0), Int(v) }` and
+        // are recognized via the Sub branch below.
         Expr::Int(v) => i128::try_from(*v).ok(),
         Expr::Path(p) if p.segments.is_empty() => const_literals.get(&p.root).copied(),
         Expr::Paren(inner) | Expr::Old(inner) => numeric_literal_value(&inner.node, const_literals),
@@ -2527,11 +2408,9 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     // First pass: collect constants so guard rendering can substitute them.
     let mut consts_map: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    // v2.24 §S2d — integer-max builtins. Lint suggestions reference these
-    // as bare identifiers; users used to have to declare them as `const`s
-    // explicitly. Builtin seeding lets `requires state.x + n <= U64_MAX`
-    // resolve out of the box. User-defined `const` shadows the builtin
-    // (insert order: builtins first, then user consts via the loop below).
+    // Integer-max builtins so `requires state.x + n <= U64_MAX` resolves
+    // out of the box. User-defined `const` shadows the builtin (builtins
+    // inserted first, user consts after).
     consts_map.insert("U64_MAX".to_string(), u64::MAX.to_string());
     consts_map.insert("U32_MAX".to_string(), u32::MAX.to_string());
     consts_map.insert("U128_MAX".to_string(), u128::MAX.to_string());
@@ -2602,20 +2481,11 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     // representation matches existing transition codegen.
                     let lifecycle: Vec<String> =
                         adt.variants.iter().map(|v| v.name.clone()).collect();
-                    // B1 (v2.6): flatten variant fields into the state-field
-                    // list BUT deduplicate by name. Before this, each variant
-                    // contributed the full record to `fields`, producing e.g.
-                    //     struct State {
-                    //         pool: u64, status: u8,
-                    //         pool: u64, status: u8,   // duplicate from Frozen
-                    //         pool: u64, status: u8,   // duplicate from Settled
-                    //     }
-                    // in the Kani harness — invalid Rust. First occurrence
-                    // wins on name collision (variants usually share the same
-                    // field shape). If two variants declare the same field
-                    // name with different types, the downstream `check.rs`
-                    // lint surfaces the mismatch. Proper enum+match codegen
-                    // is tracked separately (release notes).
+                    // Flatten variant fields into the state-field list,
+                    // deduped by name — duplicate fields would emit invalid
+                    // Rust in the Kani harness. First occurrence wins
+                    // (variants usually share field shapes); same-name
+                    // different-type collisions surface via the check.rs lint.
                     let mut fields: Vec<(String, String)> = Vec::new();
                     let mut seen: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
@@ -2626,13 +2496,11 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             }
                         }
                     }
-                    // v2.24 S5b: preserve per-variant structure alongside the
-                    // flattened `fields` view. Codegen consumers that want
-                    // real `pub enum` emission read `variants`; the flat
-                    // view stays for back-compat with readers not yet
-                    // migrated. Empty variants (zero-payload constructors
-                    // like `| Inactive`) are kept so the enum can emit
-                    // unit-style variants in v2.24 S5b's codegen pass.
+                    // Preserve per-variant structure alongside the flattened
+                    // `fields` view: enum-emitting codegen reads `variants`;
+                    // the flat view stays for back-compat. Zero-payload
+                    // variants (`| Inactive`) are kept for unit-style enum
+                    // emission.
                     let parsed_variants: Vec<ParsedVariant> = adt
                         .variants
                         .iter()
@@ -2661,25 +2529,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 out.handlers.extend(expanded);
             }
             TopItem::Property(p) => {
-                // v2.23 Slice 3: pick state_mode by the property's class.
-                // Unary properties render today's way (`s.x`). Binary
-                // properties — bodies containing `old(...)` — render with
-                // `post.x` for the current state and `pre.x` inside
-                // `old(...)`, matching the per-handler preservation
-                // harness shape that `emit_preservation_tests_for` emits.
-                // Pre-v2.23 both classes rendered identically, collapsing
-                // every `old(...)` into a structural tautology.
-                //
-                // v2.24.0 follow-up: extend the same split to the Lean
-                // side. Pre-fix the lean_expr was always rendered in
-                // `Ctx::Guard`, which lowered both `state.x` and
-                // `old(state.x)` to bare `s.x` — every binary
-                // preservation property in `render_properties_adt`
-                // emitted as a structural tautology (`s.x ≥ s.x`).
-                // Using `Ctx::Ensures` for binary bodies gives `s'.x`
-                // for `state.x` and `s.x` for `old(state.x)`, matching
-                // the `(s s' : State) : Prop` shape the inductive
-                // property emitter now uses.
+                // Pick state_mode / Lean ctx by the property's class. Unary
+                // renders `s.x`; Binary (body contains `old(...)`) renders
+                // `post.x` / `pre.x` on the Rust side and `s'.x` / `s.x`
+                // (`Ctx::Ensures`) on the Lean side — rendering both classes
+                // identically would collapse every `old(...)` preservation
+                // property into a structural tautology (`s.x ≥ s.x`).
                 let property_class = classify_property_body(&p.body);
                 let lean_ctx = match property_class {
                     crate::check::PropertyClass::Unary => Ctx::Guard,
@@ -2700,12 +2555,10 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     // handlers are known (matches pest parity).
                     a::PreservedBy::All => vec!["all".to_string()],
                     a::PreservedBy::Some(xs) => xs.clone(),
-                    // v2.24 #3 — `preserved_by all except [h1, h2, ...]`.
-                    // Tagged with a `!` prefix per name so the second-pass
-                    // expansion (which runs after all handlers are known)
-                    // can subtract these from the full handler list. Bare
-                    // handler names with literal `!` prefix aren't legal
-                    // identifiers, so this tag is collision-free.
+                    // `all except [...]`: tag each name with a `!` prefix so
+                    // the second-pass expansion (after all handlers are
+                    // known) can subtract them. `!` isn't legal in
+                    // identifiers, so the tag is collision-free.
                     a::PreservedBy::AllExcept(xs) => {
                         let mut tagged = vec!["all".to_string()];
                         for x in xs {
@@ -2745,12 +2598,9 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     }
                     _ => None,
                 };
-                // v2.20 §S1.1: classify the property's quantifier shape so
-                // `check.rs::check_completeness` can lint unsupported shapes
-                // (nested forall, exists, unbounded `Vec<T>` binder, ...).
-                // Supported shapes (no quantifier, single-binder forall) get
-                // `None`; the per_slot field above already carries the data
-                // codegen needs for the lowered harness.
+                // Classify the quantifier shape so `check_completeness` can
+                // lint unsupported shapes. Supported shapes get `None`; the
+                // per_slot field above carries what codegen needs.
                 let quantifier_lint = match crate::quantifier::supported_shape(p) {
                     Ok(_) => None,
                     // A bounded `exists` (over `Fin[N]`, directly or via an
@@ -2956,18 +2806,14 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 });
             }
             TopItem::PragmaAssign { name, value } => {
-                // v2.24 §S1b — `pragma <key> = <value>` top-level
-                // assignment. Push raw; lint validates the key against the
-                // known set and the value against declared `type Error`
-                // variants.
+                // Push raw; lint validates the key against the known set and
+                // the value against declared `type Error` variants.
                 out.pragma_assignments.push((name.clone(), value.clone()));
             }
             TopItem::Schema(s) => {
-                // v2.24 #1 — collect schema blocks so handlers can
-                // expand them via `include <name>`. Adapt each
-                // requires expression eagerly using the shared
-                // `expr_to_lean` / `expr_to_rust` so the schema's
-                // guards land in the same shape as inline requires.
+                // Collect schema blocks for `include <name>` expansion;
+                // adapt each requires eagerly so schema guards land in the
+                // same shape as inline requires.
                 let requires = s
                     .requires
                     .iter()
@@ -2991,10 +2837,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 });
             }
             TopItem::RefImpl(r) => {
-                // v2.25 — collect ref_impl bodies. Lean lowering uses
-                // `lean_body`; Kani harness inlining uses `rust_body`.
-                // The body is a pure expression — no Ctx::Ensures /
-                // Ctx::Guard distinction needed; use Guard so bare
+                // Lean lowering uses `lean_body`; Kani inlining uses
+                // `rust_body`. The body is pure — use Guard ctx so bare
                 // state refs render as `s.x` (single-state context).
                 let params: Vec<(String, String)> = r
                     .params
@@ -3124,10 +2968,9 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         }
     }
 
-    // Expand `preserved_by all` to the full handler-name list (pest parity).
-    // v2.24 #3 — `preserved_by all except [h1, h2, ...]` arrives here as
-    // `["all", "!h1", "!h2"]`; expand `all` then subtract the
-    // `!`-prefixed excludes.
+    // Expand `preserved_by all` to the full handler-name list. `all except
+    // [...]` arrives as `["all", "!h1", "!h2"]`; expand `all` then subtract
+    // the `!`-prefixed excludes.
     let all_handler_names: Vec<String> = out.handlers.iter().map(|h| h.name.clone()).collect();
     for prop in &mut out.properties {
         if prop.preserved_by.first().map(|s| s.as_str()) == Some("all") {
@@ -3152,18 +2995,11 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         }
     }
 
-    // v2.24.2 — promote the `state { ... }` sugar's record into
-    // `account_types` so downstream lints that walk `account_types`
-    // (notably `check_map_and_subscript`) can see Map-typed fields
-    // declared via the sugar. Without this, `state { lsts : Map[N] T }`
-    // parses cleanly but `lsts[idx].x := …` effects fire a spurious
-    // `subscript_not_map` error because the lint never sees the Map
-    // type information. Pre-fix workaround was to switch to the
-    // explicit `type State | Variant of { ... }` ADT form.
-    //
-    // Only synthesize when there's no explicit `type State` ADT (any
-    // account_type already in the list wins; the State record stays
-    // available via `out.records` for other consumers).
+    // Promote the `state { ... }` sugar's record into `account_types` so
+    // lints that walk `account_types` (notably `check_map_and_subscript`)
+    // see Map-typed fields — otherwise `lsts[idx].x := …` fires a spurious
+    // `subscript_not_map`. Only synthesize when there's no explicit `type
+    // State` ADT; the State record stays available via `out.records`.
     if out.account_types.is_empty() {
         if let Some(state_record) = out.records.iter().find(|r| r.name == "State") {
             out.account_types.push(ParsedAccountType {
@@ -3191,20 +3027,14 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         out.lifecycle_states = first.lifecycle.clone();
     }
 
-    // v2.26 — when the spec uses `state { ... }` sugar or
-    // `type State = { ... }` record form, and a handler has no
-    // explicit `accounts { ... }`, synthesize a default state-bearing
-    // account so downstream codegen can bind `state.X` references.
-    // Without this, guards.rs emits raw `s.X` (the lowered form of
-    // `state.X`) which refers to an undefined symbol because no
-    // Anchor account carries the state. Gated on
-    // `records.contains("State")` so ADT-state specs
-    // (`type State | Variant of { ... }`) stay unchanged — they
-    // declare variants explicitly and downstream consumers
-    // (crucible_gen, variant-state codegen) emit the right shape.
-    // The synthetic account name "state" matches the lowercase of
-    // "State" so `infer_state_name`'s case-insensitive lookup binds
-    // it to the canonical `<ProgramPascalCase>Account` struct.
+    // When the spec uses `state { ... }` sugar or `type State = { ... }`
+    // and a handler has no explicit `accounts { ... }`, synthesize a
+    // default state-bearing account so codegen can bind `state.X` refs —
+    // otherwise guards.rs emits raw `s.X` against no account. Gated on
+    // `records.contains("State")` so ADT-state specs stay unchanged. The
+    // synthetic name "state" matches lowercase "State" so
+    // `infer_state_name`'s case-insensitive lookup binds it to the
+    // canonical `<ProgramPascalCase>Account` struct.
     let is_state_record_form = out.records.iter().any(|r| r.name == "State");
     if is_state_record_form && !out.state_fields.is_empty() {
         // `path_to_lean` already lowered `state.X` to `s.X` (Ctx::Guard)
@@ -3265,26 +3095,21 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     }
 
     out.constants = constants;
-    // F5: collect uninterpreted helpers after all other fields are
-    // populated — the collector needs the full state_fields + records
-    // + sum_types picture to infer argument types.
-    //
-    // v2.25 — filter out names that are declared as `ref_impl`s. Those
-    // have real bodies in Lean (emitted as `def`) so the uninterpreted
-    // `opaque foo : T → Bool` shape would conflict. Other call sites
-    // of an unknown name still flow through the helper detector and
-    // get the axiomatic treatment.
+    // Collect uninterpreted helpers after all other fields are populated —
+    // the collector needs the full state_fields + records + sum_types
+    // picture to infer argument types. Names declared as `ref_impl`s are
+    // filtered out: they have real Lean bodies (`def`), so the
+    // uninterpreted `opaque foo : T → Bool` shape would conflict.
     out.uninterpreted_helpers = collect_uninterpreted_helpers(spec, &out);
     let ref_impl_names: std::collections::HashSet<&str> =
         out.ref_impls.iter().map(|r| r.name.as_str()).collect();
     out.uninterpreted_helpers
         .retain(|(n, _, _)| !ref_impl_names.contains(n.as_str()));
 
-    // v2.24 #1 — expand `include <schema>` clauses on handlers. Done
-    // here as a post-pass so the schema lookup sees every declared
-    // schema regardless of source order, and so synthetic match-arm
-    // handlers (which inherit `schema_includes` from their parent
-    // via `expand_handler`) get the same expansion.
+    // Expand `include <schema>` clauses as a post-pass so the lookup sees
+    // every declared schema regardless of source order, and synthetic
+    // match-arm handlers (which inherit `schema_includes`) get the same
+    // expansion.
     let schemas = out.schemas.clone();
     for handler in &mut out.handlers {
         if handler.schema_includes.is_empty() {
@@ -3299,23 +3124,18 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
         }
     }
 
-    // v2.29.1 — desugar dotted-auth (`auth admin_config.admin_key`).
-    // The parser stored it as `handler.who = Some("admin_config.admin_key")`;
-    // here we split on `.`, identify the signer account, and
-    // synthesize a `requires <acct>.<field> == <signer>.pubkey else
-    // Unauthorized` clause. `handler.who` is rewritten to the signer
-    // account name so downstream "handler has auth" lints still
-    // fire. Bare `auth <name>` (no dot) is left untouched — that
-    // path lowers to Anchor `has_one = X` for state-resident fields.
+    // Desugar dotted-auth (`auth admin_config.admin_key`): split on `.`,
+    // identify the signer, synthesize `requires <acct>.<field> ==
+    // <signer>.pubkey else Unauthorized`, and rewrite `handler.who` to the
+    // signer so "handler has auth" lints still fire. Bare `auth <name>`
+    // stays untouched (lowers to Anchor `has_one = X`).
     desugar_dotted_auth(&mut out);
 
     out
 }
 
-/// v2.29.1 — post-pass that turns `auth <acct>.<field>` into a
-/// `requires <acct>.<field> == <signer>.pubkey else Unauthorized`
-/// synthesized clause plus a `who = <signer>` rewrite. See the
-/// caller in `adapt()` for the integration point.
+/// Post-pass: `auth <acct>.<field>` → synthesized `requires <acct>.<field>
+/// == <signer>.pubkey else Unauthorized` + `who = <signer>` rewrite.
 fn desugar_dotted_auth(spec: &mut ParsedSpec) {
     for handler in &mut spec.handlers {
         let Some(actor) = handler.who.clone() else {
@@ -3408,10 +3228,8 @@ fn expand_handler(
                 rust_expr: rust_neg.clone(),
                 rust_expr_pod: rust_pod_neg.clone(),
                 error_name: None,
-                // Synthetic: derived from prior arms' negations, not a
-                // single source AST node. Slice 1b's
-                // `old_in_single_state_context` lint skips synthetic
-                // requires — there's nothing for the author to fix here.
+                // Synthetic (prior arms' negations, no single source AST
+                // node); the `old_in_single_state_context` lint skips these.
                 ast_body: None,
             });
         }
@@ -3448,8 +3266,8 @@ fn expand_handler(
                     rust_expr: "false".to_string(),
                     rust_expr_pod: "false".to_string(),
                     error_name: Some(err.clone()),
-                    // Synthetic: arm-abort lowers to literal `false`
-                    // with no source AST. Slice 1b lint skips.
+                    // Synthetic: arm-abort lowers to literal `false` with no
+                    // source AST; lint skips.
                     ast_body: None,
                 });
             }
@@ -3463,12 +3281,9 @@ fn expand_handler(
                     }
                 }
             }
-            // v2.24 #9 — synth handler issues the CPI plus any
-            // alongside effects. Mirrors the per-handler `Call`
-            // lowering at the top-level handler clause site so
-            // backends see the same ParsedCall shape regardless of
-            // whether the call came from a top-level `call` clause
-            // or from inside a match arm.
+            // Synth handler issues the CPI plus any alongside effects —
+            // mirrors the top-level `Call` clause lowering so backends see
+            // the same ParsedCall shape either way.
             a::MatchBody::Call(call, effects) => {
                 let segs = &call.target.0;
                 let (iface, handler_name) = match segs.as_slice() {
@@ -3501,11 +3316,9 @@ fn expand_handler(
                     target_handler: handler_name,
                     args,
                     result_binding: call.result_binding.clone(),
-                    // v2.27 Track A — lower the optional
-                    // `state_binders { ... }` block. Match-arm CPIs
-                    // currently always carry an empty binder list at
-                    // the parser; the lower_state_binders call still
-                    // runs so the codepath stays uniform.
+                    // Match-arm CPIs always carry an empty binder list at
+                    // the parser; lower_state_binders still runs so the
+                    // codepath stays uniform.
                     state_binders: lower_state_binders(&call.state_binders),
                 });
                 for Node { node: stmt, .. } in effects {
@@ -3526,28 +3339,18 @@ fn expand_handler(
     out
 }
 
-/// v2.27 Track A — lower the AST's `state_binders { callee_field =
-/// state.X, ... }` block into the `ParsedStateBinder` shape that
-/// downstream backends thread through to the Lean axiom signature
-/// (accessor params) and the Kani harness substitution.
-///
-/// The Track A restriction: each RHS must be exactly `state.<ident>`.
-/// Richer paths (subscripts, nested field access, computed expressions)
-/// are rejected by emitting an empty result and printing a diagnostic
-/// to stderr — the spec lint catches the same shape pre-codegen, so
-/// this is a defensive guard rather than the primary error path.
-///
-/// Returns the lowered binders. Empty input → empty output. The
-/// duplicate-callee_field case retains the first occurrence; later
-/// duplicates are dropped (the parser already coalesces multiple
-/// `state_binders { ... }` blocks, so the dedup runs across blocks).
+/// Lower `state_binders { callee_field = state.X, ... }` into the
+/// `ParsedStateBinder` shape backends thread to the Lean axiom signature
+/// and Kani harness substitution. Each RHS must be exactly
+/// `state.<ident>`; richer paths drop the binder with a stderr warning —
+/// the spec lint catches the same shape pre-codegen, so this is a
+/// defensive guard. Duplicate callee_fields keep the first occurrence
+/// (dedup runs across coalesced blocks).
 fn lower_state_binders(binders: &[a::StateBinder]) -> Vec<ParsedStateBinder> {
     let mut out: Vec<ParsedStateBinder> = Vec::new();
     for b in binders {
-        // Track A shape: the binder RHS must be `state.<ident>` —
-        // either a `Path { root: "state", segments: [Field(ident)] }`
-        // or, if the parser routed it through `Paren`, an unwrapped
-        // version of the same.
+        // RHS must be `state.<ident>` — a `Path { root: "state",
+        // segments: [Field(ident)] }`, possibly `Paren`-wrapped.
         let caller_field = extract_state_field(&b.caller_expr.node);
         match caller_field {
             Some(field) => {
@@ -3570,9 +3373,8 @@ fn lower_state_binders(binders: &[a::StateBinder]) -> Vec<ParsedStateBinder> {
     out
 }
 
-/// Walk a binder RHS looking for the v2.27 Track A shape:
-/// `state.<ident>` (with optional `Paren` wrappers). Returns the
-/// trailing field ident, or `None` if the shape doesn't match.
+/// Extract the trailing field ident from a `state.<ident>` binder RHS
+/// (optional `Paren` wrappers); `None` if the shape doesn't match.
 fn extract_state_field(e: &Expr) -> Option<String> {
     match e {
         Expr::Paren(inner) => extract_state_field(&inner.node),
@@ -3663,14 +3465,12 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                                 _ => acc.account_type = Some(s.clone()),
                             },
                             a::AccountAttr::Type(t) => {
-                                // v2.29 Slice G — dotted type ref
-                                // (`Foreign.State`) splits into namespace
-                                // alias + source type. Bare types
-                                // (`token`, `State`) keep `imported_namespace
-                                // = None`. Slice F's `imported_namespaces`
-                                // population happens BEFORE handler
-                                // adapt, so the resolver step in check.rs
-                                // validates that the namespace is known.
+                                // Dotted type ref (`Foreign.State`) splits
+                                // into namespace alias + source type; bare
+                                // types keep `imported_namespace = None`.
+                                // `imported_namespaces` is populated BEFORE
+                                // handler adapt, so check.rs validates the
+                                // namespace is known.
                                 if let Some((ns, ty)) = t.split_once('.') {
                                     acc.imported_namespace = Some(ns.to_string());
                                     acc.account_type = Some(ty.to_string());
@@ -3699,8 +3499,8 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
                     rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
-                    // v2.25 — binary rendering for Kani ensures-preservation
-                    // harness. `state.x` → `post.x`; `old(state.x)` → `pre.x`.
+                    // Binary rendering for the Kani ensures-preservation
+                    // harness: `state.x` → `post.x`; `old(state.x)` → `pre.x`.
                     rust_expr_binary: expr_to_rust(
                         &e.node,
                         Ctx::Ensures,
@@ -3740,8 +3540,8 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 ));
             }
             a::HandlerClause::Effect(blocks) => {
-                // v2.20 §S1.2 — `effect { … }` may contain a top-level
-                // `match` block alongside leaf statements. Two outputs:
+                // `effect { … }` may contain a top-level `match` block
+                // alongside leaf statements. Two outputs:
                 //   1. `handler.effects` — flat union of all leaves.
                 //   2. `handler.effect_branches` — `Some` iff the spec
                 //      uses `match`. Carries arm structure for branched
@@ -3870,24 +3670,17 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             a::HandlerClause::Invariant(name) => handler.invariants.push(name.clone()),
             a::HandlerClause::Establishes(name) => handler.establishes.push(name.clone()),
             a::HandlerClause::Abstract { name, ty } => {
-                // v2.29 Slice A (#8) — store the binder as (name,
-                // DSL-type-string). Per-backend lowering maps the
-                // DSL type to its own concrete representation
-                // (Rust via `map_type_for_target`, Lean via the
-                // Lean type vocabulary, etc.).
+                // Stored as (name, DSL-type-string); each backend maps the
+                // DSL type to its own representation.
                 handler
                     .abstract_binders
                     .push((name.clone(), type_ref_to_string(ty)));
             }
             a::HandlerClause::Include(schema_name) => {
-                // v2.24 #1 — record the schema reference here; the
-                // actual expansion (append schema.requires onto
-                // handler.requires) happens in a post-pass at the
-                // bottom of `adapt()` once every schema is known
-                // and every base handler is built. Storing the
-                // include-list on the handler lets the expansion
-                // survive the synthetic-match-arm expansion step
-                // (each arm sees the same parent's includes).
+                // Record the reference only; expansion happens in the
+                // post-pass at the bottom of `adapt()` once every schema is
+                // known. Storing the list on the handler lets it survive the
+                // synthetic-match-arm expansion (each arm inherits it).
                 handler.schema_includes.push(schema_name.clone());
             }
             a::HandlerClause::Match(_) => {
@@ -3930,14 +3723,9 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     target_interface: iface,
                     target_handler: handler_name,
                     args,
-                    // v2.24 #11 — propagate optional `let <name> =`
-                    // binding through to downstream backends.
                     result_binding: c.result_binding.clone(),
-                    // v2.27 Track A — propagate the optional
-                    // `state_binders { ... }` block into the parsed
-                    // shape. Empty when the spec author didn't declare
-                    // any binders; downstream backends preserve the
-                    // v2.26 callee-frame, param-only axiom in that case.
+                    // Empty when no binders declared; backends keep the
+                    // callee-frame, param-only axiom in that case.
                     state_binders: lower_state_binders(&c.state_binders),
                 });
             }
@@ -3974,9 +3762,8 @@ fn adapt_interface<'a>(
             verified_with: u.verified_with.clone(),
             verified_at: u.verified_at.clone(),
         }),
-        // v2.27 Phase 0 — pass through the interface-level
-        // `state { name : Type, ... }` block as (name, type-string) pairs.
-        // Empty when no block was declared (back-compat default).
+        // Interface-level `state { ... }` block as (name, type-string)
+        // pairs; empty when not declared.
         state_fields: iface
             .state_fields
             .iter()
@@ -4004,10 +3791,8 @@ fn adapt_interface_handler<'a>(
         requires: Vec::new(),
         ensures: Vec::new(),
         return_type: h.return_type.as_ref().map(type_ref_to_string),
-        // v2.26 Track K — plumb the optional named binder through.
-        // `None` means the spec wrote either nothing or the legacy
-        // `-> Type` (no binder); downstream substitution defaults to
-        // the literal `"result"` for back-compat.
+        // `None` = no binder written (bare `-> Type` or nothing);
+        // downstream substitution defaults to the literal `"result"`.
         result_binder: h.result_binder.clone(),
     };
 
@@ -4092,12 +3877,8 @@ mod tests {
     const PERCOLATOR_SPEC: &str =
         include_str!("../../../../examples/rust/percolator/percolator.qedspec");
 
-    /// v2.24 #20 — `Map[<EnumType>] T` is recognized when the bound
-    /// names a unit-only enum (sum type whose variants all have no
-    /// payload). Pre-fix the `map_bound_not_const` lint hard-errored
-    /// because only `const` bounds were accepted; spec authors with
-    /// one-PDA-per-enum-variant patterns had to fall back to
-    /// per-variant flat fields.
+    /// `Map[<EnumType>] T` is recognized when the bound names a unit-only
+    /// enum (all variants payload-free).
     #[test]
     fn map_keyed_by_enum_routes_to_sum_types() {
         let src = r#"spec EnumMap
@@ -4139,11 +3920,8 @@ type Error
         );
     }
 
-    /// v2.29 Slice C — `state := .Variant { f := e, ... }` whole-state
-    /// assignment desugars into per-field effects with
-    /// variant-prefixed LHS so the existing
-    /// `emit_cross_variant_promotion` codepath in codegen.rs can
-    /// consume them without a parallel pathway.
+    /// `state := .Variant { f := e, ... }` desugars into per-field effects
+    /// with variant-prefixed LHS for `emit_cross_variant_promotion`.
     #[test]
     fn state_variant_promotion_expands_to_per_field_effects() {
         let src = r#"spec Lifecycle
@@ -4192,11 +3970,8 @@ handler initialize : State.Uninitialized -> State.Setup {
         );
     }
 
-    /// v2.29 Slice A (#8) — `abstract <name> : <Type>` handler
-    /// clauses parse into `ParsedHandler::abstract_binders`. Each
-    /// entry carries the binder name and the verbatim DSL type
-    /// string; per-backend lowering resolves to its own concrete
-    /// type via `map_type_for_target` / Lean type mapping.
+    /// `abstract <name> : <Type>` clauses parse into
+    /// `ParsedHandler::abstract_binders` as (name, verbatim DSL type).
     #[test]
     fn abstract_binder_clause_parses_into_handler() {
         let src = r#"spec Earn
@@ -4227,10 +4002,8 @@ handler user_deposit (amount_stablecoin : U64) : State.Active -> State.Active {
         assert_eq!(handler.abstract_binders[0].1, "U64");
     }
 
-    /// v2.29 Slice A (#2) — negative integer literals desugar to
-    /// `Arith { Sub, Int(0), Int(v) }` at parse time, so they reach
-    /// the AST as a single sub-expression rather than failing the
-    /// integer-first atom parser.
+    /// Negative integer literals desugar to `Arith { Sub, Int(0), Int(v) }`
+    /// at parse time.
     #[test]
     fn negative_integer_literal_parses_as_sub_of_zero() {
         let src = r#"spec Exp
@@ -4248,16 +4021,11 @@ handler set_exp : State.Active -> State.Active {
   effect { exp := 0 }
 }
 "#;
-        // The successful parse is the assertion — pre-v2.29 the
-        // `-4` would fail because the expression-level integer atom
-        // didn't accept a leading `-`.
+        // The successful parse is the assertion.
         let _spec = parse_str(src).expect("negative literal must parse");
     }
 
-    /// v2.29 Slice A (#3) — `const NAME = -VALUE` parses with the
-    /// const value stored as a signed `i128`. The PRD's friction
-    /// case (`const N6 = -6` for a fixed-point exponent) drops the
-    /// `0 - 6` workaround.
+    /// `const NAME = -VALUE` parses with the value stored as a signed `i128`.
     #[test]
     fn const_decl_accepts_negative_literal() {
         let src = r#"spec ExpConst
@@ -4280,10 +4048,9 @@ type Error
         assert_eq!(n6.1, "-6");
     }
 
-    /// v2.29 Slice C — unit-variant promotion (`state := .Closed`)
-    /// drops to zero effects; the wrapper assignment in
-    /// `emit_cross_variant_promotion` handles the transition from
-    /// `handler.post_status` directly.
+    /// Unit-variant promotion (`state := .Closed`) drops to zero effects;
+    /// the wrapper assignment in `emit_cross_variant_promotion` handles the
+    /// transition from `handler.post_status` directly.
     #[test]
     fn state_unit_variant_promotion_emits_no_effects() {
         let src = r#"spec Lifecycle
@@ -4319,10 +4086,8 @@ handler close : State.Open -> State.Closed {
         assert_eq!(handler.post_status.as_deref(), Some("Closed"));
     }
 
-    /// v2.24 #9 — `call Interface.handler(...)` is now legal inside
-    /// a match arm body, alongside `abort` / `effect`. The expander
-    /// produces one synthetic handler per arm; the call-arm synth
-    /// gets the CPI captured on its `calls` slot (same shape as a
+    /// `call Interface.handler(...)` is legal inside a match arm body; the
+    /// call-arm synth gets the CPI on its `calls` slot (same shape as a
     /// top-level call clause).
     #[test]
     fn match_arm_accepts_call_body() {
@@ -4369,11 +4134,8 @@ handler liquidate (loss : U64) : State.Active -> State.Active {
         assert_eq!(with_call[0].calls[0].target_handler, "absorb_loss");
     }
 
-    /// v2.24 #11 — `let X = call Foo.handler(...)` parses and the
-    /// adapter records the binding name on `ParsedCall.result_binding`.
-    /// Pre-fix `call` was strictly terminal; capturing a callee return
-    /// value (e.g. `absorb_loss` returning the actually-burned amount)
-    /// required out-of-band threading via params.
+    /// `let X = call Foo.handler(...)` records the binding name on
+    /// `ParsedCall.result_binding`.
     #[test]
     fn call_with_let_binding_records_result_name() {
         let src = r#"spec CallLet
@@ -4431,11 +4193,9 @@ handler unbound_call : State.Active -> State.Active {
         );
     }
 
-    /// v2.24 #1 — top-level `schema name { requires … }` blocks parse,
-    /// and a handler's `include <schema>` clause expands every requires
-    /// from the schema into the handler's requires list at adapt time.
-    /// Closes the gist friction: pre-fix, the schema block parse-errored
-    /// and authors had to inline every cross-cutting guard.
+    /// Top-level `schema name { requires … }` blocks parse, and `include
+    /// <schema>` expands every schema requires into the handler's requires
+    /// list at adapt time.
     #[test]
     fn schema_include_expands_into_handler_requires() {
         let src = r#"spec SchemaDemo
@@ -4501,11 +4261,9 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         );
     }
 
-    /// v2.24 #3 — `preserved_by all except [h1, h2]` expands to the
-    /// full handler list minus the excluded names. Common pattern for
-    /// "every handler other than the one whose job is to break it"
-    /// (e.g. a `lock` handler that intentionally flips a flag the
-    /// rest of the spec preserves).
+    /// `preserved_by all except [h1, h2]` expands to the full handler list
+    /// minus the excluded names ("every handler other than the one whose
+    /// job is to break it").
     #[test]
     fn preserved_by_all_except_expands_to_complement() {
         let src = r#"spec ExceptDemo
@@ -4567,10 +4325,9 @@ property still_unpaused :
         );
     }
 
-    /// v2.17: both `invariant Foo` and `establishes Foo` handler clauses parse
-    /// and route to the right `ParsedHandler` field.
-    /// Backends key off this split: invariants → preserves semantics (assume
-    /// pre-state), establishes → establishes semantics (no pre-assume).
+    /// `invariant Foo` and `establishes Foo` route to distinct
+    /// `ParsedHandler` fields. Backends key off the split: invariants →
+    /// preserves (assume pre-state), establishes → no pre-assume.
     #[test]
     fn handler_invariant_clauses_route_to_invariants_vs_establishes() {
         let src = include_str!(
@@ -4612,9 +4369,7 @@ property still_unpaused :
             assert!(h.establishes.is_empty());
         }
         // The top-level invariant decl carries the predicate body that the
-        // adapter lowers via translate_property_to_rust. v2.17 wire-up
-        // confirms rust_expr is populated (it was always populated; only
-        // backend consumption was missing).
+        // adapter lowers via translate_property_to_rust.
         let inv = spec
             .invariants
             .iter()
@@ -4629,9 +4384,8 @@ property still_unpaused :
         );
     }
 
-    // Issue #8 finding #7 regression. Pubkey := <int> must be
-    // rejected at check time, not deferred to lake build's
-    // "OfNat Pubkey 0" error.
+    // Regression: Pubkey := <int> must be rejected at check time, not
+    // deferred to lake build's "OfNat Pubkey 0" error.
     #[test]
     fn finding_7_pubkey_assign_from_int_rejected() {
         let src = include_str!(
@@ -4645,8 +4399,8 @@ property still_unpaused :
         );
     }
 
-    // Issue #8 finding #8 regression. state.<Pubkey> != <int> in a
-    // `requires` clause must also be rejected.
+    // Regression: state.<Pubkey> != <int> in a `requires` clause must also
+    // be rejected.
     #[test]
     fn finding_8_pubkey_compare_with_int_rejected() {
         let src = include_str!(
@@ -4776,7 +4530,6 @@ type Battle
         assert_eq!(spec.account_types.len(), 1);
         let at = &spec.account_types[0];
         assert_eq!(at.name, "Battle");
-        // Pre-fix: fields.len() == 6 (3 variants × 2 fields, flattened).
         assert_eq!(
             at.fields.len(),
             2,
@@ -4790,10 +4543,9 @@ type Battle
         assert_eq!(at.lifecycle, vec!["Active", "Frozen", "Settled"]);
     }
 
-    // B12 regression: property bodies referencing `state.x` must render as
+    // Regression: property bodies referencing `state.x` must render as
     // `s.x` in the Rust form — `s` is the function parameter that
-    // `emit_property_predicates` binds. Pre-v2.6.1 the Rust form was
-    // `state.x >= 0`, which failed to compile (`cannot find value 'state'`).
+    // `emit_property_predicates` binds.
     #[test]
     fn property_state_root_renders_as_s_in_rust() {
         let src = r#"spec T
@@ -4923,7 +4675,7 @@ property forall_u64 :
         );
     }
 
-    // ----- v2.8 G1: adapter populates ParsedSpec.imports -----
+    // ----- adapter populates ParsedSpec.imports -----
 
     #[test]
     fn adapter_populates_imports() {
@@ -4949,7 +4701,7 @@ handler h : State.A -> State.A { effect { x := 1 } }
         assert!(spec.imports.is_empty());
     }
 
-    // ----- v2.8 fold-in F9: if-then-else expressions -----
+    // ----- if-then-else expressions -----
 
     #[test]
     fn if_then_else_renders_to_lean_native_form() {
@@ -4997,7 +4749,7 @@ property if_branch :
         );
     }
 
-    // v2.21 S2.5 — `now()` builtin.
+    // ----- `now()` builtin -----
 
     #[test]
     fn now_builtin_parses_in_effect() {
@@ -5039,9 +4791,8 @@ handler refresh : State.Active -> State.Active {
         let spec = parse_str(src).expect("parse");
         let h = spec.handlers.iter().find(|h| h.name == "refresh").unwrap();
         let req = h.requires.first().expect("requires clause");
-        // Lean form references the support-library axiom by its
-        // unqualified name; v2.21 axiom export at QEDGen.Solana.Valid.now
-        // resolves it after `open QEDGen.Solana`.
+        // Lean form references the support-library axiom by its unqualified
+        // name; QEDGen.Solana.Valid.now resolves after `open QEDGen.Solana`.
         assert!(
             req.lean_expr.contains("now"),
             "lean expr should mention now; got: {}",
@@ -5054,10 +4805,9 @@ handler refresh : State.Active -> State.Active {
         );
     }
 
-    /// v2.24 #19 — `current_epoch()` parses as a zero-arg builtin
-    /// and lowers to `Clock::get().unwrap().epoch` in Rust and to
-    /// the bare ident `current_epoch` in Lean (axiomatized in the
-    /// support library at QEDGen.Solana.Valid).
+    /// `current_epoch()` parses as a zero-arg builtin: Rust
+    /// `Clock::get().unwrap().epoch`, Lean bare ident `current_epoch`
+    /// (axiomatized at QEDGen.Solana.Valid).
     #[test]
     fn current_epoch_builtin_parses_in_requires() {
         let src = r#"spec EpochReq
@@ -5090,7 +4840,7 @@ handler refresh : State.Active -> State.Active {
     }
 
     // ========================================================================
-    // v2.23 Slice 1 — property classification snapshot tests
+    // Property classification snapshot tests
     // ========================================================================
 
     /// Helper: parse a tiny spec and return the named property's class.
@@ -5135,9 +4885,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
 
     #[test]
     fn classify_property_with_single_old_is_binary() {
-        // `old(state.x)` anywhere ⇒ Binary. This is the 001 bug class —
-        // before v2.23 it lowered to `s.x >= s.x` silently; v2.23 routes
-        // through the binary preservation harness.
+        // `old(state.x)` anywhere ⇒ Binary — routed through the binary
+        // preservation harness instead of silently lowering to `s.x >= s.x`.
         let src = format!(
             "{}{}",
             CLASSIFY_SPEC_HEAD,
@@ -5192,7 +4941,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
     }
 
     // ========================================================================
-    // v2.23 Slice 2 — RustOpts.state_mode + inside_old round-trips
+    // RustOpts.state_mode + inside_old round-trips
     // ========================================================================
 
     /// Helper: parse a tiny spec and render the named property's body via
@@ -5239,7 +4988,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
 
     #[test]
     fn render_binary_mode_state_x_lowers_to_post_dot_x() {
-        // Slice 2 binary mode: `state.x` (no `old`) → `post.x`.
+        // Binary mode: `state.x` (no `old`) → `post.x`.
         let src = format!(
             "{}{}",
             CLASSIFY_SPEC_HEAD, r#"property balance_nonneg : state.balance >= 0 preserved_by all"#
@@ -5258,9 +5007,8 @@ handler bump (delta : U64) : State.Active -> State.Active {
     }
 
     // ========================================================================
-    // Issue #67 item 2 — bounded `exists` over a `Fin[N]` index domain
-    // lowers to a real `(0..N).any(…)` predicate; unbounded `exists` keeps
-    // the harness-level sentinel.
+    // Bounded `exists` over a `Fin[N]` index domain lowers to a real
+    // `(0..N).any(…)` predicate; unbounded `exists` keeps the sentinel.
     // ========================================================================
 
     const EXISTS_SPEC_HEAD: &str = r#"
@@ -5310,7 +5058,7 @@ handler tick { effect { count := state.count + 1 } }
     }
 
     // ========================================================================
-    // Issue #67 item 3 — `ghost` lowers to a State field + per-handler update.
+    // `ghost` lowers to a State field + per-handler update.
     // ========================================================================
 
     #[test]
@@ -5360,7 +5108,7 @@ property p : state.total == state.balance preserved_by all
     }
 
     // ========================================================================
-    // Issue #67 item 4 — `hook` lowers to a per-field assertion set.
+    // `hook` lowers to a per-field assertion set.
     // ========================================================================
 
     #[test]
@@ -5416,8 +5164,7 @@ handler bump { effect { x := state.x + 1 } }
 
     #[test]
     fn render_binary_mode_old_state_x_lowers_to_pre_dot_x() {
-        // Slice 2 binary mode: `old(state.x)` → `pre.x`. This is the
-        // load-bearing fix for finding 001 — the temporal marker is
+        // Binary mode: `old(state.x)` → `pre.x` — the temporal marker is
         // honored in the rendered Rust.
         let src = format!(
             "{}{}",
@@ -5447,11 +5194,10 @@ handler bump { effect { x := state.x + 1 } }
 
     #[test]
     fn render_unary_mode_old_collapses_to_s_dot_x() {
-        // Pre-Slice-2 behavior preserved on the unary path: `old(state.x)`
-        // and `state.x` both render to `s.x`. This is the bug surface for
-        // existing callers — Slice 5's lint will P1 a tautology here when
-        // the AST contains `Expr::Old(_)`. Slice 2 itself doesn't change
-        // this path; it stays for compat with all non-property callsites.
+        // Unary path: `old(state.x)` and `state.x` both render to `s.x` —
+        // the tautology shape. The vacuous-lowering lint P1s this when the
+        // AST contains `Expr::Old(_)`; the path stays for compat with all
+        // non-property callsites.
         let src = format!(
             "{}{}",
             CLASSIFY_SPEC_HEAD,
@@ -5471,8 +5217,7 @@ handler bump { effect { x := state.x + 1 } }
     #[test]
     fn classify_property_authored_tautology_no_old_is_unary() {
         // Author-written `state.x == state.x` (no `old(...)`) — Unary.
-        // Mirrors pool.qedspec:660-662 `admin_field_tracked` pattern.
-        // Slice 5's vacuous-lowering lint must NOT fire on this case.
+        // The vacuous-lowering lint must NOT fire on this case.
         let src = format!(
             "{}{}",
             CLASSIFY_SPEC_HEAD,
@@ -5484,11 +5229,10 @@ handler bump { effect { x := state.x + 1 } }
         );
     }
 
-    /// v2.26 — when state sugar is used (or `type State = { ... }`)
-    /// and a handler has no explicit `accounts { ... }` clause, a
-    /// default `state` handler-account is synthesized so guards.rs
-    /// can rewrite `s.X` → `ctx.state.X`. Without the fix, generated
-    /// guards leaked raw `s.X` (undefined symbol → compile error).
+    /// When state sugar (or `type State = { ... }`) is used and a handler
+    /// has no explicit `accounts { ... }`, a default `state` handler-account
+    /// is synthesized so guards.rs can rewrite `s.X` → `ctx.state.X`
+    /// (otherwise generated guards leak raw `s.X` — compile error).
     #[test]
     fn state_sugar_handler_without_accounts_synthesizes_state_account() {
         let src = r#"spec Pool
@@ -5535,9 +5279,8 @@ handler check_total (idx : U64) {
         );
     }
 
-    /// v2.26 — explicit `accounts { ... }` declarations win over the
-    /// synthesis. Bundled examples all declare accounts and must not
-    /// pick up a stray `state` field.
+    /// Explicit `accounts { ... }` declarations win over the synthesis —
+    /// specs declaring accounts must not pick up a stray `state` field.
     #[test]
     fn explicit_accounts_clause_suppresses_state_synthesis() {
         let src = r#"spec Pool
@@ -5556,9 +5299,8 @@ handler bump (amt : U64) {
         assert_eq!(h.accounts[0].name, "vault");
     }
 
-    /// v2.26 — handlers that don't touch state stay account-less even
-    /// when the spec has state_fields. Without this gate, library-style
-    /// handlers (pure helpers, no-op stubs) would silently grow a
+    /// Handlers that don't touch state stay account-less even when the spec
+    /// has state_fields — otherwise pure helpers would silently grow a
     /// surprise state account in their Anchor instruction signature.
     #[test]
     fn no_state_synthesis_when_handler_does_not_touch_state() {

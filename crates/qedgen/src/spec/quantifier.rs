@@ -1,33 +1,19 @@
 //! Quantifier-shape classifier for property bodies.
 //!
-//! v2.20 §S1.1 — `forall d : T, P(d)` must lower to a Kani / proptest harness
-//! that actually exercises the post-state, not the silent `true` stub that
-//! caused 88 of 106 Kani harnesses to verify vacuously in the v2.19 audits.
-//!
-//! `supported_shape` walks the property body and either returns the
-//! information codegen needs to emit a non-vacuous harness, or a precise
-//! reason why the shape can't be mechanically lowered. Reasons feed the P5
-//! lint in `check.rs`.
-//!
-//! The classifier is intentionally narrow: anything beyond a single-binder
-//! `forall` over a primitive or named ADT type returns `Err(Reason::...)`.
-//! Broader shapes (nested quantifiers, `Vec<T>` of unbounded length, exists)
-//! either get split by the user into multiple single-binder properties (per
-//! `docs/limitations.md`) or wait for a future release.
+//! `supported_shape` either returns what codegen needs to emit a non-vacuous
+//! Kani / proptest harness, or a precise reason the shape can't be lowered
+//! (feeds the P5 lint in `check.rs`). Intentionally narrow: anything beyond a
+//! single-binder `forall` over a primitive or named ADT is `Err` — users
+//! split broader shapes into single-binder properties (`docs/limitations.md`).
 
 use crate::ast::{Expr, Node, PropertyDecl, Quantifier, Span};
 
-/// Classifier output: a property either has no quantifier (the legacy
-/// `state.field >= 0` shape), or has a single supported binder shape we can
-/// lower to a real harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shape {
-    /// Body is `P(s_post)` — no binder. The harness asserts `P(&s)` after the
-    /// transition; codegen unchanged from the legacy path.
+    /// Body is `P(s_post)` — no binder; harness asserts `P(&s)` post-transition.
     NoQuantifier,
-    /// Body is `forall <binder> : <ty>, inner(<binder>, s_post)`. The
-    /// harness binds `<binder>` symbolically (kani::any / proptest any) and
-    /// asserts `inner(&<binder>, &s_post)` after the transition.
+    /// Body is `forall <binder> : <ty>, inner(<binder>, s_post)`; harness
+    /// binds `<binder>` symbolically (kani::any / proptest any).
     SingleBinderForall {
         binder: String,
         binder_ty: String,
@@ -36,35 +22,25 @@ pub enum Shape {
     },
 }
 
-/// Why a property's quantifier shape can't be lowered to a non-vacuous
-/// harness. Each variant carries a span so `qedgen check` can point at the
-/// exact source token. The string descriptions are intentionally human-
-/// readable; they feed the P5 lint message verbatim.
+/// Why a shape can't be lowered to a non-vacuous harness. Spans point at the
+/// offending token; messages feed the P5 lint verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
-    /// Quantifier nests inside another quantifier (e.g. `forall i : A,
-    /// forall j : B, …`). Splitting into two single-binder properties is the
-    /// supported workaround.
+    /// Quantifier nested inside another; workaround is splitting into two
+    /// single-binder properties.
     NestedQuantifier { outer: Span, inner: Span },
-    /// Binder type can't be enumerated by either `kani::any::<T>()` or a
-    /// proptest `any::<T>()` strategy because it's an unbounded collection
-    /// (`Vec<T>`, `List<T>`, etc.). Bounded `Map[N] T` would be supported
-    /// but the spec grammar uses it as a state-field type, not a binder.
+    /// Binder type is an unbounded collection (`Vec<T>`, `List<T>`, …) —
+    /// not enumerable by `kani::any::<T>()` / proptest `any::<T>()`.
     UnboundedBinderType { ty: String, span: Span },
-    /// `exists` quantifier. A *bounded* `exists` (binder is a `Fin[N]`
-    /// index domain, directly or via an alias) lowers to a real
-    /// `(0..N).any(…)` harness predicate — the chumsky_adapter resolves
-    /// the alias, renders that, and suppresses this reason. This variant
-    /// only survives for an *unbounded* `exists` (e.g. over `U64`), which
-    /// can't be enumerated in a test loop. The classifier can't resolve
-    /// aliases on its own, so it conservatively reports every `exists`
-    /// here and lets the adapter clear it when the body lowered cleanly.
+    /// `exists`. The classifier can't resolve aliases, so it conservatively
+    /// reports every `exists`; the chumsky_adapter clears it when a *bounded*
+    /// binder (`Fin[N]`, directly or via alias) lowered to `(0..N).any(…)`.
+    /// Only unbounded `exists` (e.g. over `U64`) survives to the lint.
     ExistsQuantifier { span: Span },
 }
 
 impl Reason {
-    /// Human-readable message for the P5 lint and `docs/limitations.md`
-    /// cross-references.
+    /// Human-readable P5 lint message.
     pub fn message(&self) -> String {
         match self {
             Reason::NestedQuantifier { .. } => {
@@ -82,8 +58,7 @@ impl Reason {
         }
     }
 
-    /// Anchor span for diagnostics — points at the offending quantifier
-    /// token, not the whole property.
+    /// Diagnostic anchor — the offending quantifier token, not the property.
     pub fn span(&self) -> Span {
         match self {
             Reason::NestedQuantifier { inner, .. } => inner.clone(),
@@ -93,16 +68,10 @@ impl Reason {
     }
 }
 
-/// Classify a property's quantifier shape.
-///
-/// `Ok(Shape::NoQuantifier)` — body has no quantifier, legacy lowering path
-///   is correct and non-vacuous.
-/// `Ok(Shape::SingleBinderForall { … })` — body is `forall <binder> : <ty>,
-///   inner` where `inner` itself has no further quantifiers; codegen emits
-///   `<prop>_at(s, <binder>)` and binds `<binder>` at the harness layer.
-/// `Err(Reason::…)` — body has a quantifier the lowering can't handle.
-///   `check.rs` emits a P5 lint; emitters skip the harness for this property
-///   to avoid the silent `true` stub.
+/// Classify a property's quantifier shape. `SingleBinderForall` makes codegen
+/// emit `<prop>_at(s, <binder>)` with the binder bound at the harness layer;
+/// `Err` makes `check.rs` emit a P5 lint and emitters skip the harness
+/// (avoiding a silent `true` stub).
 pub fn supported_shape(prop: &PropertyDecl) -> Result<Shape, Reason> {
     classify_expr(&prop.body)
 }
@@ -141,10 +110,8 @@ fn classify_expr(node: &Node<Expr>) -> Result<Shape, Reason> {
         } => Err(Reason::ExistsQuantifier {
             span: node.span.clone(),
         }),
-        // Anything else — non-quantifier body. Sub-expressions might still
-        // contain quantifiers (e.g. `(forall i, …) and (forall j, …)`); for
-        // v2.20 we accept only the `NoQuantifier` and `SingleBinderForall`
-        // shapes, so any inner quantifier ⇒ P5 lint.
+        // Non-quantifier body. Sub-expressions may still contain quantifiers
+        // (e.g. `(forall i, …) and (forall j, …)`) — any inner quant ⇒ P5.
         _ => match find_nested_quantifier(node) {
             None => Ok(Shape::NoQuantifier),
             Some((outer, inner)) => Err(Reason::NestedQuantifier { outer, inner }),
@@ -153,52 +120,35 @@ fn classify_expr(node: &Node<Expr>) -> Result<Shape, Reason> {
 }
 
 /// Is the binder type lowerable to `kani::any::<T>()` / proptest `any::<T>()`?
-///
-/// Accepted:
-///   - Integer primitives (U8/U16/U32/U64/U128, I8/I16/I32/I64/I128)
-///   - Bool
-///   - Named record / sum / lifecycle-state references (e.g. `Distribution`,
-///     `Pool.Active`) — record codegen derives `kani::Arbitrary` and emits a
-///     proptest `arb_<Name>()` strategy.
-///
-/// Rejected:
-///   - Unbounded compounds: `Vec<T>`, `List<T>`, etc.
-///   - `Pubkey` (32 bytes; technically arbitrary-able but the harness model
-///     for "all possible authorities" doesn't add coverage proptest already
-///     gets from arbitrary State.<pubkey>).
-///   - Compound `Map[N] T` as a binder doesn't make spec sense; reject.
 fn binder_type_supported(ty: &str) -> bool {
     let ty = ty.trim();
     match ty {
-        // Primitives.
         "U8" | "U16" | "U32" | "U64" | "U128" => true,
         "I8" | "I16" | "I32" | "I64" | "I128" => true,
         "Bool" => true,
-        // Fin[N] is a bounded index type — proptest gives it usize-range and
-        // Kani picks `kani::any::<usize>()`. Accept.
+        // Fin[N] is a bounded index — proptest gets a usize range, Kani
+        // `kani::any::<usize>()`.
         t if t.starts_with("Fin[") => true,
-        // `Vec<T>` / `List<T>` / `Set<T>` — unbounded, reject.
+        // Unbounded collections: not enumerable.
         t if t.starts_with("Vec<") => false,
         t if t.starts_with("List<") => false,
         t if t.starts_with("Set<") => false,
-        // `Map[N] T` as a binder doesn't make spec sense; reject.
+        // `Map[N] T` as a binder doesn't make spec sense.
         t if t.starts_with("Map") => false,
-        // `Pubkey` — see comment above; reject for now, may revisit.
+        // Technically arbitrary-able, but symbolic authorities add no
+        // coverage over arbitrary State.<pubkey>; may revisit.
         "Pubkey" => false,
-        // Anything else is presumed a user-declared type (record, sum,
-        // lifecycle variant `Account.Active`, alias). Accept; the codegen
-        // already wires `kani::Arbitrary` for records and `arb_<Name>` for
-        // sum types. If the name doesn't resolve, codegen / cargo check
-        // surface the failure — that's a typo, not a quantifier-shape bug.
+        // Presumed user-declared (record / sum / lifecycle variant / alias):
+        // codegen wires `kani::Arbitrary` for records and `arb_<Name>` for
+        // sums. Unresolvable names fail at codegen / cargo check — a typo,
+        // not a quantifier-shape bug.
         _ => true,
     }
 }
 
-/// Walk an expression tree and return the span of the first quantifier
-/// found, if any. Returns `(span_of_quant, span_of_quant)` — the caller
-/// picks whichever it wants. Used by both the nested-quantifier walker
-/// (where the "outer" forall is already captured separately) and the no-
-/// top-quantifier path (where we treat any inner quant as nested).
+/// Span of the first quantifier in the tree, if any. Returns the same span
+/// twice — callers pick whichever slot they need (outer-already-known vs
+/// no-top-quantifier paths).
 fn find_nested_quantifier(node: &Node<Expr>) -> Option<(Span, Span)> {
     match &node.node {
         Expr::Quant { .. } => Some((node.span.clone(), node.span.clone())),
@@ -233,7 +183,6 @@ fn find_nested_quantifier(node: &Node<Expr>) -> Option<(Span, Span)> {
             .or_else(|| updates.iter().find_map(|(_, v)| find_nested_quantifier(v))),
         Expr::Ctor { payload, .. } => payload.as_ref().and_then(|p| find_nested_quantifier(p)),
         Expr::IsVariant { scrutinee, .. } => find_nested_quantifier(scrutinee),
-        // Leaves: no inner expression to walk.
         Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => None,
     }
 }

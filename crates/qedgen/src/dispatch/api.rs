@@ -247,7 +247,6 @@ fn extract_lean_code(content: &str) -> String {
     }
 
     if !extracted.is_empty() {
-        // If we have multiple blocks, try to deduplicate them
         if extracted.len() > 1 {
             deduplicate_lean_blocks(&extracted)
         } else {
@@ -294,21 +293,18 @@ fn deduplicate_lean_blocks(blocks: &[&str]) -> String {
                 let decl_end = next_decl.map(|m| m.start()).unwrap_or(block.len());
                 let decl_text = &block[decl_start..decl_end];
 
-                // Determine if this has a real implementation
-                // A stub typically has `:= by` followed by nothing or just whitespace
                 let has_implementation = !is_stub(decl_text);
 
-                // Keep the declaration with implementation, or the latest one if both are stubs
+                // Keep the implemented declaration; if both stubs, the later one.
                 if let Some((existing_idx, _existing_text, existing_has_impl)) =
                     declarations.get(&name)
                 {
-                    // Prefer the one with implementation
                     if has_implementation && !existing_has_impl {
                         declarations.insert(name, (block_idx, decl_text, has_implementation));
                     } else if !has_implementation && *existing_has_impl {
                         // Keep existing
                     } else {
-                        // Both have impl or both are stubs, keep the later one
+                        // Both impls or both stubs: keep the later one.
                         if block_idx > *existing_idx {
                             declarations.insert(name, (block_idx, decl_text, has_implementation));
                         }
@@ -423,15 +419,12 @@ pub async fn generate_proofs(
     let api_key = std::env::var("MISTRAL_API_KEY")
         .context("MISTRAL_API_KEY environment variable not set.\nGet a free key at https://console.mistral.ai\nThen run: export MISTRAL_API_KEY=your_key_here")?;
 
-    // Create output directories
     std::fs::create_dir_all(output_dir)?;
     let attempts_dir = output_dir.join("attempts");
     std::fs::create_dir_all(&attempts_dir)?;
 
-    // Set up Lean project files
     crate::project::setup_lean_project(output_dir, mathlib)?;
 
-    // Save the prompt
     std::fs::write(output_dir.join("prompt.txt"), prompt)?;
 
     eprintln!(
@@ -468,7 +461,6 @@ pub async fn generate_proofs(
             elapsed, usage.completion_tokens, sorry_count
         );
 
-        // Save raw and extracted code
         std::fs::write(
             attempts_dir.join(format!("completion_{}_raw.txt", i)),
             &content,
@@ -526,7 +518,6 @@ pub async fn generate_proofs(
             )
             .await?;
 
-            // Update metadata
             let meta = metadata
                 .completions
                 .iter_mut()
@@ -554,13 +545,11 @@ pub async fn generate_proofs(
     metadata.best_completion_index = best_idx;
     metadata.best_sorry_count = best_sorry_count;
 
-    // Save metadata
     std::fs::write(
         output_dir.join("metadata.json"),
         serde_json::to_string_pretty(&metadata)?,
     )?;
 
-    // Copy best completion to Best.lean
     let best_lean =
         std::fs::read_to_string(attempts_dir.join(format!("completion_{}.lean", best_idx)))?;
     std::fs::write(output_dir.join("Best.lean"), &best_lean)?;
@@ -575,7 +564,7 @@ pub async fn generate_proofs(
     eprintln!("  cd {}", output_dir.display());
     eprintln!("  lake build   # Build and verify proofs");
 
-    // Print best completion to stdout
+    // Best completion goes to stdout (everything else is stderr).
     println!("{}", best_lean);
 
     Ok(())
@@ -588,15 +577,13 @@ const SORRY_FILL_SYSTEM_PROMPT: &str =
 fn find_sorry_locations(code: &str) -> Vec<(usize, String)> {
     let mut locations = Vec::new();
     let sorry_re = regex::Regex::new(r"\bsorry\b").unwrap();
-
-    // Find enclosing theorem for each sorry
     let theorem_re =
         regex::Regex::new(r"(?m)^(theorem|lemma)\s+([a-zA-Z_][a-zA-Z0-9_']*)").unwrap();
 
     for mat in sorry_re.find_iter(code) {
         let line_num = code[..mat.start()].matches('\n').count() + 1;
 
-        // Find the enclosing theorem
+        // Enclosing theorem = last declaration before the sorry.
         let before = &code[..mat.start()];
         let enclosing = theorem_re
             .captures_iter(before)

@@ -1,41 +1,13 @@
-//! `qedgen probe --bootstrap` — Shank-style native dispatcher discovery
-//! (v2.20 §S2.1).
+//! `qedgen probe --bootstrap` — Shank-style native dispatcher discovery.
 //!
-//! Native Solana programs that pre-date Anchor (or deliberately opt
-//! out) almost always concentrate dispatch in a single top-level
-//! `process_instruction` fn whose body is a `match` over an
-//! `Instruction` enum deserialised from the `instruction_data` slice.
-//! Each arm calls one `process_*` handler. The probe walks `lib.rs`
-//! (or any file under `src/` containing an `entrypoint!(...)`
-//! invocation), recognises this shape, and emits the per-arm handler
-//! list the auditor subagent needs.
-//!
-//! Heuristic (PRD §S2.1):
-//!
-//! 1. Top-level `fn process_instruction(_: &Pubkey, _: &[AccountInfo],
-//!    _: &[u8]) -> ProgramResult` (or `Result<...>`).
-//! 2. Body contains a top-level `match <Ident>` expression where
-//!    `<Ident>` is bound — within the same fn body — from a `try_from`
-//!    / `try_from_primitive!` style call on `instruction_data` (or
-//!    any slice derived from it).
-//! 3. Each arm patterns as `<Enum>::<Variant>` (with or without
-//!    fields/struct shapes), and the arm body calls a single
-//!    `process_*` function.
-//!
-//! This matches the Phoenix-style / Solana token-program-style
-//! pre-Anchor central match. It does NOT match Anchor (caller routes
-//! via the IDL extractor), Pinocchio (dedicated `pinocchio_probe`),
-//! or Quasar (codegen markers preempt detection in `probe::run_bootstrap`).
-//!
-//! The probe is **deterministic AST pattern matching only** —
-//! semantic interpretation (does the handler actually validate the
-//! signer? does the enum live where we think?) is the agent's job.
-//! Per `feedback_agent_lsp_substrate`, we emit structured handles and
-//! let rust-analyzer do the impl reading.
-//!
-//! Output is `ShankCatalogue`, surfaced into the probe envelope as
-//! `dispatcher_kind: "shank_central_match"` plus a populated
-//! `handlers[]` list.
+//! Pre-Anchor native programs concentrate dispatch in a top-level
+//! `process_instruction` that matches on an instruction enum deserialised
+//! from `instruction_data`, each arm calling one `process_*` handler. The
+//! probe recognises that shape and emits the per-arm `ShankCatalogue`
+//! (`dispatcher_kind: "shank_central_match"`). Does NOT match Anchor (IDL
+//! extractor), Pinocchio (`pinocchio_probe`), or Quasar (codegen markers
+//! preempt detection). Deterministic AST pattern matching only — semantic
+//! interpretation is the agent's job (`feedback_agent_lsp_substrate`).
 
 use anyhow::Result;
 use serde::Serialize;
@@ -48,32 +20,23 @@ use syn::{
 /// One arm of a central-match dispatcher → one handler entry.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShankHandler {
-    /// Human-readable handler name. Derived from the variant identifier
-    /// (e.g. `InitializeMarket`).
+    /// Handler name, from the variant identifier (e.g. `InitializeMarket`).
     pub name: String,
-    /// Full enum-path string as it appeared in the arm pattern,
-    /// e.g. `MarketInstruction::InitializeMarket`.
+    /// Enum path as written in the arm pattern, e.g. `MarketInstruction::InitializeMarket`.
     pub enum_variant: String,
-    /// Name of the `process_*` fn called in the arm body, e.g.
-    /// `process_initialize_market`. Best-effort: just the terminal
-    /// identifier in the call path (drops module prefixes so the
-    /// auditor can grep on a stable name).
+    /// `process_*` fn called in the arm body; terminal identifier only
+    /// (module prefixes dropped so the auditor greps a stable name).
     pub entry_fn: String,
-    /// Path to the source file that contains the dispatcher (the
-    /// caller, not the callee). Relative to `project_root` when
-    /// possible. Lines are 1-indexed.
+    /// Dispatcher (caller) source file, relative to `project_root` when possible.
     pub file: String,
     /// 1-indexed line of the match arm in `file`.
     pub line: u32,
 }
 
-/// Top-level probe result. `None` from [`detect_shank_dispatcher`] means
-/// no Shank-shape match was found; the caller falls back to the
-/// generic bootstrap envelope.
+/// Top-level probe result.
 #[derive(Debug, Clone, Serialize)]
 pub struct ShankCatalogue {
-    /// Path to the file containing `process_instruction`. Relative to
-    /// `project_root` when possible.
+    /// File containing `process_instruction`, relative to `project_root` when possible.
     pub dispatcher_file: String,
     /// 1-indexed line of the `match` expression within that file.
     pub dispatcher_line: u32,
@@ -81,10 +44,9 @@ pub struct ShankCatalogue {
     pub handlers: Vec<ShankHandler>,
 }
 
-/// Walk `project_root` looking for a Shank-style central-match
-/// dispatcher. Returns `Ok(None)` (not an error) when no candidate
-/// `process_instruction` fn parses cleanly into the expected shape —
-/// the caller falls back to the runtime-agnostic bootstrap path.
+/// Walk `project_root` for a Shank-style central-match dispatcher.
+/// `Ok(None)` (not an error) when nothing matches the shape — the caller
+/// falls back to the runtime-agnostic bootstrap path.
 pub fn detect_shank_dispatcher(project_root: &Path) -> Result<Option<ShankCatalogue>> {
     let candidates = candidate_files(project_root);
 
@@ -98,19 +60,16 @@ pub fn detect_shank_dispatcher(project_root: &Path) -> Result<Option<ShankCatalo
             Err(_) => continue, // unparseable file shouldn't kill the probe
         };
 
-        // Locate the dispatcher fn in this file.
         let Some(dispatcher) = find_process_instruction(&syntax.items) else {
             continue;
         };
-        // Find the top-level match-on-instruction-data inside its body.
         let Some((match_expr, match_line, matched_ident)) =
             find_dispatch_match(dispatcher, &source)
         else {
             continue;
         };
 
-        // The matched ident must be bound from instruction_data within
-        // the same fn body (try_from / try_from_primitive! / similar).
+        // Scrutinee must be bound from instruction_data in the same fn body.
         if !ident_derived_from_instruction_data(dispatcher, &matched_ident) {
             continue;
         }
@@ -123,8 +82,8 @@ pub fn detect_shank_dispatcher(project_root: &Path) -> Result<Option<ShankCatalo
         }
 
         if handlers.is_empty() {
-            // The shape was right but every arm failed extraction. Don't
-            // claim a dispatcher we can't describe — fall back.
+            // Right shape but every arm failed extraction — don't claim a
+            // dispatcher we can't describe; fall back.
             continue;
         }
 
@@ -149,10 +108,8 @@ fn candidate_files(project_root: &Path) -> Vec<PathBuf> {
         out.push(primary);
     }
 
-    // Some workspaces nest the program under `program/src/lib.rs` or
-    // `programs/<name>/src/lib.rs`. Probe every `lib.rs` under those
-    // roots — the dispatcher detector itself decides whether the file
-    // actually contains a Shank-shape match.
+    // Workspaces may nest under `program/` or `programs/<name>/`. Probe
+    // every `lib.rs` there — the detector decides whether a file matches.
     for nested_root in ["program", "programs"] {
         let dir = project_root.join(nested_root);
         if !dir.is_dir() {
@@ -161,9 +118,8 @@ fn candidate_files(project_root: &Path) -> Vec<PathBuf> {
         collect_lib_rs(&dir, &mut out);
     }
 
-    // Final pass: any `.rs` file that names `entrypoint!(...)`
-    // explicitly. Some programs put dispatch in `processor.rs` instead
-    // of `lib.rs`.
+    // Final pass: any `.rs` naming `entrypoint!(...)` — some programs
+    // dispatch from `processor.rs` instead of `lib.rs`.
     if let Some(src_dir) = src.is_dir().then_some(&src) {
         collect_entrypoint_files(src_dir, &mut out);
     }
@@ -227,24 +183,16 @@ fn find_process_instruction(items: &[Item]) -> Option<&ItemFn> {
             Item::Fn(f) if is_process_instruction_signature(f) => {
                 return Some(f);
             }
-            // Some programs declare `impl Processor { pub fn process(...) }`.
-            // We don't currently recognise that shape — `process_instruction`
-            // at the file top level is the canonical Shank/Phoenix surface.
+            // `impl Processor { pub fn process(...) }` dispatchers are not
+            // recognised — top-level `process_instruction` is the canonical
+            // Shank/Phoenix surface.
             Item::Impl(impl_block) => {
                 for impl_item in &impl_block.items {
                     if let ImplItem::Fn(method) = impl_item {
-                        // Reuse the same signature check by synthesising
-                        // a minimal ItemFn-equivalent view: we only need
-                        // sig + block, which `ImplItemFn` exposes.
                         if signature_matches_process_instruction(&method.sig) {
-                            // We can't easily return the `ImplItemFn` as an
-                            // `ItemFn`. For now, leave impl-block
-                            // dispatchers to a future pass; document it
-                            // here so the gap is explicit.
-                            //
-                            // NOTE(v2.20-followup): impl-block process()
-                            // is rare in surveyed native programs. Surface
-                            // a structural note if a real program needs it.
+                            // Can't return an `ImplItemFn` as `ItemFn`; rare
+                            // in surveyed native programs — explicit gap,
+                            // left to a future pass.
                             let _ = method;
                         }
                     }
@@ -263,10 +211,8 @@ fn is_process_instruction_signature(f: &ItemFn) -> bool {
     signature_matches_process_instruction(&f.sig)
 }
 
-/// Validate the parameter list matches `(&Pubkey, &[AccountInfo], &[u8])`.
-/// Return type is permissive — `ProgramResult` is the convention, but
-/// `Result<T, E>` from any error type counts too. Receiver-less only
-/// (no `&self`).
+/// Params must be `(&Pubkey, &[AccountInfo], &[u8])`; return type is
+/// permissive (`ProgramResult` or any `Result`). No receiver.
 fn signature_matches_process_instruction(sig: &syn::Signature) -> bool {
     if sig.inputs.len() != 3 {
         return false;
@@ -315,21 +261,15 @@ fn is_ref_to_slice_of(ty: &Type, elem_name: &str) -> bool {
 }
 
 fn is_ref_to_slice_of_primitive(ty: &Type, prim: &str) -> bool {
-    // Same shape as is_ref_to_slice_of for primitive idents like `u8`.
     is_ref_to_slice_of(ty, prim)
 }
 
 // ---------- match-on-instruction-data discovery ---------------------------
 
-/// Locate the top-level `match <Ident>` inside the dispatcher fn. Returns
-/// the match expression, the 1-indexed source line of the match
-/// keyword, and the identifier the match scrutinises.
-///
-/// The line number is recovered from the source text (we look for the
-/// nearest `match <ident>` literal at or after the fn definition);
-/// `syn` 2 keeps `Span` information behind procmacro2 internals that
-/// aren't easily traversed here. Best-effort — falls back to the fn's
-/// declared line + 1.
+/// Locate the top-level `match <Ident>` in the dispatcher fn; returns the
+/// match expr, the 1-indexed line of the match keyword, and the scrutinised
+/// ident. The line is recovered from source text (syn 2 hides `Span`
+/// internals); best-effort.
 fn find_dispatch_match<'a>(
     f: &'a ItemFn,
     source: &str,
@@ -356,11 +296,9 @@ fn match_in_expr(expr: &Expr) -> Option<(&syn::ExprMatch, String)> {
             let scrutinee_ident = ident_of_expr(&m.expr)?;
             Some((m, scrutinee_ident))
         }
-        // `return match ... { ... }` is the second canonical shape; the
-        // dispatcher fn body is exactly `return match instruction { ... }`.
+        // `return match instruction { ... }` — second canonical shape.
         Expr::Return(ret) => ret.expr.as_deref().and_then(match_in_expr),
-        // `Ok(match instruction { ... })` wraps the match — descend into
-        // call args one level.
+        // `Ok(match instruction { ... })` — descend one level into call args.
         Expr::Call(ExprCall { args, .. }) => args.iter().find_map(match_in_expr),
         Expr::MethodCall(ExprMethodCall { receiver, .. }) => match_in_expr(receiver),
         _ => None,
@@ -388,10 +326,8 @@ fn locate_match_line(source: &str, scrutinee: &str) -> Option<u32> {
 
 // ---------- "matched ident was bound from instruction_data" --------------
 
-/// Walks `let <ident> = <expr>;` bindings inside the fn body and checks
-/// whether the matched identifier originates from a `try_from*` call (or
-/// `try_from_primitive` invocation) on something named `instruction_data`
-/// or a derivative slice.
+/// True when the matched ident is let-bound from a `try_from*`-style call
+/// on `instruction_data` or a derivative slice.
 fn ident_derived_from_instruction_data(f: &ItemFn, ident: &str) -> bool {
     // Fast path: direct let-binding traces straight to instruction_data.
     for stmt in &f.block.stmts {
@@ -405,15 +341,10 @@ fn ident_derived_from_instruction_data(f: &ItemFn, ident: &str) -> bool {
             }
         }
     }
-    // Transitive path (Phoenix-shape): `let (tag, _) =
-    // instruction_data.split_first()...;` followed by `let instruction =
-    // X::try_from(*tag)...;`. The matched ident traces to a `try_from*`-
-    // style call (or a similar enum-conversion macro) AND the same fn
-    // body has *some* let-binding traceable to instruction_data. We
-    // don't try to chase the full data-flow graph — accepting on this
-    // co-occurrence is conservative enough in practice (non-dispatcher
-    // fns rarely combine the two shapes) and correctly catches the
-    // canonical Shank/Phoenix layout.
+    // Transitive path (Phoenix-shape): ident bound by a try_from*-style
+    // call AND some let-binding in the same body traces to
+    // instruction_data. No full data-flow chase — the co-occurrence is
+    // conservative enough (non-dispatcher fns rarely combine both shapes).
     let ident_bound_by_try_from = f.block.stmts.iter().any(|stmt| {
         if let Stmt::Local(local) = stmt {
             if local_binds_ident(local, ident) {
@@ -435,12 +366,10 @@ fn ident_derived_from_instruction_data(f: &ItemFn, ident: &str) -> bool {
     ident_bound_by_try_from && body_touches_instruction_data
 }
 
-/// True when `expr` (recursively through `?`, paren, return, and method-
-/// chain receivers) contains a call whose callee path ends in a segment
-/// named `try_from` / `try_from_primitive` / `from_bytes` / `from`.
-/// Conservative on direction: we don't want to claim a dispatcher when
-/// the let-binding is unrelated, so we only accept the well-known
-/// instruction-discriminator conversion fn names.
+/// True when `expr` (through `?`, parens, return, method-chain receivers)
+/// contains a call ending in `try_from` / `try_from_primitive` /
+/// `from_bytes` / `from`. Only well-known discriminator-conversion names —
+/// an unrelated let-binding must not claim a dispatcher.
 fn expr_contains_try_from_like_call(expr: &Expr) -> bool {
     match expr {
         Expr::Try(t) => expr_contains_try_from_like_call(&t.expr),
@@ -450,14 +379,11 @@ fn expr_contains_try_from_like_call(expr: &Expr) -> bool {
             .as_deref()
             .is_some_and(expr_contains_try_from_like_call),
         Expr::MethodCall(mc) => {
-            // `X::try_from(tag).or(Err(...))` shape — the receiver is
-            // the call we care about; method args may also contain it.
+            // `X::try_from(tag).or(Err(...))` — check receiver and args.
             expr_contains_try_from_like_call(&mc.receiver)
                 || mc.args.iter().any(expr_contains_try_from_like_call)
         }
         Expr::Call(c) => {
-            // Direct call: `X::try_from(...)`, `try_from_primitive!(...)`,
-            // `FromPrimitive::from_u8(...)`, etc. Inspect the callee path.
             if let Expr::Path(p) = &*c.func {
                 if let Some(last) = p.path.segments.last() {
                     let name = last.ident.to_string();
@@ -491,10 +417,9 @@ fn pat_binds_ident(pat: &Pat, ident: &str) -> bool {
     }
 }
 
-/// True when `expr` traces — through `?`, `.method()` chains, and call
-/// arguments — to an identifier or path segment named `instruction_data`.
-/// Conservative on direction (false-negative biased): if we can't see
-/// the binding, we fall through and don't claim a Shank dispatcher.
+/// True when `expr` traces (through `?`, method chains, call args) to an
+/// ident named `instruction_data`. False-negative biased: if the binding
+/// isn't visible, we don't claim a Shank dispatcher.
 fn expr_traces_to_instruction_data(expr: &Expr) -> bool {
     match expr {
         Expr::Try(t) => expr_traces_to_instruction_data(&t.expr),
@@ -502,24 +427,19 @@ fn expr_traces_to_instruction_data(expr: &Expr) -> bool {
             if expr_traces_to_instruction_data(&mc.receiver) {
                 return true;
             }
-            // Some chains do `instruction_data.split_first().ok_or(...)?`
-            // — args may contain other expressions but the receiver is
-            // the relevant path.
+            // Args may also carry it (`instruction_data.split_first().ok_or(...)?`).
             mc.args.iter().any(expr_traces_to_instruction_data)
         }
         Expr::Call(c) => {
-            // try_from(instruction_data) / try_from_primitive(value) /
-            // FromBytes::from_bytes(...).
             if c.args.iter().any(expr_traces_to_instruction_data) {
                 return true;
             }
-            // The function path itself may carry `instruction_data`
-            // through e.g. UFCS — exceedingly rare in practice; skip.
+            // The fn path itself could carry it via UFCS — exceedingly
+            // rare in practice; skip.
             false
         }
         Expr::Macro(m) => {
-            // try_from_primitive!(...) etc. — substring-check the
-            // tokenstream for instruction_data.
+            // Substring-check the tokenstream (try_from_primitive!(...) etc.).
             let toks = m.mac.tokens.to_string();
             toks.contains("instruction_data")
         }
@@ -588,8 +508,7 @@ fn pattern_to_variant(pat: &Pat) -> Option<(String, String)> {
         }
         Pat::Reference(r) => pattern_to_variant(&r.pat),
         Pat::Paren(p) => pattern_to_variant(&p.pat),
-        // Other patterns (wildcards, literals, ranges) aren't Shank
-        // variant arms — caller skips them.
+        // Wildcards/literals/ranges aren't variant arms — caller skips them.
         _ => None,
     }
 }
@@ -606,15 +525,9 @@ fn path_to_string(path: &syn::Path) -> Option<String> {
     }
 }
 
-/// Find the first `process_*` fn called within an arm body. Returns
-/// just the terminal identifier (drops module prefixes — auditor greps
-/// on the bare name).
-///
-/// Match arm bodies in this style are typically:
-/// - `process_initialize_market(program_id, accounts, data)`
-/// - `Self::process_initialize_market(...)`
-/// - `processor::initialize_market::process(...)` (less common)
-/// - `msg!("..."); process_initialize_market(...)` (with logging)
+/// First `process_*` fn called in an arm body; terminal identifier only
+/// (auditor greps the bare name). Handles direct, `Self::`- and
+/// module-qualified calls, method calls, and bodies with leading `msg!`.
 fn first_process_callee(expr: &Expr) -> Option<String> {
     let mut visitor = CalleeVisitor { found: None };
     syn::visit::Visit::visit_expr(&mut visitor, expr);
@@ -646,7 +559,6 @@ impl<'ast> syn::visit::Visit<'ast> for CalleeVisitor {
         if self.found.is_some() {
             return;
         }
-        // Method call: `processor.process_initialize(...)` style.
         let name = node.method.to_string();
         if name.starts_with("process") {
             self.found = Some(name);
@@ -664,8 +576,6 @@ fn locate_first(source: &str, needle: &str) -> Option<u32> {
     }
     None
 }
-
-// ---------- tests ---------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -694,8 +604,7 @@ mod tests {
             &root.join("Cargo.toml"),
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         );
-        // Note: signatures are textual — the test doesn't compile this,
-        // only parses it via syn.
+        // Source is only parsed via syn, never compiled.
         write(
             &root.join("src/lib.rs"),
             r#"
@@ -740,8 +649,8 @@ pub fn process_instruction(
 
     #[test]
     fn anchor_style_program_returns_none() {
-        // Anchor programs have no top-level `process_instruction`. The
-        // `#[program] mod` form is parsed by the dedicated IDL extractor.
+        // Anchor's `#[program] mod` form is handled by the IDL extractor,
+        // not this probe.
         let root = workspace_tmp("anchor-shape");
         write(
             &root.join("src/lib.rs"),
@@ -764,8 +673,7 @@ pub mod my_program {
 
     #[test]
     fn process_instruction_without_match_returns_none() {
-        // Right-shaped signature, but the body is plain straight-line
-        // code (no central match). Don't claim a Shank dispatcher.
+        // Right signature, no central match — don't claim a dispatcher.
         let root = workspace_tmp("no-match");
         write(
             &root.join("src/lib.rs"),
@@ -788,11 +696,9 @@ pub fn process_instruction(
 
     #[test]
     fn fixture_shank_dispatcher_resolves_to_three_handlers() {
-        // The committed fixture exercises the v2.20 §S2.1 / §S2.2
-        // surface: three handlers with distinct intent shapes. We
-        // assert the dispatcher discovery half here; per-handler
-        // intent classification is tested via the end-to-end
-        // `run_bootstrap` path in `probe`.
+        // Fixture: three handlers with distinct intent shapes. Dispatcher
+        // discovery asserted here; per-handler intent classification is
+        // covered by the end-to-end `run_bootstrap` path in `probe`.
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/native-fixtures/shank-dispatcher");
         let cat = detect_shank_dispatcher(&root)
@@ -805,9 +711,8 @@ pub fn process_instruction(
 
     #[test]
     fn matched_ident_must_come_from_instruction_data() {
-        // The fn has a top-level match, but the scrutinee `kind` is
-        // bound from accounts[0].key, not instruction_data. Don't
-        // misclassify.
+        // Scrutinee `kind` is bound from accounts[0].key, not
+        // instruction_data — don't misclassify.
         let root = workspace_tmp("wrong-source");
         write(
             &root.join("src/lib.rs"),

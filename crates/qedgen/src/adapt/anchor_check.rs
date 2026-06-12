@@ -1,22 +1,7 @@
-//! Cross-check spec handlers against an Anchor program (v2.9 M5).
-//!
-//! `qedgen check --anchor-project <path>` opt-in: given the user's
-//! existing Anchor program crate, parse its `#[program]` mod and
-//! verify that the spec's handler set lines up with the program's
-//! instruction set. Catches two real adoption-time slips:
-//!
-//!   1. **Typo / stale spec** — a `handler foo { ... }` block in the
-//!      spec that has no matching `pub fn foo(...)` in the program
-//!      mod. Either the user renamed the instruction in code and
-//!      forgot to update the spec, or the spec was authored against
-//!      a different program.
-//!   2. **Uncovered handler** — a `pub fn bar(...)` in the program
-//!      mod with no corresponding spec handler. Verification can't
-//!      say anything about a handler that isn't modelled. The user
-//!      either needs to add a spec block or mark the instruction as
-//!      out-of-scope.
-//!
-//! Pure read: no codegen, no writes. Intended for CI gates.
+//! `qedgen check --anchor-project <path>`: cross-check spec handlers against
+//! the program's `#[program]` instruction set. Catches stale/typo'd spec
+//! handlers with no matching `pub fn`, and program instructions not covered
+//! by any spec handler. Pure read — no codegen, no writes; CI-gate friendly.
 
 use anyhow::Result;
 use std::collections::HashSet;
@@ -26,10 +11,8 @@ use crate::anchor_project::parse_anchor_project;
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
 use crate::check::ParsedSpec;
 
-/// Cross-check finding from comparing spec handlers to program
-/// instructions. Severity is fixed to "error" for both shapes —
-/// either condition means the spec and the deployed program disagree
-/// about what handlers exist.
+/// Coverage finding. Severity is always "error" — either shape means the
+/// spec and the program disagree about what handlers exist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorCoverageFinding {
     pub kind: AnchorCoverageKind,
@@ -59,18 +42,14 @@ impl AnchorCoverageFinding {
     }
 }
 
-/// One handler-effect coverage finding: a spec effect whose target
-/// state field is *not* referenced as the LHS of any assignment-like
-/// expression in the resolved Rust handler body. Heuristic but
-/// useful for catching the "I added an effect to the spec but
-/// forgot to wire it in code" footgun.
+/// A spec effect whose target field is never the LHS of any assignment-like
+/// expression in the resolved handler body. Heuristic — catches "effect in
+/// spec, never wired in code".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectCoverageFinding {
     pub handler: String,
     pub field: String,
-    /// What we observed instead. `None` = the body has no assignment
-    /// to a path matching this field anywhere; the user likely
-    /// hasn't implemented the effect yet.
+    /// What was observed instead; `None` = no assignment to a matching path.
     pub observed: Option<String>,
 }
 
@@ -83,11 +62,8 @@ impl EffectCoverageFinding {
     }
 }
 
-/// Walk a `syn::Block` and collect the set of field-name "leaves" that
-/// appear on the LHS of any assignment-like expression. `self.x.y = z`
-/// contributes `y`; `self.balance += 1` contributes `balance`. Used by
-/// the effect-coverage check to compare against the spec's effect
-/// field set.
+/// Field-name leaves on the LHS of assignment-like exprs in `block`:
+/// `self.x.y = z` → `y`; `self.balance += 1` → `balance`.
 fn collect_mutated_field_leaves(block: &syn::Block) -> HashSet<String> {
     use syn::visit::Visit;
 
@@ -134,9 +110,8 @@ fn collect_mutated_field_leaves(block: &syn::Block) -> HashSet<String> {
     c.out
 }
 
-/// Pull the trailing field name out of an LHS expression. `self.x.y`
-/// → `y`; `*ptr.field` → `field`; bare ident `foo` → `foo`. Returns
-/// `None` for shapes we can't pin a leaf to (calls, indexing, etc.).
+/// Trailing field name of an LHS: `self.x.y` → `y`; `*ptr.field` → `field`;
+/// bare `foo` → `foo`. None for calls, indexing, etc.
 fn expr_path_leaf(expr: &syn::Expr) -> Option<String> {
     match expr {
         syn::Expr::Field(f) => match &f.member {
@@ -151,16 +126,10 @@ fn expr_path_leaf(expr: &syn::Expr) -> Option<String> {
     }
 }
 
-/// Cross-check: for every spec handler's effect block, verify the
-/// resolved Rust handler body contains at least one assignment-like
-/// mutation whose LHS leaf matches the effect field. Misses are
-/// reported as `EffectCoverageFinding`s — heuristic, not a proof of
-/// semantic correctness, but catches the "spec effect with no code
-/// wire-up" case that body-hash sealing alone doesn't surface.
-///
-/// Handlers that resolve to `Unrecognized` are skipped (no body to
-/// inspect); the existing `check_anchor_coverage` already calls them
-/// out.
+/// For each spec effect, require at least one mutation in the resolved
+/// handler body whose LHS leaf matches the effect field. Heuristic, not
+/// semantic correctness. `Unrecognized` handlers are skipped (no body);
+/// `check_anchor_coverage` already reports them.
 pub fn check_effect_coverage(
     spec: &ParsedSpec,
     program_root: &Path,
@@ -204,8 +173,7 @@ pub fn check_effect_coverage(
     Ok(findings)
 }
 
-/// Run the cross-check. Returns the list of findings (empty when the
-/// two handler sets agree exactly).
+/// Run the cross-check; empty when the two handler sets agree exactly.
 pub fn check_anchor_coverage(
     spec: &ParsedSpec,
     program_root: &Path,
@@ -242,10 +210,6 @@ pub fn check_anchor_coverage(
 
     Ok(findings)
 }
-
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -377,8 +341,7 @@ mod tests {
         );
 
         let findings = check_anchor_coverage(&spec, &root).unwrap();
-        // `gamma` is spec-only; `beta` is program-only. Spec-only
-        // findings come first, both groups are alphabetised.
+        // Spec-only findings first; both groups alphabetised.
         assert_eq!(findings.len(), 2);
         assert_eq!(
             findings[0].kind,
@@ -456,7 +419,6 @@ mod tests {
 
     #[test]
     fn effect_coverage_handles_simple_assignment_too() {
-        // `state.field = value;` (not just `+=`) should also count.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_lib_rs(
             &tmp,
@@ -487,8 +449,7 @@ mod tests {
 
     #[test]
     fn effect_coverage_skips_unrecognized_handlers() {
-        // Custom-dispatcher shape — classifier returns Unrecognized.
-        // Effect coverage should skip silently rather than blow up.
+        // Unrecognized handler shape must skip silently, not blow up.
         let tmp = tempfile::tempdir().unwrap();
         let root = write_lib_rs(
             &tmp,

@@ -1,55 +1,17 @@
-//! `qedgen verify --probe-repros` runner. PLAN-v2.16 D4.
+//! `qedgen verify --probe-repros`: walks `<project_root>/target/qedgen-repros/`,
+//! runs each per-finding reproducer test, reports `(finding_id, status)` so
+//! consumers can gate which findings surface. Repro layout isn't pinned yet,
+//! so both shapes are supported: a single shared crate
+//! (`Cargo.toml` + `tests/probe_<finding_id>.rs`) or one crate per finding
+//! (`<finding_id>/Cargo.toml`). With no repros dir, emits a structured `note`.
 //!
-//! Walks `<project_root>/target/qedgen-repros/`, runs each per-finding
-//! reproducer test, and reports `(finding_id, status)` so downstream
-//! consumers (auditor subagent, the next probe invocation) can gate
-//! which findings make it into the surfaced report.
+//! Inverted exit semantics — each repro's `#[test]` asserts the bug is
+//! observable: cargo test pass → **Fired** (bug reproduced); assertion failure
+//! → **Silent** (finding suppressed, reproducible-only contract); build failure
+//! → **BuildError** (no verdict, finding stays structural).
 //!
-//! ## What lives under `target/qedgen-repros/`
-//!
-//! Per PLAN-v2.16 D3 (scheduled after D4), each probe finding gets a
-//! reproducer materialized as a Rust integration test that calls the
-//! user's deployed handler via `qedgen-sandbox` (Mollusk in-process
-//! SVM). The directory layout D3 will use isn't yet pinned; this
-//! runner supports both shapes:
-//!
-//! 1. **Single shared crate** — `target/qedgen-repros/Cargo.toml`
-//!    with `tests/probe_<finding_id>.rs` per finding. Single
-//!    `cargo test` invocation runs all repros (fast).
-//! 2. **One crate per finding** — `target/qedgen-repros/<finding_id>/Cargo.toml`
-//!    each, with the test inside. One `cargo test` per finding (slow
-//!    but isolated).
-//!
-//! Until D3 ships, the runner is essentially a no-op (the directory
-//! doesn't exist), and emits a structured `note` saying so. This
-//! matches the v2.16 staging plan: D4 lands the orchestration; D3
-//! lands the repros that flow through it.
-//!
-//! ## What "fired" means
-//!
-//! Each repro is a `#[test]` whose body asserts the bug is observable
-//! (e.g. `assert!(result.program_result.is_err(), "expected
-//! MathOverflow")` or `assert_eq!(post_state.balance, 0,
-//! "expected wrap to drain balance")`). Mapping cargo test's exit
-//! semantics to our model:
-//!
-//! - cargo test passes → assertion held → **bug reproduced (Fired)**
-//! - cargo test fails an assertion → **bug not reproduced (Silent)** →
-//!   the corresponding probe finding is suppressed (no advisory tier,
-//!   per `feedback_probes_reproducible_only.md`)
-//! - cargo test fails to build → **BuildError** → the finding stays
-//!   structural (we have no evidence either way; treat as build
-//!   flakiness, not a verdict)
-//!
-//! ## What this module deliberately does NOT do
-//!
-//! - It does not generate repros (that's D3).
-//! - It does not modify the probe report (the consumer reads our JSON
-//!   and gates the probe report itself; we don't reach back into
-//!   `probe.rs`).
-//! - It does not run Mollusk directly. The repros use the
-//!   `qedgen-sandbox` crate as their dep — that's the Mollusk surface;
-//!   we just orchestrate cargo.
+//! Does not generate repros, modify the probe report, or run Mollusk directly
+//! (repros depend on `qedgen-sandbox`; this just orchestrates cargo).
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -61,28 +23,23 @@ use std::time::Instant;
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // NoRepros reserved for future per-result use; today emitted only via top-level note
 pub enum ReproStatus {
-    /// Cargo test passed — the repro's assertion held, bug is reproducible.
+    /// cargo test passed — assertion held, bug reproduced.
     Fired,
-    /// Cargo test failed an assertion — repro couldn't reproduce the bug.
-    /// Per the reproducible-only contract, the corresponding probe
-    /// finding is dropped from the surfaced report.
+    /// Assertion failed — bug not reproduced; finding dropped per the
+    /// reproducible-only contract.
     Silent,
-    /// Cargo test failed to build (compile error, missing dep, etc.).
-    /// Insufficient evidence to fire OR drop — finding stays structural.
+    /// Build failure — no evidence either way; finding stays structural.
     BuildError,
-    /// No repros under `target/qedgen-repros/`. v2.16-pre-D3 baseline.
+    /// No repros under `target/qedgen-repros/`.
     NoRepros,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ReproResult {
-    /// Finding id — derived from `tests/probe_<id>.rs` or
-    /// `<id>/Cargo.toml` directory name.
+    /// From `tests/probe_<id>.rs` or the `<id>/` directory name.
     pub finding_id: String,
     pub status: ReproStatus,
-    /// Short excerpt from cargo test stderr/stdout for human triage.
-    /// Only populated for `Silent` and `BuildError`; `Fired` doesn't
-    /// need a log because the repro confirmed the bug.
+    /// cargo test output excerpt for triage; `Silent` / `BuildError` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_excerpt: Option<String>,
 }
@@ -92,17 +49,14 @@ pub struct ProbeReproReport {
     pub repros_dir: PathBuf,
     pub results: Vec<ReproResult>,
     pub duration_ms: u128,
-    /// Human-readable note for non-result outcomes (no repros found,
-    /// shared-crate cargo build failed before any test ran, etc.).
+    /// Note for non-result outcomes (no repros found, shared-crate build failed, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
 }
 
 impl ProbeReproReport {
-    /// True if every repro that ran fired (i.e. every claimed bug was
-    /// reproduced). `BuildError` results are treated as "no verdict"
-    /// — neither a fire nor a silent — so they don't fail this check.
-    /// `NoRepros` is vacuously true.
+    /// True if no repro was `Silent`. `BuildError` = no verdict (doesn't fail
+    /// the check); `NoRepros` is vacuously true.
     pub fn all_fired_or_inconclusive(&self) -> bool {
         self.results
             .iter()
@@ -111,9 +65,6 @@ impl ProbeReproReport {
 }
 
 /// Discover and run probe reproducers under `<project_root>/target/qedgen-repros/`.
-///
-/// Returns a structured report. The CLI prints it as JSON (or a short
-/// human summary), and the auditor subagent consumes it via stdin/file.
 pub fn run(project_root: &Path) -> Result<ProbeReproReport> {
     let start = Instant::now();
     let repros_dir = project_root.join("target").join("qedgen-repros");
@@ -129,15 +80,12 @@ pub fn run(project_root: &Path) -> Result<ProbeReproReport> {
         });
     }
 
-    // Distinguish the two layouts D3 may pick:
-    // - shared crate: `<repros_dir>/Cargo.toml` exists
-    // - per-finding crate: `<repros_dir>/<id>/Cargo.toml` exists
+    // Shared crate (`<repros_dir>/Cargo.toml`) vs per-finding crates
+    // (`<repros_dir>/<id>/Cargo.toml`).
     if repros_dir.join("Cargo.toml").exists() {
         return Ok(run_shared_crate(&repros_dir, start));
     }
 
-    // Per-finding-crate layout: walk subdirs, run cargo test in each
-    // that has a Cargo.toml.
     let entries = std::fs::read_dir(&repros_dir)
         .with_context(|| format!("read_dir {}", repros_dir.display()))?;
     let mut results = Vec::new();
@@ -186,12 +134,8 @@ fn run_shared_crate(repros_dir: &Path, start: Instant) -> ProbeReproReport {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            // Shared-crate parsing requires reading libtest's per-test
-            // outcome lines (`test probe_<id> ... ok|FAILED`). For v2.16
-            // pre-D3 we leave that as a TODO marker in `note` and
-            // surface a coarse-grained verdict so the orchestration
-            // works end-to-end. D3 wires a per-test parser when the
-            // first repro lands.
+            // TODO(D3): parse libtest per-test lines (`test probe_<id> ... ok|FAILED`)
+            // for per-finding results; until then surface a coarse verdict in `note`.
             let note = if out.status.success() {
                 Some("shared-crate repros all passed — per-finding parsing pending D3".to_string())
             } else {
@@ -252,10 +196,8 @@ fn run_one_repro_crate(finding_id: &str, crate_dir: &Path) -> ReproResult {
 }
 
 fn looks_like_build_error(stderr: &str) -> bool {
-    // Heuristic: cargo prints `error[E0…]:` for compile errors and
-    // `error: could not compile` for the final summary. Test failures
-    // don't produce these markers — they manifest as a failing test
-    // result line in stdout instead.
+    // cargo prints `error[E…]:` / `error: could not compile` for compile errors;
+    // test failures show up in stdout, not these markers.
     stderr.contains("error[E") || stderr.contains("could not compile")
 }
 
