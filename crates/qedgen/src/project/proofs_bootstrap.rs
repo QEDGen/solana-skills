@@ -1,12 +1,9 @@
 //! Bootstrap a skeleton `Proofs.lean` (once) and check for orphan/missing
 //! theorems on every `qedgen check`.
 //!
-//! `Spec.lean` is regenerated from the `.qedspec` every run. `Proofs.lean`
-//! is user-owned — it holds preservation theorems with user-written tactic
-//! scripts. The two talk to each other through theorem names: if the spec
-//! drops a handler, the theorem referencing it goes stale; if the spec
-//! adds a handler to `preserved_by`, a theorem is missing. Both surface
-//! as check-time diagnostics.
+//! `Spec.lean` is regenerated each run; `Proofs.lean` is user-owned. They
+//! link via theorem names: a dropped handler orphans its theorem, a new
+//! `preserved_by` entry makes one missing — both are check-time diagnostics.
 
 use anyhow::Result;
 use regex::Regex;
@@ -34,15 +31,10 @@ pub fn extract_theorem_names(source: &str) -> BTreeSet<String> {
     re.captures_iter(source).map(|c| c[1].to_string()).collect()
 }
 
-/// Render the bootstrap `Proofs.lean` body (once, when the file is absent).
-/// Emits `import Spec`, minimal `open` clauses, and a commented checklist
-/// of the preservation obligations the spec expects. The user materializes
-/// each theorem against the real signature in `Spec.lean`.
-///
-/// Intentionally does NOT emit `theorem X : True := by trivial` stubs —
-/// those type-check but prove nothing meaningful, and a skimmed `Proofs.lean`
-/// full of them reads as "everything is proven" when it isn't. Better to
-/// force the user to write the real signature from the start.
+/// Render the bootstrap `Proofs.lean` body: `import Spec`, `open` clauses,
+/// and a commented checklist of expected obligations. Intentionally no
+/// `theorem X : True := by trivial` stubs — they type-check but prove
+/// nothing, and a Proofs.lean full of them reads as "everything is proven".
 pub fn render_bootstrap(spec: &ParsedSpec) -> String {
     let mut out = String::new();
     out.push_str("/-\n");
@@ -116,13 +108,9 @@ impl std::fmt::Display for OrphanFinding {
     }
 }
 
-/// Compare the spec's expected obligation set against the theorems declared
-/// in `Proofs.lean`. Returns a list of orphans + missing obligations.
-///
-/// Theorems declared in Proofs.lean that follow the
-/// `<property>_preserved_by_<handler>` convention are checked. Theorems
-/// that don't match that pattern are ignored — users are free to add
-/// helper lemmas in Proofs.lean without triggering false orphans.
+/// Compare the spec's expected obligations against the theorems in
+/// `Proofs.lean`. Only `<property>_preserved_by_<handler>`-shaped names are
+/// checked — helper lemmas never trigger false orphans.
 pub fn check_orphans(spec: &ParsedSpec, proofs_dir: &Path) -> Result<Vec<OrphanFinding>> {
     let path = proofs_dir.join("Proofs.lean");
     if !path.exists() {

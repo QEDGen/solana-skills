@@ -1,9 +1,9 @@
 //! Parse `cargo test --release --test proptest` failure output into
-//! structured `Counterexample`s. PLAN-v2.16 D2.
+//! structured `Counterexample`s.
 //!
-//! ## Proptest's failure output (the format we parse)
+//! ## Expected output shape (brittle external contract)
 //!
-//! When a proptest property fails, libtest prints something like:
+//! A failing property prints (via libtest):
 //!
 //! ```text
 //! running 3 tests
@@ -27,46 +27,34 @@
 //! test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured
 //! ```
 //!
-//! The fields we extract per failure:
-//! - **harness** — the `---- <name> stdout ----` heading (or fallback to
-//!   the `thread '<name>' panicked` line).
-//! - **source_location** — `tests/proptest.rs:117:13` from the `panicked at`
-//!   line.
-//! - **failure_message** — the substring after `Test failed:` and before
-//!   `; minimal failing input:`.
-//! - **assignments** — parsed from `name = value, name = value, ...` after
-//!   `minimal failing input:`. Brace-balanced so `s = State { a: 1, b: 0 }`
-//!   stays one assignment.
+//! Extracted per failure:
+//! - **harness** — the `---- <name> stdout ----` heading.
+//! - **source_location** — from the `panicked at <file>:<line>:<col>` line.
+//! - **failure_message** — between `Test failed:` and `; minimal failing input:`.
+//! - **assignments** — `name = value, ...` after `minimal failing input:`,
+//!   brace-balanced so struct values stay one assignment.
 //!
-//! ## Seed (PROPTEST_REGRESSION_FILE)
-//!
-//! Proptest persists shrunk seeds to
-//! `<crate_dir>/proptest-regressions/<test-source>.txt`. We attach the
-//! file path + the latest seed line as `seed` so the user can re-run
-//! deterministically with `PROPTEST_REGRESSION_FILE=<path> cargo test ...`.
-//! Reading the file is `read_seed_for_harness`, called from `verify.rs`
-//! after parsing stdout.
+//! Seed: proptest persists shrunk seeds to
+//! `<crate_dir>/proptest-regressions/<test-source>.txt`; `read_seed_for_harness`
+//! (called from `verify.rs` after parsing) attaches `<path>::<seed-line>` for
+//! deterministic re-run via `PROPTEST_REGRESSION_FILE=`.
 
 use std::path::Path;
 
 use crate::verify_counterexample::{Counterexample, CounterexampleVar};
 
-/// Parse proptest failure stdout into a list of `Counterexample`s, one per
-/// failed harness. Returns an empty Vec if the stdout has no
-/// `failures:` block (e.g. all tests passed or the binary failed before
-/// running tests).
+/// One `Counterexample` per failed harness; empty if stdout has no
+/// `---- <name> stdout ----` failure blocks.
 pub fn parse_failures(stdout: &str) -> Vec<Counterexample> {
     let mut out = Vec::new();
     let lines: Vec<&str> = stdout.lines().collect();
 
-    // Find each `---- <name> stdout ----` block. Each one is one failure.
+    // Each `---- <name> stdout ----` block is one failure.
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
         if let Some(harness) = parse_failure_heading(line) {
-            // The block continues until the next blank line, the next
-            // `---- … stdout ----` heading, or the trailing `failures:` /
-            // `test result:` summary.
+            // Block ends at the next heading or the `failures:` / `test result:` summary.
             let block_end = (i + 1..lines.len())
                 .find(|&j| {
                     let l = lines[j];
@@ -86,21 +74,15 @@ pub fn parse_failures(stdout: &str) -> Vec<Counterexample> {
     out
 }
 
-/// Read the latest persisted regression seed for `harness_source` (the
-/// `tests/<file>.rs` basename without extension, e.g. `proptest`).
-/// Returns `<file_path>::<seed_line>` so the user has both the path
-/// (for `PROPTEST_REGRESSION_FILE=`) and the literal seed.
-///
-/// Returns `None` if the regression directory or file doesn't exist —
-/// proptest only writes regressions on failure, so absence is normal.
+/// Latest persisted regression seed for `harness_source` (test-file basename,
+/// e.g. `proptest`), as `<file_path>::<seed_line>` for `PROPTEST_REGRESSION_FILE=`.
+/// `None` if absent — proptest only writes regressions on failure.
 pub fn read_seed_for_harness(crate_dir: &Path, harness_source: &str) -> Option<String> {
     let path = crate_dir
         .join("proptest-regressions")
         .join(format!("{}.txt", harness_source));
     let content = std::fs::read_to_string(&path).ok()?;
-    // The file contains comment lines (`#`) plus seed lines starting with
-    // `cc `. Take the last `cc` line — that's the most recently shrunk
-    // counterexample.
+    // `#` comments plus `cc ` seed lines; last `cc` = most recently shrunk.
     let seed_line = content
         .lines()
         .rev()
@@ -109,7 +91,7 @@ pub fn read_seed_for_harness(crate_dir: &Path, harness_source: &str) -> Option<S
 }
 
 fn parse_failure_heading(line: &str) -> Option<&str> {
-    // Match `---- <name> stdout ----` exactly (libtest's failure block heading).
+    // libtest's failure block heading: `---- <name> stdout ----`.
     let rest = line.strip_prefix("---- ")?;
     let name = rest.strip_suffix(" stdout ----")?;
     Some(name)
@@ -211,8 +193,7 @@ fn escaped_at(bytes: &[u8], i: usize) -> bool {
 }
 
 fn split_assignment(s: &str) -> Option<CounterexampleVar> {
-    // Find the first `=` not inside a value structure. Since we already
-    // top-level split on commas, the first `=` here is the binding.
+    // Already top-level comma-split, so the first `=` is the binding.
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return None;
@@ -234,9 +215,7 @@ fn split_assignment(s: &str) -> Option<CounterexampleVar> {
 mod tests {
     use super::*;
 
-    /// Realistic stdout from a single-failure proptest run. Tests the
-    /// happy path: heading detected, panic location captured, message +
-    /// inputs split correctly, brace-balanced struct value preserved.
+    /// Realistic single-failure proptest stdout (happy path).
     const SINGLE_FAILURE: &str = "
 running 3 tests
 test init_pool_preserves_pool_solvency ... ok
@@ -378,8 +357,7 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured
 
     #[test]
     fn handles_failure_message_without_minimal_input_marker() {
-        // Defensive: if proptest's format ever changes and drops the
-        // `minimal failing input:` infix, we still record the message.
+        // Defensive: message still recorded if the `minimal failing input:` infix is absent.
         let stdout = "
 running 1 test
 test foo ... FAILED

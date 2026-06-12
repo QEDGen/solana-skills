@@ -11,7 +11,6 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
 
     let current_hash = crate::asm2lean::source_hash(&source);
 
-    // Find the generated Lean module (any file with source-hash comment)
     let generated_file = find_generated_module(proofs_dir)?;
     let generated_content = std::fs::read_to_string(&generated_file)
         .with_context(|| format!("reading {}", generated_file.display()))?;
@@ -35,7 +34,6 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
             generated_file.display(),
             asm_source.display()
         );
-        // Derive namespace from the generated file's stem
         let namespace = generated_file
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -45,7 +43,6 @@ pub fn verify(asm_source: &Path, proofs_dir: &Path) -> Result<()> {
         eprintln!("Source hash matches (sha256:{}...)", &current_hash[..12]);
     }
 
-    // Run lake build
     eprintln!("Running lake build in {}", proofs_dir.display());
     let status = Command::new("lake")
         .arg("build")

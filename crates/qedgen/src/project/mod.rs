@@ -1,14 +1,12 @@
 use anyhow::Result;
 use std::path::Path;
 
-// Embed template files
 const LAKEFILE: &str = include_str!("../../templates/lakefile.lean");
 const LEAN_TOOLCHAIN: &str = include_str!("../../templates/lean-toolchain");
 const MAIN_LEAN: &str = include_str!("../../templates/Main.lean");
 const GITIGNORE: &str = include_str!("../../templates/.gitignore");
 const README: &str = include_str!("../../templates/README.lean.md");
 
-// Embed lean_solana files (from repo root lean_solana/)
 const SUPPORT_LAKEFILE: &str = include_str!("../../../../lean_solana/lakefile.lean");
 const SUPPORT_TOOLCHAIN: &str = include_str!("../../../../lean_solana/lean-toolchain");
 const SUPPORT_ROOT: &str = include_str!("../../../../lean_solana/QEDGen.lean");
@@ -19,10 +17,8 @@ const SUPPORT_VALID: &str = include_str!("../../../../lean_solana/QEDGen/Solana/
 const SUPPORT_ARITHMETIC: &str =
     include_str!("../../../../lean_solana/QEDGen/Solana/Arithmetic.lean");
 const SUPPORT_SPEC: &str = include_str!("../../../../lean_solana/QEDGen/Solana/Spec.lean");
-// `Spec.lean` does `import QEDGen.Solana.CommandBuilders`, so the support
-// module must ship alongside it — otherwise `lake build` in the validation
-// workspace fails to resolve the import (issue #71). CommandBuilders has no
-// further QEDGen.Solana deps, so embedding it closes the import closure.
+// Spec.lean imports QEDGen.Solana.CommandBuilders — it must ship alongside or
+// the validation workspace fails to build (issue #71). No further deps.
 const SUPPORT_COMMAND_BUILDERS: &str =
     include_str!("../../../../lean_solana/QEDGen/Solana/CommandBuilders.lean");
 // Trimmed barrel import — only the modules we embed (no SBPF/Bridge/Guards)
@@ -41,17 +37,13 @@ import QEDGen.Solana.State\n\
 import QEDGen.Solana.Valid\n\
 import QEDGen.Solana.Spec\n";
 
-/// Mathlib tag pinned for every `qedgen init --mathlib` project and
-/// for `lean_solana_mathlib/lakefile.lean`. Kept in sync with the
-/// `lean-toolchain` so a `lake update` can't float the dep to a HEAD
-/// commit that drags in a newer Lean.
+/// Mathlib tag for `qedgen init --mathlib` projects. Kept in sync with
+/// `lean-toolchain` so `lake update` can't float to a newer Lean.
 const MATHLIB_TAG: &str = "v4.30.0";
 
-/// Render the Mathlib `require` stanza appended to the `lean_solana/`
-/// sub-lakefile. When the shared workspace install exists, emit a
-/// local-path require so Lake reuses the pre-built cache; otherwise
-/// fall back to a pinned git require for users without
-/// `qedgen setup --mathlib`.
+/// Mathlib `require` stanza for the `lean_solana/` sub-lakefile: local-path
+/// when the shared workspace install exists (reuses the pre-built cache),
+/// pinned git require otherwise.
 fn mathlib_require() -> String {
     match crate::validate::shared_mathlib_path() {
         Some(path) => format!("\nrequire mathlib from \"{}\"\n", path.display()),
@@ -64,22 +56,19 @@ fn mathlib_require() -> String {
 }
 
 pub fn setup_lean_project(output_dir: &Path, mathlib: bool) -> Result<()> {
-    // Write template files
     std::fs::write(output_dir.join("lakefile.lean"), LAKEFILE)?;
     std::fs::write(output_dir.join("lean-toolchain"), LEAN_TOOLCHAIN)?;
     std::fs::write(output_dir.join("Main.lean"), MAIN_LEAN)?;
     std::fs::write(output_dir.join(".gitignore"), GITIGNORE)?;
     std::fs::write(output_dir.join("README.md"), README)?;
 
-    // Write lean_solana directory
     write_lean_solana(output_dir, mathlib)?;
 
     Ok(())
 }
 
-/// Update only the lean_solana/ files without touching lakefile.lean or
-/// lean-toolchain. This preserves the .lake/ build cache while ensuring
-/// axiom definitions are current.
+/// Refresh only lean_solana/ — leaves lakefile.lean / lean-toolchain (and
+/// the .lake/ build cache) intact.
 pub fn update_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
     write_lean_solana(output_dir, mathlib)
 }
@@ -88,7 +77,6 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
     let support_dir = output_dir.join("lean_solana");
     std::fs::create_dir_all(&support_dir)?;
 
-    // Inject mathlib require into lean_solana lakefile when opted in
     if mathlib {
         let lakefile = format!("{}{}", SUPPORT_LAKEFILE, mathlib_require());
         std::fs::write(support_dir.join("lakefile.lean"), lakefile)?;
@@ -98,7 +86,6 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
     std::fs::write(support_dir.join("lean-toolchain"), SUPPORT_TOOLCHAIN)?;
     std::fs::write(support_dir.join("QEDGen.lean"), SUPPORT_ROOT)?;
 
-    // Write QEDGen/Solana.lean (namespace file)
     let qedgen_dir = support_dir.join("QEDGen");
     std::fs::create_dir_all(&qedgen_dir)?;
     let solana_barrel = if mathlib {
@@ -108,7 +95,6 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
     };
     std::fs::write(qedgen_dir.join("Solana.lean"), solana_barrel)?;
 
-    // Write QEDGen/Solana modules
     let solana_dir = support_dir.join("QEDGen/Solana");
     std::fs::create_dir_all(&solana_dir)?;
     std::fs::write(solana_dir.join("Account.lean"), SUPPORT_ACCOUNT)?;
@@ -121,7 +107,6 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
         SUPPORT_COMMAND_BUILDERS,
     )?;
 
-    // Only deploy Arithmetic.lean when Mathlib is opted in
     if mathlib {
         std::fs::write(solana_dir.join("Arithmetic.lean"), SUPPORT_ARITHMETIC)?;
     }
@@ -133,14 +118,9 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The embedded `QEDGen.Solana.*` support modules form a closed
-    /// import graph: every `import QEDGen.Solana.X` inside an embedded
-    /// module must resolve to another embedded module. Issue #71 shipped
-    /// because `Spec.lean` does `import QEDGen.Solana.CommandBuilders`
-    /// but `CommandBuilders.lean` wasn't in the embed list, so
-    /// `lake build` in the setup workspace failed to resolve it. This
-    /// test fails fast if the hand-maintained embed list drifts from the
-    /// modules' actual `import` lines again.
+    /// Embed-list closure gate: every `import QEDGen.Solana.X` inside an
+    /// embedded module must resolve to another embedded module (issue #71
+    /// shipped because Spec.lean imported a non-embedded CommandBuilders).
     fn embedded_module(name: &str, mathlib: bool) -> Option<&'static str> {
         Some(match name {
             "Account" => SUPPORT_ACCOUNT,
@@ -199,7 +179,7 @@ mod tests {
     }
 }
 
-// Submodules (v2.35 src/ reorg).
+// Submodules.
 pub(crate) mod consolidate;
 pub(crate) mod deps;
 pub(crate) mod feedback;

@@ -1,16 +1,11 @@
-//! Miri verify backend (v2.19).
+//! Miri verify backend: walks `.qed/probes/pinocchio/*/repro_miri.rs`, shells
+//! `cargo +nightly miri test` per repro, parses output for UB / panic /
+//! assertion diagnostics, and reports via the verify `BackendReport` envelope.
 //!
-//! Walks `.qed/probes/pinocchio/*/repro_miri.rs` (or anywhere the
-//! agent emitted Miri reproducers), shells `cargo +nightly miri test`
-//! per repro, parses Miri output for UB / panic / assertion failures,
-//! and surfaces each diagnostic as a `Finding`-shaped record that
-//! plugs into the existing verify `BackendReport` envelope.
-//!
-//! Dual-execution divergence detection: when the same finding-id has
-//! both a `repro_mollusk.rs` and a `repro_miri.rs`, the comparator
-//! flags Miri-fail / Mollusk-pass disagreement as
-//! `Category::ExecutionDivergence` (Critical) — the deployed `.so`'s
-//! release-mode wrap hides UB Miri's interpreter exposes.
+//! Dual-execution divergence: a finding-id with both `repro_mollusk.rs` and
+//! `repro_miri.rs` that is Miri-fail / Mollusk-pass is flagged
+//! `Category::ExecutionDivergence` (Critical) — release-mode wrap in the
+//! deployed `.so` hides UB Miri exposes.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -34,10 +29,9 @@ pub struct MiriRunResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MiriStatus {
-    /// Miri ran the repro and the test passed without UB.
+    /// Test passed without UB.
     Passed,
-    /// Miri detected UB / panic / assertion failure — the probe's bug
-    /// reproduced.
+    /// UB / panic / assertion failure — the probe's bug reproduced.
     Failed,
     /// Miri could not run (toolchain missing, compile error, etc.).
     Error,
@@ -55,10 +49,8 @@ pub struct MiriDiagnostic {
     pub source_line: Option<String>,
 }
 
-/// Locate Miri repro files under a project root. v2.19 default layout:
-/// `.qed/probes/pinocchio/<finding-id>/repro_miri.rs`. Agent-emitted
-/// paths follow the same convention via the `MiriPrompt.repro_path`
-/// field on the finding.
+/// Locate Miri repros: `.qed/probes/pinocchio/<finding-id>/repro_miri.rs`
+/// (agent-emitted paths follow the same convention via `MiriPrompt.repro_path`).
 pub fn discover_miri_repros(project_root: &Path) -> Vec<PathBuf> {
     let base = project_root.join(".qed").join("probes").join("pinocchio");
     let mut out = Vec::new();
@@ -74,11 +66,8 @@ pub fn discover_miri_repros(project_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Run every discovered Miri repro under `cargo +nightly miri test`.
-///
-/// Each repro is expected to live as a standalone bin / test target
-/// declared in its own `Cargo.toml` (the agent's responsibility to
-/// scaffold). If no `Cargo.toml` is present alongside the repro, the
-/// run is marked `Skipped` with a note for the agent.
+/// Each repro needs an agent-scaffolded `Cargo.toml`; without one the run is
+/// `Skipped` with a note.
 pub fn run_all(project_root: &Path) -> Result<Vec<MiriRunResult>> {
     let repros = discover_miri_repros(project_root);
     let mut results = Vec::new();
@@ -97,7 +86,6 @@ fn run_one(repro: &Path) -> Result<MiriRunResult> {
         .unwrap_or("unknown")
         .to_string();
 
-    // Look for Cargo.toml next to repro (or in parent).
     let manifest = repro
         .parent()
         .map(|p| p.join("Cargo.toml"))
@@ -106,7 +94,7 @@ fn run_one(repro: &Path) -> Result<MiriRunResult> {
     let manifest = match manifest {
         Some(m) => m,
         None => {
-            // Try walking up to find a Cargo.toml.
+            // Walk up for a Cargo.toml.
             let mut probe = repro.parent();
             let mut found = None;
             while let Some(p) = probe {
@@ -136,8 +124,7 @@ fn run_one(repro: &Path) -> Result<MiriRunResult> {
         }
     };
 
-    // Check for stub markers — if the agent hasn't filled in the
-    // TODOs, the test panics at runtime which is not a probe finding.
+    // Unfilled stubs panic at runtime — that's not a probe finding; skip them.
     let stub_check = std::fs::read_to_string(repro).unwrap_or_default();
     if stub_check.contains("TODO:") {
         return Ok(MiriRunResult {
@@ -193,10 +180,9 @@ fn run_one(repro: &Path) -> Result<MiriRunResult> {
     })
 }
 
-/// Parse Miri stdout / stderr for the diagnostic classes v2.19
-/// surfaces: UB (`error: Undefined Behavior`), arithmetic overflow
-/// (`this operation will panic`), assertion failures, and explicit
-/// panics with our `SAFETY claim STALE:` marker.
+/// Parse Miri stdout / stderr for: UB (`error: Undefined Behavior`),
+/// arithmetic overflow (`this operation will panic`), assertion failures,
+/// and panics carrying our `SAFETY claim STALE:` marker.
 pub fn parse_miri_output(stdout: &str, stderr: &str) -> Vec<MiriDiagnostic> {
     let mut out = Vec::new();
     let combined = format!("{}\n{}", stdout, stderr);

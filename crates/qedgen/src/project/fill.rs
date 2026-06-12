@@ -1,13 +1,7 @@
-// Agent-fill prompt emission for v2.4-M4.
-//
-// `qedgen codegen --fill` scans the generated handler files for `todo!()`
-// markers and prints one structured prompt block per handler to stdout. The
-// in-session agent (Claude / Codex / similar) reads the prompts and edits
-// the corresponding files.
-//
-// We deliberately do NOT call any LLM API from here. Routing between local
-// LLM, Leanstral, and Aristotle is agent-decided per SKILL.md, not
-// hardcoded in the CLI (memory: feedback_llm_routing).
+// Agent-fill prompt emission: `qedgen codegen --fill` scans generated
+// handler files for `todo!()` and prints one structured prompt block per
+// handler; the in-session agent edits the files. Deliberately no LLM API
+// calls here — LLM routing is agent-decided per SKILL.md.
 
 use crate::check::{ParsedHandler, ParsedSpec};
 use anyhow::{Context, Result};
@@ -142,7 +136,6 @@ fn build_test_prompt(
         out.push('\n');
     }
 
-    // Handler-specific context if the test name matches a handler.
     let handler = spec.handlers.iter().find(|h| {
         test_name == format!("test_{}", h.name)
             || test_name == format!("test_{}_unauthorized", h.name)
@@ -167,7 +160,6 @@ fn build_test_prompt(
         out.push('\n');
     }
 
-    // Available helpers (always present in the generated file).
     out.push_str("Available helpers (defined at top of file):\n");
     out.push_str("  signer(addr)                                 -> Account\n");
     out.push_str(
@@ -259,9 +251,9 @@ fn handler_file_path(programs_dir: &Path, program_name: &str, handler: &ParsedHa
 }
 
 fn needs_fill(body: &str) -> bool {
-    // The M3 expander emits a focused `todo!("fill non-mechanical ...")`
-    // when something remains; a fully-mechanized handler ends in `Ok(())`.
-    // Skip comment lines that merely mention todo!() in prose.
+    // The expander emits `todo!("fill non-mechanical ...")` when something
+    // remains; a fully-mechanized handler ends in `Ok(())`. Skip comment
+    // lines that merely mention todo!() in prose.
     body.lines()
         .any(|l| l.contains("todo!(") && !l.trim_start().starts_with("//"))
 }
@@ -413,11 +405,10 @@ fn build_prompt(
     }
     out.push('\n');
 
-    // -- CPI calls (v2.5 slice 2+5) -----------------------------------
-    // Each `call Interface.handler(name = expr, ...)` is a CPI obligation
-    // the agent must turn into the appropriate CPI envelope. The target
-    // interface's `program_id`, `discriminant`, and account shape carry
-    // everything else needed (when the interface is declared in-spec).
+    // -- CPI calls ------------------------------------------------------
+    // Each `call Interface.handler(...)` is a CPI obligation the agent turns
+    // into a CPI envelope; the target interface's program_id / discriminant /
+    // account shape carry the rest (when declared in-spec).
     out.push_str("  calls (NEEDS FILL):\n");
     if handler.calls.is_empty() {
         out.push_str("           — none —\n");

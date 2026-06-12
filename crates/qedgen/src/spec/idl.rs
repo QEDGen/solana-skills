@@ -1,17 +1,9 @@
 //! Anchor IDL parsing and pattern inference.
 //!
-//! Reads Anchor IDL JSON, decodes the schema to typed structs, and
-//! performs first-pass pattern inference (signers, writable accounts,
-//! PDA usage, has_one relations, token-program presence, close
+//! Decodes Anchor IDL JSON to typed structs and infers patterns (signers,
+//! writable accounts, PDAs, has_one relations, token-program presence, close
 //! semantics, numeric args). Consumed by `idl2spec` (IDL → `.qedspec`
 //! scaffolder) and `interface_gen` (IDL → spec interface block).
-//!
-//! v2.10 cleanup: this file replaces `spec.rs`. The SPEC.md generators
-//! that previously lived here (`generate_spec`, `generate_spec_from_qedspec`,
-//! `build_spec`) are removed — the `.qedspec` is QEDGen's front-door
-//! human-readable artifact (per `feedback_spec_design.md`); generating a
-//! parallel SPEC.md was duplicate Markdown that drifted from the spec.
-//! `qedgen spec` now exclusively scaffolds IDL → `.qedspec`.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -20,8 +12,8 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 pub(crate) struct Idl {
     pub metadata: IdlMetadata,
-    /// Anchor 0.30+ emits `address` at the IDL root for the deployed program
-    /// ID. Older IDLs put it under metadata; we fall back on both.
+    /// Anchor 0.30+ puts the program ID at the root; older IDLs under
+    /// metadata. We fall back on both.
     #[serde(default)]
     pub address: Option<String>,
     #[serde(default)]
@@ -46,9 +38,8 @@ pub(crate) struct IdlInstruction {
     pub accounts: Vec<IdlAccount>,
     #[serde(default)]
     pub args: Vec<IdlArg>,
-    /// Anchor 0.30+ emits an 8-byte discriminator. Older IDLs omit it; the
-    /// interface-from-IDL generator leaves the `discriminant` line as a
-    /// TODO in that case.
+    /// Anchor 0.30+ 8-byte discriminator; when absent (older IDLs) the
+    /// interface generator leaves the `discriminant` line as a TODO.
     #[serde(default)]
     pub discriminator: Vec<u8>,
 }
@@ -119,14 +110,9 @@ pub(crate) struct IdlError {
     pub msg: String,
 }
 
-/// First-pass pattern inference over an IDL instruction. Drives
-/// `idl2spec` scaffolding heuristics (which clauses to suggest based
-/// on signer/writable/PDA/has_one signals).
-///
-/// Fields tagged `#[allow(dead_code)]` were originally consumed by the
-/// SPEC.md narrative generator removed in v2.10. Kept on the struct
-/// as a stable analysis surface for future scaffolders (richer
-/// idl2spec emit, brownfield reverse-engineering, audit hints).
+/// First-pass pattern inference over an IDL instruction; drives `idl2spec`
+/// scaffolding heuristics. `#[allow(dead_code)]` fields are kept as a stable
+/// analysis surface for future scaffolders.
 pub(crate) struct InstructionAnalysis {
     pub name: String,
     #[allow(dead_code)]
@@ -191,8 +177,8 @@ pub(crate) fn analyze_instruction(ix: &IdlInstruction) -> InstructionAnalysis {
 
     let has_token_program = ix.accounts.iter().any(|a| a.name.contains("token_program"));
 
-    // Close semantics: non-init instruction with a writable PDA state account
-    // and either has_one relations or no args (terminal operations typically take no args)
+    // Close semantics: non-init with a writable PDA and either has_one
+    // relations or no args (terminal ops typically take no args).
     let has_writable_pda = ix.accounts.iter().any(|a| a.writable && a.pda.is_some());
     let has_relations = ix.accounts.iter().any(|a| !a.relations.is_empty());
     let is_init = ix.name.contains("init");

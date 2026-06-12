@@ -1,51 +1,14 @@
-//! Lifecycle external-state probe — v2.22 Slice 4.
+//! Lifecycle external-state probe.
 //!
 //! Detects close-handler / authority-grant asymmetry: a handler closes a
-//! PDA that holds external authority (SPL Approve delegate, token mint
-//! authority, ATA delegate, etc.) without issuing the corresponding
-//! reverse CPI (`Revoke`, `SetAuthority::None`, `Assign`). The closed
-//! PDA is still registered as an active delegate / authority on the
-//! external account, visible to wallet UIs and downstream programs as
-//! live permission.
-//!
-//! Closes the QED-HEAD-MED-3 finding the subscriptions HEAD bench
-//! surfaced (close_subscription_authority closes the PDA but doesn't
-//! `Revoke` the prior SPL Approve).
-//!
-//! ## Rule shape
-//!
-//! Two-stage:
-//!
-//! 1. **Stage A — authority grants.** Walk every `*.rs` for CPI shapes
-//!    that confer authority on a named account:
-//!    - `Approve { ..., delegate: <X>, ... }` / `Approve2022` /
-//!      `ApproveSpl`
-//!    - `SetAuthority { ..., new_authority: <X>, ... }` (or
-//!      equivalent)
-//!    - `system_program::Assign { ..., new_owner: <X> }` /
-//!      `Assign { ..., owner: <X> }`
-//!
-//!    Record the named account that received the authority.
-//!
-//! 2. **Stage B — close handlers without revoke.** Walk every fn
-//!    body whose enclosing file or fn name signals a close-shape
-//!    handler (`close_*.rs`, fn name contains `close` / `revoke` /
-//!    `terminate`). For each close handler:
-//!    - Identify the closed PDA from `<X>::close(target, ...)`
-//!      / `close_account(...)` / `ProgramAccount::close(...)`.
-//!    - If the closed PDA was recorded as a Stage A authority and
-//!      the close handler body does NOT contain a `Revoke` /
-//!      `RevokeSpl` / `Revoke2022` / `SetAuthority` reverse CPI,
-//!      emit a MEDIUM finding.
-//!
-//! ## False-positive guards
-//!
-//! - Close handlers that DO contain a reverse-CPI (`Revoke`,
-//!   `RevokeSpl`, `Revoke2022`) are suppressed.
-//! - Test fns are filtered (same predicate as the other source
-//!   scanners).
-//!
-//! See PRD-v2.22 §S4.1.
+//! PDA holding external authority (SPL Approve delegate, mint authority,
+//! Assign owner) without the reverse CPI (`Revoke`, `SetAuthority: None`,
+//! re-`Assign`), leaving the closed PDA registered as live permission on
+//! the external account. Two stages: A — record accounts granted authority
+//! via `Approve*` / `SetAuthority` / `Assign` CPIs; B — emit MEDIUM when a
+//! close-shape handler closes a Stage-A account without a revoke-shape CPI
+//! in its body. False-positive guards: close handlers containing a reverse
+//! CPI are suppressed; test fns are filtered.
 
 use anyhow::Result;
 use regex::Regex;
@@ -58,12 +21,11 @@ use crate::probe::{Category, Finding, Reproducer, Severity};
 struct AuthorityGrant {
     rel_file: PathBuf,
     line: u32,
-    /// camelCase / snake_case ident receiving the authority (the
-    /// `delegate: <X>` / `new_authority: <X>` RHS, stripped of
-    /// `accounts.` and `.address()` ornamentation).
+    /// Ident receiving the authority (`delegate:` / `new_authority:` RHS,
+    /// normalized via `normalize_target`).
     target_account: String,
-    /// The grant operator name for reproducer narrative
-    /// (`Approve`, `SetAuthority`, ...).
+    /// Grant operator name (`Approve`, `SetAuthority`, ...) for the
+    /// reproducer narrative.
     operator: String,
 }
 
@@ -72,11 +34,11 @@ struct CloseSite {
     rel_file: PathBuf,
     line: u32,
     fn_name: String,
-    /// The account being closed (first arg of the close call,
-    /// normalised same way as Stage A targets).
+    /// Account being closed (first arg of the close call, normalized
+    /// same way as Stage A targets).
     closed_account: String,
-    /// True when the enclosing fn body contains a revoke-shape CPI,
-    /// indicating the close path properly tears down the authority.
+    /// Enclosing fn body contains a revoke-shape CPI — the close path
+    /// properly tears down the authority.
     has_revoke: bool,
 }
 
@@ -84,9 +46,8 @@ struct CloseSite {
 /// sites, then cross-match.
 pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     let src_dir = project_root.join("src");
-    // Some projects keep their program crate under `program/src/`
-    // rather than the workspace root's `src/`. Walk whichever exists
-    // — falling back to nothing is fine (the catalog auto-suppresses).
+    // Program crates may live under `program/src/` instead of the root
+    // `src/`; neither existing means nothing to scan.
     let scan_root = if src_dir.exists() {
         src_dir
     } else if project_root.join("program").join("src").exists() {
@@ -111,21 +72,13 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     Ok(emit_findings(&grants, &closes))
 }
 
-/// Stage A: extract authority-conferring CPI invocations. Matches the
-/// canonical Pinocchio / Anchor struct-literal shapes:
-///
-/// - `Approve { ..., delegate: <X>, ... }.invoke(...)`
-/// - `Approve2022 { ..., delegate: <X>, ... }.invoke(...)`
-/// - `ApproveSpl { ..., delegate: <X>, ... }.invoke(...)`
-/// - `SetAuthority { ..., new_authority: <X>, ... }.invoke(...)`
-/// - `Assign { ..., new_owner: <X>, ... }.invoke(...)` /
-///   `Assign { ..., owner: <X>, ... }`
+/// Stage A: extract authority-conferring CPI struct literals —
+/// `Approve(2022|Spl)? { delegate: <X> }`, `SetAuthority { new_authority:
+/// <X> }`, `Assign { (new_)owner: <X> }` — recording the account that
+/// received the authority.
 fn scan_authority_grants(rel_file: &Path, source: &str) -> Vec<AuthorityGrant> {
-    // The regex captures `<Approve...>` / `<SetAuthority>` / `<Assign>`
-    // struct-literal blocks. We allow up to ~600 chars between the
-    // opening `{` and the field we care about — Approve calls in
-    // subscriptions take 5-6 fields including `token_program`,
-    // `source`, etc.
+    // Struct-literal bodies can span 5-6 fields; allow up to ~800 chars
+    // between the opening `{` and the field we care about.
     let grant_re = Regex::new(
         r"(?s)\b(?P<op>Approve(?:2022|Spl)?|SetAuthority|Assign)\s*\{(?P<body>[^}]{0,800})\}",
     )
@@ -146,9 +99,8 @@ fn scan_authority_grants(rel_file: &Path, source: &str) -> Vec<AuthorityGrant> {
             continue;
         }
         let op = caps.name("op").unwrap().as_str();
-        // SetAuthority's `authority` field is the *current* authority,
-        // not the new one. Only match `new_authority` for SetAuthority;
-        // for the others, `authority` is fine.
+        // Footgun: SetAuthority's `authority` field is the *current*
+        // authority, not the new one — only `new_authority` is the grant.
         let body = caps.name("body").unwrap().as_str();
         let target_field = if op == "SetAuthority" {
             new_authority_re.captures(body).map(|c| {
@@ -161,10 +113,9 @@ fn scan_authority_grants(rel_file: &Path, source: &str) -> Vec<AuthorityGrant> {
                 normalize_target(raw)
             })
         } else {
-            // Approve family: `delegate` field is the receiver.
+            // Approve family: only `delegate` is the receiver (the
+            // combined regex also matches `authority`).
             delegate_re.captures(body).and_then(|c| {
-                // The combined regex matches `authority` too; for
-                // Approve we specifically want delegate.
                 let full = c.get(0).unwrap().as_str();
                 if !full.starts_with("delegate") {
                     return None;
@@ -190,16 +141,11 @@ fn scan_authority_grants(rel_file: &Path, source: &str) -> Vec<AuthorityGrant> {
     out
 }
 
-/// Stage B: find close handlers. Two signals: (a) file name starts
-/// with `close_` / `revoke_` / `terminate_` (the per-instruction file
-/// convention in subscriptions / escrow); (b) fn name contains
-/// `close` / `revoke` / `terminate` for codebases that consolidate
-/// multiple lifecycle handlers in one file.
+/// Stage B: find close handlers. Two signals: (a) file name starts with
+/// `close_` / `revoke_` / `terminate_` (per-instruction file convention);
+/// (b) fn name contains `close` / `revoke` / `terminate` (consolidated
+/// lifecycle handlers in one file).
 fn scan_close_sites(rel_file: &Path, source: &str) -> Vec<CloseSite> {
-    // The fn signature we care about: `pub fn <name>(...)` where the
-    // body contains a close-shape call. Per-file scan: match every
-    // such fn, then per-fn check whether the body closes a known
-    // account and whether it carries a Revoke.
     let fn_re =
         Regex::new(r"(?m)^(?:\s*pub(?:\([^)]*\))?\s+)?fn\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)")
             .expect("static regex compiles");
@@ -209,8 +155,7 @@ fn scan_close_sites(rel_file: &Path, source: &str) -> Vec<CloseSite> {
     .expect("static regex compiles");
 
     let mut out = Vec::new();
-    // Iterate by enclosing fn span: for each fn-decl start, find the
-    // body span via brace-matching, scan that body for close + revoke
+    // Per fn decl: brace-match the body, scan it for close + revoke
     // signals.
     for caps in fn_re.captures_iter(source) {
         let name = caps.name("name").unwrap().as_str();
@@ -226,11 +171,8 @@ fn scan_close_sites(rel_file: &Path, source: &str) -> Vec<CloseSite> {
         let Some(body) = body_after(source, m.end()) else {
             continue;
         };
-        // Find the close target. Patterns:
-        //   ProgramAccount::close(<target>, ...)
-        //   <Type>::close(<target>, ...)
-        //   close_account(<target>, ...)
-        //   <target>.close(...)
+        // Close target = first arg of `<Type>::close(...)` /
+        // `close_account(...)`.
         for cc in close_re.captures_iter(&body) {
             let target_raw = cc
                 .name("a")
@@ -258,10 +200,8 @@ fn scan_close_sites(rel_file: &Path, source: &str) -> Vec<CloseSite> {
     out
 }
 
-/// True when the body contains a revoke-shape CPI: `Revoke` /
-/// `RevokeSpl` / `Revoke2022` / `revoke(`, OR a `SetAuthority` that
-/// reads `new_authority: None`. These signal the close handler
-/// properly tears down the authority.
+/// Revoke-shape CPI (`Revoke*` / `revoke(`) or `SetAuthority` with
+/// `new_authority: None` — the close handler tears down the authority.
 fn body_signals_revoke(body: &str) -> bool {
     if body.contains("Revoke ")
         || body.contains("Revoke{")
@@ -292,18 +232,14 @@ fn name_is_close_shape(fn_name: &str) -> bool {
     lower.contains("close") || lower.contains("revoke") || lower.contains("terminate")
 }
 
-/// Normalise an account expression for cross-stage matching. Strips
-/// common ornamentation (`accounts.`, `.address()`, `.key`, `&`,
-/// trailing whitespace) so `accounts.subscription_authority` and
-/// `subscription_authority` and `accounts.subscription_authority.address()`
-/// all canonicalise to `subscription_authority`.
+/// Normalise an account expression for cross-stage matching: strip
+/// `&` / `accounts.` prefixes and accessor suffixes so e.g.
+/// `accounts.vault.address()` and `vault` canonicalise the same.
 fn normalize_target(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     s = s.trim_start_matches('&').trim().to_string();
     s = s.trim_start_matches("accounts.").to_string();
     s = s.trim_start_matches("ctx.accounts.").to_string();
-    // Drop trailing method calls / accessors: `.address()`, `.key`,
-    // `.to_account_info()`.
     for suffix in [".address()", ".key()", ".key", ".to_account_info()", "()"] {
         if let Some(stripped) = s.strip_suffix(suffix) {
             s = stripped.to_string();
@@ -398,10 +334,8 @@ fn emit_findings(grants: &[AuthorityGrant], closes: &[CloseSite]) -> Vec<Finding
     out
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Shared helpers (duplicated from arithmetic_symbol_probe /
-// paired_validator_probe; v2.23 may factor them out).
-// ─────────────────────────────────────────────────────────────────────
+// Shared helpers — deliberately duplicated across the source-scanner
+// probes so the modules can evolve independently.
 
 fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
     let prefix = &source[..offset.min(source.len())];
@@ -444,8 +378,7 @@ fn make_id(rel_file: &Path, line: u32, key: &str) -> String {
     id[..16].to_string()
 }
 
-/// Body-after-fn-decl extraction. Walks forward to the first `{`,
-/// then brace-tracks to the matching `}`.
+/// Fn body after a decl: first `{` to its brace-matched `}`.
 fn body_after(source: &str, start: usize) -> Option<String> {
     let bytes = source.as_bytes();
     let mut i = start;
@@ -512,8 +445,8 @@ mod tests {
 
     #[test]
     fn fires_on_canonical_subscriptions_qed_head_med_3_shape() {
-        // Stage A signal: Approve2022 / ApproveSpl conferring authority
-        // on `subscription_authority`.
+        // Stage A: Approve2022 confers authority on
+        // `subscription_authority`.
         let init_src = r#"
 pub fn process(accounts: &[AccountView]) -> ProgramResult {
     Approve2022 {
@@ -527,7 +460,7 @@ pub fn process(accounts: &[AccountView]) -> ProgramResult {
     Ok(())
 }
 "#;
-        // Stage B signal: close handler with no Revoke.
+        // Stage B: close handler with no Revoke.
         let close_src = r#"
 pub fn process(accounts: &[AccountView]) -> ProgramResult {
     ProgramAccount::close(accounts.subscription_authority, accounts.user)

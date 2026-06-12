@@ -1,14 +1,10 @@
-//! `qed.lock` — resolved dependency snapshot (v2.8 G2).
+//! `qed.lock` — resolved dependency snapshot, sibling to `qed.toml`. The
+//! manifest declares deps; the lock pins how each resolved on the last
+//! successful parse (cargo/yarn split).
 //!
-//! Sibling to `qed.toml`. The manifest is the source-of-truth for which
-//! deps a spec has; the lock is a snapshot of how each dep resolved on
-//! the last successful parse. Standard cargo / yarn split.
-//!
-//! Each lock entry pins both the human-readable `ref` (the tag, branch,
-//! or rev value the user wrote in the manifest) and the `resolved_commit`
-//! — the immutable git commit hash. If a tag is force-pushed, the next
-//! resolution discovers a different commit; the lock catches the change
-//! by diffing `resolved_commit`, even though `ref` is identical.
+//! Each entry pins both `ref` (the tag/branch/rev as the user wrote it) and
+//! the immutable `resolved_commit` — a force-pushed tag surfaces as a
+//! `resolved_commit` diff even though `ref` is identical.
 //!
 //! Lock format:
 //!
@@ -31,9 +27,7 @@
 //! spec_hash = "sha256:b240..."
 //! ```
 //!
-//! For path-source deps, `ref` / `resolved_commit` / `path` /
-//! `upstream_*` are all `None` — only `name`, `source`, and `spec_hash`
-//! are written.
+//! Path-source deps write only `name`, `source`, and `spec_hash`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -42,8 +36,7 @@ use std::path::Path;
 /// File name of the lock, expected next to `qed.toml`.
 pub const LOCK_FILENAME: &str = "qed.lock";
 
-/// Current lock format version. Bumped when the schema changes
-/// incompatibly; readers reject locks with an unknown version.
+/// Lock format version; readers reject unknown versions.
 pub const LOCK_VERSION: u32 = 1;
 
 /// Top-level structure of `qed.lock`.
@@ -51,24 +44,20 @@ pub const LOCK_VERSION: u32 = 1;
 #[allow(dead_code)]
 pub struct LockFile {
     pub version: u32,
-    /// Sorted by `name` so the on-disk form is deterministic regardless
-    /// of resolution order.
+    /// Sorted by `name` for a deterministic on-disk form.
     #[serde(default, rename = "dependency")]
     pub dependencies: Vec<LockEntry>,
 }
 
-/// One resolved dependency snapshot.
-///
-/// Field naming note: `ref` is a Rust keyword, so the Rust field is
-/// `git_ref` and we rename to `ref` on the wire via serde.
+/// One resolved dependency snapshot. `ref` is a Rust keyword, so the field
+/// is `git_ref`, renamed to `ref` on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct LockEntry {
     /// Manifest dep key (the `from "..."` value in `import` statements).
     pub name: String,
-    /// `"github:org/repo"` for github sources, `"path:<rel>"` for path
-    /// sources. The qualifier prefix lets readers distinguish without
-    /// looking at the optional fields.
+    /// `"github:org/repo"` or `"path:<rel>"` — the prefix distinguishes
+    /// source kinds without inspecting the optional fields.
     pub source: String,
     /// `"sha256:..."` of the resolved spec source bytes (or, for
     /// multi-file deps, the sorted concatenation of all fragments).
@@ -85,11 +74,9 @@ pub struct LockEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
 
-    /// Program ID of the imported interface, copied from the imported
-    /// `interface { program_id "..." }` declaration. `--check-upstream`
-    /// uses this as the `solana program dump` target. None when the
-    /// imported interface omits `program_id` (purely-shape Tier 0
-    /// imports without a deployment target).
+    /// Program ID from the imported `interface { program_id "..." }` — the
+    /// `solana program dump` target for `--check-upstream`. None for
+    /// shape-only imports without a deployment target.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub program_id: Option<String>,
 
@@ -100,16 +87,12 @@ pub struct LockEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub upstream_version: Option<String>,
 
-    // ---- v2.27 Track B — verified-callee composition. ----
+    // ---- Verified-callee composition. ----
     /// `true` iff the provider shipped a Lake-buildable proof package
-    /// alongside the qedspec. Detected by
-    /// `import_resolver::ResolvedImport::has_proofs`; the consumer's
-    /// Lean codegen pulls the provider's proof module via a `require`
-    /// directive instead of generating its own sibling axiom module.
-    ///
-    /// Default `false` on old lockfiles (no migration needed); a freshly
-    /// resolved spec that detects proofs writes `verified = true` next
-    /// run, and `--frozen` notices the drift.
+    /// (`import_resolver::ResolvedImport::has_proofs`); the consumer's Lean
+    /// codegen then `require`s the provider's proof module instead of
+    /// generating a sibling axiom module. Defaults `false` on old lockfiles;
+    /// a fresh resolve writes `true` and `--frozen` notices the drift.
     #[serde(default, skip_serializing_if = "is_false")]
     pub verified: bool,
     /// sha256 of the provider's proof package contents (sorted-path
@@ -118,21 +101,17 @@ pub struct LockEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub proof_hash: Option<String>,
 
-    // ---- v2.29 Slice F — full-spec import bookkeeping. ----
-    /// Comma-separated list of account-type names captured from the
-    /// imported source (e.g. `"State,UserVault"`). Empty when the
-    /// dep ships only an interface stub with no `type` declarations
-    /// (bundled SPL Token / System Program / Metaplex). The
-    /// `--frozen` check uses this to detect a renamed / removed
-    /// imported type at resolve time, before the consumer's codegen
-    /// has a chance to fail mysteriously on a missing mirror.
+    // ---- Full-spec import bookkeeping. ----
+    /// Comma-separated account-type names from the imported source (e.g.
+    /// `"State,UserVault"`); empty for interface-only stubs. `--frozen`
+    /// uses this to catch renamed / removed imported types at resolve time,
+    /// before the consumer's codegen fails mysteriously.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub imported_account_type_names: String,
 }
 
-/// Helper for `skip_serializing_if` on `bool` fields that default to
-/// false. serde's `Option::is_none` doesn't work for plain `bool`, so we
-/// hand-roll a predicate that skips the field when it's the default.
+/// `skip_serializing_if` predicate for default-false bools (serde has no
+/// `Option::is_none` analogue for plain `bool`).
 #[allow(dead_code)]
 fn is_false(b: &bool) -> bool {
     !*b
@@ -148,9 +127,8 @@ impl LockFile {
         }
     }
 
-    /// Sort dependencies by name. Idempotent. Call before serializing
-    /// or comparing so the on-disk form and equality checks are
-    /// deterministic.
+    /// Sort by name (idempotent); call before serializing or comparing for
+    /// determinism.
     #[allow(dead_code)]
     pub fn sort_dependencies(&mut self) {
         self.dependencies.sort_by(|a, b| a.name.cmp(&b.name));
@@ -200,15 +178,11 @@ pub fn compute_spec_hash(sources: &[(std::path::PathBuf, String)]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// v2.27 Track B — sha256 of the provider's proof package contents.
-/// Walks every `.lean` file under `proof_pkg_root` in sorted-path order
-/// and concatenates with the same fragment boundary used by
-/// `compute_spec_hash`. The hash lands in `LockEntry.proof_hash` so
-/// `--frozen` notices when the provider's proofs change.
-///
-/// Returns `None` when the package root doesn't exist or contains no
-/// `.lean` files — the resolver would have set `has_proofs = false` in
-/// that case, so callers shouldn't see this path; defensive default.
+/// sha256 of the provider's proof package: every `.lean` under
+/// `proof_pkg_root`, sorted-path order, same fragment boundary as
+/// `compute_spec_hash`. Lands in `LockEntry.proof_hash` so `--frozen`
+/// notices proof changes. `None` when the root is missing or has no `.lean`
+/// files (resolver would have set `has_proofs = false`; defensive).
 #[allow(dead_code)]
 pub fn compute_proof_hash(proof_pkg_root: &std::path::Path) -> Option<String> {
     use sha2::{Digest, Sha256};
@@ -266,9 +240,7 @@ pub fn entry_for_resolved(
         Some(u) => (u.binary_hash.clone(), u.version.clone()),
         None => (None, None),
     };
-    // v2.27 Track B — verified flag + proof hash come from the resolver.
-    // The hash is computed only when the resolver detected proofs;
-    // otherwise the field stays None and serializes as omitted.
+    // proof_hash only when the resolver detected proofs; otherwise omitted.
     let proof_hash = resolved
         .proof_pkg_root
         .as_deref()
@@ -290,10 +262,9 @@ pub fn entry_for_resolved(
     }
 }
 
-/// Build a lock entry for a bundled-stdlib builtin import
-/// (v2.26 Track F). No manifest dep descriptor exists, so the source
-/// is recorded as `builtin:<key>` and version/ref fields are derived
-/// from the imported interface's `upstream` block (when present).
+/// Lock entry for a bundled-stdlib builtin import: no manifest dep exists,
+/// so source is `builtin:<key>` and version fields come from the imported
+/// interface's `upstream` block (when present).
 #[allow(dead_code)]
 pub fn entry_for_builtin(
     resolved: &crate::import_resolver::ResolvedImport,
@@ -330,19 +301,12 @@ pub fn entry_for_builtin(
 // Reconciling the computed lock with disk
 // ----------------------------------------------------------------------------
 
-/// Compare `computed` against the lock on disk at `spec_dir/qed.lock`
-/// and act per `mode`. Returns the proof_hash drift findings (empty in
-/// Auto/Skip; empty in Frozen unless the only difference is proof_hash);
-/// Err(...) when Frozen mode finds structural drift (every field other
-/// than `proof_hash`).
-///
-/// v2.27 Track D1 — proof_hash drift is reported as a soft finding
-/// (P2/CRIT routing happens at the call site via
-/// [`crate::upstream_check::route_findings`]) instead of bailing through
-/// the structural-drift path. Auto mode writes the new lock either way;
-/// only Frozen mode's exit behavior changed. Structural drift (changed
-/// `spec_hash`, `upstream_binary_hash`, `verified`, source identity,
-/// added/removed entries) still bails as before.
+/// Compare `computed` against `<spec_dir>/qed.lock` per `mode`. Returns
+/// proof_hash drift findings (empty in Auto/Skip; non-empty in Frozen only
+/// when proof_hash is the sole difference — routed P2/CRIT at the call site
+/// via [`crate::upstream_check::route_findings`]). Frozen bails on
+/// structural drift (any other field, or added/removed entries); Auto
+/// writes the new lock either way.
 #[allow(dead_code)]
 pub fn handle_lock(
     spec_dir: &Path,
@@ -376,13 +340,9 @@ pub fn handle_lock(
             Ok(Vec::new())
         }
         LockMode::Frozen => {
-            // Track D1 — if the only delta is proof_hash, surface the
-            // drift as soft findings for the caller to route through
-            // upstream_check::route_findings (P2 default, CRIT under
-            // `--strict`). Structural drift (every other field, plus
-            // added/removed entries) still bails through the legacy
-            // path; rebuilding from the wrong git ref or spec source
-            // isn't a soft signal.
+            // proof_hash-only delta → soft findings; anything else bails —
+            // rebuilding from the wrong git ref or spec source isn't a
+            // soft signal.
             if let Some(existing) = on_disk.as_ref() {
                 if structurally_equal(existing, &computed_sorted) {
                     return Ok(detect_proof_hash_drift_from_locks(
@@ -402,10 +362,8 @@ pub fn handle_lock(
     }
 }
 
-/// Track D1 — true if `a` and `b` agree on every per-entry field except
-/// `proof_hash` and have the same entry set. Used by `handle_lock`'s
-/// Frozen path to decide whether to bail (structural drift) or surface
-/// soft findings (proof_hash-only drift).
+/// True if `a` and `b` agree on every per-entry field except `proof_hash`
+/// and have the same entry set.
 fn structurally_equal(a: &LockFile, b: &LockFile) -> bool {
     let mut aa = a.clone();
     let mut bb = b.clone();
@@ -420,15 +378,11 @@ fn structurally_equal(a: &LockFile, b: &LockFile) -> bool {
     aa == bb
 }
 
-/// Track D1 — extract proof_hash drift between an on-disk lock and a
-/// freshly-computed one. Walks the computed lock's `verified` entries,
-/// looks each one up by name in the on-disk lock, and yields a
-/// [`crate::upstream_check::DepCheckOutcome::ProofHashMismatch`] for every
-/// pair whose proof_hash differs. Entries present on one side but not
-/// the other count as structural drift (handled elsewhere); this helper
-/// only yields per-entry proof_hash mismatches so the routing layer can
-/// surface them as P2 / CRIT findings without false-positiving on
-/// adds/removes.
+/// Proof_hash drift between an on-disk and freshly-computed lock: yields a
+/// [`crate::upstream_check::DepCheckOutcome::ProofHashMismatch`] per
+/// `verified` entry (matched by name) whose proof_hash differs. Adds /
+/// removes are structural drift handled elsewhere — excluded here so the
+/// routing layer doesn't false-positive on them.
 #[allow(dead_code)]
 pub fn detect_proof_hash_drift_from_locks(
     on_disk: &LockFile,
@@ -534,9 +488,7 @@ fn describe_lock_diff(existing: Option<&LockFile>, computed: &LockFile) -> Strin
                         existing_entry.verified, computed_entry.verified,
                     ));
                 }
-                // v2.29 Slice F — surface imported type-set drift so
-                // users see exactly which type was added / removed /
-                // renamed without grepping the imported source.
+                // Imported type-set drift: name the added/removed/renamed type.
                 if existing_entry.imported_account_type_names
                     != computed_entry.imported_account_type_names
                 {
@@ -878,12 +830,11 @@ spec_hash = "sha256:abc"
         handle_lock(tmp.path(), &lock, LockMode::Frozen).unwrap();
     }
 
-    // ----- v2.27 Track B: verified + proof_hash schema -----
+    // ----- verified + proof_hash schema -----
 
     #[test]
     fn old_lockfile_without_verified_field_parses_with_default_false() {
-        // Hand-written v2.26 lockfile shape — no `verified` / `proof_hash`
-        // fields. Must still parse, with both fields defaulting.
+        // Old lockfile without `verified` / `proof_hash` must parse with defaults.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join(LOCK_FILENAME),
@@ -904,9 +855,7 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn verified_false_is_elided_from_serialized_form() {
-        // Default (verified = false, proof_hash = None) should NOT appear
-        // on disk — otherwise every v2.26 lockfile would visibly churn
-        // on the next regen.
+        // Defaults must not serialize — otherwise old lockfiles churn on regen.
         let tmp = tempfile::tempdir().unwrap();
         let lock = LockFile {
             version: LOCK_VERSION,
@@ -947,7 +896,6 @@ spec_hash = "sha256:abc"
         write(tmp.path(), &lock).unwrap();
         let read_back = read(tmp.path()).unwrap().unwrap();
         assert_eq!(read_back, lock);
-        // And confirm the serialized form actually contains the fields.
         let on_disk = std::fs::read_to_string(tmp.path().join(LOCK_FILENAME)).unwrap();
         assert!(on_disk.contains("verified = true"), "got:\n{on_disk}");
         assert!(on_disk.contains("proof_hash"), "got:\n{on_disk}");
@@ -995,14 +943,8 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn frozen_proof_hash_only_drift_returns_soft_findings_not_bail() {
-        // v2.27 Track D1 — proof_hash-only drift is no longer a hard
-        // bail under `--frozen`. handle_lock returns the drift as
-        // `DepCheckOutcome::ProofHashMismatch` findings; the caller
-        // (main.rs check handler) routes them through
-        // upstream_check::route_findings as P2 (default) or CRIT
-        // (`--strict`). Other structural drift still bails — see
-        // `handle_lock_frozen_diff_names_proof_hash_and_verified` below
-        // for the `verified=true` flip path.
+        // proof_hash-only drift under --frozen returns ProofHashMismatch
+        // findings instead of bailing; the caller routes them P2/CRIT.
         let tmp = tempfile::tempdir().unwrap();
         let old = LockFile {
             version: LOCK_VERSION,
@@ -1055,11 +997,8 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn frozen_structural_drift_still_bails_even_with_proof_hash_change() {
-        // Track D1 — soft-routing only applies when proof_hash is the
-        // ONLY drifted field. If spec_hash (or any other structural
-        // field) ALSO drifts, the bail-on-structural path still runs;
-        // proof_hash gets reported in the diff line for completeness but
-        // it's not promoted to a soft finding.
+        // Soft-routing applies only when proof_hash is the ONLY drifted
+        // field; structural drift alongside it still bails.
         let tmp = tempfile::tempdir().unwrap();
         let base = LockEntry {
             name: "amm".to_string(),
@@ -1098,9 +1037,7 @@ spec_hash = "sha256:abc"
         assert!(err.contains("stale (--frozen)"), "got: {err}");
     }
 
-    // ----- end Track B -----
-
-    // ----- v2.27 Track D1: detect_proof_hash_drift_from_locks -----
+    // ----- detect_proof_hash_drift_from_locks -----
 
     fn verified_entry(name: &str, proof_hash: Option<&str>) -> LockEntry {
         let mut e = entry(name, "path:./x", "sha256:same");
@@ -1143,10 +1080,8 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn detect_proof_hash_drift_skips_unverified_entries() {
-        // verified=false means the consumer didn't expect Stance-2
-        // proofs for this dep — proof_hash drift on those entries is
-        // either a None→None no-op or a structural drift handled by
-        // handle_lock's bail path. Either way, no soft finding.
+        // verified=false: proof_hash drift is a no-op or structural drift —
+        // never a soft finding.
         let on_disk = LockFile {
             version: LOCK_VERSION,
             dependencies: vec![entry("noproofs", "path:./n", "sha256:0")],
@@ -1165,9 +1100,8 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn detect_proof_hash_drift_ignores_entries_added_or_removed() {
-        // Added/removed entries are structural — the caller bails through
-        // describe_lock_diff. The detector only emits per-entry drift for
-        // matched names so the routing layer doesn't double-report.
+        // Added/removed entries are structural — no per-entry drift, so the
+        // routing layer doesn't double-report.
         let on_disk = LockFile {
             version: LOCK_VERSION,
             dependencies: vec![verified_entry("removed", Some("sha256:gone"))],
@@ -1182,16 +1116,10 @@ spec_hash = "sha256:abc"
         );
     }
 
-    // ----- end Track D1 -----
-
     #[test]
     fn handle_lock_frozen_diff_names_upstream_binary_hash() {
-        // v2.27 Track C3 — when a bundled qedspec bumps its
-        // `binary_hash`, the resulting frozen diff should call out
-        // `upstream_binary_hash` by name (in addition to spec_hash,
-        // which also changes since the source bytes drift). Prior to
-        // Track C3 the renderer only inspected spec_hash + source + ref
-        // + resolved_commit.
+        // A bumped `binary_hash` must be named in the frozen diff (spec_hash
+        // also changes since the source bytes drift).
         let tmp = tempfile::tempdir().unwrap();
         let mut old = LockEntry {
             name: "spl".to_string(),
@@ -1231,10 +1159,7 @@ spec_hash = "sha256:abc"
 
     #[test]
     fn handle_lock_frozen_diff_names_proof_hash_and_verified() {
-        // Verified-callee flip plus proof_hash drift should both
-        // surface in the diff (Track C3 fold-in: the renderer was
-        // upgraded alongside the binary_hash field so all the new
-        // Track B fields are visible in frozen failures too).
+        // A verified flip and proof_hash drift must both surface in the diff.
         let tmp = tempfile::tempdir().unwrap();
         let old = LockEntry {
             name: "amm".to_string(),

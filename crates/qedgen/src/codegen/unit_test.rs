@@ -33,7 +33,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let is_multi = spec.account_types.len() > 1;
     let mut out = String::new();
 
-    // Header
     out.push_str(&crate::banner::banner(Some("DO NOT EDIT"), &hash));
     out.push_str("// Unit tests generated from qedspec.\n");
     out.push_str("// These test effects, guards, and properties on a plain state struct.\n");
@@ -189,12 +188,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         out.push_str("}\n\n");
     }
 
-    // =========================================================================
-    // Tests
-    // =========================================================================
     out.push_str("#[cfg(test)]\nmod tests {\n    use super::*;\n\n");
 
-    // --- Effect tests: each operation's effects produce correct state ---
     out.push_str("    // ====================================================================\n");
     out.push_str("    // Effect tests — verify state mutations match spec\n");
     out.push_str("    // ====================================================================\n\n");
@@ -207,7 +202,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         generate_effect_test(&mut out, op, fields, &sn, &spec)?;
     }
 
-    // --- Guard tests: boundary values that pass/fail ---
     out.push_str("    // ====================================================================\n");
     out.push_str("    // Guard tests — verify boundary conditions\n");
     out.push_str("    // ====================================================================\n\n");
@@ -220,7 +214,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         generate_guard_tests(&mut out, op, fields, &sn, &spec)?;
     }
 
-    // --- Property preservation tests ---
     if !spec.properties.is_empty() {
         out.push_str(
             "    // ====================================================================\n",
@@ -257,7 +250,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         }
     }
 
-    // --- Unchanged field tests ---
     out.push_str("    // ====================================================================\n");
     out.push_str("    // Unchanged field tests — fields not in effects must not change\n");
     out.push_str("    // ====================================================================\n\n");
@@ -270,7 +262,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         generate_unchanged_test(&mut out, op, fields, &sn, &spec)?;
     }
 
-    // --- State machine tests ---
     let transition_ops: Vec<&ParsedHandler> = spec
         .handlers
         .iter()
@@ -286,7 +277,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         );
 
         for op in &transition_ops {
-            // For multi-account, use per-account status enum
             let status_enum = if is_multi {
                 let target = op
                     .on_account
@@ -478,7 +468,6 @@ fn generate_effect_test(
     }
     out.push_str("        };\n");
 
-    // Declare params with concrete values
     for (pname, ptype) in &op.takes_params {
         let val = sensible_param(pname, ptype, op);
         out.push_str(&format!(
@@ -502,7 +491,6 @@ fn generate_effect_test(
         call_args(op)
     ));
 
-    // Assert effects
     for (field, kind, value) in &op.effects {
         match kind.as_str() {
             "set" => {
@@ -649,14 +637,12 @@ fn generate_property_test(
         ));
     }
 
-    // Apply effects
     out.push_str(&format!(
         "        apply_{}(&mut state{});\n",
         op.name,
         call_args(op)
     ));
 
-    // Assert property still holds
     let prop_name_upper = prop.name.replace('_', " ");
     out.push_str(&format!(
         "        // Property: {} must hold after {}\n",
@@ -718,7 +704,6 @@ fn generate_unchanged_test(
         ));
     }
 
-    // Snapshot
     for (fname, _) in &unchanged {
         out.push_str(&format!(
             "        let pre_{} = state.{}.clone();\n",
@@ -856,7 +841,6 @@ fn derive_guard_violation(guard: &str, op: &ParsedHandler) -> (Overrides, Overri
     // "s.approval_count ≥ s.threshold" → set approval_count = 0, threshold = 3
 
     if guard.contains("threshold > 0") || guard.contains("threshold>0") {
-        // Violate by setting threshold to 0
         if op.takes_params.iter().any(|(n, _)| n == "threshold") {
             param_overrides.push(("threshold".to_string(), "0".to_string()));
         } else {

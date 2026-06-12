@@ -1,45 +1,29 @@
-//! Pinocchio source → `.qedspec` skeleton (v2.19 M1.7).
-//!
-//! Walks a Pinocchio program's source tree, enumerates handlers by the
-//! `pub fn process_*` convention, and emits a structural `.qedspec`
-//! skeleton with empty handler stubs. M1.8's emitter takes this skeleton
-//! and merges the user's ratified clauses (from M1.6) into the right
-//! handler / invariant blocks.
-//!
-//! Out of scope for v1:
-//! - Account-list inference from `&[AccountInfo]` destructuring patterns
-//! - Parameter-type inference from `instruction_data` parses
-//! - Error-enum inference from `TokenError` (Pinocchio-specific) and
-//!   `ProgramError` returns
-//!
-//! These are reachable additions in v2.20 (the AST-round-trip milestone)
-//! — for v1 the skeleton is structural-only and ratified clauses do the
-//! semantic lifting.
+//! Pinocchio source → structural `.qedspec` skeleton: enumerate handlers by
+//! the `pub fn process_*` convention and emit empty handler stubs; the
+//! ratification step merges accepted clauses in. Account-list, parameter-type,
+//! and error-enum inference are out of scope — the skeleton is
+//! structural-only and ratified clauses do the semantic lifting.
 
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Render a structural `.qedspec` skeleton for a Pinocchio program.
-///
-/// `program_name` is the human-readable spec name (typically derived
-/// from the project directory). The output is a complete, parseable
-/// `.qedspec` minus semantic clauses — handlers are present but bodies
-/// are empty.
+/// Structural `.qedspec` skeleton for a Pinocchio program — complete and
+/// parseable, handlers present with empty bodies.
 pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String> {
     let handlers = enumerate_handlers(project_root)?;
     Ok(render_skeleton_from_handlers(&handlers, program_name))
 }
 
-/// Native variant — accepts any `pub fn` as a candidate handler.
-/// Native programs don't have a canonical naming prefix.
+/// Native variant — no canonical naming prefix, so any `pub fn` is a
+/// candidate handler.
 pub fn render_skeleton_native(project_root: &Path, program_name: &str) -> Result<String> {
     let handlers = enumerate_handlers_with_prefix(project_root, "")?;
     Ok(render_skeleton_from_handlers(&handlers, program_name))
 }
 
-/// Hardened variant used by tests: takes handler names directly so the
-/// rendering is exercised independent of the source walker.
+/// Takes handler names directly so rendering is testable independent of the
+/// source walker.
 pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) -> String {
     let pascal = to_pascal_case(program_name);
     let mut s = String::new();
@@ -48,15 +32,13 @@ pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) ->
     s.push_str("// invariants) are written by the interview-ratification step.\n\n");
     s.push_str(&format!("spec {}\n\n", pascal));
 
-    // Minimal state ADT — the user refines this post-interview as the
-    // program's actual lifecycle becomes clear from accepted clauses.
+    // Minimal state ADT; refined post-interview.
     s.push_str("// TODO: replace with the program's actual lifecycle states.\n");
     s.push_str("type State\n");
     s.push_str("  | Init\n");
     s.push_str("  | Active\n\n");
 
-    // Minimal error enum — placeholder, refined as the user maps
-    // handler-level `else <Err>` clauses through the interview.
+    // Placeholder error enum; refined through the interview.
     s.push_str("// TODO: list domain errors raised by handlers. Mirror the program's\n");
     s.push_str("// TokenError / ProgramError enum here as ratified clauses reference them.\n");
     s.push_str("type Error\n");
@@ -78,17 +60,14 @@ pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) ->
     s
 }
 
-/// Enumerate handler names from `pub fn process_*` declarations under
-/// the project root. Walks every `.rs` file once; matches are
-/// deduplicated and returned in sorted order so the skeleton is
-/// deterministic.
+/// Handler names from `pub fn process_*` declarations under the project
+/// root; deduplicated and sorted so the skeleton is deterministic.
 pub fn enumerate_handlers(project_root: &Path) -> Result<Vec<String>> {
     enumerate_handlers_with_prefix(project_root, "process_")
 }
 
-/// Variant accepting an arbitrary prefix. Pinocchio convention is
-/// `process_*`; Native programs vary (e.g., `processor::do_thing`,
-/// `entrypoint`, or bare names). Pass `""` to accept every `pub fn`.
+/// Arbitrary-prefix variant: Pinocchio convention is `process_*`; Native
+/// naming varies. Pass `""` to accept every `pub fn`.
 pub fn enumerate_handlers_with_prefix(project_root: &Path, prefix: &str) -> Result<Vec<String>> {
     let rs_files = collect_rust_files(project_root)?;
     let mut handlers: BTreeSet<String> = BTreeSet::new();
@@ -116,10 +95,8 @@ pub fn enumerate_handlers_with_prefix(project_root: &Path, prefix: &str) -> Resu
     Ok(handlers.into_iter().collect())
 }
 
-/// Walk the project root collecting `.rs` files. Mirrors
-/// `pinocchio_probe::collect_rust_files` (kept local so the two scanners
-/// can diverge if Pinocchio's source layout differs from the probe's
-/// site-scan rules).
+/// Mirrors `pinocchio_probe::collect_rust_files`; kept local so the two
+/// scanners can diverge.
 fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     walk(root, &mut out)?;
@@ -151,9 +128,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// snake_case → PascalCase for the `spec Name` declaration. Borrows
-/// from `anchor_adapt::to_pascal_case` semantics: split on underscores
-/// and dashes, capitalize each segment.
+/// snake/kebab-case → PascalCase for the `spec Name` declaration.
 fn to_pascal_case(name: &str) -> String {
     name.split(|c: char| c == '_' || c == '-' || !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -209,14 +184,11 @@ mod tests {
         let pos_burn = out.find("handler process_burn").unwrap();
         let pos_transfer = out.find("handler process_transfer").unwrap();
         assert!(pos_burn < pos_transfer, "alphabetical order");
-        // Only one occurrence per handler.
         assert_eq!(out.matches("handler process_transfer").count(), 1);
     }
 
     #[test]
     fn enumerate_handlers_finds_pinocchio_style_decls() {
-        // Build a fake source tree with a couple of handler files
-        // and verify the enumerator picks them up.
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path();
         std::fs::create_dir_all(root.join("src/processor")).unwrap();

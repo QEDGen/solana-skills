@@ -1,70 +1,56 @@
-//! Cluster schema for the scaffold-to-spec interview (v2.19 M1).
+//! Cluster schema for the scaffold-to-spec interview.
 //!
-//! A "cluster" is a group of findings that lift to a single candidate spec
-//! clause — the unit the auditor subagent asks the user about during the
-//! interview. Many `pinocchio_unchecked_account_load` findings whose SAFETY
-//! comments all reference "owner" collapse into one `account_owner_check`
-//! cluster with `evidence_count = N`; the user answers one question to
-//! ratify or reject the whole family.
+//! A "cluster" groups findings that lift to a single candidate spec clause —
+//! the unit the interview asks the user about. N findings sharing one
+//! implicit precondition (e.g. SAFETY comments all referencing "owner")
+//! collapse into one cluster; one answer ratifies or rejects the family.
 //!
-//! The vocabulary is **runtime-agnostic**: `ClusterKind` is the same set of
-//! 14 variants for Pinocchio, Anchor, Native, and Quasar/codegen. Per-runtime
-//! proto-clause extractors map their site shapes to these kinds; downstream
-//! emission (prompts file, spec text) doesn't care which runtime produced
-//! the cluster.
-//!
-//! Schema is v3 of the probe envelope. Findings remain at v2 shape; clusters
-//! are an additive field gated behind `--emit-spec-candidates`.
+//! `ClusterKind` is runtime-agnostic: the same 14 variants for Pinocchio,
+//! Anchor, Native, and Quasar/codegen. Per-runtime extractors map site
+//! shapes to kinds; downstream emission doesn't care which runtime produced
+//! the cluster. Clusters are an additive v3-envelope field gated behind
+//! `--emit-spec-candidates`; findings stay at v2 shape.
 
-// Constructors land incrementally across M1.3 (Pinocchio extractor), M1.4
-// (algorithm), M1.5 (prompts writer). Lift this allow once those land.
+// Constructors land incrementally (extractors, algorithm, prompts writer);
+// lift this allow once they all land.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
 /// One ratification unit — a candidate spec clause derived from one or more
-/// findings, presented to the user as a single interview question.
+/// findings, presented as a single interview question.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cluster {
-    /// Deterministic hash of `(kind, scope, normalized_clause_text)`. Stable
-    /// across runs — re-running the probe on an unchanged program produces
-    /// the same `id`. Suppression rules and resumed-interview state key off
-    /// this.
+    /// Deterministic hash of `(kind, scope, normalized_clause_text)`,
+    /// stable across runs on an unchanged program. Suppression rules and
+    /// resumed-interview state key off this.
     pub id: String,
-    /// Which spec-clause family this cluster belongs to. Drives the
-    /// `suggested_syntax` template and the `writes_on_*` routing.
+    /// Spec-clause family; drives the `suggested_syntax` template and
+    /// `writes_on_*` routing.
     pub kind: ClusterKind,
-    /// Where the clause applies: program-wide invariant or per-handler.
-    /// Promoted to `Program` when ≥3 handlers share the same normalized
-    /// clause; otherwise `Handler(name)`.
+    /// Program-wide invariant or per-handler. Promoted to `Program` when
+    /// ≥3 handlers share the same normalized clause.
     pub scope: ClusterScope,
-    /// Back-pointers to the findings this cluster aggregates. Lets the
-    /// auditor cross-reference cluster decisions with individual findings
-    /// during write-up.
+    /// Findings this cluster aggregates, for cross-referencing during
+    /// write-up.
     pub finding_ids: Vec<String>,
-    /// Number of findings rolled into this cluster. Surfaced to the user
-    /// in the interview as "N sites assume X" — finding-count is the most
-    /// load-bearing piece of evidence.
+    /// Findings rolled in; surfaced as "N sites assume X" — finding-count
+    /// is the most load-bearing piece of evidence.
     pub evidence_count: usize,
-    /// How sure we are the clause is real. Function of `(evidence_count,
-    /// SAFETY-text match, cross-handler convergence)`. `High` clusters lead
-    /// the interview; `Low` may be auto-dropped under a future suppression
-    /// rule.
+    /// Function of `(evidence_count, SAFETY-text match, cross-handler
+    /// convergence)`. `High` clusters lead the interview; `Low` may be
+    /// auto-dropped under a future suppression rule.
     pub confidence: Confidence,
-    /// Human-readable summary of the candidate clause. Shown in the
-    /// interview header.
+    /// Human-readable clause summary, shown in the interview header.
     pub proto_clause_text: String,
-    /// Verbatim `.qedspec` syntax for the accepted clause. M1 string-concats
-    /// this into the spec file; M2 round-trips it through the AST.
+    /// Verbatim `.qedspec` syntax for the accepted clause.
     pub suggested_syntax: String,
-    /// Pre-rendered markdown for the interview prompts file. Includes the
-    /// header, the proto-clause text, and the option checkboxes. The
-    /// auditor subagent concatenates these across all clusters into
+    /// Pre-rendered interview markdown (header, proto-clause text, option
+    /// checkboxes); concatenated across clusters into
     /// `.qed/audit/<ts>/interview.md`.
     pub question_md: String,
-    /// Routing for the four interview outcomes. Each value is a logical
-    /// destination key the prompts reader consults to dispatch the
-    /// accepted/narrowed/rejected/bug clauses. Keys are documented in
+    /// Routing for the four interview outcomes: logical destination keys
+    /// the prompts reader dispatches on. Documented in
     /// SCOPING-v2.19-scaffold-to-spec.md §4.
     pub writes_on_accept: String,
     pub writes_on_narrow: String,
@@ -72,10 +58,9 @@ pub struct Cluster {
     pub writes_on_bug: String,
 }
 
-/// The 14 production cluster kinds. Same vocabulary across all runtimes;
-/// per-runtime extractors decide which detected site shapes lift to each
-/// kind. See `docs/prds/SCOPING-v2.19-scaffold-to-spec.md` §3 for the
-/// detection-to-kind table.
+/// The 14 cluster kinds — one vocabulary across all runtimes; per-runtime
+/// extractors decide which site shapes lift to each kind. Detection-to-kind
+/// table: `docs/prds/SCOPING-v2.19-scaffold-to-spec.md` §3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClusterKind {
@@ -99,9 +84,9 @@ pub enum ClusterKind {
     /// mutable-borrow-aliasing sites (Pinocchio `borrow_mut_*_unchecked`
     /// pairs, Anchor missing `has_one` constraint pairs).
     AccountDistinct,
-    /// Effect uses `+=` (checked-by-default v2.7 G3) rather than `+=?`
-    /// (wrapping). Triggers from raw `+`/`-` on amount/lamport fields,
-    /// `set_amount(amount() + x)` patterns.
+    /// Effect uses checked `+=` rather than wrapping `+=?`. Triggers from
+    /// raw `+`/`-` on amount/lamport fields, `set_amount(amount() + x)`
+    /// patterns.
     ArithmeticNoOverflow,
     /// `requires amount <= bound` — caller-side value bound. Triggers from
     /// overflow sites where the implicit precondition is "amount fits in
@@ -195,68 +180,52 @@ impl ClusterScope {
 }
 
 /// Intermediate form a per-runtime extractor emits before clustering.
-/// One `ProtoClause` per (finding, candidate-clause) pair — a single site
-/// with a multi-claim SAFETY comment can produce multiple ProtoClauses (one
-/// per claim). M1.4's algorithm groups these into final `Cluster` entries.
+/// One `ProtoClause` per (finding, candidate-clause) pair — a multi-claim
+/// SAFETY comment can produce multiple ProtoClauses from one site.
 #[derive(Debug, Clone)]
 pub struct ProtoClause {
-    /// Which spec-clause family this proto-clause belongs to.
+    /// Spec-clause family.
     pub kind: ClusterKind,
-    /// Handler the finding lives in. M1.4 may promote scope to Program when
-    /// ≥3 handlers contribute proto-clauses of the same kind.
+    /// Handler the finding lives in; ≥3 handlers of the same kind promote
+    /// scope to Program.
     pub handler: String,
-    /// Back-pointer to the originating `Finding::id`. M1.4 collects these
-    /// into the final `Cluster::finding_ids`.
+    /// Originating `Finding::id`, collected into `Cluster::finding_ids`.
     pub finding_id: String,
-    /// The raw text the extractor classified (typically the SAFETY-comment
-    /// clause, or the site expression for non-comment-driven cases).
-    /// Stored for richer normalization in v2.20; v1 algorithm groups solely
-    /// on `(kind, scope)`.
+    /// Raw text the extractor classified (SAFETY-comment clause or site
+    /// expression). Stored for richer normalization later; current
+    /// algorithm groups solely on `(kind, scope)`.
     pub evidence_text: String,
 }
 
 // ============================================================================
-// Clustering algorithm (M1.4)
+// Clustering algorithm
 // ============================================================================
 
-/// Promotion threshold — when a `ClusterKind`'s proto-clauses come from at
-/// least this many distinct handlers, the kind is promoted from per-handler
-/// scope to one consolidated program-wide cluster.
+/// Proto-clauses of one kind spanning at least this many distinct handlers
+/// promote from per-handler scope to one program-wide cluster.
 ///
-/// 3 is the smallest value that distinguishes "happens in a few places" from
-/// "is a program-wide pattern." Below 3, per-handler clusters give the user
-/// finer-grained control. Tunable based on dogfood feedback.
+/// 3 is the smallest value distinguishing "happens in a few places" from
+/// "program-wide pattern"; below it, per-handler clusters give finer
+/// control. Tunable.
 const PROGRAM_SCOPE_PROMOTION_THRESHOLD: usize = 3;
 
-/// Confidence cut-offs: an evidence count of 5+ is `High`, 2-4 is `Medium`,
-/// 1 is `Low`. Calibrated against the Pinocchio p-token catalogue (~64
-/// unchecked-load findings collapse to 4-6 High clusters); revisit after
-/// M3/M4 dogfood on real Anchor/Native programs.
+/// Confidence cut-offs: 5+ evidence is `High`, 2-4 `Medium`, 1 `Low`.
+/// Calibrated against the Pinocchio p-token catalogue (~64 unchecked-load
+/// findings collapse to 4-6 High clusters).
 const CONFIDENCE_HIGH_MIN_EVIDENCE: usize = 5;
 const CONFIDENCE_MEDIUM_MIN_EVIDENCE: usize = 2;
 
-/// The clustering algorithm: lifts a `Vec<ProtoClause>` from any
-/// per-runtime extractor into a `Vec<Cluster>` ready for the prompts-file
-/// writer.
+/// Lift extractor `ProtoClause`s into `Cluster`s ready for the prompts
+/// writer: group by `(kind, handler)`; kinds spanning
+/// `PROGRAM_SCOPE_PROMOTION_THRESHOLD` handlers collapse to one
+/// program-scope cluster, the rest stay per-handler.
 ///
-/// Algorithm (v1 — naive but deterministic):
-///
-/// 1. Group proto-clauses by `(kind, handler)`.
-/// 2. For each kind, count distinct contributing handlers.
-/// 3. If the count meets `PROGRAM_SCOPE_PROMOTION_THRESHOLD`, emit one
-///    program-scope cluster aggregating all proto-clauses of that kind.
-/// 4. Otherwise, emit one handler-scope cluster per `(kind, handler)`
-///    group.
-/// 5. Generate deterministic IDs, confidence scores, and template-driven
-///    rendering fields for each cluster.
-///
-/// Output ordering is stable: clusters are sorted by `(scope priority,
-/// kind, scope key)` so re-running the algorithm produces the same JSON
-/// envelope byte-for-byte.
+/// Output order is stable — `(scope priority, kind, scope key)` — so
+/// re-runs produce a byte-identical JSON envelope.
 pub fn cluster_protos(protos: Vec<ProtoClause>) -> Vec<Cluster> {
     use std::collections::{BTreeMap, BTreeSet};
 
-    // Group by (kind, handler). BTreeMap preserves iteration order.
+    // BTreeMap for deterministic iteration order.
     let mut by_key: BTreeMap<(ClusterKind, String), Vec<ProtoClause>> = BTreeMap::new();
     for p in protos {
         by_key
@@ -265,7 +234,6 @@ pub fn cluster_protos(protos: Vec<ProtoClause>) -> Vec<Cluster> {
             .push(p);
     }
 
-    // Per-kind handler set drives scope promotion.
     let mut handlers_per_kind: BTreeMap<ClusterKind, BTreeSet<String>> = BTreeMap::new();
     for (k, h) in by_key.keys() {
         handlers_per_kind.entry(*k).or_default().insert(h.clone());
@@ -278,8 +246,7 @@ pub fn cluster_protos(protos: Vec<ProtoClause>) -> Vec<Cluster> {
 
     let mut clusters = Vec::new();
 
-    // First pass: emit per-handler clusters for kinds NOT promoted to
-    // program scope.
+    // Per-handler clusters for non-promoted kinds.
     for ((kind, handler), group) in &by_key {
         if promote.contains(kind) {
             continue;
@@ -288,7 +255,7 @@ pub fn cluster_protos(protos: Vec<ProtoClause>) -> Vec<Cluster> {
         clusters.push(build_cluster(*kind, scope, group.iter()));
     }
 
-    // Second pass: emit one program-scope cluster per promoted kind.
+    // One program-scope cluster per promoted kind.
     for kind in &promote {
         let all: Vec<&ProtoClause> = by_key
             .iter()
@@ -298,9 +265,8 @@ pub fn cluster_protos(protos: Vec<ProtoClause>) -> Vec<Cluster> {
         clusters.push(build_cluster(*kind, ClusterScope::Program, all.into_iter()));
     }
 
-    // Stable output order: program-scope first (broader claims surface
-    // before per-handler), then per-kind alphabetical, then per-scope
-    // alphabetical.
+    // Stable order: program-scope first (broader claims lead), then kind,
+    // then scope key.
     clusters.sort_by(|a, b| {
         let scope_priority = |s: &ClusterScope| match s {
             ClusterScope::Program => 0,
@@ -355,10 +321,9 @@ fn score_confidence(evidence_count: usize) -> Confidence {
     }
 }
 
-/// Deterministic cluster ID: `c-<8hex>-<kind>-<scope>`. Stable across
-/// re-runs since we hash the kind + scope alone — evidence counts and
-/// finding IDs change as the program evolves, but the cluster *identity*
-/// (this specific candidate clause at this specific scope) does not.
+/// Deterministic cluster ID: `c-<8hex>-<kind>-<scope>`. Hashes kind +
+/// scope only — evidence counts and finding IDs change as the program
+/// evolves, but the cluster *identity* does not.
 fn compute_cluster_id(kind: ClusterKind, scope: &ClusterScope) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -370,9 +335,8 @@ fn compute_cluster_id(kind: ClusterKind, scope: &ClusterScope) -> String {
     format!("c-{}-{}-{}", &hex[..8], kind.as_str(), scope.as_key())
 }
 
-/// Per-(kind, scope) rendering: the text the user sees in the interview
-/// plus the `.qedspec` syntax stub that gets concatenated into the
-/// emitted spec on accept.
+/// Per-(kind, scope) rendering: interview text plus the `.qedspec` syntax
+/// stub concatenated into the emitted spec on accept.
 struct TemplateRender {
     proto_text: String,
     syntax: String,
@@ -382,10 +346,10 @@ struct TemplateRender {
 }
 
 /// Static cluster-kind metadata: invariant identifier, human description,
-/// site label for prompts, and the recommended target form for the
-/// handler-scope clause the user fills in manually. M2.3: every emitted
-/// clause is either a description-form `invariant N "..."` (parses today)
-/// or a `// TODO ratified: ...` comment (parser-irrelevant).
+/// site label for prompts, and the target form the user fills in manually.
+/// Parse-safety invariant: every emitted clause is either a
+/// description-form `invariant N "..."` (parses today) or a
+/// `// TODO ratified: ...` comment (parser-irrelevant).
 struct KindMeta {
     invariant_name: &'static str,
     description: &'static str,
@@ -491,9 +455,8 @@ fn render_template(kind: ClusterKind, scope: &ClusterScope, n: usize) -> Templat
 }
 
 fn render_program_template(kind: ClusterKind, meta: &KindMeta, n: usize) -> TemplateRender {
-    // Description-form invariant — parses against the current grammar
-    // (escrow uses `invariant conservation "total tokens preserved across …"`).
-    // Escape any embedded quotes; the description otherwise is pure ASCII.
+    // Description-form invariant — parses against the current grammar.
+    // Escape embedded quotes; the description is otherwise pure ASCII.
     let escaped = meta.description.replace('"', "\\\"");
     TemplateRender {
         proto_text: meta.description.to_string(),
@@ -519,11 +482,10 @@ fn render_handler_template(
     handler: &str,
     n: usize,
 ) -> TemplateRender {
-    // Handler-scope clauses carry placeholder identifiers we cannot
-    // resolve without source analysis (which account name? which error
-    // variant?). Emit as a TODO comment that the user converts to a real
-    // clause — the comment is parser-irrelevant and the target_form is
-    // included verbatim so the user has the syntactic template in hand.
+    // Handler-scope clauses carry placeholders we can't resolve without
+    // source analysis (which account? which error variant?). Emit a
+    // parser-irrelevant TODO comment with the target_form verbatim so the
+    // user has the syntactic template in hand.
     let proto = format!("Handler `{}`: {}", handler, meta.description);
     let syntax = format!(
         "  // TODO ratified ({} in {}): {}\n  // Target form: {}\n",
@@ -547,8 +509,7 @@ fn render_handler_template(
     }
 }
 
-/// Render the markdown prompt the user sees in the interview file.
-/// Standardized layout: header → evidence summary → options as checkboxes.
+/// Interview prompt markdown: header → evidence summary → option checkboxes.
 fn render_question(
     label: &str,
     site_label: &str,
@@ -580,10 +541,8 @@ fn render_question(
 mod tests {
     use super::*;
 
-    /// Confirm the v3 envelope shape — `kind` / `scope` / `confidence`
-    /// serialize as snake_case strings, `scope` is internally-tagged with
-    /// `kind` + `name` fields, and the optional `name` is omitted for
-    /// `Program` scope.
+    /// v3 envelope shape: snake_case strings, `scope` tagged with
+    /// `kind` + `name`, `name` omitted for `Program` scope.
     #[test]
     fn cluster_serializes_to_v3_envelope_shape() {
         let c = Cluster {
@@ -637,8 +596,6 @@ mod tests {
 
     #[test]
     fn kind_as_str_round_trips_all_fourteen() {
-        // Compile-time exhaustive: if any variant is added without an
-        // `as_str` arm, this test fails to build.
         let all = [
             ClusterKind::AccountOwnerCheck,
             ClusterKind::AccountInitCheck,
@@ -850,10 +807,9 @@ mod tests {
         assert!(cluster_protos(vec![]).is_empty());
     }
 
-    /// M2.3: every Program-scope template's `suggested_syntax` must
-    /// parse cleanly when wrapped in a minimal spec. Validates that the
-    /// description-form invariant we emit matches the live qedspec
-    /// grammar.
+    /// Every Program-scope template's `suggested_syntax` must parse when
+    /// wrapped in a minimal spec — the description-form invariant must
+    /// match the live qedspec grammar.
     #[test]
     fn every_program_scope_template_parses() {
         let all_kinds = [
@@ -887,8 +843,8 @@ mod tests {
         }
     }
 
-    /// Handler-scope templates emit `// TODO` comments — they should
-    /// also be parser-safe when embedded inside a handler body.
+    /// Handler-scope templates (`// TODO` comments) must be parser-safe
+    /// inside a handler body.
     #[test]
     fn every_handler_scope_template_parses() {
         let all_kinds = [

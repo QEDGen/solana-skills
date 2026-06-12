@@ -3,9 +3,7 @@ use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
 
-/// Check whether `needle` appears in `haystack` as a whole word (not as a substring
-/// of a longer identifier). Word boundaries are: start/end of string, or any character
-/// that is not alphanumeric or underscore.
+/// Whole-word match: boundaries are start/end of string or any non-alphanumeric, non-underscore byte.
 fn contains_word(haystack: &str, needle: &str) -> bool {
     for (i, _) in haystack.match_indices(needle) {
         let before_ok = i == 0 || {
@@ -28,9 +26,8 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
 pub struct PropertyStatus {
     pub name: String,
     pub status: Status,
-    /// Human-readable intent description (from doc: clause or auto-generated)
+    /// From doc: clause or auto-generated.
     pub intent: Option<String>,
-    /// Suggestion when property is not proven
     pub suggestion: Option<String>,
 }
 
@@ -51,9 +48,8 @@ impl std::fmt::Display for Status {
     }
 }
 
-/// A named account type with its own fields and optional lifecycle.
-/// In single-account specs, there's one account matching the program name.
-/// In multi-account specs, each `account` block produces one of these.
+/// Named account type. Single-account specs have one matching the program name;
+/// otherwise each `account` block produces one.
 #[derive(Debug, Clone)]
 pub struct ParsedAccountType {
     pub name: String,
@@ -61,28 +57,22 @@ pub struct ParsedAccountType {
     pub lifecycle: Vec<String>,
     /// Reference to a PDA name (if this account is PDA-derived)
     pub pda_ref: Option<String>,
-    /// v2.24 S5: variant structure for multi-variant ADT state. Empty for
-    /// single-record account types (declared via `account { … }` or a
-    /// single-variant ADT). When non-empty, codegen emits a real
-    /// `pub enum <Name> { Variant { … }, … }` instead of the flattened
-    /// struct, and `fields` stays populated as the union of variant
-    /// fields (back-compat view for readers not yet migrated).
+    /// Multi-variant ADT state; empty for single-record account types. When
+    /// non-empty, codegen emits a real `pub enum` instead of the flattened
+    /// struct; `fields` stays the union of variant fields (back-compat view).
     #[allow(dead_code)] // consumed by S5b codegen pass, not yet wired
     pub variants: Vec<ParsedVariant>,
 }
 
-/// Plain record type (no variants). Declared as `type T = { field : Type, ... }`.
-/// Used as the value type of a `Map[N] T` field and for grouping account-level state.
+/// Plain record type (`type T = { field : Type, ... }`); value type of `Map[N] T` fields.
 #[derive(Debug, Clone)]
 pub struct ParsedRecordType {
     pub name: String,
     pub fields: Vec<(String, String)>,
 }
 
-/// Sum type with named variants; used when the ADT carries real alternatives
-/// (e.g. `type Account | Inactive | Active of { ... }`). Lean codegen emits
-/// this as an `inductive` with a payload-carrying constructor referencing a
-/// separate `structure` per variant that has fields.
+/// Sum type with named variants (`type Account | Inactive | Active of { ... }`).
+/// Lean codegen emits an `inductive` plus a `structure` per payload-carrying variant.
 #[derive(Debug, Clone)]
 pub struct ParsedSumType {
     pub name: String,
@@ -101,27 +91,22 @@ pub struct ParsedVariant {
 pub struct ParsedAbort {
     pub lean_expr: String,
     pub rust_expr: String,
-    /// Pod-aware Rust expression for Quasar target — Pod field accesses
-    /// carry a `.get()` postfix and mixed-kind binops add `as i128` casts.
-    /// Codegen picks between this and `rust_expr` based on `Target`.
+    /// Pod-aware Rust expression for Quasar (`.get()` postfix, `as i128` casts);
+    /// codegen picks between this and `rust_expr` by `Target`.
     pub rust_expr_pod: String,
     pub error_name: String,
 }
 
-/// Parsed requires clause: guard condition with optional abort error.
-/// When `error_name` is Some, generates both a guard (positive form in transition)
-/// and an abort theorem (negated form).
+/// Parsed requires clause. When `error_name` is Some, generates both a guard
+/// (positive form in transition) and an abort theorem (negated form).
 #[derive(Debug, Clone)]
 pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
     pub error_name: Option<String>,
-    /// v2.23 Slice 1b: source AST body retained for lints that need to
-    /// detect `Expr::Old(_)` (`old_in_single_state_context`) and any
-    /// future AST-level scans. `None` for synthetic requires generated
-    /// from `match`-arm desugaring (prior-arm negations, abort
-    /// `requires false`), where no source AST exists.
+    /// Source AST body for AST-level lints (e.g. `old_in_single_state_context`).
+    /// `None` for synthetic requires from `match`-arm desugaring.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
 }
 
@@ -135,13 +120,9 @@ pub struct ParsedEnsures {
     pub rust_expr: String,
     #[allow(dead_code)]
     pub rust_expr_pod: String,
-    /// v2.25 — binary-mode rendering: `state.x` → `post.x`,
-    /// `old(state.x)` → `pre.x`. Consumed by the ensures-preservation
-    /// Kani harness so the assertion can compare pre-state captured
-    /// before the transition against post-state observed after.
-    /// Today's `rust_expr` flattens both to `s.x`, which is fine for
-    /// requires (single-state context) but loses information for
-    /// ensures (binary context).
+    /// Binary-mode rendering (`state.x` → `post.x`, `old(state.x)` → `pre.x`)
+    /// for the ensures-preservation Kani harness; `rust_expr` flattens both to
+    /// `s.x`, losing the pre/post distinction.
     #[allow(dead_code)]
     pub rust_expr_binary: String,
 }
@@ -167,30 +148,23 @@ pub struct ParsedLiveness {
 /// Top-level invariant declaration.
 ///
 /// Two forms:
-/// - **Expression body** (`invariant <name> : <expr>`): the predicate is
-///   real and codegen emits a real theorem / harness over it. `lean_expr`
-///   and `rust_expr` are populated.
-/// - **Description-only** (`invariant <name> "<doc>"`): a stub from the
-///   pre-v2.14 era. No predicate body, codegen emits a structured comment
-///   instead of `theorem foo : True := trivial`. `doc` is populated;
-///   `lean_expr` / `rust_expr` are `None`. The `bare_invariant` lint
-///   flags these as P3 — users should give them a body.
+/// - **Expression body** (`invariant <name> : <expr>`): codegen emits a real
+///   theorem / harness; `lean_expr` and `rust_expr` populated.
+/// - **Description-only** (`invariant <name> "<doc>"`): no predicate body;
+///   codegen emits a structured comment, never `theorem foo : True := trivial`.
+///   Flagged P3 by the `bare_invariant` lint.
 #[derive(Debug, Clone)]
 pub struct ParsedInvariant {
     pub name: String,
-    /// Description string when present (non-empty for description-only form;
-    /// may be empty when only an expression body was declared).
+    /// May be empty when only an expression body was declared.
     pub doc: String,
-    /// Lean form of the predicate expression. `None` for description-only.
+    /// Lean form of the predicate. `None` for description-only.
     pub lean_expr: Option<String>,
-    /// Rust form of the predicate expression. `None` for description-only.
-    /// v2.15 wires this into Kani / proptest invariant-checking harnesses;
-    /// v2.14 ships only the Lean theorem path.
+    /// Rust form of the predicate. `None` for description-only.
     #[allow(dead_code)]
     pub rust_expr: Option<String>,
-    /// v2.23 Slice 1b: source AST body retained for the
-    /// `old_in_single_state_context` lint. `None` for the
-    /// description-only form (no expression body to inspect).
+    /// Source AST body for the `old_in_single_state_context` lint.
+    /// `None` for the description-only form.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
 }
 
@@ -203,13 +177,11 @@ pub struct ParsedEnvironment {
     pub constraints_rust: Vec<String>,  // rust form
 }
 
-/// Parsed operation from a qedspec block with its clauses.
+/// Parsed operation from a qedspec block.
 ///
-/// Scaffolding: many fields are parsed out of the qedspec operation block
-/// but consumed only by specific backends (kani/proptest/lean/codegen). We
-/// keep them on the shared struct so downstream passes can reach them without
-/// re-parsing. The struct-level `allow(dead_code)` covers fields that the
-/// active binary feature set doesn't touch yet.
+/// Fields are shared across backends (kani/proptest/lean/codegen) to avoid
+/// re-parsing; struct-level `allow(dead_code)` covers fields not all
+/// feature sets touch.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedOperation {
@@ -231,12 +203,10 @@ pub struct ParsedOperation {
     pub has_effect: bool,
     pub takes_params: Vec<(String, String)>,
     pub effects: Vec<(String, String, String)>,
-    /// v2.24 §S1a — per-site `or <ErrorVariant>` overrides, parallel to
-    /// `effects`. `effect_on_error[i]` is the override for `effects[i]`.
-    /// `None` for effects without an explicit `or` (and for all
-    /// saturating / wrapping / `Set` effects, where overrides are
-    /// meaningless). Parallel array (not extended tuple) keeps the ~30
-    /// existing destructure sites untouched.
+    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`
+    /// (`effect_on_error[i]` overrides `effects[i]`). `None` without an
+    /// explicit `or`, and for saturating / wrapping / `Set` effects where
+    /// overrides are meaningless.
     pub effect_on_error: Vec<Option<String>>,
     pub calls_accounts: Vec<(String, String)>,
     pub calls_discriminator: Option<String>,
@@ -245,24 +215,16 @@ pub struct ParsedOperation {
     pub aborts_if: Vec<ParsedAbort>,
 }
 
-/// Classification of a property body's temporal shape, computed at parse
-/// time from the AST. Drives codegen dispatch in `proptest_gen` and `kani`
-/// per PRD-v2.23 Slices 2-4: a `Binary` property lowers to a per-handler
-/// preservation harness that captures pre-state before the handler call
-/// and asserts `prop(&pre, &post)`; a `Unary` property keeps today's
-/// single-state predicate shape.
-///
-/// Classification rule: any `Expr::Old(_)` anywhere in the body ⇒ `Binary`;
-/// otherwise `Unary`. The walk is `expr_contains_old` in
-/// `chumsky_adapter.rs`.
+/// Temporal shape of a property body, computed at parse time: any
+/// `Expr::Old(_)` anywhere in the body ⇒ `Binary`, else `Unary`
+/// (`expr_contains_old` in `chumsky_adapter.rs`). Drives proptest/kani
+/// harness dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropertyClass {
-    /// Single-state predicate — no `old(...)`. Lowers to
-    /// `fn name(s: &State) -> bool`.
+    /// Single-state predicate: `fn name(s: &State) -> bool`.
     Unary,
-    /// Transition predicate — body references `old(...)`. Lowers to
-    /// `fn name(pre: &State, post: &State) -> bool`. Only meaningful
-    /// at handler boundaries.
+    /// Transition predicate: `fn name(pre: &State, post: &State) -> bool`.
+    /// Only meaningful at handler boundaries.
     Binary,
 }
 
@@ -272,53 +234,32 @@ pub struct ParsedProperty {
     pub name: String,
     /// Lean-rendered body (for proofs / diagnostics / drift).
     pub expression: Option<String>,
-    /// Rust-rendered body (for proptest/Kani codegen). When `Some` the
-    /// backends use this verbatim — no string-substitution massaging. Contains
-    /// `QEDGEN_UNSUPPORTED_QUANTIFIER` when the body has a forall/exists that
-    /// can't lower to a bool-valued function body; callers skip emission in
-    /// that case.
+    /// Rust-rendered body, used verbatim by proptest/Kani. Contains
+    /// `QEDGEN_UNSUPPORTED_QUANTIFIER` when a forall/exists can't lower to a
+    /// bool body; callers skip emission then.
     pub rust_expression: Option<String>,
-    /// Pod-aware Rust body for Quasar target (mirrors `rust_expr_pod` on
-    /// guard/abort/ensures). Codegen picks based on `Target`.
+    /// Pod-aware Rust body for Quasar (mirrors `rust_expr_pod`).
     pub rust_expression_pod: Option<String>,
     pub preserved_by: Vec<String>,
-    /// When the property has shape `forall <binder> : <BinderType>, body`
-    /// and the binder is too wide for proptest exhaust (U16+, Fin[N>256]),
-    /// this carries the body rendered with the binder kept as a free Rust
-    /// variable. proptest_gen emits `fn {prop}_at(s: &State, <binder>:
-    /// <type>)` from this, and preservation tests for handlers taking
-    /// `<binder>` as a param check the property at that one slot — which
-    /// is sufficient for inductive preservation given handlers only modify
-    /// the array at the slot they were passed (frame condition handles the
-    /// rest). The bare `{prop}(&s)` predicate stays as the harness-level
-    /// "true" stub for prop_assume sites.
+    /// For `forall <binder> : <T>, body` with a binder too wide to exhaust
+    /// (U16+, Fin[N>256]): body rendered with the binder free. proptest_gen
+    /// emits `fn {prop}_at(s, binder)` and preservation tests check only the
+    /// slot the handler was passed — sufficient for inductive preservation
+    /// since the frame condition covers untouched slots. The bare `{prop}(&s)`
+    /// predicate stays as the "true" stub for prop_assume sites.
     pub per_slot: Option<PerSlotForm>,
-    /// v2.20 §S1.1: when the property body has a quantifier shape codegen
-    /// can't mechanically lower (nested forall, exists, unbounded `Vec<T>`
-    /// binder, ...), the chumsky_adapter records *why* here so
-    /// `check.rs::check_completeness` can emit the P5
-    /// `unsupported_quantifier_shape` lint with file:line precision.
-    /// `None` means the shape is supported (no quantifier, or a single-
-    /// binder forall lowered to `per_slot`).
+    /// Why a quantifier shape can't mechanically lower (nested forall,
+    /// exists, unbounded binder, ...); feeds the P5
+    /// `unsupported_quantifier_shape` lint. `None` = supported shape.
     pub quantifier_lint: Option<QuantifierLint>,
-    /// v2.23 Slice 1: property body classification, drives the
-    /// `proptest_gen` / `kani` per-handler preservation harness shape.
-    /// `PropertyClass::Binary` (body contains `old(...)`) emits
-    /// `fn name(pre, post) -> bool` and harnesses that capture pre-state;
-    /// `PropertyClass::Unary` keeps the legacy `fn name(s) -> bool`.
     pub class: PropertyClass,
-    /// v2.23 Slice 1: the AST body of the property, retained for
-    /// downstream consumers that need to walk it (Slice 5's
-    /// `vacuous_property_lowering` lint gates on `Expr::Old(_)`
-    /// presence; future work may inspect more shape). `None` only on
-    /// test fixtures constructed by hand without an AST source.
+    /// AST body for downstream walks (e.g. `vacuous_property_lowering` gates
+    /// on `Expr::Old(_)`). `None` only on hand-built test fixtures.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
 }
 
-/// Per-slot rendering of a `forall <binder> : <T>, body` property. See
-/// `ParsedProperty::per_slot` for the rationale. Pod-aware variant for the
-/// Quasar Kani target lands when Kani consumes this; today only the native
-/// rendering (used by proptest_gen) is needed.
+/// Per-slot rendering of a `forall <binder> : <T>, body` property; see
+/// `ParsedProperty::per_slot`. Native rendering only (proptest_gen).
 #[derive(Debug, Clone)]
 pub struct PerSlotForm {
     pub binder_name: String,
@@ -326,31 +267,26 @@ pub struct PerSlotForm {
     pub rust_body: String,
 }
 
-/// v2.20 §S1.1: information about an unsupported quantifier shape that the
-/// chumsky_adapter recorded so `check.rs` can emit a precise P5 lint.
+/// Unsupported-quantifier info recorded by chumsky_adapter for the P5 lint.
 /// Mirrors `crate::quantifier::Reason` without depending on its enum (keeps
-/// `ParsedProperty` AST-free for callers that construct it in tests).
+/// `ParsedProperty` AST-free for test constructors).
 #[derive(Debug, Clone)]
 pub struct QuantifierLint {
     /// Stable rule discriminant: `nested_quantifier`, `unbounded_binder`,
     /// `exists_quantifier`. Used to key into `docs/limitations.md`.
     pub kind: String,
-    /// Human-readable message; copied verbatim into the lint output.
+    /// Copied verbatim into the lint output.
     pub message: String,
-    /// Byte range of the offending quantifier inside the source spec —
-    /// fed to the `subject` field so `qedgen check` can render a span.
+    /// Byte range of the offending quantifier in the source spec (span rendering).
     pub span_start: usize,
     pub span_end: usize,
 }
 
-/// Sentinel marker embedded by `chumsky_adapter::expr_to_rust` when a
-/// quantifier appears in a property body — no valid `fn p(&State) -> bool`
-/// lowering exists without harness-level cooperation (see B2 in v2.6.0
-/// release notes).
+/// Sentinel embedded by `chumsky_adapter::expr_to_rust` when a quantifier in a
+/// property body has no valid `fn p(&State) -> bool` lowering.
 pub const QEDGEN_UNSUPPORTED_MARKER: &str = "QEDGEN_UNSUPPORTED_QUANTIFIER";
 
-/// Does this Rust-rendered expression require harness-level scaffolding
-/// that the property function body can't provide on its own?
+/// Does this Rust-rendered expression require harness-level scaffolding?
 pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
     rust_expr.contains(QEDGEN_UNSUPPORTED_MARKER)
 }
@@ -513,7 +449,6 @@ pub struct ParsedHandler {
     pub pre_status: Option<String>,
     /// Post-state lifecycle transition.
     pub post_status: Option<String>,
-    /// Input parameters.
     pub takes_params: Vec<(String, String)>,
     /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
     pub guard_str: Option<String>,
@@ -533,75 +468,57 @@ pub struct ParsedHandler {
     pub let_bindings: Vec<(String, String, String)>,
     /// All abort conditions are exhaustive — generates ↔ theorem instead of per-abort.
     pub aborts_total: bool,
-    /// v2.7 G4: handler is deliberately permissionless — no `auth` required.
-    /// Mutually exclusive with `who`; check.rs rejects specs that declare both.
-    /// Opts out of the `no_access_control` P1 lint.
+    /// Deliberately permissionless — no `auth` required. Mutually exclusive
+    /// with `who` (check.rs rejects both); opts out of the `no_access_control` P1 lint.
     pub permissionless: bool,
     /// State effects: (field, op, value) where op is
     /// "set" | "add" | "add_sat" | "add_wrap" | "sub" | "sub_sat" | "sub_wrap".
-    /// "add"/"sub" are the checked defaults (v2.7 G3); `_sat` / `_wrap` tags
-    /// carry the explicit saturating / wrapping opt-in from `+=!` / `+=?`.
+    /// "add"/"sub" are the checked defaults; `_sat` / `_wrap` carry the
+    /// explicit opt-in from `+=!` / `+=?`.
     pub effects: Vec<(String, String, String)>,
-    /// v2.24 §S1a — per-site `or <ErrorVariant>` overrides, parallel to
-    /// `effects`. See `ParsedOperation::effect_on_error`.
+    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`.
+    /// See `ParsedOperation::effect_on_error`.
     pub effect_on_error: Vec<Option<String>>,
     /// IDL-level account descriptors.
     pub accounts: Vec<ParsedHandlerAccount>,
     /// Token transfer intents.
     pub transfers: Vec<ParsedTransfer>,
-    /// Events emitted.
     pub emits: Vec<String>,
-    /// Per-handler invariant references (names of invariants this handler must preserve).
+    /// Names of invariants this handler must preserve.
     pub invariants: Vec<String>,
-    /// Per-handler invariants this handler ESTABLISHES at post-state without
-    /// requiring them as a precondition (v2.17 follow-up). Useful
-    /// for init / one-shot handlers that bring the system into a state where
-    /// the named invariant becomes true for the first time. Codegen treats
-    /// these like `invariants` for the post-assertion but skips the
-    /// `kani::assume` / `prop_assume!` pre-state guard.
+    /// Invariants this handler ESTABLISHES at post-state without requiring
+    /// them as a precondition (init / one-shot handlers). Codegen asserts
+    /// them post-state but skips the `kani::assume` / `prop_assume!` pre-state guard.
     pub establishes: Vec<String>,
-    /// v2.24 #1 — names of `include <schema>` clauses on this handler.
-    /// The adapter's post-pass walks this list and appends each
-    /// referenced schema's `requires` onto `self.requires`. Stored
-    /// (not just expanded inline) so synthetic match-arm handlers
-    /// inherit the same expansion without duplicating the lookup.
+    /// Names of `include <schema>` clauses. The adapter's post-pass appends
+    /// each schema's `requires` onto `self.requires`; stored (not expanded
+    /// inline) so synthetic match-arm handlers inherit the same expansion.
     pub schema_includes: Vec<String>,
     /// Per-handler properties (from inline property/invariant clauses).
     pub properties: Vec<String>,
-    /// `call Interface.handler(name = expr, ...)` sites — CPI invocations
-    /// resolved against a top-level `interface` block. Empty for handlers
-    /// that don't CPI. Consumed by Rust codegen (slice 5) and the
-    /// `[shape_only_cpi]` lint (slice 4).
+    /// `call Interface.handler(name = expr, ...)` sites resolved against a
+    /// top-level `interface` block. Empty for handlers that don't CPI.
     #[allow(dead_code)]
     pub calls: Vec<ParsedCall>,
-    /// v2.20 §S1.2 — structured conditional-effect tree. `None` for
-    /// unconditional handlers; `Some` when the spec uses `match` inside
+    /// Conditional-effect tree: `Some` when the spec uses `match` inside
     /// `effect { … }`. The flat `effects` field still holds the union of
-    /// every arm's effects (for back-compat); this carries arm grouping.
+    /// every arm's effects (back-compat); this carries arm grouping.
     pub effect_branches: Option<ParsedEffectBranches>,
-    /// v2.29 Slice A (#8) — `abstract <name> : <Type>` handler clauses.
-    /// Each entry is `(name, dsl_type_string)`; the DSL-type is
-    /// preserved verbatim so per-backend lowering can resolve to its
-    /// own concrete type (`map_type_for_target` on Rust, plain DSL
-    /// name on Lean / Kani / proptest). Lowered separately by each
-    /// backend: Kani emits `let <name>: T = kani::any();` +
-    /// `kani::assume(<requires-conjunction>);`, proptest emits the
-    /// same via `any::<T>().new_tree(...)` + `prop_assume!`, Lean
-    /// wraps the handler theorem statement in `∃ <name> : T,`, and
-    /// the Rust handler scaffold emits `let <name>: T = todo!(...);`
-    /// so the agent fills the body with whichever concrete library
-    /// math produced the value.
+    /// `abstract <name> : <Type>` clauses as `(name, dsl_type_string)`; the
+    /// DSL type stays verbatim so each backend resolves its own concrete
+    /// type. Kani: `kani::any()` + assume; proptest: `any::<T>()` +
+    /// prop_assume; Lean: `∃ <name> : T,` wrapper; Rust scaffold:
+    /// `let <name>: T = todo!(...)` for the agent to fill.
     pub abstract_binders: Vec<(String, String)>,
 }
 
-/// v2.20 §S1.2 — IR form of a top-level `match` block inside `effect { … }`.
+/// IR form of a top-level `match` block inside `effect { … }`.
 #[derive(Debug, Clone)]
 pub struct ParsedEffectBranches {
     /// Scrutinee expression rendered for Rust codegen.
     pub scrutinee_rust: String,
-    /// Scrutinee expression rendered for Quasar/Pod targets. Held for
-    /// future consumers; the shared `emit_transition_fn` reads
-    /// `scrutinee_rust`. Pod codegen paths will swap to this.
+    /// Scrutinee rendered for Quasar/Pod targets; `emit_transition_fn`
+    /// currently reads `scrutinee_rust`.
     #[allow(dead_code)]
     pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
@@ -617,12 +534,10 @@ pub struct ParsedEffectArm {
     /// `true` for a wildcard arm.
     pub is_wildcard: bool,
     pub effects: Vec<(String, String, String)>,
-    /// v2.24 §S1a — per-site `or <ErrorVariant>` overrides, parallel to
-    /// `effects`. See `ParsedOperation::effect_on_error`. Populated for
-    /// symmetry with the union view, but no consumer currently reads it
-    /// at the arm level — Anchor codegen reads the flat `ParsedHandler
-    /// .effect_on_error` (mirror union), and proptest/kani don't lower
-    /// error variants.
+    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects` (see
+    /// `ParsedOperation::effect_on_error`). No consumer reads it at the arm
+    /// level yet — Anchor codegen reads the flat union, proptest/kani don't
+    /// lower error variants.
     #[allow(dead_code)]
     pub effect_on_error: Vec<Option<String>>,
 }
@@ -636,26 +551,16 @@ pub struct ParsedCall {
     pub target_interface: String,
     pub target_handler: String,
     pub args: Vec<ParsedCallArg>,
-    /// v2.24 #11 — set when the call appeared as
-    /// `let <name> = call …`. Downstream backends bind the
-    /// callee's return value to this identifier so subsequent
-    /// effects / requires can reference it. Tier-1/2 interfaces
-    /// that declare a handler return type fully drive the
-    /// resulting Rust / Lean shape; Tier-0 interfaces fall back
-    /// to an opaque placeholder.
+    /// Set for `let <name> = call …`: backends bind the callee's return
+    /// value to this identifier. Tier-1/2 interfaces with a declared return
+    /// type drive the Rust/Lean shape; Tier-0 falls back to an opaque placeholder.
     pub result_binding: Option<String>,
-    /// v2.27 Track A — `state_binders { callee_field = state.X, ... }`
-    /// entries lowered from the AST. Each binder threads through:
-    ///   1. The Lean axiom signature gets an accessor param
-    ///      `(<callee_field> : State → Nat)` and the caller theorem
-    ///      applies the axiom with `(·.<caller_field>)` for the slot.
-    ///   2. The Kani harness substitution rewrites
-    ///      `pre.<callee_field>` / `post.<callee_field>` →
-    ///      `pre.<caller_field>` / `post.<caller_field>` before the
-    ///      `rewrite_pre_post_paths` flatten to `pre_X` / `post_X`.
-    ///
-    /// Empty (default) preserves the v2.26 callee-frame, param-only
-    /// axiom shape.
+    /// `state_binders { callee_field = state.X, ... }` entries. Each binder:
+    /// (1) adds an accessor param `(<callee_field> : State → Nat)` to the Lean
+    /// axiom, applied with `(·.<caller_field>)`; (2) rewrites
+    /// `pre/post.<callee_field>` → `pre/post.<caller_field>` in the Kani
+    /// harness before `rewrite_pre_post_paths` flattens. Empty preserves the
+    /// callee-frame, param-only axiom shape.
     pub state_binders: Vec<ParsedStateBinder>,
 }
 
@@ -668,27 +573,20 @@ pub struct ParsedCallArg {
     pub rust_expr_pod: String,
 }
 
-/// v2.27 Track A — one entry in a `call X.y(state_binders { ... })`
-/// block, lowered from the AST. Maps a callee-side abstract field name
-/// to a caller-side State field path.
+/// One entry in a `call X.y(state_binders { ... })` block: maps a callee-side
+/// abstract field name to a caller-side State field.
 ///
-/// Restriction in Track A: the binder RHS must be a `state.<ident>`
-/// path — the adapter validates the shape and extracts the trailing
-/// identifier. Richer RHS forms (let-bindings, computed paths) are
-/// reserved for v3.0. The substitution helpers use only `caller_field`
-/// (the bare ident); they synthesize `pre.<caller_field>` /
-/// `post.<caller_field>` and Lean `(·.<caller_field>)` at use sites.
+/// The binder RHS must be a `state.<ident>` path — the adapter validates the
+/// shape and extracts the trailing identifier; richer RHS forms are reserved
+/// for v3.0. Substitution helpers synthesize `pre.` / `post.` prefixes and
+/// Lean `(·.<caller_field>)` at use sites.
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct ParsedStateBinder {
-    /// LHS — callee abstract field name. Found verbatim in the
-    /// callee's `ensures` text. Word-boundary substitution catches
-    /// every occurrence.
+    /// Callee abstract field name, matched verbatim (word-boundary) in the
+    /// callee's `ensures` text.
     pub callee_field: String,
-    /// RHS — caller-side bare field name (the trailing ident from
-    /// `state.<ident>`). The substitution helpers prepend `pre.` /
-    /// `post.` per context; the Lean axiom-application path wraps as
-    /// `(·.<caller_field>)`.
+    /// Caller-side bare field name (trailing ident from `state.<ident>`).
     pub caller_field: String,
 }
 
@@ -699,24 +597,12 @@ impl ParsedHandler {
     pub fn has_effect(&self) -> bool {
         !self.effects.is_empty()
     }
-    /// Whether this handler initiates a CPI. True if the handler has a
-    /// `transfers { }` block (legacy sugar for `call Token.transfer(...)`)
-    /// OR any `call Interface.handler(...)` site (v2.5 uniform CPI surface).
+    /// True if the handler has a `transfers { }` block (legacy sugar for
+    /// `call Token.transfer(...)`) or any `call Interface.handler(...)` site.
     pub fn has_calls(&self) -> bool {
         !self.transfers.is_empty() || !self.calls.is_empty()
     }
 
-    /// Unified iterator over all CPIs the handler initiates. Yields
-    /// synthetic `ParsedCall` entries for each `transfers { ... }` block
-    /// (mapped as `call Token.transfer(from, to, amount, authority)`)
-    /// followed by the explicit `call Interface.handler(...)` sites.
-    ///
-    /// **Use this for new code reading the CPI surface.** The dual
-    /// representation (`transfers` + `calls`) is a v2.x backward-compat
-    /// holdover; v3.0 collapses to `calls` only and removes the
-    /// `transfers` field entirely. The `transfers { ... }` keyword
-    /// itself stays as user-facing sugar — it just desugars at parse
-    /// time. See the v2.10 transfers/calls unification thread.
     /// Find the first signer account in this handler.
     pub fn signer_account(&self) -> Option<&ParsedHandlerAccount> {
         self.accounts.iter().find(|a| a.is_signer)
@@ -743,18 +629,14 @@ impl ParsedHandler {
     }
 }
 
-/// True iff the spec is a multi-variant ADT *and* the named field lives
-/// inside one or more variant payloads (not directly on the wrapper) *and*
-/// the spec has opted into v2.24 wrapper-struct + inner-enum codegen by
-/// declaring `WrongState` in `type Error`.
+/// True iff the spec is a multi-variant ADT, the field lives inside a variant
+/// payload (not on the wrapper), and the spec opted into wrapper-struct +
+/// inner-enum codegen (ADT state repr).
 ///
-/// Used by R25's `auth X → has_one = X` lowering and by
-/// `emit_variant_auth_guard` to decide whether the auth field is reachable
-/// from the Anchor wrapper. Without WrongState the spec stays on the
-/// legacy flat-struct codegen path where every field — including
-/// variant-payload fields — sits directly on the wrapper, so `has_one`
-/// keeps working and the variant-destructure guard would reference a
-/// non-existent `inner` enum.
+/// Used by R25's `auth X → has_one = X` lowering and `emit_variant_auth_guard`
+/// to decide whether the auth field is reachable from the Anchor wrapper. On
+/// the flat-struct path every field sits directly on the wrapper, so `has_one`
+/// works and a variant-destructure guard would reference a non-existent `inner` enum.
 pub fn is_multi_variant_adt_with_field_in_variant(spec: &ParsedSpec, field: &str) -> bool {
     let Some(acct) = spec.account_types.first() else {
         return false;
@@ -770,13 +652,11 @@ pub fn is_multi_variant_adt_with_field_in_variant(spec: &ParsedSpec, field: &str
         .any(|v| v.fields.iter().any(|(n, _)| n == field))
 }
 
-/// True if the parsed state struct that backs this handler-account has a
-/// field named `field`. For multi-state specs the lookup walks
-/// `spec.account_types`; for single-state specs the union lives in
-/// `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
+/// True if the state struct backing this handler-account has `field`.
+/// Multi-state specs walk `spec.account_types`; single-state specs use the
+/// union in `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
 fn state_account_has_field(acct: &ParsedHandlerAccount, spec: &ParsedSpec, field: &str) -> bool {
-    // Multi-state: match the account by name → ADT name (lowercase), then
-    // walk that ADT's field list.
+    // Multi-state: match account name → ADT name (lowercase).
     for at in &spec.account_types {
         let lower = at.name.to_lowercase();
         if acct.name == lower || acct.name.starts_with(&lower) {
@@ -817,15 +697,9 @@ impl ParsedHandlerAccount {
         let _ = state_name;
         let mut parts = Vec::new();
 
-        // Infer init from lifecycle: handler creates the account.
-        //
-        // In multi-state specs (e.g. lending: Loan + Pool ADTs), only the
-        // account whose name matches the handler's `on_account` (the ADT
-        // whose lifecycle is being driven) is init'd — sibling writable
-        // PDAs in the same handler are pre-existing. The previous logic
-        // marked every writable PDA as init whenever the lifecycle was
-        // Uninit/Empty → ..., which broke lending's `borrow` (init'd both
-        // `loan` and `pool`).
+        // Infer init from lifecycle. In multi-state specs only the account
+        // matching the handler's `on_account` is init'd — sibling writable
+        // PDAs in the same handler are pre-existing.
         let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
             || handler.pre_status.as_deref() == Some("Empty");
         let on_account_matches = match handler.on_account.as_deref() {
@@ -840,12 +714,8 @@ impl ParsedHandlerAccount {
         let is_init =
             lifecycle_is_init && on_account_matches && !self.is_signer && self.pda_seeds.is_some();
 
-        // v2.29 — `mut` is mutually exclusive with `init` in Anchor
-        // (init implies mut). Emit `mut` only when the account is
-        // writable AND we're NOT init'ing it. Pre-fix the writable
-        // PDAs in lifecycle-init handlers got both flags and
-        // Anchor's macro rejected with `mut cannot be provided with
-        // init`.
+        // `mut` is mutually exclusive with `init` in Anchor (init implies
+        // mut) — emitting both trips `mut cannot be provided with init`.
         if self.is_writable && !is_init {
             parts.push("mut".to_string());
         }
@@ -855,15 +725,11 @@ impl ParsedHandlerAccount {
             if let Some(signer) = handler.signer_account() {
                 parts.push(format!("payer = {}", signer.name));
             }
-            // v2.29 — Anchor requires `space = <bytes>` whenever
-            // `init` is set so the runtime knows the allocation size.
-            // We derive `InitSpace` on every account type / inner
-            // enum / record, so the canonical form is `space = 8 +
-            // <AccountStruct>::INIT_SPACE` (8 bytes for the Anchor
-            // account discriminator). The account name is the
-            // PascalCase of the account_type or the inferred
-            // multi-state name; matching the wrapper struct codegen
-            // emits in `generate_state`.
+            // Anchor requires `space = <bytes>` with `init`. We derive
+            // `InitSpace` on every account type / inner enum / record, so
+            // the canonical form is `space = 8 + <AccountStruct>::INIT_SPACE`
+            // (8 = Anchor discriminator). The struct name must match what
+            // `generate_state` emits.
             let space_target = match (target, handler.on_account.as_deref()) {
                 // Multi-state spec: per-handler `on_account` names
                 // the ADT being driven. The wrapper struct is
@@ -973,34 +839,23 @@ impl ParsedHandlerAccount {
         }
 
         // R25: lower `auth X` to `has_one = X` when the state-bearing
-        // account in this handler has a field named X. The spec's `auth
-        // X` clause + accounts block already names the authority — the
-        // codegen just needs to bind it. Without this every handler
-        // taking an authority signer is reachable by ANY signer (the
-        // signer check only verifies "someone signed", not "the right
-        // someone"). Closes the percolator-CRIT, multisig::remove_member
-        // CRIT, and the lending init_pool/borrow/repay HIGHs in one
-        // emit. Anchor and Quasar both accept `has_one = field`.
+        // account has a field named X. Without this binding, every handler
+        // taking an authority signer is reachable by ANY signer — the
+        // signer check verifies "someone signed", not "the right someone".
+        // Anchor and Quasar both accept `has_one = field`.
         //
-        // v2.24 S5c: with multi-variant ADT state, the auth field often
-        // lives in a variant payload (e.g. `Active.owner`), not directly
-        // on the wrapper struct. Anchor's `has_one` macro can't reach
-        // into the inner enum, so the attribute is silently invalid
-        // ("no field `owner` on `Account<…, VaultAccount>`"). Skip
-        // emission in that case — the auth gap surfaces via a TODO
-        // line emitted next to the handler body (rather than dropped
-        // silently). A follow-up slice (v2.24.x) will generate the
-        // explicit destructure-then-check guard.
+        // With multi-variant ADT state the auth field often lives in a
+        // variant payload (`Active.owner`); Anchor's `has_one` macro can't
+        // reach into the inner enum ("no field `owner` on `Account<…>`").
+        // Skip emission there — the auth gap surfaces via a TODO line next
+        // to the handler body rather than being dropped silently.
         if is_state_account {
             if let Some(ref who) = handler.who {
                 if state_account_has_field(self, spec, who) {
-                    // v2.24.0 follow-up: only suppress on Anchor.
-                    // Anchor's wrapper-struct + inner-enum emission
-                    // (S5b) hides variant-payload fields from
-                    // `wrapper.X`; `has_one` can't reach them.
-                    // Quasar's flat-struct emission still has every
-                    // variant-payload field at top level, so
-                    // `has_one = field` works there as before.
+                    // Suppress only on Anchor: its wrapper-struct +
+                    // inner-enum emission hides variant-payload fields from
+                    // `has_one`; Quasar's flat-struct emission keeps every
+                    // field at top level so `has_one = field` works.
                     let suppress_for_anchor_variant = matches!(target, crate::Target::Anchor)
                         && is_multi_variant_adt_with_field_in_variant(spec, who);
                     if !suppress_for_anchor_variant {
@@ -1039,28 +894,17 @@ pub struct ParsedHandlerAccount {
     /// keypair the fuzzer would have to populate.
     pub default_pubkey: Option<String>,
 
-    /// v2.29 Slice G — when set, this account's `account_type` resolves
-    /// to a type declared in an imported spec. Carries the namespace
-    /// alias (matches `ParsedSpec::imported_namespaces` key) and the
-    /// raw type name on the foreign side. Anchor codegen lowers to
-    /// `Account<'info, imported::<ns>::<source_type>>` plus an
-    /// optional `seeds::program = <ns>_PROGRAM_ID` constraint when
-    /// the binding carries `pda [...]` seeds. Field reads on the
-    /// account route through the local mirror at
-    /// `src/imported/<ns>.rs`.
+    /// Set when `account_type` resolves to a type from an imported spec;
+    /// carries the namespace alias (key into `ParsedSpec::imported_namespaces`).
+    /// Anchor codegen lowers to `Account<'info, imported::<ns>::<type>>` and
+    /// routes field reads through the local mirror at `src/imported/<ns>.rs`.
     pub imported_namespace: Option<String>,
 }
 
-/// A token transfer intent within a handler's `transfers` block.
-///
-/// **Note (v2.10+):** `transfers { from X to Y amount Z authority W }` is
-/// declarative sugar over `call Token.transfer(from = X, to = Y, amount = Z,
-/// authority = W)`. New code consuming the CPI surface should call
-/// [`ParsedHandler::all_cpi_calls`] which yields a synthetic `ParsedCall`
-/// for each `ParsedTransfer` plus the explicit `calls`. The dual storage
-/// here is backward-compat for codegen/lean_gen/fill — v3.0 collapses to
-/// `ParsedCall` only and the `transfers` field is removed (the keyword
-/// stays as parse-time sugar that desugars directly into `calls`).
+/// A token transfer intent within a handler's `transfers` block —
+/// declarative sugar over `call Token.transfer(...)`. The dual storage
+/// (`transfers` + `calls`) is backward-compat; v3.0 collapses to
+/// `ParsedCall` only (the keyword stays as parse-time sugar).
 #[derive(Debug, Clone)]
 pub struct ParsedTransfer {
     pub from: String,
@@ -1072,7 +916,7 @@ pub struct ParsedTransfer {
 /// Full parsed spec context.
 #[derive(Debug, Default, Clone)]
 pub struct ParsedSpec {
-    /// Unified handlers (v3). Populated from handler/operation/instruction blocks.
+    /// Unified handlers from handler/operation/instruction blocks.
     pub handlers: Vec<ParsedHandler>,
 
     // Legacy fields — populated by forward bridge for backward compat.
@@ -1088,9 +932,8 @@ pub struct ParsedSpec {
     pub program_id: Option<String>,
     #[allow(dead_code)]
     pub program_name: String,
-    /// Flat list of all state fields (union across all account types).
-    /// For single-account specs, this is the account's fields.
-    /// For multi-account specs, this is the primary account's fields.
+    /// Flat union of state fields across account types (single-account: the
+    /// account's fields; multi-account: the primary account's).
     #[allow(dead_code)]
     pub state_fields: Vec<(String, String)>,
     /// Flat lifecycle states (union across all account types for backward compat).
@@ -1119,25 +962,13 @@ pub struct ParsedSpec {
     /// of { ... }` referenced from `Map[N] Account` ends up here.
     pub sum_types: Vec<ParsedSumType>,
 
-    // Target mode was an explicit `target assembly|quasar` keyword; as of
-    // v2.5 it's derived from `has_pragma("sbpf")` at the call site via
-    // `ParsedSpec::is_assembly_target()`. One less source of truth.
-
-    // sBPF-specific fields
-    //
-    // `assembly_path` used to live here, populated by a top-level
-    // `assembly "..."` line. v2.5 drops the keyword entirely —
-    // `qedgen asm2lean --input <path>` is explicit, and other tooling
-    // uses the `src/program.s` convention next to the spec. The spec
-    // does not carry a file path.
     /// Known pubkeys as 4-chunk U64 representations.
     #[allow(dead_code)]
     pub pubkeys: Vec<ParsedPubkey>,
     /// Instruction handlers (sBPF mode).
     #[allow(dead_code)]
     pub instructions: Vec<ParsedInstruction>,
-    /// Global error codes with values (sBPF mode).
-    /// Populated when errors use `Name = value "desc"` syntax.
+    /// Global error codes with values (sBPF `Name = value "desc"` syntax).
     #[allow(dead_code)]
     pub valued_errors: Vec<ParsedErrorCode>,
     /// Global named constants (`const NAME = VALUE`).
@@ -1157,15 +988,13 @@ pub struct ParsedSpec {
     #[allow(dead_code)]
     pub environments: Vec<ParsedEnvironment>,
 
-    /// Interface declarations — callee contracts for CPI. See
-    /// docs/design/spec-composition.md §2. Tier-0 interfaces have no
-    /// `requires`/`ensures` on their handlers; Tier-1/Tier-2 do.
+    /// Callee contracts for CPI (docs/design/spec-composition.md §2).
+    /// Tier-0 handlers have no `requires`/`ensures`; Tier-1/Tier-2 do.
     pub interfaces: Vec<ParsedInterface>,
 
-    /// `import Name from "key"` statements at the top of the spec. The
-    /// resolver consumes these together with `qed.toml` to fetch the
-    /// referenced sources and merge their `interface` declarations into
-    /// `interfaces` above. See docs/design/spec-composition.md §3.
+    /// `import Name from "key"` statements; the resolver pairs them with
+    /// `qed.toml` to fetch sources and merge their `interface` declarations
+    /// into `interfaces` (docs/design/spec-composition.md §3).
     pub imports: Vec<ParsedImport>,
 
     /// Names of `pragma <name> { ... }` blocks that appeared in the spec.
@@ -1173,142 +1002,96 @@ pub struct ParsedSpec {
     /// platform-scoped feature flags in backends.
     pub pragmas: Vec<String>,
 
-    /// v2.24 §S1b — `pragma <key> = <value>` top-level assignments. Stored
-    /// as `(key, value)` so new keys don't require ParsedSpec edits. Current
-    /// known keys:
-    ///
-    /// - `checked_overflow_error`  — variant name to use as the error
-    ///   variant when checked `+=` overflows. Overrides the built-in
-    ///   `MathOverflow` default.
-    /// - `checked_underflow_error` — variant name to use when checked `-=`
-    ///   underflows. Overrides the built-in `MathUnderflow` default.
-    ///
-    /// Lookup goes through `ParsedSpec::pragma_value(key)`. Per-site
-    /// `EffectStmt.on_error` still wins over the pragma.
+    /// `pragma <key> = <value>` assignments, stored as `(key, value)` so new
+    /// keys don't require ParsedSpec edits. Known keys:
+    /// `checked_overflow_error` / `checked_underflow_error` — error variant
+    /// for checked `+=` / `-=` failure (defaults `MathOverflow` /
+    /// `MathUnderflow`). Lookup via `pragma_value(key)`; per-site
+    /// `EffectStmt.on_error` still wins.
     pub pragma_assignments: Vec<(String, String)>,
 
-    /// v2.24 #1 — top-level `schema name { requires expr else Err … }`
-    /// blocks. Each schema bundles a reusable set of guards. Handlers
-    /// reference them via `include <schema_name>` clauses, which the
-    /// adapter expands into the handler's `requires` list at parse
-    /// time so downstream lints / codegen see the union as if the
-    /// handler had inlined the guards itself.
+    /// Top-level `schema name { requires … }` blocks — reusable guard
+    /// bundles. Handlers reference them via `include <name>`, expanded into
+    /// the handler's `requires` at parse time so downstream lints/codegen
+    /// see the union as if inlined.
     #[allow(dead_code)]
     pub schemas: Vec<ParsedSchema>,
 
-    /// Uninterpreted helper functions referenced by name in
-    /// `requires` / `ensures` / effect-RHS / property bodies but not
-    /// declared structurally in the spec. For each, we capture an
-    /// inferred Lean signature so codegen can emit an `axiom`
-    /// declaration at the top of `Spec.lean`, letting Lake typecheck
-    /// the surrounding expressions without forcing the user to give a
-    /// full semantics for the helper. Issue #8 finding #5.
-    ///
-    /// Representation: `(func_name, arg_types_in_lean, return_type)`.
-    /// First-encounter wins for the signature — inconsistent uses
-    /// across the spec would need a richer type inference pass than
-    /// v2.7.1 carries.
+    /// Helper functions referenced by name but not declared in the spec, as
+    /// `(func_name, arg_types_in_lean, return_type)`. Codegen emits an
+    /// `axiom` per entry so Lake can typecheck the surrounding expressions
+    /// without full semantics. First-encounter wins for the signature.
     pub uninterpreted_helpers: Vec<(String, Vec<String>, String)>,
 
-    /// v2.25 — top-level `ref_impl name (...) : T = <expr>` declarations.
-    /// Reference implementations referenced from `ensures` clauses.
-    /// Lower to Lean `def`s and inline at Kani-harness assertion sites.
-    /// Distinct from `uninterpreted_helpers`: those are *axiomatic*
-    /// (declared, not defined); ref_impls carry an executable body.
+    /// Top-level `ref_impl name (...) : T = <expr>` declarations, referenced
+    /// from `ensures`. Lower to Lean `def`s and inline at Kani assertion
+    /// sites. Unlike `uninterpreted_helpers` (axiomatic), these carry an
+    /// executable body.
     #[allow(dead_code)]
     pub ref_impls: Vec<ParsedRefImpl>,
 
-    /// Issue #67 item 3 — `ghost <name> : <Ty> { init {…} on H {…} }`
-    /// spec-only auxiliary state. Rendered to verification-State fields
-    /// (Lean / proptest / Kani) plus per-handler update expressions;
-    /// omitted from the on-chain program codegen entirely.
+    /// `ghost <name> : <Ty> { init {…} on H {…} }` spec-only auxiliary
+    /// state. Rendered to verification-State fields (Lean / proptest / Kani)
+    /// plus per-handler updates; omitted from on-chain codegen entirely.
     pub ghosts: Vec<ParsedGhost>,
 
-    /// Issue #67 item 4 — `hook <kind> { assert … }` cross-cutting
-    /// assertions. Enforced in the Kani / proptest transitions at the
-    /// matching MIR-statement boundary; ignored by Lean (deferred) and the
-    /// on-chain codegen.
+    /// `hook <kind> { assert … }` cross-cutting assertions. Enforced in
+    /// Kani / proptest transitions at the matching MIR-statement boundary;
+    /// ignored by Lean (deferred) and on-chain codegen.
     pub hooks: Vec<ParsedHook>,
 
-    /// v2.27 Track B — verified-callee composition (Stance 2).
-    ///
-    /// For each imported interface whose provider shipped a
-    /// Lake-buildable proof package (`<source>/.qed/proofs/<Iface>.lean`
-    /// plus a sibling `lakefile.lean`), the entry maps the local
-    /// interface name (after any `as <alias>` rename) to the absolute
-    /// path of the provider's proof package root.
-    ///
-    /// Consumed by:
-    /// - `lean_gen::generate` — skips writing the local sibling axiom
-    ///   module for verified callees and emits a `require <pkg> from
-    ///   <rel-path>` directive in the consumer's lakefile pointing at
-    ///   the proof package.
-    /// - `check::lint_pinned_imports` — emits `cpi_unverified_callee`
-    ///   P2 for any pinned import that's NOT in this set, surfacing
-    ///   the Stance-1 trust gap.
-    ///
-    /// Empty for specs with no imports, or specs whose imports are
-    /// either bundled-stdlib builtins (no proofs in v2.27) or
-    /// path/github sources without proofs alongside.
+    /// Verified-callee composition (Stance 2): maps each imported interface
+    /// whose provider shipped a Lake-buildable proof package
+    /// (`<source>/.qed/proofs/<Iface>.lean` + lakefile) — local name after
+    /// any `as` rename — to the proof package root. lean_gen skips the local
+    /// sibling axiom module and emits a `require` directive;
+    /// `lint_pinned_imports` emits `cpi_unverified_callee` P2 for pinned
+    /// imports NOT in this set (the Stance-1 trust gap).
     #[allow(dead_code)]
     pub verified_callees: std::collections::BTreeMap<String, std::path::PathBuf>,
 
-    /// v2.27 Track D1 — proof_hash drift detected during qed.lock
-    /// reconciliation in Frozen mode. Empty in Auto/Skip modes (the lock
-    /// auto-writes anyway) and empty in Frozen when there's no drift or
-    /// when structural drift caused a bail. The check handler in
-    /// `main.rs` routes these through
-    /// `crate::upstream_check::route_findings` with `Gate::CheckFrozen`
-    /// (P2 default) or `Gate::CheckFrozenStrict` (CRIT) depending on
-    /// whether `--strict` was passed.
+    /// proof_hash drift detected during qed.lock reconciliation in Frozen
+    /// mode; empty in Auto/Skip (lock auto-writes) and in Frozen without
+    /// drift. main.rs routes these via `upstream_check::route_findings` —
+    /// P2 by default, CRIT under `--strict`.
     #[allow(dead_code)]
     pub proof_hash_findings: Vec<crate::upstream_check::DepCheckResult>,
 
-    /// v2.27 Track D3 — the proof-package directories of every imported
-    /// interface in the transitive resolution closure that ships a
-    /// Lake-buildable proof package. DFS-pre-order, deduplicated by
-    /// path. `qedgen verify --recursive` walks this list bottom-up
-    /// (per-entry `lake build`) so the consumer's claim "the dep graph
-    /// is fully proven" reduces to "every layer's Lake build succeeds."
-    /// Empty when no imports ship proofs.
+    /// Proof-package dirs of every imported interface in the transitive
+    /// closure that ships a Lake-buildable proof package (DFS-pre-order,
+    /// deduped). `qedgen verify --recursive` builds each bottom-up so "dep
+    /// graph fully proven" reduces to "every layer's Lake build succeeds."
     #[allow(dead_code)]
     pub verified_proof_pkgs: Vec<std::path::PathBuf>,
 
-    /// v2.29 Slice F — per-import account type bookkeeping. Maps the
-    /// local name (alias if declared, otherwise the source-side
-    /// `bound_name`) to its `ImportedNamespace`. Populated by
-    /// `resolve_and_merge_imports` whenever an imported source
-    /// carries `type` declarations beyond the v2.27 interface stub
-    /// shape. Empty for interface-only imports (SPL Token / System
-    /// Program / Metaplex bundled stubs).
-    ///
-    /// Consumed by Slice H's `generate_imported_mirror` to emit
-    /// `src/imported/<ns>.rs` and by Slice G's type-ref resolver to
-    /// recognize `<ns>.<Type>` in account-binding positions.
+    /// Per-import account-type bookkeeping: local name (alias or source
+    /// `bound_name`) → `ImportedNamespace`. Populated when an imported
+    /// source carries `type` declarations beyond the interface-stub shape;
+    /// empty for interface-only imports (bundled stdlib stubs). Drives
+    /// `generate_imported_mirror` (`src/imported/<ns>.rs`) and `<ns>.<Type>`
+    /// resolution in account-binding positions.
     #[allow(dead_code)]
     pub imported_namespaces: std::collections::BTreeMap<String, ImportedNamespace>,
 }
 
-/// v2.25 — adapted form of `ast::RefImplDecl`. Carries both Lean and
-/// Rust renderings of the body so the same expression can lower
-/// into Spec.lean (as a `def`) and into the impl-targeted Kani
+/// Adapted form of `ast::RefImplDecl`; carries both Lean and Rust renderings
+/// so the body lowers into Spec.lean (`def`) and the impl-targeted Kani
 /// harness (inlined at the assertion site).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedRefImpl {
     pub name: String,
     pub doc: Option<String>,
-    /// Each param is `(name, type_string)`. Type strings carry the
-    /// source DSL form (`U64`, `Map[N] T`, etc.) so downstream
-    /// lowering can pick the right Lean / Rust mapping.
+    /// `(name, type_string)`; types keep the source DSL form (`U64`,
+    /// `Map[N] T`, …) so each backend picks its own mapping.
     pub params: Vec<(String, String)>,
     pub return_type: String,
     pub lean_body: String,
     pub rust_body: String,
 }
 
-/// Issue #67 item 3 — lowered `ghost` declaration. Pre-rendered per
-/// backend, same opaque-string discipline as `ParsedRefImpl`.
+/// Lowered `ghost` declaration; pre-rendered per backend, same
+/// opaque-string discipline as `ParsedRefImpl`.
 #[derive(Debug, Clone)]
 pub struct ParsedGhost {
     pub name: String,
@@ -1332,7 +1115,7 @@ pub struct ParsedGhostUpdate {
     pub value_rust: String,
 }
 
-/// Issue #67 item 4 — lowered `hook` declaration. Pre-rendered per backend.
+/// Lowered `hook` declaration, pre-rendered per backend.
 #[derive(Debug, Clone)]
 pub struct ParsedHook {
     pub kind: ParsedHookKind,
@@ -1369,24 +1152,17 @@ impl ParsedSpec {
         self.has_pragma("sbpf")
     }
 
-    /// State-representation opt-in: `pragma state_repr = adt` present → the
-    /// multi-variant State lowers as a real `inductive State` (Lean) /
-    /// wrapper-struct + inner-enum (Anchor Rust); absent → the default
-    /// flat `structure State` + `status` discriminant. Single source of
-    /// truth for the flat-vs-ADT choice across all four backends.
-    ///
-    /// Replaces the pre-v2.33 footgun where the representation was keyed
-    /// on whether the spec happened to declare a `WrongState` error
-    /// variant — an incidental Error-type name silently flipped the
-    /// State shape (and which proofs auto-discharged). `WrongState`
-    /// keeps its *other* role (the error returned on a variant-mismatch
-    /// fallthrough); only the representation signal moved here.
+    /// `pragma state_repr = adt` present → multi-variant State lowers as
+    /// `inductive State` (Lean) / wrapper-struct + inner-enum (Anchor);
+    /// absent → flat `structure State` + `status` discriminant. Single
+    /// source of truth for flat-vs-ADT across all four backends. Note
+    /// `WrongState` is NOT a repr signal — it's only the error returned on
+    /// a variant-mismatch fallthrough.
     pub fn state_repr_is_adt(&self) -> bool {
         self.pragma_value("state_repr") == Some("adt")
     }
 
-    /// v2.24 §S1b — look up a `pragma <key> = <value>` assignment.
-    /// Returns the value as `&str` if present, `None` otherwise.
+    /// Look up a `pragma <key> = <value>` assignment.
     pub fn pragma_value(&self, key: &str) -> Option<&str> {
         self.pragma_assignments
             .iter()
@@ -1395,12 +1171,10 @@ impl ParsedSpec {
     }
 }
 
-/// `import Name from "key" [as Alias]` statement, captured before
-/// resolution. `name` selects which interface to bring in (must match a
-/// declared `interface Name` in the imported source); `from` is the key
-/// into `qed.toml`'s `[dependencies]` table. `as_name` (v2.8 F5)
-/// optionally renames the merged interface in the consumer's namespace.
-/// The local-name used at `call ...` sites is `as_name.unwrap_or(name)`.
+/// `import Name from "key" [as Alias]` statement, captured before resolution.
+/// `name` must match a declared `interface Name` in the imported source;
+/// `from` keys into `qed.toml`'s `[dependencies]`. The local name at
+/// `call ...` sites is `as_name.unwrap_or(name)`.
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct ParsedImport {
@@ -1409,48 +1183,29 @@ pub struct ParsedImport {
     pub as_name: Option<String>,
 }
 
-/// v2.29 Slice F — full-spec import bookkeeping.
-///
-/// When the imported source declares full `type <Name> { ... }` /
-/// `type <Name> | Variant of { ... }` blocks (i.e. a complete qedspec
-/// rather than an interface stub), the resolver captures the account
-/// types and records alongside the existing `ParsedInterface` merge.
-/// The data persists on `ParsedSpec::imported_namespaces` keyed by the
-/// local name the consumer uses (alias if declared, otherwise
-/// `bound_name`), and Slice H consumes it to emit a local Rust mirror
-/// at `src/imported/<ns>.rs` so handler accounts blocks can name
-/// `<ns>::<Type>` without depending on the foreign crate.
-///
-/// Interface-only imports (SPL Token / System Program / Metaplex
-/// bundled stdlib stubs) leave this map empty — they ship handlers +
-/// `upstream { binary_hash }` pins but no `type` declarations, so
-/// there's nothing to mirror. The v2.27 stance-1 / stance-2 paths
-/// continue to flow through `ParsedSpec::interfaces` exactly as
-/// before.
+/// Full-spec import bookkeeping. When the imported source declares full
+/// `type` blocks (a complete qedspec, not an interface stub), the resolver
+/// captures its account types/records so codegen can emit a local Rust
+/// mirror at `src/imported/<ns>.rs` — handler accounts blocks can then name
+/// `<ns>::<Type>` without depending on the foreign crate. Interface-only
+/// imports (bundled stdlib stubs) leave the map empty.
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct ImportedNamespace {
-    /// Manifest dep key (`from "..."` value). Used in the file
-    /// banner comment of the generated mirror so users can trace
-    /// which dep produced each `src/imported/<ns>.rs`.
+    /// Manifest dep key (`from "..."` value); cited in the generated
+    /// mirror's banner comment for traceability.
     pub dep_key: String,
-    /// Full copy of every `type Account { ... }` / `type State |
-    /// Variant of { ... }` block in the imported spec. Codegen
-    /// re-emits each as a local Rust struct (or wrapper + inner
-    /// enum) via the same `emit_account_type` path used for the
-    /// consumer's own state.
+    /// Every `type` block in the imported spec; re-emitted as local Rust
+    /// via the same `emit_account_type` path as the consumer's own state.
     pub account_types: Vec<ParsedAccountType>,
-    /// Plain record types referenced by the imported account types
-    /// (e.g. `UFixValue64` if the imported `State` carries a
-    /// `pool_balance : UFixValue64` field). Emitted alongside the
-    /// account types so the mirror is self-contained.
+    /// Record types referenced by the imported account types, emitted
+    /// alongside so the mirror is self-contained.
     pub records: Vec<ParsedRecordType>,
 }
 
 impl ParsedImport {
-    /// The name the consumer's `call <X>.handler(...)` uses to address
-    /// this imported interface. Falls back to `name` when no alias is
-    /// declared.
+    /// Name used at `call <X>.handler(...)` sites; falls back to `name`
+    /// when no alias is declared.
     #[allow(dead_code)]
     pub fn local_name(&self) -> &str {
         self.as_name.as_deref().unwrap_or(&self.name)
@@ -1458,8 +1213,6 @@ impl ParsedImport {
 }
 
 /// Callee contract: program ID + per-handler shape (and optional effects).
-/// Downstream consumers (lint, codegen) land in later v2.5 slices, hence
-/// `allow(dead_code)` on fields without readers yet.
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)]
 pub struct ParsedInterface {
@@ -1467,13 +1220,10 @@ pub struct ParsedInterface {
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<ParsedUpstream>,
-    /// v2.27 Phase 0 — typed callee-state vocabulary declared by the
-    /// optional interface-level `state { name : Type, ... }` block.
-    /// References to `state.X` in any handler's `ensures`/`requires`
-    /// consult this table to choose the abstract accessor's Lean
-    /// codomain in the bundled axiom signature (`State → T`). Empty
-    /// when no block is declared; lean_gen's axiom emitter defaults
-    /// to `State → Nat` for back-compat with v2.26 / v2.27 Track A specs.
+    /// Typed callee-state vocabulary from the optional interface-level
+    /// `state { name : Type, ... }` block; chooses the abstract accessor's
+    /// Lean codomain (`State → T`) for `state.X` references in
+    /// `ensures`/`requires`. Empty → lean_gen defaults to `State → Nat`.
     pub state_fields: Vec<(String, String)>,
     pub handlers: Vec<ParsedInterfaceHandler>,
 }
@@ -1507,34 +1257,26 @@ pub struct ParsedInterfaceHandler {
     pub accounts: Vec<ParsedHandlerAccount>,
     pub requires: Vec<ParsedRequires>,
     pub ensures: Vec<ParsedEnsures>,
-    /// v2.24 #11 — declared return type (e.g. `-> U64`). When present,
-    /// callers using `let x = call Foo.handler(...)` get a typed
-    /// binding via Solana's `get_return_data` syscall. `None`
-    /// (typical for Tier-0 / SPL Token handlers) means the call is
-    /// terminal and any caller-side `let` binding is dropped with a
-    /// warning.
+    /// Declared return type (e.g. `-> U64`): callers using `let x = call …`
+    /// get a typed binding via `get_return_data`. `None` (typical Tier-0)
+    /// means the call is terminal; caller-side `let` is dropped with a warning.
     pub return_type: Option<String>,
-    /// v2.26 Track K — when the interface handler declares
-    /// `-> <ident> : <Type>`, the identifier names the return value
-    /// inside the callee's `ensures`. The CPI substitution helper
-    /// rewrites that identifier to the caller's `let X = …` binder
-    /// at each call site. `None` (plain `-> Type` or no return) means
-    /// the substitution falls back to the literal `"result"` for
-    /// back-compat with the v2.24 #11 convention.
+    /// For `-> <ident> : <Type>`, the identifier names the return value in
+    /// the callee's `ensures`; the CPI substitution rewrites it to the
+    /// caller's `let X = …` binder per call site. `None` falls back to the
+    /// literal `"result"`.
     pub result_binder: Option<String>,
 }
 
-/// v2.24 #1 — parsed `schema` block. A named bundle of `requires`
-/// clauses that handlers reference via `include <name>` to share
-/// cross-cutting guards (e.g. pause gating, time-window checks).
+/// Parsed `schema` block: a named bundle of `requires` clauses handlers
+/// reference via `include <name>` (pause gating, time-window checks, …).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ParsedSchema {
     pub name: String,
     pub doc: Option<String>,
-    /// The schema's body — one entry per `requires expr else Err`
-    /// clause. Identical shape to `ParsedHandler.requires` so the
-    /// adapter can just clone-and-append.
+    /// One entry per `requires expr else Err` clause; same shape as
+    /// `ParsedHandler.requires` so the adapter can clone-and-append.
     pub requires: Vec<ParsedRequires>,
 }
 
@@ -1542,7 +1284,6 @@ pub struct ParsedSchema {
 pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>> {
     let parsed = parse_spec_file(spec_path)?;
 
-    // Generate expected properties with intent annotations
     let properties = generate_properties(&parsed);
 
     if properties.is_empty() {
@@ -1550,11 +1291,9 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
         return Ok(vec![]);
     }
 
-    // Collect all .lean files in the proofs directory (recursively)
     let mut proof_content = String::new();
     collect_lean_files(proofs_dir, &mut proof_content)?;
 
-    // For each property, determine status
     let results: Vec<PropertyStatus> = properties
         .into_iter()
         .map(|(name, intent, suggestion)| {
@@ -1576,18 +1315,10 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
     Ok(results)
 }
 
-/// Parse a spec from disk. Only .qedspec format is supported.
-///
-/// `path` may be either:
-///   - a single `.qedspec` file (original behaviour), or
-///   - a directory containing one or more `.qedspec` files. Every file in the
-///     directory (recursively) must declare the same `spec Name`; their top
-///     items are merged in alphabetically-sorted source-path order.
-///
-/// The multi-file form is convention-based: no new grammar, no `import`/
-/// `module` keywords. A program's spec is simply spread across files that all
-/// start with `spec <Name>`. Fragments live naturally under `handlers/`,
-/// `properties/`, etc.
+/// Parse a spec from disk (.qedspec only). `path` is a single `.qedspec`
+/// file or a directory: every `.qedspec` under it (recursively) must declare
+/// the same `spec Name`; top items merge in sorted source-path order. The
+/// multi-file form is pure convention — no grammar, no `import`/`module`.
 pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     parse_spec_file_with_opts(
         path,
@@ -1596,11 +1327,8 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     )
 }
 
-/// Parse a spec from disk with explicit control over qed.lock behavior.
-/// Defaults are exposed via `parse_spec_file`; callers like
-/// `qedgen check --frozen` use this variant to pass `LockMode::Frozen`.
-/// Kept as a thin wrapper after F7 added `parse_spec_file_with_opts`,
-/// so existing external callers don't have to update.
+/// Parse with explicit qed.lock mode (e.g. `qedgen check --frozen` passes
+/// `LockMode::Frozen`). Thin wrapper kept for existing external callers.
 #[allow(dead_code)]
 pub fn parse_spec_file_with_lock(
     path: &Path,
@@ -1624,10 +1352,8 @@ pub fn parse_spec_file_with_opts(
         return parse_spec_dir_with_opts(path, lock_mode, cache_opts);
     }
 
-    // v2.7 G5: surface a precise error when the --spec target doesn't exist
-    // at all (file or directory). Pre-v2.7 the next branch would read the
-    // extension of a non-existent path and emit "Unsupported spec format:
-    // ." which is confusing.
+    // A non-existent path would otherwise fall through to the extension
+    // check and report a confusing "Unsupported spec format: .".
     if !path.exists() {
         anyhow::bail!(
             "spec path does not exist: {}\n\
@@ -1663,11 +1389,9 @@ pub fn parse_spec_file_with_opts(
     Ok(parsed)
 }
 
-/// Load every `.qedspec` file under `dir` (recursively), parse each, validate
-/// they all declare the same `spec Name`, and merge their top items into a
-/// single typed AST. Files are visited in alphabetically-sorted path order so
-/// the resulting `ParsedSpec` — and every artifact downstream of it — is
-/// deterministic.
+/// Parse every `.qedspec` under `dir` (recursively), require a shared
+/// `spec Name`, and merge top items. Files are visited in sorted path order
+/// so the `ParsedSpec` and all downstream artifacts are deterministic.
 fn parse_spec_dir_with_opts(
     dir: &Path,
     lock_mode: crate::qed_lock::LockMode,
@@ -1727,12 +1451,10 @@ fn parse_spec_dir_with_opts(
     Ok(parsed)
 }
 
-/// v2.29 Slice G — every handler account binding of the form
-/// `acct : Ident.Ident` (parsed into
+/// Every `acct : Ident.Ident` binding (parsed into
 /// `ParsedHandlerAccount::imported_namespace`) must reference a known
-/// namespace populated by [`resolve_and_merge_imports`] AND a known
-/// type within that namespace. Bare bindings (`acct : signer`,
-/// `acct : token`, `acct : LocalState`) bypass this validator.
+/// namespace AND a known type within it. Bare bindings (`acct : signer`,
+/// `acct : LocalState`) bypass this validator.
 fn validate_imported_account_refs(parsed: &ParsedSpec) -> Result<()> {
     for handler in &parsed.handlers {
         for acct in &handler.accounts {
@@ -1801,18 +1523,13 @@ fn validate_imported_account_refs(parsed: &ParsedSpec) -> Result<()> {
     Ok(())
 }
 
-/// Resolve every `import Name from "key"` statement against `qed.toml` in
-/// `manifest_dir`, fetch the imported source(s) (path or github), parse
-/// each, and merge the matching `interface Name { ... }` declaration into
-/// `parsed.interfaces`.
+/// Resolve every `import Name from "key"` against `qed.toml` in
+/// `manifest_dir`, fetch the imported source(s) (path or github), parse, and
+/// merge the matching `interface Name { ... }` into `parsed.interfaces`.
 ///
-/// v2.8 stance 1: shallow resolution. Imported specs that themselves use
-/// `import` statements are not transitively walked — each consumer
-/// declares its own direct deps in its own qed.toml.
-///
-/// The bound name in `import X from "y"` must match an `interface X { ... }`
-/// declared in the imported source. If it doesn't, this is a hard error
-/// — v2.8 doesn't support import aliasing.
+/// Resolution is shallow: imported specs' own `import` statements are not
+/// transitively walked — each consumer declares its direct deps in its own
+/// qed.toml.
 fn resolve_and_merge_imports(
     parsed: &mut ParsedSpec,
     manifest_dir: &Path,
@@ -1861,28 +1578,20 @@ fn resolve_and_merge_imports(
             )
         })?;
 
-        // v2.24 #13 — imported source may declare an explicit
-        // `interface <name>` block OR may rely on implicit synthesis
-        // from top-level handlers. Pre-fix the resolver hard-required
-        // an explicit block, contradicting the DSL ref's "No
-        // `interface` keyword needed — every handler in the imported
-        // spec is public."
+        // Imported source may declare an explicit `interface <name>` block
+        // OR rely on implicit synthesis from top-level handlers (DSL ref:
+        // every handler in the imported spec is public).
         let explicit = imported.interfaces.iter().find(|i| i.name == r.bound_name);
         let synthesized: Option<ParsedInterface> = if explicit.is_none() {
             synthesize_interface_from_imported(&r.bound_name, &imported)
         } else {
             None
         };
-        // v2.29 Slice F — pure data-shape import. When the imported
-        // source declares neither an `interface <bound>` block nor
-        // any top-level handlers BUT carries at least one `type`
-        // declaration, treat it as a data-only import: synthesize a
-        // minimal empty interface (program_id only) so the rest of
-        // the merge loop runs and `imported_namespaces` gets
-        // populated. The consumer-side use case is `acct :
-        // Foreign.State` in an accounts block — no CPI, just field
-        // reads — which doesn't need any handler / requires /
-        // ensures on the interface side.
+        // Data-only import: no `interface <bound>` block and no top-level
+        // handlers, but at least one `type` declaration. Synthesize a
+        // minimal empty interface (program_id only) so the merge loop runs
+        // and `imported_namespaces` gets populated — supports
+        // `acct : Foreign.State` field reads without any CPI surface.
         let data_only_iface: Option<ParsedInterface> =
             if explicit.is_none() && synthesized.is_none() && !imported.account_types.is_empty() {
                 Some(ParsedInterface {
@@ -1916,20 +1625,12 @@ fn resolve_and_merge_imports(
             }
         };
 
-        // Build the lock entry while we have everything in scope: the
-        // resolved import (sources + commit), the manifest dep descriptor
-        // (source kind + ref), and the imported interface (carries
-        // program_id and the optional upstream block).
-        //
-        // Bundled-stdlib builtins (v2.26 Track F) don't appear in
-        // `manifest.dependencies`; their lock entry uses a synthetic
-        // `builtin:<key>` source identifier so reproducibility is still
-        // recorded but no manifest entry is consulted.
-        // v2.29 Slice F — record imported account-type names on the
-        // lock entry so `--frozen` notices a renamed / removed type
-        // before codegen breaks on a missing mirror. Comma-joined to
-        // keep the on-disk shape one TOML string (rather than an
-        // array that complicates serde defaults).
+        // Build the lock entry while everything is in scope. Bundled-stdlib
+        // builtins don't appear in `manifest.dependencies`; their entry uses
+        // a synthetic `builtin:<key>` source identifier. Imported
+        // account-type names go on the entry so `--frozen` notices a
+        // renamed/removed type before codegen breaks on a missing mirror;
+        // comma-joined to keep the on-disk shape one TOML string.
         let imported_type_names = imported
             .account_types
             .iter()
@@ -1943,25 +1644,16 @@ fn resolve_and_merge_imports(
         };
         lock.dependencies.push(lock_entry);
 
-        // F5 fold-in: apply the optional `as <alias>` rename when merging
-        // into the consumer's interface set. Without an alias, the
-        // imported interface keeps its source-side name.
+        // Apply the optional `as <alias>` rename when merging.
         let mut merged = iface.clone();
         if let Some(alias) = &r.local_alias {
             merged.name = alias.clone();
         }
-        // v2.27 Track B — register verified-callee mapping under the
-        // local name (post-alias). `lean_gen` looks up by this name when
-        // deciding which sibling axiom modules to skip and which
-        // `require` directives to emit in the lakefile. Skip when the
-        // resolver detected no proof package alongside the qedspec.
-        //
-        // v2.27 Track D3 fold-in: every transitive verified entry's
-        // pkg_root also goes onto `verified_proof_pkgs` (path-deduped
-        // after the loop) so `verify --recursive` can iterate the
-        // entire dep graph's proof packages without re-running the
-        // resolver. The resolver returns DFS-pre-order, so the natural
-        // iteration is also bottom-up-by-leaf.
+        // Register the verified-callee mapping under the local (post-alias)
+        // name — lean_gen looks up by this name. Each pkg_root also goes
+        // onto `verified_proof_pkgs` (path-deduped after the loop) so
+        // `verify --recursive` can walk the dep graph without re-resolving;
+        // the resolver returns DFS-pre-order, naturally bottom-up-by-leaf.
         if r.has_proofs {
             if let Some(ref pkg_root) = r.proof_pkg_root {
                 parsed
@@ -1973,21 +1665,13 @@ fn resolve_and_merge_imports(
         let local_ns_name = merged.name.clone();
         parsed.interfaces.push(merged);
 
-        // v2.30 (mir / unified imports) — every imported source
-        // registers here, including the bundled SPL Token / System
-        // Program / Metaplex stubs whose `account_types` is empty.
-        // `parsed.imported_namespaces` is the single canonical
-        // parse-layer truth for "every imported source"; the empty
-        // case is meaningful (Tier-0 interface stubs), not a
-        // suppression signal. The "is there anything to mirror?"
-        // decision moves to codegen.rs (see `generate_imported_mirror`).
-        //
-        // The local name follows the same alias-or-bound-name rule
-        // as the interface merge so the consumer-side type ref
-        // matches the consumer-side call name.
-        //
-        // See docs/design/mir-unified-imports.md §"Migration sequence"
-        // step 0 for the rationale.
+        // Every imported source registers here — including bundled stubs
+        // with empty `account_types`. `imported_namespaces` is the canonical
+        // parse-layer truth for "every imported source"; the empty case is
+        // meaningful (Tier-0 stubs), not a suppression signal — "anything to
+        // mirror?" is codegen's call (`generate_imported_mirror`). Local
+        // name follows the same alias-or-bound-name rule as the interface
+        // merge so type refs match call names.
         let ns = ImportedNamespace {
             dep_key: r.dep_key.clone(),
             account_types: imported.account_types.clone(),
@@ -1995,9 +1679,7 @@ fn resolve_and_merge_imports(
         };
         parsed.imported_namespaces.insert(local_ns_name, ns);
     }
-    // Dedup while preserving first-seen DFS order — handles diamond
-    // dep shapes where the same provider is reached via two import
-    // paths.
+    // Dedup preserving first-seen DFS order — handles diamond dep shapes.
     let mut seen = std::collections::HashSet::new();
     parsed
         .verified_proof_pkgs
@@ -2009,17 +1691,12 @@ fn resolve_and_merge_imports(
     Ok(())
 }
 
-/// v2.24 #13 — synthesize a `ParsedInterface` from the imported
-/// spec's top-level handlers when no explicit `interface { … }`
-/// block is declared. Closes the docs-vs-implementation gap:
-///
-/// > DSL ref: "No `interface` keyword needed — every handler in
-/// > the imported spec is public."
-///
-/// Tier-2 contract: requires / ensures come from the imported
-/// handlers' clauses, accounts from each handler's accounts block.
-/// Returns `None` when the imported spec has no top-level
-/// handlers (caller emits a clearer error).
+/// Synthesize a `ParsedInterface` from the imported spec's top-level
+/// handlers when no explicit `interface { … }` block is declared (DSL ref:
+/// every handler in the imported spec is public). Tier-2 contract:
+/// requires/ensures from the handlers' clauses, accounts from their accounts
+/// blocks. `None` when there are no top-level handlers (caller emits a
+/// clearer error).
 fn synthesize_interface_from_imported(
     bound_name: &str,
     imported: &ParsedSpec,
@@ -2038,16 +1715,11 @@ fn synthesize_interface_from_imported(
             accounts: h.accounts.clone(),
             requires: h.requires.clone(),
             ensures: h.ensures.clone(),
-            // v2.24 #11 — synthesized interfaces inherit no
-            // return type today. Top-level handlers can't carry a
-            // declared return until the handler grammar grows one;
-            // for now Tier-2 callers using `let x = call …` will
-            // see the binding dropped with a lint warning.
+            // Top-level handlers can't declare a return type or named
+            // binder until the handler grammar grows them: `let x = call …`
+            // bindings drop with a lint warning, and substitution falls
+            // back to the literal "result".
             return_type: None,
-            // v2.26 Track K — same story: the synthesizer can't
-            // recover a named binder until top-level handlers carry
-            // one. Defaults to `None` ⇒ literal `"result"` in the
-            // substitution.
             result_binder: None,
         })
         .collect();
@@ -2056,24 +1728,19 @@ fn synthesize_interface_from_imported(
         doc: None,
         program_id: imported.program_id.clone(),
         upstream: None,
-        // v2.27 Phase 0 — synthesized interfaces inherit no abstract-state
-        // vocabulary today. Top-level handlers can express their callee
-        // ensures with concrete `state.X` references (the imported spec's
-        // own State type provides the codomain at the caller's site), so
-        // the bundled-axiom path that needs typed accessors doesn't fire
-        // for Tier-2 callees. Defaults to empty.
+        // Synthesized interfaces carry no abstract-state vocabulary:
+        // top-level handlers express ensures with concrete `state.X`
+        // references, so the bundled-axiom path needing typed accessors
+        // never fires for Tier-2 callees.
         state_fields: Vec::new(),
         handlers,
     })
 }
 
 /// Parse the source bytes for one resolved import. Single-file deps go
-/// through `chumsky_adapter::parse_str` directly; multi-file deps follow
-/// the same path-sorted merge logic as `parse_spec_dir` — every fragment
-/// must declare the same `spec Name`, and their top items merge into one
-/// AST before the adapter runs.
-///
-/// v2.8 fold-in F4: previously only single-file imports were supported.
+/// through `chumsky_adapter::parse_str`; multi-file deps follow the same
+/// path-sorted merge logic as `parse_spec_dir` (same `spec Name`, top items
+/// merged before the adapter runs).
 fn parse_imported_sources(r: &crate::import_resolver::ResolvedImport) -> Result<ParsedSpec> {
     if r.sources.len() == 1 {
         let (src_path, src_bytes) = &r.sources[0];
@@ -2116,12 +1783,10 @@ fn parse_imported_sources(r: &crate::import_resolver::ResolvedImport) -> Result<
     Ok(parsed)
 }
 
-/// Read the source text of a spec path — single file or directory of
-/// fragments — as one contiguous string, joining fragments in the same
-/// sorted-path order the loader uses. Consumers that scan the raw text
-/// (e.g. `spec_hash_for_handler`) must go through this helper so the hash
-/// they compute is identical to what the proc-macro will compute at compile
-/// time.
+/// Read the spec source — file or directory of fragments — as one string,
+/// joined in the loader's sorted-path order. Raw-text consumers (e.g.
+/// `spec_hash_for_handler`) MUST use this so their hash matches what the
+/// proc-macro computes at compile time.
 pub fn read_spec_source(path: &Path) -> Result<String> {
     if path.is_dir() {
         let mut files = Vec::new();
@@ -2164,11 +1829,8 @@ fn collect_qedspec_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Resul
     Ok(())
 }
 
-/// Generate the full list of expected properties with intent descriptions.
-/// Returns (property_name, intent_description, optional_suggestion).
-///
-/// Uses the unified `spec.handlers` to work across all target types.
-/// Also preserves legacy paths for CPI, invariants, and property preservation.
+/// Expected properties as (property_name, intent_description, optional_suggestion).
+/// Works off unified `spec.handlers` across all target types.
 fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>)> {
     let mut props = Vec::new();
 
@@ -2252,16 +1914,12 @@ fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>
 
 /// Check whether a property is proven, sorry, or missing in the proof content.
 fn check_property_status(property_name: &str, proof_content: &str) -> Status {
-    // The property name uses dots (e.g., "Initialize.rejects_wrong_data_len").
-    // Proofs may use either dots (DSL-generated sorry stubs) or underscores
-    // (proof namespace, e.g., "initialize_rejects_wrong_data_len").
-    // Also handle «»-quoted names (e.g., «initialize».rejects_wrong_data_len).
-    // For hand-written proofs, also try the bare name without prefix
-    // (e.g., "init_rejects_wrong_data_len" or just "rejects_wrong_data_len").
+    // Property names use dots ("Initialize.rejects_wrong_data_len"); proofs
+    // may use dots, underscores, «»-quoted names, or (hand-written) the bare
+    // name without prefix.
     let leaf = property_name;
     let leaf_underscore = property_name.replace('.', "_");
 
-    // Try dot form, underscore form, and «»-quoted form
     let escaped_dot = regex::escape(leaf);
     let escaped_under = regex::escape(&leaf_underscore);
     // For «»-quoted: initialize.access_control → «initialize»\.access_control
@@ -2276,10 +1934,8 @@ fn check_property_status(property_name: &str, proof_content: &str) -> Status {
         escaped_dot.clone()
     };
 
-    // Also try the bare property name without instruction prefix, but with word boundary
-    // e.g., "Initialize.rejects_wrong_data_len" → match "theorem rejects_wrong_data_len"
-    // This handles hand-written proofs that don't use namespace prefixes.
-    // We also try a lowercase prefix match: "Initialize.X" → "init_X" or "initialize_X".
+    // Bare name without instruction prefix (hand-written proofs), plus
+    // lowercase prefix forms: "Initialize.X" → "init_X" / "initialize_X".
     let extra_patterns = if quoted.len() == 2 {
         let prefix = quoted[0].to_lowercase();
         let short_prefix = if prefix.len() > 4 {
@@ -2322,7 +1978,6 @@ fn check_property_status(property_name: &str, proof_content: &str) -> Status {
         None => rest, // last theorem in file
     };
 
-    // Check for sorry or trivial placeholder in just this theorem's body
     if body.contains("sorry") || body.contains(":= trivial") {
         return Status::Sorry;
     }
@@ -2367,56 +2022,49 @@ pub enum Severity {
 /// Structured as data so the agent can reason about it and present it clearly.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Counterexample {
-    /// The property that breaks
     pub property: String,
-    /// The handler that breaks it
     pub handler: String,
-    /// Pre-state field values (boundary case where invariant barely holds)
+    /// Pre-state field values (boundary case where invariant barely holds).
     pub pre_state: Vec<(String, i64)>,
-    /// The invariant expression evaluated on pre-state (e.g., "3 ≤ 3")
+    /// Invariant evaluated on pre-state (e.g., "3 ≤ 3").
     pub pre_check: String,
-    /// Effects applied (e.g., ["member_count -= 1"])
+    /// Effects applied (e.g., ["member_count -= 1"]).
     pub effects: Vec<String>,
-    /// Post-state field values
     pub post_state: Vec<(String, i64)>,
-    /// The invariant expression evaluated on post-state (e.g., "3 ≤ 2")
+    /// Invariant evaluated on post-state (e.g., "3 ≤ 2").
     pub post_check: String,
-    /// Whether the invariant holds after the operation
     pub invariant_holds: bool,
 }
 
 /// A structured fix option for a lint warning.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FixOption {
-    /// Short label (e.g., "Add guard", "Strengthen property", "Add compensating effect")
+    /// Short label (e.g., "Add guard", "Strengthen property").
     pub label: String,
-    /// Explanation of why this fix works
     pub rationale: String,
-    /// The concrete DSL code to add/change
+    /// Concrete DSL code to add/change.
     pub snippet: String,
 }
 
 /// A spec completeness finding — structured for agent consumption.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CompletenessWarning {
-    /// Rule identifier (e.g., "no_access_control", "unguarded_arithmetic")
+    /// Rule identifier (e.g., "no_access_control", "unguarded_arithmetic").
     pub rule: String,
     pub severity: Severity,
-    /// Priority: 1=security, 2=correctness, 3=completeness, 4=quality, 5=polish
+    /// 1=security, 2=correctness, 3=completeness, 4=quality, 5=polish.
     pub priority: u8,
     pub message: String,
-    /// The operation or field this warning relates to
+    /// The operation or field this warning relates to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    /// Concrete fix the agent can offer to apply
+    /// Concrete fix the agent can offer to apply.
     pub fix: String,
-    /// Example DSL snippet showing the fix
+    /// Example DSL snippet showing the fix.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<String>,
-    /// Structured counterexample (when applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counterexample: Option<Counterexample>,
-    /// Structured fix options (when applicable)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub fix_options: Vec<FixOption>,
@@ -2567,7 +2215,6 @@ fn reachable_lifecycle_states(spec: &ParsedSpec) -> std::collections::HashSet<St
 /// Look up the declared type of a field, checking the handler's target account
 /// first, then falling back to the global state_fields.
 fn find_field_type(spec: &ParsedSpec, op: &ParsedHandler, field: &str) -> Option<String> {
-    // Check the handler's target account type first
     if let Some(ref acct_name) = op.on_account {
         if let Some(acct) = spec.account_types.iter().find(|a| a.name == *acct_name) {
             if let Some((_, t)) = acct.fields.iter().find(|(n, _)| n == field) {
@@ -2575,7 +2222,6 @@ fn find_field_type(spec: &ParsedSpec, op: &ParsedHandler, field: &str) -> Option
             }
         }
     }
-    // Fall back to global state fields
     spec.state_fields
         .iter()
         .find(|(n, _)| n == field)
@@ -2589,7 +2235,6 @@ fn parse_property_relation<'a>(
     expr: &'a str,
     prop_fields: &[&'a str],
 ) -> Option<(&'a str, &'a str, &'a str)> {
-    // Look for common relational operators in the Lean-form expression
     for op in &[" ≤ ", " ≥ ", " < ", " > ", " = "] {
         if let Some(pos) = expr.find(op) {
             let lhs = &expr[..pos];
@@ -2617,7 +2262,6 @@ fn parse_property_relation<'a>(
     None
 }
 
-/// Build a structured counterexample showing why a handler breaks a property.
 /// True iff any of the handler's `requires` clauses textually reference any
 /// of the named property fields (as `state.<f>` or `s.<f>` with a word
 /// boundary on the trailing side, so `state.x` doesn't match `state.xyz`).
@@ -2661,7 +2305,6 @@ fn build_counterexample(
 ) -> Option<Counterexample> {
     let relation = parse_property_relation(expr, prop_fields);
 
-    // Collect effects on modified fields
     let effect_triples: Vec<(&str, &str, &str)> = op
         .effects
         .iter()
@@ -2675,13 +2318,11 @@ fn build_counterexample(
 
     let (lhs, op_sym, rhs) = relation?;
 
-    // Transition property (`<post> op old(<pre>)`): the post side renders
-    // `s'.<field>`, the `old(...)` side `s.<field>` (unprimed). The handler's
-    // effect mutates only the post side; the `old(...)` side is frozen at the
-    // pre-state snapshot. Without this, the effect lands on whichever side's
-    // field name matches first — inverting `counter ≥ old(counter)` into a
-    // bogus `old(counter) ≥ counter` violation. Detect per-side frozen-ness by
-    // re-splitting the raw expr at the operator.
+    // Transition property: the post side renders `s'.<field>`, the `old(...)`
+    // side `s.<field>` (frozen at the pre-state snapshot). Without per-side
+    // frozen-ness detection the effect would land on whichever side's field
+    // name matches first — inverting `counter ≥ old(counter)` into a bogus
+    // violation.
     let is_transition = expr.contains("s'.");
     let (lhs_frozen, rhs_frozen) = if is_transition {
         let mut split = (false, false);
@@ -2730,7 +2371,6 @@ fn build_counterexample(
 
     let pre_check = format!("{} {} {}", lhs_val, op_sym, rhs_val);
 
-    // Apply each effect
     let mut post_lhs = lhs_val;
     let mut post_rhs = rhs_val;
     let mut effects = Vec::new();
@@ -2898,13 +2538,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         .map(|(n, _)| n.as_str())
         .unwrap_or("authority");
 
-    // v2.24 S5c: variant index for `Variant.field` LHS normalization.
-    // Built once and consumed by every effect-LHS lint (unused_field,
-    // write_without_read, undeclared_state_field_in_effect) so the
-    // variant prefix is stripped before comparing against bare field
-    // names. Maps variant name → fields declared in that variant's
-    // payload. Empty when no account type has variants (single-record
-    // specs are unaffected).
+    // Variant index for `Variant.field` LHS normalization, shared by every
+    // effect-LHS lint so the variant prefix is stripped before comparing
+    // against bare field names. Maps variant name → its payload fields;
+    // empty when no account type has variants.
     let mut variant_fields: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     for acct in &spec.account_types {
@@ -2915,10 +2552,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             }
         }
     }
-    // Normalize an effect LHS string by stripping a leading
-    // `Variant.` prefix when the variant is a known multi-variant ADT
-    // payload. `Active.pool` → `pool`; `accounts[i].cap` → unchanged;
-    // `pool` → unchanged. Borrows the map so the closure stays cheap.
+    // Strip a leading `Variant.` prefix when it names a known variant:
+    // `Active.pool` → `pool`; `accounts[i].cap` / `pool` → unchanged.
     let normalize_lhs = |lhs: &str| -> String {
         if let Some(dot) = lhs.find('.') {
             let head = &lhs[..dot];
@@ -2929,15 +2564,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         lhs.to_string()
     };
 
-    // v2.33: `pragma state_repr = adt` selects the inductive multi-variant
-    // State representation, whose generated transitions return
-    // `Err(WrongState)` on a variant-mismatch fallthrough. Without that
-    // error variant declared, the emitted Rust references an undeclared
-    // symbol and fails to compile. Before v2.33 the two were coupled —
-    // declaring `WrongState` was *itself* the ADT opt-in — so this gap
-    // could not arise; the explicit pragma makes it possible, hence the
-    // lint. (The failure is loud at `cargo check`, not silent; this just
-    // surfaces it at spec-check time with a clear fix.)
+    // ADT-state transitions return `Err(WrongState)` on a variant-mismatch
+    // fallthrough; without that error variant declared the emitted Rust
+    // fails to compile. The failure is loud at `cargo check` — this lint
+    // just surfaces it at spec-check time with a clear fix.
     if spec.state_repr_is_adt()
         && spec
             .account_types
@@ -2959,7 +2589,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         });
     }
 
-    // Issue #67 item 3 — ghost-variable validation.
+    // Ghost-variable validation.
     if !spec.ghosts.is_empty() {
         let scalar = |t: &str| {
             matches!(
@@ -3044,7 +2674,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // Issue #67 item 4 — hook validation.
+    // Hook validation.
     if !spec.hooks.is_empty() {
         // Lean enforcement is deferred (lands with qedsvm); hooks are
         // currently checked only in the Kani / proptest harnesses.
@@ -3134,10 +2764,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     }
 
     for op in &spec.handlers {
-        // v2.7 G4: `auth X` and `permissionless` are mutually exclusive — one
-        // declares who can call, the other declares "anyone can call." Both
-        // at once is contradictory; surface as a P1 warning, not silent
-        // precedence of one over the other.
+        // `auth X` and `permissionless` are contradictory; surface as P1
+        // rather than silently letting one take precedence.
         if op.permissionless && op.who.is_some() {
             warnings.push(CompletenessWarning {
                 rule: "contradictory_auth".to_string(),
@@ -3156,11 +2784,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             });
         }
 
-        // Rule 1: handler without who:
-        //   - pre-v2.7: always warned
-        //   - v2.7 G4: skip when the handler declares `permissionless` —
-        //     the user has made an explicit opt-in, this is no longer
-        //     a missing declaration.
+        // Rule 1: handler without `auth`. Skipped for `permissionless` —
+        // an explicit opt-in, not a missing declaration.
         if op.who.is_none() && !op.permissionless {
             warnings.push(CompletenessWarning {
                 rule: "no_access_control".to_string(),
@@ -3208,10 +2833,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             });
         }
 
-        // Rule 3: add effect without explicit overflow bound (type-aware).
-        // Fires per-field: for each add effect, check whether any existing guard/requires
-        // mentions both the field name and a bound (<=). Sub effects get auto-guarded
-        // for underflow by codegen, so we only warn about add overflow here.
+        // Rule 3: add effect without explicit overflow bound (type-aware),
+        // per-field. Sub effects get auto-guarded for underflow by codegen,
+        // so only add overflow warns here.
         {
             // Collect all guard text for substring matching
             let all_guards: String = {
@@ -3240,15 +2864,11 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     continue;
                 }
 
-                // v2.24 §S2c: cumulative bound. The user wrote a guard like
-                // `requires state.x + a + b <= U64_MAX`, which logically
-                // bounds both `state.x += a` and `state.x += b` in the
-                // same block, but the strict per-pair patterns above only
-                // match the first additive term. Accept the guard when
-                // the field appears in an additive expression *and* the
-                // effect's RHS appears as a bare word elsewhere in the
-                // same guard string — captures cumulative bounds without
-                // re-parsing the guard.
+                // Cumulative bound: `requires state.x + a + b <= U64_MAX`
+                // bounds both `+= a` and `+= b`, but the per-pair patterns
+                // above only match the first additive term. Accept when the
+                // field appears in an additive expression AND the effect's
+                // RHS appears as a bare word in the same guard string.
                 let field_in_add = [
                     format!("state.{} +", field),
                     format!("s.{} +", field),
@@ -3320,15 +2940,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         if ftype == "Pubkey" {
             continue;
         }
-        // v2.24 #16: a Map / record field is "modified" not just when
-        // it appears as a whole-field LHS, but also when an effect
-        // writes through it via indexing or nested field access.
-        // `accounts[i].active := 1` writes the `accounts` map field;
-        // `pool.balance += amount` writes the `pool` record field.
-        // Pre-fix the lint only matched whole-field LHS, so any
-        // through-indexing write to a Map produced a false-positive
-        // `[P4] unused_field` (~once per Map field on Map-heavy
-        // specs).
+        // A Map / record field counts as modified when written through
+        // indexing or nested access (`accounts[i].active := 1`,
+        // `pool.balance += amount`) — matching only whole-field LHS gave
+        // false-positive `unused_field` on every Map field.
         let modified = spec.handlers.iter().any(|op| {
             op.effects.iter().any(|(f, _, _)| {
                 let lhs = normalize_lhs(f);
@@ -3426,10 +3041,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         if prop.per_slot.is_some() {
             continue;
         }
-        // v2.20 §S1.1: when the new P5 `unsupported_quantifier_shape` lint
-        // fires for this property, skip the legacy `unchecked_quantifier`
-        // — P5 carries strictly more precise information (kind + span) so
-        // double-reporting just clutters the output.
+        // When P5 `unsupported_quantifier_shape` fires, skip the legacy
+        // `unchecked_quantifier` — P5 carries strictly more precise
+        // information (kind + span); double-reporting clutters.
         if prop.quantifier_lint.is_some() {
             continue;
         }
@@ -3500,18 +3114,11 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // P5 (v2.20 §S1.1): quantifier shape unsupported by current codegen.
-    // The chumsky_adapter classifies every property body via
-    // `quantifier::supported_shape`; shapes that can't lower (nested forall,
-    // exists, unbounded `Vec<T>` binder) get a precise reason. We surface
-    // each as a P5 lint so the user sees the exact construct that breaks
-    // codegen instead of finding out via a silent `true` stub later.
-    //
-    // P5 supersedes the legacy `unchecked_quantifier` lint for the shapes
-    // it covers — `unchecked_quantifier` only fires when per_slot is None
-    // (legacy path), so a property with `quantifier_lint = Some(...)` won't
-    // collide with it (per_slot is also None for these unsupported shapes,
-    // but the P5 message is strictly more precise).
+    // P5: quantifier shape unsupported by codegen. The chumsky_adapter
+    // records a precise reason (nested forall, exists, unbounded binder);
+    // surfacing it here shows the exact breaking construct instead of a
+    // silent `true` stub later. Supersedes `unchecked_quantifier` for the
+    // shapes it covers (that lint skips when quantifier_lint is Some).
     for prop in &spec.properties {
         let Some(qlint) = &prop.quantifier_lint else {
             continue;
@@ -3551,24 +3158,14 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         });
     }
 
-    // P6 (v2.20 §S1.3 / v2.21 Slice 3): `Pubkey` state fields used to
-    // crash the proptest / Kani harness because the State struct
-    // dropped them while handler bodies still wrote to them. v2.21
-    // ships Option B from the PRD: `primitive_map(Pubkey, Standalone)`
-    // lowers to `[u8; 32]`, the State struct carries the field, and
-    // proptest's existing 32-byte-array strategy generates it. P6 stays
-    // as an *informational* note so users reading generated code see
-    // the structural lowering documented in the spec.
+    // P6: informational note that `Pubkey` state fields lower structurally
+    // to `[u8; 32]` in the verification State (proptest generates them via
+    // the 32-byte-array strategy).
     //
-    // Scope: every place a Pubkey field can land as state —
-    //   - `account_types[*].fields`        (multi-account, structured)
-    //   - `sum_types[*].variants[*].fields`(ADT-as-state payload)
-    //   - `records[*].fields`              (record types referenced from
-    //                                       state; emitted into proptest
-    //                                       via the same map_type pipeline)
-    //
-    // `state_fields` is a flat mirror of the first account type's fields
-    // and is intentionally not scanned here to avoid double-firing.
+    // Scope — every place a Pubkey field can land as state:
+    // `account_types[*].fields`, `sum_types[*].variants[*].fields`, and
+    // `records[*].fields`. `state_fields` is a flat mirror of the first
+    // account type's fields and is intentionally not scanned (double-firing).
     {
         let push_p6 = |warnings: &mut Vec<CompletenessWarning>, holder: &str, field: &str| {
             warnings.push(CompletenessWarning {
@@ -3619,22 +3216,15 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // P7 (v2.21 §S2.7): effect references an undeclared state field. The
-    // failure shape rewards-feedback issue #9 hit was a `state.foo` reference
-    // on the RHS of an effect whose `foo` wasn't declared anywhere in the
-    // spec — codegen emits the access verbatim, Rust then fails at
-    // `cargo test` with `no field "foo" on type "State"` 1000 lines into
-    // the generated harness. P7 catches it at `qedgen check` with a
-    // precise spec-side message.
-    //
-    // The check has two paths:
-    //   (a) LHS — `effect { undeclared := ... }`. The LHS path can be a
-    //       bare field, a nested field, or an indexed field. P7 splits
-    //       on `.`/`[` and checks the root only; nested fields under a
-    //       declared record-typed field elaborate fine downstream.
-    //   (b) RHS — `effect { x := state.undeclared }`. We scan the
-    //       rendered Lean form (the third tuple element) for
-    //       `state.<word>` and check each captured word.
+    // P7: effect references an undeclared state field. Codegen emits the
+    // access verbatim and Rust fails deep inside the generated harness with
+    // `no field "foo" on type "State"`; P7 catches it at `qedgen check` with
+    // a precise spec-side message. Two paths:
+    //   (a) LHS — `effect { undeclared := ... }`: split on `.`/`[` and check
+    //       the root only; nested fields under a declared record-typed field
+    //       elaborate fine downstream.
+    //   (b) RHS — `effect { x := state.undeclared }`: scan the rendered Lean
+    //       form for `state.<word>` and check each captured word.
     {
         // All field names declared anywhere as state. This is permissive
         // (a field that exists in any account variant clears P7 even if
@@ -3706,11 +3296,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             path[..end].to_string()
         };
 
-        // v2.24 S5c: `Variant.field` LHS forms (e.g. `Active.pool := …`)
-        // bind the root to a state ADT variant name, not a field. The
-        // `variant_fields` map (built at the top of this fn) is reused
-        // so the variant index stays consistent across every effect-LHS
-        // lint.
+        // `Variant.field` LHS forms (`Active.pool := …`) bind the root to a
+        // state ADT variant name, not a field; `variant_fields` (built at
+        // the top of this fn) keeps the variant index consistent across
+        // every effect-LHS lint.
         let second_seg = |path: &str| -> Option<String> {
             // Read the segment between the first and second separator.
             // `Active.pool` → Some("pool"); `Active.x[i]` → Some("x");
@@ -3739,13 +3328,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 if root.is_empty() || declared.contains(&root) {
                     continue;
                 }
-                // v2.24 §S2b: `state := <expr>` is the variant-promotion /
-                // whole-record-assignment form (e.g.
-                // `state := .Active { … }`). `state` here is a binder,
-                // not a field name — flagging it as "undeclared field"
-                // is the false positive surfaced in the v2.22 gist (#2).
-                // The RHS check below still scrutinizes any field
-                // references inside the variant payload.
+                // `state := <expr>` is the variant-promotion /
+                // whole-record-assignment form (`state := .Active { … }`):
+                // `state` is a binder, not a field. The RHS check below
+                // still scrutinizes field references in the payload.
                 if root == "state" {
                     continue;
                 }
@@ -3754,10 +3340,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 if op.name.contains("_case_") || op.name.ends_with("_otherwise") {
                     continue;
                 }
-                // v2.24 S5c: `Variant.field` LHS — the variant name as
-                // the path root is legal in a multi-variant ADT state.
-                // Re-target P7 at segments[0] (the actual field) and
-                // check it against that variant's payload.
+                // `Variant.field` LHS: a variant name as the path root is
+                // legal in a multi-variant ADT state — re-target P7 at the
+                // actual field, checked against that variant's payload.
                 if let Some(variant_payload) = variant_fields.get(&root) {
                     if let Some(field) = second_seg(lhs) {
                         if !variant_payload.contains(&field) && !declared.contains(&field) {
@@ -3846,31 +3431,21 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         if op.has_effect() {
             continue;
         }
-        // ensures-only handlers are deliberate — the spec author has pinned
-        // frame conditions (`ensures state.x == old(state.x)`) instead of
-        // declaring an effect. That's a legitimate shape, not a missing
-        // effect. The lint formerly flagged these as gaps; v2.11+ trusts
-        // the spec author's intent.
+        // ensures-only handlers are deliberate — the author pinned frame
+        // conditions (`ensures state.x == old(state.x)`) instead of an
+        // effect. Legitimate shape, not a gap.
         if !op.ensures.is_empty() {
             continue;
         }
-        // v2.24 #12 — a `call X.handler(...)` (CPI) or a declared
-        // `modifies [field, ...]` clause IS the handler's effect.
-        // The lint pre-fix didn't see these and fired
-        // `[P2] missing_effect` on every CPI-only handler (Token
-        // init / metadata create / close shapes), forcing spec
-        // authors to add fictional state writes or accept the noise.
-        // `transfers` blocks are token movements declared at spec
-        // level; same treatment.
+        // A `call X.handler(...)` (CPI), `transfers` block, or declared
+        // `modifies [...]` IS the handler's effect — firing here on
+        // CPI-only handlers would force fictional state writes.
         if !op.calls.is_empty() || !op.transfers.is_empty() || op.modifies.is_some() {
             continue;
         }
-        // Match-arm aborts: when the parser expands a handler's `match` into
-        // synthetic per-arm handlers (`<parent>_case_<N>`, `<parent>_otherwise`)
-        // the abort arms have no effect by construction. The qed(verified)
-        // codegen reads them off `name.contains("_case_")` /
-        // `ends_with("_otherwise")`; mirror the same convention here so the
-        // lint doesn't fire on shapes the codegen treats as intentional.
+        // Synthetic per-arm handlers (`<parent>_case_<N>`, `_otherwise`)
+        // from `match` expansion have no effect by construction; mirror the
+        // codegen's name convention so the lint doesn't fire on them.
         if op.name.contains("_case_") || op.name.ends_with("_otherwise") {
             continue;
         }
@@ -3964,27 +3539,16 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         });
     }
 
-    // Rule 10: handler has token program in accounts but no transfers
+    // Rule 10: handler has token program in accounts but no transfers.
     //
-    // v2.29 Slice D (#9) — suppress on lifecycle-init handlers that
-    // create a token account. Anchor's `#[account(init,
-    // associated_token::mint = X, associated_token::authority = Y)]` (or
-    // `init, token::authority = Y, token::mint = X`) handles the
-    // SPL Token CPI implicitly via the init macro — no explicit
-    // `transfers` or `call Token.*` is needed.
-    //
-    // v2.29.2 — the v2.29 detection keyed on `pre_status in
-    // {Uninitialized, Empty}` (hardcoded names) and over-fired on any
-    // user spec whose lifecycle ADT named the pre-state differently
-    // (`Uninit`, `Created`, `NotInitialized`, etc.). Switched to a
-    // shape predicate: the pre-state variant carries no payload
-    // fields — exactly the "freshly-created account, no inner state
-    // to read" semantic the suppression was meant for.
-    // State ADT variants live on `account_types[*].variants` (the
-    // multi-variant inner-enum carrier); other declared sum types
-    // (lifecycle enums on non-state records, key types, etc.) live on
-    // `sum_types`. Pull unit variants from both — the suppression
-    // applies whenever the pre-state has no payload fields.
+    // Suppressed on lifecycle-init handlers that create a token account:
+    // Anchor's `#[account(init, token::… / associated_token::…)]` handles
+    // the SPL Token CPI implicitly — no explicit `transfers` / `call
+    // Token.*` needed. Init detection is a shape predicate (pre-state
+    // variant carries no payload fields = freshly-created account), not a
+    // hardcoded name list, which over-fired on specs naming the pre-state
+    // `Uninit` / `Created` / etc. Unit variants come from both
+    // `account_types[*].variants` and `sum_types`.
     let unit_variant_names: std::collections::HashSet<&str> = spec
         .account_types
         .iter()
@@ -4003,16 +3567,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 .as_deref()
                 .map(|s| unit_variant_names.contains(s))
                 .unwrap_or(false);
-            // v2.29.2 — drop the previous `&& has_writable_token_account`
-            // sub-condition. Real specs frequently leave token accounts
-            // bare-typed (`stablecoin_pool : writable`) and let Anchor
-            // resolve the type via `#[account(init,
-            // associated_token::mint = X, associated_token::authority =
-            // Y)]` constraints. Requiring an explicit `type token` on
-            // the writable account didn't add safety — `is_lifecycle_init
-            // && !has_calls()` (the outer guard) is already the
-            // "freshly-created account, no explicit CPI" shape Anchor's
-            // init macro covers implicitly.
+            // No writable-token-account sub-condition: real specs often
+            // leave token accounts bare-typed and let Anchor resolve via
+            // init constraints; `is_lifecycle_init && !has_calls()` already
+            // captures the shape Anchor's init macro covers implicitly.
             if is_lifecycle_init {
                 continue;
             }
@@ -4106,14 +3664,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     // Rule 13: write_without_read — state field written in effects but never read in guards/properties
     {
-        // v2.24 S5c: normalize variant-prefixed LHS forms
-        // (`Active.pool` → `pool`) so the read-match below can find
-        // them in property bodies that reference the bare `pool`.
-        // v2.24 #16: ALSO emit leaf names for nested paths. A LHS
-        // like `accounts[i].fee_credits` indexes-then-writes `accounts`
-        // AND writes `fee_credits` — both should count as "written"
-        // so the lint can match against bare-leaf reads in
-        // properties / requires bodies.
+        // Normalize variant-prefixed LHS (`Active.pool` → `pool`) so the
+        // read-match finds bare references, and emit leaf names for nested
+        // paths: `accounts[i].fee_credits` writes both `accounts` and
+        // `fee_credits` for bare-leaf reads in properties/requires.
         let mut written_fields: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for op in &spec.handlers {
@@ -4133,13 +3687,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 }
             }
         }
-        // Gather every text that might mention a state field. Pre-
-        // v2.24 #16 the lint only consulted the legacy `guard_str`
-        // slot, which modern specs leave as `None` — every requires-
-        // only / property-only / invariant-only read was invisible
-        // to the lint, producing ~30 false-positive `write_without_read`
-        // hits on real specs. Now we scan every requires / ensures /
-        // property body / invariant the spec declares.
+        // Gather every text that might mention a state field — all
+        // requires / ensures / property bodies / invariants, not just the
+        // legacy `guard_str` slot (which modern specs leave `None`,
+        // making reads invisible and the lint false-positive-heavy).
         let mut texts: Vec<&str> = Vec::new();
         for op in &spec.handlers {
             if let Some(ref guard) = op.guard_str {
@@ -4216,7 +3767,6 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     .filter(|s| !s.is_empty())
                     .collect();
 
-                // Parse each conjunct into (field, op, value) triples
                 let parsed: Vec<(usize, &str, &str, i64)> = conjuncts
                     .iter()
                     .enumerate()
@@ -4230,7 +3780,6 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     })
                     .collect();
 
-                // Check if any conjunct is subsumed by another
                 for &(i, field_a, cmp_a, val_a) in &parsed {
                     for &(j, field_b, cmp_b, val_b) in &parsed {
                         if i == j || field_a != field_b {
@@ -4347,16 +3896,12 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         .map(|(f, _, _)| f.as_str())
                         .collect();
                     if !covered_modified.is_empty() {
-                        // Skip when any `requires` clause references a property
-                        // field. The boundary `build_counterexample` picks
-                        // (e.g., lhs=3, rhs=3 for `≤`) is often unreachable in
-                        // practice because of guards the local effect-analyzer
-                        // doesn't model — dedup bitmaps, lifecycle gates,
-                        // signer-bound bounds. If the spec author has bounded
-                        // any property field via a guard, trust them and
-                        // suppress the boundary-only false positive. Real
-                        // bugs (preserved_by claim with no constraining
-                        // guard at all) still fire.
+                        // Skip when any `requires` references a property
+                        // field: the boundary `build_counterexample` picks is
+                        // often unreachable because of guards the local
+                        // analyzer doesn't model (dedup bitmaps, lifecycle
+                        // gates). Trust the author's bound; preserved_by
+                        // claims with NO constraining guard still fire.
                         if requires_constrains_prop_fields(op, &prop_fields) {
                             continue;
                         }
@@ -4422,7 +3967,6 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         }
                     }
 
-                    // Build structured counterexample and fix options for agent consumption.
                     let counterexample = build_counterexample(
                         expr,
                         &prop.name,
@@ -4440,7 +3984,6 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         &modified_prop_fields,
                     );
 
-                    // Compose the human-readable fix string from the first fix option
                     let fix = fix_options.first().map_or_else(
                         || format!(
                             "Add '{}' to property '{}' `preserved_by` with a guard, or restructure the property",
@@ -4470,13 +4013,9 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
     }
 
-    // Rule 17: invariant_no_body — `invariant <name> "..."` declared with
-    // only a doc-string and no `expr` body. Lean codegen lowers this to
-    // `theorem <name> : True := trivial` (vacuous), violating the
-    // `feedback_no_tautological_proofs` policy. Surface the gap at check
-    // time so the spec author closes it before codegen runs. Two of four
-    // shipping examples hit this in the v2.15 audit (escrow `conservation`,
-    // escrow-split `conservation`).
+    // Rule 17: invariant_no_body — doc-string-only invariant. Lean codegen
+    // would lower it to `theorem <name> : True := trivial` (vacuous, banned
+    // by the no-tautological-proofs policy); surface at check time.
     for inv in &spec.invariants {
         if inv.lean_expr.is_none() {
             warnings.push(CompletenessWarning {
@@ -4512,14 +4051,12 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // program is verified." See docs/design/spec-composition.md §2.
     warnings.extend(check_shape_only_cpi(spec));
 
-    // v2.26 Track F: complement to shape_only_cpi — flags declared handlers
-    // with no `ensures` clauses, since the caller's Lean theorem still has
-    // to carry `by sorry` in that case.
+    // Complement to shape_only_cpi: declared handlers with no `ensures`
+    // leave the caller's Lean theorem carrying `by sorry`.
     warnings.extend(check_cpi_no_callee_ensures(spec));
 
-    // v2.27 Track B: trust-anchor advisory — surfaces every imported
-    // interface that discharges via Stance-1 axiom because its provider
-    // didn't ship a proof package alongside the qedspec. P2 advisory;
+    // Trust-anchor advisory: imported interfaces discharging via Stance-1
+    // axiom because the provider shipped no proof package. P2 advisory;
     // the caller still gets discharge.
     warnings.extend(check_cpi_unverified_callee(spec));
 
@@ -4527,115 +4064,86 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // to the same on-chain address — a common source of account confusion bugs.
     warnings.extend(check_pda_collisions(spec));
 
-    // v2.8 F8: when a handler uses checked-arithmetic effects (`+=` / `-=`),
-    // the generated Rust references `<ProgramName>Error::MathOverflow`. If
-    // the spec doesn't declare a `MathOverflow` Error variant, the cargo
-    // build will fail loudly. Surface that ahead of time so users see it
-    // at `qedgen check` rather than at `cargo build`.
+    // Checked-arithmetic effects (`+=` / `-=`) make the generated Rust
+    // reference `<ProgramName>Error::MathOverflow`; without that variant
+    // declared, cargo build fails — surface it at check time instead.
     warnings.extend(check_checked_arith_needs_math_overflow(spec));
 
-    // v2.24 §S1d — per-site `or X` overrides or `pragma checked_overflow_error
-    // = X` / `pragma checked_underflow_error = X` referencing variants that
-    // aren't declared in `type Error | …` would also fail cargo build.
+    // Per-site `or X` overrides or checked_overflow/underflow pragmas
+    // referencing undeclared Error variants would also fail cargo build.
     warnings.extend(check_unknown_error_variant(spec));
 
-    // v2.16: opt-in non-default arithmetic (`+=?` / `-=?` wrapping or `+=!`
-    // / `-=!` saturating) is a spec-authoring concern that needs surfacing
-    // but isn't reproducible from the spec alone. Demoted from `qedgen
-    // probe` to `qedgen check` per the reproducer-only probe contract.
+    // Opt-in non-default arithmetic (`+=?`/`-=?` wrapping, `+=!`/`-=!`
+    // saturating) needs surfacing but isn't reproducible from the spec
+    // alone — lives in check, not probe (reproducer-only probe contract).
     warnings.extend(check_wrapping_arithmetic_opt_in(spec));
 
-    // v2.10 — spec-authoring lints covering the security shapes the
-    // v2.10 post-codegen audit caught. See
-    // `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` for the full proposal and
-    // the auditor-finding mapping.
+    // Spec-authoring lints for post-codegen-audit security shapes. See
+    // `docs/prds/SPEC-AUTHORING-LINTS-v2.10.md` for the auditor-finding mapping.
     warnings.extend(check_unbound_auth(spec));
     warnings.extend(check_unguarded_indexed_mutation(spec));
     warnings.extend(check_scalar_counter_no_dedup(spec));
     warnings.extend(check_unguarded_terminal_transition(spec));
     warnings.extend(check_unconditional_value_transfer(spec));
 
-    // v2.21 §S2.1 — flag bare same-named field references in multi-ADT
-    // specs. Lint-only; user qualifies or splits the property.
+    // Flag bare same-named field references in multi-ADT specs.
+    // Lint-only; user qualifies or splits the property.
     warnings.extend(check_cross_adt_field_ambiguity(spec));
 
-    // v2.23 Slice 5 — vacuous_property_lowering defense-in-depth lint.
-    // Catches codegen-induced tautologies (Expr::Old(_) in source AST +
-    // identical sides in rendered Rust — the finding 001 bug class), plus
-    // unconditional rules for the unsupported-quantifier marker and
-    // literal `true` bodies. Author-written tautologies (no `Expr::Old`
-    // in AST) translate faithfully and are silently accepted.
+    // vacuous_property_lowering: codegen-induced tautologies, the
+    // unsupported-quantifier marker, and literal `true` bodies.
+    // Author-written tautologies are silently accepted.
     warnings.extend(check_vacuous_property_lowering(spec));
 
-    // v2.23 Slice 1b — `old_in_single_state_context`. Walks every
-    // `requires` clause and every `invariant` body, looking for
-    // `Expr::Old(_)`. Fires P1 with a fix-it diagnostic. `requires` /
-    // `invariant` describe a single state and have no "old" value to
-    // reference; the construct is a category error.
+    // `old(...)` inside `requires` / `invariant` is a category error —
+    // both describe a single state with no "old" value. P1 with fix-it.
     warnings.extend(check_old_in_single_state_context(spec));
 
-    // v2.24.2 — `type Error = { … }` (record brace form) parses
-    // cleanly but produces no error variants, so every downstream
-    // consumer that expects `spec.error_codes` to be populated
-    // breaks silently. Fire a P0 with a fix-it pointing at the
-    // pipe form.
+    // `type Error = { … }` (record brace form) parses cleanly but yields no
+    // error variants, silently breaking every `error_codes` consumer. P0.
     warnings.extend(check_error_declared_as_record(spec));
 
-    // v2.24.x Phase A.5 — `modifies [X]` declared, X not written in
-    // `effect { ... }`, and no `ensures` clause references X. The
-    // field is completely unconstrained: Lean frame proofs allow any
-    // post-value (X is in modifies), the Rust impl-fill site has
-    // nothing to verify against. Either spec'd intent is missing or
-    // the modifies clause is wrong. Fire P0.
+    // `modifies [X]` with no effect write and no `ensures` reference: the
+    // field is completely unconstrained — Lean frame proofs allow any
+    // post-value, the impl-fill site has nothing to verify against. P0.
     warnings.extend(check_unconstrained_modifies(spec));
 
-    // v2.26 fold-in: ref_impl bodies with potentially-overflowing
-    // arithmetic over bounded-numeric params surface a P2 informational
-    // lint. The Lean side proves on unbounded `Nat`; Rust runs on
-    // bounded `u64`/`i64` where the same expression can wrap or panic.
-    // Bounded-arith verification lives in Kani; the same predicate
-    // drives the impl-targeted Kani auto-trigger.
+    // ref_impl bodies with potentially-overflowing arithmetic over bounded
+    // numerics: Lean proves on unbounded `Nat`; Rust runs on `u64`/`i64`
+    // where the same expression can wrap or panic. Bounded-arith
+    // verification lives in Kani; the same predicate drives the
+    // impl-targeted Kani auto-trigger.
     warnings.extend(check_ref_impl_unbounded_arith(spec));
 
-    // v2.26 Track J: when a handler makes ≥2 CPI calls whose substituted
-    // ensures reference the SAME caller-state field, both `kani::assume`
-    // lines fire at the same splice point against one (pre, post)
-    // snapshot pair, which can over-constrain. Lint surfaces the
-    // structural gap; per-call snapshot frames is v3.0-class.
+    // ≥2 CPI calls whose substituted ensures reference the SAME caller-state
+    // field: both `kani::assume` lines fire at one splice point against one
+    // (pre, post) snapshot pair, which can over-constrain. Per-call snapshot
+    // frames is v3.0-class.
     warnings.extend(check_multi_cpi_same_field(spec));
 
-    // Sort by priority (ascending), then by rule name for stability
+    // Sort by priority (ascending), then by rule name for stability.
     warnings.sort_by(|a, b| a.priority.cmp(&b.priority).then(a.rule.cmp(&b.rule)));
 
     warnings
 }
 
-/// v2.23 Slice 5 — defense-in-depth lint that catches three vacuous-
-/// property-body shapes in the *rendered Rust*:
+/// Defense-in-depth lint for three vacuous-property-body shapes in the
+/// *rendered Rust*:
 ///
-/// 1. **Codegen-induced tautology (P1, AST-gated).** Property's AST body
-///    contains `Expr::Old(_)` *and* `rust_expression` reduces to
-///    `<expr> cmp <expr>` with structurally identical sides. This is the
-///    001 bug class — the spec carried temporal content, codegen dropped
-///    the marker, both sides collapsed to the same path. Pre-v2.23 this
-///    fired routinely; post-Slices 2-4 it should be unreachable from
-///    codegen and remains as a regression net.
+/// 1. **Codegen-induced tautology (P1, AST-gated).** AST body contains
+///    `Expr::Old(_)` AND `rust_expression` reduces to `<expr> cmp <expr>`
+///    with structurally identical sides — the temporal marker was dropped
+///    during lowering. Should be unreachable from current codegen; kept as
+///    a regression net.
 /// 2. **Unsupported-quantifier marker (P1).** `rust_expression` contains
-///    `QEDGEN_UNSUPPORTED_QUANTIFIER`. Stronger sibling of the legacy
-///    `unsupported_quantifier_shape` (which only fires when `per_slot`
-///    is `None`); this one fires regardless of `per_slot`. The marker
-///    means codegen emitted a stub `true` body — any harness sitting on
-///    top is vacuous.
-/// 3. **Literal `true` body (P1).** `rust_expression` is the literal
-///    token `true` (post-trim). Catches any other codegen path that
+///    `QEDGEN_UNSUPPORTED_QUANTIFIER` — codegen emitted a stub `true` body.
+///    Unlike `unsupported_quantifier_shape`, fires regardless of `per_slot`.
+/// 3. **Literal `true` body (P1).** Catches any other codegen path that
 ///    short-circuited to a constant.
 ///
-/// **Author-written tautologies are silently accepted.** A property
-/// whose AST has no `Expr::Old(_)` and whose body renders to
-/// `<expr> cmp <expr>` with identical sides is an authored choice (see
-/// `pool.qedspec:660-662 admin_field_tracked` — the "field tracking"
-/// pattern). Rule 1 gates on `Expr::Old(_)` presence precisely so this
-/// case passes silently.
+/// **Author-written tautologies are silently accepted**: no `Expr::Old(_)`
+/// in the AST + identical sides is an authored choice (the "field tracking"
+/// pattern). Rule 1 gates on `Expr::Old(_)` precisely so this passes.
 fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for prop in &spec.properties {
@@ -4691,11 +4199,9 @@ fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning
             continue;
         }
 
-        // Rule 1 — AST-gated: temporal marker present in source AND
-        // rendered body is `<expr> cmp <expr>` with identical sides.
-        // Without the AST gate, this would fire on author-written
-        // tautologies (e.g. pool.qedspec:660 `state.admin == state.admin`
-        // as a field-tracking pattern), which the lint must not override.
+        // Rule 1 — AST-gated; without the gate this would fire on
+        // author-written tautologies (`state.admin == state.admin`
+        // field-tracking), which the lint must not override.
         let Some(ast) = &prop.ast_body else {
             continue;
         };
@@ -4730,16 +4236,11 @@ fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning
     warnings
 }
 
-/// v2.23 Slice 5 helper. Split a rendered Rust comparison expression
-/// `<lhs> <op> <rhs>` at the top-level comparison operator into its
-/// three pieces. Returns `None` if the expression isn't a top-level
-/// comparison. String-level only — no AST round-trip.
-///
-/// Top-level means: not inside parens, not inside angle-bracketed
-/// generic args (`Vec<...>`), not inside `[...]` indices. We scan
-/// left-to-right and track paren / bracket depth; the first comparison
-/// operator at depth 0 is the split. Operators tried in priority order
-/// so `==`/`!=`/`<=`/`>=` are matched before `<`/`>`.
+/// Split a rendered Rust comparison `<lhs> <op> <rhs>` at the top-level
+/// comparison operator (string-level, no AST). Top-level = not inside
+/// parens, generic args (`Vec<...>`), or `[...]` indices; first depth-0
+/// comparison wins, with `==`/`!=`/`<=`/`>=` matched before `<`/`>`.
+/// `None` if the expression isn't a top-level comparison.
 fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
     let bytes = expr.as_bytes();
     let mut depth: i32 = 0;
@@ -4834,25 +4335,13 @@ fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
     None
 }
 
-/// v2.23 Slice 1b — `old_in_single_state_context`. Walks every
-/// `requires` clause (across handlers + interface handlers) and every
-/// `invariant` body looking for `Expr::Old(_)`. Fires P1 with a fix-it
-/// diagnostic pointing the author at `ensures` / `property` as the
-/// right construct for transition-time obligations.
-///
-/// `requires` describes a precondition on the pre-state — no transition
-/// has happened yet, so there is no "old" value. `invariant` is a
-/// single-state predicate; the binary form is `property … preserved_by …`.
-/// Both misuses are category errors; today Lean renders them as
-/// guillemet-quoted `«old(...)»` (which type-fails downstream) and Rust
-/// silently drops the marker. The lint surfaces both uniformly.
-///
-/// Synthetic requires (prior-arm negations, abort `requires false` from
-/// match-arm desugaring) carry `ast_body: None` and are skipped — they
-/// have no source to fix.
-///
-/// Bundled-corpus audit (2026-05-20, PRD-v2.23 Slice 1b): 0 of 45 specs
-/// use this pattern. The lint breaks no current example.
+/// `old_in_single_state_context`: P1 when `Expr::Old(_)` appears in a
+/// `requires` clause or `invariant` body. Both describe a single state —
+/// no transition has happened, so there is no "old" value; the right
+/// constructs are `ensures` / `property … preserved_by …`. Left alone,
+/// Lean renders guillemet-quoted `«old(...)»` (type-fails downstream) and
+/// Rust silently drops the marker. Synthetic requires (match-arm
+/// desugaring) carry `ast_body: None` and are skipped — no source to fix.
 fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
@@ -4881,17 +4370,11 @@ fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<CompletenessWarni
     warnings
 }
 
-/// v2.24.2 — when a user writes `type Error = { InvalidAmount : U64, ... }`
-/// (record brace form) the parser accepts it as a `Record` named `Error`
-/// but `error_codes` ends up empty. Every downstream consumer that
-/// matches against error variants (e.g. `WrongState` gate,
-/// `MathOverflow` check) then misbehaves silently because the lookup
-/// returns no match.
-///
-/// Fire a P0 error pointing at the pipe form. Detected by walking
-/// `spec.records` for a record named "Error" alongside an empty
-/// `error_codes`. We also fire when both forms are declared (the
-/// record shadows nothing but signals user confusion).
+/// `type Error = { ... }` (record brace form) parses as a `Record` named
+/// `Error` with `error_codes` left empty, so every error-variant consumer
+/// (`WrongState` gate, `MathOverflow` check) misbehaves silently. P0
+/// pointing at the pipe form; also fires when both forms are declared
+/// (signals user confusion).
 fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let has_error_record = spec.records.iter().any(|r| r.name == "Error");
@@ -4931,26 +4414,11 @@ fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning>
     warnings
 }
 
-/// v2.24.x Phase A.5 — `unconstrained_modifies`: fires when a field
-/// appears in a handler's `modifies [...]` list but neither
-///   - the `effect { ... }` block writes to it, nor
-///   - any `ensures` clause references it.
-///
-/// The field is *completely unconstrained*: Lean frame conditions
-/// allow any post-value (the field is in modifies, so no frame axiom
-/// pins it equal to pre); the Rust impl-fill site (codegen emits a
-/// `todo!()` for unfilled-modifies fields) has no spec contract to
-/// satisfy; Kani / proptest harnesses have no `ensures` to assert.
-///
-/// Two ways out: add an `ensures` clause that constrains the
-/// post-value (the canonical "Kani checks impl" pattern), or remove
-/// the field from `modifies` (it wasn't really being modified).
-/// v2.26 fold-in — predicate shared with `kani_impl::spec_triggers_impl_harness`.
-/// True iff a ref_impl carries arithmetic that could overflow when lowered to
-/// bounded Rust types, even though the Lean lowering on `Nat`/`Int` cannot.
-/// Used both as a lint trigger and as an auto-trigger for the impl-targeted
-/// Kani harness so spec authors don't ship a ref_impl-bearing spec without
-/// the bit-width-bounded verification surface running.
+/// Predicate shared with `kani_impl::spec_triggers_impl_harness`: true iff
+/// a ref_impl carries arithmetic that could overflow on bounded Rust types
+/// (the Lean lowering on `Nat`/`Int` cannot). Used as both a lint trigger
+/// and the impl-targeted Kani auto-trigger so ref_impl-bearing specs always
+/// get the bit-width-bounded verification surface.
 pub fn ref_impl_has_overflow_risk(r: &ParsedRefImpl) -> bool {
     let has_numeric_io = std::iter::once(&r.return_type)
         .chain(r.params.iter().map(|(_, t)| t))
@@ -5088,18 +4556,11 @@ fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     warnings
 }
 
-/// v2.26 Track J — extract the set of `pre.<field>` / `post.<field>` field
-/// references from a `rust_expr_binary`-rendered expression.
-///
-/// The chumsky_adapter's binary-mode renderer is the only source of these
-/// tokens: `state.x` → `post.x`, `old(state.x)` → `pre.x`. No other DSL
-/// construct produces a bare `pre.` / `post.` prefix in the binary form, so
-/// a static regex over the textual rendering is sufficient and stable.
-///
-/// "Same field" for the multi-CPI lint normalizes `pre.X` and `post.X` both
-/// to `X` — the Kani impl harness reads both from the same snapshot pair
-/// (`pre_X` / `post_X`), so an over-constraint via `pre.X` in one assume
-/// and via `post.X` in another binds the same locals.
+/// Extract `pre.<field>` / `post.<field>` references from a
+/// `rust_expr_binary`-rendered expression. The binary-mode renderer is the
+/// only source of these tokens, so a static regex is sufficient and stable.
+/// `pre.X` and `post.X` both normalize to `X` — the Kani impl harness reads
+/// both from the same snapshot pair, so either binds the same locals.
 pub fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<String> {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
         // Word-boundary at the start ensures `xpre.foo` doesn't match.
@@ -5112,19 +4573,13 @@ pub fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<Str
     fields
 }
 
-/// v2.26 Track J — per-handler predicate consumed by both `check.rs` (lint
-/// emission) and `kani_impl.rs` (breadcrumb comment above the assume block).
-///
-/// Walks `handler.calls` and, for each unordered pair `(call_i, call_j)`
-/// with `i < j` whose callees both resolve in `spec.interfaces`, runs the
-/// same substitution `kani_impl.rs::emit_cpi_ensures_as_assume` runs and
-/// reports any `pre.X` / `post.X` field reference that appears in both
-/// callees' substituted ensures. Tier-0 callees (empty ensures) contribute
-/// no field refs → silent.
-///
-/// Returns `(call_i_label, call_j_label, shared_field)` triples, one per
-/// shared field per pair. The label format `Iface.handler` mirrors the
-/// CPI-block comment in the generated harness.
+/// Per-handler predicate shared by `check.rs` (lint) and `kani_impl.rs`
+/// (breadcrumb comment). For each unordered call pair whose callees resolve
+/// in `spec.interfaces`, runs the same substitution as
+/// `emit_cpi_ensures_as_assume` and reports `pre.X` / `post.X` references
+/// appearing in both callees' substituted ensures. Tier-0 callees are
+/// silent. Returns `(call_i_label, call_j_label, shared_field)` triples;
+/// label format `Iface.handler` mirrors the harness CPI-block comment.
 pub fn multi_cpi_shared_fields(
     spec: &ParsedSpec,
     handler: &ParsedHandler,
@@ -5210,10 +4665,8 @@ fn disjoint_token_transfer_resources(left: &ParsedCall, right: &ParsedCall) -> b
     left_resources.is_disjoint(&right_resources)
 }
 
-/// v2.26 Track J — P2 informational lint surfacing the multi-CPI ordering
-/// gap. Fires when `multi_cpi_shared_fields` returns at least one entry
-/// for any handler. One warning per shared field per call pair (matches
-/// the predicate's granularity).
+/// P2 informational lint for the multi-CPI ordering gap; one warning per
+/// shared field per call pair.
 fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
@@ -5276,20 +4729,13 @@ fn make_old_in_single_state_warning(
     }
 }
 
-/// v2.8 F8: emit a `[missing_math_overflow]` warning when a spec uses
-/// checked arithmetic effects (`+=` / `-=` lower to `checked_add` /
-/// `checked_sub`, which return `<ProgramName>Error::MathOverflow` /
-/// `::MathUnderflow` on overflow) but the spec's `type Error | …` block
-/// doesn't declare the variant the lowering would reference. Without the
-/// declaration, `cargo build` of the generated code fails with "unknown
-/// variant". Surfacing this at lint time keeps the pre-flight cycle tight.
-///
-/// v2.24 §S1c: extended to consider per-effect overrides (`pool += x or X`)
-/// and pragma defaults (`pragma checked_overflow_error = X`). When an
-/// override or pragma is set, this lint defers to
-/// `check_unknown_error_variant`. The back-compat fallback (spec declares
-/// `MathOverflow` but not `MathUnderflow` → `-=` raises `MathOverflow`)
-/// is honored here so existing specs continue to lint-clean.
+/// `[missing_math_overflow]`: checked effects (`+=` / `-=`) lower to
+/// `checked_add` / `checked_sub` returning `<ProgramName>Error::MathOverflow`
+/// / `::MathUnderflow`; without the variant declared, the generated code
+/// fails `cargo build` with "unknown variant" — surface at lint time.
+/// Per-effect overrides and pragma defaults defer to
+/// `check_unknown_error_variant`. Back-compat fallback honored: declared
+/// `MathOverflow` but not `MathUnderflow` → `-=` raises `MathOverflow`.
 fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let has_overflow = has_decl("MathOverflow");
@@ -5324,9 +4770,8 @@ fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<Completenes
                     if pragma_underflow.is_some() {
                         continue;
                     }
-                    // S1c back-compat: declared MathOverflow but not
-                    // MathUnderflow → `-=` falls back to MathOverflow. Spec
-                    // is fine; don't fire.
+                    // Back-compat: declared MathOverflow but not
+                    // MathUnderflow → `-=` falls back to MathOverflow.
                     if has_underflow {
                         continue;
                     }
@@ -5377,11 +4822,9 @@ fn check_checked_arith_needs_math_overflow(spec: &ParsedSpec) -> Vec<Completenes
     }]
 }
 
-/// v2.24 §S1d — fire `unknown_error_variant` when a per-site `or X` override
-/// or a `pragma checked_overflow_error = X` / `pragma checked_underflow_error
-/// = X` references a variant that isn't declared in `type Error | …`.
-/// Without the declaration, the generated Rust references
-/// `<ProgramName>Error::X` and won't compile.
+/// `unknown_error_variant`: a per-site `or X` override or checked_overflow/
+/// underflow pragma references a variant not declared in `type Error | …` —
+/// the generated Rust references `<ProgramName>Error::X` and won't compile.
 fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let mut warnings = Vec::new();
@@ -5443,23 +4886,17 @@ fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     warnings
 }
 
-/// `[wrapping_arithmetic]` / `[saturating_arithmetic]` — handler effect uses
-/// explicit non-default arithmetic (`+=?` / `-=?` wrapping, or `+=!` / `-=!`
-/// saturating). Default `+=` / `-=` (v2.7 G3 checked semantics) abort on
-/// overflow, which is the safe default. The non-default variants are explicit
-/// user opt-ins:
+/// `[wrapping_arithmetic]` / `[saturating_arithmetic]` — explicit
+/// non-default arithmetic opt-ins (default `+=` / `-=` is checked):
 ///
-/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N. Almost always
-///   wrong on monetary amounts. Severity: Warning, priority 1.
-/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN. Hides bugs that should
-///   propagate as errors. Sometimes legitimate (rate limiters, epoch counters).
-///   Severity: Info, priority 2.
+/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N; almost always
+///   wrong on monetary amounts. Warning, P1.
+/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN, hiding bugs that should
+///   error; sometimes legitimate (rate limiters, epoch counters). Info, P2.
 ///
-/// Demoted from `qedgen probe`'s `arithmetic_overflow_wrapping` finding
-/// (v2.16): the structural pattern is real, but it's a *spec-authoring*
-/// concern, not a reproducible vulnerability. The probe channel ships
-/// reproducer-bearing findings only; this rule is the lint-channel
-/// counterpart. See `feedback_probes_reproducible_only.md`.
+/// Lives in check, not probe: a real structural pattern but a spec-authoring
+/// concern, not a reproducible vulnerability (probe ships reproducer-bearing
+/// findings only).
 fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
@@ -5500,10 +4937,6 @@ fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarnin
     warnings
 }
 
-/// Emit `[shape_only_cpi]` info-level warnings for `call Interface.handler(...)`
-/// sites whose target declares no `ensures`. The call still generates a real
-/// Rust CPI builder; the lint simply makes the proof-side gap explicit so
-/// nobody mistakes a compiling CPI for a verified one.
 /// True iff this handler's `auth X` will be lowered to `has_one = X` by
 /// R25 — that is, `X` is a field on a state account this handler
 /// touches. Used by terminal-transition and value-transfer lints to
@@ -5522,14 +4955,12 @@ fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
 }
 
 // ============================================================================
-// v2.10 spec-authoring lints (audit follow-up)
+// Spec-authoring lints (audit follow-up)
 //
-// These complement codegen fixes R25–R28 by surfacing the *spec shapes*
-// that lead to under-specified auth, value transfer, and lifecycle
-// transitions. Each lint maps 1:1 to a finding from the v2.10 post-codegen
-// audit (.qed/findings/audit-20260427-v210.md). Catching them at
-// `qedgen check` time means routine spec gaps don't have to wait for an
-// auditor invocation.
+// Complement codegen fixes R25–R28 by surfacing the *spec shapes* behind
+// under-specified auth, value transfer, and lifecycle transitions. Each
+// lint maps 1:1 to a post-codegen audit finding; catching them at check
+// time means routine spec gaps don't wait for an auditor invocation.
 // ============================================================================
 
 /// `[cross_adt_field_ambiguity]` — multi-ADT spec has a property whose
@@ -5539,10 +4970,8 @@ fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
 /// expression substring-matches, which silently produces duplicate (and
 /// usually wrong) predicates.
 ///
-/// v2.21 §S2.1 (Option A): lint, don't auto-qualify. Auto-qualification
-/// would silently pick the first-matching ADT, which can wedge invariants
-/// against the wrong State. Surfacing the ambiguity lets the user choose
-/// explicitly.
+/// Lint, don't auto-qualify: auto-qualification would silently pick the
+/// first-matching ADT and can wedge invariants against the wrong State.
 fn check_cross_adt_field_ambiguity(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     if spec.account_types.len() < 2 {
@@ -5692,16 +5121,12 @@ fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         if manually_bound {
             continue;
         }
-        // v2.29.2 — also accept the dotted-auth desugar / cross-program
-        // shape, where the binding clause reads an imported-account
-        // field rather than a state field. Pattern: `<acct>.<field> =
-        // <who>.pubkey` (Lean form) where `<acct>` is a non-signer
-        // account on this handler. Covers both the v2.29.1 `auth
-        // <acct>.<field>` sugar (which `adapt()` rewrites to this
-        // synthesized clause) and the equivalent hand-written
-        // `requires` longhand. Without this escape,
-        // `examples/rust/cross-program-vault/` trips unbound_auth on
-        // the v2.29.1 feature it was meant to showcase.
+        // Also accept the dotted-auth desugar / cross-program shape, where
+        // the binding clause reads an imported-account field: pattern
+        // `<acct>.<field> = <who>.pubkey` (Lean form) with `<acct>` a
+        // non-signer account. Covers both the `auth <acct>.<field>` sugar
+        // (adapt() rewrites it to this synthesized clause) and the
+        // hand-written `requires` longhand.
         let who_pubkey = format!("{who}.pubkey");
         let auth_bound_via_account = handler.requires.iter().any(|r| {
             if !r.lean_expr.contains(&who_pubkey) {
@@ -6040,16 +5465,11 @@ fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarn
     warnings
 }
 
-/// v2.26 Track F lint: `cpi_no_callee_ensures` flags a `call
-/// Interface.handler(...)` site whose interface handler has no
-/// `ensures` clauses. The caller's Lean proof carries a `by sorry` at
-/// the call site (Tier-0 axiomatization) because there's no
-/// post-condition to discharge. Adding an `ensures` clause — even a
-/// trivial one — gives the caller a binding hypothesis after the call.
-///
-/// Distinct from `shape_only_cpi` (v2.24 #15, which flags missing
-/// interface / handler declarations) — this one fires on declared
-/// handlers that simply have no post-condition shape.
+/// `cpi_no_callee_ensures`: flags a call site whose interface handler has
+/// no `ensures` — the caller's Lean proof carries `by sorry` (Tier-0
+/// axiomatization) with no post-condition to discharge. Distinct from
+/// `shape_only_cpi` (missing interface/handler declarations): this fires
+/// on declared handlers that simply have no post-condition shape.
 fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
@@ -6099,23 +5519,14 @@ fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     warnings
 }
 
-/// v2.27 Track B lint: `cpi_unverified_callee` flags a `call
-/// Interface.handler(...)` site whose callee has `ensures` clauses but
-/// no imported proof package alongside the qedspec. The caller still
-/// gets discharge — via the bundled axiom (Stance 1) — but the trust
-/// anchor is "binary matches a hash we pinned" rather than "we have a
-/// proof against the callee's spec."
-///
-/// Fires on:
-/// - Bundled-stdlib builtins (`from "spl"` / `from "system"` /
-///   `from "metaplex"`) in v2.27 — Slice C2 ships proofs in a later
-///   release; until then they're Stance 1.
-/// - External path / github imports whose provider didn't ship
-///   `<source>/.qed/proofs/<Iface>.lean` + `lakefile.lean`.
-///
-/// Suppressed when the resolver detected proofs and populated
-/// `spec.verified_callees`. P2 — advisory, not blocking; `qedgen
-/// verify --require-verified` (Slice D, future) will escalate.
+/// `cpi_unverified_callee`: callee has `ensures` but no imported proof
+/// package. The caller still gets discharge via the bundled axiom (Stance
+/// 1), but the trust anchor is "binary matches a pinned hash" rather than
+/// "we have a proof against the callee's spec." Fires on bundled-stdlib
+/// builtins (no proofs shipped) and external imports without
+/// `<source>/.qed/proofs/<Iface>.lean` + `lakefile.lean`; suppressed when
+/// `spec.verified_callees` has the interface. P2 advisory — `qedgen verify
+/// --require-verified` escalates.
 fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     // Only walk imports — in-spec interfaces declared inline by the
@@ -6187,10 +5598,9 @@ fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     warnings
 }
 
-/// v2.27 Track D2 — one finding per imported interface that
-/// `qedgen verify --require-verified` would reject. Carries enough
-/// context (interface name + fix hint pointing at the expected proof
-/// package shape) for main.rs to render a CRIT line and exit non-zero.
+/// One finding per imported interface that `qedgen verify
+/// --require-verified` would reject; carries enough context for main.rs to
+/// render a CRIT line and exit non-zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct UnverifiedCallee {
@@ -6198,29 +5608,16 @@ pub struct UnverifiedCallee {
     pub fix_hint: String,
 }
 
-/// v2.27 Track D2 — `qedgen verify --require-verified` predicate.
-/// Walks the resolved imports and yields one [`UnverifiedCallee`] per
-/// imported interface that satisfies all of:
-///
-/// - The interface was reached via `import X from "..."` (not declared
-///   inline by the same spec author).
-/// - At least one of its handlers declares non-empty `ensures` clauses
-///   (Tier-1 or Tier-2 — Tier-0 shape-only imports are exempt and
-///   covered by the `cpi_no_callee_ensures` P1 lint instead).
-/// - The resolver did NOT detect a Lake-buildable proof package at
-///   `<source>/.qed/proofs/` (i.e. `spec.verified_callees` doesn't
-///   contain the interface).
-/// - The interface's bundled `upstream { binary_hash }` is NOT the
-///   sentinel `sha256:00…00`. Sentinel-pinned native programs (System)
-///   are documented runtime trust boundaries — their `ensures` are
-///   discharged by the validator itself, not by a proof package, so
-///   counting them as "unverified" would always fail any spec that
-///   imports them.
-///
-/// Mirrors [`check_cpi_unverified_callee`]'s P2 advisory predicate.
-/// Returns an empty vec when every imported interface either ships
-/// proofs, is Tier-0, or is sentinel-pinned native — i.e. the dep graph
-/// is "fully proven" from a Stance-2 standpoint and the gate passes.
+/// `qedgen verify --require-verified` predicate. Yields one
+/// [`UnverifiedCallee`] per imported interface that: was reached via
+/// `import` (not declared inline); has at least one handler with non-empty
+/// `ensures` (Tier-0 shape-only imports are exempt — `cpi_no_callee_ensures`
+/// covers them); is absent from `spec.verified_callees`; and is NOT
+/// sentinel-pinned (`sha256:00…00`). Sentinel-pinned native programs
+/// (System) are documented runtime trust boundaries — their `ensures` are
+/// discharged by the validator itself, so counting them "unverified" would
+/// fail every spec that imports them. Empty vec = dep graph fully proven
+/// from a Stance-2 standpoint; mirrors `check_cpi_unverified_callee`.
 #[allow(dead_code)]
 pub fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
     let import_iface_names: std::collections::HashSet<&str> = spec
@@ -6301,16 +5698,11 @@ fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         call.target_handler, call.target_interface
                     ),
                 ),
-                // v2.24 #15 — pre-fix, this arm fired
-                // `shape_only_cpi` whenever a callee handler had no
-                // `ensures` clause, forcing spec authors to write
-                // `ensures true` on Token init / metadata-create /
-                // close shapes (which have no meaningful input-only
-                // post-condition). The advisory was redundant with
-                // the import-level Tier 0/1/2 signal; dropping it
-                // here removes the tautology-pressure on real specs.
-                // Tier 1 / 2 targets and shape-only Tier 0 targets
-                // all skip the lint.
+                // Declared interface + declared handler: skip, even with no
+                // `ensures`. Firing here pressured authors into `ensures
+                // true` on shapes with no meaningful post-condition (Token
+                // init / metadata-create / close); the import-level Tier
+                // 0/1/2 signal already covers it.
                 _ => continue,
             };
 
@@ -6473,13 +5865,9 @@ fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     let const_names: HashSet<&str> = spec.constants.iter().map(|(n, _)| n.as_str()).collect();
     let record_names: HashSet<&str> = spec.records.iter().map(|r| r.name.as_str()).collect();
-    // v2.24 #20 — enum-typed Map bounds (`Map[AddressField] T`) where
-    // the bound names a sum type that has only unit (no-payload)
-    // variants. One slot per variant — the natural shape for
-    // per-variant PDAs (e.g. one AddressUpdateProposal per
-    // AddressField). Mixed-variant sums (some payload, some unit)
-    // are rejected by the second pass so the slot shape stays
-    // homogeneous.
+    // Enum-typed Map bounds (`Map[AddressField] T`): a unit-only sum type
+    // gives one slot per variant (per-variant PDAs). Mixed-variant sums are
+    // rejected by the second pass so the slot shape stays homogeneous.
     let unit_only_sum_names: HashSet<&str> = spec
         .sum_types
         .iter()
@@ -6493,8 +5881,7 @@ fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     for acct in &spec.account_types {
         for (fname, ftype) in &acct.fields {
             if let FieldTypeShape::Map { bound, inner } = classify_field_type(ftype) {
-                // Rule: bound must be a declared const OR a unit-only
-                // sum type (v2.24 #20).
+                // Rule: bound must be a declared const OR a unit-only sum type.
                 if !const_names.contains(bound) && !unit_only_sum_names.contains(bound) {
                     warnings.push(CompletenessWarning {
                         rule: "map_bound_not_const".to_string(),
@@ -6676,7 +6063,6 @@ pub fn print_coverage_table(matrix: &CoverageMatrix) {
         return;
     }
 
-    // Header row: operation name column + property columns
     let op_col_width = matrix
         .operations
         .iter()
@@ -6692,21 +6078,18 @@ pub fn print_coverage_table(matrix: &CoverageMatrix) {
         .unwrap_or(4)
         .max(4);
 
-    // Print header
     eprint!("{:<width$}", "operation", width = op_col_width + 2);
     for prop in &matrix.properties {
         eprint!(" {:^width$}", prop, width = prop_col_width);
     }
     eprintln!();
 
-    // Separator
     eprint!("{}", "-".repeat(op_col_width + 2));
     for _ in &matrix.properties {
         eprint!("-{}", "-".repeat(prop_col_width));
     }
     eprintln!();
 
-    // Data rows
     for op in &matrix.operations {
         eprint!("{:<width$}", op, width = op_col_width + 2);
         for prop in &matrix.properties {
@@ -6750,10 +6133,8 @@ pub fn check_code_drift(
         "Cargo.toml".to_string(),
     ];
     // src/guards.rs is codegen-owned whenever any handler has a `requires`
-    // / `aborts_if` clause that lowers to runtime guard logic. The previous
-    // version of this list omitted it, so spec changes that should re-emit
-    // guards.rs slipped past `qedgen check --code` reporting "in sync"
-    // even after material guard drift. (GH issue #25.)
+    // / `aborts_if` clause that lowers to runtime guard logic — omitting it
+    // lets material guard drift report "in sync".
     let any_handler_has_guards = spec
         .handlers
         .iter()
@@ -6767,18 +6148,15 @@ pub fn check_code_drift(
     if !spec.error_codes.is_empty() {
         codegen_owned_files.push("src/errors.rs".to_string());
     }
-    // v2.26 Slice 3: ref_impls.rs is codegen-owned whenever the spec
-    // declares any `ref_impl` — the file holds one `pub fn` per impl.
+    // ref_impls.rs is codegen-owned whenever the spec declares any
+    // `ref_impl` — the file holds one `pub fn` per impl.
     if !spec.ref_impls.is_empty() {
         codegen_owned_files.push("src/ref_impls.rs".to_string());
     }
 
     // Per-handler files at `src/instructions/<handler>.rs` are user-owned
-    // (the agent fills the body). Codegen never re-stamps them after the
-    // initial scaffold, so they don't carry an embedded spec-hash. We
-    // still want Missing detection — a handler in the spec without a
-    // corresponding source file is a real gap — but NoHash is the
-    // expected steady state for these files, not a drift signal.
+    // and never re-stamped after the initial scaffold, so NoHash is their
+    // expected steady state, not a drift signal — only Missing matters.
     let user_owned_handler_files: Vec<String> = spec
         .handlers
         .iter()
@@ -6877,16 +6255,12 @@ pub fn check_code_drift(
     Ok(results)
 }
 
-/// Walk user-owned handler source files and flag residual `todo!()` placeholders
-/// that codegen left for the agent to fill.
-///
-/// `cargo check` passes through a `todo!()` because the macro returns `!`, and
-/// the existing drift check only covers codegen-owned files. Without this lint,
-/// a scaffolded program ships with the placeholder business logic intact and
-/// nothing in the spec/code gates catches it. A `todo!()` inside a
-/// `#[qed(verified, ...)]` body means the handler scaffolding is committed but
-/// the events / token transfers / CPIs / non-mechanical effects haven't been
-/// filled. Codegen is the deterministic substrate; the agent owns this fill.
+/// Flag residual `todo!()` placeholders in user-owned handler files.
+/// `cargo check` passes through `todo!()` (returns `!`) and drift detection
+/// only covers codegen-owned files, so without this lint a scaffolded
+/// program ships with placeholder business logic uncaught. A `todo!()`
+/// inside a `#[qed(verified, ...)]` body means events / transfers / CPIs /
+/// non-mechanical effects haven't been filled.
 pub fn check_handler_todos(
     spec: &ParsedSpec,
     code_dir: &std::path::Path,
@@ -7149,7 +6523,7 @@ pub fn check_unified(
         None
     };
 
-    // 4. Lean coverage (existing)
+    // 4. Lean coverage
     let lean_coverage = check(spec_path, proofs_dir)?;
 
     Ok(UnifiedReport {
@@ -7382,11 +6756,9 @@ mod tests {
         }
     }
 
-    // v2.24.2 — `state { fields }` sugar should expose Map-typed
-    // fields to `check_map_and_subscript`. Pre-fix the adapter only
-    // pushed the sugar to `out.records`, leaving `out.account_types`
-    // empty so the lint walked nothing and `subscript_not_map` fired
-    // on every effect LHS that subscripted a sugared Map field.
+    // `state { fields }` sugar must expose Map-typed fields to
+    // `check_map_and_subscript` — otherwise `subscript_not_map` fires on
+    // every effect LHS that subscripts a sugared Map field.
     #[test]
     fn state_sugar_map_field_is_visible_to_subscript_lint() {
         let src = r#"
@@ -7411,15 +6783,8 @@ handler deposit (idx : U64) (amt : U64) {
         );
     }
 
-    // v2.24.2 — `type Error = { ... }` (record brace form) parses
-    // as a Record named "Error" with field declarations rather than
-    // populating `spec.error_codes`. Lint fires with a fix-it
-    // pointing at the pipe form.
-    //
-    // v2.24.x Phase A.5 — `modifies [X]` + no effect write + no
-    // ensures referencing X = completely unconstrained field. Lint
-    // fires P0 telling the author to either constrain via ensures
-    // or remove from modifies.
+    // `modifies [X]` + no effect write + no ensures referencing X =
+    // completely unconstrained field; fires P0.
     #[test]
     fn unconstrained_modifies_lint_fires_on_uncovered_field() {
         let src = r#"
@@ -7483,7 +6848,7 @@ handler deposit (amount : U64) {
     }
 
     // ========================================================================
-    // v2.33 — adt_state_missing_wrong_state lint
+    // adt_state_missing_wrong_state lint
     // ========================================================================
 
     /// `pragma state_repr = adt` selects the inductive representation,
@@ -7540,7 +6905,7 @@ handler open (amount : U64) : State.Uninitialized -> State.Active {
     }
 
     // ========================================================================
-    // v2.26 Track J — multi_cpi_same_field lint
+    // multi_cpi_same_field lint
     // ========================================================================
 
     /// Two CPI calls whose substituted ensures both reference the same
@@ -7814,11 +7179,9 @@ handler init { effect { balance := 0 } }
         );
     }
 
-    /// v2.24 #12 — `call X.handler(...)` (CPI) or `transfers { … }`
-    /// or `modifies [...]` all count as effect-satisfying. Pre-fix
-    /// the lint required an `effect { … }` block specifically and
-    /// fired on CPI-only handlers (Token init / metadata-create /
-    /// close shapes) where state writes are the wrong abstraction.
+    /// `call X.handler(...)`, `transfers { … }`, or `modifies [...]` all
+    /// count as effect-satisfying — the lint must not fire on CPI-only
+    /// handlers where state writes are the wrong abstraction.
     #[test]
     fn test_missing_effect_skips_when_handler_has_only_calls() {
         let mut h = make_handler("init_mint");
@@ -7845,10 +7208,8 @@ handler init { effect { balance := 0 } }
         );
     }
 
-    /// v2.24 #12 — `modifies [field, ...]` is the frame-condition
-    /// shape used by handlers whose effect is "writes one or more of
-    /// these fields but in a way the spec doesn't model further".
-    /// Pre-fix the lint demanded a full `effect { … }` block.
+    /// `modifies [field, ...]` is the frame-condition shape for handlers
+    /// whose writes the spec doesn't model further — must satisfy the lint.
     #[test]
     fn test_missing_effect_skips_when_handler_has_modifies() {
         let mut h = make_handler("opaque_update");
@@ -7946,9 +7307,8 @@ handler init { effect { balance := 0 } }
 
     #[test]
     fn permissionless_skips_no_access_control() {
-        // v2.7 G4: a handler declaring `permissionless` opts out of the P1
-        // `no_access_control` lint. Without the marker, who-less handlers
-        // still fire.
+        // `permissionless` opts out of the P1 `no_access_control` lint;
+        // without the marker, who-less handlers still fire.
         let mut h = make_handler("init_user");
         h.who = None;
         h.permissionless = true;
@@ -8130,11 +7490,9 @@ handler init { effect { balance := 0 } }
 
     #[test]
     fn test_missing_cpi_for_token_context_suppressed_on_lifecycle_init() {
-        // v2.29 Slice D (#9): an `initialize` handler that creates a
-        // writable token account via Anchor's `#[account(init, ...)]`
-        // doesn't need an explicit `transfers` or `call Token.*` block —
-        // the init macro handles the SPL CPI implicitly. The lint must
-        // recognize this shape and stay silent.
+        // An `initialize` handler creating a writable token account via
+        // Anchor's `#[account(init, ...)]` needs no explicit `transfers` /
+        // `call Token.*` — the init macro handles the SPL CPI implicitly.
         let mut h = make_handler("initialize");
         h.pre_status = Some("Uninitialized".to_string());
         h.post_status = Some("Active".to_string());
@@ -8207,14 +7565,10 @@ handler init { effect { balance := 0 } }
 
     #[test]
     fn test_missing_cpi_for_token_context_suppressed_on_non_canonical_init_name() {
-        // v2.29.2 — the v2.29 suppression hardcoded `pre_status in
-        // {Uninitialized, Empty}`. User specs that named the pre-init
-        // variant differently (`Uninit`, `Created`, `NotInitialized`,
-        // `Setup`, ...) tripped the lint spuriously. The shape
-        // predicate keys on "pre-state variant has no payload" and
-        // correctly suppresses regardless of name. Mirror of the
-        // canonical-name test above with `Uninit` substituted; both
-        // must stay silent.
+        // The suppression keys on "pre-state variant has no payload", not
+        // a hardcoded name list — specs naming the pre-init variant
+        // `Uninit` / `Created` / etc. must stay silent too. Mirror of the
+        // canonical-name test above with `Uninit` substituted.
         let mut h = make_handler("initialize");
         h.pre_status = Some("Uninit".to_string());
         h.post_status = Some("Active".to_string());
@@ -8288,16 +7642,10 @@ handler init { effect { balance := 0 } }
 
     #[test]
     fn test_missing_cpi_for_token_context_suppressed_when_no_typed_token_account() {
-        // v2.29.2 — the v2.29.2 suppression required BOTH lifecycle-init
-        // AND at least one writable account with `account_type ==
-        // Some("token")`. Real specs frequently leave token accounts
-        // bare-typed (`stablecoin_pool : writable`) and rely on Anchor's
-        // `#[account(init, associated_token::mint = X, associated_token::
-        // authority = Y)]` constraints to resolve the type at scaffold
-        // time. Pre-v2.29.2 those specs tripped the lint despite shipping
-        // the exact "Anchor init handles SPL implicitly" shape. Drop the
-        // writable-token-account precondition; `is_lifecycle_init && !
-        // has_calls()` is sufficient.
+        // The suppression must not require a writable account typed
+        // `token`: real specs leave token accounts bare-typed and rely on
+        // Anchor's `init, associated_token::*` constraints to resolve the
+        // type. `is_lifecycle_init && !has_calls()` is sufficient.
         let mut h = make_handler("initialize");
         h.pre_status = Some("Uninit".to_string());
         h.post_status = Some("Active".to_string());
@@ -8606,9 +7954,7 @@ handler init { effect { balance := 0 } }
             crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
         let warnings = check_completeness(&spec);
         // A well-formed spec should have zero `Warning`-severity findings.
-        // v2.21 Slice 3 reverts the P6 filter — Pubkey state fields now
-        // lower to `[u8; 32]` in proptest / Kani harnesses, so the lint
-        // fires at `Info` severity only and doesn't appear in this set.
+        // (P6 on Pubkey state fields is Info-only, so it never appears here.)
         let warning_rules: Vec<&str> = warnings
             .iter()
             .filter(|w| w.severity == Severity::Warning)
@@ -8622,10 +7968,9 @@ handler init { effect { balance := 0 } }
     }
 
     // ========================================================================
-    // v2.10 spec-authoring lint regression tests. Each fixture mirrors the
-    // shape of an audit finding from `.qed/findings/audit-20260427-v210.md`.
-    // These guard against the lints silently regressing — if they stop
-    // firing, the audit's recurring spec-shape gaps go uncaught.
+    // Spec-authoring lint regression tests. Each fixture mirrors an audit
+    // finding shape — if the lints stop firing, those recurring spec-shape
+    // gaps go uncaught.
     // ========================================================================
 
     /// Fixture mirroring the percolator-CRIT shape: `auth authority` but
@@ -8678,15 +8023,12 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         );
     }
 
-    /// v2.29.2 — dotted-auth desugar (v2.29.1 `auth <acct>.<field>`)
-    /// synthesizes a `requires <acct>.<field> == <signer>.pubkey else
-    /// Unauthorized` clause and rewrites `who` to the signer name.
-    /// Pre-v2.29.2 the `unbound_auth` lint then read the stripped-down
-    /// `auth <signer>` bare form and falsely flagged it, because the
-    /// "manually bound by requires" escape only matched `s.<field>`
-    /// state references. This regression locks in the imported-account
-    /// shape escape — the fixture is the bundled cross-program-vault's
-    /// `emergency_close` shape distilled to its essence.
+    /// Dotted-auth desugar (`auth <acct>.<field>`) synthesizes a
+    /// `requires <acct>.<field> == <signer>.pubkey else Unauthorized`
+    /// clause and rewrites `who` to the signer name; `unbound_auth` must
+    /// recognize the imported-account binding shape (not just `s.<field>`
+    /// state references) and stay silent. Fixture distills the bundled
+    /// cross-program-vault `emergency_close` shape.
     const DOTTED_AUTH_BOUND_FIXTURE: &str = r#"
 spec Vault
 
@@ -8864,7 +8206,7 @@ handler liquidate : State.Active -> State.Liquidated {
     }
 
     // ========================================================================
-    // v2.0 tests: coverage matrix, write_without_read, circular_lifecycle
+    // Coverage matrix, write_without_read, circular_lifecycle
     // ========================================================================
 
     #[test]
@@ -8876,7 +8218,7 @@ handler liquidate : State.Active -> State.Liquidated {
         assert_eq!(matrix.coverage_pct, 100.0);
         assert!(matrix.gaps.is_empty());
         // 8 handlers: create_vault, propose, approve, reject, execute,
-        // cancel_proposal, add_member (post-v2.10 audit fix), remove_member.
+        // cancel_proposal, add_member, remove_member.
         assert_eq!(matrix.operations.len(), 8);
         assert_eq!(matrix.properties.len(), 2);
     }
@@ -9133,10 +8475,8 @@ handler dec (x : U64) : State.Active -> State.Active {
 
     #[test]
     fn parse_spec_file_surfaces_clear_error_for_missing_path() {
-        // v2.7 G5: a non-existent --spec path used to fall through to the
-        // extension check and emit "Unsupported spec format: ." — confusing
-        // because the file doesn't exist in the first place. Should say so
-        // explicitly.
+        // A non-existent --spec path must say so explicitly instead of
+        // falling through to the extension check ("Unsupported spec format: .").
         let missing = std::path::PathBuf::from("/tmp/does_not_exist_g5.qedspec");
         let err = parse_spec_file(&missing).unwrap_err().to_string();
         assert!(
@@ -9167,21 +8507,13 @@ handler dec (x : U64) : State.Active -> State.Active {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Interface adapter round-trip (v2.5 slice 1)
+    // [shape_only_cpi] lint
     // ──────────────────────────────────────────────────────────────────────
 
-    // ──────────────────────────────────────────────────────────────────────
-    // [shape_only_cpi] lint (v2.5 slice 4)
-    // ──────────────────────────────────────────────────────────────────────
-
-    /// v2.24 #15 — declared Tier-0 interfaces with no `ensures` no
-    /// longer fire `shape_only_cpi`. Pre-fix the lint forced spec
-    /// authors to write `ensures true` tautologies on Token init /
-    /// metadata-create / close handlers that have no meaningful
-    /// input-only post-condition. The Tier 0/1/2 import-level
-    /// signal already documents what kind of contract a call gets.
-    /// The lint still fires for undeclared interfaces / missing
-    /// handlers (real spec bugs).
+    /// Declared Tier-0 interfaces with no `ensures` must not fire
+    /// `shape_only_cpi` — firing would force `ensures true` tautologies on
+    /// handlers with no meaningful post-condition. The lint still fires for
+    /// undeclared interfaces / missing handlers (real spec bugs).
     #[test]
     fn shape_only_cpi_silent_on_declared_tier0_interface() {
         let src = r#"spec Demo
@@ -9262,7 +8594,7 @@ handler pay : State.A -> State.A {
         );
     }
 
-    // ----- v2.27 Track B: cpi_unverified_callee P2 lint -----
+    // ----- cpi_unverified_callee P2 lint -----
 
     #[test]
     fn cpi_unverified_callee_fires_on_unverified_import() {
@@ -9442,7 +8774,7 @@ handler pay_b : State.A -> State.A {
         assert_eq!(ws.len(), 1, "should dedupe across call sites; got: {ws:?}");
     }
 
-    // ----- end Track B -----
+    // ----- end cpi_unverified_callee -----
 
     #[test]
     fn call_clause_populates_handler_calls() {
@@ -9519,10 +8851,9 @@ pragma sbpf {
 
     #[test]
     fn top_level_sbpf_items_now_rejected() {
-        // Platform-specifics (pubkey, instruction, assembly) used to parse
-        // at the top level; v2.5 moves them behind `pragma sbpf { ... }`.
-        // The grammar enforces the discipline so a spec can't quietly mix
-        // them into the core surface.
+        // Platform-specifics (pubkey, instruction, assembly) only parse
+        // behind `pragma sbpf { ... }` — the grammar keeps them out of the
+        // core surface.
         let src = r#"spec T
 
 pubkey TOKEN_PROGRAM [1, 2, 3, 4]
@@ -9534,7 +8865,7 @@ pubkey TOKEN_PROGRAM [1, 2, 3, 4]
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // ML syntax — let...in in expressions (v2.5)
+    // ML syntax — let...in in expressions
     // ──────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -9565,8 +8896,7 @@ handler h (amount : U64) : State.A -> State.A {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Smoke test — items 1 (match) and 2 (ctors) already in the grammar.
-    // Confirms the claim in the v2.5 report.
+    // Smoke test — match and ctors in the grammar.
     // ──────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -9775,10 +9105,9 @@ handler tick : State.Active -> State.Active {
     }
 
     /// Transition property `counter >= old(counter)` preserved by an `add`
-    /// handler must NOT fire. Regression: the counterexample builder used to
-    /// misread the post side (`s'.counter`) as a constant and apply the
-    /// effect to the `old(...)` side, inverting the relation into a bogus
-    /// `old(counter) >= counter` (3 >= 4) violation.
+    /// handler must NOT fire — guards against the counterexample builder
+    /// misreading `s'.counter` as a constant and applying the effect to the
+    /// `old(...)` side (inverting the relation into a bogus violation).
     #[test]
     fn preserved_by_transition_property_silent_when_add_preserves_monotonicity() {
         let spec = crate::chumsky_adapter::parse_str(
@@ -9864,7 +9193,7 @@ handler shrink : State.Active -> State.Active {
         );
     }
 
-    // ----- PDA seed collision (PR #14) -----
+    // ----- PDA seed collision -----
 
     #[test]
     fn pda_seed_collision_fires_for_identical_seeds() {
@@ -9930,7 +9259,7 @@ handler shrink : State.Active -> State.Active {
         );
     }
 
-    // ----- v2.8 F8: missing_math_overflow lint -----
+    // ----- missing_math_overflow lint -----
 
     #[test]
     fn missing_math_overflow_fires_when_checked_arith_used_without_declaration() {
@@ -10001,12 +9330,12 @@ handler clear : State.Active -> State.Active {
         );
     }
 
-    // ----- v2.24 §S1c: -= raises MathUnderflow (with back-compat) -----
+    // ----- -= raises MathUnderflow (with back-compat) -----
 
     #[test]
     fn missing_math_overflow_fires_on_sub_without_underflow_or_overflow() {
-        // Pure `-=` use with neither MathOverflow nor MathUnderflow declared
-        // → fires for MathUnderflow (the v2.24 default for `-=`).
+        // Pure `-=` with neither MathOverflow nor MathUnderflow declared
+        // → fires for MathUnderflow (the default for `-=`).
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Pool
 program_id "11111111111111111111111111111111"
@@ -10034,9 +9363,8 @@ handler withdraw (n : U64) : State.Active -> State.Active {
 
     #[test]
     fn missing_math_overflow_silent_on_sub_with_only_overflow_declared() {
-        // v2.24 §S1c back-compat: declared MathOverflow but not
-        // MathUnderflow → `-=` falls back to MathOverflow. Lint stays
-        // silent; existing pre-v2.24 specs continue building.
+        // Back-compat: declared MathOverflow but not MathUnderflow →
+        // `-=` falls back to MathOverflow; lint stays silent.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Pool
 program_id "11111111111111111111111111111111"
@@ -10057,7 +9385,7 @@ handler withdraw (n : U64) : State.Active -> State.Active {
         );
     }
 
-    // ----- v2.24 §S1d: unknown_error_variant lint -----
+    // ----- unknown_error_variant lint -----
 
     #[test]
     fn unknown_error_variant_fires_on_per_site_override_with_undeclared() {
@@ -10137,7 +9465,7 @@ handler deposit (n : U64) : State.Active -> State.Active {
         );
     }
 
-    // ----- v2.8 G1: import resolution + interface merge -----
+    // ----- import resolution + interface merge -----
 
     #[test]
     fn parse_spec_file_resolves_path_imports_and_merges_interface() {
@@ -10281,7 +9609,7 @@ handler h : State.A -> State.A { effect { x := 1 } }
         assert!(parsed.imports.is_empty());
     }
 
-    // ----- v2.8 G2: qed.lock integration -----
+    // ----- qed.lock integration -----
 
     fn write_simple_path_dep_setup(spec_dir: &std::path::Path) -> std::path::PathBuf {
         std::fs::write(
@@ -10656,14 +9984,11 @@ handler bump : State.Active -> State.Active {
         );
     }
 
-    // ── P6: pubkey_state_field_unsupported (v2.20 §S1.3) ─────────────────
+    // ── P6: pubkey_state_field_unsupported ────────────────────────────────
     //
-    // The bug: pre-v2.20, a State carrying `authority : Pubkey` had that
-    // field silently dropped from the proptest struct while handler bodies
-    // still referenced it — 13 compile errors on `cargo test --test
-    // proptest`. P6 lint-rejects the shape with a workaround pointer so
-    // the user sees the constraint at `qedgen check` time, not at compile
-    // time. Option B (`Pubkey` → `[u8; 32]` lowering) is v2.21.
+    // Guards the structural lowering note: a State carrying
+    // `authority : Pubkey` lowers to `[u8; 32]` in the verification State;
+    // P6 surfaces the lowering at check time.
 
     #[test]
     fn pubkey_state_field_lint_fires_on_account_type() {
@@ -10693,9 +10018,8 @@ handler h : State.Active -> State.Active {
             "message must cite P6 and name the field: {}",
             w.message
         );
-        // v2.21 Slice 3: P6 downgraded from Warning to Info because
-        // Pubkey state fields now lower to `[u8; 32]` automatically;
-        // the lint remains as an informational note about the lowering.
+        // P6 is Info-only: Pubkey state fields lower to `[u8; 32]`
+        // automatically; the lint just documents the lowering.
         assert!(
             w.message.contains("lowered to `[u8; 32]`"),
             "message must describe the lowering: {}",
@@ -10772,7 +10096,7 @@ handler h : State.Active -> State.Active {
         );
     }
 
-    // ── P7: undeclared_state_field_in_effect (v2.21 §S2.7) ────────────────
+    // ── P7: undeclared_state_field_in_effect ──────────────────────────────
 
     #[test]
     fn p7_fires_on_lhs_undeclared_field() {
@@ -10851,10 +10175,9 @@ handler add : State.Active -> State.Active {
 
     #[test]
     fn unguarded_arithmetic_accepts_cumulative_bound_across_multiple_adds() {
-        // v2.24 §S2c: a single `requires state.x + a + b <= U64_MAX`
-        // logically bounds both `state.x += a` and `state.x += b`. Pre-v2.24
-        // the lint only matched per-pair patterns and fired on the second
-        // add. v2.24 accepts the cumulative form.
+        // A single `requires state.x + a + b <= U64_MAX` logically bounds
+        // both `state.x += a` and `state.x += b`; the lint must accept the
+        // cumulative form, not just per-pair patterns.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Pool
 program_id "11111111111111111111111111111111"
@@ -10885,10 +10208,8 @@ handler deposit (a : U64) (b : U64) : State.Active -> State.Active {
 
     #[test]
     fn u64_max_builtin_resolves_in_requires_clause() {
-        // v2.24 §S2d: `U64_MAX` (and friends) are seeded as builtin consts
-        // so users don't have to declare `const U64_MAX = …` per spec.
-        // unguarded_arithmetic's suggestion already references U64_MAX as
-        // if it were a builtin; this aligns the impl with the suggestion.
+        // `U64_MAX` (and friends) are seeded as builtin consts so users
+        // don't have to declare `const U64_MAX = …` per spec.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Pool
 program_id "11111111111111111111111111111111"
@@ -10913,10 +10234,9 @@ handler deposit (n : U64) : State.Active -> State.Active {
 
     #[test]
     fn p7_does_not_fire_on_state_variant_promotion() {
-        // v2.24 §S2b: `state := .Variant { ... }` is the documented
-        // variant-promotion / whole-state-assignment form. Pre-v2.24,
-        // P7 stripped the LHS root and flagged `state` as an undeclared
-        // field. That was the false positive surfaced in the v2.22 gist (#2).
+        // `state := .Variant { ... }` is the documented variant-promotion /
+        // whole-state-assignment form; P7 must not strip the LHS root and
+        // flag `state` as an undeclared field.
         let spec = crate::chumsky_adapter::parse_str(
             r#"spec Lifecycle
 program_id "11111111111111111111111111111111"
@@ -11004,7 +10324,7 @@ handler activate : State.Setup -> State.Active {
         }
     }
 
-    // v2.21 §S2.1 — cross-ADT field-ambiguity lint. Three cases:
+    // Cross-ADT field-ambiguity lint. Three cases:
     //   (a) two ADTs share a field name AND a property references the bare
     //       name → lint fires.
     //   (b) single-ADT spec → never fires (lint short-circuits).
@@ -11130,14 +10450,14 @@ property positive_balance :
     }
 
     // ========================================================================
-    // v2.24 S5b — ParsedAccountType.variants populated for multi-variant ADTs
+    // ParsedAccountType.variants populated for multi-variant ADTs
     // ========================================================================
 
     #[test]
     fn multi_variant_adt_populates_account_variants() {
         // Two-variant state ADT. Flat `fields` view stays the union (first
-        // occurrence wins). `variants` carries the per-variant shape so
-        // S5b codegen can emit `pub enum State { Setup{...}, Active{...} }`.
+        // occurrence wins); `variants` carries the per-variant shape so
+        // codegen can emit `pub enum State { Setup{...}, Active{...} }`.
         let src = r#"spec Multi
 program_id "11111111111111111111111111111111"
 
@@ -11208,16 +10528,16 @@ property pool_nonneg :
     }
 
     // ========================================================================
-    // v2.24 S5c — variant-prefixed effect LHS doesn't false-positive lints
+    // Variant-prefixed effect LHS doesn't false-positive lints
     // ========================================================================
 
     #[test]
     fn variant_prefixed_lhs_passes_all_effect_lints() {
         // `Active.pool := amount` on a multi-variant ADT state must NOT
-        // trigger any of: undeclared_state_field_in_effect (P7 LHS),
-        // write_without_read (Rule 13), unused_field (Rule 4). All three
-        // walked the LHS string assuming the path root was a field name
-        // before S5c — variant prefixes confused them.
+        // trigger undeclared_state_field_in_effect (P7 LHS),
+        // write_without_read (Rule 13), or unused_field (Rule 4) — all
+        // three walk the LHS string and must not treat the variant prefix
+        // as a field name.
         let src = r#"spec MultiVar
 program_id "11111111111111111111111111111111"
 
@@ -11314,7 +10634,7 @@ property pool_nonneg :
     }
 
     // ========================================================================
-    // v2.23 Slice 5 — vacuous_property_lowering lint
+    // vacuous_property_lowering lint
     // ========================================================================
 
     const VPL_SPEC_HEAD: &str = r#"
@@ -11388,11 +10708,9 @@ handler bump (delta : U64) : State.Active -> State.Active {
 
     #[test]
     fn vpl_lint_silent_on_binary_property_post_slice_2() {
-        // A binary property (`old(...)` in body) lowered after Slices 2-4
-        // emits `post.balance >= pre.balance` — distinct sides, no
-        // tautology. The lint should be silent: Slices 2-4 fixed the
-        // underlying bug. (If the lint fires here, it means the
-        // codegen regressed.)
+        // A binary property (`old(...)` in body) lowers to
+        // `post.balance >= pre.balance` — distinct sides, no tautology.
+        // If the lint fires here, codegen regressed.
         let src = format!(
             "{}{}",
             VPL_SPEC_HEAD,
@@ -11438,7 +10756,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
     }
 
     // ========================================================================
-    // v2.23 Slice 1b — old_in_single_state_context lint
+    // old_in_single_state_context lint
     // ========================================================================
 
     const OLD_SSC_SPEC_HEAD: &str = r#"
@@ -11558,7 +10876,7 @@ handler tweak (delta : U64) : State.Active -> State.Active {
     #[test]
     fn old_ssc_lint_silent_on_old_in_property() {
         // `old(...)` inside a `property` body — the right context, must
-        // NOT fire (this is the v2.23 Slices 1-4 happy path).
+        // NOT fire.
         let src = format!(
             "{}{}",
             OLD_SSC_SPEC_HEAD,
@@ -11615,9 +10933,9 @@ property balance_monotonic :
         );
     }
 
-    /// v2.26 fold-in — ref_impl with multiplication over U64 params trips
-    /// the lint. Lean lowers to `Nat` (no overflow); Rust runs `u64 *
-    /// u64` which can wrap or panic.
+    /// ref_impl with multiplication over U64 params trips the lint: Lean
+    /// lowers to `Nat` (no overflow); Rust runs `u64 * u64` which can wrap
+    /// or panic.
     #[test]
     fn ref_impl_with_multiplication_over_u64_fires_unbounded_arith_lint() {
         let src = r#"spec Pool
@@ -11706,7 +11024,7 @@ handler set (amt : U64) {
     }
 
     // ------------------------------------------------------------------
-    // v2.27 Track D2 — collect_require_verified_findings
+    // collect_require_verified_findings
     // ------------------------------------------------------------------
 
     #[test]
@@ -11885,13 +11203,12 @@ handler pay : State.A -> State.A {
         );
     }
 
-    // ----- end Track D2 -----
+    // ----- end collect_require_verified_findings -----
 
     // ------------------------------------------------------------------
-    // v2.27 Track D3 — ParsedSpec.verified_proof_pkgs population.
-    // The runner that shells `lake build` is exercised via the smoke
-    // in /tmp/v227-smoke-b/ (handoff documents the end-to-end check);
-    // this test just pins the resolver→ParsedSpec wiring.
+    // ParsedSpec.verified_proof_pkgs population — pins the
+    // resolver→ParsedSpec wiring (the `lake build` runner is exercised
+    // end-to-end elsewhere).
     // ------------------------------------------------------------------
 
     #[test]
@@ -11973,5 +11290,5 @@ handler h : State.A -> State.A { effect { x := 1 } }
         );
     }
 
-    // ----- end Track D3 -----
+    // ----- end verified_proof_pkgs -----
 }

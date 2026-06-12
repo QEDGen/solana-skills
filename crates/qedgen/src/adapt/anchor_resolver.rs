@@ -1,75 +1,39 @@
-//! Forwarder resolution for discovered Anchor instructions (v2.9 M4.2).
-//!
-//! Given an `Instruction` from `anchor_project::parse_anchor_project`
-//! (a pub fn inside the `#[program]` mod), this module classifies the
-//! body's tail expression to find where the *actual* handler lives, and
-//! returns a `HandlerLocation` carrying the resolved `syn::ItemFn` plus
-//! a source-path breadcrumb for diagnostics.
-//!
-//! Survey-driven design (`reference_anchor_patterns.md`): six shapes
-//! coexist in production Anchor code. v2.9 M4.2 supports four of them
-//! plus a graceful `Unrecognized` fall-through:
-//!
-//! 1. **Inline** (Jito tip-distribution): body has multiple effectful
-//!    statements (`require!`, `let`-bindings, `msg!`) or a non-forwarder
-//!    tail; the program_fn IS the handler.
-//! 2. **Free-fn forwarder** (Anchor scaffold, Raydium): tail expression
-//!    is `<path>::<function>(args)`. Resolved by walking the program
-//!    crate's source files for a `pub fn <function>` matching the path
-//!    segments. Also accepts the two-statement propagate-then-`Ok(())`
-//!    form (`<call>?; Ok(())`) and a `?`-tail single statement —
-//!    these are pure forwarder plumbing, not user logic.
-//! 3. **Type-associated forwarder** (Squads V4): tail is
-//!    `<Type>::<method>(ctx, args)`. Resolved by walking source for an
-//!    `impl <Type>` block containing the named method.
-//! 4. **Accounts-method forwarder** (Marinade): tail is
-//!    `ctx.accounts.<method>(args)`. Resolved by looking up the
-//!    `<Ctx>` type from the program_fn signature, then walking source
-//!    for an `impl <Ctx>` block containing the named method.
-//!
-//! Drift's custom dispatcher pattern (no straight forwarder; handler
-//! discovery via runtime lookup table) is documented as
-//! `Unrecognized { reason: "custom dispatcher" }`. M4.3's CLI exposes
-//! a `--handler <name>=<rust_path>` override flag for those cases.
+//! Forwarder resolution: classify a `#[program]` pub fn's tail expression to
+//! find where the actual handler body lives. Production shapes: Inline (the
+//! program fn IS the handler), free-fn `<path>::<fn>(args)` (incl. `<call>?;
+//! Ok(())` and `?`-tail plumbing), type-assoc `<Type>::<method>(ctx, args)`,
+//! and accounts-method `ctx.accounts.<method>(args)`. Custom dispatchers fall
+//! to `Unrecognized`; `--handler <name>=<rust_path>` is the CLI override.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use crate::anchor_project::Instruction;
 
-/// Where the actual handler body lives, after following the
-/// `#[program]` mod's pub fn.
+/// Where the actual handler body lives.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub enum HandlerLocation {
-    /// The handler body is the `#[program]` mod fn itself — no
-    /// forwarder; Jito tip-distribution style.
+    /// The `#[program]` mod fn itself is the handler — no forwarder.
     Inline {
         item_fn: syn::ItemFn,
-        /// Path to the file declaring the `#[program]` mod (typically
-        /// `<crate>/src/lib.rs`).
+        /// File declaring the `#[program]` mod (typically `src/lib.rs`).
         source_path: PathBuf,
     },
-    /// A free `pub fn <name>(...)` reached via path forwarder
-    /// (`module::fn(...)` or just `fn_name(...)`).
+    /// A free `pub fn` reached via path forwarder (`module::fn(...)`).
     FreeFn {
         item_fn: syn::ItemFn,
         source_path: PathBuf,
     },
-    /// A method on a typed accounts struct or context wrapper. Covers
-    /// both Marinade (`ctx.accounts.process(...)`) and Squads
-    /// (`<Type>::<method>(ctx, args)`).
+    /// Method reached via `ctx.accounts.<m>(...)` or `<Type>::<m>(ctx, ...)`.
     Method {
         item_fn: syn::ImplItemFn,
         source_path: PathBuf,
-        /// The type the impl block is on. For Marinade this is the
-        /// `Context<X>`'s `X` (the accounts struct); for Squads it's
-        /// the type written before `::<method>`.
+        /// Type the impl block is on: the `Context<X>`'s `X` for
+        /// accounts-method, the written type for type-assoc.
         impl_type: String,
     },
-    /// We couldn't classify the forwarder. The CLI's
-    /// `--handler <name>=<rust_path>` override is the escape hatch
-    /// for these cases.
+    /// Unclassifiable forwarder; the `--handler` override is the escape hatch.
     Unrecognized { reason: String },
 }
 
@@ -101,15 +65,8 @@ impl std::fmt::Debug for HandlerLocation {
     }
 }
 
-/// Resolve where an instruction's actual handler body lives.
-///
-/// `lib_rs_path` is needed for Inline / Marinade-style fallbacks (the
-/// program mod fn itself is the handler in inline cases, and the
-/// accounts type lives in the same crate's source tree).
-///
-/// `program_root` is the program crate's root directory (sibling of
-/// `src/`). Used to find sibling source files when the forwarder
-/// references a module path like `instructions::buy`.
+/// Resolve where an instruction's handler body lives. `lib_rs_path` backs
+/// the Inline case; `program_root` roots the source walk for forwarders.
 #[allow(dead_code)]
 pub fn resolve_handler(
     instruction: &Instruction,
@@ -130,8 +87,7 @@ pub fn resolve_handler(
             method_name,
         } => resolve_method(&type_name, &method_name, program_root, lib_rs_path),
         ForwarderKind::AccountsMethod { method_name } => {
-            // Look up the Context<Ctx>'s Ctx from the program_fn
-            // signature, then resolve the method on that type.
+            // Resolve the method on the signature's Context<Ctx> type.
             match accounts_type_from_signature(&instruction.program_fn) {
                 Some(ctx_type) => {
                     resolve_method(&ctx_type, &method_name, program_root, lib_rs_path)
@@ -178,24 +134,18 @@ enum ForwarderKind {
 }
 
 fn classify_forwarder(program_fn: &syn::ItemFn) -> ForwarderKind {
-    // Production Anchor handlers wrap their forwarder in a few common
-    // shapes. We accept the ones whose only "extra" content is the
-    // forwarder's own plumbing (Ok(...) wrappers, `?` propagation,
-    // a `let _ = …; Ok(())` two-step). Any leading user logic —
-    // `require!`, `msg!`, validation let-bindings — keeps the body
-    // Inline so its bytes flow into the spec hash.
+    // Accept only forwarder plumbing (Ok(...) wrappers, `?` propagation,
+    // `<call>?; Ok(())`). Any leading user logic — require!, msg!, lets —
+    // keeps the body Inline so its bytes flow into the spec hash.
     let stmts = &program_fn.block.stmts;
     let tail_expr = match extract_forwarder_tail(stmts) {
         Some(expr) => expr,
         None => return ForwarderKind::Inline,
     };
 
-    // Strip a wrapping Ok(...) if present (some programs return
-    // `Ok(handler::call(ctx)?)`). Look for the inner call.
+    // Strip a wrapping `Ok(...)` (`Ok(handler(ctx)?)`) then a trailing `?` —
+    // both are forwarder plumbing.
     let unwrapped = unwrap_ok_tail(tail_expr).unwrap_or(tail_expr);
-    // Strip a trailing `?` (try-expression) — `handler(ctx)?` is the
-    // same forwarder shape as `handler(ctx)` for our purposes; the
-    // `?` just surfaces an Err to the caller.
     let actual = unwrap_try(unwrapped).unwrap_or(unwrapped);
 
     match actual {
@@ -205,19 +155,10 @@ fn classify_forwarder(program_fn: &syn::ItemFn) -> ForwarderKind {
     }
 }
 
-/// Find the forwarder call expression in `stmts`, if the body is a
-/// pure forwarder. Recognized shapes:
-///   - `[Stmt::Expr(call, _)]` — single expression body (the v2.9 G2
-///     baseline; works for `handler(ctx)`, `Type::method(ctx, args)`,
-///     `ctx.accounts.fn(args)`).
-///   - `[Stmt::Expr(call?, Semi)]` followed by `Stmt::Expr(Ok(()), _)`
-///     — explicit propagate-then-Ok two-statement form.
-///   - Same as above but the trailing Ok is `return Ok(())`.
-///
-/// Anything else (multiple effectful stmts, `let` bindings, `require!`
-/// macros, blocks, …) returns None so the classifier falls back to
-/// Inline and the user's leading code keeps flowing into the body
-/// hash.
+/// Tail call expression of a pure-forwarder body: a single-expression body,
+/// or `<call>?;` followed by `Ok(())` / `return Ok(())`. Anything else (lets,
+/// require!, extra stmts) returns None → Inline, so user code keeps flowing
+/// into the body hash.
 fn extract_forwarder_tail(stmts: &[syn::Stmt]) -> Option<&syn::Expr> {
     match stmts.len() {
         0 => None,
@@ -226,18 +167,13 @@ fn extract_forwarder_tail(stmts: &[syn::Stmt]) -> Option<&syn::Expr> {
             _ => None,
         },
         2 => {
-            // Pattern: `<call>?;` then `Ok(())`. The first statement
-            // is an expression-with-trailing-semicolon whose expr is
-            // a try-expression; the second is the `Ok(())` literal
-            // (with or without a trailing `;` and with or without a
-            // `return` keyword).
+            // `<call>?;` then `Ok(())` (optional `return`, optional `;`).
             let call_stmt = match &stmts[0] {
                 syn::Stmt::Expr(expr, Some(_)) => expr,
                 _ => return None,
             };
-            // The leading statement must be `<call>?` — a try-expr.
-            // If it's not, the user has hand-rolled validation and we
-            // shouldn't skip past it.
+            // Must be a try-expr; otherwise the user hand-rolled validation
+            // we shouldn't skip past.
             if !matches!(call_stmt, syn::Expr::Try(_)) {
                 return None;
             }
@@ -250,9 +186,8 @@ fn extract_forwarder_tail(stmts: &[syn::Stmt]) -> Option<&syn::Expr> {
     }
 }
 
-/// True when `stmt` is one of the trailing forms we accept after a
-/// `<call>?;` first statement: `Ok(())`, `Ok(())`-as-expr-with-semi,
-/// `return Ok(())`, or `return Ok(());`.
+/// True for the accepted terminals after `<call>?;`: `Ok(())` or
+/// `return Ok(())`, with or without `;`.
 fn is_ok_unit_terminal(stmt: &syn::Stmt) -> bool {
     let expr = match stmt {
         syn::Stmt::Expr(expr, _) => expr,
@@ -280,9 +215,8 @@ fn is_ok_unit_terminal(stmt: &syn::Stmt) -> bool {
     if last.ident != "Ok" {
         return false;
     }
-    // Accept `Ok(())` (one tuple-empty arg); reject `Ok(value)` since
-    // that would be propagating a real return value the body produced
-    // (which is no longer pure forwarding).
+    // Only `Ok(())` — `Ok(value)` propagates a produced value, which is
+    // no longer pure forwarding.
     if call.args.len() != 1 {
         return false;
     }
@@ -329,8 +263,8 @@ fn classify_call(call: &syn::ExprCall) -> ForwarderKind {
         return ForwarderKind::Unknown("empty path call".to_string());
     }
 
-    // Is the last segment-but-one PascalCase? → Type::method (Squads).
-    // Otherwise the segments are a module path + function name (free fn).
+    // PascalCase second-to-last segment → Type::method; else module path +
+    // free fn.
     if segments.len() >= 2 {
         let prefix_last = &segments[segments.len() - 2];
         if is_pascal_case(prefix_last) {
@@ -371,9 +305,8 @@ fn classify_method_call(mcall: &syn::ExprMethodCall) -> ForwarderKind {
     ))
 }
 
-/// Heuristic: a segment is PascalCase if its first char is uppercase.
-/// Sufficient for Type vs module distinction in Anchor code (modules
-/// are snake_case, types are PascalCase per Rust convention).
+/// First-char-uppercase heuristic — sufficient since modules are snake_case
+/// and types PascalCase per Rust convention.
 fn is_pascal_case(s: &str) -> bool {
     s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
@@ -382,15 +315,9 @@ fn is_pascal_case(s: &str) -> bool {
 // Resolvers — find the actual ItemFn / ImplItemFn in the project sources
 // ----------------------------------------------------------------------------
 
-/// Walk the program crate's `src/` for a `pub fn <fn_name>` whose
-/// surrounding module path matches the forwarder's path. Returns
-/// `Unrecognized` if the function can't be found.
-///
-/// `pub` so `qedgen adapt --handler <name>=<rust_path>` overrides can
-/// reuse the same lookup path: an override is, semantically, a
-/// hand-supplied free-fn forwarder for handlers the classifier
-/// returned `Unrecognized` for (Drift's custom dispatcher being the
-/// canonical case).
+/// Walk `src/` for a `pub fn <fn_name>` whose module path matches the
+/// forwarder's path; `Unrecognized` when absent. `pub` so `--handler`
+/// overrides (hand-supplied free-fn forwarders) reuse the same lookup.
 pub fn resolve_free_fn(
     module_path: &[String],
     fn_name: &str,
@@ -401,10 +328,8 @@ pub fn resolve_free_fn(
     let candidates = walk_rust_files(&src_dir);
 
     for path in &candidates {
-        // Skip lib.rs itself for the free-fn lookup — the program mod
-        // there shouldn't shadow handler bodies. (Still searched for
-        // type-assoc / accounts methods, which can be defined inline
-        // in lib.rs on rare programs.)
+        // Skip lib.rs for path-qualified lookups — its program mod shouldn't
+        // shadow handler bodies. (Method resolution still searches lib.rs.)
         if path == lib_rs_path && !module_path.is_empty() {
             continue;
         }
@@ -417,9 +342,8 @@ pub fn resolve_free_fn(
             Err(_) => continue,
         };
 
-        // The file's items live at this module path (relative to the
-        // crate root). We seed `current_path` with it so a target like
-        // `instructions::buy` resolves against `src/instructions/buy.rs`.
+        // Seed with the file's own module path so `instructions::buy`
+        // resolves against `src/instructions/buy.rs`.
         let file_mod_path = file_module_path(path, &src_dir);
         if let Some(item_fn) = find_pub_fn(&file, module_path, fn_name, &file_mod_path) {
             return Ok(HandlerLocation::FreeFn {
@@ -482,8 +406,7 @@ fn resolve_method(
     })
 }
 
-/// Walk a directory for `.rs` files (recursively). Returns paths in
-/// deterministic sorted order.
+/// Recursive `.rs` walk, sorted for determinism.
 fn walk_rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk_rust_files_inner(dir, &mut out);
@@ -506,14 +429,9 @@ fn walk_rust_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Walk a parsed file for a `pub fn <fn_name>` whose enclosing module
-/// path (relative to the crate root) matches the requested
-/// `module_path`. The caller seeds `initial_path` with the file's own
-/// module path (e.g. `["instructions", "buy"]` for
-/// `src/instructions/buy.rs`) so file-to-module mapping works without
-/// needing an explicit `pub mod ...` wrapper inside the file. Nested
-/// `pub mod foo { ... }` blocks within the file extend the path.
-/// Empty `module_path` matches any location.
+/// Find `pub fn <fn_name>` whose enclosing module path matches
+/// `module_path`. `initial_path` seeds the file's own module path; nested
+/// `pub mod` blocks extend it. Empty `module_path` matches anywhere.
 fn find_pub_fn(
     file: &syn::File,
     module_path: &[String],
@@ -523,16 +441,9 @@ fn find_pub_fn(
     find_pub_fn_in_items(&file.items, module_path, fn_name, initial_path)
 }
 
-/// Translate a `.rs` file path under `src/` into the Rust module path
-/// that file represents. Mirrors Cargo/rustc conventions:
-///   - `src/lib.rs`              → `[]`
-///   - `src/foo.rs`              → `["foo"]`
-///   - `src/foo/mod.rs`          → `["foo"]`
-///   - `src/foo/bar.rs`          → `["foo", "bar"]`
-///   - `src/foo/bar/mod.rs`      → `["foo", "bar"]`
-///
-/// Returns `[]` for files outside `src_dir` (defensive — shouldn't
-/// happen since the walker is rooted there).
+/// `.rs` path under `src/` → Rust module path (Cargo conventions):
+/// `src/lib.rs` → `[]`; `src/foo.rs` / `src/foo/mod.rs` → `["foo"]`;
+/// `src/foo/bar.rs` → `["foo", "bar"]`. `[]` for files outside `src_dir`.
 fn file_module_path(file_path: &Path, src_dir: &Path) -> Vec<String> {
     let rel = match file_path.strip_prefix(src_dir) {
         Ok(r) => r,
@@ -565,18 +476,11 @@ fn find_pub_fn_in_items(
     fn_name: &str,
     current_path: &[String],
 ) -> Option<syn::ItemFn> {
-    // The forwarder named `<target_path>::<fn_name>`. The handler can be
-    // defined either:
-    //   (a) directly at `<target_path>` — `current_path == target_path`.
-    //       e.g. `instructions::buy` defined in `instructions/mod.rs`
-    //       or `instructions.rs`.
-    //   (b) at `<target_path>/<fn_name>.rs` and re-exported through
-    //       `pub use <fn_name>::*;` in the parent's `mod.rs` —
-    //       `current_path == target_path + [fn_name]`. This is the
-    //       file-named-after-the-fn convention used by most modern
-    //       Anchor scaffolds (token-fundraiser uses it via
-    //       `Initialize::handler` methods; token-swap uses it via
-    //       free-fn forwarders like `instructions::create_amm`).
+    // `<target_path>::<fn_name>` resolves either (a) directly at
+    // `<target_path>` (`instructions/mod.rs` or `instructions.rs`), or
+    // (b) at `<target_path>/<fn_name>.rs` re-exported via `pub use` from the
+    // parent mod — the file-named-after-the-fn convention modern Anchor
+    // scaffolds use.
     let path_matches = target_path.is_empty()
         || target_path == current_path
         || (current_path.len() == target_path.len() + 1
@@ -608,9 +512,8 @@ fn find_pub_fn_in_items(
     None
 }
 
-/// Walk a parsed file for an `impl <type_name>` block containing a
-/// `pub fn <method_name>`. Tolerates impl blocks with generics
-/// (`impl<'info> Buy<'info>`) — we strip generics before matching.
+/// `impl <type_name>` block containing `pub fn <method_name>`; generics
+/// (`impl<'info> Buy<'info>`) are stripped before matching.
 fn find_impl_method(
     file: &syn::File,
     type_name: &str,
@@ -636,8 +539,7 @@ fn find_impl_method(
 
 fn impl_matches_type(item_impl: &syn::ItemImpl, type_name: &str) -> bool {
     if let syn::Type::Path(type_path) = &*item_impl.self_ty {
-        // Ignore generics (the last segment's PathArguments) — we're
-        // matching on the bare type name here.
+        // Match the bare type name; ignore generics.
         if let Some(last) = type_path.path.segments.last() {
             return last.ident == type_name;
         }
@@ -645,9 +547,8 @@ fn impl_matches_type(item_impl: &syn::ItemImpl, type_name: &str) -> bool {
     false
 }
 
-/// Pull the `X` out of `Context<X>` in a program_fn signature. Returns
-/// the bare type name (no lifetime / generic args) or None when the
-/// first argument isn't a `Context<...>`.
+/// `Context<X>` in a program_fn signature → bare `X`; None when the first
+/// arg isn't a `Context<...>`.
 fn accounts_type_from_signature(item_fn: &syn::ItemFn) -> Option<String> {
     let first_input = item_fn.sig.inputs.first()?;
     let pat_type = match first_input {
@@ -676,10 +577,6 @@ fn accounts_type_from_signature(item_fn: &syn::ItemFn) -> Option<String> {
     None
 }
 
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,8 +593,6 @@ mod tests {
 
     #[test]
     fn classifies_anchor_scaffold_as_free_fn() {
-        // pub fn handler in instructions/<name>.rs, lib.rs forwards via
-        // `<module>::handler(ctx)`.
         let kind = classify(
             r#"
             #[program]
@@ -794,8 +689,7 @@ mod tests {
 
     #[test]
     fn classifies_inline_body_when_multi_statement() {
-        // Jito style: the body has the actual handler logic, not a
-        // forwarder. Multi-statement bodies are always Inline.
+        // Multi-statement bodies with real logic are always Inline.
         let kind = classify(
             r#"
             #[program]
@@ -815,9 +709,7 @@ mod tests {
 
     #[test]
     fn unwraps_ok_tail_to_recognize_forwarder() {
-        // Some programs wrap the forwarder call in Ok(...) explicitly:
-        // `Ok(handler(ctx)?)` is `Ok(`-unwrap → `handler(ctx)?` →
-        // try-unwrap → `handler(ctx)`. Both wrappers strip cleanly.
+        // `Ok(handler(ctx)?)` — both wrappers strip cleanly.
         let kind = classify(
             r#"
             #[program]
@@ -843,8 +735,6 @@ mod tests {
 
     #[test]
     fn classifies_try_tail_as_forwarder() {
-        // Single-statement body with a `?` tail: `handler(ctx)?` is
-        // pure forwarding plumbing, the same shape as `handler(ctx)`.
         let kind = classify(
             r#"
             #[program]
@@ -870,10 +760,6 @@ mod tests {
 
     #[test]
     fn classifies_two_stmt_propagate_then_ok_as_forwarder() {
-        // The propagate-then-`Ok(())` two-step is a common Anchor
-        // pattern: the handler returns `Result<()>` and the wrapper
-        // wants to forward errors via `?` while still returning `()`.
-        // No user logic between the call and the final `Ok(())`.
         let kind = classify(
             r#"
             #[program]
@@ -900,8 +786,6 @@ mod tests {
 
     #[test]
     fn classifies_two_stmt_with_return_ok_as_forwarder() {
-        // Same shape, but the trailing statement is `return Ok(())`
-        // instead of bare `Ok(())`.
         let kind = classify(
             r#"
             #[program]
@@ -919,10 +803,8 @@ mod tests {
 
     #[test]
     fn classifies_three_stmt_forwarder_as_inline() {
-        // Three statements: `<call>?;` then user logic then `Ok(())`.
-        // The user inserted real work between the forwarder and the
-        // return; that work has to flow into the body hash, so we
-        // keep this classified Inline.
+        // User logic between the forwarder call and the return must flow
+        // into the body hash → Inline.
         let kind = classify(
             r#"
             #[program]
@@ -941,10 +823,7 @@ mod tests {
 
     #[test]
     fn classifies_let_binding_then_ok_as_inline() {
-        // `let _result = call?; Ok(())` introduces a binding the user
-        // could later add to — that's user logic, not forwarder
-        // plumbing. Keep Inline so the let-binding stays in the body
-        // hash.
+        // A let-binding is user logic, not plumbing — stays in the body hash.
         let kind = classify(
             r#"
             #[program]
@@ -979,7 +858,7 @@ mod tests {
 
     #[test]
     fn accounts_type_handles_lifetime_generics() {
-        // `Context<'info, Buy<'info>>` style — extract `Buy`.
+        // `Context<'info, Buy<'info>>` → `Buy`.
         let project = project_for(
             r#"
             #[program]
@@ -1004,8 +883,7 @@ mod tests {
         assert!(!is_pascal_case(""));
     }
 
-    // End-to-end: build a tiny project on disk, resolve a free-fn
-    // forwarder. Exercises walk_rust_files + find_pub_fn integration.
+    // End-to-end on disk: walk_rust_files + find_pub_fn integration.
     #[test]
     fn resolve_handler_finds_anchor_scaffold_free_fn() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1163,7 +1041,6 @@ mod tests {
             } => {
                 assert_eq!(source_path, lib_rs_path);
                 assert_eq!(item_fn.sig.ident, "initialize");
-                // Inline body has the require! macro (3 stmts total).
                 assert!(item_fn.block.stmts.len() >= 2);
             }
             other => panic!("expected Inline, got {:?}", other),

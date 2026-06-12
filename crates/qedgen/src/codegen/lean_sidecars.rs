@@ -2,17 +2,10 @@
 //! `lean_gen_mir::generate`.
 //!
 //! `write_spec_with_sidecars` takes a rendered `Spec.lean` body and emits
-//! it plus every pinned-interface sidecar artifact: the sibling
-//! `<Iface>.lean` axiom modules, the `import <Iface>` lines injected into
-//! the body, and the consumer lakefile's `roots` / verified-callee
-//! `require` directives.
-//!
-//! Extracted from the former `lean_gen.rs` in v2.32 so the sidecar
-//! closure outlived that module's deletion. Self-contained: it carries
-//! its own private copies of the small leaf helpers (`safe_name`,
-//! `param_sig_str`, `map_type`, `handler_is_pinned`, `scan_abstract_fields`,
-//! `rewrite_axiom_body_to_accessors`) — these and `render_interface_axiom_module`
-//! are gated against drift by the `axiom_module_matches_golden` test below.
+//! it plus every pinned-interface sidecar artifact: sibling `<Iface>.lean`
+//! axiom modules, injected `import <Iface>` lines, and the consumer
+//! lakefile's `roots` / verified-callee `require` directives. Self-contained
+//! (private leaf-helper copies), drift-gated by `axiom_module_matches_golden`.
 
 use crate::check::ParsedSpec;
 use anyhow::Result;
@@ -20,9 +13,7 @@ use std::path::Path;
 
 /// Write the rendered `Spec.lean` plus every pinned-interface sidecar
 /// (sibling axiom module, lakefile roots update, verified-callee
-/// `require` directives). Shared between `lean_gen::generate` and
-/// `lean_gen_mir::generate` so the codegens emit identical sidecar
-/// layouts regardless of which renderer produced the `Spec.lean` body.
+/// `require` directives).
 pub(crate) fn write_spec_with_sidecars(
     content: String,
     spec: &ParsedSpec,
@@ -30,12 +21,9 @@ pub(crate) fn write_spec_with_sidecars(
 ) -> Result<()> {
     let pinned = collect_pinned_interfaces(spec);
 
-    // v2.26 Track F: prepend `import <Iface>` lines for every pinned
-    // interface module. The renderer already places `import
-    // QEDGen.Solana.*` at the top of every output flavor (single,
-    // multi, ADT); we inject the interface-module imports immediately
-    // after the existing import block so the namespace order matches
-    // Lean's expectation (imports before `namespace`).
+    // Inject `import <Iface>` lines for every pinned interface right
+    // after the existing import block (Lean requires imports before
+    // `namespace`).
     let final_content = if !pinned.is_empty() {
         inject_interface_imports(&content, &pinned)
     } else {
@@ -48,20 +36,12 @@ pub(crate) fn write_spec_with_sidecars(
     std::fs::write(output_path, &final_content)?;
     eprintln!("  wrote {}", output_path.display());
 
-    // Write sibling `<Iface>.lean` axiom modules for every pinned
-    // interface. The set is recomputed here (independent of the
-    // render pass) so `render` keeps its single-String signature;
-    // the call-site discharge path inside `render_cpi_theorems` uses
-    // the same `handler_is_pinned` predicate so the two sides agree
-    // on which interfaces need axioms.
-    //
-    // v2.27 Track B — verified callees (those in `spec.verified_callees`)
-    // get their proof modules from the provider package via a `require`
-    // directive in the consumer's lakefile. Skip writing the local
-    // sibling axiom module for them and don't add them to the lakefile
-    // `roots := #[...]` array (the imported package owns those modules).
-    // Unverified pinned callees stay on the v2.26 stance-1 path:
-    // sibling axiom module + roots entry.
+    // Sibling `<Iface>.lean` axiom modules. The pinned set is recomputed
+    // here (render keeps a single-String signature); `render_cpi_theorems`
+    // uses the same `handler_is_pinned` predicate so both sides agree on
+    // which interfaces need axioms. Verified callees instead pull proof
+    // modules via a lakefile `require` — no local sibling module, no
+    // `roots` entry (the imported package owns those modules).
     if let Some(parent) = output_path.parent() {
         let local_pinned: std::collections::BTreeSet<String> = pinned
             .iter()
@@ -80,20 +60,15 @@ pub(crate) fn write_spec_with_sidecars(
             eprintln!("  wrote {}", iface_path.display());
         }
 
-        // Update the lakefile's roots to include any newly-written
-        // sibling axiom modules. Best-effort: lakefile may not exist
-        // yet (the `qedgen init` step ships it). When it does, append
-        // the modules deterministically so the rewrite is idempotent.
+        // Best-effort: lakefile may not exist yet (`qedgen init` ships
+        // it); when present, the roots rewrite is idempotent.
         if !pinned.is_empty() {
             let lakefile_path = parent.join("lakefile.lean");
             if lakefile_path.exists() {
-                // v2.27 Track B — strip stale sibling-module roots for
-                // callees that transitioned from unverified to
-                // verified. The local `<Iface>.lean` is no longer
-                // written, so its `roots` entry would point at a
-                // non-existent module and break `lake build`. Narrow:
-                // only removes roots whose name matches a verified
-                // callee.
+                // Strip stale sibling-module roots for callees that became
+                // verified — their local `<Iface>.lean` is no longer
+                // written, so a stale root would break `lake build`.
+                // Narrow: only removes roots matching a verified callee.
                 let verified_roots: Vec<String> = spec
                     .verified_callees
                     .keys()
@@ -103,11 +78,8 @@ pub(crate) fn write_spec_with_sidecars(
                     remove_lakefile_roots(&lakefile_path, &verified_roots)?;
                 }
                 update_lakefile_roots(&lakefile_path, &local_pinned)?;
-                // v2.27 Track B — inject a `require <pkg> from
-                // "<rel-path>"` directive for every verified callee.
-                // The relative path is computed from the consumer's
-                // lakefile location to the provider's proof package
-                // root recorded in `spec.verified_callees`.
+                // Inject `require <pkg> from "<rel-path>"` per verified
+                // callee, relative to the consumer's lakefile.
                 let verified_for_emit: Vec<(String, std::path::PathBuf)> = pinned
                     .iter()
                     .filter_map(|name| {
@@ -126,9 +98,8 @@ pub(crate) fn write_spec_with_sidecars(
     Ok(())
 }
 
-/// v2.27 Track B — idempotent injection of `require <pkg> from "<path>"`
-/// directives for every verified callee (one per imported interface
-/// whose provider shipped a Lake-buildable proof package).
+/// Idempotent injection of `require <pkg> from "<path>"` directives,
+/// one per verified callee with a Lake-buildable proof package.
 fn inject_verified_callee_requires(
     lakefile_path: &Path,
     verified: &[(String, std::path::PathBuf)],
@@ -154,8 +125,8 @@ fn inject_verified_callee_requires(
     if to_add.is_empty() {
         return Ok(());
     }
-    // Anchor: prefer the line right after `package <name>` (always
-    // present in qedgen-emitted lakefiles). Falls back to file-end.
+    // Insert right after `package <name>` (always present in
+    // qedgen-emitted lakefiles); fall back to file-end.
     let injected = match original.find("package ") {
         Some(start) => {
             let line_end = original[start..]
@@ -192,11 +163,10 @@ fn inject_verified_callee_requires(
     Ok(())
 }
 
-/// Compute `target` relative to `base`. Pure-string version of
-/// `std::path` semantics — only descends when components match. Falls
-/// back to an absolute path when no common prefix exists (so the
-/// lakefile still compiles even when the provider lives outside the
-/// consumer's tree).
+/// Compute `target` relative to `base` (pure-string `std::path`
+/// semantics). Falls back to an absolute path when no common prefix
+/// exists, so the lakefile still compiles when the provider lives
+/// outside the consumer's tree.
 fn pathdiff_relative_from(target: &Path, base: &Path) -> Option<std::path::PathBuf> {
     use std::path::Component;
     let target = target
@@ -232,8 +202,7 @@ fn pathdiff_relative_from(target: &Path, base: &Path) -> Option<std::path::PathB
 /// `import QEDGen.Solana.*` block. Idempotent: pre-existing imports
 /// for the same module are left in place.
 fn inject_interface_imports(content: &str, pinned: &std::collections::BTreeSet<String>) -> String {
-    // Find the position just after the last `import QEDGen.Solana.*`
-    // line at the top of the file. If no such line exists (sBPF mode,
+    // Insert after the last leading `import` line; if none (sBPF mode,
     // indexed-state mode), inject at the very top.
     let mut insert_at: usize = 0;
     for (i, line) in content.lines().enumerate() {
@@ -266,9 +235,8 @@ fn inject_interface_imports(content: &str, pinned: &std::collections::BTreeSet<S
     out
 }
 
-/// v2.26 Track F: walk every handler's `call Interface.handler(...)`
-/// sites and collect the set of interfaces that meet both pinning
-/// requirements (binary_hash + non-empty `ensures`).
+/// Collect interfaces referenced by `call Interface.handler(...)` sites
+/// that meet both pinning requirements (binary_hash + non-empty `ensures`).
 fn collect_pinned_interfaces(spec: &ParsedSpec) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for handler in &spec.handlers {
@@ -295,11 +263,9 @@ fn collect_pinned_interfaces(spec: &ParsedSpec) -> std::collections::BTreeSet<St
     out
 }
 
-/// Sanitize an interface name for use as a Lean module file name.
-/// Lean module names must be valid identifiers; the same name is used
-/// in the `import` line and the `roots` list of the lakefile.
+/// Sanitize an interface name into a valid Lean module identifier (used
+/// in both the `import` line and the lakefile `roots` list).
 fn safe_module_name(name: &str) -> String {
-    // Replace anything that isn't a Lean ident-char with underscore.
     name.chars()
         .map(|c| {
             if c.is_alphanumeric() || c == '_' {
@@ -311,13 +277,11 @@ fn safe_module_name(name: &str) -> String {
         .collect()
 }
 
-/// v2.27 Track B — Lake package name convention for a verified-callee's
-/// proof package. Convention: lowercase the interface's first character
-/// + append `Proofs`. `Token` → `tokenProofs`.
+/// Lake package name for a verified-callee's proof package: lowercase
+/// first char + `Proofs` (`Token` → `tokenProofs`).
 ///
-/// `pub(crate)` — `check.rs` reuses it when surfacing verified-callee
-/// lint diagnostics so the package name it reports matches the one this
-/// module emits into the lakefile.
+/// `pub(crate)`: `check.rs` reuses it so lint diagnostics report the
+/// same package name this module emits into the lakefile.
 pub(crate) fn proof_pkg_name(iface_name: &str) -> String {
     let safe = safe_module_name(iface_name);
     let mut chars = safe.chars();
@@ -385,16 +349,15 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
         out.push_str(&format!("namespace {}\n\n", safe_name(&handler.name)));
         for (ens_idx, ensures) in handler.ensures.iter().enumerate() {
             let params_sig = param_sig_str(&handler.params);
-            // v2.27 Track A — scan the callee's lean_expr for any
-            // abstract State-field references (`s.X` / `s'.X`,
-            // produced by the `Ctx::Ensures` lowering of `state.X`).
+            // Abstract State-field refs (`s.X` / `s'.X`, from the
+            // `Ctx::Ensures` lowering of `state.X`).
             let abstract_fields = scan_abstract_fields(&ensures.lean_expr);
             out.push_str(&format!(
                 "/-- `{}.{}` post-condition #{} (axiomatized; discharged by binary_hash pin). -/\n",
                 iface.name, handler.name, ens_idx,
             ));
             if abstract_fields.is_empty() {
-                // v2.26 path — callee-frame, param-only.
+                // Callee-frame, param-only.
                 if handler.params.is_empty() {
                     out.push_str(&format!(
                         "axiom ensures_axiom_{} : {}\n\n",
@@ -407,7 +370,7 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
                     ));
                 }
             } else {
-                // v2.27 Track A path — caller-State-aware.
+                // Caller-State-aware path.
                 let mut sig = String::new();
                 sig.push_str(" {State : Type} [Inhabited State]");
                 sig.push_str(" (pre post : State)");
@@ -421,7 +384,6 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
                         .unwrap_or("Nat");
                     sig.push_str(&format!(" ({} : State \u{2192} {})", field, codomain));
                 }
-                // Body rewrite: `s'.X` → `(X post)`, `s.X` → `(X pre)`.
                 let body = rewrite_axiom_body_to_accessors(&ensures.lean_expr);
                 out.push_str(&format!(
                     "axiom ensures_axiom_{}{} : {}\n\n",
@@ -436,9 +398,8 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
     out
 }
 
-/// v2.27 Track A — scan a callee's Lean-rendered `ensures` text for
-/// abstract State-field references (`s.X` / `s'.X`). Returns the
-/// abstract field names in first-occurrence order.
+/// Scan a callee's Lean-rendered `ensures` text for abstract State-field
+/// references (`s.X` / `s'.X`); names returned in first-occurrence order.
 fn scan_abstract_fields(ensures_lean: &str) -> Vec<String> {
     let re = regex::Regex::new(r"\bs'?\.([A-Za-z_][A-Za-z0-9_]*)")
         .expect("regex compiles for abstract-field scan");
@@ -453,12 +414,10 @@ fn scan_abstract_fields(ensures_lean: &str) -> Vec<String> {
     out
 }
 
-/// v2.27 Track A — rewrite a callee's Lean `ensures` text into the
-/// abstract-accessor form used inside the bundled axiom body. Each
-/// `s'.X` becomes `(X post)` and each `s.X` becomes `(X pre)`.
+/// Rewrite a callee's Lean `ensures` into the abstract-accessor form used
+/// inside the axiom body: `s'.X` → `(X post)`, `s.X` → `(X pre)`.
 fn rewrite_axiom_body_to_accessors(ensures_lean: &str) -> String {
-    // Order matters: do `s'.X` first so we don't accidentally match
-    // the `s` half of `s'.X` after the apostrophe.
+    // `s'.X` must rewrite first so the pre-pass can't match its `s` half.
     let re_post = regex::Regex::new(r"\bs'\.([A-Za-z_][A-Za-z0-9_]*)")
         .expect("regex compiles for post-state accessor rewrite");
     let after_post = re_post.replace_all(ensures_lean, "($1 post)").into_owned();
@@ -467,10 +426,8 @@ fn rewrite_axiom_body_to_accessors(ensures_lean: &str) -> String {
     re_pre.replace_all(&after_post, "($1 pre)").into_owned()
 }
 
-/// v2.27 Track B — strip the named modules from a lakefile's
-/// `roots := #[...]` array. Counterpart to `update_lakefile_roots`.
-/// Idempotent: when none of the named modules are present, the file
-/// is left untouched.
+/// Strip the named modules from a lakefile's `roots := #[...]` array.
+/// Idempotent counterpart to `update_lakefile_roots`.
 fn remove_lakefile_roots(lakefile_path: &Path, to_remove: &[String]) -> Result<()> {
     if to_remove.is_empty() {
         return Ok(());
@@ -525,7 +482,6 @@ fn update_lakefile_roots(
         .iter()
         .map(|i| format!("`{}", safe_module_name(i)))
         .collect();
-    // Find a `roots := #[ ... ]` segment and add any missing modules.
     let needle = "roots := #[";
     let Some(start) = original.find(needle) else {
         return Ok(()); // unknown shape; leave the file alone.
@@ -566,10 +522,7 @@ fn update_lakefile_roots(
 }
 
 // ----------------------------------------------------------------------
-// Leaf helpers — small pure functions shared with the legacy
-// `lean_gen` renderer. Carried as private copies so this module is
-// self-contained; the `lean_gen.rs` copies die with that module in
-// workstream 3.
+// Leaf helpers — private copies so this module stays self-contained.
 // ----------------------------------------------------------------------
 
 /// True iff an interface handler is Tier-1/2 pinned: it declares
@@ -645,13 +598,12 @@ fn param_sig_str(params: &[(String, String)]) -> String {
 mod tests {
     use super::*;
 
-    /// A pinned-but-unverified interface (`upstream { binary_hash }` +
-    /// `ensures` referencing `state.X`) — the only shape that drives the
-    /// sibling `<Iface>.lean` axiom-module writer (`render_interface_axiom_module`).
-    /// The bundled examples' pinned interfaces are all *verified callees*
-    /// (lakefile `require`, no sibling module), so the snapshot suites
-    /// don't cover this path; this fixture does. It exercises the v2.27
-    /// Track A branch (polymorphic State + accessor params).
+    /// Pinned-but-unverified interface (`upstream { binary_hash }` +
+    /// `ensures` over `state.X`) — the only shape that drives the sibling
+    /// `<Iface>.lean` axiom-module writer. Bundled examples' pinned
+    /// interfaces are all *verified callees* (lakefile `require`, no
+    /// sibling module), so the snapshot suites don't cover this path;
+    /// this fixture exercises the polymorphic-State + accessor branch.
     const LP_POOL_SPEC: &str = r#"spec LpPool
 program_id "11111111111111111111111111111111"
 
@@ -689,12 +641,8 @@ handler deposit (amount : U64) {
 }
 "#;
 
-    /// Regression gate for the sibling `<Iface>.lean` axiom-module
-    /// renderer. The golden was captured from the v2.32 port, proven
-    /// byte-identical to the (now-deleted) legacy
-    /// `lean_gen::render_interface_axiom_module` before deletion.
-    /// Regenerate intentionally if the renderer changes:
-    /// `UPDATE_AXIOM_GOLDEN=1 cargo test axiom_module_matches_golden`.
+    /// Regression gate for the sibling axiom-module renderer. Regenerate
+    /// intentionally: `UPDATE_AXIOM_GOLDEN=1 cargo test axiom_module_matches_golden`.
     const TOKEN_AXIOM_GOLDEN: &str =
         include_str!("../../tests/fixtures/token_axiom_module.lean.golden");
 

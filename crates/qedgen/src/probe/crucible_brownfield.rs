@@ -1,33 +1,29 @@
-//! Brownfield Crucible harness emission — v2.21 Slice 1, extended in
-//! v2.22 Slice 3 for Pinocchio.
+//! Brownfield Crucible harness emission.
 //!
-//! Lifts the `qedgen probe --fuzz requires --spec` gate by synthesising
-//! a minimal [`ParsedSpec`] from a brownfield project root (no
-//! `.qedspec` required). The synthesised spec carries enough handler
-//! metadata for [`crucible_gen::generate`] to emit a working harness
-//! whose `invariant_test()` body is empty — Crucible's intrinsic
-//! crash detector (panic / unwrap-on-None / BorrowMutError / arithmetic
-//! overflow) does the lifting. See PRD-v2.21 §"Slice 1".
+//! Lifts the `qedgen probe --fuzz requires --spec` gate by synthesising a
+//! minimal [`ParsedSpec`] from a brownfield project root (no `.qedspec`
+//! required). The synthesised spec carries enough handler metadata for
+//! [`crucible_gen::generate`] to emit a working harness whose
+//! `invariant_test()` body is empty — Crucible's intrinsic crash detector
+//! (panic / unwrap-on-None / BorrowMutError / arithmetic overflow) does
+//! the lifting.
 //!
 //! ## Runtime coverage
 //!
-//! - **Anchor / Quasar / qedgen-codegen** (v2.21) — handler enumeration
-//!   via the regex used by `anchor_extractor::scan_handler_context_map`.
-//!   Anchor IDL discovery hooks the same `target/idl/<prog>.json` lookup
-//!   as spec-mode.
-//! - **Pinocchio** (v2.22) — requires an on-disk Codama / Anchor 0.30
-//!   IDL (canonical paths: `idl.json`, `program/idl.json`,
-//!   `idl/*.json`, `target/idl/*.json`). The IDL is passed through to
-//!   `<harness>/idls/<prog>.json` verbatim. Scanner-based metadata
-//!   inference from handler bodies is intentionally out of scope —
-//!   account flags and arg types extracted via regex are too noisy to
-//!   ship; the maintainer-authored Codama IDL is the trusted source.
+//! - **Anchor / Quasar / qedgen-codegen** — handler enumeration via the
+//!   regex used by `anchor_extractor::scan_handler_context_map`; IDL
+//!   discovery reuses spec-mode's `target/idl/<prog>.json` lookup.
+//! - **Pinocchio** — deliberately gated on an on-disk Codama / Anchor 0.30
+//!   IDL (canonical paths: `idl.json`, `program/idl.json`, `idl/*.json`,
+//!   `target/idl/*.json`), passed through to `<harness>/idls/<prog>.json`
+//!   verbatim. Scanner-based metadata inference from handler bodies is
+//!   intentionally out of scope — account flags and arg types extracted
+//!   via regex are too noisy to ship; the maintainer-authored Codama IDL
+//!   is the trusted source.
 //! - **Native / sBPF** — deferred (errors with a clear message). Native
-//!   programs follow the same gate: Shank IDL discovery is the next
-//!   target after v2.23 (v2.23 shipped the pre/post property lowering
-//!   trust fix + brownfield first-contact onboarding flow instead).
-//!   sBPF brownfield fuzz is parked indefinitely (no AccountInfo
-//!   abstraction at source level).
+//!   follows the same gate and is unblocked by Shank IDL discovery. sBPF
+//!   brownfield fuzz is parked indefinitely (no AccountInfo abstraction
+//!   at source level).
 
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
@@ -39,36 +35,26 @@ use crate::probe::Runtime;
 /// Output of a brownfield synthesis: the [`ParsedSpec`] that drives
 /// `crucible_gen::generate` plus, when the runtime needs it, a
 /// pre-rendered IDL JSON to drop at `<harness>/idls/<prog>.json` (the
-/// macro input). Anchor-family programs return `idl_json: None` and let
-/// the existing `crucible_probe::discover_idl` symlink the
-/// `anchor build`-produced IDL.
+/// macro input).
 #[derive(Debug)]
 pub struct BrownfieldSynthesis {
     pub spec: ParsedSpec,
-    /// Pinocchio: anchor-shaped IDL JSON synthesised from the source
-    /// scan. Anchor-family: `None` (the existing IDL pickup path
-    /// applies).
+    /// Pinocchio: IDL JSON for the harness. Anchor-family: `None` —
+    /// `crucible_probe::discover_idl` symlinks the `anchor build` IDL.
     pub idl_json: Option<String>,
 }
 
-/// Synthesise a [`ParsedSpec`] from a brownfield project root. The
-/// resulting spec has:
+/// Synthesise a [`ParsedSpec`] from a brownfield project root:
 ///
-/// - `program_name` derived from `Cargo.toml`'s `[package] name`
-///   (falling back to the root's leaf directory name).
-/// - `handlers[]` populated from `pub fn <name>(ctx: Context<X>, ...)`
-///   signatures scanned across the crate's `src/` tree. Handler params
-///   are intentionally left empty in v2.21 — Crucible's IDL-derived
-///   typed builders generate the param payload at fuzz time, and the
-///   per-action stub gets `agent-fill` `todo!()` for the typed accounts
-///   literal (same shape as spec-mode).
-/// - No invariants, properties, account types, or PDAs — protocol mode
-///   doesn't assert spec invariants. See
-///   [`crate::crucible_gen::InvariantMode::Protocol`].
-///
-/// Errors on Native / sBPF (deferred); routes Pinocchio through the
-/// v2.22 metadata-extraction + IDL-synthesis path; otherwise falls
-/// through to the v2.21 Anchor-family handler enumeration.
+/// - `program_name` from `Cargo.toml`'s `[package] name` (falling back to
+///   the root's leaf directory name).
+/// - `handlers[]` from `pub fn <name>(ctx: Context<X>, ...)` signatures
+///   under `src/`. Handler params stay empty — Crucible's IDL-derived
+///   typed builders generate the payload at fuzz time, and the per-action
+///   stub gets an agent-fill `todo!()` (same shape as spec-mode).
+/// - No invariants / properties / account types / PDAs — protocol mode
+///   doesn't assert spec invariants
+///   ([`crate::crucible_gen::InvariantMode::Protocol`]).
 pub fn synthesize_spec(project_root: &Path, runtime: Runtime) -> Result<BrownfieldSynthesis> {
     match runtime {
         Runtime::Anchor | Runtime::Quasar | Runtime::QedgenCodegen => {
@@ -141,16 +127,15 @@ fn synthesize_anchor_family(project_root: &Path) -> Result<BrownfieldSynthesis> 
 }
 
 fn synthesize_pinocchio(project_root: &Path) -> Result<BrownfieldSynthesis> {
-    // v2.22 Slice 3 gates Pinocchio brownfield on a maintainer-authored
-    // Codama / Anchor 0.30 IDL. Scanner-based account & arg inference
-    // from `pub fn process_*` bodies is fragile — `.borrow_mut_*`
-    // patterns miss CPI-mutated accounts, `from_le_bytes` patterns miss
-    // zero-copy unpacking, and account-name suffix conventions vary by
-    // codebase. A hand-validated Codama IDL is the trusted source.
+    // Pinocchio brownfield is gated on a maintainer-authored Codama /
+    // Anchor 0.30 IDL. Scanner-based account & arg inference from
+    // `pub fn process_*` bodies is fragile — `.borrow_mut_*` patterns miss
+    // CPI-mutated accounts, `from_le_bytes` patterns miss zero-copy
+    // unpacking, and account-name suffix conventions vary by codebase.
     //
-    // Future runtimes follow the same gate: Shank for legacy native
-    // Rust programs (v2.24+); custom dispatchers carry a Codama IDL via
-    // codama-cli or are out of scope.
+    // Future runtimes follow the same gate: Shank for legacy native Rust
+    // programs; custom dispatchers carry a Codama IDL via codama-cli or
+    // are out of scope.
     let idl_text = discover_pinocchio_idl(project_root)?.ok_or_else(|| {
         anyhow!(
             "Brownfield Pinocchio fuzz requires a Codama / Anchor 0.30 IDL on disk. \
@@ -171,15 +156,12 @@ fn synthesize_pinocchio(project_root: &Path) -> Result<BrownfieldSynthesis> {
             project_root.display()
         );
     }
-    // Pull the program name from the IDL itself when present. The
-    // declare_fuzz_program! macro derives the generated module name
-    // from the IDL's `program.name` (Codama IR) or `metadata.name`
-    // (Anchor 0.30), so the harness's `use {prog}::instruction;` must
-    // line up with that — not with the surrounding Cargo workspace's
-    // leaf directory. Fall back to the Cargo / leaf-dir name when the
-    // IDL doesn't carry one (rare; an Anchor IDL always does, and
-    // Codama IR carries `program.name` even when the file doesn't
-    // declare `metadata`).
+    // Program name must come from the IDL when present: declare_fuzz_program!
+    // derives the generated module name from the IDL's `program.name`
+    // (Codama IR) or `metadata.name` (Anchor 0.30), and the harness's
+    // `use {prog}::instruction;` must line up with that — not the Cargo
+    // workspace's leaf dir. Cargo / leaf-dir fallback is rare (Anchor IDLs
+    // always carry a name; Codama IR carries `program.name`).
     let program_name = program_name_from_idl(&idl_text)
         .or_else(|| program_name_from_root(project_root).ok())
         .unwrap_or_else(|| "program".to_string());
@@ -203,9 +185,8 @@ fn synthesize_pinocchio(project_root: &Path) -> Result<BrownfieldSynthesis> {
     })
 }
 
-/// Extract the program name from either an Anchor 0.30 IDL
-/// (`metadata.name`) or a Codama IR JSON (`program.name`). Returns
-/// `None` when neither is present.
+/// Program name from an Anchor 0.30 IDL (`metadata.name`) or Codama IR
+/// (`program.name`); `None` when neither is present.
 fn program_name_from_idl(idl_text: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(idl_text).ok()?;
     v.get("metadata")
@@ -220,22 +201,17 @@ fn program_name_from_idl(idl_text: &str) -> Option<String> {
         })
 }
 
-/// Search the brownfield project root for a Codama / Anchor 0.30 IDL
-/// JSON. Returns the file contents verbatim when found so the macro
-/// consumes the maintainer-authored schema rather than a regex-derived
-/// reconstruction.
+/// Find a Codama / Anchor 0.30 IDL under the project root; contents are
+/// returned verbatim so the macro consumes the maintainer-authored schema.
 ///
 /// Lookup order (first match wins):
-/// 1. `<root>/idl.json` — Codama convention (also used by
-///    `solana-program/` Pinocchio crates).
+/// 1. `<root>/idl.json` — Codama convention.
 /// 2. `<root>/program/idl.json` — workspace-rooted variant.
-/// 3. `<root>/target/idl/<*>.json` — Anchor `anchor build` output (may
-///    appear in a Pinocchio workspace that also builds via Anchor).
+/// 3. `<root>/target/idl/*.json` — `anchor build` output.
 /// 4. `<root>/idl/*.json` — Codama default output dir.
 ///
-/// Multiple matches at the same precedence level are sorted
-/// alphabetically and the first picked, so behavior is deterministic
-/// across runs.
+/// Same-level matches are sorted alphabetically and the first picked —
+/// deterministic across runs.
 pub(crate) fn discover_pinocchio_idl(project_root: &Path) -> Result<Option<String>> {
     let candidates = [
         project_root.join("idl.json"),
@@ -269,27 +245,16 @@ pub(crate) fn discover_pinocchio_idl(project_root: &Path) -> Result<Option<Strin
     Ok(None)
 }
 
-/// Extract per-handler argument lists alongside instruction names. The
-/// harness emitter uses `takes_params` to build `instruction::Foo { arg1,
-/// arg2, ... }` literals that match the macro-generated struct shape;
-/// without typed args the literals leave fields uninitialised and the
-/// build fails with E0063.
+/// Per-instruction `(snake_name, vec![(arg_name, type), ...])`. The
+/// emitter needs `takes_params` to build `instruction::Foo { ... }`
+/// literals matching the macro-generated struct — untyped args leave
+/// fields uninitialised (E0063). Args flagged
+/// `defaultValueStrategy: "omitted"` (e.g. discriminators) are skipped;
+/// the macro doesn't surface them as struct fields.
 ///
-/// Returns one entry per IDL instruction. Each entry: `(snake_name,
-/// vec![(arg_name, rust_type), ...])`. Discriminator arguments and any
-/// argument flagged `defaultValueStrategy: "omitted"` are skipped — the
-/// macro doesn't surface those as struct fields.
-///
-/// Type mapping (current scope):
-/// - Codama `numberTypeNode { format: "u8" | "u16" | ... | "i128" }` →
-///   `"u8"` / `"u16"` / ... / `"i128"`.
-/// - Codama `publicKeyTypeNode`, Anchor `"pubkey"` → `"Pubkey"`.
-/// - Codama `booleanTypeNode`, Anchor `"bool"` → `"bool"`.
-/// - Codama `stringTypeNode`, Anchor `"string"` → `"String"`.
-/// - Anything else → `"u64"` placeholder (the action param will compile
-///   but the fuzzer-generated value may not type-coerce into the
-///   macro's field; the caller should refine the IDL or accept the
-///   compile error as a signal that the type isn't supported yet).
+/// Unrecognised types map to a `"u64"` placeholder: it compiles, but a
+/// type-coercion failure in the macro's field is the signal that the type
+/// isn't supported yet (refine the IDL or accept the compile error).
 fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, String)>)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(idl_text) else {
         return Vec::new();
@@ -318,9 +283,8 @@ fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, Stri
                 .map(|arr| {
                     arr.iter()
                         .filter(|a| {
-                            // Codama: skip args with `defaultValueStrategy: "omitted"`
-                            // (e.g. the discriminator field). The macro elides
-                            // those from the generated struct.
+                            // Skip `defaultValueStrategy: "omitted"` args —
+                            // the macro elides them from the struct.
                             a.get("defaultValueStrategy")
                                 .and_then(|s| s.as_str())
                                 .map(|s| s != "omitted")
@@ -339,23 +303,20 @@ fn handlers_with_args_from_idl(idl_text: &str) -> Vec<(String, Vec<(String, Stri
         .collect()
 }
 
-/// Extract per-handler account lists. Keyed by snake_case handler name
-/// (matching `handlers_with_args_from_idl`'s output). Each entry is the
-/// flat list of accounts in declaration order — the `.accounts(...)`
-/// literal in the emitted harness uses this list to produce a real
-/// `accounts::Foo { ... }` initializer instead of a `todo!()` placeholder.
+/// Per-handler account lists, keyed by snake_case handler name (matching
+/// `handlers_with_args_from_idl`), in declaration order — lets the emitted
+/// harness produce a real `accounts::Foo { ... }` initializer instead of
+/// `todo!()`.
 ///
-/// Codama account fields used:
-/// - `name` → ParsedHandlerAccount.name (kept camelCase to match the
-///   macro-generated struct field name).
+/// Codama fields used:
+/// - `name` → ParsedHandlerAccount.name, kept camelCase to match the
+///   macro-generated struct field.
 /// - `isSigner` / `isWritable` → flags.
-/// - `defaultValue.kind: "publicKeyValueNode"` + `publicKey` → store
-///   the literal base58 in `default_pubkey` so the emitter renders
-///   `solana_pubkey::pubkey!("...")`.
-/// - `defaultValue.kind: "pdaValueNode"` → leave `default_pubkey: None`
-///   and mark `pda_seeds: Some(vec![])` so the emitter knows to derive
-///   via `Pubkey::find_program_address` (v2.22 emits a placeholder; full
-///   seed-aware derivation is v2.22.x).
+/// - `defaultValue.kind: "publicKeyValueNode"` → base58 in `default_pubkey`
+///   so the emitter renders `solana_pubkey::pubkey!("...")`.
+/// - `defaultValue.kind: "pdaValueNode"` → `pda_seeds: Some(vec![])` so the
+///   emitter derives via `Pubkey::find_program_address` (currently a
+///   placeholder; seed-aware derivation TODO).
 fn accounts_per_handler_from_idl(
     idl_text: &str,
 ) -> std::collections::HashMap<String, Vec<ParsedHandlerAccount>> {
@@ -401,11 +362,9 @@ fn accounts_per_handler_from_idl(
                             .and_then(|d| d.get("publicKey"))
                             .and_then(|k| k.as_str())
                             .map(|s| s.to_string());
-                        // Codama marks program defaults via the
-                        // accountValueNode/programLink chain in other
-                        // shapes; for our scope, a publicKeyValueNode
-                        // pointing at a fixed pubkey is effectively a
-                        // program/sysvar account.
+                        // For our scope, a publicKeyValueNode pointing at a
+                        // fixed pubkey is effectively a program/sysvar
+                        // account.
                         (pk, None, true)
                     }
                     Some("pdaValueNode") => (None, Some(vec![]), false),
@@ -444,14 +403,11 @@ fn camel_to_snake(name: &str) -> String {
     out
 }
 
-/// Map an IDL argument's `type` field to a qedgen DSL type identifier
-/// (`U8`, `U64`, `Pubkey`, `Bool`, ...). The harness emitter runs the
-/// result back through `crucible_gen::map_simple_type` to get the
-/// Rust-side type, so this returns the DSL convention used by
-/// `ParsedHandler::takes_params`.
-///
-/// Tolerates both the Codama IR tree shape (`{kind, format, ...}`) and
-/// the Anchor 0.30 string-shorthand shape (`"u64"`).
+/// Map an IDL argument `type` to a qedgen DSL type identifier (`U8`,
+/// `Pubkey`, ...) — the `ParsedHandler::takes_params` convention, which
+/// the emitter runs back through `crucible_gen::map_simple_type`.
+/// Tolerates both Codama IR trees (`{kind, format, ...}`) and Anchor 0.30
+/// string shorthand (`"u64"`).
 fn idl_arg_type(ty: &serde_json::Value) -> String {
     if let Some(s) = ty.as_str() {
         return anchor_str_to_dsl(s);
@@ -487,9 +443,8 @@ fn anchor_str_to_dsl(s: &str) -> String {
     }
 }
 
-/// Write the synthesised IDL JSON into `<harness>/idls/<prog>.json`.
-/// Idempotent — if the destination already exists it is overwritten so
-/// re-runs pick up scanner improvements without manual cleanup.
+/// Write the synthesised IDL JSON into `<harness>/idls/<prog>.json`,
+/// overwriting any existing file so re-runs pick up scanner improvements.
 pub fn write_synthesized_idl(
     harness_dir: &Path,
     program_name: &str,
@@ -503,12 +458,10 @@ pub fn write_synthesized_idl(
     Ok(dest)
 }
 
-/// Read `Cargo.toml`'s `[package] name`. Falls back to the root's
-/// leaf-directory name (lowercased, hyphens kept) when `Cargo.toml` is
-/// missing or unparseable — both happen on multi-program workspaces
-/// where the user pointed `--root` at a workspace-level path. The
-/// downstream caller surfaces a cleaner error if the program crate
-/// can't be resolved at IDL-discovery time.
+/// `Cargo.toml`'s `[package] name`, falling back to the root's
+/// leaf-directory name when missing or unparseable (both happen when
+/// `--root` points at a workspace-level path). Downstream surfaces a
+/// cleaner error if the program crate can't be resolved at IDL discovery.
 fn program_name_from_root(root: &Path) -> Result<String> {
     let manifest = root.join("Cargo.toml");
     if manifest.exists() {
@@ -529,9 +482,8 @@ fn program_name_from_root(root: &Path) -> Result<String> {
         })
 }
 
-/// Extract `name = "..."` from a `[package]` section. Hand-rolled
-/// rather than pulling `toml` as a dep — qedgen already vends a regex
-/// + manual parser for similar single-key reads (`anchor_resolver.rs`).
+/// Extract `name = "..."` from a `[package]` section. Hand-rolled rather
+/// than pulling `toml` as a dep (cf. `anchor_resolver.rs`).
 fn parse_package_name(toml_str: &str) -> Option<String> {
     let mut in_package = false;
     for line in toml_str.lines() {
@@ -555,9 +507,9 @@ fn parse_package_name(toml_str: &str) -> Option<String> {
     None
 }
 
-/// Walk `<root>/src/**/*.rs` and collect handler names from
-/// `pub fn <name>(ctx: Context<X>, ...)` signatures. De-dupes by name
-/// (Anchor sometimes splits handlers across module re-exports).
+/// Collect handler names from `pub fn <name>(ctx: Context<X>, ...)`
+/// signatures under `src/`. De-dupes by name (Anchor sometimes splits
+/// handlers across module re-exports).
 fn scan_anchor_handlers(root: &Path) -> Result<Vec<String>> {
     let src_dir = root.join("src");
     if !src_dir.exists() {
@@ -607,19 +559,16 @@ fn collect_rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// Default harness location for brownfield mode: `<root>/.qed/fuzz/`.
-/// `crucible_gen::generate` appends the program-name leaf, so this
-/// returns the parent directory (matching the spec-mode convention).
+/// Default brownfield harness location: `<root>/.qed/fuzz/`. Returns the
+/// parent dir — `crucible_gen::generate` appends the program-name leaf
+/// (spec-mode convention).
 pub fn brownfield_harness_parent(root: &Path) -> PathBuf {
     root.join(".qed").join("fuzz")
 }
 
-/// Best-effort project-root discovery from `--root`: if the user
-/// pointed at a Cargo workspace (with `programs/<prog>/`), walk down
-/// to the first `pub mod ... declare_id!` crate. v2.21 returns the
-/// input unchanged — workspace traversal is a v2.22 polish. We keep
-/// the function defined so the caller can swap in a smarter walker
-/// without a CLI shape change.
+/// Project-root resolution from `--root`. Currently returns the input
+/// unchanged; kept as a seam so a workspace walker (descend to the first
+/// `declare_id!` crate) can swap in without a CLI shape change.
 pub fn resolve_program_root(input: &Path) -> Result<PathBuf> {
     Ok(input.to_path_buf())
 }
@@ -776,8 +725,8 @@ version = "0.1.0"
         assert!(synth.spec.handlers[0].permissionless);
         assert!(synth.spec.invariants.is_empty());
         assert!(synth.spec.properties.is_empty());
-        // Anchor path doesn't synthesise an IDL — the v2.21 discover_idl
-        // symlink picks up `target/idl/<prog>.json`.
+        // Anchor path doesn't synthesise an IDL — discover_idl symlinks
+        // `target/idl/<prog>.json`.
         assert!(synth.idl_json.is_none());
     }
 
@@ -808,9 +757,7 @@ version = "0.1.0"
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // v2.22 Slice 3 — Pinocchio brownfield
-    // ─────────────────────────────────────────────────────────────────
+    // Pinocchio brownfield
 
     #[test]
     fn pinocchio_brownfield_requires_codama_idl_on_disk() {
@@ -876,12 +823,10 @@ version = "0.1.0"
 
     #[test]
     fn pinocchio_brownfield_takes_program_name_from_idl_not_cargo() {
-        // Cargo.toml at workspace root has no `[package] name` (the
-        // `solana-program-escrow-2026-05` audit corpus shape). The
-        // discovered IDL declares `program.name = escrowProgram`. The
-        // synthesized spec must use the IDL's name so the harness's
-        // `use {prog}::instruction;` matches the
-        // `declare_fuzz_program!` macro's module name.
+        // Workspace-root Cargo.toml with no `[package] name`; the IDL
+        // declares `program.name = escrowProgram`. The spec must use the
+        // IDL's name so the harness's `use {prog}::instruction;` matches
+        // the `declare_fuzz_program!` module name.
         let tmp = tempfile::tempdir().unwrap();
         // Workspace Cargo.toml — no [package].
         std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
@@ -911,11 +856,9 @@ version = "0.1.0"
 
     #[test]
     fn pinocchio_brownfield_consumes_codama_ir_tree() {
-        // Codama IR (the format `solana-program/` Pinocchio crates ship):
-        // instructions are nested under `program.instructions[]` with a
-        // top-level `kind: "rootNode"` envelope. We must enumerate handlers
-        // from this shape too — the multi_delegator subscriptions bench
-        // entry uses exactly this layout.
+        // Codama IR nests instructions under `program.instructions[]`
+        // inside a `kind: "rootNode"` envelope — handlers must be
+        // enumerable from this shape too.
         let tmp = tempfile::tempdir().unwrap();
         write_manifest(
             tmp.path(),

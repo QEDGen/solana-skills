@@ -1,9 +1,6 @@
-//! `qed.toml` — manifest for spec dependencies (v2.8 G1).
-//!
-//! Cargo-style split: `qed.toml` is the source of truth for which interfaces
-//! a spec depends on. The spec-side `import Name from "key"` statements
-//! reference dep keys declared here; the resolver consumes both to fetch
-//! sources and merge interface declarations.
+//! `qed.toml` — manifest for spec dependencies: source of truth for which
+//! interfaces a spec depends on. Spec-side `import Name from "key"`
+//! statements reference dep keys declared here; the resolver consumes both.
 //!
 //! Schema:
 //!
@@ -20,8 +17,8 @@
 //! - **Path**: `path = "..."` — relative to `qed.toml`'s directory, or
 //!   absolute. Mutually exclusive with the GitHub fields.
 //!
-//! v2.8 does not support: registry shorthand (`spl_token = "1.0"`), workspace
-//! inheritance, or transitive lock merging.
+//! Not supported: registry shorthand (`spl_token = "1.0"`), workspace
+//! inheritance, transitive lock merging.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -113,10 +110,8 @@ struct RawDependency {
 // Public API
 // ----------------------------------------------------------------------------
 
-/// Load and validate `qed.toml` from `spec_dir`. Returns `Ok(None)` if no
-/// manifest is present (the caller can decide whether that's an error
-/// based on whether the spec has any `import` statements). Returns
-/// `Ok(Some(_))` on success and `Err(_)` on read / parse / validation
+/// Load and validate `qed.toml` from `spec_dir`. `Ok(None)` when absent
+/// (caller decides if that's an error); `Err` on read / parse / validation
 /// failure.
 #[allow(dead_code)]
 pub fn load_from_dir(spec_dir: &Path) -> Result<Option<Manifest>> {
@@ -191,7 +186,6 @@ fn validate_dep(name: &str, raw: RawDependency) -> Result<Dependency> {
             })
         }
         None => {
-            // Must be a path source.
             let p = match path {
                 Some(p) => p,
                 None => bail!(
@@ -218,10 +212,8 @@ fn validate_dep(name: &str, raw: RawDependency) -> Result<Dependency> {
 mod tests {
     use super::*;
 
-    // Test-only inline of the former `parse_str` helper: production
-    // callers always reach the manifest through `load_from_dir`. Keeping
-    // the parse-and-validate shape here lets the suite exercise the
-    // validator branches directly without round-tripping through disk.
+    // Production callers go through `load_from_dir`; this inline helper
+    // exercises validator branches without disk round-trips.
     fn parse_str(src: &str) -> Result<Manifest> {
         let raw: RawManifest = toml::from_str(src).context("parsing qed.toml")?;
         validate(raw)

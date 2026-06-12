@@ -1,7 +1,5 @@
-//! Dependency checks — called at the point of use, not at install time.
-//!
-//! Each function checks for a specific external dependency and returns
-//! a clear error message with install instructions if it's missing.
+//! Dependency checks — called at point of use, not install time; each
+//! returns an install-instruction error when missing.
 
 use anyhow::{bail, Result};
 use std::process::Command;
@@ -63,11 +61,8 @@ pub fn require_crucible() -> Result<()> {
     );
 }
 
-/// Check that `cargo +nightly miri` is available. Called by
-/// `qedgen verify --miri` (v2.19).
+/// Check that `cargo +nightly miri` is available (`qedgen verify --miri`).
 pub fn require_miri() -> Result<()> {
-    // Probe via `cargo +nightly miri --version`. The toolchain has to
-    // be a nightly with the `miri` component installed.
     let out = Command::new("cargo")
         .args(["+nightly", "miri", "--version"])
         .output();
@@ -88,21 +83,17 @@ pub fn require_miri() -> Result<()> {
     );
 }
 
-/// True if the harness file uses the z3 SMT solver anywhere
-/// (`#[kani::solver(bin = "z3")]`). Factored out so the preflight and
-/// tests share one marker definition.
+/// True if the harness uses z3 (`#[kani::solver(bin = "z3")]`) — shared
+/// marker definition for the preflight and tests.
 pub(crate) fn harness_uses_z3(harness: &std::path::Path) -> bool {
     std::fs::read_to_string(harness)
         .map(|s| s.contains("bin = \"z3\""))
         .unwrap_or(false)
 }
 
-/// If the generated Kani harness file uses the z3 SMT solver anywhere
-/// (`#[kani::solver(bin = "z3")]`), check that z3 is on `PATH`. This is
-/// chosen by `pick_kani_solver_for_effect` for wide-type mul/div effects
-/// (u64/u128/i128), which otherwise wedge CBMC's SAT backends for tens of
-/// minutes. Missing z3 → the Kani run will fail with an unhelpful spawn
-/// error deep inside cbmc; surface it here instead.
+/// If the harness uses z3 (chosen by `pick_kani_solver_for_effect` for
+/// wide-type mul/div effects that wedge CBMC's SAT backends), require z3 on
+/// PATH — otherwise the run fails with an unhelpful spawn error inside cbmc.
 pub fn require_z3_if_kani_harness_needs_it(harness: &std::path::Path) -> Result<()> {
     if !harness_uses_z3(harness) {
         return Ok(());
@@ -157,11 +148,8 @@ mod tests {
         )
         .unwrap();
         assert!(harness_uses_z3(&path));
-        // The require_ function's ok/err depends on whether z3 is actually
-        // installed on the test runner — both CI states are valid — but the
-        // marker-detection step is deterministic, which is what this test
-        // pins. The error-message shape is verified by the `missing_z3`
-        // test below in environments where z3 is not installed.
+        // require_'s ok/err depends on the runner's z3 install (both CI
+        // states valid); this test pins only the deterministic marker step.
         std::fs::remove_file(&path).ok();
     }
 

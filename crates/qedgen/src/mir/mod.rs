@@ -1,97 +1,33 @@
-// v2.30 MIR — typed IR consumed by lean_gen_mir / kani_mir /
-// codegen_mir / proptest_gen_mir. A handful of fields and enum
-// variants are reserved for the v3.0 cleanup that lifts requires +
-// effects into typed `Stmt` nodes (the deferred guards / proptest
-// sub-emitter ports — see Phase 4g + Phase 5 deferral comments).
-// Removing them now would force re-adding when that work starts;
-// keeping `allow(dead_code)` here ratifies the "IR ahead of
-// consumers" design.
+// Some fields / variants are reserved for the v3.0 cleanup that lifts
+// requires + effects into typed `Stmt` nodes; `allow(dead_code)` ratifies
+// the "IR ahead of consumers" design.
 #![allow(dead_code)]
 
-//! qedgen MIR — typed Solana-native intermediate representation between
-//! the `.qedspec` parser and the codegens.
+//! qedgen MIR — typed Solana-native IR between the `.qedspec` parser
+//! (`crate::check::ParsedSpec`) and the four codegens (lean_gen_mir,
+//! codegen_mir, kani_mir + kani_impl, proptest_gen_mir). `lower(parsed)`
+//! is the canonical entry. Design rationale: `docs/design/qedgen-mir-sketch.md`,
+//! divergence classes: `docs/design/codegen-divergence.md`, fixture evidence:
+//! `docs/design/intrinsic-fixture-map.md`.
 //!
-//! Phase 0 of the v2.30 refactor. See `docs/design/qedgen-mir-sketch.md` for
-//! the design rationale, `docs/design/codegen-divergence.md` for the measured
-//! cross-codegen divergence classes this IR closes, and
-//! `docs/design/intrinsic-fixture-map.md` for the fixture evidence behind
-//! the chosen `Stmt` set.
-//!
-//! ## What this is
-//!
-//! A typed IR that sits between `crate::check::ParsedSpec` and the four
-//! primary codegens (`lean_gen.rs`, `codegen.rs`, `kani.rs` + `kani_impl.rs`,
-//! `proptest_gen.rs`). Every codegen will eventually consume `Mir` instead
-//! of pattern-matching on `ParsedSpec` directly.
-//!
-//! ## Key design constraints
-//!
-//! 1. **Structurally typed at the statement level, opaque at the expression
-//!    level.** `Expr` carries pre-rendered target strings (`lean`, `rust`,
-//!    `rust_pod`, `rust_binary`) — the parser already lowers expressions
-//!    per target via `ParsedRequires` / `ParsedEnsures` etc. Re-modelling
-//!    expressions as a typed tree would duplicate that work and reach back
-//!    into `crate::ast::Node<crate::ast::Expr>`, which only `ParsedRequires`
-//!    preserves. So MIR's value comes from desugaring *structure*, not
-//!    expressions.
-//!
-//! 2. **MIR is desugared, not optimized.** Surface sugar (`+=!`, `else Err`,
-//!    schema-includes, dotted-auth, `transfers {…}` blocks) lowers to
-//!    explicit primitive nodes during parser→MIR. Optimizations
-//!    (const fold, dead-handler elimination) are out of scope for v2.30.
-//!
-//! 3. **Bug-reduction is the goal**, not LoC purity. A `Stmt` kind earns
-//!    inclusion by closing a divergence class from
-//!    `docs/design/codegen-divergence.md`, not by reaching a codegen-count
-//!    quorum. See [[feedback-mir-is-bug-reduction]] for the framing.
-//!
-//! 4. **qedgen-local scope.** No `runMir` Lean-side operational semantics
-//!    (parked). No `applyOp ≡ runMir` equivalence lemma. The sBPF
+//! Design constraints:
+//! 1. **Typed statements, opaque expressions.** `Expr` carries pre-rendered
+//!    target strings (`lean`, `rust`, `rust_pod`, `rust_binary`) — the parser
+//!    already lowers expressions per target; MIR's value is desugaring
+//!    *structure*, not re-modelling expressions.
+//! 2. **Desugared, not optimized.** Surface sugar (`+=!`, `else Err`,
+//!    schema-includes, dotted-auth, `transfers {…}`) lowers to explicit
+//!    primitive nodes; no const fold / dead-handler elimination.
+//! 3. **Bug-reduction is the goal**, not LoC purity — a `Stmt` kind earns
+//!    inclusion by closing a divergence class, not a codegen-count quorum.
+//! 4. **qedgen-local scope.** No `runMir` Lean operational semantics; sBPF
 //!    semantics + binary-proof engines come from the qedsvm package
-//!    (`require qedsvm`, `SVM.SBPF.*`); the former vendored copy at
-//!    `lean_solana/QEDGen/Solana/SBPF/` was deleted when qedsvm tagged
-//!    v0.3.0 (solana-skills#86).
+//!    (`require qedsvm`, `SVM.SBPF.*`).
 //!
-//! ## Lowering source — ParsedSpec types we read from
-//!
-//! Phase 0a survey notes (cross-reference `crates/qedgen/src/check.rs`):
-//!
-//! - `ParsedSpec.handlers: Vec<ParsedHandler>` — main input.
-//! - `ParsedSpec.account_types: Vec<ParsedAccountType>` — state ADT;
-//!   carries `variants: Vec<ParsedVariant>` for multi-variant lifecycle.
-//! - `ParsedSpec.records: Vec<ParsedRecordType>` — plain record types.
-//! - `ParsedSpec.pdas: Vec<ParsedPda>` — top-level PDA declarations.
-//! - `ParsedSpec.error_codes: Vec<String>` — declared error variants.
-//! - `ParsedSpec.events: Vec<ParsedEvent>` — event declarations.
-//! - `ParsedSpec.imported_namespaces` — v2.29 Slice F unified imports.
-//!
-//! Per-handler shapes consumed:
-//!
-//! - `ParsedHandler.who: Option<String>` + `permissionless: bool` — auth.
-//! - `ParsedHandler.pre_status` / `post_status: Option<String>` — lifecycle.
-//! - `ParsedHandler.requires: Vec<ParsedRequires>` — pre-conditions (with
-//!   optional `error_name` for `requires X else Err`).
-//! - `ParsedHandler.ensures: Vec<ParsedEnsures>` — post-conditions; carries
-//!   `lean_expr`, `rust_expr`, `rust_expr_pod`, `rust_expr_binary`.
-//! - `ParsedHandler.effects: Vec<(String, String, String)>` — `(field, op_kind, value)`.
-//!   op_kind ∈ {"set", "add", "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap"}.
-//! - `ParsedHandler.effect_on_error: Vec<Option<String>>` — v2.24 per-site error
-//!   overrides parallel to `effects`.
-//! - `ParsedHandler.effect_branches: Option<ParsedEffectBranches>` — issue #42
-//!   conditional effects (only consumed by Lean today; MIR makes it first-class).
-//! - `ParsedHandler.transfers: Vec<ParsedTransfer>` — declarative
-//!   `transfers { from A to B amount X authority W }`. Lowers to
-//!   `Stmt::TokenTransfer`.
-//! - `ParsedHandler.calls: Vec<ParsedCall>` — explicit
-//!   `call Interface.method(arg = expr, ...)`. `Token.transfer` calls lower
-//!   to `Stmt::TokenTransfer`; everything else lowers to `Stmt::Cpi`.
-//! - `ParsedHandler.accounts: Vec<ParsedHandlerAccount>` — per-handler
-//!   account bindings (writable / signer / pda / authority / type).
-//! - `ParsedHandler.emits: Vec<String>` — event emission (auxiliary).
-//!
-//! Predicate-carrier structs all share the same shape: each carries
-//! `lean_expr: String` plus one or more Rust forms. MIR's `Expr` mirrors
-//! this — see the `Expr` struct below.
+//! Lowering reads `ParsedSpec` / `ParsedHandler` shapes (see check.rs).
+//! Effect triples are `(field, op_kind, value)` with op_kind ∈ {"set", "add",
+//! "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap"}; `transfers {…}`
+//! blocks lower to `Stmt::TokenTransfer`, explicit `call`s to `Stmt::Cpi`.
 
 use crate::check::ParsedSpec;
 use std::collections::BTreeMap;
@@ -105,112 +41,83 @@ use std::collections::BTreeMap;
 pub struct Mir {
     /// Spec name (typically `spec <Name>` line).
     pub name: Symbol,
-    /// State ADT — variants and their fields. For single-variant specs,
-    /// this is a single `StateVariant` with all fields and `tag = Symbol::default()`.
-    ///
-    /// For multi-account specs this carries the *primary* account so the
-    /// single-account renderers stay byte-stable; `account_states[0]`
-    /// reflects the same data. Multi-account renderers walk
-    /// `account_states` instead.
+    /// State ADT. For multi-account specs this carries the *primary*
+    /// account (single-account renderers stay byte-stable); multi-account
+    /// renderers walk `account_states` instead (`account_states[0]` mirrors
+    /// this).
     pub state: StateAdt,
     /// Per-account state lifts. Always populated; `len() == 1` for
-    /// single-account specs (back-compat path), `> 1` for multi-account.
-    /// Lending is the canonical multi-account fixture (Pool + Loan).
-    /// v2.30 Phase 2.
+    /// single-account specs, `> 1` for multi-account (lending = Pool + Loan).
     pub account_states: Vec<AccountStateMir>,
     /// Account-block surface — PDAs, owners, writability, init, authority,
-    /// token-type annotations. Foundational per
-    /// `docs/design/qedgen-mir-sketch.md` §"AccountTable is foundational"
-    /// (339 fixture references across account-block features).
+    /// token-type annotations.
     pub accounts: AccountTable,
     /// Declared error variants (from `type Error | InvalidAmount | …` blocks).
     pub errors: ErrorEnum,
-    /// Cross-program references — the sole lifted structure for
-    /// everything an `import` resolves to AND every inline
-    /// `interface { … }` block. v2.30 unified imports collapses the
-    /// parallel `ParsedSpec.interfaces` + `ParsedSpec.imported_namespaces`
-    /// surfaces into one canonical view keyed by local namespace
-    /// alias. See `docs/design/mir-unified-imports.md`.
+    /// Cross-program references — the sole lifted structure for everything
+    /// an `import` resolves to AND every inline `interface { … }` block,
+    /// keyed by local namespace alias. See `docs/design/mir-unified-imports.md`.
     pub imports: BTreeMap<Symbol, ImportedSpecMir>,
     /// Per-handler IR.
     pub handlers: Vec<HandlerMir>,
     /// Top-level invariants (whole-state predicates, not method-level).
     pub invariants: Vec<InvariantMir>,
-    /// Declared events. Auxiliary — codegen reads them when lowering
-    /// `HandlerMir.emits`; they're not body statements.
+    /// Declared events. Auxiliary — read when lowering `HandlerMir.emits`;
+    /// not body statements.
     pub events: Vec<EventDecl>,
-    /// Top-level `const NAME = VALUE` declarations. Stored as
-    /// `(name, raw-value-string)` — codegens render `abbrev NAME : Nat
-    /// := VALUE` in Lean, `pub const NAME: u64 = VALUE;` in Rust, etc.
+    /// Top-level `const NAME = VALUE` as `(name, raw-value-string)`;
+    /// codegens render `abbrev` (Lean) / `pub const` (Rust).
     pub constants: Vec<(Symbol, String)>,
-    /// Uninterpreted helper functions referenced from spec bodies but
-    /// declared opaquely. Each becomes a Lean `opaque <name> : T1 → T2
-    /// → ... → R` declaration. Issue #8 finding #5.
+    /// Helpers referenced from spec bodies but declared opaquely; each
+    /// becomes a Lean `opaque <name> : T1 → … → R`.
     pub uninterpreted_helpers: Vec<UninterpretedHelper>,
-    /// `ref_impl name (params) : T = <expr>` declarations. Reference
-    /// implementations referenced from `ensures` clauses. Lower to
-    /// Lean `def`s and inline at Kani-harness assertion sites
-    /// (distinct from `uninterpreted_helpers`: those are axiomatic,
-    /// these carry executable bodies).
+    /// `ref_impl name (params) : T = <expr>` — reference implementations
+    /// referenced from `ensures`. Lower to Lean `def`s and inline at Kani
+    /// assertion sites (unlike `uninterpreted_helpers`, these carry
+    /// executable bodies).
     pub ref_impls: Vec<RefImpl>,
-    /// Top-level `property name { ... } preserved_by [op, ...]`
-    /// declarations. Each emits a Lean predicate `def` + a master
-    /// preservation theorem (and per-handler sub-lemmas). Per-slot
-    /// proptest forms (`PerSlotForm`) and quantifier-lint metadata
-    /// stay on `ParsedSpec` for now — those are proptest-codegen
-    /// concerns that don't need MIR lifting until that target ports.
+    /// `property name { ... } preserved_by [op, ...]` — each emits a Lean
+    /// predicate `def` + master preservation theorem + per-handler
+    /// sub-lemmas. Per-slot proptest forms and quantifier-lint metadata
+    /// stay on `ParsedSpec` (proptest-codegen concerns).
     pub properties: Vec<PropertyMir>,
-    /// Top-level `cover` reachability declarations. Each emits an
-    /// existential theorem per trace + per `(op, when)` pair.
+    /// `cover` reachability declarations — one existential theorem per
+    /// trace + per `(op, when)` pair.
     pub covers: Vec<CoverMir>,
-    /// Top-level `liveness` (leads-to) declarations. Each emits a
-    /// bounded-reachability theorem over a lifecycle-state transition.
+    /// `liveness` (leads-to) declarations — bounded-reachability theorems
+    /// over lifecycle transitions.
     pub liveness_props: Vec<LivenessMir>,
-    /// Top-level `environment` blocks describing external state
-    /// mutations. Each property × environment cross emits a
-    /// preservation theorem.
+    /// `environment` blocks (external state mutations) — one preservation
+    /// theorem per property × environment.
     pub environments: Vec<EnvironmentMir>,
-    /// Issue #67 item 4 — `hook after_store(<field>)` / `hook
-    /// before_cpi` assertion blocks, lifted from `ParsedSpec.hooks`.
-    /// The Kani/proptest transition emitter injects `AfterStore`
-    /// asserts after each matching field store; Lean ignores hooks
-    /// (enforcement deferred to the qedsvm path).
+    /// `hook after_store(<field>)` / `hook before_cpi` assertion blocks
+    /// (#67). Kani/proptest inject `AfterStore` asserts after matching
+    /// field stores; Lean ignores hooks (enforcement deferred to qedsvm).
     pub hooks: Vec<HookMir>,
-    /// Issue #67 item 3 — `ghost` spec-only auxiliary state. Lowered to
-    /// extra verification-State fields (Lean / proptest / Kani) plus a
-    /// per-handler new-value expression; the on-chain codegen ignores
-    /// these entirely.
+    /// `ghost` spec-only auxiliary state (#67) — extra verification-State
+    /// fields (Lean / proptest / Kani) plus per-handler new-value
+    /// expressions; the on-chain codegen ignores these.
     pub ghosts: Vec<GhostMir>,
-    /// Top-level `type T = { … }` record declarations (the value types of
-    /// `Map[N] T` fields, e.g. percolator's `Account`). The indexed-state
-    /// Lean renderer emits a `structure T` + `instance Inhabited T` per
-    /// record. Carried verbatim from `ParsedSpec.records` — the indexed
-    /// renderer is the only consumer today.
+    /// `type T = { … }` records (value types of `Map[N] T` fields), carried
+    /// verbatim from `ParsedSpec.records`; the indexed-state Lean renderer
+    /// (sole consumer) emits `structure T` + `instance Inhabited T`.
     pub records: Vec<crate::check::ParsedRecordType>,
-    /// True for sBPF assembly specs (`pragma sbpf { … }`, detected via
-    /// `ParsedSpec::is_assembly_target`). The Lean renderer dispatches on
-    /// this flag to `render_sbpf` (assembly proofs over `Program.lean` +
-    /// `wp_exec`) — a wholly different output shape from the state-machine
-    /// renderers. The Kani/proptest backends skip assembly targets
-    /// entirely (sBPF runtime behavior is exercised by client-side tests),
-    /// so this flag has a single consumer: `lean_gen_mir`. The instruction
-    /// / layout / guard data the renderer needs is read from `ParsedSpec`
-    /// at the codegen call site (it is not lifted into MIR — with only one
-    /// consumer there is no cross-codegen divergence for MIR to prevent).
+    /// True for sBPF assembly specs (`pragma sbpf`, via
+    /// `ParsedSpec::is_assembly_target`). Sole consumer is `lean_gen_mir`,
+    /// which dispatches to `render_sbpf`; Kani/proptest skip assembly
+    /// targets. Instruction / layout / guard data stays on `ParsedSpec`
+    /// (one consumer → no cross-codegen divergence to prevent).
     pub is_assembly: bool,
-    /// State-representation opt-in (`pragma state_repr = adt`, via
-    /// `ParsedSpec::state_repr_is_adt`). True → the multi-variant State
-    /// lowers as a real `inductive State` (Lean) / wrapper-struct +
-    /// inner-enum (Anchor Rust); false (default) → flat `structure
-    /// State` + `status` discriminant. Replaces the pre-v2.33 footgun
-    /// that keyed the choice on an incidental `WrongState` error
-    /// variant. `lean_gen_mir::is_multi_variant_adt` reads this; the
-    /// `ParsedSpec`-based codegens read `state_repr_is_adt()` directly.
+    /// `pragma state_repr = adt` opt-in (`ParsedSpec::state_repr_is_adt`).
+    /// True → multi-variant State lowers as `inductive State` (Lean) /
+    /// wrapper-struct + inner-enum (Anchor); false (default) → flat
+    /// `structure State` + `status` discriminant.
+    /// `lean_gen_mir::is_multi_variant_adt` reads this.
     pub adt_state: bool,
 }
 
-/// Issue #67 item 4 — a `hook … { assert <expr>, … }` block. Mirrors
-/// `ParsedHook`; asserts carry both Lean and Rust renderings.
+/// A `hook … { assert <expr>, … }` block (mirrors `ParsedHook`); asserts
+/// carry both Lean and Rust renderings.
 #[derive(Debug, Clone)]
 pub struct HookMir {
     pub kind: HookKind,
@@ -226,12 +133,10 @@ pub enum HookKind {
 }
 
 impl Mir {
-    /// Look up a handler's lowered body by name. Handler names are
-    /// unique (spec validation rejects duplicates), and the per-account
-    /// scoped `ParsedSpec` views the Kani/proptest emitters build only
-    /// *filter* the handler set — they never rewrite handler content —
-    /// so a name-keyed lookup against the unscoped `Mir` stays valid
-    /// inside scoped sections.
+    /// Handler body by name. Names are unique (validation rejects dupes),
+    /// and the Kani/proptest per-account scoped views only *filter* the
+    /// handler set — never rewrite content — so this lookup against the
+    /// unscoped `Mir` stays valid inside scoped sections.
     pub fn handler_block(&self, name: &str) -> Option<&Block> {
         self.handlers
             .iter()
@@ -260,12 +165,10 @@ pub struct StateVariant {
     pub fields: Vec<FieldDecl>,
 }
 
-/// Per-account state lift. v2.30 Phase 2 multi-account scaffolding:
-/// `Mir.state` collapses to the primary account for back-compat, while
-/// `Mir.account_states` carries the full list so the multi-account
-/// renderer can emit per-account `<Name>State` structs, per-group
-/// `apply<Name>Op` dispatchers, and per-group preservation theorems.
-/// Single-account specs surface as `account_states.len() == 1`.
+/// Per-account state lift. `Mir.state` collapses to the primary account for
+/// back-compat; `Mir.account_states` carries the full list for per-account
+/// `<Name>State` structs, `apply<Name>Op` dispatchers, and per-group
+/// preservation theorems.
 #[derive(Debug, Clone)]
 pub struct AccountStateMir {
     /// Account-type name from the `type <Name>` block (e.g., "Pool",
@@ -297,11 +200,8 @@ pub struct AccountTable {
     /// Top-level `pda <name> [seeds]` declarations. Per-account inline PDAs
     /// (`acct : writable, pda [seeds]`) live in `AccountBindingShape.pda_ref`.
     pub pdas: BTreeMap<Symbol, PdaDeclaration>,
-    /// Handler-scoped bindings are stored on each `HandlerMir.accounts`;
-    /// this map holds spec-level account shapes shared across handlers
-    /// when the surface DSL eventually supports them (today every
-    /// account binding is handler-scoped, so this is reserved for v3.0
-    /// — kept here to fix the shape).
+    /// Reserved for spec-level account shapes shared across handlers; today
+    /// every binding is handler-scoped (`HandlerMir.accounts`).
     #[allow(dead_code)]
     pub spec_level_bindings: BTreeMap<Symbol, AccountBindingShape>,
 }
@@ -309,9 +209,8 @@ pub struct AccountTable {
 #[derive(Debug, Clone)]
 pub struct PdaDeclaration {
     pub name: Symbol,
-    /// Seeds as pre-rendered target strings; same opaque-string discipline
-    /// as `Expr`. Each seed maps to its own multi-target rendering since
-    /// seeds can be literals, account refs, or param refs.
+    /// Seeds (literals, account refs, or param refs) as pre-rendered target
+    /// strings — same opaque-string discipline as `Expr`.
     pub seeds: Vec<Expr>,
 }
 
@@ -323,18 +222,14 @@ pub struct AccountBindingShape {
     pub init: bool,
     pub is_program: bool,
     pub kind: AccountKind,
-    /// `authority <other_account>` annotation. None for accounts without
-    /// declared authority (signer accounts, programs).
+    /// `authority <other_account>` annotation; `None` when undeclared.
     pub authority: Option<AccountRef>,
-    /// Refers to a `PdaDeclaration` in `Mir.accounts.pdas` when the
-    /// account is PDA-derived.
+    /// `PdaDeclaration` key in `Mir.accounts.pdas` for PDA-derived accounts.
     pub pda_ref: Option<Symbol>,
-    /// v2.29 Slice G — when the account's type comes from an imported
-    /// spec, this carries the namespace alias.
+    /// Namespace alias when the account's type comes from an imported spec.
     pub imported_namespace: Option<Symbol>,
-    /// v2.29 brownfield — hard-coded base58 pubkey when this account is
-    /// a well-known default (system_program, the program itself, event
-    /// authority, etc.). Codegen lowers to `solana_pubkey::pubkey!("…")`.
+    /// Hard-coded base58 pubkey for well-known defaults (system_program,
+    /// the program itself, …); lowers to `solana_pubkey::pubkey!("…")`.
     pub default_pubkey: Option<String>,
     /// `account_type` annotation (e.g., `type token` → AccountKind::Token,
     /// or a user-declared type name → AccountKind::TypedAccount).
@@ -373,69 +268,55 @@ pub struct HandlerMir {
     pub params: Vec<(Symbol, Ty)>,
     /// Per-handler account bindings — the `accounts { … }` block.
     pub accounts: Vec<AccountBindingShape>,
-    /// Authorization requirement (`auth <account>` or
-    /// `auth <account>.<field>` dotted form, post-v2.29.1 desugaring).
-    /// `None` means handler is either permissionless or had no auth
-    /// requirement declared.
+    /// Authorization requirement (`auth <account>` or dotted
+    /// `auth <account>.<field>`). `None` = permissionless or undeclared.
     pub auth: Option<AccountOrField>,
     pub permissionless: bool,
-    /// Lifecycle transition (`: State.V1 -> State.V2` in handler signature).
-    /// Lowered into a synthetic entry-`RequireOrAbort` by Phase 3's
-    /// `lifecycle_lower` MIR→MIR pass; carried separately here to
-    /// preserve the user-level intent and let some codegens emit
-    /// alternative shapes if needed.
+    /// Lifecycle transition (`: State.V1 -> State.V2`). Lowered into a
+    /// synthetic entry-`RequireOrAbort` by the `lifecycle_lower` pass;
+    /// carried separately to preserve user-level intent.
     pub transition: Option<(VariantTag, VariantTag)>,
-    /// Multi-account routing — when the handler signature qualifies the
-    /// pre-state with an account name (e.g. `: Loan.Empty -> Loan.Active`),
-    /// `on_account` records `"Loan"`. `None` means the handler defaults
-    /// to the primary account. Mirrors `ParsedHandler.on_account`.
-    /// v2.30 Phase 2 multi-account codegen reads this to group handlers
-    /// per account.
+    /// Multi-account routing — `: Loan.Empty -> Loan.Active` records
+    /// `"Loan"`; `None` = primary account. Mirrors
+    /// `ParsedHandler.on_account`; multi-account codegen groups handlers
+    /// per account with this.
     pub on_account: Option<Symbol>,
-    /// Pre-conditions. Schema-includes are already expanded in
-    /// `chumsky_adapter.rs:3125+`; what arrives here is the flat list.
+    /// Pre-conditions (schema-includes already expanded upstream in
+    /// `chumsky_adapter.rs`).
     pub pre: Vec<Predicate>,
-    /// ALL `requires` predicates in original spec order (both `else
-    /// <Err>` and bare), before the `split_requires` partition into
-    /// `pre` (bare) + body `RequireOrAbort` (with-err). The indexed-state
-    /// Lean renderer emits guard conjuncts from this so its ordering
-    /// matches `lean_gen`'s single-list iteration (the split-then-
-    /// concatenate path reordered an interleaved bare/with-err sequence
-    /// — e.g. percolator's match-arm-abort guards). Same predicate
-    /// construction as `split_requires` (`Predicate(Expr::from_requires)`).
+    /// ALL `requires` in original spec order (both `else <Err>` and bare),
+    /// before the `split_requires` partition. The indexed-state Lean
+    /// renderer emits guard conjuncts from this so ordering matches the
+    /// single-list iteration — split-then-concatenate reordered
+    /// interleaved bare/with-err sequences.
     pub requires_in_order: Vec<Predicate>,
-    /// Pre-conditions with `else <ErrorName>` markers — these lower to
-    /// `Stmt::RequireOrAbort` rather than collected `pre`.
-    /// Empty after Phase 3 lowering (passes synthesize them into `body`);
-    /// populated during parser→MIR before the pass runs.
+    /// `requires … else <ErrorName>` clauses — lower to
+    /// `Stmt::RequireOrAbort` rather than `pre`. Populated during
+    /// parser→MIR; empty after the Phase 3 pass synthesizes them into `body`.
     pub requires_or_abort: Vec<RequireOrAbortClause>,
-    /// Legacy `aborts_if <pred> Error` clauses. Parallel to
-    /// `requires_or_abort` but with the predicate already in the
-    /// "abort triggers when this holds" sense (not negated).
-    /// Carries the predicate alongside the error for theorem emission
-    /// (Lean's `theorem h_aborts_if_Err (s) (h : <pred>) : ... = none`).
+    /// Legacy `aborts_if <pred> Error` clauses — the predicate IS the abort
+    /// condition (not negated). Predicate kept alongside the error for
+    /// theorem emission (`theorem h_aborts_if_Err (s) (h : <pred>) : … = none`).
     pub aborts_if: Vec<AbortClause>,
     pub body: Block,
     /// Post-conditions (`ensures`).
     pub post: Vec<Predicate>,
-    /// Frame condition — fields that may be modified. None means
-    /// "everything modifiable per the effects list."
+    /// Frame condition — fields that may be modified. `None` =
+    /// "everything modifiable per the effects list".
     pub modifies: Option<Vec<Path>>,
-    /// Event names emitted by this handler. Codegen pulls event schema
-    /// from `Mir.events`.
+    /// Emitted event names; schema lives in `Mir.events`.
     pub emits: Vec<Symbol>,
-    /// Per-handler invariant references (names of invariants this handler
-    /// must preserve).
+    /// Names of invariants this handler must preserve.
     pub invariants: Vec<Symbol>,
-    /// v2.17 — invariants this handler *establishes* at post-state without
+    /// Invariants this handler *establishes* at post-state without
     /// requiring at pre-state (init / one-shot handlers).
     pub establishes: Vec<Symbol>,
-    /// v2.29 Slice A — `abstract <name> : <Type>` declarations. Each
-    /// codegen lowers to its own existential / fuzz-input / agent-fill
-    /// shape. Pair: (name, dsl-type-string).
+    /// `abstract <name> : <Type>` declarations as (name, dsl-type-string);
+    /// each codegen lowers to its own existential / fuzz-input / agent-fill
+    /// shape.
     pub abstract_binders: Vec<(Symbol, String)>,
-    /// `aborts_total` — every abort branch is exhaustive; codegen emits
-    /// a ↔ theorem instead of per-abort.
+    /// `aborts_total` — abort branches are exhaustive; codegen emits a ↔
+    /// theorem instead of per-abort.
     pub aborts_total: bool,
 }
 
@@ -445,10 +326,9 @@ pub struct RequireOrAbortClause {
     pub err: ErrorRef,
 }
 
-/// Legacy `aborts_if <pred> Error` clause. Functionally inverse of
-/// `RequireOrAbortClause` — here the predicate IS the abort
-/// condition, not its negation. Kept distinct so the emitted Lean
-/// theorem hypothesis matches the source shape.
+/// Legacy `aborts_if <pred> Error` clause — inverse of
+/// `RequireOrAbortClause`: the predicate IS the abort condition. Distinct so
+/// the emitted Lean theorem hypothesis matches the source shape.
 #[derive(Debug, Clone)]
 pub struct AbortClause {
     pub pred: Predicate,
@@ -464,58 +344,50 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-/// Statement kinds. Total: 12 — 4 primary intrinsics + 7 effect/control +
-/// 1 escape hatch CPI. See `docs/design/intrinsic-fixture-map.md` for
-/// the fixture evidence per kind.
+/// Statement kinds (fixture evidence per kind:
+/// `docs/design/intrinsic-fixture-map.md`).
 ///
-/// **Exhaustiveness discipline (#66):** matches over `Stmt` must list
-/// every variant explicitly — no `_` arms. The point of the closed enum
-/// is that adding a variant breaks every consumer at compile time, so
-/// each backend is forced to decide how the new statement kind renders
-/// (even if the decision is "nothing"). A wildcard arm silently opts the
-/// site out of that safety net.
+/// **Exhaustiveness discipline (#66):** matches over `Stmt` must list every
+/// variant explicitly — no `_` arms. The point of the closed enum is that
+/// adding a variant breaks every consumer at compile time, forcing each
+/// backend to decide how the new statement kind renders (even if the
+/// decision is "nothing"). A wildcard arm silently opts the site out of
+/// that safety net.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    // ---- Primary intrinsics (fixture-evidence anchored) ----
-    /// Authorization-or-abort. Canonical `requires X else Err` shape;
-    /// 96 uses across 15 of 21 main fixtures. Closes divergence A3.
+    // ---- Primary intrinsics ----
+    /// Authorization-or-abort: the canonical `requires X else Err` shape.
     RequireOrAbort {
         pred: Predicate,
         err: ErrorRef,
     },
 
     /// SPL Token Transfer (`call Token.transfer` or `transfers {}` block).
-    /// 7 fixtures, 15 total uses. Closes divergence A2 (Kani/proptest CPI
-    /// gap) and A4 (CPI ensures coordination).
     TokenTransfer {
         from: AccountRef,
         to: AccountRef,
         amount: Expr,
-        /// `None` when the `transfers` block declared no `authority`
-        /// clause. The CPI envelope theorem needs a 3-account shape,
-        /// so authorityless transfers skip the theorem emission with
-        /// an obligation comment — preserving the v2.29 behavior.
+        /// `None` when no `authority` clause. The CPI envelope theorem needs
+        /// a 3-account shape, so authorityless transfers skip theorem
+        /// emission with an obligation comment.
         authority: Option<AccountRef>,
     },
 
     /// Lifecycle promotion to a new variant, carrying payload.
-    /// 1 main fixture + regression coverage. Closes A2 (Kani/proptest
-    /// variant-promotion gap).
     VariantPromote {
         from_tag: VariantTag,
         to_tag: VariantTag,
         payload: Vec<(Symbol, Expr)>,
     },
 
-    // ---- Effect-op kinds (closes B1: effect-op string-literal dispatch) ----
+    // ---- Effect-op kinds ----
     /// `field := value`. Escape hatch for arbitrary effect RHS.
     Assign {
         path: Path,
         rhs: Expr,
     },
 
-    /// `field +=` with checked overflow → ErrorRef. Default arithmetic
-    /// shape post-v2.7 G3 / v2.24.
+    /// `field +=` — checked overflow → ErrorRef (the default arithmetic shape).
     CheckedAdd {
         path: Path,
         delta: Expr,
@@ -527,9 +399,8 @@ pub enum Stmt {
         err: ErrorRef,
     },
 
-    /// `field +=?` — wrapping arithmetic, no error. v2.24 explicit marker
-    /// (parser op_kind `add_wrap`; see the tier table in
-    /// `rust_codegen_util::emit_transition_fn_inner`).
+    /// `field +=?` — wrapping arithmetic, no error (parser op_kind
+    /// `add_wrap`; tier table in `rust_codegen_util::emit_transition_fn_inner`).
     WrapAdd {
         path: Path,
         delta: Expr,
@@ -539,8 +410,7 @@ pub enum Stmt {
         delta: Expr,
     },
 
-    /// `field +=!` — saturating arithmetic, no error. v2.24 explicit marker
-    /// (parser op_kind `add_sat`).
+    /// `field +=!` — saturating arithmetic, no error (parser op_kind `add_sat`).
     SatAdd {
         path: Path,
         delta: Expr,
@@ -550,9 +420,9 @@ pub enum Stmt {
         delta: Expr,
     },
 
-    // ---- Control flow (closes A1: ParsedEffectBranches divergence) ----
-    /// Conditional effect block. Lowered from
-    /// `ParsedHandler.effect_branches` (issue #42).
+    // ---- Control flow ----
+    /// Conditional effect block, lowered from
+    /// `ParsedHandler.effect_branches` (#42).
     Branch {
         scrutinee: BranchScrutinee,
         arms: Vec<BranchArm>,
@@ -571,11 +441,10 @@ pub enum Stmt {
         /// Which handler within the targeted interface.
         method: MethodRef,
         args: Vec<CallArg>,
-        /// v2.27 Track A — caller-supplied projections from the
-        /// callee's abstract state vocabulary onto the caller's
-        /// concrete State fields. Empty when the caller declared no
-        /// `state_binders { ... }` block on the call site (preserves
-        /// the v2.26 callee-frame, param-only axiom shape).
+        /// Caller-supplied projections from the callee's abstract state
+        /// vocabulary onto the caller's concrete State fields. Empty when
+        /// the call site declared no `state_binders { ... }` block
+        /// (callee-frame, param-only axiom shape).
         state_binders: Vec<StateBinder>,
         /// `let X = call ...` binder; `None` for terminal calls.
         result_binding: Option<Symbol>,
@@ -617,36 +486,27 @@ pub struct CallArg {
 // Predicates and expressions (opaque carriers per design)
 // ----------------------------------------------------------------------
 
-/// Opaque expression carrier. The parser already lowers expressions to
-/// per-target string forms; MIR mirrors them without re-modelling.
-///
-/// One of the fields will be non-empty depending on the source. For
-/// `ParsedRequires`-derived expressions, `lean`, `rust`, and `rust_pod`
-/// are all populated. For `ParsedEnsures`-derived expressions, the
-/// `rust_binary` form is additionally populated. Each codegen picks the
-/// field it needs.
+/// Opaque expression carrier — the parser already lowers expressions to
+/// per-target strings; MIR mirrors them. `ParsedRequires`-derived exprs
+/// populate `lean` / `rust` / `rust_pod`; `ParsedEnsures`-derived exprs add
+/// `rust_binary`. Each codegen picks its field.
 #[derive(Debug, Clone, Default)]
 pub struct Expr {
     pub lean: String,
     pub rust: String,
     pub rust_pod: String,
-    /// v2.25 — binary-mode rendering for ensures clauses
-    /// (`state.x` → `post.x`, `old(state.x)` → `pre.x`). Empty for
-    /// expressions sourced from pre-conditions or effect RHS where the
-    /// distinction doesn't apply.
+    /// Binary-mode rendering for ensures (`state.x` → `post.x`,
+    /// `old(state.x)` → `pre.x`); empty where the distinction doesn't apply.
     pub rust_binary: String,
-    /// Source AST retained when available (today only `ParsedRequires`
-    /// preserves it). Lints and AST-level checks can read this; codegens
-    /// shouldn't.
+    /// Source span when available; lints may read it, codegens shouldn't.
     pub source_span: Option<SourceSpan>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Predicate(pub Expr);
 
-/// Source-span placeholder. Today qedgen's parsing doesn't surface
-/// spans up to ParsedSpec uniformly; the v3.0 refactor will. Kept as
-/// an opaque carrier so adding real spans later is non-breaking.
+/// Source-span placeholder — parsing doesn't surface spans uniformly yet;
+/// opaque carrier so adding real spans later is non-breaking.
 #[derive(Debug, Clone, Default)]
 pub struct SourceSpan {
     pub start: usize,
@@ -661,8 +521,7 @@ pub struct SourceSpan {
 pub struct InvariantMir {
     pub name: Symbol,
     pub doc: String,
-    /// `None` for description-only invariants (pre-v2.14 stubs flagged
-    /// by the `bare_invariant` lint).
+    /// `None` for description-only invariants (flagged by `bare_invariant`).
     pub body: Option<Predicate>,
 }
 
@@ -683,12 +542,9 @@ pub enum Ty {
     Pubkey,
     /// User-declared type name (a record, sum type, or imported type).
     Custom(Symbol),
-    /// Bounded map keyed by `Pubkey` with value type `Custom(_)` and
-    /// capacity carried verbatim as a string. Accepts both numeric
-    /// literals (`Map[10] TokenAccount`) and constant-name references
-    /// (`Map[MAX_MEMBERS] Pubkey`); the latter resolves via a top-
-    /// level `const` declaration that the indexed-state renderer
-    /// emits as `abbrev <name> : Nat := <value>`.
+    /// Bounded map keyed by `Pubkey`; capacity carried verbatim as a string —
+    /// numeric literal (`Map[10] T`) or constant name (`Map[MAX_MEMBERS] T`),
+    /// the latter resolved via the spec's `const` table.
     Map {
         capacity: Symbol,
         value: Box<Ty>,
@@ -710,10 +566,8 @@ pub struct EventDecl {
     pub fields: Vec<FieldDecl>,
 }
 
-/// Uninterpreted helper signature. Codegens lower as `opaque <name> :
-/// T1 → T2 → ... → R` (Lean) or as TODO call-sites (Rust). First
-/// encounter wins for the inferred signature — inconsistent uses
-/// across the spec would need a richer type inference pass.
+/// Uninterpreted helper signature — Lean `opaque <name> : T1 → … → R`,
+/// Rust TODO call-sites. First encounter wins for the inferred signature.
 #[derive(Debug, Clone)]
 pub struct UninterpretedHelper {
     pub name: Symbol,
@@ -723,12 +577,9 @@ pub struct UninterpretedHelper {
     pub return_type: String,
 }
 
-/// Spec-level property declaration.
-///
-/// Body lives in `expression` as a pre-rendered Lean expression
-/// (parsing as `Prop`). `preserved_by` names the handlers that must
-/// preserve the property — codegen emits per-(property × handler)
-/// preservation sub-lemmas plus a master case-split theorem.
+/// Spec-level property. `expression` is a pre-rendered Lean `Prop`;
+/// `preserved_by` handlers get per-(property × handler) sub-lemmas plus a
+/// master case-split theorem.
 #[derive(Debug, Clone)]
 pub struct PropertyMir {
     pub name: Symbol,
@@ -739,59 +590,42 @@ pub struct PropertyMir {
     pub preserved_by: Vec<Symbol>,
 }
 
-/// Cover (reachability) declaration. Mirrors `check::ParsedCover`.
-///
-/// Each `cover <name> [op1, op2, ...]` line lowers to one `CoverMir`
-/// with a single trace. The `name <ident> reachable when <expr>` shape
-/// lowers to a `(handler, Some(expr))` entry in `reachable`. Codegen
-/// emits one existential theorem per trace (nested `∃` chain
-/// asserting the trace runs to completion) plus one theorem per
-/// `reachable` entry.
+/// Cover (reachability) declaration, mirroring `check::ParsedCover`.
+/// `cover <name> [op, ...]` → one trace; `<ident> reachable when <expr>` →
+/// a `(handler, Some(expr))` entry. Codegen emits one existential theorem
+/// per trace + one per `reachable` entry.
 #[derive(Debug, Clone)]
 pub struct CoverMir {
     pub name: Symbol,
-    /// Each inner Vec is a handler-name sequence to drive from an
-    /// initial state. The outer Vec lets one cover bundle multiple
-    /// trace alternatives.
+    /// Handler-name sequences driven from an initial state; the outer Vec
+    /// bundles trace alternatives.
     pub traces: Vec<Vec<Symbol>>,
-    /// `(handler-name, optional when-predicate)` reachability claims.
-    /// `when` carries a Lean-rendered Bool predicate over `s : State`.
+    /// `(handler, optional when-predicate)` claims; `when` is a
+    /// Lean-rendered Bool predicate over `s : State`.
     pub reachable: Vec<(Symbol, Option<Predicate>)>,
 }
 
-/// Liveness (leads-to) declaration. Mirrors `check::ParsedLiveness`.
-///
-/// Encodes `liveness <name> : <from> ~> <to> via [op, ...] within N`:
-/// from the source lifecycle state, applying some sequence of `via_ops`
-/// of length ≤ `within_steps` reaches the target lifecycle state.
-/// Codegen emits a single theorem of the form
+/// Liveness (leads-to) declaration, mirroring `check::ParsedLiveness`.
+/// `liveness <name> : <from> ~> <to> via [op, ...] within N` emits
 /// `∃ ops, ops.length ≤ N ∧ ∀ s', applyOps s signer ops = some s' → s'.status = .<to>`.
 #[derive(Debug, Clone)]
 pub struct LivenessMir {
     pub name: Symbol,
-    /// Source lifecycle state tag (e.g., `Open`). The leading `State.`
-    /// prefix from the surface DSL is stripped by the parser.
+    /// Source lifecycle tag (leading `State.` stripped by the parser).
     pub from_state: Symbol,
-    /// Target lifecycle state tag (e.g., `Closed`).
+    /// Target lifecycle tag.
     pub leads_to_state: Symbol,
-    /// Handlers eligible to drive the transition. Order is preserved
-    /// because the lifecycle-path search walks them sequentially.
+    /// Eligible handlers; order preserved (the path search walks sequentially).
     pub via_ops: Vec<Symbol>,
-    /// Step bound. `None` is treated as the legacy default of 10 at
-    /// emit time.
+    /// Step bound; `None` = legacy default of 10 at emit time.
     pub within_steps: Option<u64>,
 }
 
-/// Environment (external-state-change) declaration. Mirrors
-/// `check::ParsedEnvironment`.
-///
-/// Encodes `environment <name> { mutates <field> : <T>; constraint <expr> }`:
-/// every spec property must hold after the listed fields mutate under
-/// the listed constraints. Codegen emits one preservation theorem per
-/// (property × environment) pair, with `new_<field>` parameters and
-/// constraint hypotheses. `mutates` carries field-name and the MIR
-/// `Ty` (pre-resolved from the surface type string at lowering time);
-/// `constraints` carries Lean-rendered predicates.
+/// Environment (external-state-change) declaration, mirroring
+/// `check::ParsedEnvironment`. Every spec property must hold after the
+/// `mutates` fields change under the `constraints`; codegen emits one
+/// preservation theorem per (property × environment) with `new_<field>`
+/// params and constraint hypotheses.
 #[derive(Debug, Clone)]
 pub struct EnvironmentMir {
     pub name: Symbol,
@@ -799,9 +633,8 @@ pub struct EnvironmentMir {
     pub constraints: Vec<Predicate>,
 }
 
-/// `ref_impl <name> (params) : <return_type> = <expr>` declaration.
-/// Carries pre-rendered body strings per backend, same opaque-string
-/// discipline as `Expr`.
+/// `ref_impl <name> (params) : <return_type> = <expr>` declaration; carries
+/// pre-rendered per-backend body strings (opaque-string discipline).
 #[derive(Debug, Clone)]
 pub struct RefImpl {
     pub name: Symbol,
@@ -812,13 +645,10 @@ pub struct RefImpl {
     pub rust_body: String,
 }
 
-/// Issue #67 item 3 — lowered `ghost` declaration. A spec-only auxiliary
-/// State field with a pre-rendered initial value and a per-handler
-/// new-value expression (keyed by handler name). Backends that model the
-/// verification State (Lean / proptest / Kani) add `name : ty` as a State
-/// field, initialise it to `init`, and — in each handler that appears in
-/// `updates` — assign `name := updates[handler]` alongside the normal
-/// effects. The on-chain program codegen never reads this.
+/// Lowered `ghost` declaration (#67) — spec-only auxiliary State field.
+/// Verification-State backends (Lean / proptest / Kani) add `name : ty`,
+/// initialise to `init`, and assign `name := updates[handler]` in each
+/// listed handler; the on-chain codegen never reads this.
 #[derive(Debug, Clone)]
 pub struct GhostMir {
     pub name: Symbol,
@@ -832,9 +662,8 @@ pub struct GhostMir {
 #[derive(Debug, Clone)]
 pub struct InterfaceDecl {
     pub name: Symbol,
-    /// Declared program ID for the callee. `None` for inline
-    /// `interface { … }` blocks that omit the field; the legacy
-    /// `lean_gen` lowering renders `"<unknown>"` in that case.
+    /// Callee program ID. `None` for inline `interface { … }` blocks that
+    /// omit it; the CPI emitter renders `"<unknown>"` in that case.
     pub program_id: Option<Symbol>,
     pub methods: BTreeMap<Symbol, InterfaceMethod>,
 }
@@ -844,127 +673,94 @@ pub struct InterfaceMethod {
     pub name: Symbol,
     pub params: Vec<(Symbol, Ty)>,
     /// Pre-rendered callee ensures clauses — fed into per-callsite
-    /// substitution by the `cpi_substitute` MIR→MIR pass.
+    /// substitution by `cpi_substitute`.
     pub ensures: Vec<Predicate>,
-    /// v2.27 Track A — typed abstract-state vocabulary declared by
-    /// the optional interface-level `state { name : Type, ... }` block.
-    /// Empty when the interface declares no state. Used by the CPI
-    /// theorem emitter to pick the right Lean codomain in the bundled
-    /// axiom signature (`State → T`).
+    /// Typed abstract-state vocabulary from the interface-level
+    /// `state { name : Type, ... }` block; the CPI theorem emitter uses it
+    /// to pick the Lean codomain in the bundled axiom signature (`State → T`).
     pub state_fields: Vec<(Symbol, Ty)>,
-    /// v2.26 Track K — when the source declared
-    /// `-> <ident> : <Type>`, the identifier names the return value
-    /// inside the callee's ensures. Substitution rewrites this name to
-    /// the caller's `let X = ...` binder; `None` falls back to the
-    /// literal `"result"` for back-compat.
+    /// `-> <ident> : <Type>` return-value identifier inside the callee's
+    /// ensures; substitution rewrites it to the caller's `let X = ...`
+    /// binder. `None` falls back to the literal `"result"`.
     pub result_binder: Option<Symbol>,
-    /// v2.24 #11 declared handler return type, in source DSL form
-    /// (e.g. `U64`). `None` for terminal handlers.
+    /// Declared handler return type in source DSL form (e.g. `U64`);
+    /// `None` for terminal handlers.
     pub return_type: Option<Symbol>,
 }
 
 // ----------------------------------------------------------------------
-// Cross-program references — unified imports (v2.30 / Phase 1c-7)
+// Cross-program references — unified imports
 // ----------------------------------------------------------------------
 //
-// One canonical lifted structure for everything an `import` resolves
-// to AND every inline `interface { … }` block. See
-// `docs/design/mir-unified-imports.md` for the design rationale —
-// notably the collapse of the parallel `ParsedSpec.interfaces` +
-// `ParsedSpec.imported_namespaces` surfaces into a single MIR view.
+// One canonical lifted structure for everything an `import` resolves to AND
+// every inline `interface { … }` block (`docs/design/mir-unified-imports.md`).
 //
-// Tier classification under unification is derivable, not declared:
-//   * Tier 0 — `ImportOrigin::Inline` OR an external import with
-//     every interface declaring no `ensures`. No call-site warrant.
-//   * Tier 1 — external import with non-empty `ensures` AND
-//     `Some(upstream)` carrying a `binary_hash` pin. Caller theorems
-//     apply the bundled axiom; runtime CPI is warranted by the pin.
-//   * Tier 2 — same as Tier 1 plus a bundled proof package under
-//     `crates/qedgen/data/proofs/`. The lakefile `require`s pull the
-//     callee's verified theorems in directly (Stance 2 in
-//     [[project-stance3-qedsvm-discharge]]).
+// Tier classification is derivable, not declared:
+//   * Tier 0 — `ImportOrigin::Inline` OR external import with no `ensures`
+//     anywhere. No call-site warrant.
+//   * Tier 1 — external import with non-empty `ensures` AND `Some(upstream)`
+//     carrying a `binary_hash` pin: caller theorems apply the bundled axiom,
+//     runtime CPI is warranted by the pin.
+//   * Tier 2 — Tier 1 plus a bundled proof package under
+//     `crates/qedgen/data/proofs/`; lakefile `require`s pull the callee's
+//     verified theorems in directly.
 
-/// One imported source — both types and call contracts come from the
-/// same artifact, warranted by the same `binary_hash` pin (when the
-/// import is external).
+/// One imported source — types and call contracts come from the same
+/// artifact, warranted by the same `binary_hash` pin (when external).
 #[derive(Debug, Clone)]
 pub struct ImportedSpecMir {
-    /// Local alias used by `call <alias>.handler(...)` and
-    /// `<alias>.<Type>` references. Falls back to the bound name when
-    /// no `as` clause is declared. For `ImportOrigin::Inline`, the
-    /// alias IS the interface name itself (see
-    /// `mir-unified-imports.md` §"Open questions" #2).
+    /// Local alias for `call <alias>.handler(...)` / `<alias>.<Type>`.
+    /// Falls back to the bound name without an `as` clause; for
+    /// `ImportOrigin::Inline` the alias IS the interface name.
     pub alias: Symbol,
-    /// Where the imported source came from — built-in stdlib key,
-    /// user-supplied file path, or the `Inline` marker for inline
-    /// `interface` blocks (no source, no warrant).
+    /// Built-in stdlib key, user file path, or `Inline` (no source, no warrant).
     pub origin: ImportOrigin,
-    /// Account-type declarations exported by the imported spec.
-    /// Re-emitted as Rust mirrors at `src/imported/<alias>.rs` when
-    /// non-empty. Empty for Tier-0 interface-only stubs (SPL Token /
-    /// System Program / Metaplex bundled stubs) and inline blocks.
+    /// Exported account-type declarations; re-emitted as Rust mirrors at
+    /// `src/imported/<alias>.rs` when non-empty. Empty for Tier-0
+    /// interface-only stubs and inline blocks.
     pub account_types: Vec<crate::check::ParsedAccountType>,
-    /// Record types referenced by the imported account types.
-    /// Re-emitted alongside `account_types` so the mirror is
-    /// self-contained.
+    /// Record types referenced by `account_types`, re-emitted alongside so
+    /// the mirror is self-contained.
     pub records: Vec<crate::check::ParsedRecordType>,
-    /// Interface (call-contract) declarations the imported spec
-    /// exports. Each carries handlers + ensures + requires + the
-    /// abstract state-field vocabulary (v2.27 Phase 0). For inline
-    /// `interface Foo { ... }` blocks, this map has a single entry
-    /// keyed by `Foo`.
+    /// Exported interface (call-contract) declarations: handlers, ensures,
+    /// requires, and abstract state-field vocabulary. Inline blocks yield a
+    /// single entry keyed by the interface name.
     pub interfaces: BTreeMap<Symbol, InterfaceDecl>,
-    /// `upstream { binary_hash = ... }` pin warranting the entire
-    /// imported artifact. The pin justifies trusting both
-    /// `interfaces` ensures AND `account_types` layouts — they're
-    /// the same artifact, not two contracts. `None` for
-    /// `ImportOrigin::Inline` (Tier 0 by construction).
+    /// `upstream { binary_hash = ... }` pin warranting the *entire* imported
+    /// artifact — both `interfaces` ensures AND `account_types` layouts
+    /// (same artifact, not two contracts). `None` for `Inline` (Tier 0 by
+    /// construction).
     pub upstream: Option<crate::check::ParsedUpstream>,
-    /// v2.27 Track B / Stance 2 — set to `Some(pkg_root)` when the
-    /// imported source ships a bundled proof package whose theorems
-    /// will discharge this import's per-handler ensures. `None` keeps
-    /// the Stance-1 axiom path active (consumer emits its own
-    /// sibling axiom module). The package root informs the lakefile
-    /// `require` directive that pulls in the provider's proofs.
+    /// `Some(pkg_root)` when the import ships a bundled proof package
+    /// (Stance 2) discharging its per-handler ensures; informs the lakefile
+    /// `require`. `None` keeps the Stance-1 axiom path (consumer emits its
+    /// own sibling axiom module).
     pub verified_pkg_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ImportOrigin {
-    /// Built-in stdlib key resolved through the bundled qedspec at
-    /// `crates/qedgen/data/interfaces/<key>.qedspec` (e.g. `"spl"`,
-    /// `"system"`, `"metaplex"`).
+    /// Built-in stdlib key (`"spl"`, `"system"`, `"metaplex"`), resolved
+    /// through `crates/qedgen/data/interfaces/<key>.qedspec`.
     Builtin(Symbol),
-    /// File-path import from the consumer's `qed.toml`. The path
-    /// stored is the manifest dep key (the value after `from "..."`).
+    /// File-path import; stores the manifest dep key (after `from "..."`).
     File(Symbol),
-    /// Inline `interface Foo { ... }` block declared in the
-    /// consumer's own spec. No source, no `upstream` pin — Tier 0
-    /// by construction. The interface name doubles as the namespace
-    /// alias (`Mir.imports["Foo"]` and `Mir.imports["Foo"]
-    /// .interfaces["Foo"]`).
+    /// Inline `interface Foo { ... }` block — no source, no `upstream` pin,
+    /// Tier 0 by construction. The interface name doubles as the alias.
     Inline,
 }
 
-/// v2.27 Track A — caller-supplied projection from a callee's
-/// abstract state field onto a caller's concrete State field.
-///
-/// At today's surface, the RHS must be a single dotted path
-/// (`state.<ident>`). The MIR type tightens that to a `Path`,
-/// trading the free-string shape for structure. Richer RHS
-/// expressions are reserved for a future spec evolution.
+/// Caller-supplied projection from a callee's abstract state field onto a
+/// caller's concrete State field. Today's surface restricts the RHS to a
+/// single dotted path (`state.<ident>`); MIR carries a `Path` so richer
+/// `state.X.Y` projections can land without reshaping the IR.
 #[derive(Debug, Clone)]
 pub struct StateBinder {
-    /// LHS — callee abstract field name (from the imported
-    /// interface's `state { ... }` block). Word-boundary substitution
-    /// catches every occurrence in the callee's ensures.
+    /// Callee abstract field name (from the interface's `state { ... }`
+    /// block); word-boundary substitution catches every ensures occurrence.
     pub callee_field: Symbol,
-    /// RHS — caller-side projection. Typically a single bare state
-    /// field (`Path { segments: ["caller_field"] }`) lifted from
-    /// `state.<ident>` at the surface; carrying the full `Path`
-    /// shape leaves room for `state.X.Y` projections to land
-    /// alongside [[project-stance3-qedsvm-discharge]] without
-    /// reshaping the IR.
+    /// Caller-side projection — typically a single bare state field lifted
+    /// from `state.<ident>`.
     pub caller_projection: Path,
 }
 
@@ -972,8 +768,7 @@ pub struct StateBinder {
 // Reference types
 // ----------------------------------------------------------------------
 
-/// Interned symbol — today just a String for simplicity, will become
-/// a hash-interned id when the corpus grows large enough to warrant it.
+/// Interned symbol — a plain String until the corpus warrants interning.
 pub type Symbol = String;
 
 pub type VariantTag = Symbol;
@@ -1021,26 +816,19 @@ pub enum AccountRef {
 pub enum AccountOrField {
     /// Bare `auth <account_name>`.
     Account(AccountRef),
-    /// Dotted-auth v2.29.1 — `auth <account>.<field>`. Already desugared
-    /// to a synthetic `requires` clause in `chumsky_adapter.rs:3144`, but
-    /// the structured form is retained here so codegens that want the
-    /// original shape (e.g., the lint that detects auth patterns) can
-    /// reach it.
+    /// Dotted `auth <account>.<field>`. Already desugared to a synthetic
+    /// `requires` in `chumsky_adapter.rs`; the structured form is retained
+    /// for consumers that want the original shape (e.g. auth-pattern lints).
     AccountField { account: AccountRef, field: Symbol },
 }
-
-// ----------------------------------------------------------------------
-// Lowering entry point — implemented in Phase 0c
-// ----------------------------------------------------------------------
 
 // ----------------------------------------------------------------------
 // Expr constructors
 // ----------------------------------------------------------------------
 
 impl Expr {
-    /// Build an `Expr` from a `ParsedRequires` — uses all three render
-    /// forms (`lean_expr` / `rust_expr` / `rust_expr_pod`). `rust_binary`
-    /// stays empty since requires runs in single-state context.
+    /// From a `ParsedRequires` — `rust_binary` stays empty (requires runs
+    /// in single-state context).
     pub fn from_requires(req: &crate::check::ParsedRequires) -> Self {
         Expr {
             lean: req.lean_expr.clone(),
@@ -1051,8 +839,8 @@ impl Expr {
         }
     }
 
-    /// Build an `Expr` from a `ParsedEnsures` — uses all four render
-    /// forms including `rust_expr_binary` for the pre/post split.
+    /// From a `ParsedEnsures` — all four render forms, including
+    /// `rust_expr_binary` for the pre/post split.
     pub fn from_ensures(ens: &crate::check::ParsedEnsures) -> Self {
         Expr {
             lean: ens.lean_expr.clone(),
@@ -1063,11 +851,9 @@ impl Expr {
         }
     }
 
-    /// Build an `Expr` from a raw single-form string (e.g., an effect
-    /// value, a transfer amount, a seed). Stores in `rust` only;
-    /// codegens that need other forms must render on the fly from this.
-    /// This is the Phase 0 compromise — proper multi-form rendering at
-    /// lowering time requires touching the parser, deferred to v3.0.
+    /// From a raw single-form string (effect value, transfer amount, seed):
+    /// the same string fills every form. Proper multi-form rendering at
+    /// lowering time requires parser changes, deferred to v3.0.
     pub fn from_raw(s: impl Into<String>) -> Self {
         let s = s.into();
         Expr {
@@ -1084,25 +870,16 @@ impl Expr {
 // Lowering — ParsedSpec → MIR
 // ----------------------------------------------------------------------
 
-/// Lower a fully-parsed and checked `ParsedSpec` to MIR.
+/// Lower a fully-parsed and checked `ParsedSpec` to MIR — the canonical
+/// entry point, consumed by all four codegens.
 ///
-/// The lowering is **lossless w.r.t. semantics** but not w.r.t. source
-/// syntax — surface sugar (schema-includes, `transfers` blocks,
-/// dotted-auth) is desugared into the explicit `Stmt` shapes during
-/// lowering. Schema-include expansion and dotted-auth desugaring have
-/// already run upstream in `chumsky_adapter.rs:3125+`; lowering reads
-/// the expanded form.
+/// Lossless w.r.t. semantics but not source syntax: surface sugar
+/// (schema-includes, `transfers` blocks, dotted-auth) is desugared into
+/// explicit `Stmt` shapes; schema-include expansion and dotted-auth
+/// desugaring have already run upstream in `chumsky_adapter.rs`.
 ///
-/// Pre-conditions: `parsed` must have passed `check::check_spec` so
-/// post-pass expansions have run. The lowering assumes these are
-/// already done and does not re-validate.
-///
-/// Phase 0c scope: lowers TokenTransfer, RequireOrAbort, Assign,
-/// CheckedAdd / CheckedSub, WrapAdd / WrapSub, SatAdd / SatSub,
-/// lifecycle gating via `HandlerMir.transition`, and the AccountTable.
-/// `Stmt::Branch` (conditional effects) and `Stmt::VariantPromote`
-/// recognize their parsed source but emit a structured TODO `Stmt::Abort`
-/// stub today; Phase 5 fills them in.
+/// Pre-condition: `parsed` must have passed `check::check_spec` (post-pass
+/// expansions done); lowering does not re-validate.
 pub fn lower(parsed: &ParsedSpec) -> Mir {
     Mir {
         name: parsed.program_name.clone(),
@@ -1182,9 +959,8 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
     }
 }
 
-/// Lift every `type <Account>` declaration into a parallel
-/// `AccountStateMir`. The primary account is the first entry;
-/// multi-account codegen walks the full list. v2.30 Phase 2.
+/// Lift every `type <Account>` declaration into an `AccountStateMir`;
+/// primary account first, multi-account codegen walks the full list.
 fn lower_account_states(parsed: &ParsedSpec) -> Vec<AccountStateMir> {
     parsed
         .account_types
@@ -1224,9 +1000,8 @@ fn lower_account_states(parsed: &ParsedSpec) -> Vec<AccountStateMir> {
 }
 
 fn lower_state(parsed: &ParsedSpec) -> StateAdt {
-    // Primary account type drives the state ADT. Multi-account specs
-    // surface only the primary here; per-account state lives on each
-    // handler's `accounts` binding. v3.0 may revisit.
+    // Primary account type drives the state ADT; multi-account specs
+    // surface only the primary here.
     let primary = parsed.account_types.first();
 
     let variants = match primary {
@@ -1246,9 +1021,8 @@ fn lower_state(parsed: &ParsedSpec) -> StateAdt {
             })
             .collect(),
         Some(at) => {
-            // Single-record account type — one synthetic variant
-            // carrying all fields. tag = the account-type name for
-            // back-compat with codegens that key on the name.
+            // Single-record account type — one synthetic variant with all
+            // fields; tag = account-type name (codegens key on it).
             vec![StateVariant {
                 tag: at.name.clone(),
                 fields: at
@@ -1297,24 +1071,15 @@ fn lower_errors(parsed: &ParsedSpec) -> ErrorEnum {
     }
 }
 
-/// Lower `ParsedSpec` import sources (both `import` resolutions in
-/// `imported_namespaces` and inline `interface { ... }` blocks in
-/// `interfaces`) to the unified `BTreeMap<Symbol, ImportedSpecMir>`
-/// shape. Implements step 4 of
-/// `docs/design/mir-unified-imports.md`.
+/// Lower import sources (external `imported_namespaces` + inline
+/// `interfaces`) to the unified `BTreeMap<Symbol, ImportedSpecMir>`.
 ///
-/// Discrimination rule: external imports register in both
-/// `parsed.imported_namespaces` (keyed by local alias) and
-/// `parsed.interfaces` (one entry per alias, name post-rename).
-/// Inline `interface { … }` blocks register only in
-/// `parsed.interfaces`. So the algorithm:
-///   1. Walk `imported_namespaces` → external import entries
-///      (`ImportOrigin::Builtin` if `dep_key` resolves through
-///      `import_resolver::builtin_source`, else
-///      `ImportOrigin::File`).
-///   2. Walk `parsed.interfaces`; any entry whose name is NOT a key
-///      in `imported_namespaces` is an inline block →
-///      `ImportOrigin::Inline`.
+/// Discrimination rule: external imports register in BOTH
+/// `imported_namespaces` (keyed by local alias) and `interfaces`; inline
+/// blocks register only in `interfaces`. So: (1) walk
+/// `imported_namespaces` → external entries (`Builtin` if `dep_key`
+/// resolves via `import_resolver::builtin_source`, else `File`); (2) any
+/// `interfaces` entry not keyed in `imported_namespaces` is `Inline`.
 fn lower_imports(parsed: &ParsedSpec) -> BTreeMap<Symbol, ImportedSpecMir> {
     let mut imports = BTreeMap::new();
 
@@ -1368,14 +1133,10 @@ fn lower_imports(parsed: &ParsedSpec) -> BTreeMap<Symbol, ImportedSpecMir> {
     imports
 }
 
-/// Lift a single `ParsedInterface` to the MIR `InterfaceDecl` shape.
-///
-/// Preserves the legacy semantics: `program_id` flows through as
-/// `Option<Symbol>` (the CPI emitter renders `"<unknown>"` for the
-/// `None` case to match the v2.x output exactly), and every handler's
-/// `ensures` clauses become `Predicate`s carrying their pre-rendered
-/// Lean / Rust forms — Phase 3's `cpi_substitute` MIR→MIR pass will
-/// rewrite them per call site.
+/// Lift a `ParsedInterface` to `InterfaceDecl`. `program_id` flows through
+/// as `Option<Symbol>` (CPI emitter renders `"<unknown>"` for `None`);
+/// handler `ensures` become `Predicate`s that `cpi_substitute` rewrites
+/// per call site.
 fn lift_interface(iface: &crate::check::ParsedInterface) -> InterfaceDecl {
     let mut methods = BTreeMap::new();
     for h in &iface.handlers {
@@ -1553,9 +1314,8 @@ fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
     };
 
     let (pre, requires_or_abort) = split_requires(&h.requires);
-    // Original spec order of all requires (for the indexed renderer's
-    // conjunct ordering — see `HandlerMir.requires_in_order`). Identical
-    // predicate construction to `split_requires`.
+    // All requires in spec order (see `HandlerMir.requires_in_order`);
+    // same predicate construction as `split_requires`.
     let requires_in_order: Vec<Predicate> = h
         .requires
         .iter()
@@ -1612,11 +1372,9 @@ fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
     }
 }
 
-/// Split `ParsedRequires` into (pure pre-conditions, requires-or-abort).
-/// Clauses with `error_name = Some(...)` go to the requires-or-abort
-/// list (lowered to `Stmt::RequireOrAbort` in the body); clauses
-/// without go to `pre` (silent pre-conditions used in theorem
-/// hypotheses but not enforced via abort).
+/// Split `ParsedRequires`: clauses with `error_name = Some(...)` →
+/// requires-or-abort (body `Stmt::RequireOrAbort`); bare clauses → `pre`
+/// (theorem hypotheses, not enforced via abort).
 fn split_requires(
     requires: &[crate::check::ParsedRequires],
 ) -> (Vec<Predicate>, Vec<RequireOrAbortClause>) {
@@ -1637,11 +1395,8 @@ fn split_requires(
 
 fn lower_auth(h: &crate::check::ParsedHandler) -> Option<AccountOrField> {
     h.who.as_ref().map(|who| {
-        // Dotted form was desugared in chumsky_adapter.rs:3144 — by the
-        // time we see it, `who` is the bare signer-account name (the
-        // dotted clause was synthesized into requires). But keep the
-        // structured form here so future passes can recover the original
-        // shape from a paired ParsedRequires lookup if needed.
+        // Dotted form was already desugared in chumsky_adapter.rs — `who`
+        // is the bare signer-account name here.
         AccountOrField::Account(AccountRef::ByBinding(who.clone()))
     })
 }
@@ -1661,19 +1416,16 @@ fn lower_account_binding(a: &crate::check::ParsedHandlerAccount) -> AccountBindi
         name: a.name.clone(),
         writable: a.is_writable,
         is_signer: a.is_signer,
-        init: false, // ParsedHandlerAccount doesn't carry `init` today;
-        // Anchor's #[account(init)] comes from account_attr —
-        // pre-v3.0 lives in a separate parser surface. v3.0
-        // unifies.
+        init: false, // ParsedHandlerAccount doesn't carry `init`; Anchor's
+        // #[account(init)] lives in a separate parser surface until v3.0.
         is_program: a.is_program,
         kind,
         authority: a
             .authority
             .as_ref()
             .map(|name| AccountRef::ByBinding(name.clone())),
-        pda_ref: None, // inline `pda [seeds]` is captured on
-        // `ParsedHandlerAccount.pda_seeds`; top-level
-        // pdas live in AccountTable. v3.0 unifies.
+        pda_ref: None, // inline `pda [seeds]` lives on
+        // `ParsedHandlerAccount.pda_seeds`; top-level pdas in AccountTable.
         imported_namespace: a.imported_namespace.clone(),
         default_pubkey: a.default_pubkey.clone(),
         account_type: a.account_type.clone(),
@@ -1698,11 +1450,10 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         stmts.push(Stmt::Abort(ab.error_name.clone()));
     }
 
-    // 3. Effects → typed Stmt kinds per op_kind. Suppressed when the
-    //    handler declared `effect { match … }` — `h.effects` then
-    //    carries the *union* of every arm's effects (parser back-compat
-    //    view) and the real statements live on the `Stmt::Branch`
-    //    lowered in step 7; lowering both would double-emit.
+    // 3. Effects → typed Stmt kinds per op_kind. Suppressed under
+    //    `effect { match … }`: `h.effects` then carries the *union* of all
+    //    arms (parser back-compat view) and the real statements live on the
+    //    step-7 `Stmt::Branch` — lowering both would double-emit.
     if h.effect_branches.is_none() {
         stmts.extend(lower_effects(&h.effects, &h.effect_on_error));
     }
@@ -1724,12 +1475,10 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         });
     }
 
-    // 5. Explicit CPI calls — all lower to `Stmt::Cpi`. The legacy
-    //    `lean_gen::render_cpi_theorems` deliberately routes
-    //    `call Token.transfer(...)` through the call-site ensures-as-
-    //    axiom half (and reserves the transfer-envelope half for
-    //    `transfers { ... }` blocks). Collapsing them at lowering
-    //    time would erase that intent.
+    // 5. Explicit CPI calls — ALL lower to `Stmt::Cpi`, including
+    //    `call Token.transfer(...)`: the ensures-as-axiom half is for call
+    //    sites, the transfer-envelope half is reserved for `transfers {}`
+    //    blocks. Collapsing them at lowering time would erase that intent.
     for call in &h.calls {
         let stmt = {
             Stmt::Cpi {
@@ -1768,10 +1517,9 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         stmts.push(Stmt::Emit { event: ev.clone() });
     }
 
-    // 7. ParsedEffectBranches → `Stmt::Branch` (Phase 5, issue #42).
-    //    Non-wildcard arms lower in declaration order; the wildcard arm
-    //    becomes `default`. The flat union in `h.effects` was suppressed
-    //    in step 3 — the Branch is the sole carrier of these effects.
+    // 7. ParsedEffectBranches → `Stmt::Branch`: non-wildcard arms in
+    //    declaration order, wildcard arm as `default`. The flat union was
+    //    suppressed in step 3 — the Branch is the sole carrier.
     if let Some(br) = &h.effect_branches {
         let mut arms = Vec::new();
         let mut default = None;
@@ -1810,10 +1558,9 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     Block { stmts }
 }
 
-/// Lower a parsed effect-triple list into typed `Stmt`s.
-/// `on_error[i]` (when present) supplies the per-site error name for
-/// checked variants. Shared by the flat-effects path and the per-arm
-/// `Stmt::Branch` lowering.
+/// Lower effect triples into typed `Stmt`s; `on_error[i]` supplies per-site
+/// error names for checked variants. Shared by the flat-effects path and
+/// per-arm `Stmt::Branch` lowering.
 fn lower_effects(effects: &[(String, String, String)], on_error: &[Option<String>]) -> Vec<Stmt> {
     let mut stmts = Vec::new();
     for (i, (field, op_kind, value)) in effects.iter().enumerate() {
@@ -1837,8 +1584,8 @@ fn lower_effects(effects: &[(String, String, String)], on_error: &[Option<String
             "add_sat" => Stmt::SatAdd { path, delta: rhs },
             "sub_sat" => Stmt::SatSub { path, delta: rhs },
             other => {
-                // Unknown op_kind — synthesize an Assign with a structured
-                // comment marker so codegens can surface it as a bug.
+                // Unknown op_kind — Assign with a structured marker so
+                // codegens surface it as a bug.
                 Stmt::Assign {
                     path,
                     rhs: Expr::from_raw(format!(
@@ -1852,8 +1599,7 @@ fn lower_effects(effects: &[(String, String, String)], on_error: &[Option<String
     stmts
 }
 
-/// Parse a dotted field path like `state.admin` or `accounts.escrow_ta.amount`
-/// into a `Path`. For Phase 0, just splits on `.`.
+/// Parse a dotted field path (`state.admin`) into a `Path` — splits on `.`.
 fn parse_field_path(s: &str) -> Path {
     Path {
         segments: s.split('.').map(|seg| seg.to_string()).collect(),
@@ -1874,11 +1620,8 @@ fn parse_ty(s: &str) -> Ty {
         "Bool" => Ty::Bool,
         "Pubkey" => Ty::Pubkey,
         other => {
-            // `Map[N] T` matcher. Accepts either a numeric literal
-            // (`Map[10] TokenAccount`) or a constant-name reference
-            // (`Map[MAX_MEMBERS] Pubkey`). The capacity passes through
-            // as a string; the indexed-state renderer resolves
-            // identifier capacities via the spec's `const` table.
+            // `Map[N] T`: numeric literal or constant-name capacity, passed
+            // through as a string (see `Ty::Map`).
             if let Some(rest) = other.strip_prefix("Map[") {
                 if let Some(close) = rest.find(']') {
                     let cap_str = rest[..close].trim().to_string();
@@ -1905,9 +1648,9 @@ mod tests {
     use super::*;
     use std::path::Path as FsPath;
 
-    /// Phase-5 #42 — `effect { match … }` lowers to a real `Stmt::Branch`:
-    /// non-wildcard arms in order, wildcard arm as `default`, NO flat
-    /// union effects (they would double-emit), no Phase-5 stub `Abort`.
+    /// `effect { match … }` lowers to a real `Stmt::Branch`: non-wildcard
+    /// arms in order, wildcard as `default`, NO flat union effects
+    /// (double-emit) and no stub `Abort`.
     #[test]
     fn effect_branches_lower_to_branch_stmt() {
         let src = r#"spec CondFee
@@ -1985,7 +1728,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         );
     }
 
-    // ---- Phase 0b: type-composition smoke tests ----
+    // ---- Type-composition smoke tests ----
 
     #[test]
     fn mir_types_construct() {
@@ -2081,16 +1824,11 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         }
     }
 
-    // ---- Phase 0d: fixture-based lowering tests ----
+    // ---- Fixture-based lowering tests ----
     //
-    // Each test parses a real .qedspec from `examples/` and lowers it to
-    // MIR, asserting structural properties. Pass = lowering succeeds
-    // without panic and key features survive the round-trip.
-    //
-    // These tests use `parse_spec_file` which exercises the full
-    // chumsky parser + chumsky_adapter post-pass pipeline. Schema-include
-    // expansion and dotted-auth desugaring run before lowering sees the
-    // ParsedSpec, matching production usage.
+    // Each test parses a real .qedspec from `examples/` via
+    // `parse_spec_file` (full chumsky parser + adapter post-passes,
+    // matching production) and asserts structural properties of the MIR.
 
     fn lower_fixture(rel_path: &str) -> Mir {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -2104,9 +1842,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             "fixture not found: {}",
             spec_path.display()
         );
-        // `parse_spec_file` handles both single-file and multi-file
-        // (directory) specs — escrow-split distributes its handlers
-        // across `handlers/*.qedspec` and needs the directory as input.
+        // `parse_spec_file` handles single-file and directory specs
+        // (escrow-split needs the directory as input).
         let parsed = crate::check::parse_spec_file(&spec_path)
             .unwrap_or_else(|e| panic!("parse {}: {e}", spec_path.display()));
         lower(&parsed)
@@ -2270,9 +2007,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn lower_effects_to_typed_stmt() {
-        // Walk every handler in every pilot fixture and confirm each
-        // effect op_kind lowers to its typed Stmt kind (not the
-        // unknown-op fallback marker).
+        // Every effect op_kind in the pilot fixtures lowers to its typed
+        // Stmt kind (no unknown-op fallback marker).
         for fixture in &[
             "examples/rust/escrow/escrow.qedspec",
             "examples/rust/lending/lending.qedspec",
@@ -2283,8 +2019,6 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             for h in &mir.handlers {
                 for s in &h.body.stmts {
                     if let Stmt::Assign { rhs, .. } = s {
-                        // Unknown op_kind path tags the RHS with a TODO comment.
-                        // If any Assign carries that, our op-kind switch missed something.
                         assert!(
                             !rhs.rust.starts_with("/* MIR-TODO: unknown op_kind"),
                             "fixture {} has unknown-op_kind effect: {}",
@@ -2299,9 +2033,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn lower_preserves_handler_count_across_pilot() {
-        // Smoke: every pilot fixture parses + lowers without panic and
-        // yields ≥1 handler. Catches future parser regressions or
-        // lowering-side panics.
+        // Smoke: every pilot fixture parses + lowers without panic, ≥1 handler.
         for fixture in &[
             "examples/rust/escrow/escrow.qedspec",
             "examples/rust/escrow-split",
@@ -2318,18 +2050,14 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         }
     }
 
-    // ---- Phase 1c-7 (unified imports) — lower_imports tests ----
+    // ---- lower_imports tests ----
 
     #[test]
     fn lower_imports_builtin_spl_token() {
-        // bundled-stdlib-demo/pool.qedspec is the only pilot fixture
-        // with an explicit `import Token from "spl"` line. The lifted
-        // import should land as `Mir.imports["Token"]` tagged
-        // `ImportOrigin::Builtin("spl")` with the SPL Token interface
-        // (carrying `transfer`, `mint_to`, etc.) lifted into
-        // `.interfaces["Token"]`. v2.30 unified-imports step 0
-        // guarantees the entry exists even though the bundled stub
-        // declares no `type`s.
+        // `import Token from "spl"` should land as `Mir.imports["Token"]`
+        // tagged `Builtin("spl")` with the SPL Token interface lifted into
+        // `.interfaces["Token"]` — even though the bundled stub declares
+        // no `type`s.
         let mir = lower_fixture("examples/rust/bundled-stdlib-demo/pool.qedspec");
         let token = mir
             .imports
@@ -2360,10 +2088,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn lower_imports_inline_interface() {
-        // issue-8 pool.qedspec declares an inline `interface MockEncrypt
-        // { ... }` block — it should lower as
-        // `Mir.imports["MockEncrypt"]` tagged `ImportOrigin::Inline`
-        // with no upstream pin (Tier 0 by construction).
+        // Inline `interface MockEncrypt { ... }` lowers as
+        // `Mir.imports["MockEncrypt"]` tagged `Inline`, no upstream pin.
         let mir = lower_fixture("crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec");
         let mock = mir
             .imports
@@ -2382,11 +2108,8 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
 
     #[test]
     fn lower_imports_no_imports_is_empty() {
-        // Specs that initiate CPIs only through the `transfers { }`
-        // sugar (no explicit `import` line, no inline `interface`
-        // block) should produce an empty `Mir.imports`. The escrow
-        // pilot is the canonical case — three `transfers` blocks but
-        // no top-level import.
+        // CPIs only via `transfers {}` sugar (no `import`, no inline
+        // `interface`) → empty `Mir.imports`. Escrow is the canonical case.
         let mir = lower_fixture("examples/rust/escrow/escrow.qedspec");
         assert!(
             mir.imports.is_empty(),
@@ -2396,5 +2119,4 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
     }
 }
 
-// Submodules (v2.35 src/ reorg).
 pub(crate) mod cpi_substitute;

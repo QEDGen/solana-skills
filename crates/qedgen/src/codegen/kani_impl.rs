@@ -1,55 +1,27 @@
-//! Impl-targeted Kani harness emission (v2.26 Batch 2 — Track H).
+//! Impl-targeted Kani harness emission. The spec-model harness checks the
+//! spec's translated transition against its own `ensures`; this module
+//! emits harnesses that call the user's REAL handler against a symbolic
+//! accounts context — a counterexample blames the impl, not the spec.
+//! `pre`/`post` in `ParsedEnsures.rust_expr_binary` flatten to
+//! harness-local `pre_<field>` / `post_<field>` account-data snapshots
+//! (`rewrite_pre_post_paths`).
 //!
-//! The v2.25 ensures-preservation harness (`kani.rs`) verifies the spec's
-//! own translated transition fn against its declared `ensures` clauses. That
-//! catches spec-internal inconsistency — useful, but doesn't validate that
-//! the *user's Rust handler* satisfies the contract.
+//! Triggers: explicit `--kani-impl`, or auto when a handler's `modifies`
+//! lists fields absent from its effect LHS (the agent-fill signal; the
+//! file header names the triggering handlers).
 //!
-//! This module emits a parallel harness shape that calls the user's REAL
-//! Anchor handler against a symbolic `Accounts` context. Pre/post account-
-//! field snapshots replace the spec-model `pre = s.clone()`; the assertion
-//! body reuses `ParsedEnsures.rust_expr_binary` so the same `pre.x` / `post.x`
-//! rendering applies — but `pre`/`post` are now flat `pre_<field>` /
-//! `post_<field>` locals reading from account data instead of `State` copies.
+//! CPI ensures-as-fact: callee `ensures` are substituted with call-site
+//! expressions (`cpi_substitute::substitute_callee_ensures_rust_binary`)
+//! and spliced as `kani::assume(...)` between `if result.is_ok()` and the
+//! first caller `assert!`; Tier-0 callees (no ensures) emit nothing — the
+//! `cpi_no_callee_ensures` lint surfaces the gap at check time.
 //!
-//! ## Triggers (opt-in)
-//!
-//! 1. User passes `--kani-impl` to `qedgen codegen`.
-//! 2. Auto-trigger: any handler has `modifies` listing fields not present in
-//!    the effect block's LHS (the v2.25 LP-shape signal indicating the impl
-//!    is expected to fill those fields via the agent-fill `todo!()` site).
-//!    When auto-triggered, the file header carries a comment naming the
-//!    triggering handler(s).
-//!
-//! ## CPI ensures-as-fact (Track I)
-//!
-//! When the handler does `call Foo.bar(...)` and the callee declares
-//! `ensures`, we splice `kani::assume(<callee_ensures, substituted>)` lines
-//! between `if result.is_ok()` and the first caller `assert!`. The
-//! substitution maps each callee param to the caller's call-site expression
-//! via `crate::cpi_substitute::substitute_callee_ensures_rust_binary` — the
-//! same helper `kani.rs`'s spec-model harness uses. The substituted clauses
-//! come back in `pre.X` / `post.X` form (from `rust_expr_binary`); we then
-//! flatten those to the harness-local `pre_X` / `post_X` snapshots via
-//! `rewrite_pre_post_paths`.
-//!
-//! Tier-0 callees (no `ensures` declared) emit nothing — same fallback as
-//! the spec-model variant and `lean_gen.rs::render_cpi_theorems`'s
-//! `:= by sorry`. The `cpi_no_callee_ensures` lint surfaces the gap at
-//! check time.
-//!
-//! ## Per-target shapes
-//!
-//! - Anchor / Quasar — struct-based: build a symbolic `crate::<Pascal>`
-//!   accounts struct and call its `handler(&mut self, …)` method (the
-//!   Quasar `#[program]` / `Ctx<X>` dispatcher just forwards to that same
-//!   method, so the two share `emit_symbolic_accounts_module` +
-//!   `emit_handler_harness`). See `emit_kani_impl_quasar` (slice 5).
-//! - Pinocchio — stack-allocated `AccountInfo` via a `#[repr(C)]` layout
-//!   mirror + transmute, calling the real `process_<handler>` against raw
-//!   account slices. See `emit_kani_impl_pinocchio` (slice 8).
-//! - native targets — not yet emitted; the per-target dispatch in
-//!   `generate_from_spec` is the seam a future arm plugs into.
+//! Per-target shapes: Anchor / Quasar — symbolic `crate::<Pascal>` accounts
+//! struct + `.handler(&mut self, …)` call (the Quasar `Ctx<X>` dispatcher
+//! just forwards, so both share `emit_symbolic_accounts_module` +
+//! `emit_handler_harness`); Pinocchio — stack-allocated `AccountInfo` via a
+//! `#[repr(C)]` layout mirror + transmute calling the real dispatcher;
+//! native — not yet emitted (the `generate_from_spec` dispatch is the seam).
 
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,14 +37,10 @@ use crate::pinocchio_profile::{
 };
 use crate::Target;
 
-/// Predicate: a handler triggers auto-emission of an impl-targeted harness
-/// when its `modifies` clause lists at least one field that does NOT appear
-/// as the LHS of any effect in its `effect` block. This is the LP-shape
-/// signal — the agent-fill `todo!()` site expects the user's Rust impl to
-/// satisfy the contract for that field.
-///
-/// Mirrors the diff logic in `codegen.rs` Phase A so the trigger here and
-/// the agent-fill emission there stay in lock step.
+/// A handler triggers auto-emission when its `modifies` clause lists a
+/// field that does NOT appear as any effect LHS — the signal that the
+/// agent-fill `todo!()` site is expected to satisfy the contract for that
+/// field. Keep in lock step with the scaffold's agent-fill diff logic.
 pub fn handler_triggers_impl_harness(handler: &ParsedHandler) -> bool {
     let Some(modifies) = &handler.modifies else {
         return false;
@@ -81,9 +49,8 @@ pub fn handler_triggers_impl_harness(handler: &ParsedHandler) -> bool {
         .effects
         .iter()
         .map(|(lhs, _, _)| {
-            // Strip array index suffix the same way Phase A does, so
-            // `lp_supply[i]` doesn't false-positive against a bare
-            // `lp_supply` in `modifies`.
+            // Strip the array-index suffix so `lp_supply[i]` doesn't
+            // false-positive against a bare `lp_supply` in `modifies`.
             let bare = crate::rust_codegen_util::effect_target_base(lhs);
             bare.to_string()
         })
@@ -91,16 +58,12 @@ pub fn handler_triggers_impl_harness(handler: &ParsedHandler) -> bool {
     modifies.iter().any(|f| !effect_lhs.contains(f))
 }
 
-/// Predicate: any handler in the spec triggers the auto-emission. The CLI
-/// consults this before emitting the impl harness file when `--kani-impl`
-/// was NOT passed explicitly.
-///
-/// Two trigger conditions:
-///   1. Handler `modifies ⊋ effect.lhs` — the LP-shape signal (Track H).
+/// Any handler triggers auto-emission (consulted by the CLI when
+/// `--kani-impl` wasn't passed). Two conditions:
+///   1. Handler `modifies ⊋ effect.lhs`.
 ///   2. Any `ref_impl` carries potentially-overflowing arithmetic over
-///      bounded-numeric params (`ref_impl_has_overflow_risk`). Lean
-///      proves on unbounded `Nat`/`Int`; Kani is the only verification
-///      surface that catches the `u64`/`i64` overflow.
+///      bounded-numeric params — Lean proves on unbounded `Nat`/`Int`,
+///      so Kani is the only surface that catches the `u64`/`i64` overflow.
 pub fn spec_triggers_impl_harness(spec: &ParsedSpec) -> bool {
     spec.handlers.iter().any(handler_triggers_impl_harness)
         || spec

@@ -1,24 +1,11 @@
 //! `qedgen probe` — spec-coverage gap analyzer.
 //!
-//! Walks a parsed `.qedspec` and emits structured findings describing
-//! categories the spec is silent on. Output is JSON, consumed by the
-//! harness-native auditor subagent (CI / non-agent users can read the
-//! same JSON directly). The CLI does **not** read implementation source
-//! — that's the auditor's job. Predicates here are runtime-agnostic
-//! (operate on the spec) by design; per-runtime spec-less predicates
-//! live in the auditor SKILL.md.
-//!
-//! Spec-aware categories: `missing_signer`, `arbitrary_cpi`,
-//! `arithmetic_overflow_wrapping`, `lifecycle_one_shot_violation`,
-//! `unbounded_amount_param`, `permissionless_state_writer`,
-//! `init_without_pda`, `stored_field_never_written`. Each is a
-//! *compose-able primitive* — the
-//! auditor subagent chains them into kill-chains (see SKILL.md
-//! "Compose-with-what cookbook"). Spec-less / impl-side categories
-//! (`cpi_param_swap`, `pda_canonical_bump`, `account_type_confusion`,
-//! `close_account_redirection`, `oracle_staleness`, etc.) live in
-//! the auditor SKILL.md per-runtime predicates — they need source
-//! reading the CLI doesn't do.
+//! Walks a parsed `.qedspec` and emits JSON findings for categories the
+//! spec is silent on, consumed by the harness-native auditor subagent.
+//! The CLI does **not** read implementation source — that's the auditor's
+//! job. Predicates here are runtime-agnostic compose-able primitives the
+//! auditor chains into kill-chains (SKILL.md "Compose-with-what cookbook");
+//! spec-less / impl-side categories live in the auditor SKILL.md.
 
 use anyhow::{anyhow, Result};
 use serde::Serialize;
@@ -29,15 +16,11 @@ use crate::anchor_project::parse_anchor_project;
 use crate::check::{parse_spec_file, ParsedHandler, ParsedSpec};
 
 /// Probe output schema version. Bump on incompatible finding-shape changes;
-/// the auditor pins against this.
-///
-/// v2: spec-aware findings now carry a required `reproducer` (drop-on-fail
-/// pipeline). `Finding.reproducer` is still typed `Option<Reproducer>` as
-/// a transitional shim during the v2.16 per-category retrofit; the
-/// pipeline drops candidates whose reproducer cannot be constructed,
-/// so consumers will see `reproducer: <something>` on every emitted
-/// finding (or no finding at all). Spec-less / `--bootstrap` mode is
-/// unchanged — it never emitted findings.
+/// the auditor pins against this. v2: spec-aware findings carry a
+/// `reproducer` (drop-on-fail pipeline) — the field is typed `Option` as a
+/// transitional shim, but candidates without a constructible reproducer are
+/// dropped, so every emitted finding has one. Spec-less / `--bootstrap`
+/// never emits findings.
 const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,21 +45,17 @@ pub enum Category {
     /// `missing_signer` → spoof another user's init.
     InitWithoutPda,
     /// State field declared on an `account` type and read somewhere in the
-    /// spec (`auth <field>`, a `requires`/`aborts_if` referencing
-    /// `state.<field>`, an `effect` RHS, or a property expression) but
-    /// never written by any handler `effect`. On Quasar/Anchor, `auth X`
-    /// lowers to `has_one = X`, so an unset Pubkey field makes the
-    /// constraint unsatisfiable. On counter-shaped fields, a
-    /// `preserved_by all` invariant proves vacuously because the value
-    /// is constant. Recurring shape across multisig, escrow, lending,
-    /// and percolator audits.
+    /// spec (`auth <field>`, `requires`/`aborts_if`, effect RHS, property
+    /// expression) but never written by any handler `effect`. On
+    /// Quasar/Anchor, `auth X` lowers to `has_one = X`, so an unset Pubkey
+    /// makes the constraint unsatisfiable; a never-written counter makes a
+    /// `preserved_by all` invariant prove vacuously.
     StoredFieldNeverWritten,
-    /// Coverage-guided fuzz crash — Crucible found an action sequence
-    /// that violates a spec invariant or triggers a runtime abort.
-    /// Distinct from the pattern-match categories above: those flag
-    /// structural risks; this one carries concrete path evidence.
+    /// Coverage-guided fuzz crash — Crucible found an action sequence that
+    /// violates a spec invariant or triggers a runtime abort. Unlike the
+    /// pattern-match categories above, carries concrete path evidence.
     CrucibleFuzzCrash,
-    // ----- Pinocchio (v2.19) ----------------------------------------
+    // ----- Pinocchio -------------------------------------------------
     /// `_unchecked` account-data load (e.g. `load_mut::<Account>(
     /// account.borrow_mut_data_unchecked())`) where the SAFETY comment
     /// claims owner / init / length / discriminator preconditions the
@@ -114,56 +93,37 @@ pub enum Category {
     /// Critical because the deployed `.so`'s release-mode wrap +
     /// sBPF alignment hides UB the host interpreter exposes.
     ExecutionDivergence,
-    // ----- Arithmetic-symbol catalog (v2.22 Slice 1) ----------------
-    /// `saturating_sub` / `saturating_add` on a timestamp-shape
-    /// receiver (`current_ts`, `Clock::get()?.unix_timestamp`, `slot`,
-    /// `epoch`, `block_height`) whose result feeds a `>=`/`>` comparison
-    /// that gates a non-trivial effect (transfer / mint / state
-    /// mutation). The operator returns the boundary value (0 / MAX)
-    /// when the conceptual operation would underflow, collapsing two
-    /// semantically distinct states into one — opens a fund-flow gate
-    /// that should have stayed closed. Closes CAN-H1 on the
-    /// subscriptions bench. See PRD-v2.22 §S1.1.
+    // ----- Arithmetic-symbol catalog ---------------------------------
+    /// `saturating_sub` / `saturating_add` on a timestamp-shape receiver
+    /// (`current_ts`, `unix_timestamp`, `slot`, `epoch`, `block_height`)
+    /// whose result feeds a `>=`/`>` comparison gating a non-trivial
+    /// effect (transfer / mint / state mutation). Saturation collapses
+    /// two semantically distinct states into the boundary value (0 / MAX),
+    /// opening a fund-flow gate that should have stayed closed.
     SilentSuccessArithmetic,
     /// `checked_sub` / `checked_add` / `checked_mul` whose `Err`
     /// propagation permanently bricks a deterministic / PDA-derived
-    /// address. The operator is correct in isolation; the bug is the
-    /// failure-mode interaction with the address's *permanence*.
-    /// Nobody holds the PDA's private key, the seeds are
-    /// deterministic, and every subsequent init attempt hits the same
-    /// underflow → the address is locked forever. Closes CAN-H3 on
-    /// the subscriptions bench. See PRD-v2.22 §S1.2.
+    /// address. Correct in isolation; the bug is the failure mode ×
+    /// address *permanence* — every subsequent init attempt hits the
+    /// same underflow, locking the address forever.
     GracefulErrorAsDos,
-    /// Unchecked `*` / `+` / `-` arithmetic on integer values inside a
-    /// handler whose body also contains a token / system CPI. The
-    /// arithmetic is locally safe under the program's current bounds
-    /// (e.g. `period_hours * 3600` where `period_hours` is capped
-    /// upstream), but the local code makes no explicit invariant
-    /// claim — if the upstream bound ever loosens the multiplication
-    /// wraps and the fund-flow effect proceeds on a corrupted value.
-    /// Surfaced as Low severity because most call sites are safe
-    /// today and the recommendation is preventive (`checked_*`). See
-    /// PRD-v2.22 §S1.3.
+    /// Unchecked `*` / `+` / `-` on integers inside a handler that also
+    /// contains a token / system CPI. Locally safe under current upstream
+    /// bounds, but no local invariant claim — if the bound loosens, the
+    /// arithmetic wraps and the fund-flow effect proceeds on a corrupted
+    /// value. Low severity: most sites are safe today, recommendation is
+    /// preventive (`checked_*`).
     UncheckedArithWithFundFlow,
-    /// Two or more validator-shape sites in the program apply
-    /// distinct accept-domains to the same logical field. Canonical:
-    /// `create_*::validate` rejects `field == 0` (treats it as
-    /// "past expiry"); `transfer_validation` carves out `field == 0`
-    /// as "never expires." Users following the docs for one path
-    /// hit a hard rejection on the other. The mismatch is a sentinel-
-    /// semantics drift across handlers. Closes CAN-M1 / CAN-M2 /
-    /// CAN-L2 / CAN-L3 on the subscriptions bench. See PRD-v2.22
-    /// §S2.1.
+    /// Two or more validator-shape sites apply distinct accept-domains to
+    /// the same logical field — sentinel-semantics drift across handlers.
+    /// Canonical: `create_*::validate` rejects `field == 0` ("past
+    /// expiry") while `transfer_validation` treats `0` as "never expires";
+    /// users following one path's docs hit a hard rejection on the other.
     PairedValidatorInputDomainMismatch,
-    /// A handler closes a PDA that holds external authority (SPL
-    /// Approve delegate, token mint authority, ATA delegate, etc.)
-    /// without issuing the corresponding reverse CPI (`Revoke`,
-    /// `SetAuthority::None`, `Assign`). The closed PDA is still
-    /// registered as an active delegate / authority on the external
-    /// account — visible to wallet UIs and downstream programs as
-    /// live permission. Closes QED-HEAD-MED-3 (subscriptions
-    /// `close_subscription_authority`) on the bench. See PRD-v2.22
-    /// §S4.1.
+    /// Handler closes a PDA that holds external authority (SPL Approve
+    /// delegate, mint authority, ATA delegate, …) without the reverse CPI
+    /// (`Revoke`, `SetAuthority::None`, `Assign`). The closed PDA remains
+    /// registered as live permission on the external account.
     ExternalAuthorityNotRevokedOnClose,
 }
 
@@ -178,17 +138,14 @@ pub enum Severity {
 }
 
 /// A concrete artifact the user can re-run deterministically to observe the
-/// finding. The probe pipeline contract: a `Finding` without a `Reproducer`
-/// is dropped, never emitted. There is no "advisory" / "possibly" tier —
-/// either the bug is reproducible or the probe is silent. The optionality
-/// in `Finding.reproducer` is a v2.16 transitional shim while categories
-/// retrofit one at a time; once all 7 categories construct reproducers,
-/// the field becomes required and `SCHEMA_VERSION` bumps to 2.
+/// finding. Pipeline contract: a `Finding` without a `Reproducer` is
+/// dropped, never emitted — no "advisory" / "possibly" tier; either the bug
+/// is reproducible or the probe is silent.
 ///
 /// Reproducers live under `target/qedgen-repros/<finding_id>/` — ephemeral
-/// (regenerated every probe run; never committed). Per PLAN-v2.16 D3, the
-/// `.invocation` field is the claim that travels with the finding; the
-/// generated artifact under `target/` is what makes that claim re-runnable.
+/// (regenerated every probe run; never committed). The `.invocation` field
+/// is the claim that travels with the finding; the generated artifact under
+/// `target/` makes it re-runnable.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(dead_code)] // Variants populated incrementally during v2.16 retrofit
@@ -220,11 +177,10 @@ pub enum Reproducer {
         failing_input: serde_json::Value,
     },
     /// Mollusk-driven Rust integration test under
-    /// `<project_root>/target/qedgen-repros/tests/probe_<finding_id>.rs`
-    /// (PLAN-v2.16 D3 + D4). The test invokes the user's deployed
-    /// handler via `qedgen-sandbox` and asserts the bug fires. Run via
-    /// `qedgen verify --probe-repros` or `cargo test --manifest-path
-    /// target/qedgen-repros/Cargo.toml --test probe_<id>` directly.
+    /// `<project_root>/target/qedgen-repros/tests/probe_<finding_id>.rs`.
+    /// Invokes the user's deployed handler via `qedgen-sandbox` and asserts
+    /// the bug fires. Run via `qedgen verify --probe-repros` or `cargo test
+    /// --manifest-path target/qedgen-repros/Cargo.toml --test probe_<id>`.
     Sandbox {
         /// Path to the test file, relative to project root.
         test_path: String,
@@ -235,16 +191,13 @@ pub enum Reproducer {
         /// True when the skeleton has agent-fill TODO markers (the test
         /// panics at runtime, so the finding is dropped per the
         /// reproducer-only contract). Flips to false once
-        /// `qedgen probe --fill-repros` (D3.2) walks the agent through
-        /// filling the TODOs.
+        /// `qedgen probe --fill-repros` fills the TODOs.
         needs_fill: bool,
     },
-    /// Pinocchio probe (v2.19): structured prompt the audit subagent
-    /// expands into a Mollusk-driven Rust test the user can run. The
-    /// CLI emits the prompt + substitution map; the agent writes the
-    /// actual `repro.rs` body. Mirrors the `Sandbox { needs_fill: true }`
-    /// flow but is template-driven (one markdown per probe) rather
-    /// than codegen-emitted.
+    /// Pinocchio probe: structured prompt the audit subagent expands into
+    /// a Mollusk-driven Rust test. The CLI emits the prompt + substitution
+    /// map; the agent writes the `repro.rs` body. Template-driven (one
+    /// markdown per probe) rather than codegen-emitted.
     MolluskPrompt {
         /// Path to the markdown template under
         /// `references/probes/pinocchio/<probe>.md#reproducer`.
@@ -256,29 +209,26 @@ pub enum Reproducer {
         /// project root: `.qed/probes/pinocchio/<finding-id>/repro_mollusk.rs`.
         repro_path: String,
     },
-    /// Pinocchio Miri repro (v2.19): structured prompt for a direct
-    /// handler-call test (no SVM) that exercises the unsafe path
-    /// under `cargo +nightly miri test`. Catches the UB class
-    /// (aliasing, OOB, overflow, uninit, invalid transmute) that
+    /// Pinocchio Miri repro: structured prompt for a direct handler-call
+    /// test (no SVM) run under `cargo +nightly miri test`. Catches the UB
+    /// class (aliasing, OOB, overflow, uninit, invalid transmute) that
     /// Mollusk's SVM-level execution can't see.
     MiriPrompt {
         template_path: String,
         substitutions: std::collections::BTreeMap<String, String>,
         repro_path: String,
-        /// G1 — adversarial inputs derived from the site's SAFETY
-        /// comment clauses. Each entry is a SAFETY claim the agent
-        /// negates in the generated test.
+        /// Adversarial inputs derived from the site's SAFETY-comment
+        /// clauses — each a claim the agent negates in the generated test.
         adversarial_inputs: Vec<AdversarialInput>,
-        /// G3 — invariant assertions the agent brackets the handler
-        /// call with (conservation, distinctness, owner-write).
-        /// Selected from `_harness/invariants.rs`.
+        /// Invariant assertions the agent brackets the handler call with
+        /// (conservation, distinctness, owner-write). Selected from
+        /// `_harness/invariants.rs`.
         invariant_asserts: Vec<String>,
     },
-    /// Coverage-guided fuzz crash discovered by Crucible (v2.18). The
-    /// reproducer is the on-disk crash blob produced by `crucible run`
-    /// plus the minimized action sequence after auto-`tmin`. Run
-    /// `crucible show <harness_dir> <crash_path> --replay` to re-fire
-    /// the bug deterministically.
+    /// Coverage-guided fuzz crash discovered by Crucible: the on-disk
+    /// crash blob from `crucible run` plus the minimized action sequence
+    /// after auto-`tmin`. Re-fire deterministically with
+    /// `crucible show <harness_dir> <crash_path> --replay`.
     Crucible {
         /// Path to the harness root directory (e.g. `fuzz/escrow`),
         /// relative to project root.
@@ -287,27 +237,23 @@ pub enum Reproducer {
         crash_path: String,
         /// Exact CLI invocation that re-runs the minimized crash.
         invocation: String,
-        /// Action sequence after `crucible tmin` minimization. The list
-        /// is what the user sees in the human render; the full pre-min
-        /// chain stays on disk in `crash_path` for audit.
+        /// Action sequence after `crucible tmin` minimization — what the
+        /// human render shows; the full pre-min chain stays on disk in
+        /// `crash_path` for audit.
         action_sequence: Vec<CrucibleActionRecord>,
-        /// Additional per-seed reproducer paths discovered for the same
-        /// (handler, invariant) pair. Surfaced in JSON so users can
-        /// drill in; one canonical reproducer renders in the human
-        /// output. Empty when no other crash deduplicated into this
-        /// finding.
+        /// Extra per-seed reproducer paths deduplicated into this
+        /// (handler, invariant) finding; one canonical reproducer renders
+        /// in the human output.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         extra_seeds: Vec<String>,
-        /// Crucible binary version captured at run time. Pins the
-        /// reproducer so re-running against a different Crucible build
-        /// surfaces as a version mismatch rather than silent drift.
+        /// Crucible binary version at run time — re-running against a
+        /// different build surfaces as version mismatch, not silent drift.
         crucible_version: String,
     },
 }
 
-/// One adversarial input the agent writes into a Miri reproducer (v2.19
-/// G1). Each entry corresponds to a SAFETY-comment clause we want the
-/// generated test to negate.
+/// One adversarial input for a Miri reproducer — a SAFETY-comment clause
+/// the generated test negates.
 #[derive(Debug, Clone, Serialize)]
 pub struct AdversarialInput {
     /// Verbatim SAFETY-comment clause this input attacks.
@@ -325,9 +271,8 @@ pub struct AdversarialInput {
 }
 
 /// Replica of Crucible's on-disk `<hash>.meta.json` shape — we don't pull
-/// `crucible-fuzz-cli` as a library (heavy LibAFL transitive deps), so we
-/// re-declare the schema with serde. If Crucible changes their format we
-/// detect a parse error and surface a clear hint to re-pin the version.
+/// `crucible-fuzz-cli` as a library (heavy LibAFL transitive deps). If
+/// Crucible changes the format, the parse error surfaces a re-pin hint.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct CrucibleCrashMetadata {
     pub test_name: String,
@@ -351,9 +296,9 @@ pub struct CrucibleActionRecord {
     pub error_code: Option<u32>,
 }
 
-/// Captured Kani counterexample. Keeps just enough to let the user
-/// understand the finding without re-running Kani; the `invocation` on the
-/// parent `Reproducer::Kani` is the source of truth for re-validation.
+/// Captured Kani counterexample — just enough to understand the finding
+/// without re-running Kani; the parent `Reproducer::Kani.invocation` is
+/// the source of truth for re-validation.
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)] // Populated incrementally during v2.16 retrofit
 pub struct KaniTrace {
@@ -397,25 +342,21 @@ pub enum Runtime {
     /// Categories collapse to user-owned-handler-body + Quasar-specific
     /// drift / unanchored-field / bounty-intent shapes.
     QedgenCodegen,
-    /// Pinocchio (no_std, hand-rolled `unsafe` serde). Identified by
-    /// `pinocchio` Cargo dep. Audit obligations differ in kind: every
-    /// safety check Anchor's framework discharges automatically (owner,
-    /// init, length, discriminator, alias) is the program author's
-    /// responsibility. v2.19 routes to pinocchio_probe.rs which
-    /// enumerates `unsafe` serde sites + parsed SAFETY comments for
-    /// the auditor subagent.
+    /// Pinocchio (no_std, hand-rolled `unsafe` serde), identified by the
+    /// `pinocchio` Cargo dep. Every safety check Anchor discharges
+    /// automatically (owner, init, length, discriminator, alias) is the
+    /// author's responsibility; routes to pinocchio_probe.rs, which
+    /// enumerates `unsafe` serde sites + parsed SAFETY comments.
     Pinocchio,
     /// Detection inconclusive — auditor falls back to source-walking.
     Unknown,
 }
 
 /// One discovered handler in bootstrap (spec-less) mode. Auditor reads
-/// `source_file` to investigate per-handler categories.
-///
-/// v2.20 §S2.1 added Shank-dispatcher fields (`enum_variant`,
-/// `entry_fn`, `line`). They're optional + `omitempty` so Anchor / IDL
-/// consumers see no change — the fields appear only when the
-/// dispatcher is Shank-shape.
+/// `source_file` to investigate per-handler categories. The
+/// Shank-dispatcher fields (`enum_variant`, `entry_fn`, `line`) are
+/// optional + `omitempty` — present only when the dispatcher is
+/// Shank-shape, so Anchor / IDL consumers see no change.
 #[derive(Debug, Clone, Serialize)]
 pub struct BootstrapHandler {
     pub name: String,
@@ -434,22 +375,16 @@ pub struct BootstrapHandler {
     /// dispatcher only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
-    /// v2.20 §S2.2: per-handler narrowing of the global
-    /// `applicable_categories` list, computed from intent-tag
-    /// classification of the handler body (see `handler_intent.rs`).
-    /// Absent means the global list applies — the auditor must walk
-    /// every category for this handler. Present means "walk only these
-    /// categories for this handler". Set only when Shank discovery
-    /// successfully resolves the handler body AND the classifier
-    /// emits a non-trivial narrowing; otherwise the global list still
-    /// applies and we omit the field.
+    /// Per-handler narrowing of the global `applicable_categories` list,
+    /// from intent-tag classification of the handler body
+    /// (`handler_intent.rs`). Absent = global list applies; present =
+    /// "walk only these". Set only when Shank discovery resolves the body
+    /// AND the classifier emits a non-trivial narrowing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applicable_categories: Option<Vec<String>>,
-    /// v2.20 §S2.2: intent tag the classifier derived
-    /// (`authority_gated` / `trader_gated` / `permissionless`). Absent
-    /// when no rule matched. Surfaced for auditor explainability — the
-    /// agent uses it to phrase findings ("this authority-gated
-    /// handler …").
+    /// Intent tag the classifier derived (`authority_gated` /
+    /// `trader_gated` / `permissionless`); absent when no rule matched.
+    /// Surfaced for auditor explainability when phrasing findings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent_tag: Option<String>,
 }
@@ -469,22 +404,17 @@ pub struct Finding {
     pub investigation_hint: String,
     /// Category identifier for documentation / grouping.
     pub category_tag: String,
-    /// Concrete artifact reproducing the bug. `None` is a transitional state
-    /// during the v2.16 per-category retrofit — once all predicates construct
-    /// reproducers, this becomes required and findings without one are
-    /// dropped at the pipeline level (no "advisory" tier). Serialized
-    /// `omitempty` so v1 schema consumers keep working.
+    /// Concrete artifact reproducing the bug. `None` is transitional —
+    /// findings without one are dropped at the pipeline level (no
+    /// "advisory" tier). Serialized `omitempty` for v1 consumers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reproducer: Option<Reproducer>,
-    /// v2.22 Slice 5: list of gate names the probe detected upstream of
-    /// this finding's site. For Pinocchio zero-copy loads the canonical
-    /// triad is `["length_check", "discriminator_check", "owner_check"]`;
-    /// for `offset_overrun` it's `["length_check"]`. When the gate
-    /// signals fire, the underlying unsafe pattern is defensively
-    /// fenced and the finding is much less likely to be a real bug.
-    /// The auditor subagent uses this list to bulk-suppress
-    /// belt-and-braces findings keyed on the triad rather than per
-    /// site. `None` for findings the gate detector doesn't analyze.
+    /// Gate names detected upstream of this finding's site (canonical
+    /// Pinocchio zero-copy triad: `["length_check", "discriminator_check",
+    /// "owner_check"]`; `offset_overrun`: `["length_check"]`). Fired gates
+    /// mean the unsafe pattern is defensively fenced and likely not a real
+    /// bug; the auditor bulk-suppresses belt-and-braces findings keyed on
+    /// the triad. `None` = gate detector doesn't analyze this finding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gated_by: Option<Vec<String>>,
 }
@@ -510,17 +440,14 @@ pub struct ProbeOutput {
     pub applicable_categories: Option<Vec<String>>,
     /// Findings (spec-aware mode only — spec-less is investigation-by-auditor).
     pub findings: Vec<Finding>,
-    /// v2.19 M1: candidate spec clauses derived from findings + runtime
-    /// signals. Populated only when `--emit-spec-candidates` is set; absent
-    /// otherwise (schema v3 is additive — v2 consumers ignore the field).
-    /// Per-runtime extractors map detected sites to `Cluster` entries; the
-    /// auditor subagent reads these to drive the scaffold-to-spec interview.
+    /// Candidate spec clauses derived from findings + runtime signals.
+    /// Populated only under `--emit-spec-candidates` (additive — older
+    /// consumers ignore it). The auditor reads these to drive the
+    /// scaffold-to-spec interview.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clusters: Option<Vec<crate::cluster::Cluster>>,
-    /// v2.20 §S2.1: structural shape of the native dispatcher when one
-    /// was detected. Currently only `"shank_central_match"` is emitted;
-    /// other runtime backings (Anchor IDL, Pinocchio probe, etc.) leave
-    /// this field absent.
+    /// Structural shape of the native dispatcher when detected. Only
+    /// `"shank_central_match"` is emitted; other runtimes leave it absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatcher_kind: Option<String>,
 }
@@ -553,8 +480,8 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     }
     findings.extend(predicate_stored_field_never_written(&spec));
 
-    // v2.16 drop-on-fail: every candidate must acquire a concrete
-    // reproducer or be silently dropped. No advisory tier.
+    // Drop-on-fail: every candidate must acquire a concrete reproducer
+    // or be silently dropped. No advisory tier.
     let ctx = crate::probe_repro::ReproducerContext::from_spec_path(&spec, spec_path);
     findings.retain_mut(
         |finding| match crate::probe_repro::construct_reproducer(finding, &ctx) {
@@ -580,20 +507,15 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
     })
 }
 
-/// Spec-less probe (the `--bootstrap` mode). Walks a project root,
-/// detects runtime, discovers handlers, and emits the work-list envelope
-/// the auditor consumes. **The CLI does not investigate handlers in this
-/// mode** — that's the auditor's job per the v2.10 architecture
-/// (`feedback_audit_as_subagent.md`). The CLI's role is structured
-/// dispatch: tell the auditor what runtime, which handlers, and which
-/// categories to investigate.
+/// Spec-less probe (`--bootstrap`): walk a project root, detect runtime,
+/// discover handlers, emit the work-list envelope the auditor consumes.
+/// **The CLI does not investigate handlers in this mode** — its role is
+/// structured dispatch: tell the auditor what runtime, which handlers,
+/// and which categories to investigate.
 ///
-/// Per-runtime handler discovery in v2.10:
-/// - **Anchor**: `parse_anchor_project` walks the program crate's
-///   `lib.rs`, finds the `#[program]` mod, lists its `pub fn`s.
-/// - **Native / sBPF / qedgen-codegen**: handler list is left empty;
-///   auditor walks source directly via Read+Grep. Future v2.x adds
-///   per-runtime discovery as adoption demand justifies.
+/// Handler discovery: Anchor via `parse_anchor_project` (`#[program]`
+/// mod's `pub fn`s); Native via the Shank detector; sBPF / qedgen-codegen
+/// leave the list empty (auditor walks source directly).
 pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     if !project_root.exists() {
         return Err(anyhow!(
@@ -611,12 +533,10 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
             discover_anchor_handlers(project_root).unwrap_or_default(),
             None,
         ),
-        // v2.20 §S2.1: native programs may concentrate dispatch in a
-        // top-level `process_instruction` central match. Try the
-        // Shank-shape detector first; on no-match, fall back to an
-        // empty handler list (auditor walks source directly, as before).
-        // v2.20 §S2.2: also classify each handler body and emit a
-        // narrowed `applicable_categories` per entry.
+        // Native: try the Shank central-match detector first; on no-match,
+        // fall back to an empty handler list (auditor walks source
+        // directly). Each handler body is also classified to emit a
+        // narrowed `applicable_categories`.
         Runtime::Native => match crate::shank_probe::detect_shank_dispatcher(project_root) {
             Ok(Some(cat)) => {
                 let global = applicable_categories(&runtime);
@@ -659,21 +579,18 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     })
 }
 
-/// Public wrapper exposed to main.rs for the v2.19 `qedgen probe
-/// --program <path>` dispatcher. Keeps the internal `detect_runtime`
-/// signature intact so the rest of the probe module isn't disturbed.
+/// Public wrapper for the main.rs `qedgen probe --program <path>` dispatcher.
 pub fn detect_runtime_public(root: &Path) -> Runtime {
     detect_runtime(root)
 }
 
-/// Public wrapper for v2.19.
+/// Public wrapper for the main.rs dispatcher.
 pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
     applicable_categories(runtime)
 }
 
-/// Public accessor for the SCHEMA_VERSION constant — exposed so the
-/// v2.19 Pinocchio dispatcher emits envelopes with the canonical
-/// version number rather than hard-coding a duplicate.
+/// Exposed so the Pinocchio dispatcher emits envelopes with the canonical
+/// version rather than hard-coding a duplicate.
 pub fn schema_version() -> u32 {
     SCHEMA_VERSION
 }
@@ -681,11 +598,10 @@ pub fn schema_version() -> u32 {
 /// Runtime detection by filesystem heuristics. Order matters: a project
 /// with both `Anchor.toml` and `solana-program` dep is Anchor.
 fn detect_runtime(root: &Path) -> Runtime {
-    // QedgenCodegen wins over Anchor.toml: codegen examples scaffold an
-    // `Anchor.toml` for the test harness alongside the actual Quasar
-    // program. Without this precedence, a qedgen-codegen scaffold would
-    // be misclassified as Anchor and skip the Quasar-specific category
-    // overlay (`stored_field_never_written` etc.).
+    // QedgenCodegen wins over Anchor.toml: codegen scaffolds an
+    // `Anchor.toml` for the test harness, and without this precedence the
+    // scaffold would be misclassified as Anchor and skip the
+    // Quasar-specific category overlay.
     if has_qedgen_markers(root) {
         return Runtime::QedgenCodegen;
     }
@@ -710,18 +626,13 @@ fn detect_runtime(root: &Path) -> Runtime {
     let cargo = root.join("Cargo.toml");
     if cargo.exists() {
         let content = std::fs::read_to_string(&cargo).unwrap_or_default();
-        // Pinocchio: pre-empt Anchor/Native checks because a Pinocchio
-        // crate may also list `solana-program` as a transitive dep; the
-        // `pinocchio` dep is the canonical signal.
+        // Pinocchio pre-empts Anchor/Native: a Pinocchio crate may also
+        // list `solana-program`; the `pinocchio` dep is canonical.
         if has_pinocchio_dep(&content) {
             return Runtime::Pinocchio;
         }
         if content.contains("quasar-lang") {
-            // Distinguish hand-written Quasar from qedgen-codegen output:
-            // codegen leaves a `formal_verification/` dir, a `qed.toml`,
-            // or `#[qed(verified)]` markers in source. Without any of
-            // those, treat as hand-written Quasar (Anchor-shaped surface
-            // plus Quasar-specific shapes).
+            // qedgen markers split codegen output from hand-written Quasar.
             if has_qedgen_markers(root) {
                 return Runtime::QedgenCodegen;
             }
@@ -738,25 +649,16 @@ fn detect_runtime(root: &Path) -> Runtime {
     Runtime::Unknown
 }
 
-/// Pinocchio dep check. Matches `pinocchio = ...`, `pinocchio = {...}`, or
-/// `pinocchio-token`/`pinocchio-system` siblings under `[dependencies]`.
-/// Robust against workspace.dependencies redirection — that ships as a
-/// `pinocchio.workspace = true`-style line which the substring check
-/// also catches.
+/// Pinocchio dep check. Matches `pinocchio = ...`, `pinocchio.workspace =
+/// true`, or `pinocchio-token`/`-system` siblings (siblings require the
+/// root pinocchio surface).
 fn has_pinocchio_dep(cargo_toml: &str) -> bool {
     for line in cargo_toml.lines() {
         let t = line.trim();
         if t.starts_with('#') {
             continue;
         }
-        // `pinocchio` as a standalone crate name in the dep position.
-        // Matches: `pinocchio = "0.x"`, `pinocchio = { ... }`,
-        // `pinocchio.workspace = true`, `pinocchio-token = ...` (any
-        // sibling triggers — sibling crates require the root pinocchio
-        // primitive surface).
         if let Some(after) = t.strip_prefix("pinocchio") {
-            // accept the bare crate `pinocchio` (followed by `=`, `.`,
-            // or `-` for sibling crates).
             if after.starts_with(['=', '.', '-', ' ']) {
                 return true;
             }
@@ -765,9 +667,9 @@ fn has_pinocchio_dep(cargo_toml: &str) -> bool {
     false
 }
 
-/// Did codegen run against this crate? Three independent signals; any
-/// one is sufficient. Used to split `Runtime::Quasar` (hand-written)
-/// from `Runtime::QedgenCodegen` when the Cargo dep alone is ambiguous.
+/// Did codegen run against this crate? Any one of three signals suffices.
+/// Splits `Runtime::Quasar` from `Runtime::QedgenCodegen` when the Cargo
+/// dep alone is ambiguous.
 fn has_qedgen_markers(root: &Path) -> bool {
     if root.join("formal_verification").is_dir() {
         return true;
@@ -784,17 +686,11 @@ fn has_qedgen_markers(root: &Path) -> bool {
     false
 }
 
-/// Wrap `anchor_project::parse_anchor_project` to map discovered
-/// instructions into `BootstrapHandler` entries. Returns empty vec on
-/// failure (auditor falls back to source-walking).
-///
-/// Handles two layouts:
-/// 1. **Program crate root** — `<root>/src/lib.rs` exists. Single
-///    `#[program]` mod parsed directly.
-/// 2. **Anchor workspace root** — `<root>/programs/*/src/lib.rs`
-///    exists. Each child crate is parsed independently and handlers
-///    are aggregated. Brownfield users naturally point at workspace
-///    roots, so this is the common case.
+/// Map `parse_anchor_project` instructions into `BootstrapHandler`
+/// entries; empty vec on failure (auditor falls back to source-walking).
+/// Handles both a program crate root (`<root>/src/lib.rs`) and an Anchor
+/// workspace root (`<root>/programs/*/src/lib.rs`, aggregated) — the
+/// latter is the common brownfield case.
 fn discover_anchor_handlers(root: &Path) -> Result<Vec<BootstrapHandler>> {
     let direct_lib = root.join("src").join("lib.rs");
     if direct_lib.is_file() {
@@ -841,9 +737,7 @@ fn single_crate_handlers(crate_root: &Path, project_root: &Path) -> Result<Vec<B
         .collect())
 }
 
-/// Categories the auditor should investigate per runtime in spec-less
-/// mode. Reflects the v2.10 design table in
-/// `docs/prds/PRD-v2.10.md` (runtime coverage section).
+/// Categories the auditor should investigate per runtime in spec-less mode.
 fn applicable_categories(runtime: &Runtime) -> Vec<String> {
     let universal = [
         "missing_signer",
@@ -852,11 +746,10 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "lifecycle_one_shot_violation",
     ];
     let anchor_native = ["cpi_param_swap", "pda_canonical_bump"];
-    // QedgenCodegen runtime: codegen mechanizes the "universal" categories
-    // from the spec, so they don't apply at user-owned handler-body level.
-    // What does apply: handler-body-level numeric / lifecycle bugs and the
-    // Quasar-specific drift / unanchored-field / bounty-intent shapes added
-    // in v2.13.
+    // QedgenCodegen: codegen mechanizes the "universal" categories from
+    // the spec, so only handler-body-level numeric / lifecycle bugs and
+    // the Quasar-specific drift / unanchored-field / bounty-intent shapes
+    // apply.
     let quasar_handler_body = [
         "arithmetic_overflow_wrapping",
         "lifecycle_one_shot_violation",
@@ -870,14 +763,8 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "init_config_field_unanchored",
         "bounty_intent_drift",
     ];
-    // Multi-actor / quorum primitive family — added to the v2.15 SKILL.md
-    // catalog from the external multisig audit, but the prior release
-    // stamped them only as prose. The auditor caught the multisig
-    // duplicate-signer CRIT through the escalation rule rather than
-    // through a structured `applicable_categories` listing. Surface
-    // the family here so the agent walks it as part of the standard
-    // category catalog on any program that ships a multi-party state
-    // shape.
+    // Multi-actor / quorum primitive family — walked as part of the
+    // standard catalog on any program with a multi-party state shape.
     let multi_actor = [
         "quorum_dup_inflation",
         "quorum_set_dup_at_init",
@@ -885,10 +772,9 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "creator_admin_outside_quorum",
         "signer_set_pinned_to_creator_pda_only",
     ];
-    // v2.20 §S2.2 + §S3.1: permissionless-shape categories. Spec-less
-    // mode surfaces these so the auditor walks the relevant handler
-    // bodies. Per-handler narrowing (handler_intent classifier) filters
-    // them back out when the handler is `authority_gated`.
+    // Permissionless-shape categories. Per-handler narrowing
+    // (handler_intent classifier) filters these back out when the handler
+    // is `authority_gated`.
     let permissionless_shapes = [
         "permissionless_state_writer",
         "permissionless_create_account_dos",
@@ -944,21 +830,13 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
     }
 }
 
-/// v2.20 §S2.2: resolve a Shank handler's source body, run the intent
-/// classifier, and return `(intent_tag_str, narrowed_categories)`. The
-/// narrowed list is only emitted when the classifier actually narrows
-/// the global list (i.e. drops at least one category) — otherwise we
-/// omit it and the caller's global `applicable_categories` field stays
-/// authoritative.
-///
-/// Both fields are `None` when the handler body can't be located or
-/// the classifier emits no tag. Failure modes:
-/// - `resolve_handler_body` returns `None` (handler defined outside `src/`,
-///   or unparseable file): both `None`.
-/// - Classifier returns `None` (body too trivial / no shape match):
-///   both `None`.
-/// - Filter doesn't drop anything (e.g. `TraderGated` with the current
-///   exclusion table): we still emit the tag but no narrowing.
+/// Resolve a Shank handler's source body, run the intent classifier, and
+/// return `(intent_tag_str, narrowed_categories)`. The narrowed list is
+/// emitted only when the classifier actually drops a category — otherwise
+/// the caller's global `applicable_categories` stays authoritative. Both
+/// fields are `None` when the body can't be located or no rule matches;
+/// a tag whose filter is a no-op (e.g. `TraderGated`) still emits the tag
+/// with no narrowing.
 fn classify_shank_handler(
     handler_name: &str,
     entry_fn: &str,
@@ -973,19 +851,15 @@ fn classify_shank_handler(
     let tag_str = tag.map(|t| t.as_str().to_string());
     let narrowed = crate::handler_intent::filter_categories(global, tag);
     if narrowed.len() == global.len() {
-        // Filter was a no-op — don't bother emitting a duplicate list.
+        // No-op filter — don't emit a duplicate list.
         return (tag_str, None);
     }
     (tag_str, Some(narrowed))
 }
 
 /// Spec-aware predicate: handler has no `auth X` clause and is not marked
-/// `permissionless`. Both fields land in `ParsedHandler` from the chumsky
-/// adapter (`who: Option<String>`, `permissionless: bool`).
-///
-/// Mutually-exclusive enforcement (handler can't have both `auth X` and
-/// `permissionless`) already lives in `check.rs`; here we just gate on
-/// the negative shape.
+/// `permissionless`. Mutual-exclusion enforcement (can't have both) lives
+/// in `check.rs`; here we only gate on the negative shape.
 fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
     if handler.who.is_some() || handler.permissionless {
         return None;
@@ -1016,28 +890,22 @@ fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
 }
 
 /// Spec-aware predicate: handler has a `writable` `token`-typed account
-/// (which signals external token state will change) but the spec declares
-/// no `transfers { ... }` block and no `call Interface.handler(...)` site.
-/// Without a CPI declaration, codegen has nothing to mechanize; the user
-/// is left to fill `todo!()` by hand or — worse — the impl emits no
-/// transfer at all and silently violates the handler's evident intent.
+/// but declares no `transfers { ... }` block and no `call
+/// Interface.handler(...)` site — codegen has nothing to mechanize, and
+/// the impl may silently violate the handler's evident intent.
 ///
-/// Auditor classification (per SKILL.md draft): this is usually a
-/// **spec-gap** finding (impl is incomplete or under-specified) rather
-/// than a real-vulnerability finding (impl is doing arbitrary CPI). The
-/// auditor confirms by reading the handler body for `invoke` /
-/// `invoke_signed` calls; if present without spec coverage, escalate to
+/// Auditor classification: usually a **spec-gap** finding, not a
+/// real-vulnerability one. The auditor reads the body for `invoke` /
+/// `invoke_signed`; present without spec coverage → escalate to
 /// real-vulnerability.
 fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
     if handler.has_calls() {
         return None;
     }
-    // Init pattern: handler transitioning from a "no-fields" pre-state
-    // (Uninitialized / Empty / Inactive) is creating accounts via System
-    // Program CPI, not transferring tokens. Writable token accounts in
-    // this shape are creation targets, not transfer targets. Suppress
-    // the finding — spec-author intent is captured structurally by the
-    // lifecycle transition.
+    // Init pattern: a handler transitioning from a "no-fields" pre-state
+    // (Uninitialized / Empty / Inactive) creates accounts via System CPI —
+    // writable token accounts are creation targets, not transfer targets.
+    // Suppress: intent is captured structurally by the lifecycle transition.
     if let Some(pre) = handler.pre_status.as_deref() {
         if matches!(pre, "Uninitialized" | "Empty" | "Inactive") {
             return None;
@@ -1077,28 +945,20 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
 }
 
 /// Spec-aware predicate: handler uses explicit non-default arithmetic
-/// operators (`+=?` / `-=?` wrapping, or `+=!` / `-=!` saturating).
-/// Default `+=` / `-=` (v2.7 G3 checked semantics) are silent — they
-/// abort on overflow, which is the safe default. The non-default
-/// variants are explicit user opt-ins that almost always carry a
-/// vulnerability story for amount-shaped fields:
+/// operators. Default `+=` / `-=` (checked, aborts on overflow) are
+/// silent; the opt-in variants almost always carry a vulnerability story
+/// on amount-shaped fields:
 ///
-/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N. Almost
-///   always wrong on monetary amounts. Severity: HIGH.
-/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN. Hides bugs that
-///   should propagate as errors. Sometimes legitimate (rate limiters,
-///   epoch counters). Severity: MEDIUM.
+/// - **Wrapping** (`+=?` / `-=?`): silent overflow modulo 2^N — almost
+///   always wrong on monetary amounts. HIGH.
+/// - **Saturating** (`+=!` / `-=!`): caps at MAX/MIN, hiding bugs that
+///   should propagate as errors; sometimes legitimate (rate limiters,
+///   epoch counters). MEDIUM.
 ///
-/// Fires once per (field, op) pair on the handler. Auditor SKILL.md
-/// classification rules separate "intentional design" (suppress with
-/// rationale comment) from "real vulnerability" (change to default `+=`).
-///
-/// **Companion lint** (`qedgen check`): the same pattern surfaces as
-/// `wrapping_arithmetic` / `saturating_arithmetic` lints — those are
-/// instant structural advisories. This probe finding is the
-/// reproducer-bearing version: once Mollusk-backed repros land
-/// (PLAN-v2.16 D3/D4), the finding ships with a witness tx that
-/// demonstrates state corruption, not just operator opt-in.
+/// Fires once per (field, op) pair. The same pattern surfaces as
+/// `wrapping_arithmetic` / `saturating_arithmetic` lints in `qedgen check`
+/// (instant structural advisories); this probe finding is the
+/// reproducer-bearing version.
 fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Finding> {
     let mut out = Vec::new();
     for (field, op, _value) in &handler.effects {
@@ -1141,21 +1001,12 @@ fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Findin
     out
 }
 
-/// Spec-aware predicate: spec models lifecycle states (either via top-level
-/// `state ... lifecycle [...]` or per-account-type lifecycle), but this
-/// handler declares no `pre_status` AND mutates state in some way
-/// (effects / transfers / calls). Without a lifecycle gate, the handler
-/// can be invoked in any program state — replay surface, ordering
-/// surface, init-after-close surface.
-///
-/// Suppressed by:
-/// - `permissionless` marker (handler is intentionally always-callable)
-/// - the spec doesn't model lifecycle at all (stateless program — no gate
-///   to declare)
-///
-/// Auditor classification: usually a spec-gap finding (state machine is
-/// modeled but this handler is undeclared). Real-vulnerability if the
-/// impl actually has cross-state replay paths the spec is silent on.
+/// Spec-aware predicate: spec models lifecycle states but this handler
+/// declares no `pre_status` AND mutates state (effects / transfers /
+/// calls) — invokable in any program state: replay, ordering, and
+/// init-after-close surface. Suppressed by `permissionless` or by specs
+/// that don't model lifecycle at all. Usually a spec-gap finding;
+/// real-vulnerability if the impl has cross-state replay paths.
 fn predicate_lifecycle_one_shot_violation(
     handler: &ParsedHandler,
     spec_models_lifecycle: bool,
@@ -1202,21 +1053,18 @@ fn predicate_lifecycle_one_shot_violation(
     })
 }
 
-/// Spec-aware predicate: handler takes an integer-shaped parameter that
-/// flows into a `transfers.amount` slot or an `effects` value RHS, but no
-/// `requires` clause bounds the parameter. The agent should compose this
-/// finding with the rest of the handler shape:
+/// Spec-aware predicate: integer-shaped param flows into a
+/// `transfers.amount` slot or an `effects` RHS with no bounding
+/// `requires` clause. Composes with:
 ///
-/// - `+ permissionless` → any caller can pass `u64::MAX`, draining /
-///   bricking the system depending on what the param controls.
-/// - `+ missing_signer` → any caller can do the above + spoof identity.
-/// - `+ arithmetic_overflow_wrapping` on the same field → silent overflow
-///   to a wrong post-state (the wrap finding tells you the math is fragile;
-///   this one tells you the input is unbounded; together = exploit).
+/// - `+ permissionless` → any caller can pass `u64::MAX` (drain / brick).
+/// - `+ missing_signer` → the above + identity spoof.
+/// - `+ arithmetic_overflow_wrapping` on the same field → fragile math +
+///   unbounded input = exploit.
 ///
-/// Detection is intentionally surface-level (substring match on the
-/// param name). False positives are acceptable — the auditor reads the
-/// impl to confirm. False negatives (missing a bounded param) are worse.
+/// Detection is intentionally surface-level (word-boundary match on the
+/// param name): false positives are acceptable — the auditor confirms in
+/// the impl; false negatives are worse.
 fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
     let mut out = Vec::new();
     for (pname, ptype) in &handler.takes_params {
@@ -1277,17 +1125,12 @@ fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
     out
 }
 
-/// Spec-aware predicate: handler is marked `permissionless` AND has at
-/// least one `effects` clause. Permissionless writes to shared state are
-/// griefing surface — anyone can call repeatedly, fill the field, contend
-/// with the legitimate caller, or chain with another finding to escalate.
-///
-/// Composes with:
-/// - `unbounded_amount_param` → any value griefing
-/// - `arithmetic_overflow_wrapping` → cheap overflow trigger
-/// - `lifecycle_one_shot_violation` (suppressed by `permissionless` itself,
-///   but the chain still applies if the agent finds an undeclared state
-///   transition during impl review)
+/// Spec-aware predicate: handler is `permissionless` AND has at least one
+/// `effects` clause — permissionless writes to shared state are griefing
+/// surface. Composes with `unbounded_amount_param` (any-value griefing),
+/// `arithmetic_overflow_wrapping` (cheap overflow trigger), and
+/// `lifecycle_one_shot_violation` (suppressed by `permissionless` itself,
+/// but the chain applies if impl review finds an undeclared transition).
 fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Finding> {
     if !handler.permissionless {
         return None;
@@ -1330,24 +1173,17 @@ fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Find
     })
 }
 
-/// Spec-aware predicate: init-shape handler (matches one of the canonical
-/// init-state names) but no writable account in the handler's `accounts`
-/// block declares `pda` seeds. Without a PDA, two distinct callers can
-/// both target the same canonical address; the second call either fails
-/// noisily or — worse — overwrites the first's state.
+/// Spec-aware predicate: init-shape handler with no writable account
+/// declaring `pda` seeds — two distinct callers can target the same
+/// canonical address; the second call fails noisily or overwrites the
+/// first's state. Composes with `missing_signer` (front-run another
+/// user's init) and the auditor-side `init_without_is_initialized`
+/// (re-init replay).
 ///
-/// Composes with:
-/// - `missing_signer` → spoof another user's init by racing them or
-///   front-running with attacker-controlled signer/payer
-/// - `init_without_is_initialized` (per-runtime auditor predicate) → re-init
-///   replay if the impl doesn't guard
-///
-/// "Init-shape" is matched by `pre_status` ∈ {Uninitialized, Empty,
-/// Inactive} — the same convention `predicate_arbitrary_cpi` uses to
-/// recognize the init pattern. Specs without those states (e.g., a
-/// lifecycle that starts in `Active` because the program runs as a
-/// singleton or always-on engine) are out of scope for this probe;
-/// init-collision risk only applies to multi-instance programs.
+/// "Init-shape" = `pre_status` ∈ {Uninitialized, Empty, Inactive}, same
+/// convention as `predicate_arbitrary_cpi`. Specs starting in `Active`
+/// (singleton / always-on) are out of scope — init-collision risk only
+/// applies to multi-instance programs.
 fn predicate_init_without_pda(
     handler: &ParsedHandler,
     _initial_state: Option<&str>,
@@ -1396,27 +1232,18 @@ fn predicate_init_without_pda(
     })
 }
 
-/// Spec-aware predicate: state field declared on an `account` type but
-/// never written by any handler `effect`, while being read somewhere in
-/// the spec — `auth <field>`, a `requires` / `aborts_if` referencing
-/// `state.<field>`, an effect RHS, or a property expression.
+/// Spec-aware predicate: state field read somewhere in the spec (`auth`,
+/// `requires` / `aborts_if`, effect RHS, property expression) but never
+/// written by any handler `effect` — downstream codegen sees only the
+/// type's default. Two recurring CRIT shapes:
+/// - `auth <pubkey-field>` lowers to `has_one = <field>`; an unset Pubkey
+///   is the zero key — no signer satisfies it, handler unreachable.
+/// - Counter read by a `preserved_by all` invariant but never updated —
+///   the invariant proves vacuously.
 ///
-/// Reading without writing means downstream codegen lowerings see only
-/// the type's default. Two CRIT shapes recur across audits:
-/// - `auth <pubkey-field>` lowers to `has_one = <field>` — an unset
-///   Pubkey is the zero key, no signer can satisfy the constraint, the
-///   handler is unreachable. Caught the multisig `creator` and escrow
-///   `taker` shapes.
-/// - Counter / accumulator field read by a `preserved_by all` invariant
-///   but never updated — invariant proves vacuously because the value
-///   is constant. Caught lending's `total_borrows` shape.
-///
-/// Composes with:
-/// - `partial_has_one_chain` (auditor side): even if some `has_one`
-///   constraints are present, this field's missing writer makes the
-///   chain partial.
-/// - `field_chain_missing_root_anchor`: when the never-written field is
-///   a stored authority anchor.
+/// Composes with auditor-side `partial_has_one_chain` (missing writer
+/// makes the chain partial) and `field_chain_missing_root_anchor` (when
+/// the field is a stored authority anchor).
 fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -1427,21 +1254,19 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
             written.insert(field.as_str());
         }
     }
-    // Fields used as PDA seeds are bound implicitly by codegen at init
-    // (the seed value populates the field as part of address derivation).
-    // Treat them as written to avoid flagging — spec authors don't write
-    // an explicit `initializer := initializer.key()` effect for the
-    // canonical `pda X ["X", initializer]` shape.
+    // PDA-seed fields are bound implicitly by codegen at init; treat as
+    // written — spec authors don't write an explicit
+    // `initializer := initializer.key()` effect for the canonical
+    // `pda X ["X", initializer]` shape.
     for pda in &spec.pdas {
         for seed in &pda.seeds {
             written.insert(seed.as_str());
         }
     }
 
-    // Step 2: for every declared state field that is NOT written,
-    // search for readers. Skip fields that are neither written nor
-    // read — that's the `write_without_read` lint's complement on
-    // the dead-code axis, not what this predicate is about.
+    // Step 2: for every unwritten state field, search for readers.
+    // Fields neither written nor read are the dead-code axis
+    // (`write_without_read`'s complement), not this predicate's concern.
     for acct in &spec.account_types {
         for (field, _ty) in &acct.fields {
             if written.contains(field.as_str()) {
@@ -1502,8 +1327,8 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
                 }
             }
 
-            // Property expressions (top-level, including `preserved_by all`
-            // invariants) are the most common second-source of reads.
+            // Top-level property expressions (incl. `preserved_by all`)
+            // are the most common second source of reads.
             let mut prop_reads = false;
             for prop in &spec.properties {
                 if let Some(expr) = &prop.expression {
@@ -1564,9 +1389,8 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
     findings
 }
 
-/// True for the integer-typed DSL types `qedgen probe` reasons about.
-/// Matches what `unbounded_amount_param` cares about: scalar quantities
-/// that flow into transfer amounts or arithmetic effects.
+/// Integer-typed DSL types — the scalar quantities that flow into
+/// transfer amounts or arithmetic effects.
 fn is_integer_type(ty: &str) -> bool {
     matches!(
         ty,
@@ -1574,10 +1398,8 @@ fn is_integer_type(ty: &str) -> bool {
     )
 }
 
-/// Substring match on word-boundary references to `param` in `value`.
-/// Surface-level: catches `param`, `state.x + param`, `wrapping_add(param)`,
-/// `param * 2`. Misses obfuscated forms — that's OK; the auditor is the
-/// real backstop.
+/// Word-boundary substring match for `param` in `value`. Surface-level
+/// by design — misses obfuscated forms; the auditor is the backstop.
 fn param_referenced(value: &str, param: &str) -> bool {
     let bytes = value.as_bytes();
     let pbytes = param.as_bytes();
@@ -1599,31 +1421,24 @@ fn param_referenced(value: &str, param: &str) -> bool {
     false
 }
 
-/// True when `expr` looks like an *upper* bound on `param`. Lower-only
-/// bounds (`amount > 0`) don't suppress the finding — those don't
-/// constrain the dangerous side (`u64::MAX`) of an amount param flowing
-/// into a transfer. We accept either form:
-///
-/// - LHS-bounded: `param < X`, `param <= X`, `param ≤ X`
-/// - RHS-bounded: `X > param`, `X >= param`, `X ≥ param`
-///
-/// Equality (`param == X`) also suppresses — fixed value, no overflow
-/// surface. Lower-only forms (`param > 0`, `param >= 1`) do NOT suppress.
+/// True when `expr` looks like an *upper* bound on `param` — LHS-bounded
+/// (`param <[=] X`) or RHS-bounded (`X >[=] param`). Equality also
+/// suppresses (fixed value, no overflow surface). Lower-only bounds
+/// (`param > 0`) do NOT — they don't constrain the dangerous `u64::MAX`
+/// side.
 fn requires_bounds_param(expr: &str, param: &str) -> bool {
     if !param_referenced(expr, param) {
         return false;
     }
 
-    // Equality / inequality fix the param exactly or constrain it from
-    // above implicitly. Cheap escape hatch.
+    // Equality / inequality fix the param — cheap escape hatch.
     if expr.contains("==") || expr.contains("!=") || expr.contains('\u{2260}') {
         return true;
     }
 
-    // Tokenize-ish: split on whitespace and look for a (lhs, op, rhs)
-    // triple where the param is on the bounded side of an inequality.
-    // Multi-conjunct expressions (`a > 0 && a < MAX`) are scanned for
-    // any bound that satisfies the upper-bound shape.
+    // Whitespace-tokenize and scan (lhs, op, rhs) triples for any
+    // upper-bound shape; multi-conjunct exprs (`a > 0 && a < MAX`) count
+    // if any conjunct qualifies.
     let normalized = expr
         .replace('\u{2264}', "<=")
         .replace('\u{2265}', ">=")
@@ -1636,7 +1451,6 @@ fn requires_bounds_param(expr: &str, param: &str) -> bool {
     let upper_ops = ["<", "<="];
     let lower_ops = [">", ">="];
 
-    // Sliding window of length 3.
     for w in tokens.windows(3) {
         let (lhs, op, rhs) = (w[0], w[1], w[2]);
         // LHS-bounded upper: `param <[=] _`
@@ -2291,8 +2105,8 @@ solana-program = "1.18"
 
     #[test]
     fn applicable_categories_for_native_includes_permissionless_shapes() {
-        // v2.20 §S2.2 — the per-handler filter only does useful work
-        // when these categories are in the global list to begin with.
+        // The per-handler filter only does useful work when these
+        // categories are in the global list to begin with.
         let cats = applicable_categories(&Runtime::Native);
         assert!(
             cats.iter().any(|c| c == "permissionless_state_writer"),
@@ -2362,7 +2176,6 @@ solana-program = "1.18"
     }
 }
 
-// Submodules (v2.35 src/ reorg).
 pub(crate) mod arithmetic_symbol_probe;
 pub(crate) mod cluster;
 pub(crate) mod crucible_brownfield;

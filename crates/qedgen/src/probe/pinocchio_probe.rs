@@ -1,42 +1,19 @@
 //! `qedgen probe --runtime pinocchio` — Pinocchio-aware audit data layer.
 //!
-//! Walks every `.rs` under the project's `src/` (or `program/src/`),
-//! enumerates `unsafe`-serde and arithmetic sites that Pinocchio
-//! programs hand-write in place of Anchor's framework checks, parses
-//! adjacent `// SAFETY:` comments, and emits the structured catalogue
-//! the audit subagent consumes via rust-analyzer.
-//!
-//! Per `feedback_agent_lsp_substrate`: the enumerator is **deterministic
-//! pattern matching only**. Control-flow analysis (does the SAFETY claim
-//! hold on every reachable path?) is the agent's job. We emit sites
-//! plus their author-written preconditions; the agent reads the impl and
-//! decides.
-//!
-//! Site kinds enumerated (10 total):
-//!
-//! 1. `BorrowUnchecked` — `*.borrow_*_unchecked*()`
-//! 2. `BytemuckCall` — `bytemuck::(from|try_from|cast)*<T>`
-//! 3. `RawPtrCastFromAccount` — raw `as *const _` / `transmute` on account data
-//! 4. `CustomLoadCall` — `load*` fn inside `unsafe { }` with a `borrow_*_unchecked` first arg
-//! 5. `TryIntoUnwrapOnSlice` — `_[..].try_into().unwrap()`
-//! 6. `SetLamportsArith` — `set_lamports(...)` / `*lamports {+/-}= _`
-//! 7. `SetAmountArith` — `set_amount(amount() {+/-} _)`
-//! 8. `IndexedAccountAccess` — `accounts[N]` literal
-//! 9. `IndexedDataSlice` — `data[CONST..CONST{+/-}N]`
-//! 10. `SafetyComment` — `// SAFETY:` blocks attached to the next `unsafe { }` scope
-//!
-//! Output: `PinocchioCatalogue { sites, summary }`. Consumers (the audit
-//! subagent and `references/probes/pinocchio/*.md`) map sites → findings
-//! via per-site predicates the agent applies.
+//! Enumerates the unsafe-serde and arithmetic sites Pinocchio programs
+//! hand-write in place of Anchor's framework checks, plus adjacent
+//! `// SAFETY:` comments, into the catalogue the audit subagent maps to
+//! findings via `references/probes/pinocchio/*.md`. Deterministic pattern
+//! matching only (`feedback_agent_lsp_substrate`): whether a SAFETY claim
+//! holds on every reachable path is the agent's job.
 
 use anyhow::Result;
 use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-/// One detected site. `extra` carries site-kind-specific structured
-/// data (load-type `T`, offset constant, etc.) that probe markdowns
-/// use as `${...}` substitutions in the reproducer template.
+/// One detected site. `extra` carries kind-specific structured data that
+/// probe markdowns use as `${...}` substitutions in reproducer templates.
 #[derive(Debug, Clone, Serialize)]
 pub struct PinocchioSite {
     pub kind: SiteKind,
@@ -45,18 +22,13 @@ pub struct PinocchioSite {
     pub col: u32,
     /// The matched expression / call text, trimmed.
     pub expr: String,
-    /// Containing fn name (best-effort — the most recent `fn` declaration
-    /// seen above the site, ignoring nested closures).
+    /// Containing fn (best-effort: most recent `fn` above, ignoring closures).
     pub fn_name: Option<String>,
-    /// True when the site lives inside an `unsafe { }` block scope. The
-    /// scope detector is a brace-depth heuristic, not a full parser.
+    /// Inside an `unsafe { }` block (brace-depth heuristic, not a parser).
     pub in_unsafe_block: bool,
-    /// Parsed `// SAFETY: ...` runs from the lines immediately above
-    /// the enclosing `unsafe { }`. Concatenated into a single string
-    /// for the agent to read verbatim.
+    /// `// SAFETY:` run above the enclosing `unsafe { }`, concatenated.
     pub safety_comment: Option<String>,
-    /// Kind-specific structured fields. Schema is documented in
-    /// `references/probes/pinocchio/<probe>.md#substitutions`.
+    /// Kind-specific fields; schema in `references/probes/pinocchio/<probe>.md#substitutions`.
     pub extra: serde_json::Value,
 }
 
@@ -92,8 +64,7 @@ pub struct PinocchioCatalogue {
 
 const SCHEMA_VERSION: u32 = 1;
 
-/// Walk the project root and emit the full site catalogue. Reads every
-/// `*.rs` under `src/`, `program/src/`, and `programs/*/src/`.
+/// Walk `src/`, `program/src/`, and `programs/*/src/`; emit the site catalogue.
 pub fn scan_program(project_root: &Path) -> Result<PinocchioCatalogue> {
     let rs_files = collect_rust_files(project_root)?;
     let mut sites = Vec::new();
@@ -135,9 +106,8 @@ pub fn scan_program(project_root: &Path) -> Result<PinocchioCatalogue> {
     })
 }
 
-/// Recursively collect `.rs` files under conventional Solana program
-/// source roots. Stops at `target/`, `.qed/`, and `node_modules/` to
-/// avoid scanning build artifacts.
+/// Recursively collect `.rs` under conventional program source roots,
+/// skipping build-artifact dirs.
 fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let candidates = ["src", "program/src", "programs"];
@@ -148,8 +118,7 @@ fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
         }
         walk_dir(&dir, &mut out)?;
     }
-    // Fallback: also scan project_root for top-level .rs if nothing
-    // matched (some Pinocchio fixtures put source straight under root).
+    // Fallback: some Pinocchio fixtures put source straight under root.
     if out.is_empty() {
         walk_dir(root, &mut out)?;
     }
@@ -196,11 +165,9 @@ struct SitePatterns {
 
 impl SitePatterns {
     fn new() -> Self {
-        // Each regex is intentionally permissive: false positives are
-        // cheaper than misses because the agent re-reads context via
-        // rust-analyzer before reporting. The patterns target what's
-        // SYNTACTICALLY unsafe; the agent decides what's SEMANTICALLY a
-        // bug.
+        // Intentionally permissive: false positives are cheaper than misses
+        // (the agent re-reads context before reporting). Patterns target the
+        // SYNTACTICALLY unsafe; the agent decides what's semantically a bug.
         SitePatterns {
             borrow_unchecked: Regex::new(r"\.borrow_[a-z_]*unchecked[a-z_]*\s*\(\s*\)")
                 .expect("regex"),
@@ -210,9 +177,8 @@ impl SitePatterns {
             .expect("regex"),
             raw_ptr_cast: Regex::new(r"\bas\s+\*(?:const|mut)\s+[A-Za-z_]").expect("regex"),
             transmute_account: Regex::new(r"\btransmute\b").expect("regex"),
-            // `unsafe { load*::<T>(...)? }` or similar. We catch any
-            // identifier-shaped fn name containing `load` whose first
-            // arg references a `borrow_*_unchecked` call.
+            // Any fn name containing `load` whose first arg references a
+            // `borrow_*_unchecked` call.
             custom_load: Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*load[A-Za-z0-9_]*)\s*(?:::\s*<[^>]+>\s*)?\(")
                 .expect("regex"),
             try_into_unwrap: Regex::new(r"\.try_into\s*\(\s*\)\s*\.\s*unwrap\s*\(\s*\)")
@@ -233,16 +199,13 @@ impl SitePatterns {
             )
             .expect("regex"),
             indexed_account: Regex::new(r"\baccounts\s*\[\s*(\d+)\s*\]").expect("regex"),
-            // `data[OFFSET..OFFSET+N]` or `data[A..B]` with const-y
-            // looking identifiers.
+            // `data[OFFSET..OFFSET+N]` with const-looking identifiers.
             indexed_data_slice: Regex::new(
                 r"\b(?:data|raw|buf|bytes)\s*\[\s*([A-Z0-9_]+)\s*\.\.\s*([A-Z0-9_+\- ]+)\s*\]",
             )
             .expect("regex"),
-            // Note: tolerate optional `pub`, `async`, `unsafe`, and
-            // `extern "C"` modifiers; the abi string is matched
-            // permissively to avoid hitting raw-string quote-escape
-            // issues.
+            // Tolerates pub/async/unsafe/extern "C"; abi string matched
+            // permissively to avoid raw-string quote-escape issues.
             fn_decl: Regex::new(
                 r#"^\s*(?:pub\s+(?:\([^)]*\)\s+)?)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+(?:"[^"]+"\s+)?)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"#,
             )
@@ -258,16 +221,14 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
     let unsafe_ranges = compute_unsafe_block_ranges(&lines);
     let safety_blocks = parse_safety_comments(&lines);
 
-    // Track containing fn — most recent `fn NAME` declaration whose
-    // brace depth still encloses the current line. Brace-depth
-    // heuristic is good enough; we are not building an AST.
+    // Containing fn = most recent `fn NAME` whose brace depth still
+    // encloses the line. Heuristic; not an AST.
     let mut fn_stack: Vec<(String, usize)> = Vec::new();
     let mut depth_at_line_end: Vec<i32> = Vec::with_capacity(lines.len());
     let mut depth = 0_i32;
 
     for line in &lines {
-        // Strip line comments but preserve strings as best-effort —
-        // close enough for brace counting in source we control.
+        // Strip line comments; close enough for brace counting.
         let stripped = strip_line_comment(line);
         for ch in stripped.chars() {
             match ch {
@@ -283,7 +244,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
         let line_no = (idx + 1) as u32;
         let stripped = strip_line_comment(raw_line);
 
-        // Update fn_stack — pop frames whose depth is no longer active.
         let current_depth = depth_at_line_end.get(idx).copied().unwrap_or(0);
         while let Some((_, start_depth)) = fn_stack.last() {
             if current_depth <= *start_depth as i32 {
@@ -292,10 +252,9 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
                 break;
             }
         }
-        // Push fn declared on this line, if any.
         if let Some(m) = p.fn_decl.captures(raw_line) {
-            // depth_before_line: depth_at_line_end[idx] minus brace
-            // events on this line.
+            // depth before this line = depth_at_line_end[idx] minus this
+            // line's brace events.
             let mut brace_before = 0_i32;
             for ch in stripped.chars() {
                 match ch {
@@ -314,7 +273,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             .any(|(s, e)| line_no >= *s && line_no <= *e);
         let safety = safety_for_line(&safety_blocks, line_no);
 
-        // 1. BorrowUnchecked
         for m in p.borrow_unchecked.find_iter(&stripped) {
             sites.push(PinocchioSite {
                 kind: SiteKind::BorrowUnchecked,
@@ -331,7 +289,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 2. BytemuckCall
         for m in p.bytemuck_call.find_iter(&stripped) {
             sites.push(PinocchioSite {
                 kind: SiteKind::BytemuckCall,
@@ -348,11 +305,9 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 3. RawPtrCast / Transmute
         for m in p.raw_ptr_cast.find_iter(&stripped) {
-            // Filter out trivial `as *const u8` casts of non-account
-            // exprs by requiring the LHS to mention `.data` /
-            // `.borrow` / `account` — keeps the signal high.
+            // Require the LHS to mention data/borrow/account — filters
+            // trivial casts of non-account exprs, keeps signal high.
             let lhs_start = stripped[..m.start()].rfind([';', '{', '(', ',']);
             let lhs = match lhs_start {
                 Some(p) => &stripped[p + 1..m.start()],
@@ -381,17 +336,14 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
         for m in p.transmute_account.find_iter(&stripped) {
-            // Skip `use core::mem::{transmute, ...};` imports — they
-            // match the bare `transmute` token but aren't call sites.
+            // Skip `use` imports — bare `transmute` token, not a call site.
             let trimmed = stripped.trim_start();
             if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
                 continue;
             }
-            // Same LHS-shape guard as the `raw_ptr_cast` branch above:
-            // a real transmute on account data references `data` /
-            // `borrow` / `account` / `input` in its surrounding
-            // expression. Filters out non-data transmutes (size_of
-            // arithmetic, type conversions on local arrays).
+            // Same LHS guard as raw_ptr_cast: real account-data transmutes
+            // mention data/borrow/account/input — filters size_of arithmetic
+            // and local-array conversions.
             let context_start = stripped[..m.start()].rfind([';', '{', '(', ',']);
             let context = match context_start {
                 Some(p) => &stripped[p + 1..],
@@ -420,15 +372,13 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 4. CustomLoadCall — only when in_unsafe AND a borrow_*_unchecked
-        // sibling expression appears on this line or the previous line.
+        // CustomLoadCall fires only when in_unsafe AND a borrow_*_unchecked
+        // sibling appears on a nearby line.
         if in_unsafe {
             for cap in p.custom_load.captures_iter(&stripped) {
                 let callee = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-                // Skip obvious noise — `payload`, `download`, etc. The
-                // strict signal is a fn name containing `load` followed
-                // by `(` whose first arg expression references
-                // `borrow_*_unchecked`.
+                // Skip noise (`payload`, `download`, …): require a
+                // load-shaped fn name.
                 if !callee.starts_with("load")
                     && callee != "loader"
                     && !callee.ends_with("_load")
@@ -458,7 +408,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             }
         }
 
-        // 5. TryIntoUnwrapOnSlice
         for m in p.try_into_unwrap.find_iter(&stripped) {
             sites.push(PinocchioSite {
                 kind: SiteKind::TryIntoUnwrapOnSlice,
@@ -473,7 +422,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 6. SetLamportsArith
         if let Some(m) = p.set_lamports_arith_call.find(&stripped) {
             sites.push(PinocchioSite {
                 kind: SiteKind::SetLamportsArith,
@@ -501,7 +449,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 7. SetAmountArith
         if let Some(m) = p.set_amount_arith.find(&stripped) {
             sites.push(PinocchioSite {
                 kind: SiteKind::SetAmountArith,
@@ -516,7 +463,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 8. IndexedAccountAccess
         for cap in p.indexed_account.captures_iter(&stripped) {
             let m = cap.get(0).expect("g0");
             let idx_val: u32 = cap[1].parse().unwrap_or(0);
@@ -533,7 +479,6 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
             });
         }
 
-        // 9. IndexedDataSlice
         for cap in p.indexed_data_slice.captures_iter(&stripped) {
             let m = cap.get(0).expect("g0");
             sites.push(PinocchioSite {
@@ -553,7 +498,7 @@ fn scan_file(rel_file: &Path, source: &str, p: &SitePatterns) -> Vec<PinocchioSi
         }
     }
 
-    // 10. SafetyComment — emitted standalone so the catalogue is
+    // SafetyComment sites are emitted standalone so the catalogue is
     // queryable without re-walking the source.
     for block in &safety_blocks {
         sites.push(PinocchioSite {
@@ -644,11 +589,9 @@ fn is_outer_cfg_kani_attr(line: &str) -> bool {
         || compact.starts_with("#[cfg(any(kani")
 }
 
-/// Best-effort detection of `unsafe { ... }` block extents. We scan
-/// for the literal token `unsafe {` and walk forward counting braces
-/// until depth balances. Strings / comments inside the block are
-/// stripped per-line. Returns (start_line, end_line) inclusive in
-/// 1-based numbering.
+/// Best-effort `unsafe { ... }` extents: scan for `unsafe {`, count braces
+/// until balanced (comments stripped per-line). Returns inclusive 1-based
+/// (start_line, end_line).
 fn compute_unsafe_block_ranges(lines: &[&str]) -> Vec<(u32, u32)> {
     let mut ranges = Vec::new();
     let unsafe_re = Regex::new(r"\bunsafe\s*\{").expect("regex");
@@ -656,16 +599,13 @@ fn compute_unsafe_block_ranges(lines: &[&str]) -> Vec<(u32, u32)> {
     for (idx, line) in lines.iter().enumerate() {
         let stripped = strip_line_comment(line);
         for m in unsafe_re.find_iter(&stripped) {
-            // Walk from the open brace position forward.
             let start_line = (idx + 1) as u32;
-            // Find the `{` after the `unsafe` keyword.
             let after = &stripped[m.end() - 1..]; // includes `{`
             let mut depth: i32 = 0;
             let mut consumed_first = false;
-            // Continue across subsequent lines if needed.
             let mut end_line = start_line;
             let mut line_offset = idx;
-            // Local slice to process: start with `after`, then full lines.
+            // Start with `after`, then continue across full lines.
             let mut buf = after.to_string();
             loop {
                 for ch in buf.chars() {
@@ -708,10 +648,8 @@ struct SafetyBlock {
     attached_unsafe_line: Option<u32>,
 }
 
-/// Find every `// SAFETY:` comment run. A run is consecutive
-/// `// `-prefixed lines whose first line starts with `// SAFETY:`,
-/// ending at the next non-`//`-prefix line. Attach to the next
-/// `unsafe` block within 3 lines.
+/// Find `// SAFETY:` comment runs (consecutive `//` lines starting at a
+/// `// SAFETY:` line); attach each to the next `unsafe` within 3 lines.
 fn parse_safety_comments(lines: &[&str]) -> Vec<SafetyBlock> {
     let mut blocks = Vec::new();
     let safety_start = Regex::new(r"^\s*//\s*SAFETY\b").expect("regex");
@@ -725,7 +663,6 @@ fn parse_safety_comments(lines: &[&str]) -> Vec<SafetyBlock> {
             let mut last = i;
             let mut text = String::new();
             while last < lines.len() && comment_cont.is_match(lines[last]) {
-                // Strip the leading `//` and optional whitespace.
                 let raw = lines[last].trim_start();
                 let after = raw.trim_start_matches('/').trim_start_matches('/').trim();
                 if !text.is_empty() {
@@ -756,10 +693,9 @@ fn parse_safety_comments(lines: &[&str]) -> Vec<SafetyBlock> {
 }
 
 fn safety_for_line(blocks: &[SafetyBlock], line: u32) -> Option<String> {
-    // Return the SAFETY block whose `attached_unsafe_line` matches
-    // the current line (or is 1-2 lines earlier — the `unsafe {`
-    // statement may span lines). Tight attachment avoids cascading
-    // a single SAFETY block across unrelated sites further down.
+    // Match the block whose `attached_unsafe_line` is at or just above
+    // `line` (the `unsafe {` may span lines). Tight attachment avoids
+    // cascading one SAFETY block across unrelated sites further down.
     for b in blocks {
         if let Some(att) = b.attached_unsafe_line {
             if line >= att && line <= att + 4 {
@@ -798,31 +734,24 @@ fn nearby_text(lines: &[&str], idx: usize, radius: usize) -> String {
     lines[lo..hi].join("\n")
 }
 
-/// Map each site in the catalogue to a candidate `Finding` carrying the
-/// canonical `MolluskPrompt` + `MiriPrompt` reproducer pair the audit
-/// subagent expands. Per `feedback_repros_agent_authored`: the prompt
-/// is the artifact the agent acts on — not a generated test body.
+/// Map catalogue sites to candidate `Finding`s carrying the
+/// `MolluskPrompt`/`MiriPrompt` reproducer pair the audit subagent expands —
+/// the prompt is the artifact the agent acts on, not a generated test body.
 ///
-/// Only the high-signal site kinds map directly to findings; the rest
-/// (e.g. `SafetyComment`, `IndexedAccountAccess`) inform the agent's
-/// CF analysis via the `pinocchio_catalogue` envelope. We never
-/// duplicate a `SafetyComment` into a `findings[]` entry — those are
-/// strictly informational.
+/// `SafetyComment` sites are strictly informational (agent CF context via
+/// the catalogue envelope) and never become `findings[]` entries.
 pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Finding> {
     use crate::probe::{Category, Finding, Reproducer, Severity};
     use sha2::{Digest, Sha256};
 
-    // Cache per-file source so repeated lookups (multiple sites in one
-    // file) don't re-read the same content. Maps absolute path →
-    // contents. Sites carry their path relative to `cat.project_root`.
+    // Cache per-file source so multiple sites in one file don't re-read it.
     let mut source_cache: std::collections::HashMap<PathBuf, String> =
         std::collections::HashMap::new();
     let mut load_source = |rel: &Path| -> Option<String> {
         if let Some(s) = source_cache.get(rel) {
             return Some(s.clone());
         }
-        // Try absolute (catalogue may store absolute paths) then
-        // relative to project_root.
+        // Catalogue paths may be absolute or project-root-relative.
         let abs = if rel.is_absolute() {
             rel.to_path_buf()
         } else {
@@ -876,13 +805,10 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
             SiteKind::SafetyComment => continue,
         };
 
-        // v2.22 Slice 5: compute `gated_by` for the high-noise
-        // categories. Walks the source preceding the site for length /
-        // discriminator / owner gate signals; the auditor subagent
-        // bulk-suppresses findings whose gate set covers the
-        // expected triad. Computed once per (site, finding pair) and
-        // shared between the Mollusk and Miri finding emissions
-        // below.
+        // `gated_by` for the high-noise categories: scan preceding source
+        // for length / discriminator / owner gates; the auditor subagent
+        // bulk-suppresses findings whose gate set covers the expected triad.
+        // Computed once, shared by the Mollusk and Miri findings below.
         let gated_by = match site.kind {
             SiteKind::BytemuckCall
             | SiteKind::RawPtrCastFromAccount
@@ -893,17 +819,15 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
                 source
                     .as_deref()
                     .map(|src| detect_gates(src, site.line))
-                    // Collapse empty-gate to None so the JSON envelope
-                    // omits the field for findings with no gates
-                    // detected (the auditor-focus subset).
+                    // Empty → None so the JSON envelope omits the field
+                    // (the auditor-focus subset).
                     .filter(|gates| !gates.is_empty())
             }
             _ => None,
         };
 
-        // Stable id: hash of (file, line, kind). Mirrors probe.rs's
-        // `stable_id` shape so suppression files stay consistent
-        // across runs.
+        // Stable id = hash(file, line, kind); mirrors probe.rs `stable_id`
+        // so suppression files stay consistent across runs.
         let mut hasher = Sha256::new();
         hasher.update(site.file.display().to_string().as_bytes());
         hasher.update(b":");
@@ -913,9 +837,8 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
         let id = format!("{:x}", hasher.finalize());
         let id = id[..16].to_string();
 
-        // Substitution map seeded with the universal keys probe
-        // markdowns rely on. Per-probe markdowns may reference
-        // additional keys via the `extra` blob.
+        // Seed the universal substitution keys; per-probe markdowns may
+        // also reference keys from the `extra` blob.
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FILE".to_string(), site.file.display().to_string());
         subs.insert("LINE".to_string(), site.line.to_string());
@@ -927,7 +850,7 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
         if let Some(safety) = &site.safety_comment {
             subs.insert("SAFETY_CLAIM".to_string(), safety.clone());
         }
-        // Flatten the `extra` JSON object into sub keys for convenience.
+        // Flatten `extra` into substitution keys.
         if let Some(obj) = site.extra.as_object() {
             for (k, v) in obj {
                 if let Some(s) = v.as_str() {
@@ -942,17 +865,13 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
             }
         }
 
-        // Adversarial inputs derived from the SAFETY comment. The
-        // agent reads each clause and picks a negation strategy per
-        // the table in references/probes/pinocchio/<probe>.md. We
-        // seed with the canonical strategies the probe is most likely
-        // to consume; the agent extends or prunes during repro
-        // authoring.
+        // Adversarial inputs derived from the SAFETY comment: seed the
+        // canonical negation strategies (per the probe markdown table);
+        // the agent extends or prunes during repro authoring.
         let adversarial = adversarial_for(site, &category);
 
-        // Invariant asserts the Miri repro brackets the handler with.
-        // Conservative default: lamport + token conservation. The
-        // agent picks the relevant subset per probe.
+        // Miri-repro invariant asserts. Conservative default: lamport +
+        // token conservation; the agent picks the relevant subset per probe.
         let invariants = invariants_for(&category);
 
         let mollusk = Reproducer::MolluskPrompt {
@@ -964,11 +883,9 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
             repro_path: format!(".qed/probes/pinocchio/{}/repro_mollusk.rs", id),
         };
 
-        // Stale SAFETY upgrade: when a finding carries a SAFETY claim
-        // and the site is one of the high-leverage kinds, emit the
-        // `stale_safety_comment` probe in parallel. Surfaces in the
-        // catalogue as a second finding sharing the same site; the
-        // agent merges or keeps separate per its CF read.
+        // Stale-SAFETY upgrade: a SAFETY claim on a high-leverage kind also
+        // emits the `stale_safety_comment` probe — a second finding on the
+        // same site; the agent merges or keeps separate per its CF read.
         if site.safety_comment.is_some()
             && matches!(
                 category,
@@ -1023,9 +940,8 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
             invariant_asserts: invariants,
         };
 
-        // Primary finding carries the Mollusk variant; a sibling
-        // finding (id + "-miri") carries the Miri variant. The
-        // verifier wires both into the dual-execution comparator.
+        // Primary finding = Mollusk variant; sibling (id + "-miri") = Miri.
+        // The verifier wires both into the dual-execution comparator.
         let handler = site.fn_name.clone().unwrap_or_else(|| "<unknown>".into());
 
         findings.push(Finding {
@@ -1085,24 +1001,17 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
     findings
 }
 
-/// v2.22 Slice 5: detect upstream guards preceding a zero-copy /
-/// account-data load. Walks backward from `target_line` for ~30 lines
-/// looking for canonical Pinocchio gate signals:
+/// Detect upstream guards in the ~30 lines before a zero-copy /
+/// account-data load:
 ///
-/// - **`length_check`** — any `<...>.len() < N` / `!= LEN` / `== LEN`
-///   / `>= N` comparison (the prerequisite for safe transmute /
-///   bytemuck on a byte slice).
-/// - **`discriminator_check`** — any reference to an
-///   `AccountDiscriminator::*` constant or a `discriminator` /
-///   `DISCRIMINATOR` ident compared.
-/// - **`owner_check`** — `ProgramAccount::check(<acc>, ...)` /
-///   `<acc>.owner()` reference / `&crate::ID` comparison.
+/// - `length_check` — `.len()` comparison (prerequisite for safe
+///   transmute/bytemuck on a byte slice).
+/// - `discriminator_check` — discriminator ident/constant reference.
+/// - `owner_check` — `ProgramAccount::check` / `.owner()` / `&crate::ID`.
 ///
-/// When all three fire upstream, the load is defensively fenced and
-/// the auditor subagent can bulk-suppress the finding via the
-/// `gated_by` list. When only the length gate fires (the
-/// instruction-data parsing case), the finding stays but the
-/// auditor knows the buffer-bound check is in place.
+/// All three ⇒ defensively fenced; the auditor can bulk-suppress via
+/// `gated_by`. Length-only (instruction-data parsing) keeps the finding
+/// but signals the buffer bound is checked.
 pub(crate) fn detect_gates(source: &str, target_line: u32) -> Vec<String> {
     let lines: Vec<&str> = source.lines().collect();
     if target_line == 0 || (target_line as usize) > lines.len() {
@@ -1135,8 +1044,7 @@ pub(crate) fn detect_gates(source: &str, target_line: u32) -> Vec<String> {
     gates
 }
 
-/// Per-category catalogue of adversarial inputs the agent should
-/// include in the Miri reproducer.
+/// Adversarial inputs the agent should include in the Miri reproducer.
 fn adversarial_for(
     site: &PinocchioSite,
     category: &crate::probe::Category,
@@ -1145,8 +1053,7 @@ fn adversarial_for(
     let mut out = Vec::new();
     let safety = site.safety_comment.clone().unwrap_or_default();
 
-    // Generic by-claim mapping. The agent re-reads the SAFETY text
-    // verbatim and refines.
+    // Generic by-claim mapping; the agent re-reads the SAFETY text and refines.
     if safety.to_lowercase().contains("init") {
         out.push(AdversarialInput {
             claim_text: "account is initialized".to_string(),
@@ -1418,9 +1325,8 @@ pub fn risky_load(data: &[u8]) -> &Self {
 
     #[test]
     fn detect_gates_partial_length_only() {
-        // Instruction-data parse — has length gate but no
-        // discriminator / owner (those don't apply to instruction
-        // data).
+        // Instruction-data parse: length gate only (discriminator/owner
+        // don't apply to instruction data).
         let src = r#"
 pub fn load(data: &[u8]) -> Result<&Self, ProgramError> {
     if data.len() != Self::LEN {

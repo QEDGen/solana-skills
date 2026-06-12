@@ -87,10 +87,9 @@ fn client() -> Client {
         .expect("failed to build HTTP client")
 }
 
-/// Create a tar.gz archive of a Lean project directory, filtering out
-/// VCS metadata (`.git`), Lake build output (`.lake`), and Lean
-/// build artifacts (`.olean`/`.ilean`/`.ir`/native objects). Matches
-/// the packaging shape Aristotle expects on the upload side.
+/// tar.gz a Lean project dir, filtering `.git`, `.lake`, and build artifacts
+/// (`.olean`/`.ilean`/`.ir`/native objects) — the packaging shape Aristotle
+/// expects on upload.
 fn tar_project_dir(dir: &Path) -> Result<Vec<u8>> {
     use std::io::Write;
 
@@ -133,7 +132,6 @@ fn tar_project_dir(dir: &Path) -> Result<Vec<u8>> {
     walk(dir, dir, &mut tar_builder, skip_dirs, skip_extensions)?;
     let tar_data = tar_builder.into_inner()?;
 
-    // gzip the tar
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&tar_data)?;
     Ok(encoder.finish()?)
@@ -304,16 +302,12 @@ pub async fn download_result(project_id: &str, output_dir: &Path) -> Result<Path
     }
     std::fs::create_dir_all(output_dir)?;
 
-    // Extract tar.gz, stripping the top-level directory prefix
-    // (Aristotle wraps results in a `project_aristotle/` directory).
+    // Extract tar.gz, stripping the top-level prefix (Aristotle wraps results
+    // in `project_aristotle/`).
     //
-    // SECURITY: validate every entry's resolved path is contained
-    // under `output_dir` after stripping. A malicious or compromised
-    // archive could include traversal components (`..`) or absolute
-    // paths that escape the output dir; the pre-v2.15 implementation
-    // unpacked the entry's path verbatim after stripping, with no
-    // bound check. (GH issue #26.) Reject any entry whose stripped
-    // path contains `..`, a root directory, or a Windows path prefix.
+    // SECURITY (GH #26): every stripped entry path must stay under
+    // `output_dir` — reject `..`, root dirs, and Windows prefixes, or a
+    // malicious archive could escape the extraction dir.
     let decoder = flate2::read::GzDecoder::new(&bytes[..]);
     let mut archive = tar::Archive::new(decoder);
 

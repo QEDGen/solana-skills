@@ -1,28 +1,11 @@
-//! Import resolver — fetches sources for `import Name from "key"` (v2.8 G1).
+//! Import resolver — fetches sources for `import Name from "key"` against a
+//! `qed.toml` `Manifest` (GitHub or path deps).
 //!
-//! Consumes a `Manifest` (parsed from `qed.toml`) and a list of
-//! `ParsedImport` statements, and returns the source bytes for each
-//! imported spec — fetched from GitHub for `Dependency::Github` or read
-//! from disk for `Dependency::Path`.
-//!
-//! Per `feedback_dispatch_over_reimplement.md`, GitHub fetches shell out
-//! to the system `git` binary rather than pulling in `git2`. For `Tag`
-//! and `Branch` refs we use `git clone --depth=1 --branch <ref>`; for
-//! `Rev` (commit hash) we clone the default branch and `git checkout
-//! <rev>` afterwards.
-//!
-//! Cache layout: `<cache_root>/github/<org>/<repo>/<kind>/<ref>/`. The
-//! cache root defaults to `~/.qedgen/cache` and can be overridden via
-//! the `QEDGEN_CACHE_DIR` env var (used by tests to avoid polluting the
-//! user's real cache).
-//!
-//! v2.8 scope:
-//! - Single-level resolution. Imported specs that themselves contain
-//!   `import` statements are not transitively resolved — each consumer
-//!   is responsible for declaring its own direct dependencies. This
-//!   matches stance 1 from `docs/design/spec-composition.md`.
-//! - No lock-file integration; that lands in M1.5 once the resolver is
-//!   wired into the parse pipeline.
+//! GitHub fetches shell out to the system `git` binary (no `git2`): `Tag` /
+//! `Branch` use `git clone --depth=1 --branch <ref>`; `Rev` clones the
+//! default branch then `git checkout <rev>`. Cache layout:
+//! `<cache_root>/github/<org>/<repo>/<kind>/<ref>/`, root `~/.qedgen/cache`,
+//! overridable via `QEDGEN_CACHE_DIR` (tests use this).
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -45,29 +28,24 @@ pub struct ResolvedImport {
     pub bound_name: String,
     /// Manifest dep key (matches `qed.toml`'s `[dependencies]`).
     pub dep_key: String,
-    /// Local alias from `import X from "y" as <alias>` (v2.8 F5).
-    /// `None` when no alias was declared — the merge keeps `bound_name`
-    /// as the local name.
+    /// Local alias from `import X from "y" as <alias>`; `None` keeps
+    /// `bound_name` as the local name.
     pub local_alias: Option<String>,
     pub sources: Vec<(PathBuf, String)>,
     pub commit: Option<String>,
-    /// v2.27 Track B — true iff the provider ships a Lake-buildable
-    /// proof package alongside the qedspec. Detected by the presence
-    /// of both `<source_dir>/.qed/proofs/<bound_name>.lean` and
-    /// `<source_dir>/.qed/proofs/lakefile.lean`. When true, the
-    /// consumer's codegen skips writing its local sibling axiom module
-    /// and emits a `require` directive in its lakefile against
+    /// True iff the provider ships a Lake-buildable proof package — both
+    /// `<source_dir>/.qed/proofs/<bound_name>.lean` and a sibling
+    /// `lakefile.lean` present. When true, consumer codegen skips its local
+    /// sibling axiom module and emits a lakefile `require` against
     /// `proof_pkg_root` instead.
     pub has_proofs: bool,
-    /// v2.27 Track B — directory containing the provider's proof
-    /// package (i.e. the parent of `<bound_name>.lean` and
-    /// `lakefile.lean`). Populated when `has_proofs` is true; `None`
-    /// otherwise. The consumer's lakefile rewrite computes a relative
-    /// path from its own location to this directory.
+    /// Directory containing the provider's proof package; `Some` iff
+    /// `has_proofs`. The consumer's lakefile rewrite computes a relative
+    /// path to it.
     pub proof_pkg_root: Option<PathBuf>,
 }
 
-/// Cache-handling options for github fetches. v2.8 fold-in F7.
+/// Cache-handling options for github fetches.
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
 pub struct CacheOpts {
@@ -88,28 +66,16 @@ pub fn resolve_imports(
     resolve_imports_with_opts(imports, manifest, manifest_dir, CacheOpts::default())
 }
 
-/// `resolve_imports`, with explicit cache-policy controls. Performs
-/// **transitive** resolution as of v2.9 G5: imported specs that
-/// themselves contain `import` statements are walked depth-first;
-/// the resolved set includes both direct and transitive deps.
+/// `resolve_imports` with explicit cache-policy controls. Resolution is
+/// **transitive** (depth-first); transitive deps resolve against the
+/// **imported spec's own** `qed.toml` (sibling to its source), not the
+/// consumer's manifest — cargo / npm semantics.
 ///
-/// Transitive deps are resolved against the **imported spec's own**
-/// `qed.toml` (sibling to its source file), not the consumer's
-/// manifest. This matches cargo / npm semantics — a peer spec
-/// declares its own deps in its own manifest; the consumer doesn't
-/// need to repeat them.
-///
-/// Conflict policy (v2.9 B1, no semver):
-/// - Same dep key (`from "..."`) resolving to the same canonical
-///   source path → dedupe (silent).
-/// - Same dep key resolving to *different* canonical paths →
-///   hard-error with the conflicting paths and the import chain
-///   that brought each.
-/// - Cycle (a transitive walk re-encounters a path already on the
-///   current chain) → hard-error with the cycle path.
-///
-/// Full version-conflict resolution (semver-aware) is v2.10+ scope
-/// (B2 from `SCOPING-v2.9.md`).
+/// Conflict policy (no semver):
+/// - Same dep key → same canonical source path: silent dedupe.
+/// - Same dep key → *different* canonical paths: hard-error with both
+///   paths and the import chain.
+/// - Cycle (path re-encountered on the current chain): hard-error.
 #[allow(dead_code)]
 pub fn resolve_imports_with_opts(
     imports: &[ParsedImport],
@@ -130,15 +96,12 @@ pub fn resolve_imports_with_opts(
     Ok(state.resolved)
 }
 
-/// Per-invocation resolver state. Tracks the deduplicated set of
-/// resolved imports plus the bookkeeping needed for cycle and
-/// conflict detection.
+/// Per-invocation resolver state: deduped results + cycle/conflict bookkeeping.
 #[derive(Default)]
 struct ResolverState {
     /// All resolved imports, in DFS-pre-order.
     resolved: Vec<ResolvedImport>,
-    /// `dep_key` → canonical source path of the first source. Used
-    /// for conflict detection across the dep graph.
+    /// `dep_key` → canonical first-source path, for conflict detection.
     seen: std::collections::HashMap<String, String>,
 }
 
@@ -151,11 +114,9 @@ fn resolve_recursive(
     chain: &mut Vec<String>,
 ) -> Result<()> {
     for imp in imports {
-        // v2.26 Track F (4a-3): builtin stdlib short-circuit. Keys "spl"
-        // and "system" point at bundled `.qedspec` fixtures shipped with
-        // the qedgen binary. The manifest doesn't need to declare them;
-        // they're always available. Materialize to the cache once and
-        // resolve as if they were a path dep.
+        // Builtin stdlib short-circuit: bundled fixtures are always
+        // available without a manifest entry — materialize to the cache
+        // and resolve as a path dep.
         let res = if let Some(builtin) = builtin_source(&imp.from) {
             resolve_builtin_dep(&imp.from, builtin)?
         } else {
@@ -177,11 +138,9 @@ fn resolve_recursive(
             }
         };
 
-        // Canonical source path = canonicalized first source file.
-        // Stable across multi-file deps (sources are returned in
-        // sorted order); falls back to the raw path if canonicalize
-        // fails (e.g. the file lives under a path that no longer
-        // exists when this is called repeatedly).
+        // Canonical source path = canonicalized first source file — stable
+        // across multi-file deps (sources are sorted); falls back to the
+        // raw path if canonicalize fails.
         let first_source = &res.sources[0].0;
         let canonical = first_source
             .canonicalize()
@@ -189,8 +148,6 @@ fn resolve_recursive(
             .to_string_lossy()
             .into_owned();
 
-        // Cycle detection: if this path is already on the current
-        // resolution chain, we have a cycle.
         if chain.contains(&canonical) {
             anyhow::bail!(
                 "import cycle detected:\n  {} -> {}\n  Each consumer must declare its own deps; cyclic peer references are not supported.",
@@ -199,9 +156,8 @@ fn resolve_recursive(
             );
         }
 
-        // Conflict detection: same dep_key, different canonical
-        // sources. Diagnose with the chain that brought the second
-        // path so the user can see the conflict point.
+        // Conflict: same dep_key, different canonical sources — diagnose
+        // with the chain that brought the second path.
         if let Some(prev_canonical) = state.seen.get(&imp.from) {
             if prev_canonical != &canonical {
                 anyhow::bail!(
@@ -220,12 +176,10 @@ fn resolve_recursive(
             continue;
         }
 
-        // v2.27 Track B — detect a Lake-buildable proof package alongside
-        // the qedspec. Convention: `<source_dir>/.qed/proofs/<bound_name>.lean`
-        // plus a sibling `lakefile.lean` declaring `package <name>Proofs`
-        // (see `lean_gen::proof_pkg_name`). Both must be present; the
-        // module file alone isn't enough because the consumer's `require`
-        // directive needs a Lake package to point at.
+        // Detect a Lake-buildable proof package alongside the qedspec:
+        // `<source_dir>/.qed/proofs/<bound_name>.lean` plus a sibling
+        // `lakefile.lean` (see `lean_gen::proof_pkg_name`). Both required —
+        // the consumer's `require` needs a Lake package to point at.
         let source_dir = first_source.parent().unwrap_or(Path::new("."));
         let proof_module = source_dir
             .join(".qed")
@@ -249,10 +203,8 @@ fn resolve_recursive(
             proof_pkg_root,
         });
 
-        // Walk into transitive deps. Imported specs that contain
-        // `import` statements need their own qed.toml (sibling to
-        // the source file) to resolve; absence is fine and just
-        // means no transitive deps.
+        // Transitive deps resolve against the imported spec's own qed.toml
+        // (sibling to its source); absence just means no transitive deps.
         let transitive = parse_imports_from_sources(&res.sources).with_context(|| {
             format!(
                 "scanning imported spec `{}` for transitive imports",
@@ -288,18 +240,13 @@ fn resolve_recursive(
     Ok(())
 }
 
-/// Parse an imported spec's source bytes just far enough to extract
-/// its own `import` statements. Equivalent to a full
-/// `chumsky_adapter::parse_str` followed by reading
-/// `parsed.imports`, but tolerates minor parse failures: a malformed
-/// imported spec doesn't block the resolver from reporting the
-/// actual problem (the parse error surfaces when the consumer-side
-/// pipeline parses it for real).
+/// Extract an imported spec's own `import` statements. Tolerates parse
+/// failures — a malformed import doesn't block the resolver; the parse
+/// error surfaces when the consumer-side pipeline parses it for real.
 fn parse_imports_from_sources(sources: &[(PathBuf, String)]) -> Result<Vec<ParsedImport>> {
     if sources.is_empty() {
         return Ok(Vec::new());
     }
-    // Fast path: single file → parse directly.
     if sources.len() == 1 {
         let parsed = match crate::chumsky_adapter::parse_str(&sources[0].1) {
             Ok(p) => p,
@@ -307,8 +254,8 @@ fn parse_imports_from_sources(sources: &[(PathBuf, String)]) -> Result<Vec<Parse
         };
         return Ok(parsed.imports);
     }
-    // Multi-file: concatenate via the same logic check.rs uses
-    // (parse each fragment, merge AST top items, adapt).
+    // Multi-file: same merge logic as check.rs (parse each fragment,
+    // merge AST top items, adapt).
     let mut merged_items = Vec::new();
     let mut merged_name: Option<String> = None;
     for (_, src) in sources {
@@ -575,7 +522,7 @@ fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 // ----------------------------------------------------------------------------
-// Builtin stdlib (v2.26 Track F)
+// Builtin stdlib
 // ----------------------------------------------------------------------------
 
 /// Bundled SPL Token interface fixture. Tier 1 — `ensures` clauses backed
@@ -589,22 +536,15 @@ const BUILTIN_SYSTEM: &str = include_str!("../../data/interfaces/system.qedspec"
 /// Bundled Metaplex Token Metadata interface fixture (Tier 1).
 const BUILTIN_METAPLEX: &str = include_str!("../../data/interfaces/metaplex.qedspec");
 
-// ---------------------------------------------------------------------
-// v2.27 Track C2 — bundled proof packages (Stance 2).
+// Bundled proof packages: written alongside the materialized qedspec, so
+// the standard proof-detection logic in `resolve_recursive` picks them up.
 //
-// Each tuple is (relative_path_inside_<cache>/builtin/<key>/.qed/proofs,
-// content). The resolver writes them out alongside the materialized
-// qedspec; the existing proof-detection logic at line 230 picks them
-// up automatically because the conventional location matches.
-//
-// System Program intentionally has no bundled proof package in v2.27:
-// `create_account` and `assign` have `Pubkey` params that would force
-// the bundled module to `import QEDGen.Solana.Account`, which would in
-// turn require a `require qedgenSupport` directive in the bundled
-// lakefile — defeating the self-contained-distribution goal.
-// `import System from "system"` therefore stays Stance-1 (axiom from
-// codegen-emitted local sibling module), unchanged from v2.26.
-// v2.28 may revisit if there's demand.
+// System Program intentionally has no bundled proof package:
+// `create_account` / `assign` have `Pubkey` params that would force the
+// bundled module to `import QEDGen.Solana.Account` and thus a `require
+// qedgenSupport` in the bundled lakefile — defeating self-contained
+// distribution. `import System from "system"` stays axiom-from-local-
+// sibling-module.
 const BUILTIN_SPL_PROOF_LAKEFILE: &str = include_str!("../../data/proofs/spl/lakefile.lean");
 const BUILTIN_SPL_PROOF_MODULE: &str = include_str!("../../data/proofs/spl/Token.lean");
 const BUILTIN_METAPLEX_PROOF_LAKEFILE: &str =
@@ -612,9 +552,8 @@ const BUILTIN_METAPLEX_PROOF_LAKEFILE: &str =
 const BUILTIN_METAPLEX_PROOF_MODULE: &str =
     include_str!("../../data/proofs/metaplex/Metadata.lean");
 
-/// Per-builtin bundled proof package: `(module_filename, module_source)`
-/// alongside a shared `lakefile.lean` source. `None` for builtins with
-/// no bundled proof (currently System Program — see comment above).
+/// `(module_filename, module_source, lakefile_source)` for a builtin's
+/// bundled proof package; `None` for builtins with none (System — see above).
 fn builtin_proof_pkg(key: &str) -> Option<(&'static str, &'static str, &'static str)> {
     match key {
         "spl" => Some((
@@ -655,18 +594,11 @@ pub fn all_imports_are_builtins(imports: &[ParsedImport]) -> bool {
 }
 
 /// Materialize a builtin fixture to `<cache_root>/builtin/<key>/<key>.qedspec`
-/// and return its source. The cache dir is created fresh each time only if
-/// the file is missing — once written, the same path is reused for cycle /
-/// conflict detection. Stable canonical paths matter for the resolver's
-/// dedup logic.
-///
-/// v2.27 Track C3 — the cached file is also refreshed whenever the bundled
-/// `include_str!` source differs from the on-disk copy. Without this, a
-/// qedgen-version upgrade that updates a bundled qedspec (e.g. real
-/// `binary_hash` pins replacing `sha256:0000…` placeholders) would not be
-/// visible to consumers until they manually `rm -rf ~/.qedgen/cache/builtin`.
-/// The on-disk path is still stable across runs, just its contents track
-/// the binary's bundled source.
+/// and return its source. The path is stable across runs — the resolver's
+/// cycle/conflict dedup needs stable canonical paths — but contents are
+/// refreshed whenever the bundled `include_str!` source differs from the
+/// on-disk copy, so a qedgen upgrade is visible without manually clearing
+/// `~/.qedgen/cache/builtin`.
 fn resolve_builtin_dep(key: &str, source: &'static str) -> Result<ResolvedSource> {
     let cache_root = cache_root();
     let builtin_dir = cache_root.join("builtin").join(key);
@@ -682,17 +614,10 @@ fn resolve_builtin_dep(key: &str, source: &'static str) -> Result<ResolvedSource
             .with_context(|| format!("materializing builtin fixture {}", file_path.display()))?;
     }
 
-    // v2.27 Track C2 — also materialize the bundled proof package, if
-    // one ships for this builtin. The existing proof-detection logic
-    // (around line 230) looks for `<source_dir>/.qed/proofs/<Iface>.lean`
-    // + `lakefile.lean`. Match that convention so Track B's
-    // `verified_callees` populates automatically without a special
-    // builtin-aware code path.
-    //
-    // The cache file is refreshed whenever the bundled `include_str!`
-    // source differs from the on-disk copy — same staleness rule as
-    // the qedspec above. A qedgen-version upgrade that rewrites the
-    // bundled theorem package is immediately visible to consumers.
+    // Also materialize the bundled proof package (if any) at the
+    // conventional `<source_dir>/.qed/proofs/` location so the standard
+    // proof-detection logic populates `verified_callees` with no
+    // builtin-aware code path. Same content-refresh rule as the qedspec.
     if let Some((module_filename, module_src, lakefile_src)) = builtin_proof_pkg(key) {
         let proofs_dir = builtin_dir.join(".qed").join("proofs");
         std::fs::create_dir_all(&proofs_dir)
@@ -841,7 +766,7 @@ mod tests {
         }
     }
 
-    // ----- v2.27 Track B: verified-callee detection -----
+    // ----- verified-callee detection -----
 
     #[test]
     fn detects_proof_package_alongside_qedspec() {
@@ -962,8 +887,6 @@ mod tests {
         assert!(resolved[0].proof_pkg_root.is_none());
     }
 
-    // ----- end Track B -----
-
     #[test]
     fn resolves_path_source_pointing_at_single_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1057,7 +980,7 @@ mod tests {
         );
     }
 
-    // ----- v2.26 Track F: bundled-stdlib builtins -----
+    // ----- bundled-stdlib builtins -----
 
     #[test]
     fn builtin_source_returns_spl_system_and_metaplex() {
@@ -1153,7 +1076,7 @@ mod tests {
             .contains("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"));
     }
 
-    // ----- v2.9 G5: transitive resolution -----
+    // ----- transitive resolution -----
 
     #[test]
     fn resolves_three_level_chain_via_transitive_walk() {

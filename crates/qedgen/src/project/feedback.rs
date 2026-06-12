@@ -1,16 +1,9 @@
-//! `qedgen feedback` — structured GitHub-issue authoring from the CLI.
-//!
-//! Bundles a small, predictable context envelope (qedgen version, OS,
-//! detected runtime, last command's failure output, and an optional spec
-//! excerpt) into a Markdown body and either files the issue via the `gh`
-//! CLI or prints a pre-filled GitHub web URL. Per
-//! `[[feedback_tactile_tooling]]`, the local artifact (`.qed/feedback/
-//! <timestamp>.md`) is written silently — the consent prompt fires only
-//! at the remote-submission boundary.
-//!
-//! Companion: `capture_last_error` is called from `main()`'s error path
-//! so the next `qedgen feedback` invocation has real stderr to attach.
-//! Without this hook the feedback body would be context-free.
+//! `qedgen feedback` — structured GitHub-issue authoring: bundles version,
+//! OS, runtime, last failure output, and a spec excerpt into a Markdown
+//! body, then files via `gh` or prints a pre-filled URL. The local artifact
+//! (`.qed/feedback/<ts>.md`) is written silently; the consent prompt fires
+//! only at the remote-submission boundary. `capture_last_error` runs from
+//! `main()`'s error path so the next invocation has real stderr to attach.
 
 use anyhow::{anyhow, Context as _, Result};
 use std::fs;
@@ -19,21 +12,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Upstream repo for feedback issues. Override via `QEDGEN_FEEDBACK_REPO`
-/// (forks, internal mirrors). Default points at the public skill repo so
-/// users land on a triage-ready issue tracker.
+/// (forks, internal mirrors).
 const DEFAULT_FEEDBACK_REPO: &str = "QEDGen/solana-skills";
 
-/// Hard cap on the GitHub web URL fallback. The actual GitHub limit is
-/// ~8 KB but we keep margin for the title + query keys + percent
-/// expansion. Body is truncated with a marker if it would push past
-/// this; the user can paste the full version into the issue body once
-/// the browser opens.
+/// Cap on the GitHub web-URL fallback: the actual limit is ~8 KB; margin
+/// covers title + query keys + percent expansion. Bodies past this truncate
+/// with a marker.
 const URL_BODY_BUDGET: usize = 6500;
 
-/// What the user typed (`Title: …` becomes the issue title) plus what
-/// we found on disk. Stays plain data — rendering and submission are
-/// separate so the `--dry-run` path can print the body without touching
-/// the network.
+/// What the user typed plus what we found on disk. Plain data — rendering
+/// and submission are separate so `--dry-run` never touches the network.
 pub struct FeedbackContext {
     pub qedgen_version: &'static str,
     pub os: String,
@@ -52,12 +40,9 @@ pub struct LastError {
     pub stderr: String,
 }
 
-/// Entry point for the `qedgen feedback` subcommand.
-///
-/// Order: collect → render → preview → confirm → submit. Each step
-/// short-circuits cleanly on failure so a user with no `gh` and no
-/// internet still gets the local `.qed/feedback/<ts>.md` artifact they
-/// can attach manually.
+/// Entry point. Order: collect → render → preview → confirm → submit; each
+/// step short-circuits so a user with no `gh` / internet still gets the
+/// local artifact.
 pub fn run(
     spec_path: Option<&Path>,
     note: Option<&str>,
@@ -112,11 +97,9 @@ pub fn run(
     }
 }
 
-/// Persisted to `.qed/last-error.{log,json}` from main()'s error path.
-/// `command` is the top-level subcommand name (`check`, `codegen`, …);
-/// the full stderr is captured so panics and structured errors both
-/// land in the feedback bundle without the user having to scroll their
-/// terminal.
+/// Persist to `.qed/last-error.{log,json}` from main()'s error path.
+/// `command` is the top-level subcommand name; the full stderr is captured
+/// so panics and structured errors both land in the feedback bundle.
 pub fn capture_last_error(workdir: &Path, command: &str, error: &anyhow::Error) -> Result<()> {
     let dir = workdir.join(".qed");
     fs::create_dir_all(&dir).ok();
@@ -162,8 +145,7 @@ fn collect(cwd: &Path, spec_path: Option<&Path>, note: Option<&str>) -> Result<F
 }
 
 fn detect_runtime_label(cwd: &Path) -> Option<String> {
-    // Best-effort: probe::detect_runtime_public returns a value for every
-    // directory, but the label is only meaningful when it's not Unknown.
+    // Best-effort: the label is only meaningful when not Unknown.
     let rt = crate::probe::detect_runtime_public(cwd);
     let label = format!("{rt:?}");
     if label == "Unknown" {
@@ -239,10 +221,8 @@ fn find_default_spec(cwd: &Path) -> Option<PathBuf> {
 
 fn find_spec_in_error(last_error: Option<&LastError>) -> Option<PathBuf> {
     let err = last_error?;
-    // Cheap heuristic: the lint and parser error messages quote the spec
-    // path. We pull the first `.qedspec` token out of the stderr — wrong
-    // matches are harmless because the excerpt step also requires the
-    // file to read.
+    // Cheap heuristic: pull the first `.qedspec` token from stderr — wrong
+    // matches are harmless (the excerpt step must also read the file).
     for token in err.stderr.split_whitespace() {
         let trimmed = token.trim_matches(|c: char| matches!(c, '"' | '\'' | ',' | '`' | ':'));
         if trimmed.ends_with(".qedspec") {
@@ -464,9 +444,8 @@ fn open_in_browser(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Minimal RFC 3986 percent-encoder. Avoids a new dep this late in the
-/// release cycle; the input is always our own title/body text so the
-/// reserved-character set doesn't need to cover the full URI grammar.
+/// Minimal RFC 3986 percent-encoder — avoids a dep; input is our own
+/// title/body text, so the full URI grammar isn't needed.
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -480,9 +459,8 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// ISO-8601-ish timestamp without pulling chrono. `time` is already in
-/// the workspace deps so we use it for formatting, but the call surface
-/// is tiny and gracefully falls back to UNIX seconds.
+/// ISO-8601-ish timestamp via the existing `time` dep; falls back to UNIX
+/// seconds.
 fn chrono_like_timestamp() -> String {
     use time::format_description::well_known::Iso8601;
     use time::OffsetDateTime;

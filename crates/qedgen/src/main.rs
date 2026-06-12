@@ -1156,8 +1156,7 @@ fn crucible_backend_report(
     let prog = if parsed.program_name.is_empty() {
         "program".to_string()
     } else {
-        // Re-use the snake-case logic via crucible_gen's path: walk chars,
-        // insert `_` before each capital. Lighter version inlined here.
+        // Inlined snake-case normalization (mirrors crucible_gen).
         let mut out = String::new();
         let mut prev_lower = false;
         for c in parsed.program_name.chars() {
@@ -1412,8 +1411,7 @@ fn run_anchor_probe(
     audit_dir: Option<&Path>,
 ) -> Result<()> {
     let applicable = probe::applicable_categories_public(&runtime_final);
-    // Anchor handlers come from the existing IDL-aware enumerator;
-    // empty if the project layout isn't standard (we don't fail —
+    // IDL-aware enumerator; empty on non-standard layouts (don't fail —
     // ratify continues with what it has).
     let handlers_opt = match probe::run_bootstrap(prog_root) {
         Ok(bs) => bs.handlers,
@@ -1436,16 +1434,12 @@ fn run_anchor_probe(
         let now_iso = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Iso8601::DEFAULT)
             .unwrap_or_else(|_| "unknown".to_string());
-        // 1. interview.md
         let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
         std::fs::write(dir.join("interview.md"), md)?;
-        // 2. clusters.json
         let cj = serde_json::to_string_pretty(clusters_ref)?;
         std::fs::write(dir.join("clusters.json"), cj)?;
-        // 3. skeleton.qedspec — reuse anchor_adapt::adapt as the
-        // structural skeleton. If it fails (e.g., non-standard project
-        // layout), fall back to a minimal stub that ratify still
-        // accepts.
+        // skeleton.qedspec — anchor_adapt::adapt as the structural skeleton;
+        // on failure fall back to a minimal stub ratify still accepts.
         let skeleton = match anchor_adapt::adapt(prog_root, &std::collections::HashMap::new()) {
             Ok(s) => s,
             Err(e) => {
@@ -1510,20 +1504,16 @@ fn run_native_probe(
         std::fs::write(dir.join("interview.md"), md)?;
         let cj = serde_json::to_string_pretty(clusters_ref)?;
         std::fs::write(dir.join("clusters.json"), cj)?;
-        // Native skeleton: pinocchio_to_spec::render_skeleton_native
-        // accepts any `pub fn` (Native has no naming convention vs
-        // Pinocchio's `process_*` prefix).
+        // Native skeleton accepts any `pub fn` (no `process_*`-style naming
+        // convention to key on).
         let skeleton = pinocchio_to_spec::render_skeleton_native(prog_root, &program_name)?;
         std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
         eprintln!("Wrote audit working set to {}", dir.display());
     }
 
-    // v2.20 §S2.1: also try Shank-shape central-match dispatcher on
-    // the native `--program` path. The richer envelope (handlers +
-    // dispatcher_kind) is purely additive; absent detection leaves the
-    // path unchanged.
-    // v2.20 §S2.2: also classify each handler body and emit narrowed
-    // `applicable_categories` per entry.
+    // Shank central-match dispatcher detection — the richer envelope
+    // (handlers + dispatcher_kind) is purely additive. Each handler body is
+    // also classified to narrow `applicable_categories`.
     let (handlers, dispatcher_kind) = match shank_probe::detect_shank_dispatcher(prog_root)
         .ok()
         .flatten()
@@ -1599,10 +1589,9 @@ async fn main() -> Result<()> {
 
     let result = dispatch(cli.command).await;
 
-    // Persist the failing command's stderr so the next `qedgen feedback`
-    // invocation has real context to bundle. Skip when `feedback` itself
-    // is what failed — overwriting the error it would have reported on
-    // is exactly the wrong outcome.
+    // Persist the failing command's stderr for the next `qedgen feedback`.
+    // Skip when `feedback` itself failed — don't overwrite the error it
+    // would have reported on.
     if command_name != "feedback" {
         if let (Err(e), Some(cwd)) = (result.as_ref(), cwd_for_capture.as_ref()) {
             let _ = feedback::capture_last_error(cwd, &command_name, e);
@@ -1701,7 +1690,6 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             )
             .await?;
 
-            // If --escalate: check for remaining sorry markers, submit to Aristotle
             if escalate {
                 let result_path = output.as_deref().unwrap_or(&file);
                 let content = std::fs::read_to_string(result_path)?;
@@ -1777,9 +1765,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Interface { idl, out, vendor } => {
             if vendor {
-                // Drop into `.qed/interfaces/<program>.qedspec`. The program
-                // name is derived from the IDL metadata; the directory is
-                // resolved via the nearest `.qed/` ancestor of cwd.
+                // `.qed/interfaces/<idl-stem>.qedspec`, resolved via the
+                // nearest `.qed/` ancestor of cwd.
                 let cwd = std::env::current_dir()?;
                 let (qed_dir, config) = init::discover_qed_config(&cwd).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1823,12 +1810,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             emit_spec_candidates,
             audit_dir,
         } => {
-            // v2.19: --program <path> (with optional --runtime pinocchio)
-            // routes through the Pinocchio site enumerator and emits a
-            // probe-shaped JSON envelope whose `findings` are the
-            // site catalogue mapped 1:1 to candidate findings. The
-            // audit subagent picks the relevant probe markdown per
-            // site kind and writes the reproducer.
+            // --program routes through the Pinocchio site enumerator; the
+            // envelope's `findings` are the site catalogue mapped 1:1. The
+            // audit subagent writes the reproducers.
             if let Some(prog_root) = &program {
                 let detected = probe::detect_runtime_public(prog_root);
                 let runtime_final = match runtime {
@@ -1840,11 +1824,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     None => detected.clone(),
                 };
 
-                // M3: Anchor (and Quasar) route through anchor_extractor
-                // for scaffold-to-spec interviews. Doesn't emit per-site
-                // findings yet — the auditor SKILL.md handles that via
-                // Read+Grep at the agent layer. Clusters come directly
-                // from source patterns.
+                // Anchor/Quasar route through anchor_extractor for
+                // scaffold-to-spec interviews; no per-site findings yet
+                // (the auditor handles those via Read+Grep).
                 if matches!(
                     runtime_final,
                     probe::Runtime::Anchor | probe::Runtime::Quasar
@@ -1857,12 +1839,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     );
                 }
 
-                // M4 (preview): Native Rust programs (solana-program
-                // dep, no anchor / pinocchio) route through
-                // native_extractor. Pattern coverage is narrower than
-                // Anchor's because Native has no framework conventions
-                // — see native_extractor.rs docs for the v1 detector
-                // set.
+                // Native (solana-program, no framework) routes through
+                // native_extractor; pattern coverage is narrower — see its
+                // module docs.
                 if matches!(runtime_final, probe::Runtime::Native) {
                     return run_native_probe(
                         prog_root,
@@ -1885,37 +1864,24 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 let catalogue = pinocchio_probe::scan_program(prog_root)?;
                 let mut findings = pinocchio_probe::findings_from_catalogue(&catalogue);
-                // v2.22 Slice 1 — arithmetic-symbol catalog. Runtime-
-                // agnostic source-scanner findings (currently:
-                // silent_success_arithmetic) merge into the same
-                // envelope as the Pinocchio-specific probes. Both run
-                // on the `--program <root>` path; the
-                // arithmetic-symbol rules fire on any Rust source
-                // regardless of detected runtime.
+                // Arithmetic-symbol catalog: runtime-agnostic source-scan
+                // findings merge into the same envelope.
                 findings.extend(arithmetic_symbol_probe::scan_program(prog_root)?);
-                // v2.22 Slice 2 — paired-validator asymmetry across
-                // files. Runs alongside the per-file scanners; merges
-                // into the same envelope.
+                // Paired-validator asymmetry across files.
                 findings.extend(paired_validator_probe::scan_program(prog_root)?);
-                // v2.22 Slice 4 — lifecycle external-state catalog.
-                // Cross-file: pairs authority-conferring CPI grants
-                // with close-handler bodies that don't tear them down.
+                // Lifecycle catalog: pairs authority-conferring CPI grants
+                // with close handlers that don't tear them down.
                 findings.extend(lifecycle_probe::scan_program(prog_root)?);
-                // M1.3+M1.4: when --emit-spec-candidates is set, lift
-                // findings into proto-clauses via the Pinocchio extractor,
-                // then cluster them via the runtime-agnostic algorithm.
-                // Other runtimes (Anchor, Native, Quasar) gain their own
-                // extractors in M3/M4.
+                // --emit-spec-candidates: lift findings into proto-clauses,
+                // then cluster.
                 let clusters = if emit_spec_candidates {
                     let protos = pinocchio_extractor::extract_proto_clauses(&findings);
                     Some(cluster::cluster_protos(protos))
                 } else {
                     None
                 };
-                // M1.5+M1.7+M1.8: when --audit-dir is set, materialize
-                // the full audit working set: interview.md (user prompts),
-                // clusters.json (full envelope for `qedgen ratify`),
-                // skeleton.qedspec (pre-interview structural skeleton).
+                // --audit-dir: materialize the audit working set
+                // (interview.md, clusters.json, skeleton.qedspec).
                 if let (Some(dir), Some(clusters_ref)) = (audit_dir.as_ref(), clusters.as_ref()) {
                     let program_name = prog_root
                         .file_name()
@@ -1926,15 +1892,12 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                         .format(&time::format_description::well_known::Iso8601::DEFAULT)
                         .unwrap_or_else(|_| "unknown".to_string());
                     std::fs::create_dir_all(dir)?;
-                    // 1. interview.md
                     let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
                     std::fs::write(dir.join("interview.md"), md)?;
-                    // 2. clusters.json — full envelope; ratify consumes
-                    // this to look up cluster_id → suggested_syntax.
+                    // clusters.json — ratify looks up cluster_id → suggested_syntax here.
                     let clusters_json = serde_json::to_string_pretty(clusters_ref)?;
                     std::fs::write(dir.join("clusters.json"), clusters_json)?;
-                    // 3. skeleton.qedspec — pre-interview structural
-                    // skeleton (handler stubs only).
+                    // skeleton.qedspec — handler stubs only.
                     let skeleton = pinocchio_to_spec::render_skeleton(prog_root, &program_name)?;
                     std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
                     eprintln!("Wrote audit working set to {}", dir.display());
@@ -1953,10 +1916,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     clusters,
                     dispatcher_kind: None,
                 };
-                // Top-level envelope: include the raw catalogue so the
-                // subagent has both `findings[]` (per-site mapped) and
-                // the full site list (other kinds the agent may want
-                // to cross-reference).
+                // Include the raw catalogue so the subagent has both
+                // `findings[]` and the full site list to cross-reference.
                 let mut value = serde_json::to_value(&output)?;
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert(
@@ -1968,20 +1929,12 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 return Ok(());
             }
 
-            // v2.18: --fuzz drives the Crucible engine. Different engine
-            // from the pattern-match predicates that run when --fuzz is
-            // absent — both produce Findings into the same surface, so
-            // a user wanting both should run probe twice (once with,
-            // once without) and merge JSON. v2.18.1 may merge them in a
-            // single invocation if real eval data warrants it.
-            //
-            // v2.21 Slice 1: --fuzz now accepts EITHER --spec (existing
-            // spec-driven path) OR --root (brownfield protocol-mode).
-            // The two modes share the build → smoke → run → triage
-            // pipeline in `crucible_probe::run_fuzz_probe`; they differ
-            // only in (a) which `.qedspec` is loaded (real vs.
-            // synthesised) and (b) which invariant family
-            // `crucible_gen::generate` emits. See PRD-v2.21 §"Slice 1".
+            // --fuzz drives the Crucible engine — separate from the
+            // pattern-match predicates (run probe twice and merge JSON for
+            // both). Accepts EITHER --spec (spec-driven) OR --root
+            // (brownfield protocol-mode); both share the build → smoke →
+            // run → triage pipeline and differ only in which `.qedspec` is
+            // loaded and which invariant family is emitted.
             if let Some(budget_secs) = fuzz {
                 let (
                     synthesised_spec,
@@ -2033,13 +1986,10 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                         ));
                     }
                 };
-                // Use the same name normalization as crucible_gen so
-                // the harness path the dispatcher computes here lines
-                // up with the directory crucible_gen::generate actually
-                // creates. Kebab-case Cargo names like `multi-delegator`
-                // must become `multi_delegator`; otherwise the dispatcher
-                // writes the IDL to a sibling directory of the real
-                // harness.
+                // Same name normalization as crucible_gen so the computed
+                // harness path matches the directory generate creates —
+                // kebab-case names must become snake_case or the IDL lands
+                // in a sibling directory of the real harness.
                 let prog = crucible_gen::spec_program_name(&synthesised_spec);
                 let harness_parent = if matches!(mode, crucible_gen::InvariantMode::Protocol) {
                     crucible_brownfield::brownfield_harness_parent(&project_root_for_idl)
@@ -2049,30 +1999,23 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 let harness = harness_dir
                     .clone()
                     .unwrap_or_else(|| harness_parent.join(&prog));
-                // Brownfield mode: emit the harness scaffold under
-                // `.qed/fuzz/<prog>/` if it isn't there yet. Spec mode
-                // expects the user has already run
-                // `qedgen codegen --crucible`; we don't auto-regen.
+                // Brownfield: emit the harness under `.qed/fuzz/<prog>/` if
+                // absent. Spec mode expects a prior `codegen --crucible`;
+                // never auto-regen.
                 if matches!(mode, crucible_gen::InvariantMode::Protocol) && !harness.exists() {
                     std::fs::create_dir_all(&harness_parent)?;
                     crucible_gen::generate(&synthesised_spec, &harness_parent, mode)?;
                 }
-                // v2.22 Slice 3: Pinocchio brownfield ships its own
-                // IDL — there's no `anchor build` step to feed
-                // `discover_idl`. Write the synthesised JSON straight
-                // into `<harness>/idls/<prog>.json` so the existing
-                // emitter path picks it up unchanged. Overwrite on every
-                // run so scanner improvements propagate without manual
-                // cleanup.
+                // Brownfield ships its own IDL (no `anchor build` to feed
+                // `discover_idl`): write the synthesised JSON to
+                // `<harness>/idls/<prog>.json`, overwriting each run so
+                // scanner improvements propagate.
                 if let Some(idl_json) = synthesised_idl.as_deref() {
                     crucible_brownfield::write_synthesized_idl(&harness, &prog, idl_json)
                         .context("writing synthesised IDL")?;
                 }
-                // Budget-0 emit-and-exit: lets users preview the
-                // harness without paying the Crucible build cost. The
-                // existing spec-mode UX implicitly did smoke + a 0-len
-                // full run; v2.21 short-circuits to skip both. Same
-                // shape as a "dry-run" without adding a new flag.
+                // Budget 0 = emit the harness and exit (dry-run preview
+                // without the Crucible build cost).
                 if budget_secs == 0 {
                     let output = probe::ProbeOutput {
                         version: 1,
@@ -2213,11 +2156,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             target,
             output_dir,
         } => {
-            // Program scaffolding (codegen + kani harnesses + unit tests)
-            // requires the original `.qedspec` — `init` writes a
-            // separate `Spec.lean` skeleton, but the codegen path parses
-            // the qedspec directly. Refuse cleanly when `--target` is
-            // set without `--spec`.
+            // Program scaffolding parses the `.qedspec` directly (init's
+            // Spec.lean skeleton isn't enough) — refuse `--target` without
+            // `--spec`.
             let scaffold_target = target;
             if scaffold_target.is_some() && spec.is_none() {
                 anyhow::bail!(
@@ -2226,9 +2167,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 );
             }
 
-            // .qed/ lives at the program root. If the user passed --spec, anchor
-            // to the spec's parent directory (what they expect); otherwise fall
-            // back to the output_dir's parent. See init::resolve_program_root.
+            // .qed/ lives at the program root — see init::resolve_program_root.
             let cwd = std::env::current_dir()?;
             let program_root = init::resolve_program_root(spec.as_deref(), &output_dir, &cwd);
             // The spec pointer is stored relative to program_root so
@@ -2252,28 +2191,21 @@ async fn dispatch(cmd: Commands) -> Result<()> {
 
             if let (Some(target), Some(qedspec_path)) = (scaffold_target, spec.as_ref()) {
                 let program_dir = program_root.join(format!("programs/{}", name));
-                // v2.6: tests live INSIDE the program package so cargo-kani
-                // and cargo-test can resolve the governing Cargo.toml via the
-                // usual `tests/` convention. Previously at `tests/kani.rs` at
-                // program_root, which had no Cargo.toml above it.
+                // Tests live INSIDE the program package so cargo-kani /
+                // cargo-test resolve the governing Cargo.toml.
                 let kani_path = program_dir.join("tests/kani.rs");
 
-                // Generate the framework-flavored Rust program skeleton via
-                // the default MIR path (codegen_mir) — same as the `codegen`
-                // command. Routes Pinocchio through its MIR-native emitters
-                // and keeps init consistent with the MIR-is-the-path design.
+                // Rust skeleton via the MIR path (codegen_mir) — same as the
+                // `codegen` command.
                 let parsed = check::parse_spec_file(qedspec_path)?;
                 let mir = mir::lower(&parsed);
                 codegen_mir::generate(&mir, &parsed, qedspec_path, &program_dir, target)?;
 
-                // Kani harnesses are framework-neutral (no Anchor/Quasar
-                // types — pure spec-derived state model). Emitted via the
-                // MIR path; `parsed`/`mir` are already in scope from the
-                // scaffold step above.
+                // Kani harnesses are framework-neutral (pure spec-derived
+                // state model).
                 kani_mir::generate(&mir, &parsed, &kani_path)?;
 
-                // Unit tests are framework-neutral too — plain `cargo
-                // test` over the spec-derived state struct.
+                // Unit tests are framework-neutral too.
                 let test_path = program_dir.join("src/tests.rs");
                 unit_test::generate(qedspec_path, &test_path)?;
             }
@@ -2344,33 +2276,27 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Spec".to_string());
 
-            // v2.8 G2: --frozen elevates qed.lock drift to a hard error
-            // (CI usage). Default Auto mode auto-writes the lock on drift,
-            // which is the right behavior for local development.
+            // --frozen elevates qed.lock drift to a hard error (CI); Auto
+            // writes the lock on drift (right for local dev).
             let lock_mode = if frozen {
                 qed_lock::LockMode::Frozen
             } else {
                 qed_lock::LockMode::Auto
             };
 
-            // F7 fold-in: --no-cache forces a fresh github fetch for every
-            // imported dep (skips the TTL window). Path sources unaffected.
+            // --no-cache forces a fresh github fetch for every imported dep
+            // (skips the TTL window). Path sources unaffected.
             let cache_opts = import_resolver::CacheOpts {
                 force_refresh: no_cache,
             };
 
             let mut has_issues = false;
 
-            // v2.26 Slice 4c — `check --frozen` runs the upstream
-            // binary-hash diff opportunistically. Mismatches surface as
-            // P2 warnings (`has_issues` stays false; exit zero) so a
-            // routine CI run that misses a redeploy still draws
-            // attention without blocking. `--strict` escalates mismatch
-            // to CRIT and gates exit, matching the verify behavior.
-            //
-            // Fetch errors (missing `solana` CLI, no network) never
-            // gate either mode — they always surface as P2 so a sandbox
-            // without the Solana toolchain doesn't false-positive CI.
+            // `check --frozen` runs the upstream binary-hash diff
+            // opportunistically: mismatches are P2 warnings (exit 0);
+            // `--strict` escalates to CRIT and gates exit (verify parity).
+            // Fetch errors (no `solana` CLI / network) never gate either
+            // mode — a sandbox without the toolchain mustn't fail CI.
             if frozen {
                 let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
                 let pinned = qed_lock::read(spec_dir)
@@ -2394,26 +2320,18 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            // Couldn't open the lock to dispatch — surface
-                            // a P2-equivalent note but never gate exit
-                            // (parity with the verify path's Error
-                            // routing). `--strict` users see the message;
-                            // they decide whether to investigate.
+                            // Couldn't open the lock — note but never gate
+                            // exit (parity with verify's Error routing).
                             eprintln!("note: --frozen upstream check skipped: {}", e);
                         }
                     }
                 }
 
-                // v2.27 Track D1 — proof_hash drift routing. Sibling to
-                // the binary_hash dispatch above; parses the spec under
-                // Frozen mode so qed_lock::handle_lock populates
-                // `ParsedSpec.proof_hash_findings` with any Stance-2
-                // proof package whose content drifted from the on-disk
-                // lock. P2 under plain `--frozen` (warn, exit 0), CRIT
-                // under `--frozen --strict`. Parse errors here surface
-                // identically to the main parse below (they would have
-                // fired there too); we let the downstream parse re-raise
-                // them rather than double-reporting.
+                // proof_hash drift routing (sibling of the binary_hash
+                // dispatch): parse under Frozen so handle_lock populates
+                // `proof_hash_findings`. P2 under `--frozen`, CRIT with
+                // `--strict`. Parse errors re-raise at the main parse
+                // below — don't double-report here.
                 if let Ok(parsed) = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts) {
                     if !parsed.proof_hash_findings.is_empty() {
                         let gate = if strict {
@@ -2472,9 +2390,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // Anchor cross-check (--anchor-project) — verify that the spec's
-            // handler list matches the user's existing Anchor program. M5
-            // catches stale specs and uncovered handlers as a CI gate.
+            // Anchor cross-check (--anchor-project) — spec handler list vs
+            // the existing program; catches stale specs and uncovered
+            // handlers as a CI gate.
             if let Some(ref project_path) = anchor_project {
                 let parsed = check::parse_spec_file(&spec)?;
                 let findings = anchor_check::check_anchor_coverage(&parsed, project_path)?;
@@ -2596,9 +2514,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // Orphan / missing preservation theorems in Proofs.lean. This
-            // runs whenever the proofs dir exists and is a no-op on specs
-            // without preservation obligations.
+            // Orphan / missing preservation theorems in Proofs.lean — runs
+            // whenever the proofs dir exists; no-op without obligations.
             if proofs.exists() {
                 let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
                 let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
@@ -2692,30 +2609,22 @@ async fn dispatch(cmd: Commands) -> Result<()> {
         } => {
             require_git_repo()?;
 
-            // Resolve --spec the same way `check` and `codegen` do: fall
-            // back to .qed/config.json's `spec` field when omitted, so the
-            // README's quick-start `qedgen verify` (no flags after init)
-            // works as documented.
+            // Fall back to .qed/config.json's `spec` like check/codegen so
+            // flag-less `qedgen verify` works.
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
 
-            // v2.27 Track D2 / D3 — parse the spec once if either flag
-            // needs the ParsedSpec (verified_callees / verified_proof_pkgs).
-            // Both gates are pre-checks that may exit before backends
-            // dispatch; bundling the parse avoids paying for it twice.
+            // Parse once if either gate needs the ParsedSpec; both are
+            // pre-checks that may exit before backends dispatch.
             let parsed_for_gates = if require_verified || recursive {
                 Some(check::parse_spec_file(&spec)?)
             } else {
                 None
             };
 
-            // v2.27 Track D2 — short-circuit on unverified imports
-            // before any backend dispatches. Rationale: if the dep
-            // graph isn't fully Stance-2 proven, running proptest /
-            // Kani / Lean against it still produces results that
-            // depend on Stance-1 axiom discharge. Failing fast lets CI
-            // gate on "all imports verified" cleanly without
-            // surrounding the verify call with shell glue.
+            // --require-verified: fail fast before backends — results
+            // against a not-fully-proven dep graph still rest on Stance-1
+            // axiom discharge.
             if require_verified {
                 let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
                 let findings = check::collect_require_verified_findings(parsed);
@@ -2733,18 +2642,10 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // v2.27 Track D3 — `--recursive` walks the transitive
-            // resolution closure (cycle-detected by the resolver) and
-            // runs `lake build` against every imported proof package.
-            // Per-layer pass/fail is reported up-front so a downstream
-            // backend failure doesn't mask a transitive proof failure.
-            // Each layer's failure is independent: keep walking so
-            // operators see every breakage, then aggregate exit at the
-            // end.
-            //
-            // Empty `verified_proof_pkgs` is a no-op success — this
-            // spec doesn't import any verified providers, so there's
-            // nothing transitive to build.
+            // --recursive: `lake build` every imported proof package
+            // (resolver returns DFS-pre-order = bottom-up, cycle-detected).
+            // Keep walking on failure so every breakage shows; aggregate
+            // exit at the end. Empty list = no-op success.
             if recursive {
                 let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
                 if parsed.verified_proof_pkgs.is_empty() {
@@ -2778,10 +2679,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
                                 let stdout = String::from_utf8_lossy(&out.stdout);
                                 eprintln!("       FAIL");
-                                // Show the first ~10 lines of each
-                                // stream — `lake build` output gets
-                                // very long; the head is usually
-                                // enough to identify the failure.
+                                // First ~10 lines of each stream — the head
+                                // usually identifies the failure.
                                 for line in stderr.lines().take(10) {
                                     eprintln!("         | {}", line);
                                 }
@@ -2807,29 +2706,20 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // v2.8 G5 / v2.26 Slice 4c: --check-upstream diffs each
-            // imported library's pinned binary hash against the on-chain
-            // `.so` via `solana program dump`. Runs independently so
-            // users can `--check-upstream` without re-running the harnesses.
-            // F6 fold-in: --offline refuses any network fetch.
-            //
-            // v2.26 Slice 4c — auto-on when `qed.lock` declares any
-            // pinned `upstream_binary_hash`. Explicit `--check-upstream`
-            // still works (and is the right flag in scripts / CI), but
-            // skipping it no longer silently bypasses the gate. Pair
-            // with `--upstream-stale-ok` to suppress the check for
-            // offline dev runs.
+            // --check-upstream diffs each pinned binary hash against the
+            // on-chain `.so` (`solana program dump`); runs independently of
+            // the harnesses; --offline refuses network. Auto-on when
+            // qed.lock has any pinned hash — skipping the flag no longer
+            // bypasses the gate; `--upstream-stale-ok` suppresses it for
+            // offline dev.
             let spec_dir = spec.parent().unwrap_or_else(|| Path::new("."));
             let run_upstream = if upstream_stale_ok {
-                // Honor the suppression flag even when --check-upstream
-                // is explicit — `upstream-stale-ok` is the local-dev
-                // escape hatch, not a "render warnings anyway" knob.
+                // Honored even when --check-upstream is explicit — the
+                // local-dev escape hatch, not a "render warnings anyway" knob.
                 false
             } else if check_upstream {
                 true
             } else {
-                // Auto-on detection: only when a qed.lock exists and
-                // at least one entry has a populated binary_hash pin.
                 qed_lock::read(spec_dir)
                     .ok()
                     .flatten()
@@ -2853,9 +2743,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     return Ok(());
                 }
             } else if check_upstream && upstream_stale_ok {
-                // The combination is explicitly allowed — emit a single
-                // breadcrumb so the operator knows the gate was honored
-                // but the suppression flag won.
+                // Allowed combination — breadcrumb that the suppression
+                // flag won.
                 eprintln!(
                     "note: --upstream-stale-ok suppressed --check-upstream (offline-dev mode)"
                 );
@@ -2865,12 +2754,10 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
 
-            // PLAN-v2.16 D4: --probe-repros runs the per-probe Mollusk
-            // reproducers under `target/qedgen-repros/`. Like
-            // --check-upstream, it's a separate verification stage with
-            // its own report shape — not folded into the backend
-            // BackendReport rollup. Runs before the proptest/kani/lean
-            // backends so the auditor has the gating data first.
+            // --probe-repros runs the per-probe Mollusk reproducers — a
+            // separate stage with its own report shape (not folded into the
+            // BackendReport rollup), run first so the auditor has the
+            // gating data.
             if probe_repros {
                 let project_root = spec.parent().map(Path::to_path_buf).unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -2891,8 +2778,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             }
 
             // No explicit backend flags -> run every backend whose artifact
-            // is present on disk. This matches the agent-friendly "just do
-            // the right thing" default from the PRD.
+            // is present on disk.
             let any_flag = proptest || kani || lean || miri;
             // Project root used by Miri repro discovery — spec parent dir.
             let project_root = spec
@@ -2937,10 +2823,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
 
             let mut report = verify::run(&opts)?;
 
-            // v2.18 P3: --crucible is a thin alias over the probe engine.
-            // Findings come back as a Vec<Finding>; we wrap them as a
-            // single BackendReport so they render through the v2.17
-            // format_human named-trace surface alongside Kani/proptest.
+            // --crucible is a thin alias over the probe engine; findings
+            // wrap into one BackendReport so they render alongside
+            // Kani/proptest.
             if let Some(budget_secs) = crucible {
                 let backend = crucible_backend_report(
                     &spec,
@@ -2968,11 +2853,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
         // readiness — preflight lint for first-deploy mainnet-readiness
         // ==================================================================
         //
-        // Exit-code discipline matches ratchet's CLI: rule-engine findings
-        // map to 1/2 via `ratchet::exit_code`, but caller-side failures
-        // (missing IDL, unparseable JSON) exit 3 so CI scripts can
-        // distinguish "your program has a breaking change" from "your
-        // pipeline is misconfigured."
+        // Exit codes match ratchet: findings map to 1/2 via
+        // `ratchet::exit_code`; caller-side failures (missing IDL, bad
+        // JSON) exit 3 so CI can tell breakage from misconfiguration.
         Commands::Readiness {
             idl,
             list_rules,
@@ -3081,25 +2964,16 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             fill_tests,
         } => {
             require_git_repo()?;
-            // Pinocchio is MIR-native (slice 6): the scaffold emits via
-            // `codegen_mir` for all three targets. `is_pinocchio` still
-            // gates the post-regen stamped-drift scan below (the Pinocchio
-            // scaffold carries no `#[qed(verified)]` stamps to drift yet).
+            // `is_pinocchio` gates the post-regen stamped-drift scan below
+            // (the Pinocchio scaffold carries no `#[qed(verified)]` stamps).
             let is_pinocchio = matches!(target, Target::Pinocchio);
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
-            // sBPF specs (`pragma sbpf`) model assembly, not a Rust
-            // state machine — old-syntax specs declare `instruction`
-            // blocks instead of handlers, and every Rust-shaped
-            // artifact (scaffold, Kani, proptest, unit/integration
-            // tests, Crucible) is meaningless for them. Decide up
-            // front so the scaffold's handlers gate can't fire before
-            // the Lean branch is reached (#88): for assembly targets
-            // only `--lean` and `--ci` emit.
+            // sBPF specs model assembly, not a Rust state machine — every
+            // Rust-shaped artifact is meaningless for them. Decide up front
+            // so the scaffold's handlers gate can't fire before the Lean
+            // branch (#88): assembly targets emit only `--lean` and `--ci`.
             let is_assembly = check::parse_spec_file(&spec)?.is_assembly_target();
-            // Rust skeleton — all three targets emit via the MIR path
-            // (`codegen_mir`, the sole Rust-codegen path since v2.32
-            // deleted the legacy `codegen::generate`).
             if is_assembly {
                 eprintln!(
                     "note: sBPF spec — skipping Rust scaffold (assembly programs \
@@ -3113,14 +2987,9 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             }
 
             if kani || all {
-                // sBPF programs are verified by Lean proofs over the
-                // assembly (Program.lean + wp_exec), not by Kani BMC over
-                // a Rust model — and their runtime behavior is exercised
-                // by client-side tests, not generated harnesses. The
-                // generic harness generator has no sBPF awareness and
-                // would emit Anchor-shaped harnesses treating the spec's
-                // `State` enum as an Anchor account, which is meaningless.
-                // Skip Kani codegen entirely for assembly targets.
+                // sBPF is verified by Lean proofs over the assembly; the
+                // harness generator has no sBPF awareness and would emit
+                // meaningless Anchor-shaped harnesses. Skip.
                 if is_assembly {
                     if kani {
                         eprintln!(
@@ -3130,39 +2999,24 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                         );
                     }
                 } else {
-                    // Codegen is pure text generation; missing cargo-kani only
-                    // matters when the harness is actually executed. The hard gate
-                    // lives in `qedgen verify --kani` (see verify.rs). Warn here
-                    // so the install hint surfaces, but don't block codegen.
+                    // Codegen is pure text generation — the hard cargo-kani
+                    // gate lives in `qedgen verify --kani`. Warn so the
+                    // install hint surfaces; don't block.
                     if let Err(e) = deps::require_kani() {
                         eprintln!("warning: {e}");
                     }
-                    // MIR is the sole Kani-codegen path (v2.32 deleted the
-                    // legacy `kani.rs` after byte-parity was proven across
-                    // every pilot fixture — gated by `tests/kani_snapshot.rs`).
                     let parsed = check::parse_spec_file(&spec)?;
                     let mir = mir::lower(&parsed);
                     kani_mir::generate(&mir, &parsed, &kani_output)?;
                 }
             }
 
-            // v2.26 Batch 2 Track H — impl-targeted Kani harness. Emits
-            // when:
-            //   1. `--kani-impl` was passed explicitly, OR
-            //   2. `--all` was passed AND at least one handler auto-triggers
-            //      (modifies ⊋ effect.lhs — the LP-shape signal).
-            //
-            // Plain `--kani` stays model-only so callers can keep the
-            // spec-transition and implementation proof gates separate. This
-            // also lets wrappers run the model proofs one harness at a time
-            // without doing extra impl-harness generation first.
-            //
-            // `kani_impl::spec_triggers_impl_harness` is the auto-trigger
-            // predicate. Per-handler heuristic lives in one place
-            // (mirrors `codegen.rs` Phase A's modifies-vs-effect diff).
-            // sBPF specs never emit Kani harnesses (see the `kani || all`
-            // block above) — the impl-targeted variant is likewise
-            // meaningless for assembly targets, so suppress its
+            // Impl-targeted Kani harness emits when `--kani-impl` is
+            // explicit, or `--all` + at least one handler auto-triggers
+            // (modifies ⊋ effect.lhs — the LP-shape signal;
+            // `kani_impl::spec_triggers_impl_harness`). Plain `--kani`
+            // stays model-only so the spec-transition and implementation
+            // gates remain separable. sBPF never emits Kani — suppress the
             // auto-trigger too.
             let auto_impl_trigger = if is_assembly {
                 false
@@ -3175,16 +3029,10 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 if let Err(e) = deps::require_kani() {
                     eprintln!("warning: {e}");
                 }
-                // Pinocchio AND Quasar harnesses must live in the program
-                // crate's `src/` — `cargo kani` only discovers
-                // `#[kani::proof]` in the lib, not in `tests/` (M1
-                // smoke-test finding, design doc §11a), and the harness's
-                // `crate::<Pascal>` references only resolve from inside the
-                // lib crate. Redirect the default Anchor-shaped
-                // `…/tests/kani_impl.rs` path to a sibling `…/src/`.
-                // (Anchor stays in `tests/` — its tests/-placement is the
-                // pre-existing default; revisiting it is out of slice-5
-                // scope.)
+                // Pinocchio/Quasar harnesses must live in `src/` — `cargo
+                // kani` only discovers `#[kani::proof]` in the lib, and the
+                // harness's `crate::<Pascal>` refs only resolve there.
+                // Anchor keeps its `tests/` default.
                 let kani_impl_path = if matches!(target, Target::Pinocchio | Target::Quasar) {
                     redirect_kani_impl_to_src(&kani_impl_output)
                 } else {
@@ -3199,9 +3047,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
             }
 
             if test || all {
-                // Unit tests exercise effects/guards on the Rust spec
-                // model — meaningless for assembly targets (same
-                // rationale as the Kani block).
+                // Meaningless for assembly targets (same rationale as Kani).
                 if is_assembly {
                     if test {
                         eprintln!(
@@ -3215,11 +3061,7 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
             if proptest || all {
-                // Same rationale as the Kani block: sBPF specs model
-                // assembly, not a Rust state machine, so a proptest
-                // harness over the spec model is meaningless. Runtime
-                // properties are exercised via client-side tests. Skip
-                // proptest codegen for assembly targets.
+                // Meaningless for assembly targets (same rationale as Kani).
                 if is_assembly {
                     if proptest {
                         eprintln!(
@@ -3229,8 +3071,6 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                         );
                     }
                 } else {
-                    // `proptest_gen_mir` is the sole proptest path since
-                    // v2.32 deleted the legacy `proptest_gen`.
                     let parsed = check::parse_spec_file(&spec)?;
                     let mir = mir::lower(&parsed);
                     proptest_gen_mir::generate(&mir, &parsed, &proptest_output)?;
@@ -3270,22 +3110,15 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 }
             }
             if lean || all {
-                // Same rationale as the Kani branch: `lean_gen_mir::generate`
-                // and `proofs_bootstrap::bootstrap_if_missing` are pure text
-                // writers. `lake` is only required to *build* the generated
-                // proofs, which `qedgen verify --lean` (and Aristotle) gate
-                // separately. Warn here without blocking codegen.
+                // Pure text writers; `lake` is only needed to *build*, which
+                // `qedgen verify --lean` gates. Warn without blocking.
                 if let Err(e) = deps::require_lean() {
                     eprintln!("warning: {e}");
                 }
                 let parsed = check::parse_spec_file(&spec)?;
-                // MIR is the sole Lean-codegen path (v2.32 deleted the
-                // legacy `lean_gen.rs`). `lean_gen_mir` handles every spec
-                // shape — single/multi-account, indexed records, ADTs, and
-                // sBPF (dispatched internally via the MIR `is_assembly`
-                // flag). All were proven byte-identical to the former
-                // legacy renderer before deletion (gated by the
-                // `lean_gen_mir` snapshot + parity unit tests).
+                // `lean_gen_mir` handles every spec shape — single/multi-
+                // account, indexed records, ADTs, and sBPF (via the MIR
+                // `is_assembly` flag).
                 let mir = mir::lower(&parsed);
                 lean_gen_mir::generate(&mir, &parsed, &lean_output)?;
                 // Bootstrap Proofs.lean alongside Spec.lean. Never overwrites
@@ -3317,20 +3150,11 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!("Generated CI workflow: {}", ci_output.display());
             }
 
-            // v2.29 Slice E (#16) — surface stale `#[qed(verified)]`
-            // stamps immediately after regen so users get the re-stamp
-            // command before the proc-macro's `compile_error!` fires
-            // on the next `cargo build`. Scans the Rust scaffold output
-            // dir for stamped functions whose `hash`, `spec_hash`, or
-            // `accounts_hash` no longer matches; emits a `cargo:warning=`-
-            // style line per affected file plus a one-line hint with the
-            // exact `qedgen check --drift … --update-hashes` invocation.
-            //
-            // Skipped for pure-Pinocchio specs (no Rust scaffold; no
-            // user-owned `#[qed(verified)]` stamps to drift) and for
-            // assembly targets (no Rust scaffold at all). Also
-            // skipped on output_dir miss, since the drift scan only
-            // makes sense when the scaffold tree was actually emitted.
+            // Surface stale `#[qed(verified)]` stamps right after regen so
+            // users get the re-stamp command before the proc-macro's
+            // `compile_error!` fires on the next build. Skipped for
+            // Pinocchio (no stamps), assembly targets (no scaffold), and a
+            // missing output_dir.
             if !is_pinocchio && !is_assembly && output_dir.exists() {
                 match drift::check_stamped_drift(&output_dir) {
                     Ok(stamped) if !stamped.is_empty() => {
@@ -3345,10 +3169,8 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                                 entry.fn_name
                             );
                         }
-                        // Build a representative re-stamp command. All
-                        // stamped fns share the same `--drift` root
-                        // (programs/<name>/src), so one invocation
-                        // refreshes the whole tree.
+                        // All stamped fns share the same `--drift` root, so
+                        // one invocation re-stamps the whole tree.
                         eprintln!(
                             "cargo:warning=hint: run `qedgen check --drift {} --update-hashes` \
                              to re-stamp",
@@ -3608,12 +3430,9 @@ mod tests {
         assert!(rendered.contains("Example:"));
     }
 
-    // The committed verify.yml template carries two extension placeholders
-    // — {{VERIFY_STEP}} for the optional sBPF source-hash check and
-    // {{RATCHET_STEP}} for the optional deploy-safety lint. A refactor
-    // that silently drops or mangles either one would be invisible in the
-    // rest of the test suite; these three snapshots catch that class of
-    // regression cheaply.
+    // verify.yml carries {{VERIFY_STEP}} and {{RATCHET_STEP}} placeholders;
+    // a refactor that drops or mangles either would be invisible elsewhere —
+    // these three tests catch that cheaply.
     const CI_TEMPLATE: &str = include_str!("../../../templates/verify.yml");
 
     #[test]

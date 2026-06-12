@@ -140,14 +140,11 @@ fn process_proof_file(proof_file: &Path) -> Result<(String, Vec<String>, String)
 
 /// Consolidate multiple Lean proof projects into a single project
 pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
-    // Create output directory
     fs::create_dir_all(output_dir)?;
 
-    // Find all proof files
     let proof_files = find_proof_files(input_dir)?;
     println!("Found {} proof files to consolidate", proof_files.len());
 
-    // Process all proof files and collect their imports
     let mut all_imports = std::collections::BTreeSet::new();
     let mut proofs = Vec::new();
 
@@ -157,17 +154,14 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
         proofs.push((namespace, content));
     }
 
-    // Build the consolidated proof file
     let mut consolidated = String::new();
 
-    // Add union of all imports
     for import in &all_imports {
         consolidated.push_str(import);
         consolidated.push('\n');
     }
     consolidated.push_str("\nopen QEDGen.Solana\n\n");
 
-    // Write each proof in its namespace
     for (namespace, content) in &proofs {
         consolidated.push_str(&format!(
             "/- {separator}\n   {namespace} Proof\n   {separator} -/\n\n",
@@ -181,17 +175,13 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
         consolidated.push_str("\n\n");
     }
 
-    // Write the consolidated proof file
     fs::write(output_dir.join("Proofs.lean"), consolidated)?;
 
-    // Write lean_solana from embedded sources
     crate::project::update_lean_solana(output_dir, false)?;
 
-    // Write lean-toolchain
     let toolchain = include_str!("../../../../lean_solana/lean-toolchain");
     fs::write(output_dir.join("lean-toolchain"), toolchain)?;
 
-    // Write lakefile, README, and .gitignore
     fs::write(output_dir.join("lakefile.lean"), CONSOLIDATED_LAKEFILE)?;
     fs::write(output_dir.join("README.md"), CONSOLIDATED_README)?;
     fs::write(output_dir.join(".gitignore"), CONSOLIDATED_GITIGNORE)?;
