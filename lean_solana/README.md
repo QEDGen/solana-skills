@@ -6,8 +6,6 @@ Standalone Lean 4 library providing types, axioms, and the `qedspec` DSL for for
 
 ```bash
 lake build                         # Build library
-lake env lean test_lemmas.lean     # Test axioms
-lake env lean test_spec.lean       # Test qedspec DSL
 ```
 
 ## Modules
@@ -142,33 +140,34 @@ CPI verification is structural: correct program, correct accounts with correct f
 
 ```bash
 lake build                         # Build all modules
-lake env lean test_lemmas.lean     # Axiom smoke tests (Account, Cpi, State)
-lake env lean test_spec.lean       # qedspec DSL behavioral tests
 ```
 
-`test_spec.lean` proves properties of generated code — not just `#check` existence. A regression in code generation will cause a proof failure.
+Regression coverage comes from `lake build` (every theorem in the library must
+re-elaborate) plus the generated-proof builds gated by the repo's snapshot
+suites and `scripts/check-lake-build.sh`. sBPF semantics tests live upstream
+in the qedsvm package.
 
 ## Adding New Axioms
 
 1. Add to the appropriate module in `QEDGen/Solana/`
 2. Document the trust assumption with a comment
-3. Export in the `QEDGen.Solana` namespace (via `QEDGen.lean` or the module's export block)
-4. Add a test in `test_lemmas.lean`
-5. `lake build && lake env lean test_lemmas.lean`
+3. Export via `QEDGen.lean` (or the module's export block)
+4. `lake build`
 
 ## Files
 
 ```
 lean_solana/
-├── lakefile.lean                  Build config
-├── QEDGen.lean                    Root export (imports all modules)
-├── QEDGen/Solana/
-│   ├── Account.lean               Pubkey, Account, lookup axioms
-│   ├── Cpi.lean                   CpiInstruction, predicates, constants
-│   ├── State.lean                 Lifecycle state machine
-│   ├── Valid.lean                 Numeric bounds predicates
-│   ├── Spec.lean                  qedspec DSL macro + elaborator
-│   └── SBPF/                     sBPF VM model (ISA, Memory, Execute, Tactic)
-├── test_lemmas.lean               Axiom tests
-└── test_spec.lean                 DSL behavioral tests
+├── lakefile.lean                  Build config (requires qedsvm, pinned tag)
+├── QEDGen.lean                    Root export (imports the modules below)
+└── QEDGen/Solana/
+    ├── Account.lean               Pubkey, Account, lookup axioms
+    ├── Arithmetic.lean            Mathlib-backed arithmetic lemmas (--mathlib projects)
+    ├── Bridge.lean                qedbridge DSL
+    ├── CommandBuilders.lean       Command-construction helpers (Spec dep)
+    ├── Cpi.lean                   CpiInstruction, predicates, constants
+    ├── Guards.lean                Guard combinators
+    ├── Spec.lean                  qedspec DSL macro + elaborator
+    ├── State.lean                 Lifecycle state machine
+    └── Valid.lean                 Numeric bounds predicates
 ```
