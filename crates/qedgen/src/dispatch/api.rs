@@ -11,12 +11,13 @@ const TIMEOUT_SECS: u64 = 180;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_MS: u64 = 2000;
 
-const SYSTEM_PROMPT: &str = include_str!("../../../templates/prompts/system_prompt.txt");
+const SYSTEM_PROMPT: &str = include_str!("../../../../templates/prompts/system_prompt.txt");
 
-const SBPF_SYSTEM_PROMPT: &str = include_str!("../../../templates/prompts/sbpf_system_prompt.txt");
+const SBPF_SYSTEM_PROMPT: &str =
+    include_str!("../../../../templates/prompts/sbpf_system_prompt.txt");
 
 const SBPF_SORRY_FILL_SYSTEM_PROMPT: &str =
-    include_str!("../../../templates/prompts/sbpf_sorry_fill_prompt.txt");
+    include_str!("../../../../templates/prompts/sbpf_sorry_fill_prompt.txt");
 
 /// Check if a prompt or code references sBPF types
 fn is_sbpf_content(content: &str) -> bool {
@@ -581,7 +582,7 @@ pub async fn generate_proofs(
 }
 
 const SORRY_FILL_SYSTEM_PROMPT: &str =
-    include_str!("../../../templates/prompts/sorry_fill_prompt.txt");
+    include_str!("../../../../templates/prompts/sorry_fill_prompt.txt");
 
 /// Parse sorry locations from a Lean file
 fn find_sorry_locations(code: &str) -> Vec<(usize, String)> {

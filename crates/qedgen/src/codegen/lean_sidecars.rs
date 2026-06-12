@@ -696,7 +696,7 @@ handler deposit (amount : U64) {
     /// Regenerate intentionally if the renderer changes:
     /// `UPDATE_AXIOM_GOLDEN=1 cargo test axiom_module_matches_golden`.
     const TOKEN_AXIOM_GOLDEN: &str =
-        include_str!("../tests/fixtures/token_axiom_module.lean.golden");
+        include_str!("../../tests/fixtures/token_axiom_module.lean.golden");
 
     #[test]
     fn axiom_module_matches_golden() {

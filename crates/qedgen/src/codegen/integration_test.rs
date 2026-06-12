@@ -145,8 +145,8 @@ fn emit_account_helpers(
     spec: &ParsedSpec,
     needs_token: bool,
 ) -> Result<()> {
-    const BASE_HELPERS: &str = include_str!("../templates/integration-helpers-base.rs");
-    const TOKEN_HELPERS: &str = include_str!("../templates/integration-helpers-token.rs");
+    const BASE_HELPERS: &str = include_str!("../../templates/integration-helpers-base.rs");
+    const TOKEN_HELPERS: &str = include_str!("../../templates/integration-helpers-token.rs");
 
     out.push_str("// ── Account helpers ──────────────────────────────────────────────\n\n");
     out.push_str(BASE_HELPERS);
@@ -608,9 +608,9 @@ mod tests {
     use super::*;
     use crate::chumsky_adapter;
 
-    const MULTISIG_SPEC: &str = include_str!("../../../examples/rust/multisig/multisig.qedspec");
+    const MULTISIG_SPEC: &str = include_str!("../../../../examples/rust/multisig/multisig.qedspec");
 
-    const ESCROW_SPEC: &str = include_str!("../../../examples/rust/escrow/escrow.qedspec");
+    const ESCROW_SPEC: &str = include_str!("../../../../examples/rust/escrow/escrow.qedspec");
 
     #[test]
     fn integration_test_multisig_generates() {

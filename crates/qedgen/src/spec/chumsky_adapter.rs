@@ -4090,7 +4090,7 @@ mod tests {
     use super::*;
 
     const PERCOLATOR_SPEC: &str =
-        include_str!("../../../examples/rust/percolator/percolator.qedspec");
+        include_str!("../../../../examples/rust/percolator/percolator.qedspec");
 
     /// v2.24 #20 — `Map[<EnumType>] T` is recognized when the bound
     /// names a unit-only enum (sum type whose variants all have no
@@ -4574,7 +4574,7 @@ property still_unpaused :
     #[test]
     fn handler_invariant_clauses_route_to_invariants_vs_establishes() {
         let src = include_str!(
-            "../tests/fixtures/regressions/invariants/repro-establishes-clause.qedspec"
+            "../../tests/fixtures/regressions/invariants/repro-establishes-clause.qedspec"
         );
         let spec = parse_str(src).expect("parse");
         let init = spec
@@ -4599,7 +4599,7 @@ property still_unpaused :
     #[test]
     fn handler_invariant_clause_routes_to_invariants() {
         let src = include_str!(
-            "../tests/fixtures/regressions/invariants/repro-handler-invariant-clause.qedspec"
+            "../../tests/fixtures/regressions/invariants/repro-handler-invariant-clause.qedspec"
         );
         let spec = parse_str(src).expect("parse");
         for h in &spec.handlers {
@@ -4635,7 +4635,7 @@ property still_unpaused :
     #[test]
     fn finding_7_pubkey_assign_from_int_rejected() {
         let src = include_str!(
-            "../tests/fixtures/regressions/issue-8/repro-07-pubkey-literal-assign.qedspec"
+            "../../tests/fixtures/regressions/issue-8/repro-07-pubkey-literal-assign.qedspec"
         );
         let err = parse_str(src).expect_err("expected Pubkey := 0 to fail");
         let msg = format!("{err:#}");
@@ -4650,7 +4650,7 @@ property still_unpaused :
     #[test]
     fn finding_8_pubkey_compare_with_int_rejected() {
         let src = include_str!(
-            "../tests/fixtures/regressions/issue-8/repro-08-pubkey-literal-compare.qedspec"
+            "../../tests/fixtures/regressions/issue-8/repro-08-pubkey-literal-compare.qedspec"
         );
         let err = parse_str(src).expect_err("expected state.key != 0 to fail");
         let msg = format!("{err:#}");
@@ -4728,11 +4728,11 @@ handler h (k : Pubkey) : State.Active -> State.Active {
     #[test]
     fn pubkey_typecheck_does_not_break_bundled_examples() {
         for src in [
-            include_str!("../../../examples/rust/escrow/escrow.qedspec"),
-            include_str!("../../../examples/rust/lending/lending.qedspec"),
-            include_str!("../../../examples/rust/multisig/multisig.qedspec"),
-            include_str!("../../../examples/rust/percolator/percolator.qedspec"),
-            include_str!("../tests/fixtures/regressions/issue-8/pool.qedspec"),
+            include_str!("../../../../examples/rust/escrow/escrow.qedspec"),
+            include_str!("../../../../examples/rust/lending/lending.qedspec"),
+            include_str!("../../../../examples/rust/multisig/multisig.qedspec"),
+            include_str!("../../../../examples/rust/percolator/percolator.qedspec"),
+            include_str!("../../tests/fixtures/regressions/issue-8/pool.qedspec"),
         ] {
             parse_str(src).unwrap();
         }

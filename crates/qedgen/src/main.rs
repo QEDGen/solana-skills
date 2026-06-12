@@ -1,75 +1,42 @@
-mod anchor_adapt;
-mod anchor_check;
-mod anchor_extractor;
-mod anchor_project;
-mod anchor_resolver;
-mod api;
-mod aristotle;
-mod arithmetic_symbol_probe;
-mod asm2lean;
-mod ast;
-mod banner;
+mod adapt;
 mod check;
-mod chumsky_adapter;
-mod chumsky_parser;
-mod cluster;
-mod codegen_mir;
-mod codegen_shared;
-mod consolidate;
-mod cpi_substitute;
-mod crucible_brownfield;
-mod crucible_gen;
-mod crucible_probe;
-mod deps;
-mod drift;
-mod feedback;
-mod fill;
-mod fingerprint;
-mod handler_intent;
-mod idl;
-mod idl2spec;
-mod import_resolver;
-mod init;
-mod integration_test;
-mod interface_gen;
-mod kani_impl;
-mod kani_mir;
-mod lean_gen_mir;
-mod lean_sidecars;
-mod lifecycle_probe;
+mod codegen;
+mod dispatch;
 mod mir;
-mod miri_verify;
-mod native_extractor;
-mod paired_validator_probe;
-mod pinocchio_extractor;
-mod pinocchio_probe;
-mod pinocchio_profile;
-mod pinocchio_to_spec;
 mod probe;
-mod probe_repro;
 mod project;
-mod prompts;
-mod proofs_bootstrap;
-mod proptest_gen_mir;
-mod qed_lock;
-mod qed_manifest;
-mod quantifier;
-mod ratchet;
-mod ratify;
-mod reconcile;
-mod regen_drift;
-mod rust_codegen_util;
-mod sbpf_verify;
-mod shank_probe;
-mod spec_hash;
-mod unit_test;
-mod upstream_check;
-mod validate;
+mod spec;
 mod verify;
-mod verify_counterexample;
-mod verify_kani_parse;
-mod verify_probe_repros;
-mod verify_proptest_parse;
+
+// Root re-exports: the v2.35 src/ reorg moved flat modules into directory
+// groups; these keep every pre-existing `crate::<module>` path valid.
+pub(crate) use adapt::{
+    anchor_adapt, anchor_check, anchor_extractor, anchor_project, anchor_resolver,
+    native_extractor, pinocchio_extractor, pinocchio_profile, pinocchio_to_spec,
+};
+pub(crate) use codegen::{
+    asm2lean, banner, codegen_mir, codegen_shared, crucible_gen, fingerprint, integration_test,
+    interface_gen, kani_impl, kani_mir, lean_gen_mir, lean_sidecars, proptest_gen_mir,
+    rust_codegen_util, unit_test,
+};
+pub(crate) use dispatch::{api, aristotle};
+pub(crate) use mir::cpi_substitute;
+pub(crate) use probe::{
+    arithmetic_symbol_probe, cluster, crucible_brownfield, crucible_probe, handler_intent,
+    lifecycle_probe, paired_validator_probe, pinocchio_probe, probe_repro, prompts, ratify,
+    shank_probe,
+};
+pub(crate) use project::{
+    consolidate, deps, feedback, fill, init, proofs_bootstrap, qed_lock, qed_manifest, reconcile,
+};
+pub(crate) use spec::{
+    ast, chumsky_adapter, chumsky_parser, idl, idl2spec, import_resolver, quantifier, spec_hash,
+    validate,
+};
+pub(crate) use verify::{
+    drift, miri_verify, ratchet, regen_drift, sbpf_verify, upstream_check, verify_counterexample,
+    verify_kani_parse, verify_probe_repros, verify_proptest_parse,
+};
 
 use anyhow::{ensure, Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};

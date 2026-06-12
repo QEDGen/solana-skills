@@ -2,8 +2,8 @@
 description: Lean proof gotchas — auto-loaded when editing Lean files or the Lean codegens
 paths:
   - "**/*.lean"
-  - "crates/qedgen/src/lean_gen_mir.rs"
-  - "crates/qedgen/src/asm2lean.rs"
+  - "crates/qedgen/src/codegen/lean_gen_mir.rs"
+  - "crates/qedgen/src/codegen/asm2lean.rs"
 ---
 
 # Lean proof gotchas

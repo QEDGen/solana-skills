@@ -581,13 +581,13 @@ fn run_git_in(dir: &Path, args: &[&str]) -> Result<String> {
 /// Bundled SPL Token interface fixture. Tier 1 — `ensures` clauses backed
 /// by an `upstream { binary_hash = ... }` pin so callers can discharge
 /// post-conditions via the bundled axiom module instead of `sorry`.
-const BUILTIN_SPL_TOKEN: &str = include_str!("../data/interfaces/spl_token.qedspec");
+const BUILTIN_SPL_TOKEN: &str = include_str!("../../data/interfaces/spl_token.qedspec");
 
 /// Bundled System Program interface fixture (Tier 1).
-const BUILTIN_SYSTEM: &str = include_str!("../data/interfaces/system.qedspec");
+const BUILTIN_SYSTEM: &str = include_str!("../../data/interfaces/system.qedspec");
 
 /// Bundled Metaplex Token Metadata interface fixture (Tier 1).
-const BUILTIN_METAPLEX: &str = include_str!("../data/interfaces/metaplex.qedspec");
+const BUILTIN_METAPLEX: &str = include_str!("../../data/interfaces/metaplex.qedspec");
 
 // ---------------------------------------------------------------------
 // v2.27 Track C2 — bundled proof packages (Stance 2).
@@ -605,10 +605,12 @@ const BUILTIN_METAPLEX: &str = include_str!("../data/interfaces/metaplex.qedspec
 // `import System from "system"` therefore stays Stance-1 (axiom from
 // codegen-emitted local sibling module), unchanged from v2.26.
 // v2.28 may revisit if there's demand.
-const BUILTIN_SPL_PROOF_LAKEFILE: &str = include_str!("../data/proofs/spl/lakefile.lean");
-const BUILTIN_SPL_PROOF_MODULE: &str = include_str!("../data/proofs/spl/Token.lean");
-const BUILTIN_METAPLEX_PROOF_LAKEFILE: &str = include_str!("../data/proofs/metaplex/lakefile.lean");
-const BUILTIN_METAPLEX_PROOF_MODULE: &str = include_str!("../data/proofs/metaplex/Metadata.lean");
+const BUILTIN_SPL_PROOF_LAKEFILE: &str = include_str!("../../data/proofs/spl/lakefile.lean");
+const BUILTIN_SPL_PROOF_MODULE: &str = include_str!("../../data/proofs/spl/Token.lean");
+const BUILTIN_METAPLEX_PROOF_LAKEFILE: &str =
+    include_str!("../../data/proofs/metaplex/lakefile.lean");
+const BUILTIN_METAPLEX_PROOF_MODULE: &str =
+    include_str!("../../data/proofs/metaplex/Metadata.lean");
 
 /// Per-builtin bundled proof package: `(module_filename, module_source)`
 /// alongside a shared `lakefile.lean` source. `None` for builtins with

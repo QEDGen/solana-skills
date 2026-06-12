@@ -2395,3 +2395,6 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
         );
     }
 }
+
+// Submodules (v2.35 src/ reorg).
+pub(crate) mod cpi_substitute;

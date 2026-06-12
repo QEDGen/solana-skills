@@ -8601,7 +8601,7 @@ handler init { effect { balance := 0 } }
 
     #[test]
     fn test_complete_spec_clean() {
-        let spec_content = include_str!("../../../examples/rust/escrow/escrow.qedspec");
+        let spec_content = include_str!("../../../../examples/rust/escrow/escrow.qedspec");
         let spec =
             crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
         let warnings = check_completeness(&spec);
@@ -8869,7 +8869,7 @@ handler liquidate : State.Active -> State.Liquidated {
 
     #[test]
     fn test_coverage_matrix_full_coverage() {
-        let spec_content = include_str!("../../../examples/rust/multisig/multisig.qedspec");
+        let spec_content = include_str!("../../../../examples/rust/multisig/multisig.qedspec");
         let spec =
             crate::chumsky_adapter::parse_str(spec_content).expect("multisig.qedspec should parse");
         let matrix = coverage_matrix(&spec);
