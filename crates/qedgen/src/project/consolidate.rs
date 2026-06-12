@@ -188,7 +188,7 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     crate::project::update_lean_solana(output_dir, false)?;
 
     // Write lean-toolchain
-    let toolchain = include_str!("../../../lean_solana/lean-toolchain");
+    let toolchain = include_str!("../../../../lean_solana/lean-toolchain");
     fs::write(output_dir.join("lean-toolchain"), toolchain)?;
 
     // Write lakefile, README, and .gitignore

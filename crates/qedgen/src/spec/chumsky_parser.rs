@@ -3607,7 +3607,7 @@ property conservation :
 
     #[test]
     fn parses_full_percolator_spec() {
-        const SRC: &str = include_str!("../../../examples/rust/percolator/percolator.qedspec");
+        const SRC: &str = include_str!("../../../../examples/rust/percolator/percolator.qedspec");
         let s = parse_ok(SRC);
         assert_eq!(s.name, "Percolator");
 

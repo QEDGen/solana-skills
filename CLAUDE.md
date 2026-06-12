@@ -38,19 +38,17 @@ Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fix
 
 **`crates/qedgen-macros/`** — `#[qed]` proc macro: compile-time drift detection (`lib.rs` entry, `verified.rs` content-hash + `compile_error!`).
 
-**`crates/qedgen/src/`** — CLI, parsers, codegens:
+**`crates/qedgen/src/`** — CLI, parsers, codegens. Directory modules by pipeline stage (post-v2.35 reorg; root re-exports in `main.rs` keep `crate::<module>` paths stable):
 - `main.rs` — CLI entry points (init, setup, check, codegen, verify, reconcile, generate, fill-sorry, aristotle, spec, asm2lean, consolidate, probe, adapt, interface, readiness, check-upgrade, …)
-- `chumsky_parser.rs` / `chumsky_adapter.rs` — `.qedspec` → typed AST
-- `mir.rs` — typed Solana-native IR; `lower(parsed) -> Mir` is the canonical entry, consumed by all four codegens
-- `lean_gen_mir.rs` — Lean 4 codegen (flat `structure State` default; `mir.adt_state` for inductive; `mir.is_assembly` → sBPF `render_sbpf`)
-- `kani_mir.rs` / `proptest_gen_mir.rs` — Kani BMC + proptest harness codegens
-- `codegen_mir.rs` — Rust codegen for all three targets (Anchor / Quasar / Pinocchio)
-- `codegen_shared.rs` — shared Rust-codegen helpers: `FrameworkSurface`, `generate_guards`, Pinocchio scaffold, per-target SPL/System CPI dispatch (`try_emit_cpi`)
-- `lean_sidecars.rs` — pinned-interface `import` lines + sibling `<Iface>.lean` axiom modules
-- `check.rs` — lint, coverage matrix, drift detection
-- `pinocchio_probe.rs` / `miri_verify.rs` — Pinocchio audit-site enumerator + Miri verify backend
-- `asm2lean.rs` — sBPF `.s` → Lean program module
-- supporting: `api.rs` (Mistral), `aristotle.rs`, `drift.rs`, `idl.rs` / `idl2spec.rs`, `fingerprint.rs`, `validate.rs`, `deps.rs`, `project.rs`, `consolidate.rs`, `unit_test.rs`, `integration_test.rs`
+- `spec/` — `.qedspec` front-end: `chumsky_parser` / `chumsky_adapter` (→ typed AST), `ast`, `validate`, `quantifier`, `spec_hash`, `import_resolver`, `idl` / `idl2spec`
+- `mir/` (`mod.rs` = the IR) — typed Solana-native IR; `lower(parsed) -> Mir` is the canonical entry, consumed by all four codegens; `cpi_substitute`
+- `codegen/` — all backends: `lean_gen_mir` (Lean 4; flat `structure State` default, `mir.adt_state` for inductive, `mir.is_assembly` → sBPF `render_sbpf`), `kani_mir` / `kani_impl` / `proptest_gen_mir` (Kani BMC + proptest), `codegen_mir` (Rust for Anchor / Quasar / Pinocchio), `codegen_shared` (`FrameworkSurface`, `generate_guards`, Pinocchio scaffold, per-target SPL/System CPI dispatch `try_emit_cpi`), `rust_codegen_util`, `lean_sidecars` (pinned-interface imports + `<Iface>.lean` axiom modules), `asm2lean` (sBPF `.s` → Lean), `crucible_gen`, `interface_gen`, `unit_test`, `integration_test`, `banner`, `fingerprint`
+- `check/` (`mod.rs`) — lint, coverage matrix, drift detection
+- `probe/` (`mod.rs` = the enumerator) — audit data layer: `pinocchio_probe`, `shank_probe`, `crucible_probe` / `crucible_brownfield`, `arithmetic_symbol_probe`, `lifecycle_probe`, `paired_validator_probe`, `probe_repro`, scaffold-to-spec interview (`cluster`, `handler_intent`, `prompts`, `ratify`)
+- `adapt/` — brownfield ingest: `anchor_adapt` / `anchor_check` / `anchor_extractor` / `anchor_project` / `anchor_resolver`, `native_extractor`, `pinocchio_extractor` / `pinocchio_profile` / `pinocchio_to_spec`
+- `verify/` (`mod.rs` = the orchestrator) — `miri_verify`, `sbpf_verify`, `verify_{counterexample,kani_parse,proptest_parse,probe_repros}`, `drift`, `regen_drift`, `upstream_check`, `ratchet`
+- `dispatch/` — external LLM dispatch: `api` (Mistral), `aristotle`
+- `project/` (`mod.rs` = scaffolding) — `init`, `deps`, `qed_lock`, `qed_manifest`, `consolidate`, `reconcile`, `fill`, `proofs_bootstrap`, `feedback`
 
 **`lean_solana/`** — Solana axiom library (`QEDGen.Solana.{Account,Cpi,State,Valid}`); sBPF semantics + binary-proof engines come from the `qedsvm` package (`require qedsvm`, `SVM.SBPF.*`, pinned tag).
 

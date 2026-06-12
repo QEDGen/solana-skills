@@ -1122,3 +1122,15 @@ end Outer
         assert!(!out.contains("trust surface"));
     }
 }
+
+// Submodules (v2.35 src/ reorg).
+pub(crate) mod drift;
+pub(crate) mod miri_verify;
+pub(crate) mod ratchet;
+pub(crate) mod regen_drift;
+pub(crate) mod sbpf_verify;
+pub(crate) mod upstream_check;
+pub(crate) mod verify_counterexample;
+pub(crate) mod verify_kani_parse;
+pub(crate) mod verify_probe_repros;
+pub(crate) mod verify_proptest_parse;

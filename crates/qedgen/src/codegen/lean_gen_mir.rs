@@ -5962,9 +5962,9 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
     /// byte-identical to the (now-deleted) legacy `lean_gen::render_sbpf`
     /// before deletion. Regenerate intentionally if `render_sbpf` changes:
     /// `UPDATE_SBPF_GOLDEN=1 cargo test sbpf_render_matches_golden`.
-    const DROPSET_SBPF_SPEC: &str = include_str!("../tests/fixtures/dropset_sbpf.qedspec");
+    const DROPSET_SBPF_SPEC: &str = include_str!("../../tests/fixtures/dropset_sbpf.qedspec");
     const DROPSET_SBPF_GOLDEN: &str =
-        include_str!("../tests/fixtures/dropset_sbpf.Spec.lean.golden");
+        include_str!("../../tests/fixtures/dropset_sbpf.Spec.lean.golden");
 
     #[test]
     fn sbpf_render_matches_golden() {

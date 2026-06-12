@@ -2,28 +2,29 @@ use anyhow::Result;
 use std::path::Path;
 
 // Embed template files
-const LAKEFILE: &str = include_str!("../templates/lakefile.lean");
-const LEAN_TOOLCHAIN: &str = include_str!("../templates/lean-toolchain");
-const MAIN_LEAN: &str = include_str!("../templates/Main.lean");
-const GITIGNORE: &str = include_str!("../templates/.gitignore");
-const README: &str = include_str!("../templates/README.lean.md");
+const LAKEFILE: &str = include_str!("../../templates/lakefile.lean");
+const LEAN_TOOLCHAIN: &str = include_str!("../../templates/lean-toolchain");
+const MAIN_LEAN: &str = include_str!("../../templates/Main.lean");
+const GITIGNORE: &str = include_str!("../../templates/.gitignore");
+const README: &str = include_str!("../../templates/README.lean.md");
 
 // Embed lean_solana files (from repo root lean_solana/)
-const SUPPORT_LAKEFILE: &str = include_str!("../../../lean_solana/lakefile.lean");
-const SUPPORT_TOOLCHAIN: &str = include_str!("../../../lean_solana/lean-toolchain");
-const SUPPORT_ROOT: &str = include_str!("../../../lean_solana/QEDGen.lean");
-const SUPPORT_ACCOUNT: &str = include_str!("../../../lean_solana/QEDGen/Solana/Account.lean");
-const SUPPORT_STATE: &str = include_str!("../../../lean_solana/QEDGen/Solana/State.lean");
-const SUPPORT_CPI: &str = include_str!("../../../lean_solana/QEDGen/Solana/Cpi.lean");
-const SUPPORT_VALID: &str = include_str!("../../../lean_solana/QEDGen/Solana/Valid.lean");
-const SUPPORT_ARITHMETIC: &str = include_str!("../../../lean_solana/QEDGen/Solana/Arithmetic.lean");
-const SUPPORT_SPEC: &str = include_str!("../../../lean_solana/QEDGen/Solana/Spec.lean");
+const SUPPORT_LAKEFILE: &str = include_str!("../../../../lean_solana/lakefile.lean");
+const SUPPORT_TOOLCHAIN: &str = include_str!("../../../../lean_solana/lean-toolchain");
+const SUPPORT_ROOT: &str = include_str!("../../../../lean_solana/QEDGen.lean");
+const SUPPORT_ACCOUNT: &str = include_str!("../../../../lean_solana/QEDGen/Solana/Account.lean");
+const SUPPORT_STATE: &str = include_str!("../../../../lean_solana/QEDGen/Solana/State.lean");
+const SUPPORT_CPI: &str = include_str!("../../../../lean_solana/QEDGen/Solana/Cpi.lean");
+const SUPPORT_VALID: &str = include_str!("../../../../lean_solana/QEDGen/Solana/Valid.lean");
+const SUPPORT_ARITHMETIC: &str =
+    include_str!("../../../../lean_solana/QEDGen/Solana/Arithmetic.lean");
+const SUPPORT_SPEC: &str = include_str!("../../../../lean_solana/QEDGen/Solana/Spec.lean");
 // `Spec.lean` does `import QEDGen.Solana.CommandBuilders`, so the support
 // module must ship alongside it — otherwise `lake build` in the validation
 // workspace fails to resolve the import (issue #71). CommandBuilders has no
 // further QEDGen.Solana deps, so embedding it closes the import closure.
 const SUPPORT_COMMAND_BUILDERS: &str =
-    include_str!("../../../lean_solana/QEDGen/Solana/CommandBuilders.lean");
+    include_str!("../../../../lean_solana/QEDGen/Solana/CommandBuilders.lean");
 // Trimmed barrel import — only the modules we embed (no SBPF/Bridge/Guards)
 const SUPPORT_SOLANA_BASE: &str = "\
 import QEDGen.Solana.Account\n\
@@ -197,3 +198,14 @@ mod tests {
         assert_import_closure(true);
     }
 }
+
+// Submodules (v2.35 src/ reorg).
+pub(crate) mod consolidate;
+pub(crate) mod deps;
+pub(crate) mod feedback;
+pub(crate) mod fill;
+pub(crate) mod init;
+pub(crate) mod proofs_bootstrap;
+pub(crate) mod qed_lock;
+pub(crate) mod qed_manifest;
+pub(crate) mod reconcile;

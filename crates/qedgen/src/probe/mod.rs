@@ -2361,3 +2361,17 @@ solana-program = "1.18"
         assert_eq!(close.intent_tag.as_deref(), Some("trader_gated"));
     }
 }
+
+// Submodules (v2.35 src/ reorg).
+pub(crate) mod arithmetic_symbol_probe;
+pub(crate) mod cluster;
+pub(crate) mod crucible_brownfield;
+pub(crate) mod crucible_probe;
+pub(crate) mod handler_intent;
+pub(crate) mod lifecycle_probe;
+pub(crate) mod paired_validator_probe;
+pub(crate) mod pinocchio_probe;
+pub(crate) mod probe_repro;
+pub(crate) mod prompts;
+pub(crate) mod ratify;
+pub(crate) mod shank_probe;

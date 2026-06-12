@@ -538,7 +538,7 @@ mod tests {
     /// bundled escrow example (commit 689e63a). Validates that our parser
     /// + categorize + handler-derive paths handle real crash output, not
     ///   just synthetic test data.
-    const REAL_CRASH_META: &str = include_str!("../test-fixtures/real-crucible-crash.meta.json");
+    const REAL_CRASH_META: &str = include_str!("../../test-fixtures/real-crucible-crash.meta.json");
 
     #[test]
     fn parses_real_crucible_crash_metadata() {
