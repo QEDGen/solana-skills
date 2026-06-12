@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedHandlerAccount, ParsedSpec};
-use crate::codegen_shared::{map_type, to_pascal_case};
+use crate::codegen_shared::{map_type, to_pascal_case, write_generated_file};
 
 /// Generate QuasarSVM integration test scaffolds: tests run the compiled
 /// binary in an in-process Solana VM, exercising the full instruction flow
@@ -24,10 +24,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         );
     }
 
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let fp = crate::fingerprint::compute_fingerprint(&spec);
     let hash = fp
         .file_hashes
@@ -36,7 +32,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         .unwrap_or_default();
 
     let out = render(&spec, &hash)?;
-    std::fs::write(output_path, &out)?;
+    write_generated_file(output_path, &out)?;
     eprintln!("  wrote {}", output_path.display());
 
     Ok(())

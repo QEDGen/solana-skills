@@ -3,6 +3,7 @@
 /// Used by both `proptest_gen` and `kani` to avoid duplicating
 /// the qedspec-to-Rust translation logic.
 use crate::check::{ParsedHandler, ParsedProperty, ParsedSpec};
+use crate::codegen_shared::DslTypeExt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardTermSource {
@@ -1521,8 +1522,7 @@ pub fn emit_state_init_symbolic(
 
 /// Emit `let mut s = State { ... };` zeroed, with `status` set to the
 /// initial lifecycle state — the canonical pre-state for init-handler
-/// harnesses. Type-aware defaults via
-/// `proptest_gen_mir::default_value_for_field`.
+/// harnesses. Type-aware defaults come from the shared DSL type surface.
 pub fn emit_state_init_zeroed(
     out: &mut String,
     mutable_fields: &[&(String, String)],
@@ -1531,7 +1531,7 @@ pub fn emit_state_init_zeroed(
 ) {
     out.push_str("    let mut s = State {\n");
     for (fname, ftype) in mutable_fields {
-        if let Some(default) = crate::proptest_gen_mir::default_value_for_field(ftype, spec) {
+        if let Some(default) = spec.default_value_for_type(ftype) {
             out.push_str(&format!("        {}: {},\n", fname, default));
         }
     }
