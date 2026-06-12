@@ -864,10 +864,7 @@ pub fn asm2lean(input: &Path, output: &Path, namespace: Option<&str>) -> Result<
     let prog = parse(&source)?;
     let lean_code = generate(&source, &ns, &input_filename)?;
 
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(output, &lean_code)?;
+    crate::codegen_shared::write_generated_file(output, &lean_code)?;
 
     eprintln!(
         "✓ Generated {} ({} instructions, {} constants)",

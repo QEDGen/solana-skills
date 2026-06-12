@@ -12,6 +12,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::ParsedSpec;
+use crate::codegen_shared::{write_generated_file, DslTypeExt};
 use crate::mir::Mir;
 
 /// Generate the Kani harness file at `output_path` from a pre-lowered
@@ -23,12 +24,8 @@ pub fn generate(mir: &Mir, parsed: &ParsedSpec, output_path: &Path) -> Result<()
 
     crate::rust_codegen_util::check_effect_targets(parsed)?;
 
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
     let content = render_with_progress(mir, parsed);
-    std::fs::write(output_path, &content)?;
+    write_generated_file(output_path, &content)?;
 
     eprintln!("Generated Kani harnesses in {}", output_path.display());
     Ok(())
@@ -1044,9 +1041,7 @@ fn emit_property_preservation_harnesses(out: &mut String, parsed: &ParsedSpec) -
                 out.push_str("    let pre = ");
                 out.push_str("State {\n");
                 for (fname, ftype) in &mutable {
-                    if let Some(default) =
-                        crate::proptest_gen_mir::default_value_for_field(ftype, parsed)
-                    {
+                    if let Some(default) = parsed.default_value_for_type(ftype) {
                         out.push_str(&format!("        {}: {},\n", fname, default));
                     }
                 }

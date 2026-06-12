@@ -8,6 +8,7 @@
 //! (private leaf-helper copies), drift-gated by `axiom_module_matches_golden`.
 
 use crate::check::ParsedSpec;
+use crate::codegen_shared::write_generated_file;
 use anyhow::Result;
 use std::path::Path;
 
@@ -30,10 +31,7 @@ pub(crate) fn write_spec_with_sidecars(
         content
     };
 
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(output_path, &final_content)?;
+    write_generated_file(output_path, &final_content)?;
     eprintln!("  wrote {}", output_path.display());
 
     // Sibling `<Iface>.lean` axiom modules. The pinned set is recomputed
@@ -56,7 +54,7 @@ pub(crate) fn write_spec_with_sidecars(
                 .expect("pinned interface must exist in spec.interfaces");
             let iface_path = parent.join(format!("{}.lean", safe_module_name(iface_name)));
             let module = render_interface_axiom_module(iface);
-            std::fs::write(&iface_path, &module)?;
+            write_generated_file(&iface_path, &module)?;
             eprintln!("  wrote {}", iface_path.display());
         }
 

@@ -10,9 +10,11 @@ mod verify;
 
 // Root re-exports: the v2.35 src/ reorg moved flat modules into directory
 // groups; these keep every pre-existing `crate::<module>` path valid.
+#[cfg(test)]
+pub(crate) use adapt::pinocchio_to_spec;
 pub(crate) use adapt::{
     anchor_adapt, anchor_check, anchor_extractor, anchor_project, anchor_resolver,
-    native_extractor, pinocchio_extractor, pinocchio_profile, pinocchio_to_spec,
+    native_extractor, pinocchio_extractor, pinocchio_profile, program_model,
 };
 pub(crate) use codegen::{
     asm2lean, banner, codegen_mir, codegen_shared, crucible_gen, fingerprint, integration_test,
@@ -150,17 +152,20 @@ enum Commands {
         escalate: bool,
     },
 
-    /// Brownfield adapter for existing Anchor programs. Two modes:
+    /// Brownfield adapter for existing Solana programs. Two modes:
     ///
-    /// `--program <c>` (scaffold): parses `<c>/src/lib.rs`, finds the
-    /// `#[program]` mod, walks each instruction to its handler body,
-    /// and emits a `.qedspec` skeleton with TODO markers for state
-    /// machine / requires / effects. Round-trips through the parser.
+    /// `--program <c>` (scaffold): detects the framework — Anchor (an
+    /// `anchor-lang` dep or a `#[program]` mod), else Pinocchio
+    /// (`pub fn process_*`), else native (any `pub fn`) — walks the
+    /// program's handlers, and emits a `.qedspec` skeleton with TODO
+    /// markers for state machine / requires / effects. The Anchor path
+    /// resolves each instruction to its handler body and round-trips
+    /// through the parser.
     ///
-    /// `--program <c> --spec <s>` (attribute): given an existing spec,
-    /// emits one `#[qed(verified, spec = ..., handler = ..., hash = ...,
-    /// spec_hash = ...)]` line per handler. Paste each above its
-    /// handler `pub fn`; future body edits fire `compile_error!`
+    /// `--program <c> --spec <s>` (attribute, Anchor-only): given an
+    /// existing spec, emits one `#[qed(verified, spec = ..., handler = ...,
+    /// hash = ..., spec_hash = ...)]` line per handler. Paste each above
+    /// its handler `pub fn`; future body edits fire `compile_error!`
     /// until you re-run this command.
     Adapt {
         /// Path to the program crate (the directory containing the
@@ -1438,13 +1443,20 @@ fn run_anchor_probe(
         std::fs::write(dir.join("interview.md"), md)?;
         let cj = serde_json::to_string_pretty(clusters_ref)?;
         std::fs::write(dir.join("clusters.json"), cj)?;
-        // skeleton.qedspec — anchor_adapt::adapt as the structural skeleton;
-        // on failure fall back to a minimal stub ratify still accepts.
-        let skeleton = match anchor_adapt::adapt(prog_root, &std::collections::HashMap::new()) {
+        // skeleton.qedspec — the Anchor-compatible structural adapter feeds
+        // the pre-interview skeleton; on failure fall back to a minimal stub
+        // ratify still accepts.
+        let anchor_overrides = std::collections::HashMap::new();
+        let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
+        let skeleton = match adapt::render_skeleton_for_framework(
+            program_model::ProgramFramework::Anchor,
+            prog_root,
+            adapter_config,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
-                    "warning: anchor_adapt::adapt failed ({}); writing minimal skeleton",
+                    "warning: program adapter failed ({}); writing minimal skeleton",
                     e
                 );
                 format!(
@@ -1506,7 +1518,13 @@ fn run_native_probe(
         std::fs::write(dir.join("clusters.json"), cj)?;
         // Native skeleton accepts any `pub fn` (no `process_*`-style naming
         // convention to key on).
-        let skeleton = pinocchio_to_spec::render_skeleton_native(prog_root, &program_name)?;
+        let anchor_overrides = std::collections::HashMap::new();
+        let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
+        let skeleton = adapt::render_skeleton_for_framework(
+            program_model::ProgramFramework::Native,
+            prog_root,
+            adapter_config,
+        )?;
         std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
         eprintln!("Wrote audit working set to {}", dir.display());
     }
@@ -1753,10 +1771,12 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     }
                 }
                 None => {
+                    let program_name = adapt::default_program_name(&program);
+                    let adapter_config = adapt::AdapterConfig::new(&program_name, &overrides);
                     if let Some(path) = out {
-                        anchor_adapt::adapt_to_file(&program, &path, &overrides)?;
+                        adapt::render_skeleton_to_file(&program, &path, adapter_config)?;
                     } else {
-                        let rendered = anchor_adapt::adapt(&program, &overrides)?;
+                        let rendered = adapt::render_skeleton(&program, adapter_config)?;
                         print!("{}", rendered);
                     }
                 }
@@ -1898,7 +1918,14 @@ async fn dispatch(cmd: Commands) -> Result<()> {
                     let clusters_json = serde_json::to_string_pretty(clusters_ref)?;
                     std::fs::write(dir.join("clusters.json"), clusters_json)?;
                     // skeleton.qedspec — handler stubs only.
-                    let skeleton = pinocchio_to_spec::render_skeleton(prog_root, &program_name)?;
+                    let anchor_overrides = std::collections::HashMap::new();
+                    let adapter_config =
+                        adapt::AdapterConfig::new(&program_name, &anchor_overrides);
+                    let skeleton = adapt::render_skeleton_for_framework(
+                        program_model::ProgramFramework::Pinocchio,
+                        prog_root,
+                        adapter_config,
+                    )?;
                     std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
                     eprintln!("Wrote audit working set to {}", dir.display());
                 }

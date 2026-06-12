@@ -450,6 +450,39 @@ pub fn map_type(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     map_type_standalone(dsl_type, spec)
 }
 
+/// Shared type-shape queries used by the Rust harness emitters. Keeping
+/// these on `ParsedSpec` avoids making one backend (for example proptest)
+/// the accidental owner of generic DSL type behavior.
+pub(crate) trait DslTypeExt {
+    fn resolve_map_bound(&self, bound: &str) -> Result<String>;
+    fn default_value_for_type(&self, dsl_type: &str) -> Option<String>;
+}
+
+impl DslTypeExt for ParsedSpec {
+    fn resolve_map_bound(&self, bound: &str) -> Result<String> {
+        resolve_map_bound(bound, self)
+    }
+
+    fn default_value_for_type(&self, dsl_type: &str) -> Option<String> {
+        default_value_for_type(dsl_type, self)
+    }
+}
+
+pub(crate) fn ensure_parent_dir(output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn write_generated_file(output_path: &Path, content: &str) -> Result<()> {
+    ensure_parent_dir(output_path)?;
+    std::fs::write(output_path, content)?;
+    Ok(())
+}
+
 pub fn map_type_standalone(dsl_type: &str, spec: &ParsedSpec) -> Result<String> {
     map_type_with_context(dsl_type, spec, TypeMapContext::Standalone)
 }
@@ -638,6 +671,57 @@ fn resolve_map_bound(bound: &str, spec: &ParsedSpec) -> Result<String> {
         "Map bound `{}` is not a numeric literal, not declared as a `const`, and not a unit-only enum type",
         bound
     )
+}
+
+/// Type-aware default for a generated `State { ... }` literal.
+///
+/// `Map[N] T` becomes `[<default of T>; N]`, aliases recurse, records use
+/// `<Name>::default()`, and payload-variant sums intentionally return
+/// `None` so rustc reports the exact missing field instead of accepting an
+/// arbitrary placeholder.
+pub(crate) fn default_value_for_type(dsl_type: &str, spec: &ParsedSpec) -> Option<String> {
+    let dsl_type = dsl_type.trim();
+
+    if let Some(rest) = dsl_type.strip_prefix("Map") {
+        let rest = rest.trim_start();
+        if let Some(rest) = rest.strip_prefix('[') {
+            if let Some(close) = rest.find(']') {
+                let bound_src = rest[..close].trim();
+                let inner_src = rest[close + 1..].trim();
+                if let Ok(n) = resolve_map_bound(bound_src, spec) {
+                    let inner_default = default_value_for_type(inner_src, spec)?;
+                    return Some(format!("[{}; {}]", inner_default, n));
+                }
+            }
+        }
+        return None;
+    }
+
+    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
+        return default_value_for_type(rhs, spec);
+    }
+
+    if spec.records.iter().any(|r| r.name == dsl_type) {
+        return Some(format!("{}::default()", dsl_type));
+    }
+
+    if spec
+        .sum_types
+        .iter()
+        .any(|s| s.name == dsl_type && s.variants.iter().any(|v| !v.fields.is_empty()))
+    {
+        return None;
+    }
+
+    if dsl_type.starts_with("Fin[") {
+        return Some("0".to_string());
+    }
+
+    if dsl_type == "Pubkey" {
+        return Some("[0u8; 32]".to_string());
+    }
+
+    Some("0".to_string())
 }
 
 /// Sanitize a field-path string (e.g. `accounts[i].active`) into a legal

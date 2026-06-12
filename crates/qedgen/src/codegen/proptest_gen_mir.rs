@@ -11,7 +11,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{ParsedHandler, ParsedInvariant, ParsedProperty, ParsedSpec};
-use crate::codegen_shared::map_type;
+use crate::codegen_shared::{map_type, write_generated_file, DslTypeExt};
 use crate::mir::Mir;
 use crate::rust_codegen_util;
 
@@ -87,7 +87,7 @@ fn strategy_for_field(
             if let Some(close) = rest.find(']') {
                 let bound_src = rest[..close].trim();
                 let inner_src = rest[close + 1..].trim();
-                let n = resolve_map_bound_local(bound_src, spec)?;
+                let n = spec.resolve_map_bound(bound_src)?;
                 let inner_strategy = strategy_for_field(inner_src, spec, mode, None)?;
                 return Ok(format!(
                     "prop::collection::vec({inner_strategy}, {n}..={n}).prop_map(|v| v.try_into().ok().unwrap())"
@@ -152,84 +152,6 @@ fn strategy_for_field(
         StrategyMode::Boundary => boundary_strategy_for_type(dsl_type).to_string(),
         StrategyMode::Full => strategy_for_type(dsl_type).to_string(),
     })
-}
-
-/// Type-aware default for a state field, used to seed `State { ... }`
-/// literals (init preservation tests, `state_machine_sequence`).
-/// `Map[N] T` → `[<default of T>; N]`; records → `<Name>::default()`
-/// (record structs derive `Default`). Returns `None` when no sensible
-/// default exists (e.g. payload-variant sums) — the caller skips the field
-/// so rustc's E0063 missing-field error points at the exact line, a clearer
-/// diagnostic than wrong-type code.
-pub(crate) fn default_value_for_field(dsl_type: &str, spec: &ParsedSpec) -> Option<String> {
-    let dsl_type = dsl_type.trim();
-    // Map[BOUND] T → [<default of T>; N]
-    if let Some(rest) = dsl_type.strip_prefix("Map") {
-        let rest = rest.trim_start();
-        if let Some(rest) = rest.strip_prefix('[') {
-            if let Some(close) = rest.find(']') {
-                let bound_src = rest[..close].trim();
-                let inner_src = rest[close + 1..].trim();
-                if let Ok(n) = resolve_map_bound_local(bound_src, spec) {
-                    let inner_default = default_value_for_field(inner_src, spec)?;
-                    return Some(format!("[{}; {}]", inner_default, n));
-                }
-            }
-        }
-        return None;
-    }
-    // Type alias → recurse on rhs
-    if let Some((_, rhs)) = spec.type_aliases.iter().find(|(n, _)| n == dsl_type) {
-        return default_value_for_field(rhs, spec);
-    }
-    // Record type → <Name>::default() (emit_record_structs derives Default).
-    if spec.records.iter().any(|r| r.name == dsl_type) {
-        return Some(format!("{}::default()", dsl_type));
-    }
-    // Payload-variant sums: no meaningful zero default → None (see doc).
-    // Unit-variant sums fall through to the primitive path —
-    // `emit_unit_enum_sums` doesn't derive Default.
-    if spec
-        .sum_types
-        .iter()
-        .any(|s| s.name == dsl_type && s.variants.iter().any(|v| !v.fields.is_empty()))
-    {
-        return None;
-    }
-    // Fin[N] → 0usize (modeled as usize index)
-    if dsl_type.starts_with("Fin[") {
-        return Some("0".to_string());
-    }
-    // Pubkey → [0u8; 32] (usually filtered by mutable_fields, but a
-    // Map[N] Pubkey gets here).
-    if dsl_type == "Pubkey" {
-        return Some("[0u8; 32]".to_string());
-    }
-    // Primitive numeric types → 0
-    Some("0".to_string())
-}
-
-/// Local copy of codegen::resolve_map_bound (private there): bound is a
-/// numeric literal, a declared spec constant, or a unit-only enum type.
-fn resolve_map_bound_local(bound: &str, spec: &ParsedSpec) -> Result<String> {
-    let bound = bound.trim();
-    if bound.chars().all(|c| c.is_ascii_digit()) && !bound.is_empty() {
-        return Ok(bound.to_string());
-    }
-    if let Some((_, value)) = spec.constants.iter().find(|(n, _)| n == bound) {
-        return Ok(value.clone());
-    }
-    // Enum-typed bound → variant count; must agree with the codegen-side
-    // resolver so the proptest model and Anchor codegen share the shape.
-    if let Some(sum) = spec.sum_types.iter().find(|s| s.name == bound) {
-        if sum.variants.iter().all(|v| v.fields.is_empty()) {
-            return Ok(sum.variants.len().to_string());
-        }
-    }
-    anyhow::bail!(
-        "Map bound `{}` is not a numeric literal, not declared as a `const`, and not a unit-only enum type",
-        bound
-    )
 }
 
 /// Emit a `prop_compose!` strategy per spec record. Order matters: after
@@ -353,10 +275,6 @@ fn extract_field_upper_bounds(
 /// invariants after every transition.
 fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()> {
     rust_codegen_util::check_effect_targets(spec)?;
-
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let fp = crate::fingerprint::compute_fingerprint(spec);
     let hash = fp
@@ -504,7 +422,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
         )?;
     }
 
-    std::fs::write(output_path, &out)?;
+    write_generated_file(output_path, &out)?;
     eprintln!("Generated proptest harnesses at {}", output_path.display());
     Ok(())
 }
@@ -524,7 +442,7 @@ fn emit_account_section(
 ) -> Result<()> {
     // Records/enums referenced by State are declared first, then their
     // `arb_<Name>()` strategies so `arb_state` can call into them. `Default`
-    // is required by the seed-state path (`default_value_for_field` emits
+    // is required by the seed-state path (`default_value_for_type` emits
     // `<Name>::default()`); a non-Default field type fails at the record
     // struct itself — clearer than a cascading E0599 at the call site.
     rust_codegen_util::emit_record_structs(out, spec, "Debug, Clone, Copy, Default", |t| {
@@ -980,7 +898,7 @@ fn emit_preservation_tests_for(
             if is_init {
                 out.push_str("        let mut post = State {\n");
                 for (fname, ftype) in mutable_fields {
-                    if let Some(default) = default_value_for_field(ftype, spec) {
+                    if let Some(default) = spec.default_value_for_type(ftype) {
                         out.push_str(&format!("            {}: {},\n", fname, default));
                     }
                     // No sensible default: skip — the struct-init E0063
@@ -1138,7 +1056,7 @@ fn emit_invariant_preservation_tests_for(
             if is_init {
                 out.push_str("        let mut s = State {\n");
                 for (fname, ftype) in mutable_fields {
-                    if let Some(default) = default_value_for_field(ftype, spec) {
+                    if let Some(default) = spec.default_value_for_type(ftype) {
                         out.push_str(&format!("            {}: {},\n", fname, default));
                     }
                 }
@@ -1520,7 +1438,7 @@ fn emit_sequence_test_for(
     // the spec's first declared lifecycle state.
     out.push_str("        let mut s = State {\n");
     for (fname, ftype) in mutable_fields {
-        if let Some(default) = default_value_for_field(ftype, spec) {
+        if let Some(default) = spec.default_value_for_type(ftype) {
             out.push_str(&format!("            {}: {},\n", fname, default));
         }
     }

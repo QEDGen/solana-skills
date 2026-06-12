@@ -20,13 +20,8 @@ pub fn generate(idl_path: &Path) -> Result<String> {
 /// Convenience: generate + write in one step.
 pub fn generate_to_file(idl_path: &Path, out_path: &Path) -> Result<()> {
     let src = generate(idl_path)?;
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-    }
-    std::fs::write(out_path, &src).with_context(|| format!("writing {}", out_path.display()))?;
+    crate::codegen_shared::write_generated_file(out_path, &src)
+        .with_context(|| format!("writing {}", out_path.display()))?;
     Ok(())
 }
 

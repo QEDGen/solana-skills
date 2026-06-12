@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::{self, ParsedHandler, ParsedSpec};
-use crate::codegen_shared::map_type;
+use crate::codegen_shared::{map_type, write_generated_file};
 
 /// Generate unit tests from a spec file (.lean or .qedspec).
 /// Tests exercise effects, guards, and properties directly on a plain state
@@ -18,10 +18,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     crate::rust_codegen_util::check_effect_targets(&spec)?;
-
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
     let hash = fp
@@ -292,8 +288,6 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
     out.push_str("}\n");
 
-    std::fs::write(output_path, &out)?;
-
     // Count tests
     let effect_count = spec.handlers.iter().filter(|o| o.has_effect()).count();
     let guard_count = spec.handlers.iter().filter(|o| o.has_guard()).count() * 2; // pass + fail
@@ -315,6 +309,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let unchanged_count = effect_count;
     let sm_count = transition_ops.len();
     let total = effect_count + guard_count + prop_count + unchanged_count + sm_count;
+
+    write_generated_file(output_path, &out)?;
 
     eprintln!(
         "Generated {} unit tests in {}",

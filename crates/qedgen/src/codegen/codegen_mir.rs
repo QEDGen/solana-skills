@@ -10,8 +10,102 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::check::ParsedSpec;
+use crate::fingerprint::SpecFingerprint;
 use crate::mir::Mir;
 use crate::Target;
+
+struct CodegenCtx<'a> {
+    mir: &'a Mir,
+    parsed: &'a ParsedSpec,
+    fp: &'a SpecFingerprint,
+    spec_path: &'a Path,
+    output_dir: &'a Path,
+}
+
+/// Per-framework codegen. Every `emit_*` method defaults to the shared
+/// `emit_*` free function (dispatched on `self.target()`), so today the three
+/// implementors differ only in the `Target` they return. Each method is an
+/// intentional override point for upcoming per-target divergence — e.g.
+/// Pinocchio zero-copy `State`, Quasar pod layout — where the shared default
+/// no longer fits; until then the defaults keep all targets in lockstep.
+trait FrameworkCodegen {
+    fn target(&self) -> Target;
+
+    fn emit_lib(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_lib(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_state(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_state(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_events(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_events(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_errors(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_errors(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_instructions(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_instructions(
+            ctx.mir,
+            ctx.parsed,
+            ctx.fp,
+            ctx.spec_path,
+            ctx.output_dir,
+            self.target(),
+        )
+    }
+
+    fn emit_guards(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        // Guards stay ParsedSpec-based: they render account-constraint
+        // surface (signer/writable flags, pda_seeds, variant-payload fields),
+        // not effect-body `Stmt` IR (see `codegen_shared`).
+        crate::codegen_shared::generate_guards(ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_math(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        if crate::codegen_shared::guards_use_math_helpers(ctx.parsed) {
+            emit_math(ctx.fp, ctx.output_dir)?;
+        }
+        Ok(())
+    }
+
+    fn emit_ref_impls(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_ref_impls(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_imported_mirror(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_imported_mirror(ctx.mir, ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+    }
+
+    fn emit_cargo_toml(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
+        emit_cargo_toml(ctx.mir, ctx.fp, ctx.output_dir, self.target())
+    }
+}
+
+struct AnchorCodegen;
+struct QuasarCodegen;
+struct PinocchioCodegen;
+
+impl FrameworkCodegen for AnchorCodegen {
+    fn target(&self) -> Target {
+        Target::Anchor
+    }
+}
+
+impl FrameworkCodegen for QuasarCodegen {
+    fn target(&self) -> Target {
+        Target::Quasar
+    }
+}
+
+impl FrameworkCodegen for PinocchioCodegen {
+    fn target(&self) -> Target {
+        Target::Pinocchio
+    }
+}
 
 /// Generate the program crate under `output_dir`. `spec_path` feeds the
 /// instruction emitter's drift stamping.
@@ -38,22 +132,19 @@ pub fn generate(
     std::fs::create_dir_all(output_dir)?;
 
     let fp = crate::fingerprint::compute_fingerprint(parsed);
+    let ctx = CodegenCtx {
+        mir,
+        parsed,
+        fp: &fp,
+        spec_path,
+        output_dir,
+    };
 
-    emit_lib(mir, parsed, &fp, output_dir, target)?;
-    emit_state(mir, parsed, &fp, output_dir, target)?;
-    emit_events(mir, parsed, &fp, output_dir, target)?;
-    emit_errors(mir, parsed, &fp, output_dir, target)?;
-    emit_instructions(mir, parsed, &fp, spec_path, output_dir, target)?;
-    // Guards stay ParsedSpec-based: they render account-constraint surface
-    // (signer/writable flags, pda_seeds, variant-payload fields), not
-    // effect-body `Stmt` IR (see `codegen_shared`).
-    crate::codegen_shared::generate_guards(parsed, &fp, output_dir, target)?;
-    if crate::codegen_shared::guards_use_math_helpers(parsed) {
-        emit_math(&fp, output_dir)?;
+    match target {
+        Target::Anchor => run_framework_codegen(&AnchorCodegen, &ctx)?,
+        Target::Quasar => run_framework_codegen(&QuasarCodegen, &ctx)?,
+        Target::Pinocchio => run_framework_codegen(&PinocchioCodegen, &ctx)?,
     }
-    emit_ref_impls(mir, parsed, &fp, output_dir, target)?;
-    emit_imported_mirror(mir, parsed, &fp, output_dir, target)?;
-    emit_cargo_toml(mir, &fp, output_dir, target)?;
 
     let file_count = 4
         + parsed.handlers.len()
@@ -62,6 +153,20 @@ pub fn generate(
 
     eprintln!("Generated {} files in {}", file_count, output_dir.display());
 
+    Ok(())
+}
+
+fn run_framework_codegen(framework: &dyn FrameworkCodegen, ctx: &CodegenCtx<'_>) -> Result<()> {
+    framework.emit_lib(ctx)?;
+    framework.emit_state(ctx)?;
+    framework.emit_events(ctx)?;
+    framework.emit_errors(ctx)?;
+    framework.emit_instructions(ctx)?;
+    framework.emit_guards(ctx)?;
+    framework.emit_math(ctx)?;
+    framework.emit_ref_impls(ctx)?;
+    framework.emit_imported_mirror(ctx)?;
+    framework.emit_cargo_toml(ctx)?;
     Ok(())
 }
 

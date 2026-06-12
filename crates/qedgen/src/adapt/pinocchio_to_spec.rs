@@ -8,24 +8,109 @@ use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Structural `.qedspec` skeleton for a Pinocchio program — complete and
-/// parseable, handlers present with empty bodies.
-pub fn render_skeleton(project_root: &Path, program_name: &str) -> Result<String> {
-    let handlers = enumerate_handlers(project_root)?;
-    Ok(render_skeleton_from_handlers(&handlers, program_name))
+use crate::program_model::{
+    HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework, ProgramModel,
+};
+
+pub struct PinocchioAdapter<'a> {
+    program_name: &'a str,
 }
 
-/// Native variant — no canonical naming prefix, so any `pub fn` is a
-/// candidate handler.
-pub fn render_skeleton_native(project_root: &Path, program_name: &str) -> Result<String> {
-    let handlers = enumerate_handlers_with_prefix(project_root, "")?;
-    Ok(render_skeleton_from_handlers(&handlers, program_name))
+impl<'a> PinocchioAdapter<'a> {
+    pub fn new(program_name: &'a str) -> Self {
+        Self { program_name }
+    }
+}
+
+impl ProgramAdapter for PinocchioAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Pinocchio
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        enumerate_handlers(root)
+            .map(|handlers| !handlers.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        let handlers = enumerate_handlers(root)?;
+        Ok(program_model_from_handlers(
+            &handlers,
+            self.program_name,
+            ProgramFramework::Pinocchio,
+        ))
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_skeleton_from_model(model))
+    }
+}
+
+pub struct NativeAdapter<'a> {
+    program_name: &'a str,
+}
+
+impl<'a> NativeAdapter<'a> {
+    pub fn new(program_name: &'a str) -> Self {
+        Self { program_name }
+    }
+}
+
+impl ProgramAdapter for NativeAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Native
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        enumerate_handlers_with_prefix(root, "")
+            .map(|handlers| !handlers.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        let handlers = enumerate_handlers_with_prefix(root, "")?;
+        Ok(program_model_from_handlers(
+            &handlers,
+            self.program_name,
+            ProgramFramework::Native,
+        ))
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_skeleton_from_model(model))
+    }
 }
 
 /// Takes handler names directly so rendering is testable independent of the
 /// source walker.
+#[allow(dead_code)]
 pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) -> String {
-    let pascal = to_pascal_case(program_name);
+    let model = program_model_from_handlers(handlers, program_name, ProgramFramework::Pinocchio);
+    render_skeleton_from_model(&model)
+}
+
+pub fn program_model_from_handlers(
+    handlers: &[String],
+    program_name: &str,
+    framework: ProgramFramework,
+) -> ProgramModel {
+    let mut model = ProgramModel::new(framework, program_name);
+    model.handlers = handlers
+        .iter()
+        .map(|name| HandlerModel {
+            name: name.clone(),
+            args: Vec::new(),
+            accounts_type: None,
+            source_path: None,
+            shape: HandlerShape::SourceWalk,
+        })
+        .collect();
+    model
+}
+
+pub fn render_skeleton_from_model(model: &ProgramModel) -> String {
+    let pascal = to_pascal_case(&model.name);
     let mut s = String::new();
     s.push_str("// Skeleton emitted by `qedgen probe --emit-spec-candidates` (Pinocchio).\n");
     s.push_str("// Empty handler stubs only — semantic clauses (requires / effect / transfers /\n");
@@ -45,13 +130,19 @@ pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) ->
     s.push_str("  | InvalidArgument\n");
     s.push_str("  | Unauthorized\n\n");
 
-    if handlers.is_empty() {
+    if model.handlers.is_empty() {
         s.push_str("// No `pub fn process_*` handlers discovered under the project root.\n");
         s.push_str("// Add handler declarations manually or verify the source-walk worked.\n");
     } else {
-        for h in handlers {
-            s.push_str(&format!("/// `{}` — discovered via source-walk\n", h));
-            s.push_str(&format!("handler {} : State.Init -> State.Active {{\n", h));
+        for handler in &model.handlers {
+            s.push_str(&format!(
+                "/// `{}` — discovered via source-walk\n",
+                handler.name
+            ));
+            s.push_str(&format!(
+                "handler {} : State.Init -> State.Active {{\n",
+                handler.name
+            ));
             s.push_str("  // accounts, requires, effect, transfers — filled by interview\n");
             s.push_str("}\n\n");
         }
@@ -185,6 +276,65 @@ mod tests {
         let pos_transfer = out.find("handler process_transfer").unwrap();
         assert!(pos_burn < pos_transfer, "alphabetical order");
         assert_eq!(out.matches("handler process_transfer").count(), 1);
+    }
+
+    #[test]
+    fn builds_program_model_from_handlers() {
+        let handlers = vec!["process_transfer".to_string()];
+        let model = program_model_from_handlers(&handlers, "p-token", ProgramFramework::Pinocchio);
+
+        assert_eq!(model.framework, ProgramFramework::Pinocchio);
+        assert_eq!(model.name, "p-token");
+        assert_eq!(model.handlers.len(), 1);
+        assert_eq!(model.handlers[0].name, "process_transfer");
+        assert_eq!(model.handlers[0].shape, HandlerShape::SourceWalk);
+    }
+
+    #[test]
+    fn pinocchio_adapter_detects_extracts_and_renders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn process_transfer(accounts: &[AccountInfo]) -> ProgramResult { Ok(()) }\n",
+        )
+        .unwrap();
+        let adapter = PinocchioAdapter::new("p-token");
+
+        assert_eq!(adapter.framework(), ProgramFramework::Pinocchio);
+        assert!(adapter.detect(root));
+
+        let model = adapter.extract(root).unwrap();
+        assert_eq!(model.handlers.len(), 1);
+        assert_eq!(model.handlers[0].name, "process_transfer");
+        let rendered = adapter.render_spec(&model).unwrap();
+        assert!(rendered.contains("spec PToken"));
+        assert!(rendered.contains("handler process_transfer"));
+    }
+
+    #[test]
+    fn native_adapter_uses_all_public_functions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn initialize() {}\nfn helper() {}\npub fn close_account() {}\n",
+        )
+        .unwrap();
+        let adapter = NativeAdapter::new("native-program");
+
+        assert_eq!(adapter.framework(), ProgramFramework::Native);
+        assert!(adapter.detect(root));
+
+        let model = adapter.extract(root).unwrap();
+        let names: Vec<&str> = model.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["close_account", "initialize"]);
+        assert!(adapter
+            .render_spec(&model)
+            .unwrap()
+            .contains("handler close_account"));
     }
 
     #[test]

@@ -9,8 +9,12 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::anchor_project::{parse_anchor_project, AnchorProject, Instruction};
+use crate::anchor_project::{parse_anchor_project, Instruction};
 use crate::anchor_resolver::{resolve_handler, HandlerLocation};
+use crate::program_model::{
+    ErrorModel, HandlerArgModel, HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework,
+    ProgramModel,
+};
 
 /// Per-handler override naming the real implementation when the classifier
 /// can't follow a forwarder (custom dispatchers). Path parses like a free-fn
@@ -63,10 +67,72 @@ pub fn parse_handler_override(value: &str) -> Result<(String, HandlerOverride)> 
     Ok((name.to_string(), rust_override))
 }
 
+pub struct AnchorAdapter<'a> {
+    overrides: &'a HashMap<String, HandlerOverride>,
+}
+
+impl<'a> AnchorAdapter<'a> {
+    pub fn new(overrides: &'a HashMap<String, HandlerOverride>) -> Self {
+        Self { overrides }
+    }
+}
+
+impl ProgramAdapter for AnchorAdapter<'_> {
+    fn framework(&self) -> ProgramFramework {
+        ProgramFramework::Anchor
+    }
+
+    fn detect(&self, root: &Path) -> bool {
+        parse_anchor_project(root).is_ok()
+    }
+
+    fn extract(&self, root: &Path) -> Result<ProgramModel> {
+        extract_program_model(root, self.overrides)
+    }
+
+    fn render_spec(&self, model: &ProgramModel) -> Result<String> {
+        Ok(render_spec(model))
+    }
+
+    fn adapt(&self, root: &Path) -> Result<String> {
+        let model = self.extract(root)?;
+        let rendered = self.render_spec(&model)?;
+
+        // Round-trip: a parse failure here is a renderer bug, not user input.
+        crate::chumsky_adapter::parse_str(&rendered).context(
+            "Generated .qedspec failed to parse — this is a bug in `qedgen adapt`. \
+             Please report at https://github.com/qedgen/solana-skills/issues",
+        )?;
+
+        Ok(rendered)
+    }
+}
+
+/// Parse-independent "is this an Anchor crate?" check: an `anchor-lang`
+/// dependency in the crate's `Cargo.toml`. Adapter detection consults this so
+/// a malformed Anchor program surfaces the real Anchor parse error instead of
+/// being swallowed by the permissive native source-walk (which regex-scans
+/// for `pub fn` and would emit a wrong-shaped skeleton).
+pub(crate) fn looks_like_anchor(program_root: &Path) -> bool {
+    std::fs::read_to_string(program_root.join("Cargo.toml"))
+        .map(|s| s.contains("anchor-lang"))
+        .unwrap_or(false)
+}
+
 /// Generate a starter `.qedspec` for the Anchor program at `program_root`
 /// (the crate dir holding `src/`). `overrides` points unrecognized handlers
 /// at their actual implementation.
+#[allow(dead_code)]
 pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
+    let adapter = AnchorAdapter::new(overrides);
+    adapter.adapt(program_root)
+}
+
+/// Extract an Anchor program into the neutral brownfield adapter model.
+pub fn extract_program_model(
+    program_root: &Path,
+    overrides: &HashMap<String, HandlerOverride>,
+) -> Result<ProgramModel> {
     let project = parse_anchor_project(program_root).with_context(|| {
         format!(
             "failed to parse Anchor project at {}",
@@ -74,7 +140,11 @@ pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) 
         )
     })?;
 
-    let mut entries = Vec::with_capacity(project.instructions.len());
+    let mut model = ProgramModel::new(ProgramFramework::Anchor, project.program_mod_name.clone());
+    model.primary_source = Some(rel_to(program_root, &project.lib_rs_path));
+    model.entry_module = Some(project.program_mod_name.clone());
+    model.handlers = Vec::with_capacity(project.instructions.len());
+
     for instruction in &project.instructions {
         let location = resolve_with_override(
             instruction,
@@ -82,22 +152,19 @@ pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) 
             program_root,
             overrides.get(&instruction.name),
         )?;
-        entries.push(HandlerEntry::from(instruction, &location, program_root));
+        model.handlers.push(handler_model_from_anchor(
+            instruction,
+            &location,
+            program_root,
+        ));
     }
 
-    let error_enum = discover_error_enum(program_root);
-    let rendered = render_spec(&project, &entries, program_root, error_enum.as_ref());
-
-    // Round-trip: a parse failure here is a renderer bug, not user input.
-    crate::chumsky_adapter::parse_str(&rendered).context(
-        "Generated .qedspec failed to parse — this is a bug in `qedgen adapt`. \
-         Please report at https://github.com/qedgen/solana-skills/issues",
-    )?;
-
-    Ok(rendered)
+    model.errors = discover_error_enum(program_root);
+    Ok(model)
 }
 
 /// Convenience wrapper: write the adapted `.qedspec` to disk.
+#[allow(dead_code)]
 pub fn adapt_to_file(
     program_root: &Path,
     output_path: &Path,
@@ -443,66 +510,48 @@ pub fn render_attributes(entries: &[AttributeEntry]) -> String {
 // Rendering
 // ----------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct HandlerEntry {
-    name: String,
-    /// `(arg_name, qedspec_type)`; None when the Rust type couldn't be
-    /// mapped (e.g. `Vec<MyStruct>`) — renderer falls back to a TODO.
-    args: Vec<(String, Option<String>)>,
-    /// Type written in the handler's `Context<X>`, emitted as a comment.
-    accounts_type: Option<String>,
-    /// File holding the handler body, relative to the program root; None
-    /// when the resolver returned Unrecognized.
-    source_breadcrumb: Option<PathBuf>,
-    /// Resolver classification, surfaced in the rendered doc comment.
-    shape: HandlerShape,
-}
-
-#[derive(Debug)]
-enum HandlerShape {
-    Inline,
-    FreeFn,
-    Method { impl_type: String },
-    Unrecognized { reason: String },
-}
-
-impl HandlerEntry {
-    fn from(instruction: &Instruction, location: &HandlerLocation, program_root: &Path) -> Self {
-        let args = extract_args(&instruction.program_fn);
-        let accounts_type = extract_accounts_type(&instruction.program_fn);
-        let (source_breadcrumb, shape) = match location {
-            HandlerLocation::Inline { source_path, .. } => (
-                Some(rel_to(program_root, source_path)),
-                HandlerShape::Inline,
-            ),
-            HandlerLocation::FreeFn { source_path, .. } => (
-                Some(rel_to(program_root, source_path)),
-                HandlerShape::FreeFn,
-            ),
-            HandlerLocation::Method {
-                source_path,
-                impl_type,
-                ..
-            } => (
-                Some(rel_to(program_root, source_path)),
-                HandlerShape::Method {
-                    impl_type: impl_type.clone(),
-                },
-            ),
-            HandlerLocation::Unrecognized { reason } => (
-                None,
-                HandlerShape::Unrecognized {
-                    reason: reason.clone(),
-                },
-            ),
-        };
-        HandlerEntry {
-            name: instruction.name.clone(),
-            args,
-            accounts_type,
-            source_breadcrumb,
-            shape,
-        }
+fn handler_model_from_anchor(
+    instruction: &Instruction,
+    location: &HandlerLocation,
+    program_root: &Path,
+) -> HandlerModel {
+    let args = extract_args(&instruction.program_fn)
+        .into_iter()
+        .map(|(name, qedspec_type)| HandlerArgModel { name, qedspec_type })
+        .collect();
+    let accounts_type = extract_accounts_type(&instruction.program_fn);
+    let (source_path, shape) = match location {
+        HandlerLocation::Inline { source_path, .. } => (
+            Some(rel_to(program_root, source_path)),
+            HandlerShape::Inline,
+        ),
+        HandlerLocation::FreeFn { source_path, .. } => (
+            Some(rel_to(program_root, source_path)),
+            HandlerShape::FreeFn,
+        ),
+        HandlerLocation::Method {
+            source_path,
+            impl_type,
+            ..
+        } => (
+            Some(rel_to(program_root, source_path)),
+            HandlerShape::Method {
+                impl_type: impl_type.clone(),
+            },
+        ),
+        HandlerLocation::Unrecognized { reason } => (
+            None,
+            HandlerShape::Unrecognized {
+                reason: reason.clone(),
+            },
+        ),
+    };
+    HandlerModel {
+        name: instruction.name.clone(),
+        args,
+        accounts_type,
+        source_path,
+        shape,
     }
 }
 
@@ -622,22 +671,9 @@ fn map_rust_type(ty: &syn::Type) -> Option<String> {
     Some(mapped.to_string())
 }
 
-/// Discovered `#[error_code]` enum, used to seed the spec's `type Error`
-/// block with real variant names.
-#[derive(Debug, Clone)]
-struct ErrorEnumInfo {
-    /// File containing the enum, surfaced in a spec comment.
-    source_path: PathBuf,
-    /// Enum name, carried as a comment only — the qedspec type is always
-    /// called `Error`.
-    enum_name: String,
-    /// Variant identifiers, in source order; may be empty (legal but unusual).
-    variants: Vec<String>,
-}
-
 /// First `#[error_code] pub enum` found in `src/` (deterministic walk
 /// order); None when absent.
-fn discover_error_enum(program_root: &Path) -> Option<ErrorEnumInfo> {
+fn discover_error_enum(program_root: &Path) -> Option<ErrorModel> {
     let src_dir = program_root.join("src");
     let mut files = walk_rust_files(&src_dir);
     files.sort();
@@ -651,8 +687,8 @@ fn discover_error_enum(program_root: &Path) -> Option<ErrorEnumInfo> {
             Err(_) => continue,
         };
         if let Some((enum_name, variants)) = find_error_code_enum(&file.items) {
-            return Some(ErrorEnumInfo {
-                source_path: rel_to(program_root, &path),
+            return Some(ErrorModel {
+                source_path: Some(rel_to(program_root, &path)),
                 enum_name,
                 variants,
             });
@@ -716,37 +752,34 @@ fn walk_rust_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn render_spec(
-    project: &AnchorProject,
-    entries: &[HandlerEntry],
-    program_root: &Path,
-    error_enum: Option<&ErrorEnumInfo>,
-) -> String {
+fn render_spec(model: &ProgramModel) -> String {
     let mut s = String::new();
     s.push_str("// Generated by `qedgen adapt`. Fill in the TODOs to make this verifiable.\n");
-    // Program-root-relative path keeps snapshots machine-stable.
-    let rel_lib_rs = rel_to(program_root, &project.lib_rs_path);
-    s.push_str(&format!(
-        "// Source: {} (program mod: `{}`)\n\n",
-        rel_lib_rs.display(),
-        project.program_mod_name,
-    ));
-    s.push_str(&format!(
-        "spec {}\n\n",
-        to_pascal_case(&project.program_mod_name)
-    ));
+    if let (Some(primary_source), Some(entry_module)) = (&model.primary_source, &model.entry_module)
+    {
+        s.push_str(&format!(
+            "// Source: {} (program mod: `{}`)\n\n",
+            primary_source.display(),
+            entry_module,
+        ));
+    }
+    s.push_str(&format!("spec {}\n\n", to_pascal_case(&model.name)));
 
     s.push_str("// TODO: replace with the actual lifecycle of your program.\n");
     s.push_str("type State\n");
     s.push_str("  | Init\n");
     s.push_str("  | Active\n\n");
 
-    match error_enum {
+    match model.errors.as_ref() {
         Some(info) if !info.variants.is_empty() => {
+            let source_path = info
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
             s.push_str(&format!(
                 "// Error variants discovered in {} (`#[error_code] pub enum {}`).\n",
-                info.source_path.display(),
-                info.enum_name,
+                source_path, info.enum_name,
             ));
             s.push_str("type Error\n");
             for variant in &info.variants {
@@ -755,10 +788,14 @@ fn render_spec(
             s.push('\n');
         }
         Some(info) => {
+            let source_path = info
+                .source_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
             s.push_str(&format!(
                 "// Found `#[error_code] pub enum {}` in {} but it has no variants.\n",
-                info.enum_name,
-                info.source_path.display(),
+                info.enum_name, source_path,
             ));
             s.push_str("// TODO: list domain errors raised by the handlers below.\n");
             s.push_str("type Error\n");
@@ -772,15 +809,15 @@ fn render_spec(
         }
     }
 
-    for entry in entries {
-        render_handler(&mut s, entry);
+    for handler in &model.handlers {
+        render_handler(&mut s, handler);
         s.push('\n');
     }
 
     s
 }
 
-fn render_handler(s: &mut String, entry: &HandlerEntry) {
+fn render_handler(s: &mut String, entry: &HandlerModel) {
     match &entry.shape {
         HandlerShape::Inline => {
             s.push_str(&format!(
@@ -808,8 +845,14 @@ fn render_handler(s: &mut String, entry: &HandlerEntry) {
                  ///       cover yet.\n",
             );
         }
+        HandlerShape::SourceWalk => {
+            s.push_str(&format!(
+                "/// `{}` — discovered via source-walk\n",
+                entry.name
+            ));
+        }
     }
-    if let Some(path) = &entry.source_breadcrumb {
+    if let Some(path) = &entry.source_path {
         s.push_str(&format!("/// discovered at: {}\n", path.display()));
     }
     if let Some(accounts) = &entry.accounts_type {
@@ -823,14 +866,14 @@ fn render_handler(s: &mut String, entry: &HandlerEntry) {
     // fallback notes go inside the body, not the signature.
     s.push_str(&format!("handler {}", entry.name));
     let mut unknown_args: Vec<&str> = Vec::new();
-    for (arg_name, arg_ty) in &entry.args {
-        match arg_ty {
-            Some(ty) => s.push_str(&format!(" ({} : {})", arg_name, ty)),
+    for arg in &entry.args {
+        match &arg.qedspec_type {
+            Some(ty) => s.push_str(&format!(" ({} : {})", arg.name, ty)),
             None => {
                 // Unknown type → U64 placeholder so the spec parses;
                 // surfaced in a body comment.
-                s.push_str(&format!(" ({} : U64)", arg_name));
-                unknown_args.push(arg_name.as_str());
+                s.push_str(&format!(" ({} : U64)", arg.name));
+                unknown_args.push(arg.name.as_str());
             }
         }
     }
@@ -950,6 +993,97 @@ mod tests {
         assert!(rendered.contains("accounts struct: `Initialize`"));
         assert!(rendered.contains("accounts struct: `Cancel`"));
         // Round-trip parsability is enforced inside `adapt()` itself.
+    }
+
+    #[test]
+    fn extract_program_model_captures_anchor_handlers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[
+                (
+                    "src/lib.rs",
+                    r#"
+                use anchor_lang::prelude::*;
+                pub mod instructions;
+
+                #[program]
+                pub mod my_escrow {
+                    use super::*;
+                    pub fn initialize(ctx: Context<Initialize>, amount: u64) -> Result<()> {
+                        instructions::initialize::handler(ctx, amount)
+                    }
+                }
+                "#,
+                ),
+                ("src/instructions/mod.rs", "pub mod initialize;\n"),
+                (
+                    "src/instructions/initialize.rs",
+                    r#"
+                use anchor_lang::prelude::*;
+                pub fn handler(ctx: Context<Initialize>, amount: u64) -> Result<()> {
+                    Ok(())
+                }
+                "#,
+                ),
+            ],
+        );
+
+        let model = extract_program_model(&root, &HashMap::new()).unwrap();
+
+        assert_eq!(model.framework, ProgramFramework::Anchor);
+        assert_eq!(model.name, "my_escrow");
+        assert_eq!(
+            model.primary_source.as_deref(),
+            Some(Path::new("src/lib.rs"))
+        );
+        assert_eq!(model.entry_module.as_deref(), Some("my_escrow"));
+        assert_eq!(model.handlers.len(), 1);
+
+        let handler = &model.handlers[0];
+        assert_eq!(handler.name, "initialize");
+        assert_eq!(handler.accounts_type.as_deref(), Some("Initialize"));
+        assert_eq!(
+            handler.source_path.as_deref(),
+            Some(Path::new("src/instructions/initialize.rs"))
+        );
+        assert_eq!(handler.shape, HandlerShape::FreeFn);
+        assert_eq!(handler.args.len(), 1);
+        assert_eq!(handler.args[0].name, "amount");
+        assert_eq!(handler.args[0].qedspec_type.as_deref(), Some("U64"));
+    }
+
+    #[test]
+    fn anchor_adapter_trait_detects_extracts_and_renders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = write_project(
+            &tmp,
+            &[(
+                "src/lib.rs",
+                r#"
+                use anchor_lang::prelude::*;
+
+                #[program]
+                pub mod inline_prog {
+                    use super::*;
+                    pub fn initialize(ctx: Context<Init>, x: u64) -> Result<()> {
+                        Ok(())
+                    }
+                }
+                "#,
+            )],
+        );
+        let overrides = HashMap::new();
+        let adapter = AnchorAdapter::new(&overrides);
+
+        assert_eq!(adapter.framework(), ProgramFramework::Anchor);
+        assert!(adapter.detect(&root));
+
+        let model = adapter.extract(&root).unwrap();
+        assert_eq!(model.name, "inline_prog");
+        let rendered = adapter.render_spec(&model).unwrap();
+        assert!(rendered.contains("spec InlineProg"));
+        assert!(rendered.contains("handler initialize (x : U64)"));
     }
 
     #[test]
