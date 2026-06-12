@@ -170,6 +170,12 @@ pub struct Mir {
     /// mutations. Each property × environment cross emits a
     /// preservation theorem.
     pub environments: Vec<EnvironmentMir>,
+    /// Issue #67 item 4 — `hook after_store(<field>)` / `hook
+    /// before_cpi` assertion blocks, lifted from `ParsedSpec.hooks`.
+    /// The Kani/proptest transition emitter injects `AfterStore`
+    /// asserts after each matching field store; Lean ignores hooks
+    /// (enforcement deferred to the qedsvm path).
+    pub hooks: Vec<HookMir>,
     /// Issue #67 item 3 — `ghost` spec-only auxiliary state. Lowered to
     /// extra verification-State fields (Lean / proptest / Kani) plus a
     /// per-handler new-value expression; the on-chain codegen ignores
@@ -201,6 +207,22 @@ pub struct Mir {
     /// variant. `lean_gen_mir::is_multi_variant_adt` reads this; the
     /// `ParsedSpec`-based codegens read `state_repr_is_adt()` directly.
     pub adt_state: bool,
+}
+
+/// Issue #67 item 4 — a `hook … { assert <expr>, … }` block. Mirrors
+/// `ParsedHook`; asserts carry both Lean and Rust renderings.
+#[derive(Debug, Clone)]
+pub struct HookMir {
+    pub kind: HookKind,
+    pub asserts: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookKind {
+    /// Fires after any store to the named state field.
+    AfterStore(Symbol),
+    /// Fires before a CPI (optionally only to the named callee namespace).
+    BeforeCpi(Option<Symbol>),
 }
 
 impl Mir {
@@ -1093,6 +1115,27 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
         invariants: lower_invariants(parsed),
         events: lower_events(parsed),
         constants: parsed.constants.clone(),
+        hooks: parsed
+            .hooks
+            .iter()
+            .map(|h| HookMir {
+                kind: match &h.kind {
+                    crate::check::ParsedHookKind::AfterStore(f) => HookKind::AfterStore(f.clone()),
+                    crate::check::ParsedHookKind::BeforeCpi(ns) => HookKind::BeforeCpi(ns.clone()),
+                },
+                asserts: h
+                    .asserts
+                    .iter()
+                    .map(|a| Expr {
+                        lean: a.lean.clone(),
+                        rust: a.rust.clone(),
+                        rust_pod: a.rust.clone(),
+                        rust_binary: String::new(),
+                        source_span: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
         uninterpreted_helpers: parsed
             .uninterpreted_helpers
             .iter()
@@ -1957,6 +2000,7 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             invariants: vec![],
             events: vec![],
             constants: vec![],
+            hooks: vec![],
             uninterpreted_helpers: vec![],
             ref_impls: vec![],
             properties: vec![],
