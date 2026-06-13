@@ -201,7 +201,7 @@ pub(super) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<Complet
 ///   - `N` must be a declared `const`
 ///   - `T` must be either a declared record or a well-known primitive
 ///   - Effect LHS of form `field[i].x` must reference a Map-typed state field
-pub(crate) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     use std::collections::{HashMap, HashSet};
 
     let mut warnings = Vec::new();

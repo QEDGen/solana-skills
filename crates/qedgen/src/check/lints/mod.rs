@@ -14,7 +14,7 @@ mod shared;
 mod state;
 mod structural;
 
-pub(crate) use arithmetic::*;
+pub(in crate::check::lints) use arithmetic::*;
 pub(in crate::check::lints) use auth::*;
 pub(crate) use cpi::*;
 pub(crate) use shared::*;
