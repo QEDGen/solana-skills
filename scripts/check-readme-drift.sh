@@ -7,16 +7,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 README="$REPO_ROOT/README.md"
-MAIN_RS="$REPO_ROOT/crates/qedgen/src/main.rs"
+# The `Commands` enum lives in cli.rs since the v2.36 main.rs split (PR #115).
+CLI_RS="$REPO_ROOT/crates/qedgen/src/cli.rs"
 
-# Extract subcommand names from the Commands enum in main.rs.
+# Extract subcommand names from the Commands enum in cli.rs.
 # Handles: explicit #[command(name = "...")] overrides, PascalCase -> kebab-case conversion,
 # and #[command(subcommand)] variants.
 get_commands() {
     local in_enum=0
     local next_name=""
     while IFS= read -r line; do
-        if [[ "$line" =~ ^enum\ Commands ]]; then
+        if [[ "$line" =~ ^(pub\(crate\)\ )?enum\ Commands ]]; then
             in_enum=1
             continue
         fi
@@ -40,7 +41,7 @@ get_commands() {
                 echo "$variant" | sed -E 's/([a-z0-9])([A-Z])/\1-\2/g' | tr '[:upper:]' '[:lower:]'
             fi
         fi
-    done < "$MAIN_RS"
+    done < "$CLI_RS"
 }
 
 commands=$(get_commands)
