@@ -8,7 +8,7 @@ use super::*;
 /// (`WrongState` gate, `MathOverflow` check) misbehaves silently. P0
 /// pointing at the pipe form; also fires when both forms are declared
 /// (signals user confusion).
-pub(crate) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let has_error_record = spec.records.iter().any(|r| r.name == "Error");
     if !has_error_record {
@@ -50,7 +50,7 @@ pub(crate) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
 /// `unknown_error_variant`: a per-site `or X` override or checked_overflow/
 /// underflow pragma references a variant not declared in `type Error | …` —
 /// the generated Rust references `<ProgramName>Error::X` and won't compile.
-pub(crate) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let mut warnings = Vec::new();
 
@@ -111,7 +111,7 @@ pub(crate) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     warnings
 }
 
-pub(crate) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let pdas = &spec.pdas;
 
@@ -223,7 +223,7 @@ pub(crate) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
 /// **Author-written tautologies are silently accepted**: no `Expr::Old(_)`
 /// in the AST + identical sides is an authored choice (the "field tracking"
 /// pattern). Rule 1 gates on `Expr::Old(_)` precisely so this passes.
-pub(crate) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for prop in &spec.properties {
         let Some(rs) = prop.rust_expression.as_deref() else {
@@ -313,4 +313,375 @@ pub(crate) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
         }
     }
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_declared_as_record_lint_fires_and_suggests_pipe_form() {
+        let src = r#"
+    spec Probe
+    state { balance : U64 }
+    type Error = {
+      InvalidAmount : U64,
+      Unauthorized : U64,
+    }
+    handler init { effect { balance := 0 } }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_error_declared_as_record(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "error_declared_as_record")
+            .expect("error_declared_as_record fires");
+        assert_eq!(hit.severity, Severity::Error);
+        let example = hit.example.as_deref().unwrap_or("");
+        assert!(
+            example.contains("type Error\n  | InvalidAmount"),
+            "example should suggest pipe form, got: {}",
+            example
+        );
+    }
+
+    // ----- PDA seed collision -----
+
+    #[test]
+    fn pda_seed_collision_fires_for_identical_seeds() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+                spec CollisionTest
+
+                pda vault ["vault", user]
+                pda escrow ["vault", user]
+
+                state { dummy : U64 }
+                "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "pda_seed_collision"),
+            "must warn on identical seed tuples; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pda_seed_collision_no_false_positive_for_distinct_seeds() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+                spec CollisionTest
+
+                pda vault ["vault", user]
+                pda escrow ["escrow", user]
+
+                state { dummy : U64 }
+                "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "pda_seed_collision"),
+            "must NOT warn when seeds differ by literal discriminator"
+        );
+    }
+
+    #[test]
+    fn pda_seed_possible_collision_fires_when_literals_match_but_vars_differ() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"
+                spec CollisionTest
+
+                pda order_a ["order", user_a]
+                pda order_b ["order", user_b]
+
+                state { dummy : U64 }
+                "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "pda_seed_possible_collision"),
+            "must warn on same literals but different variable seeds; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ----- unknown_error_variant lint -----
+
+    #[test]
+    fn unknown_error_variant_fires_on_per_site_override_with_undeclared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow | MathUnderflow
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance += n else MintOverflow }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "unknown_error_variant")
+            .expect("expected unknown_error_variant warning");
+        assert!(hit.message.contains("MintOverflow"));
+        assert!(hit.message.contains("deposit"));
+    }
+
+    #[test]
+    fn unknown_error_variant_fires_on_pragma_with_undeclared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow | MathUnderflow
+
+    pragma checked_overflow_error = MintOverflow
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance += n }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "unknown_error_variant")
+            .expect("expected unknown_error_variant warning for pragma");
+        assert!(hit.message.contains("checked_overflow_error"));
+        assert!(hit.message.contains("MintOverflow"));
+    }
+
+    #[test]
+    fn unknown_error_variant_silent_when_override_is_declared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow | MintOverflow
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance += n else MintOverflow }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unknown_error_variant"),
+            "per-site override referencing a declared variant should not fire"
+        );
+        // The site provides an override, so missing_math_overflow defers
+        // (the `+=` doesn't fall back to the builtin default).
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "per-site override defers missing_math_overflow"
+        );
+    }
+
+    // ----- Rule 17: invariant_no_body -----
+
+    #[test]
+    fn invariant_no_body_fires_on_doc_only_invariant() {
+        // The escrow / escrow-split shape: invariant declared with only a
+        // description string, no `expr` body. Lean codegen would emit
+        // `theorem conservation : True := trivial`.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Demo
+    type State | Active of { counter : U64 }
+
+    invariant conservation "total tokens preserved across all handlers"
+
+    handler bump : State.Active -> State.Active {
+      auth admin
+      accounts { admin : signer }
+      effect { counter += 1 }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "invariant_no_body")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one finding: {hits:#?}");
+        assert!(hits[0].message.contains("conservation"));
+    }
+
+    #[test]
+    fn invariant_no_body_silent_on_real_body() {
+        // An invariant with a proper expression body — no finding.
+        // The DSL form: `invariant <name> : <expr>` (one-liner, no
+        // preserved_by — the expression body alone is what matters
+        // for this lint).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Demo
+    type State | Active of { counter : U64 }
+
+    invariant counter_nonneg : state.counter >= 0
+
+    handler bump : State.Active -> State.Active {
+      auth admin
+      accounts { admin : signer }
+      effect { counter += 1 }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "invariant_no_body"),
+            "real expr body should suppress: {warnings:#?}"
+        );
+    }
+
+    // ========================================================================
+    // vacuous_property_lowering lint
+    // ========================================================================
+
+    const VPL_SPEC_HEAD: &str = r#"
+    spec VplTest
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Active of { balance : U64, admin : U64 }
+
+    type Error
+      | E
+
+    handler bump (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance := balance + delta }
+    }
+    "#;
+
+    #[test]
+    fn vpl_lint_silent_on_author_tautology_without_old() {
+        // pool.qedspec:660-662 pattern — `state.x == state.x` with no
+        // `old(...)` in the AST. The author wants the field surfaced in
+        // proofs; the lint must NOT fire.
+        let src = format!(
+            "{}{}",
+            VPL_SPEC_HEAD,
+            r#"property admin_tracked : state.admin == state.admin preserved_by all"#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_vacuous_property_lowering(&spec);
+        assert!(
+            warnings.is_empty(),
+            "author-written tautology (no Expr::Old) must not fire; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn vpl_lint_silent_on_distinct_sides() {
+        // Distinct comparison — silent regardless of `old(...)`.
+        let src = format!(
+            "{}{}",
+            VPL_SPEC_HEAD, r#"property balance_le_max : state.balance <= 1000 preserved_by all"#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_vacuous_property_lowering(&spec);
+        assert!(
+            warnings.is_empty(),
+            "distinct-sides comparison must not fire; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn vpl_lint_silent_on_binary_property_post_slice_2() {
+        // A binary property (`old(...)` in body) lowers to
+        // `post.balance >= pre.balance` — distinct sides, no tautology.
+        // If the lint fires here, codegen regressed.
+        let src = format!(
+            "{}{}",
+            VPL_SPEC_HEAD,
+            r#"property balance_monotonic : state.balance >= old(state.balance) preserved_by all"#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_vacuous_property_lowering(&spec);
+        let vpl: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "vacuous_property_lowering")
+            .collect();
+        assert!(
+            vpl.is_empty(),
+            "binary property correctly lowered to pre/post must not fire VPL; got: {:?}",
+            vpl.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn vpl_lint_fires_on_literal_true_body() {
+        // Construct a property whose rust_expression is the literal "true"
+        // — Rule 3 unconditionally fires.
+        let mut spec = ParsedSpec::default();
+        spec.properties.push(ParsedProperty {
+            name: "always_true".to_string(),
+            expression: Some("True".to_string()),
+            rust_expression: Some("true".to_string()),
+            rust_expression_pod: Some("true".to_string()),
+            preserved_by: vec![],
+            per_slot: None,
+            quantifier_lint: None,
+            class: PropertyClass::Unary,
+            ast_body: None,
+        });
+        let warnings = check_vacuous_property_lowering(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "vacuous_property_lowering"),
+            "literal `true` body must fire VPL; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn vpl_lint_fires_on_unsupported_quantifier_marker() {
+        // Construct a property whose rust_expression carries the marker
+        // — Rule 2 unconditionally fires.
+        let mut spec = ParsedSpec::default();
+        spec.properties.push(ParsedProperty {
+            name: "stub_forall".to_string(),
+            expression: Some("forall x : U64, x > 0".to_string()),
+            rust_expression: Some(format!(
+                "/* {} : forall x : U64, x > 0 */ true",
+                QEDGEN_UNSUPPORTED_MARKER
+            )),
+            rust_expression_pod: Some("true".to_string()),
+            preserved_by: vec![],
+            per_slot: None,
+            quantifier_lint: None,
+            class: PropertyClass::Unary,
+            ast_body: None,
+        });
+        let warnings = check_vacuous_property_lowering(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "vacuous_property_lowering"
+                    && w.message.contains("QEDGEN_UNSUPPORTED_QUANTIFIER")),
+            "marker body must fire VPL with marker mention; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.message))
+                .collect::<Vec<_>>(),
+        );
+    }
 }

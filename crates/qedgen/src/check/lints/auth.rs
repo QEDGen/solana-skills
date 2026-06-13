@@ -8,7 +8,7 @@ use super::*;
 /// touches. Used by terminal-transition and value-transfer lints to
 /// avoid false positives on auth-bound handlers (the signer identity
 /// IS the gate).
-pub(crate) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
+pub(super) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
     let Some(ref who) = handler.who else {
         return false;
     };
@@ -35,7 +35,7 @@ pub(crate) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> 
 ///
 /// Closed by R25 when `X` IS a state field. Catches the percolator-CRIT
 /// shape — auth name without a state-side anchor.
-pub(crate) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         if handler.permissionless {
@@ -122,7 +122,7 @@ pub(crate) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
 /// `authority X` with X being a handler-bound account that's program-
 /// derived), AND the handler has no `requires` clause that constrains
 /// who can call it. Catches the lending::liquidate vault-drain shape.
-pub(crate) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         for transfer in &handler.transfers {
@@ -183,4 +183,115 @@ pub(crate) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<Compl
         }
     }
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // Spec-authoring lint regression tests. Each fixture mirrors an audit
+    // finding shape — if the lints stop firing, those recurring spec-shape
+    // gaps go uncaught.
+    // ========================================================================
+
+    /// Fixture mirroring the percolator-CRIT shape: `auth authority` but
+    /// no `authority` field on the state. Every handler is reachable by
+    /// any signer.
+    const UNBOUND_AUTH_FIXTURE: &str = r#"
+    spec Vault
+
+    type State
+      | Uninitialized
+      | Active of {
+          balance : U64,
+        }
+
+    type Error | InvalidAmount
+
+    handler init : State.Uninitialized -> State.Active {
+      auth authority
+      accounts {
+        authority : signer
+        vault     : writable
+      }
+      effect { balance := 0 }
+    }
+
+    handler withdraw (amount : U64) : State.Active -> State.Active {
+      auth authority
+      accounts {
+        authority : signer
+        vault     : writable
+      }
+      requires amount > 0 else InvalidAmount
+      effect { balance -= amount }
+    }
+    "#;
+
+    #[test]
+    fn lint_unbound_auth_fires() {
+        let spec =
+            crate::chumsky_adapter::parse_str(UNBOUND_AUTH_FIXTURE).expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let unbound: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unbound_auth")
+            .collect();
+        assert!(
+                !unbound.is_empty(),
+                "expected unbound_auth to fire on a spec with `auth authority` and no state field; got: {:?}",
+                warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+            );
+    }
+
+    /// Dotted-auth desugar (`auth <acct>.<field>`) synthesizes a
+    /// `requires <acct>.<field> == <signer>.pubkey else Unauthorized`
+    /// clause and rewrites `who` to the signer name; `unbound_auth` must
+    /// recognize the imported-account binding shape (not just `s.<field>`
+    /// state references) and stay silent. Fixture distills the bundled
+    /// cross-program-vault `emergency_close` shape.
+    const DOTTED_AUTH_BOUND_FIXTURE: &str = r#"
+    spec Vault
+
+    type State
+      | Active of {
+          total_deposits : U64,
+        }
+
+    type AdminConfig
+      | Active of {
+          admin : Pubkey,
+        }
+
+    type Error | Unauthorized
+
+    handler close : State.Active -> State.Active {
+      auth admin_config.admin
+      accounts {
+        admin        : signer
+        vault        : writable
+        admin_config : type AdminConfig
+      }
+      effect { total_deposits := 0 }
+    }
+    "#;
+
+    #[test]
+    fn lint_unbound_auth_silent_on_dotted_auth_desugar() {
+        let spec = crate::chumsky_adapter::parse_str(DOTTED_AUTH_BOUND_FIXTURE)
+            .expect("dotted-auth fixture should parse");
+        let warnings = check_completeness(&spec);
+        let unbound: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unbound_auth")
+            .collect();
+        assert!(
+            unbound.is_empty(),
+            "unbound_auth must stay silent when the synthesized `requires \
+                 <acct>.<field> == <signer>.pubkey` clause binds the signer \
+                 via an imported account (v2.29.2 escape); got: {:?}",
+            unbound.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
 }

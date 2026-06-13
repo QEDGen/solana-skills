@@ -22,7 +22,7 @@ pub use parse::*;
 pub use proof_status::*;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod test_support;
 
 /// Lint with explicit control over both lock behavior and cache policy.
 /// `qedgen check --frozen --no-cache` calls this.

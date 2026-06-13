@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(crate) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for r in &spec.ref_impls {
         if !ref_impl_has_overflow_risk(r) {
@@ -58,7 +58,7 @@ pub(crate) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<Completen
 /// Per-effect overrides and pragma defaults defer to
 /// `check_unknown_error_variant`. Back-compat fallback honored: declared
 /// `MathOverflow` but not `MathUnderflow` → `-=` raises `MathOverflow`.
-pub(crate) fn check_checked_arith_needs_math_overflow(
+pub(super) fn check_checked_arith_needs_math_overflow(
     spec: &ParsedSpec,
 ) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
@@ -157,7 +157,7 @@ pub(crate) fn check_checked_arith_needs_math_overflow(
 /// Lives in check, not probe: a real structural pattern but a spec-authoring
 /// concern, not a reproducible vulnerability (probe ships reproducer-bearing
 /// findings only).
-pub(crate) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
         for (field, kind, _value) in &op.effects {
@@ -313,4 +313,311 @@ pub(crate) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
     }
 
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::test_support::*;
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_on_wrap() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("tick");
+        h.effects
+            .push(("epoch".to_string(), "add_wrap".to_string(), "1".to_string()));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule, "wrapping_arithmetic");
+        assert_eq!(warnings[0].severity, Severity::Warning);
+        assert!(warnings[0].message.contains("wrapping"));
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_on_saturating() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("apply");
+        h.effects.push((
+            "balance".to_string(),
+            "add_sat".to_string(),
+            "delta".to_string(),
+        ));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].rule, "saturating_arithmetic");
+        assert_eq!(warnings[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_silent_on_default_checked() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("deposit");
+        h.effects
+            .push(("total".to_string(), "add".to_string(), "amount".to_string()));
+        h.effects.push((
+            "fee_pool".to_string(),
+            "sub".to_string(),
+            "amount".to_string(),
+        ));
+        spec.handlers.push(h);
+        assert!(check_wrapping_arithmetic_opt_in(&spec).is_empty());
+    }
+
+    #[test]
+    fn wrapping_arithmetic_lint_fires_per_op() {
+        let mut spec = empty_spec();
+        let mut h = make_handler("complex");
+        h.effects
+            .push(("a".to_string(), "add_wrap".to_string(), "1".to_string()));
+        h.effects
+            .push(("b".to_string(), "sub_sat".to_string(), "1".to_string()));
+        spec.handlers.push(h);
+        let warnings = check_wrapping_arithmetic_opt_in(&spec);
+        assert_eq!(warnings.len(), 2);
+    }
+
+    // `state { fields }` sugar must expose Map-typed fields to
+    // `check_map_and_subscript` — otherwise `subscript_not_map` fires on
+    // every effect LHS that subscripts a sugared Map field.
+    #[test]
+    fn state_sugar_map_field_is_visible_to_subscript_lint() {
+        let src = r#"
+    spec Probe
+    const MAX = 8
+    type User = { active : Bool, balance : U64, }
+    state {
+      lsts : Map[MAX] User,
+    }
+    type Error
+      | InvalidAmount
+    handler deposit (idx : U64) (amt : U64) {
+      effect { lsts[idx].balance := amt }
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_map_and_subscript(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "subscript_not_map"),
+            "spurious subscript_not_map on `state {{ ... }}` sugar: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ----- missing_math_overflow lint -----
+
+    #[test]
+    fn missing_math_overflow_fires_when_checked_arith_used_without_declaration() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | InvalidAmount
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance += n }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "missing_math_overflow")
+            .expect("expected missing_math_overflow warning");
+        assert!(hit.message.contains("deposit"));
+        assert!(hit.message.contains("PoolError::MathOverflow"));
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_variant_is_declared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow | InvalidAmount
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance += n }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "should not warn when MathOverflow is declared in Error sum"
+        );
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_when_no_checked_arithmetic() {
+        // Spec uses only `effect { x := ... }` (set, no overflow path).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Reset
+    program_id "11111111111111111111111111111111"
+    type State | Active of { counter : U64 }
+    type Error | InvalidAmount
+
+    handler clear : State.Active -> State.Active {
+      permissionless
+      effect { counter := 0 }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "no checked arith → no MathOverflow obligation"
+        );
+    }
+
+    // ----- -= raises MathUnderflow (with back-compat) -----
+
+    #[test]
+    fn missing_math_overflow_fires_on_sub_without_underflow_or_overflow() {
+        // Pure `-=` with neither MathOverflow nor MathUnderflow declared
+        // → fires for MathUnderflow (the default for `-=`).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | InvalidAmount
+
+    handler withdraw (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance -= n }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "missing_math_overflow")
+            .expect("expected missing_math_overflow warning for MathUnderflow");
+        assert!(
+            hit.message.contains("MathUnderflow"),
+            "v2.24: `-=` defaults to MathUnderflow; message was {:?}",
+            hit.message
+        );
+    }
+
+    #[test]
+    fn missing_math_overflow_silent_on_sub_with_only_overflow_declared() {
+        // Back-compat: declared MathOverflow but not MathUnderflow →
+        // `-=` falls back to MathOverflow; lint stays silent.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow
+
+    handler withdraw (n : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance -= n }
+    }
+    "#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_math_overflow"),
+            "back-compat: only MathOverflow declared → -= falls back; no warning"
+        );
+    }
+
+    /// ref_impl with multiplication over U64 params trips the lint: Lean
+    /// lowers to `Nat` (no overflow); Rust runs `u64 * u64` which can wrap
+    /// or panic.
+    #[test]
+    fn ref_impl_with_multiplication_over_u64_fires_unbounded_arith_lint() {
+        let src = r#"spec Pool
+    type Error | InvalidAmount
+    type State = { x : U64 }
+
+    ref_impl scaled (a : U64) (b : U64) : U64 = a * b
+
+    handler set (amt : U64) {
+      requires amt > 0 else InvalidAmount
+      effect { x := amt }
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"
+                    && w.subject.as_deref() == Some("scaled")),
+            "expected ref_impl_unbounded_arith on `scaled`; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Pure-division ref_impl doesn't trip the lint — `/` cannot produce
+    /// values exceeding the inputs in unsigned arithmetic.
+    #[test]
+    fn ref_impl_with_division_only_does_not_fire_unbounded_arith_lint() {
+        let src = r#"spec Pool
+    type Error | InvalidAmount
+    type State = { x : U64 }
+
+    ref_impl half (a : U64) : U64 = a / 2
+
+    handler set (amt : U64) {
+      requires amt > 0 else InvalidAmount
+      effect { x := amt }
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"),
+            "lint should not fire on division-only ref_impl; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Ref impls without bounded-numeric params (e.g., Pubkey predicates)
+    /// don't trip the lint even when they do arithmetic on other inputs.
+    /// Lean and Rust agree on Bool / Pubkey semantics, so no gap.
+    #[test]
+    fn ref_impl_with_no_numeric_params_does_not_fire_unbounded_arith_lint() {
+        let src = r#"spec Pool
+    type Error | InvalidAmount
+    type State = { admin : Pubkey }
+
+    ref_impl is_admin (who : Pubkey) (admin : Pubkey) : Bool = who == admin
+
+    handler set (amt : U64) {
+      requires amt > 0 else InvalidAmount
+      effect {}
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_ref_impl_unbounded_arith(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "ref_impl_unbounded_arith"),
+            "lint should not fire when ref_impl has no bounded-numeric IO; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>(),
+        );
+    }
 }

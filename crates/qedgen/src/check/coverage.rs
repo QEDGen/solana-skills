@@ -132,3 +132,56 @@ pub fn print_coverage_table(matrix: &CoverageMatrix) {
         eprintln!("Gaps: {}", matrix.gaps.join(", "));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::test_support::*;
+
+    // ========================================================================
+    // Coverage matrix, write_without_read, circular_lifecycle
+    // ========================================================================
+
+    #[test]
+    fn test_coverage_matrix_full_coverage() {
+        let spec_content = include_str!("../../../../examples/rust/multisig/multisig.qedspec");
+        let spec =
+            crate::chumsky_adapter::parse_str(spec_content).expect("multisig.qedspec should parse");
+        let matrix = coverage_matrix(&spec);
+        assert_eq!(matrix.coverage_pct, 100.0);
+        assert!(matrix.gaps.is_empty());
+        // 8 handlers: create_vault, propose, approve, reject, execute,
+        // cancel_proposal, add_member, remove_member.
+        assert_eq!(matrix.operations.len(), 8);
+        assert_eq!(matrix.properties.len(), 2);
+    }
+
+    #[test]
+    fn test_coverage_matrix_detects_gaps() {
+        let mut h_covered = make_handler("deposit");
+        h_covered.effects = vec![("balance".into(), "add".into(), "amount".into())];
+        let mut h_uncovered = make_handler("withdraw");
+        h_uncovered.effects = vec![("balance".into(), "sub".into(), "amount".into())];
+
+        let spec = ParsedSpec {
+            handlers: vec![h_covered, h_uncovered],
+            state_fields: vec![("balance".into(), "U64".into())],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("state.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()], // only covers deposit
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let matrix = coverage_matrix(&spec);
+        assert_eq!(matrix.gaps, vec!["withdraw"]);
+        assert!(matrix.coverage_pct < 100.0);
+    }
+}
