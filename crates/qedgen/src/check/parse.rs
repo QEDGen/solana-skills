@@ -84,8 +84,14 @@ fn parse_spec_dir_with_opts(
     lock_mode: crate::qed_lock::LockMode,
     cache_opts: crate::import_resolver::CacheOpts,
 ) -> Result<ParsedSpec> {
+    // Local `import` dependencies (declared in qed.toml, e.g. an `imports/`
+    // subtree) are *separate* specs, not fragments of this multi-file spec.
+    // Exclude their paths from the sibling-fragment sweep — otherwise their
+    // own `spec <Name>` trips the shared-name check below (issue #100).
+    // `import` resolution reads them later via `resolve_and_merge_imports`.
+    let import_roots = import_path_roots(dir);
     let mut files = Vec::new();
-    collect_qedspec_files(dir, &mut files)?;
+    collect_qedspec_files(dir, &import_roots, &mut files)?;
     files.sort();
 
     anyhow::ensure!(
@@ -476,8 +482,13 @@ fn parse_imported_sources(r: &crate::import_resolver::ResolvedImport) -> Result<
 /// proc-macro computes at compile time.
 pub fn read_spec_source(path: &Path) -> Result<String> {
     if path.is_dir() {
+        // Hash source: pass NO exclusions. This must stay byte-for-byte
+        // identical to the proc-macro's own dir walk
+        // (qedgen-macros::spec_bind::collect_qedspec_files) so the spec_hash
+        // agrees at compile time. The import-subtree exclusion is a
+        // *semantic-merge* concern (parse_spec_dir_with_opts), not a hash one.
         let mut files = Vec::new();
-        collect_qedspec_files(path, &mut files)?;
+        collect_qedspec_files(path, &[], &mut files)?;
         files.sort();
         let mut out = String::new();
         for f in &files {
@@ -496,17 +507,55 @@ pub fn read_spec_source(path: &Path) -> Result<String> {
 
 /// Recursive collector for `.qedspec` files under a directory, depth-first.
 /// Silently skips non-UTF8 paths (pathologically rare in a source tree).
-fn collect_qedspec_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+/// Local dependency-path roots from `dir`'s `qed.toml`, canonicalized. These
+/// are the subtrees `import` resolution reads from; `collect_qedspec_files`
+/// skips them so imported specs aren't merged as sibling fragments (#100).
+/// A missing/unreadable manifest or a path that doesn't resolve yields no
+/// exclusion — the authoritative manifest check runs later in
+/// `resolve_and_merge_imports`. GitHub deps resolve from the on-disk cache,
+/// never a spec-dir subtree, so they need no exclusion.
+fn import_path_roots(dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(Some(manifest)) = crate::qed_manifest::load_from_dir(dir) else {
+        return Vec::new();
+    };
+    manifest
+        .dependencies
+        .values()
+        .filter_map(|dep| match dep {
+            crate::qed_manifest::Dependency::Path { path } => {
+                std::fs::canonicalize(dir.join(path)).ok()
+            }
+            crate::qed_manifest::Dependency::Github { .. } => None,
+        })
+        .collect()
+}
+
+fn collect_qedspec_files(
+    dir: &Path,
+    excluded: &[std::path::PathBuf],
+    out: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("reading dir {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("reading entry in {}", dir.display()))?;
         let path = entry.path();
+
+        // Skip anything at or under a local `import` dependency root (#100).
+        // Compare canonical paths so the check is robust to `..`/symlinks.
+        if !excluded.is_empty() {
+            if let Ok(canon) = std::fs::canonicalize(&path) {
+                if excluded.iter().any(|root| canon.starts_with(root)) {
+                    continue;
+                }
+            }
+        }
+
         let file_type = entry
             .file_type()
             .with_context(|| format!("stat {}", path.display()))?;
         if file_type.is_dir() {
-            collect_qedspec_files(&path, out)?;
+            collect_qedspec_files(&path, excluded, out)?;
         } else if file_type.is_file()
             && path.extension().and_then(|e| e.to_str()) == Some("qedspec")
         {
@@ -945,6 +994,58 @@ handler h : State.A -> State.A { effect { x := 1 } }
         assert!(
             err.contains("must declare the same name"),
             "expected name-mismatch error; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_spec_dir_excludes_import_subtree_from_sibling_sweep() {
+        // Regression for #100: `check --spec <dir>/` must not sweep a local
+        // `import` dependency's `.qedspec` into the multi-file sibling-fragment
+        // merge. The dep declares its own `spec <Name>`, which previously
+        // tripped the shared-name check before import resolution ever ran.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_dir = tmp.path();
+
+        // Imported dep lives under an `imports/` subtree, declaring a DIFFERENT
+        // `spec` name than the main fragment — the exact #100 shape.
+        let dep_dir = spec_dir.join("imports").join("admin");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        std::fs::write(
+            dep_dir.join("admin.qedspec"),
+            "spec AdminConfig\n\
+             interface Admin { program_id \"11111111111111111111111111111111\" }\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            spec_dir.join("qed.toml"),
+            "[dependencies.admin_config]\npath = \"imports/admin\"\n",
+        )
+        .unwrap();
+
+        // Main fragment in the dir root imports the dep by its interface name.
+        std::fs::write(
+            spec_dir.join("vault.qedspec"),
+            r#"spec Vault
+import Admin from "admin_config"
+type State | A of { x : U64 }
+handler h : State.A -> State.A { effect { x := 1 } }
+"#,
+        )
+        .unwrap();
+
+        // Dir-form parse must succeed: the import subtree is excluded from the
+        // sibling sweep, then resolved normally.
+        let parsed = parse_spec_file(spec_dir).expect("dir-form parse should succeed (#100)");
+        assert_eq!(parsed.program_name, "Vault");
+        assert!(
+            parsed.interfaces.iter().any(|i| i.name == "Admin"),
+            "Admin interface should resolve from the import; got {:?}",
+            parsed
+                .interfaces
+                .iter()
+                .map(|i| &i.name)
+                .collect::<Vec<_>>(),
         );
     }
 
