@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 /// only source of these tokens, so a static regex is sufficient and stable.
 /// `pre.X` and `post.X` both normalize to `X` — the Kani impl harness reads
 /// both from the same snapshot pair, so either binds the same locals.
-pub fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<String> {
+fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<String> {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
         // Word-boundary at the start ensures `xpre.foo` doesn't match.
         Regex::new(r"\b(?:pre|post)\.([A-Za-z_][A-Za-z0-9_]*)").expect("static regex")
@@ -31,7 +31,7 @@ pub fn extract_pre_post_field_refs(expr: &str) -> std::collections::BTreeSet<Str
 /// appearing in both callees' substituted ensures. Tier-0 callees are
 /// silent. Returns `(call_i_label, call_j_label, shared_field)` triples;
 /// label format `Iface.handler` mirrors the harness CPI-block comment.
-pub fn multi_cpi_shared_fields(
+pub(crate) fn multi_cpi_shared_fields(
     spec: &ParsedSpec,
     handler: &ParsedHandler,
 ) -> Vec<(String, String, String)> {
@@ -93,7 +93,7 @@ pub fn multi_cpi_shared_fields(
     findings
 }
 
-pub(crate) fn disjoint_token_transfer_resources(left: &ParsedCall, right: &ParsedCall) -> bool {
+fn disjoint_token_transfer_resources(left: &ParsedCall, right: &ParsedCall) -> bool {
     fn token_transfer_resources(call: &ParsedCall) -> Option<std::collections::BTreeSet<String>> {
         if call.target_interface != "Token" || call.target_handler != "transfer" {
             return None;
@@ -118,7 +118,7 @@ pub(crate) fn disjoint_token_transfer_resources(left: &ParsedCall, right: &Parse
 
 /// P2 informational lint for the multi-CPI ordering gap; one warning per
 /// shared field per call pair.
-pub(crate) fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         let findings = multi_cpi_shared_fields(spec, handler);
@@ -157,7 +157,7 @@ pub(crate) fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessW
 /// axiomatization) with no post-condition to discharge. Distinct from
 /// `shape_only_cpi` (missing interface/handler declarations): this fires
 /// on declared handlers that simply have no post-condition shape.
-pub(crate) fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         for call in &handler.calls {
@@ -214,7 +214,7 @@ pub(crate) fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<Completeness
 /// `<source>/.qed/proofs/<Iface>.lean` + `lakefile.lean`; suppressed when
 /// `spec.verified_callees` has the interface. P2 advisory — `qedgen verify
 /// --require-verified` escalates.
-pub(crate) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     // Only walk imports — in-spec interfaces declared inline by the
     // author aren't "callees" from a composition standpoint; they're
@@ -290,7 +290,7 @@ pub(crate) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<Completeness
 /// render a CRIT line and exit non-zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
-pub struct UnverifiedCallee {
+pub(crate) struct UnverifiedCallee {
     pub interface_name: String,
     pub fix_hint: String,
 }
@@ -306,7 +306,7 @@ pub struct UnverifiedCallee {
 /// fail every spec that imports them. Empty vec = dep graph fully proven
 /// from a Stance-2 standpoint; mirrors `check_cpi_unverified_callee`.
 #[allow(dead_code)]
-pub fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
+pub(crate) fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
     let import_iface_names: std::collections::HashSet<&str> = spec
         .imports
         .iter()
@@ -352,7 +352,7 @@ pub fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCal
     results
 }
 
-pub(crate) fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
 
     for handler in &spec.handlers {

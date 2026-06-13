@@ -5,7 +5,7 @@
 use super::*;
 
 /// Whole-word match: boundaries are start/end of string or any non-alphanumeric, non-underscore byte.
-pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
+pub(super) fn contains_word(haystack: &str, needle: &str) -> bool {
     for (i, _) in haystack.match_indices(needle) {
         let before_ok = i == 0 || {
             let b = haystack.as_bytes()[i - 1];
@@ -28,7 +28,7 @@ pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
 /// parens, generic args (`Vec<...>`), or `[...]` indices; first depth-0
 /// comparison wins, with `==`/`!=`/`<=`/`>=` matched before `<`/`>`.
 /// `None` if the expression isn't a top-level comparison.
-pub(crate) fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
+pub(super) fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
     let bytes = expr.as_bytes();
     let mut depth: i32 = 0;
     let mut i = 0;
@@ -129,7 +129,7 @@ pub(crate) fn parse_top_level_cmp(expr: &str) -> Option<(&str, &str, &str)> {
 /// the trimmed type string for future linting passes (e.g., primitive-type
 /// checks, alias resolution) and intentionally remains exhaustive.
 #[derive(Debug)]
-pub(crate) enum FieldTypeShape<'a> {
+pub(super) enum FieldTypeShape<'a> {
     Simple(#[allow(dead_code)] &'a str),
     Map { bound: &'a str, inner: &'a str },
 }
@@ -137,7 +137,7 @@ pub(crate) enum FieldTypeShape<'a> {
 /// Parse a field-type source string into a structured view.
 /// Returns `Simple` for `U128`, `Account`, `Vec U64` and `Map { ... }` for
 /// `Map[CONST] T` (bound and inner trimmed).
-pub(crate) fn classify_field_type(s: &str) -> FieldTypeShape<'_> {
+pub(super) fn classify_field_type(s: &str) -> FieldTypeShape<'_> {
     let trimmed = s.trim();
     if let Some(rest) = trimmed.strip_prefix("Map") {
         let rest = rest.trim_start();
@@ -152,7 +152,7 @@ pub(crate) fn classify_field_type(s: &str) -> FieldTypeShape<'_> {
     FieldTypeShape::Simple(trimmed)
 }
 
-pub(crate) fn make_old_in_single_state_warning(
+pub(super) fn make_old_in_single_state_warning(
     holder: &str,
     kind: &str,
     body_snippet: &str,
@@ -185,7 +185,7 @@ pub(crate) fn make_old_in_single_state_warning(
 /// (the Lean lowering on `Nat`/`Int` cannot). Used as both a lint trigger
 /// and the impl-targeted Kani auto-trigger so ref_impl-bearing specs always
 /// get the bit-width-bounded verification surface.
-pub fn ref_impl_has_overflow_risk(r: &ParsedRefImpl) -> bool {
+pub(crate) fn ref_impl_has_overflow_risk(r: &ParsedRefImpl) -> bool {
     let has_numeric_io = std::iter::once(&r.return_type)
         .chain(r.params.iter().map(|(_, t)| t))
         .any(|t| {

@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(crate) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for r in &spec.ref_impls {
         if !ref_impl_has_overflow_risk(r) {
@@ -58,7 +58,7 @@ pub(crate) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<Completen
 /// Per-effect overrides and pragma defaults defer to
 /// `check_unknown_error_variant`. Back-compat fallback honored: declared
 /// `MathOverflow` but not `MathUnderflow` → `-=` raises `MathOverflow`.
-pub(crate) fn check_checked_arith_needs_math_overflow(
+pub(super) fn check_checked_arith_needs_math_overflow(
     spec: &ParsedSpec,
 ) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
@@ -157,7 +157,7 @@ pub(crate) fn check_checked_arith_needs_math_overflow(
 /// Lives in check, not probe: a real structural pattern but a spec-authoring
 /// concern, not a reproducible vulnerability (probe ships reproducer-bearing
 /// findings only).
-pub(crate) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
         for (field, kind, _value) in &op.effects {

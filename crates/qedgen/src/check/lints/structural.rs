@@ -8,7 +8,7 @@ use super::*;
 /// (`WrongState` gate, `MathOverflow` check) misbehaves silently. P0
 /// pointing at the pipe form; also fires when both forms are declared
 /// (signals user confusion).
-pub(crate) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let has_error_record = spec.records.iter().any(|r| r.name == "Error");
     if !has_error_record {
@@ -50,7 +50,7 @@ pub(crate) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
 /// `unknown_error_variant`: a per-site `or X` override or checked_overflow/
 /// underflow pragma references a variant not declared in `type Error | …` —
 /// the generated Rust references `<ProgramName>Error::X` and won't compile.
-pub(crate) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
     let mut warnings = Vec::new();
 
@@ -111,7 +111,7 @@ pub(crate) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     warnings
 }
 
-pub(crate) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let pdas = &spec.pdas;
 
@@ -223,7 +223,7 @@ pub(crate) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
 /// **Author-written tautologies are silently accepted**: no `Expr::Old(_)`
 /// in the AST + identical sides is an authored choice (the "field tracking"
 /// pattern). Rule 1 gates on `Expr::Old(_)` precisely so this passes.
-pub(crate) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for prop in &spec.properties {
         let Some(rs) = prop.rust_expression.as_deref() else {

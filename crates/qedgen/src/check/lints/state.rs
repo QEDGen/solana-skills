@@ -11,7 +11,7 @@ use super::*;
 /// Lean renders guillemet-quoted `«old(...)»` (type-fails downstream) and
 /// Rust silently drops the marker. Synthetic requires (match-arm
 /// desugaring) carry `ast_body: None` and are skipped — no source to fix.
-pub(crate) fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
         for req in &op.requires {
@@ -39,7 +39,7 @@ pub(crate) fn check_old_in_single_state_context(spec: &ParsedSpec) -> Vec<Comple
     warnings
 }
 
-pub(crate) fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for h in &spec.handlers {
         let Some(modifies) = h.modifies.as_ref() else {
@@ -113,7 +113,7 @@ pub(crate) fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<Completenes
 /// or matches the heuristic terminal-name list) with no `requires`
 /// clauses AND no R25-eligible auth binding. Catches the
 /// lending::liquidate HIGH (anyone-can-liquidate).
-pub(crate) fn check_unguarded_terminal_transition(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unguarded_terminal_transition(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     let terminal_name_heuristic: &[&str] = &[
         "Liquidated",
@@ -179,7 +179,7 @@ pub(crate) fn check_unguarded_terminal_transition(spec: &ParsedSpec) -> Vec<Comp
 /// spec has no per-actor tracking field that prevents the same actor
 /// from voting multiple times. Catches the dedup arm of the multisig
 /// approve/reject HIGH.
-pub(crate) fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     // Map field names whose type starts with Bool/U8 + "Map[" — the kinds
     // of fields users add for per-actor dedup (`voted : Map[N] U8`,
@@ -260,7 +260,7 @@ pub(crate) fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<Completene
 /// the signer. Catches the multisig::approve/reject shape — anyone can
 /// vote with any `member_index` because the spec doesn't tie the index
 /// to the signer's pubkey.
-pub(crate) fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         if handler.permissionless {
@@ -352,7 +352,7 @@ pub(crate) fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<Complet
 ///
 /// Lint, don't auto-qualify: auto-qualification would silently pick the
 /// first-matching ADT and can wedge invariants against the wrong State.
-pub(crate) fn check_cross_adt_field_ambiguity(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_cross_adt_field_ambiguity(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     if spec.account_types.len() < 2 {
         return warnings;

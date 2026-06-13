@@ -8,7 +8,7 @@ use super::*;
 /// touches. Used by terminal-transition and value-transfer lints to
 /// avoid false positives on auth-bound handlers (the signer identity
 /// IS the gate).
-pub(crate) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
+pub(super) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> bool {
     let Some(ref who) = handler.who else {
         return false;
     };
@@ -35,7 +35,7 @@ pub(crate) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> 
 ///
 /// Closed by R25 when `X` IS a state field. Catches the percolator-CRIT
 /// shape — auth name without a state-side anchor.
-pub(crate) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         if handler.permissionless {
@@ -122,7 +122,7 @@ pub(crate) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
 /// `authority X` with X being a handler-bound account that's program-
 /// derived), AND the handler has no `requires` clause that constrains
 /// who can call it. Catches the lending::liquidate vault-drain shape.
-pub(crate) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+pub(super) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
         for transfer in &handler.transfers {

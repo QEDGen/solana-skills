@@ -15,11 +15,11 @@ mod state;
 mod structural;
 
 pub(crate) use arithmetic::*;
-pub(crate) use auth::*;
+pub(in crate::check::lints) use auth::*;
 pub(crate) use cpi::*;
 pub(crate) use shared::*;
-pub(crate) use state::*;
-pub(crate) use structural::*;
+pub(in crate::check::lints) use state::*;
+pub(in crate::check::lints) use structural::*;
 
 /// Check spec completeness — heuristic rules for under-specification.
 /// Returns structured warnings with fix suggestions for agent consumption.
