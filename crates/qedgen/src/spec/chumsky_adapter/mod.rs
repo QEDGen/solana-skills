@@ -1,0 +1,459 @@
+//! Adapter: typed AST (`ast::Spec`) → string-rendered `ParsedSpec` for
+//! downstream consumers (check, lean_gen, kani, proptest_gen, …).
+//!
+//! Guard expressions are rendered to Lean-form (unicode operators, pre/post
+//! state prefixes) and Rust-form (ASCII) strings here. The typed AST keeps
+//! structure; the string forms are lossy projections.
+
+use crate::ast::{self as a, Expr, Node, TopItem};
+use crate::check::{
+    FlowKind, ParsedAccountType, ParsedCall, ParsedCallArg, ParsedCover, ParsedEnsures,
+    ParsedEnvironment, ParsedErrorCode, ParsedEvent, ParsedGuard, ParsedHandler,
+    ParsedHandlerAccount, ParsedImport, ParsedInstruction, ParsedInterface, ParsedInterfaceHandler,
+    ParsedLayoutField, ParsedLiveness, ParsedPda, ParsedProperty, ParsedPubkey, ParsedRecordType,
+    ParsedRequires, ParsedSbpfProperty, ParsedSpec, ParsedStateBinder, ParsedSumType,
+    ParsedUpstream, ParsedVariant, SbpfPropertyKind,
+};
+
+// Per-concern submodules. The directory rename keeps the module path
+// `crate::spec::chumsky_adapter` (and the root re-export
+// `crate::chumsky_adapter`) intact; these globs re-export each submodule's
+// items so the existing `crate::chumsky_adapter::<name>` call sites — and the
+// cross-submodule references — continue to resolve unchanged.
+mod adapt;
+mod effects;
+mod lean;
+mod rust;
+mod typecheck;
+
+pub use adapt::{adapt, parse_str};
+pub use typecheck::typecheck_spec;
+
+pub(in crate::spec::chumsky_adapter) use effects::*;
+pub(in crate::spec::chumsky_adapter) use lean::*;
+pub(in crate::spec::chumsky_adapter) use rust::*;
+pub(in crate::spec::chumsky_adapter) use typecheck::collect_uninterpreted_helpers;
+
+#[cfg(test)]
+mod tests;
+
+// ============================================================================
+// Shared rendering context: Ctx / Kind / ConstTable / TypeEnv
+// ============================================================================
+
+#[derive(Copy, Clone)]
+enum Ctx {
+    /// Inside a handler's `requires` / property body / invariant —
+    /// `state.X` renders with pre-state prefix.
+    Guard,
+    /// Inside an `ensures` clause — `state.X` is post-state `s'`, `old(X)` is pre-state `s`.
+    Ensures,
+}
+
+type ConstTable<'a> = &'a std::collections::BTreeMap<String, String>;
+
+// ----------------------------------------------------------------------------
+// Type inference for mixed Nat/Int arithmetic
+//
+// Lean doesn't implicitly coerce Nat → Int in arithmetic. When a spec writes
+// `state.accounts[i].capital + state.accounts[i].pnl` (U128 + I128 in source),
+// the Lean output must wrap the Nat side as `((x : Nat) : Int)`. We resolve
+// each operand's kind from a shallow type environment built during adapt().
+// ----------------------------------------------------------------------------
+
+/// Lean-level type kind for the purpose of operator coercion. We collapse
+/// all unsigned widths to `Nat` and all signed widths to `Int`; `Pubkey`
+/// and `Bool` propagate through equality tests but don't participate in
+/// arithmetic. `Unknown` is treated as `Nat` for conservatism — the current
+/// codegen already defaults to Nat on unknowns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Nat,
+    Int,
+    Bool,
+    Other,
+}
+
+/// Type environment for expression rendering.
+///   - `state_fields`: bare field name → TypeRef (top-level state fields like V, I)
+///   - `records`: record name → field name → TypeRef (e.g. Account.capital → U128)
+///   - `params`: current handler's params, for bare-ident lookups
+///   - `aliases`: type-alias name → its target rendered as a source-DSL string
+///     (e.g. `AccountIdx` → `Fin[MAX_ACCOUNTS]`). Lets the quantifier renderer
+///     resolve a binder type written as an alias down to the underlying
+///     `Fin[N]` so it can emit a bounded `(0..N).all/.any(…)` iteration.
+#[derive(Default, Clone)]
+struct TypeEnv<'a> {
+    state_fields: std::collections::BTreeMap<String, &'a a::TypeRef>,
+    records: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
+    params: Vec<(String, &'a a::TypeRef)>,
+    aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl<'a> TypeEnv<'a> {
+    fn from_spec(spec: &'a a::Spec) -> Self {
+        let mut env = TypeEnv::default();
+        for Node { node, .. } in &spec.items {
+            match node {
+                TopItem::Record(r) => {
+                    let m: std::collections::BTreeMap<_, _> =
+                        r.fields.iter().map(|f| (f.name.clone(), &f.ty)).collect();
+                    env.records.insert(r.name.clone(), m);
+                }
+                // State-like ADTs: flatten all variant fields into the
+                // state_fields map (backward-compat with the existing
+                // ParsedSpec shape). The first variant carrying fields
+                // wins for name collisions. `Error`-shaped ADTs are skipped.
+                TopItem::Adt(a) if a.name != "Error" => {
+                    for variant in &a.variants {
+                        for f in &variant.fields {
+                            env.state_fields.entry(f.name.clone()).or_insert(&f.ty);
+                        }
+                    }
+                }
+                TopItem::TypeAlias(ta) => {
+                    env.aliases
+                        .insert(ta.name.clone(), type_ref_to_string(&ta.target));
+                }
+                // Ghosts render as state fields: `state.<ghost>` must resolve
+                // in properties / invariants / `requires` / `ensures` and in
+                // other ghosts' update RHS. They are rendering-only here — the
+                // on-chain codegen reads `ParsedSpec.state_fields`, which never
+                // includes ghosts.
+                TopItem::Ghost(g) => {
+                    env.state_fields.entry(g.name.clone()).or_insert(&g.ty);
+                }
+                _ => {}
+            }
+        }
+        env
+    }
+
+    /// If `binder_ty` is a bounded index domain — either `Fin[N]` written
+    /// directly or an alias resolving to one (e.g. `AccountIdx`) — return
+    /// the bound symbol `N` (a numeric literal or a `const` name). Returns
+    /// `None` for any non-`Fin` binder type. The bound is emitted verbatim
+    /// by callers: a numeric literal renders as-is, a const name renders as
+    /// the Rust `const` the codegen already emits.
+    fn fin_bound(&self, binder_ty: &str) -> Option<String> {
+        let resolved = self
+            .aliases
+            .get(binder_ty.trim())
+            .map(String::as_str)
+            .unwrap_or(binder_ty)
+            .trim();
+        let inner = resolved.strip_prefix("Fin[")?.strip_suffix(']')?;
+        Some(inner.trim().to_string())
+    }
+
+    fn with_params(mut self, params: &'a [a::TypedField]) -> Self {
+        self.params = params.iter().map(|f| (f.name.clone(), &f.ty)).collect();
+        self
+    }
+
+    /// Resolve a source-language TypeRef to its Lean `Kind`.
+    fn type_ref_kind(&self, t: &a::TypeRef) -> Kind {
+        match t {
+            a::TypeRef::Named(n) => match n.as_str() {
+                "U8" | "U16" | "U32" | "U64" | "U128" => Kind::Nat,
+                "I8" | "I16" | "I32" | "I64" | "I128" => Kind::Int,
+                "Bool" => Kind::Bool,
+                // Named records / aliases bottom out here.
+                _ => Kind::Other,
+            },
+            a::TypeRef::Map { .. } => Kind::Other,
+            a::TypeRef::Fin { .. } => Kind::Nat, // Fin n coerces to Nat for arithmetic.
+            a::TypeRef::Param(_, _) => Kind::Other,
+        }
+    }
+
+    /// Resolve the kind of a Path. Handles subscripts into Map fields by
+    /// reading through the map's value-record to find the trailing field.
+    fn path_kind(&self, p: &a::Path) -> Kind {
+        // `state.x.y` or `state.accounts[i].capital` or bare `amount`
+        if p.root == "state" {
+            // Walk the segments: first Field must be a state field; subsequent
+            // Fields index into a record or Map-of-record.
+            let mut current: Option<&a::TypeRef> = None;
+            for seg in &p.segments {
+                match seg {
+                    a::PathSeg::Field(f) => {
+                        let field_ty = match current {
+                            None => self.state_fields.get(f).copied(),
+                            Some(a::TypeRef::Named(rec_name)) => {
+                                self.records.get(rec_name).and_then(|m| m.get(f).copied())
+                            }
+                            Some(a::TypeRef::Map { inner, .. }) => {
+                                // direct .field after a Map without [idx] shouldn't happen
+                                // in valid specs, but bottom out safely
+                                if let a::TypeRef::Named(rec_name) = inner.as_ref() {
+                                    self.records.get(rec_name).and_then(|m| m.get(f).copied())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        current = field_ty;
+                    }
+                    a::PathSeg::Index(_) => {
+                        // Subscript into a Map: advance `current` to the inner record type.
+                        if let Some(a::TypeRef::Map { inner, .. }) = current {
+                            current = Some(inner.as_ref());
+                        }
+                    }
+                }
+            }
+            return current.map(|t| self.type_ref_kind(t)).unwrap_or(Kind::Nat);
+        }
+        // Bare ident — try handler params first.
+        if p.segments.is_empty() {
+            if let Some((_, ty)) = self.params.iter().find(|(n, _)| n == &p.root) {
+                return self.type_ref_kind(ty);
+            }
+        }
+        Kind::Nat
+    }
+
+    /// Resolve the SOURCE type name of a path expression — e.g.,
+    /// `state.accounts[i]` → `"Account"` when `accounts : Map[N] Account`.
+    /// Returns None when the path terminates on a primitive/Bool/unknown type
+    /// or doesn't refer into the state.
+    fn path_type_name(&self, p: &a::Path) -> Option<String> {
+        if p.root != "state" {
+            if p.segments.is_empty() {
+                if let Some((_, a::TypeRef::Named(n))) =
+                    self.params.iter().find(|(n, _)| n == &p.root)
+                {
+                    return Some(n.clone());
+                }
+            }
+            return None;
+        }
+        let mut current: Option<&a::TypeRef> = None;
+        for seg in &p.segments {
+            match seg {
+                a::PathSeg::Field(f) => {
+                    current = match current {
+                        None => self.state_fields.get(f).copied(),
+                        Some(a::TypeRef::Named(rec)) => {
+                            self.records.get(rec).and_then(|m| m.get(f).copied())
+                        }
+                        Some(a::TypeRef::Map { inner, .. }) => {
+                            if let a::TypeRef::Named(rec) = inner.as_ref() {
+                                self.records.get(rec).and_then(|m| m.get(f).copied())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                }
+                a::PathSeg::Index(_) => {
+                    if let Some(a::TypeRef::Map { inner, .. }) = current {
+                        current = Some(inner.as_ref());
+                    }
+                }
+            }
+        }
+        match current? {
+            a::TypeRef::Named(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Infer the kind of an Expr.
+    fn infer(&self, e: &Expr) -> Kind {
+        match e {
+            Expr::Int(_) => Kind::Nat, // Lean elaborates literals against context.
+            Expr::Bool(_) => Kind::Bool,
+            Expr::Path(p) => self.path_kind(p),
+            Expr::Old(inner) => self.infer(&inner.node),
+            Expr::Sum { body, .. } => self.infer(&body.node),
+            Expr::Quant { .. } => Kind::Bool,
+            Expr::BoolOp { .. } => Kind::Bool,
+            Expr::Not(_) => Kind::Bool,
+            Expr::Cmp { .. } => Kind::Bool,
+            Expr::Arith { lhs, rhs, .. } => {
+                let lk = self.infer(&lhs.node);
+                let rk = self.infer(&rhs.node);
+                // Int dominates Nat; anything with Other stays Nat (safe default).
+                match (lk, rk) {
+                    (Kind::Int, _) | (_, Kind::Int) => Kind::Int,
+                    _ => Kind::Nat,
+                }
+            }
+            Expr::Paren(inner) => self.infer(&inner.node),
+            // mul_div_floor/ceil follow the operand types: Int if any of a or
+            // b is Int, else Nat. Divisor kind doesn't promote — it's a scale.
+            Expr::MulDivFloor { a, b, .. } | Expr::MulDivCeil { a, b, .. } => {
+                let ak = self.infer(&a.node);
+                let bk = self.infer(&b.node);
+                match (ak, bk) {
+                    (Kind::Int, _) | (_, Kind::Int) => Kind::Int,
+                    _ => Kind::Nat,
+                }
+            }
+            // Match result type: use the first arm's body. Arms must agree;
+            // in phase 1 we don't cross-check.
+            Expr::Match { arms, .. } => arms
+                .first()
+                .map(|a| self.infer(&a.body.node))
+                .unwrap_or(Kind::Other),
+            // Constructor value — sum-type result. Kind is Other because
+            // downstream consumers (Map updates, effect assignments) don't
+            // need arithmetic promotion for the outer value.
+            Expr::Ctor { .. } => Kind::Other,
+            // Anonymous record literal — Other (no arithmetic promotion).
+            Expr::RecordLit(_) => Kind::Other,
+            // Record update produces the same kind as the base.
+            Expr::RecordUpdate { base, .. } => self.infer(&base.node),
+            // Constructor test → Bool (propositional).
+            Expr::IsVariant { .. } => Kind::Bool,
+            // Function application — abstract, treat as Other (no promotion).
+            Expr::App { .. } => Kind::Other,
+            // Postfix field access — abstract, treat as Other.
+            Expr::Field { .. } => Kind::Other,
+            // `let x = v in body` — kind follows the body (the let is
+            // transparent from the caller's perspective).
+            Expr::Let { body, .. } => self.infer(&body.node),
+            // `if c then a else b` — both branches must agree; in phase 1
+            // we trust the type checker and use the then-branch's kind.
+            Expr::IfThenElse { then_branch, .. } => self.infer(&then_branch.node),
+        }
+    }
+
+    /// True iff this Path resolves to a state/record field whose type would
+    /// be lowered to a Quasar Pod companion (`U16`/`U32`/`U64`/`U128` →
+    /// `PodU16`/…/`PodU128`; `I16`/…/`I128` → `PodI16`/…; `Bool` →
+    /// `PodBool`). `U8`/`I8` stay native (alignment 1 already), so they
+    /// don't need `.get()` and are reported as not Pod.
+    ///
+    /// Only state-rooted paths apply — handler parameters arrive at the
+    /// inner handler in their native form (the dispatch shim unwraps
+    /// `PodU64` → `u64` etc.) so a bare-ident param load isn't Pod.
+    fn path_is_pod_field(&self, p: &a::Path) -> bool {
+        if p.root != "state" {
+            return false;
+        }
+        let Some(t) = self.path_type_ref(p) else {
+            return false;
+        };
+        match t {
+            a::TypeRef::Named(n) => matches!(
+                n.as_str(),
+                "U16" | "U32" | "U64" | "U128" | "I16" | "I32" | "I64" | "I128" | "Bool"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Resolve the leaf TypeRef of a Path, walking through state fields,
+    /// records, and Map subscripts. Mirrors `path_kind` but returns the
+    /// raw `TypeRef` instead of collapsing to `Kind`. Bare-ident params
+    /// resolve through `params`.
+    fn path_type_ref(&self, p: &a::Path) -> Option<&'a a::TypeRef> {
+        if p.root == "state" {
+            let mut current: Option<&a::TypeRef> = None;
+            for seg in &p.segments {
+                match seg {
+                    a::PathSeg::Field(f) => {
+                        let next = match current {
+                            None => self.state_fields.get(f).copied(),
+                            Some(a::TypeRef::Named(rec)) => {
+                                self.records.get(rec).and_then(|m| m.get(f).copied())
+                            }
+                            Some(a::TypeRef::Map { inner, .. }) => match inner.as_ref() {
+                                a::TypeRef::Named(rec) => {
+                                    self.records.get(rec).and_then(|m| m.get(f).copied())
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        current = next;
+                    }
+                    a::PathSeg::Index(_) => {
+                        if let Some(a::TypeRef::Map { inner, .. }) = current {
+                            current = Some(inner.as_ref());
+                        }
+                    }
+                }
+            }
+            return current;
+        }
+        if p.segments.is_empty() {
+            return self
+                .params
+                .iter()
+                .find(|(n, _)| n == &p.root)
+                .map(|(_, t)| *t);
+        }
+        None
+    }
+}
+
+/// Any `Expr::Old(_)` in the tree? Used by `classify_property_body` and the
+/// `vacuous_property_lowering` lint. Mirrors the shape of
+/// `quantifier::find_nested_quantifier` — same node set, different predicate.
+pub(crate) fn expr_contains_old(node: &Node<Expr>) -> bool {
+    match &node.node {
+        Expr::Old(_) => true,
+        Expr::BoolOp { lhs, rhs, .. }
+        | Expr::Cmp { lhs, rhs, .. }
+        | Expr::Arith { lhs, rhs, .. } => expr_contains_old(lhs) || expr_contains_old(rhs),
+        Expr::Not(inner) | Expr::Paren(inner) => expr_contains_old(inner),
+        Expr::Sum { body, .. } | Expr::Quant { body, .. } => expr_contains_old(body),
+        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+            expr_contains_old(a) || expr_contains_old(b) || expr_contains_old(d)
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_contains_old(scrutinee) || arms.iter().any(|arm| expr_contains_old(&arm.body))
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_contains_old(cond)
+                || expr_contains_old(then_branch)
+                || expr_contains_old(else_branch)
+        }
+        Expr::Let { value, body, .. } => expr_contains_old(value) || expr_contains_old(body),
+        Expr::App { args, .. } => args.iter().any(expr_contains_old),
+        Expr::Field { base, .. } => expr_contains_old(base),
+        Expr::RecordLit(fs) => fs.iter().any(|(_, v)| expr_contains_old(v)),
+        Expr::RecordUpdate { base, updates } => {
+            expr_contains_old(base) || updates.iter().any(|(_, v)| expr_contains_old(v))
+        }
+        Expr::Ctor { payload, .. } => payload.as_ref().is_some_and(|p| expr_contains_old(p)),
+        Expr::IsVariant { scrutinee, .. } => expr_contains_old(scrutinee),
+        // Leaves
+        Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => false,
+    }
+}
+
+/// Temporal shape of a property body: contains `Expr::Old(_)` ⇒ `Binary`,
+/// else `Unary`. Drives codegen dispatch ([`crate::check::PropertyClass`]).
+pub(crate) fn classify_property_body(node: &Node<Expr>) -> crate::check::PropertyClass {
+    if expr_contains_old(node) {
+        crate::check::PropertyClass::Binary
+    } else {
+        crate::check::PropertyClass::Unary
+    }
+}
+
+/// Lowering mode for state-path rendering in property bodies. `Binary` is
+/// set by `proptest_gen` / `kani` when rendering a `PropertyClass::Binary`
+/// body, matching the per-handler preservation harness that captures
+/// pre-state before the handler call. Mirrors the Lean side's
+/// `Ctx::Ensures` + `inside_old` distinction in `path_to_lean`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StateMode {
+    /// `state.x` and `old(state.x)` both render to `s.x` — correct for
+    /// single-state contexts. Default on every callsite.
+    Unary,
+    /// `state.x` → `post.x`, `old(state.x)` → `pre.x`. Used only when
+    /// emitting `PropertyClass::Binary` property fn bodies.
+    Binary,
+}
