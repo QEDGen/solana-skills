@@ -1066,4 +1066,297 @@ handler h : State.A -> State.A { effect { x := 1 } }
             parsed.verified_proof_pkgs
         );
     }
+
+    // ----- colocated import/merge + parse-surface tests -----
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Multi-file spec loader
+    // ──────────────────────────────────────────────────────────────────────
+
+    const SPEC_ROOT: &str = r#"
+    spec Demo
+
+    type State
+      | Active of { count : U64 }
+    "#;
+
+    const SPEC_INC: &str = r#"
+    spec Demo
+
+    /// Increments count
+    handler inc (x : U64) : State.Active -> State.Active {
+      effect { count += x }
+    }
+    "#;
+
+    const SPEC_DEC: &str = r#"
+    spec Demo
+
+    handler dec (x : U64) : State.Active -> State.Active {
+      effect { count -= x }
+    }
+    "#;
+
+    #[test]
+    fn multi_file_spec_merges_handlers_across_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("demo.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::create_dir_all(dir.path().join("handlers")).unwrap();
+        std::fs::write(dir.path().join("handlers/inc.qedspec"), SPEC_INC).unwrap();
+        std::fs::write(dir.path().join("handlers/dec.qedspec"), SPEC_DEC).unwrap();
+
+        let parsed = parse_spec_file(dir.path()).unwrap();
+        assert_eq!(parsed.program_name, "Demo");
+        let names: Vec<_> = parsed.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"inc"), "got handlers: {:?}", names);
+        assert!(names.contains(&"dec"), "got handlers: {:?}", names);
+    }
+
+    #[test]
+    fn parse_spec_file_surfaces_clear_error_for_missing_path() {
+        // A non-existent --spec path must say so explicitly instead of
+        // falling through to the extension check ("Unsupported spec format: .").
+        let missing = std::path::PathBuf::from("/tmp/does_not_exist_g5.qedspec");
+        let err = parse_spec_file(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "expected 'does not exist' in error, got: {err}"
+        );
+        assert!(
+            !err.contains("Unsupported spec format"),
+            "should not surface the extension-check error for missing path: {err}"
+        );
+    }
+
+    #[test]
+    fn multi_file_spec_rejects_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(
+            dir.path().join("b.qedspec"),
+            "spec Other\n\nhandler noop : State.Active -> State.Active { effect {} }\n",
+        )
+        .unwrap();
+
+        let err = parse_spec_file(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("spec name mismatch"),
+            "expected name-mismatch error, got: {err}"
+        );
+    }
+
+    // ----- end cpi_unverified_callee -----
+
+    #[test]
+    fn call_clause_populates_handler_calls() {
+        let src = r#"spec Demo
+
+    handler exchange : State.A -> State.B {
+      call Token.transfer(from = taker_ta, to = initializer_ta, amount = taker_amount)
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.calls.len(), 1);
+        let c = &handler.calls[0];
+        assert_eq!(c.target_interface, "Token");
+        assert_eq!(c.target_handler, "transfer");
+        assert_eq!(c.args.len(), 3);
+        assert_eq!(c.args[0].name, "from");
+        assert_eq!(c.args[2].name, "amount");
+        // Args carry both renderings so backends can pick the form they want.
+        assert!(!c.args[0].rust_expr.is_empty());
+        assert!(!c.args[0].lean_expr.is_empty());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // pragma sbpf { ... } adaptation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pragma_sbpf_unpacks_inner_items() {
+        let src = r#"spec Transfer
+
+    pragma sbpf {
+      pubkey TOKEN_PROGRAM [6, 221, 246, 225]
+
+      instruction transfer {
+        discriminant 3
+        entry 0
+      }
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "transfer");
+    }
+
+    #[test]
+    fn pragma_body_adapts_into_standard_parsed_spec_fields() {
+        // Items wrapped in `pragma sbpf { ... }` must land in the same
+        // ParsedSpec fields downstream consumers already read — pubkeys,
+        // instructions, etc. The pragma is a grammatical namespace, not
+        // a new parallel tree.
+        let src = r#"spec T
+
+    pragma sbpf {
+      pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+
+      instruction foo {
+        discriminant 1
+        entry 0
+      }
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.pragmas, vec!["sbpf".to_string()]);
+        assert!(parsed.has_pragma("sbpf"));
+        assert_eq!(parsed.pubkeys.len(), 1);
+        assert_eq!(parsed.pubkeys[0].name, "TOKEN_PROGRAM");
+        assert_eq!(parsed.instructions.len(), 1);
+        assert_eq!(parsed.instructions[0].name, "foo");
+    }
+
+    #[test]
+    fn top_level_sbpf_items_now_rejected() {
+        // Platform-specifics (pubkey, instruction, assembly) only parse
+        // behind `pragma sbpf { ... }` — the grammar keeps them out of the
+        // core surface.
+        let src = r#"spec T
+
+    pubkey TOKEN_PROGRAM [1, 2, 3, 4]
+    "#;
+        assert!(
+            crate::chumsky_adapter::parse_str(src).is_err(),
+            "top-level `pubkey` should no longer parse"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // ML syntax — let...in in expressions
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn let_in_renders_to_lean_and_rust() {
+        let src = r#"spec T
+    type State | A of { balance : U64 }
+
+    handler h (amount : U64) : State.A -> State.A {
+      ensures let delta = old(state.balance) - state.balance in delta == amount
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        let handler = &parsed.handlers[0];
+        assert_eq!(handler.ensures.len(), 1);
+        let e = &handler.ensures[0];
+        // Lean form uses Lean's let-binding syntax.
+        assert!(
+            e.lean_expr.contains("let delta :="),
+            "expected Lean let-binding, got: {}",
+            e.lean_expr
+        );
+        // Rust form lowers to a block expression.
+        assert!(
+            e.rust_expr.contains("let delta ="),
+            "expected Rust let-in-block, got: {}",
+            e.rust_expr
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Smoke test — match and ctors in the grammar.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ml_match_and_ctor_already_parse() {
+        let src = r#"spec T
+    type State | Active of { count : U64 } | Closed
+
+    handler inspect : State.Active -> State.Active {
+      ensures
+        match state with
+        | Active a => a.count >= 0
+        | Closed => true
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.handlers.len(), 1);
+        assert_eq!(parsed.handlers[0].ensures.len(), 1);
+        // The rendered form should reference both variants.
+        let lean = &parsed.handlers[0].ensures[0].lean_expr;
+        assert!(lean.contains("Active"), "got: {}", lean);
+        assert!(lean.contains("Closed"), "got: {}", lean);
+    }
+
+    #[test]
+    fn interface_block_populates_parsed_spec() {
+        let src = r#"spec Escrow
+
+    interface Token {
+      program_id "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+      upstream {
+        package      "spl-token"
+        version      "4.0.3"
+        binary_hash  "sha256:abc"
+        verified_with ["proptest", "kani"]
+        verified_at  "2026-04-18"
+      }
+
+      handler transfer (amount : U64) {
+        accounts {
+          from      : writable, type token
+          to        : writable, type token
+          authority : signer
+        }
+        requires amount > 0
+        ensures  amount > 0
+      }
+    }
+    "#;
+        let parsed = crate::chumsky_adapter::parse_str(src).unwrap();
+        assert_eq!(parsed.interfaces.len(), 1);
+        let i = &parsed.interfaces[0];
+        assert_eq!(i.name, "Token");
+        assert_eq!(
+            i.program_id.as_deref(),
+            Some("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        );
+
+        let u = i.upstream.as_ref().expect("upstream present");
+        assert_eq!(u.binary_hash.as_deref(), Some("sha256:abc"));
+        // Lean absent by design — no overclaiming.
+        assert!(!u.verified_with.contains(&"lean".to_string()));
+
+        assert_eq!(i.handlers.len(), 1);
+        let h = &i.handlers[0];
+        assert_eq!(h.name, "transfer");
+        assert_eq!(h.params, vec![("amount".to_string(), "U64".to_string())]);
+        assert_eq!(h.accounts.len(), 3);
+        assert_eq!(h.requires.len(), 1);
+        assert_eq!(h.ensures.len(), 1);
+    }
+
+    #[test]
+    fn multi_file_spec_source_matches_single_file_concat() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1.qedspec"), SPEC_ROOT).unwrap();
+        std::fs::write(dir.path().join("2.qedspec"), SPEC_INC).unwrap();
+
+        // read_spec_source must emit fragments in sorted-path order so
+        // spec_hash_for_handler finds handler bodies regardless of which
+        // fragment they live in.
+        let src = read_spec_source(dir.path()).unwrap();
+        assert!(
+            src.contains("type State"),
+            "root fragment missing in merged source"
+        );
+        assert!(
+            src.contains("handler inc"),
+            "handler fragment missing in merged source"
+        );
+    }
 }

@@ -205,3 +205,60 @@ pub fn ref_impl_has_overflow_risk(r: &ParsedRefImpl) -> bool {
     let body = &r.rust_body;
     body.contains('*') || body.contains("<<") || body.contains('+') || body.contains('-')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- contains_word unit tests ----
+
+    #[test]
+    fn test_contains_word_basic() {
+        assert!(contains_word("balance > 0", "balance"));
+        assert!(contains_word("check balance here", "balance"));
+        assert!(!contains_word("imbalance > 0", "balance"));
+        assert!(!contains_word("rebalance_flag", "balance"));
+        assert!(!contains_word("my_balance_v2", "balance"));
+    }
+
+    #[test]
+    fn test_contains_word_short_field() {
+        // Field "id" must not match inside "valid", "provide", "identity"
+        assert!(!contains_word("valid > 0", "id"));
+        assert!(!contains_word("provide_service", "id"));
+        assert!(!contains_word("identity = true", "id"));
+        // But should match when standalone
+        assert!(contains_word("id > 0", "id"));
+        assert!(contains_word("state.id > 0", "id"));
+        assert!(contains_word("check id here", "id"));
+    }
+
+    #[test]
+    fn test_contains_word_at_boundaries() {
+        assert!(contains_word("id", "id"));
+        assert!(contains_word("id ", "id"));
+        assert!(contains_word(" id", "id"));
+        assert!(contains_word("(id)", "id"));
+        assert!(contains_word("id+1", "id"));
+        assert!(!contains_word("kid", "id"));
+        assert!(!contains_word("ids", "id"));
+    }
+
+    #[test]
+    fn parse_top_level_cmp_handles_simple_comparison() {
+        let r = parse_top_level_cmp("s.balance >= s.balance");
+        assert_eq!(r, Some(("s.balance", ">=", "s.balance")));
+    }
+
+    #[test]
+    fn parse_top_level_cmp_handles_equality() {
+        let r = parse_top_level_cmp("s.admin == s.admin");
+        assert_eq!(r, Some(("s.admin", "==", "s.admin")));
+    }
+
+    #[test]
+    fn parse_top_level_cmp_returns_none_on_non_comparison() {
+        let r = parse_top_level_cmp("s.x + 1");
+        assert!(r.is_none(), "expected None on non-comparison; got: {:?}", r);
+    }
+}

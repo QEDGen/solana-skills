@@ -453,3 +453,476 @@ pub(crate) fn check_cross_adt_field_ambiguity(spec: &ParsedSpec) -> Vec<Complete
     }
     warnings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `modifies [X]` + no effect write + no ensures referencing X =
+    // completely unconstrained field; fires P0.
+    #[test]
+    fn unconstrained_modifies_lint_fires_on_uncovered_field() {
+        let src = r#"
+    spec Probe
+    state { pool_balance : U64, lp_supply : U64 }
+    type Error
+      | InvalidAmount
+      | MathOverflow
+    handler deposit (amount : U64) {
+      requires amount > 0 else InvalidAmount
+      modifies [pool_balance, lp_supply]
+      effect { pool_balance += amount }
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_unconstrained_modifies(&spec);
+        let hit = warnings
+            .iter()
+            .find(|w| w.rule == "unconstrained_modifies")
+            .expect("unconstrained_modifies fires for lp_supply");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(
+            hit.message.contains("'lp_supply'"),
+            "message names the field, got: {}",
+            hit.message
+        );
+        // pool_balance is in modifies AND in effect — no warning for it.
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.message.contains("'pool_balance'")),
+            "pool_balance must not fire — it's written by the effect"
+        );
+    }
+
+    // Inverse: when an `ensures` clause references the field, the
+    // lint stays silent. The field is constrained even if the effect
+    // block doesn't write it (the "Kani checks impl" pattern).
+    #[test]
+    fn unconstrained_modifies_lint_silent_when_ensures_references_field() {
+        let src = r#"
+    spec Probe
+    state { pool_balance : U64, lp_supply : U64 }
+    type Error
+      | InvalidAmount
+      | MathOverflow
+    handler deposit (amount : U64) {
+      requires amount > 0 else InvalidAmount
+      modifies [pool_balance, lp_supply]
+      effect { pool_balance += amount }
+      ensures lp_supply >= old(state.lp_supply)
+    }
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_unconstrained_modifies(&spec);
+        assert!(
+            warnings.is_empty(),
+            "lint must stay silent when ensures references the field, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// Fixture mirroring the multisig::approve/reject HIGH: handler
+    /// takes `member_index` and mutates `state.voted[member_index]` but
+    /// no `requires` binds the index to the signer.
+    const UNGUARDED_INDEXED_FIXTURE: &str = r#"
+    spec Voting
+
+    const N = 8
+
+    type State
+      | Uninitialized
+      | Active of {
+          voted : Map[N] U8,
+          count : U8,
+        }
+
+    type Error | OutOfRange | MathOverflow
+
+    handler vote (member_index : U8) : State.Active -> State.Active {
+      auth voter
+      accounts {
+        voter : signer
+        vault : writable
+      }
+      requires member_index < 8 else OutOfRange
+      effect {
+        count += 1
+        voted[member_index] := 1
+      }
+    }
+    "#;
+
+    #[test]
+    fn lint_unguarded_indexed_mutation_fires() {
+        let spec = crate::chumsky_adapter::parse_str(UNGUARDED_INDEXED_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_indexed_mutation")
+            .collect();
+        assert!(
+                !hits.is_empty(),
+                "expected unguarded_indexed_mutation to fire on a vote-by-index handler with no signer↔index binding; got: {:?}",
+                warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+            );
+    }
+
+    /// Fixture mirroring the lending::liquidate HIGH: handler
+    /// transitions to a terminal state with no `requires`.
+    const UNGUARDED_TERMINAL_FIXTURE: &str = r#"
+    spec Loan
+
+    type State
+      | Empty
+      | Active of {
+          borrower : Pubkey,
+          amount   : U64,
+        }
+      | Liquidated
+
+    type Error | NotFound
+
+    handler liquidate : State.Active -> State.Liquidated {
+      auth liquidator
+      accounts {
+        liquidator : signer
+        loan       : writable
+      }
+      effect { amount := 0 }
+    }
+    "#;
+
+    #[test]
+    fn lint_unguarded_terminal_transition_fires() {
+        let spec = crate::chumsky_adapter::parse_str(UNGUARDED_TERMINAL_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_terminal_transition")
+            .collect();
+        assert!(
+                !hits.is_empty(),
+                "expected unguarded_terminal_transition to fire on a Liquidated transition with no requires; got: {:?}",
+                warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+            );
+    }
+
+    /// Inverse: when the transition IS gated by an explicit `requires`,
+    /// the lint should NOT fire (audit-fixed lending::liquidate shape).
+    const GATED_TERMINAL_FIXTURE: &str = r#"
+    spec Loan
+
+    type State
+      | Empty
+      | Active of {
+          borrower   : Pubkey,
+          amount     : U64,
+          collateral : U64,
+        }
+      | Liquidated
+
+    type Error | AccountHealthy
+
+    handler liquidate : State.Active -> State.Liquidated {
+      auth liquidator
+      accounts {
+        liquidator : signer
+        loan       : writable
+      }
+      requires state.amount > state.collateral else AccountHealthy
+      effect { amount := 0 }
+    }
+    "#;
+
+    #[test]
+    fn lint_gated_terminal_transition_does_not_fire() {
+        let spec = crate::chumsky_adapter::parse_str(GATED_TERMINAL_FIXTURE)
+            .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_terminal_transition")
+            .map(|w| w.rule.as_str())
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "unguarded_terminal_transition should not fire on health-gated liquidate; got: {:?}",
+            hits
+        );
+    }
+
+    // Cross-ADT field-ambiguity lint. Three cases:
+    //   (a) two ADTs share a field name AND a property references the bare
+    //       name → lint fires.
+    //   (b) single-ADT spec → never fires (lint short-circuits).
+    //   (c) explicit `<adt>.<field>` qualification → does not fire.
+    #[test]
+    fn cross_adt_field_ambiguity_fires_on_bare_reference() {
+        let src = r#"spec Pair
+
+    type Distribution
+      | Empty
+      | Active of {
+          authority : Pubkey,
+          balance   : U64,
+        }
+
+    type Claim
+      | Empty
+      | Active of {
+          claimant : Pubkey,
+          balance  : U64,
+        }
+
+    property positive_balance :
+      state.balance >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_cross_adt_field_ambiguity(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "cross_adt_field_ambiguity"),
+            "expected cross_adt_field_ambiguity to fire on bare `state.balance` ref, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>(),
+        );
+        // The message names both ADTs so the user can pick.
+        let msg = &warnings
+            .iter()
+            .find(|w| w.rule == "cross_adt_field_ambiguity")
+            .unwrap()
+            .message;
+        assert!(
+            msg.contains("Distribution"),
+            "message must name Distribution: {}",
+            msg
+        );
+        assert!(msg.contains("Claim"), "message must name Claim: {}", msg);
+    }
+
+    #[test]
+    fn cross_adt_field_ambiguity_silent_on_single_adt() {
+        // Lending's exact shape: two ADTs but no overlapping field names.
+        // Cross-ADT lint must stay silent. (We don't try lending itself
+        // because the parser needs proper headers; use a synthetic two-ADT
+        // spec with disjoint fields.)
+        let src = r#"spec Lending
+
+    type Pool
+      | Uninitialized
+      | Active of {
+          authority      : Pubkey,
+          total_deposits : U64,
+        }
+
+    type Loan
+      | Empty
+      | Active of {
+          borrower : Pubkey,
+          amount   : U64,
+        }
+
+    property pool_nonneg :
+      state.total_deposits >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_cross_adt_field_ambiguity(&spec);
+        assert!(
+            warnings.is_empty(),
+            "no overlapping fields → no lint, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.message))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn cross_adt_field_ambiguity_silent_when_qualified() {
+        // Same shape as the positive-case fixture, but the property
+        // qualifies the reference as `distribution.balance`. The lint
+        // must NOT fire — the user has already disambiguated.
+        let src = r#"spec Pair
+
+    type Distribution
+      | Empty
+      | Active of {
+          authority : Pubkey,
+          balance   : U64,
+        }
+
+    type Claim
+      | Empty
+      | Active of {
+          claimant : Pubkey,
+          balance  : U64,
+        }
+
+    property positive_balance :
+      distribution.balance >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_cross_adt_field_ambiguity(&spec);
+        assert!(
+            warnings.is_empty(),
+            "qualified `distribution.balance` should clear the ambiguity, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.message))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    // ========================================================================
+    // old_in_single_state_context lint
+    // ========================================================================
+
+    const OLD_SSC_SPEC_HEAD: &str = r#"
+    spec OldSscTest
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Active of { balance : U64 }
+
+    type Error
+      | E
+      | BadGuard
+    "#;
+
+    #[test]
+    fn old_ssc_lint_fires_on_old_in_requires() {
+        // `old(...)` inside a `requires` body — category error, P1.
+        let src = format!(
+            "{}{}",
+            OLD_SSC_SPEC_HEAD,
+            r#"
+    handler tweak (delta : U64) : State.Active -> State.Active {
+      permissionless
+      requires state.balance >= old(state.balance) else BadGuard
+      effect { balance := balance + delta }
+    }
+    "#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_old_in_single_state_context(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "old_in_single_state_context"),
+            "expected lint to fire on old() inside requires; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>(),
+        );
+        let w = &warnings[0];
+        assert_eq!(w.severity, Severity::Warning);
+        assert_eq!(w.priority, 1);
+        assert!(w.message.contains("requires"), "msg: {}", w.message);
+    }
+
+    #[test]
+    fn old_ssc_lint_fires_on_old_in_invariant() {
+        // `old(...)` inside an `invariant` body — category error, P1.
+        let src = format!(
+            "{}{}",
+            OLD_SSC_SPEC_HEAD,
+            r#"
+    invariant balance_nondec : state.balance >= old(state.balance)
+
+    handler tweak (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance := balance + delta }
+    }
+    "#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_old_in_single_state_context(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "old_in_single_state_context" && w.message.contains("invariant")),
+            "expected lint to fire on old() inside invariant; got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.message))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn old_ssc_lint_silent_on_clean_requires() {
+        // `requires` without `old(...)` — silent, no false positive.
+        let src = format!(
+            "{}{}",
+            OLD_SSC_SPEC_HEAD,
+            r#"
+    handler tweak (delta : U64) : State.Active -> State.Active {
+      permissionless
+      requires delta > 0 else BadGuard
+      effect { balance := balance + delta }
+    }
+    "#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_old_in_single_state_context(&spec);
+        assert!(
+            warnings.is_empty(),
+            "clean requires must not fire the lint; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn old_ssc_lint_silent_on_old_in_ensures() {
+        // `old(...)` inside `ensures` — the right context, must NOT fire.
+        let src = format!(
+            "{}{}",
+            OLD_SSC_SPEC_HEAD,
+            r#"
+    handler tweak (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance := balance + delta }
+      ensures state.balance >= old(state.balance)
+    }
+    "#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_old_in_single_state_context(&spec);
+        assert!(
+            warnings.is_empty(),
+            "old() in ensures must not fire the lint; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn old_ssc_lint_silent_on_old_in_property() {
+        // `old(...)` inside a `property` body — the right context, must
+        // NOT fire.
+        let src = format!(
+            "{}{}",
+            OLD_SSC_SPEC_HEAD,
+            r#"
+    handler tweak (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { balance := balance + delta }
+    }
+
+    property balance_monotonic :
+      state.balance >= old(state.balance)
+      preserved_by all
+    "#
+        );
+        let spec = crate::chumsky_adapter::parse_str(&src).expect("parse");
+        let warnings = check_old_in_single_state_context(&spec);
+        assert!(
+            warnings.is_empty(),
+            "old() in property body must not fire the single-state lint; got: {:?}",
+            warnings.iter().map(|w| &w.message).collect::<Vec<_>>(),
+        );
+    }
+}

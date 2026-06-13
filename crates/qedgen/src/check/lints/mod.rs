@@ -1622,3 +1622,1786 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
     warnings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::test_support::*;
+
+    // ========================================================================
+    // adt_state_missing_wrong_state lint
+    // ========================================================================
+
+    /// `pragma state_repr = adt` selects the inductive representation,
+    /// whose variant-mismatch fallthrough returns `Err(WrongState)`.
+    /// Declaring the pragma without the error variant would emit
+    /// non-compiling Rust, so `check` surfaces it. Without the pragma the
+    /// same spec lowers flat and the lint stays silent.
+    #[test]
+    fn adt_state_pragma_without_wrong_state_fires() {
+        let body = r#"
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Uninitialized
+      | Active of { balance : U64 }
+      | Closed
+
+    type Error
+      | InvalidAmount
+
+    handler open (amount : U64) : State.Uninitialized -> State.Active {
+      auth owner
+      accounts { owner : signer, writable }
+      requires amount > 0 else InvalidAmount
+    }"#;
+
+        // pragma set, no WrongState → fires
+        let adt = crate::chumsky_adapter::parse_str(&format!(
+            "spec Adt\npragma state_repr = adt\n{body}"
+        ))
+        .expect("parse adt");
+        let w = check_completeness(&adt);
+        let hit = w
+            .iter()
+            .find(|w| w.rule == "adt_state_missing_wrong_state")
+            .unwrap_or_else(|| {
+                panic!(
+                    "lint must fire; got: {:?}",
+                    w.iter().map(|w| &w.rule).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(hit.severity, Severity::Warning);
+        assert_eq!(hit.priority, 2);
+
+        // no pragma (flat) → silent even without WrongState
+        let flat =
+            crate::chumsky_adapter::parse_str(&format!("spec Flat\n{body}")).expect("parse flat");
+        assert!(
+            !check_completeness(&flat)
+                .iter()
+                .any(|w| w.rule == "adt_state_missing_wrong_state"),
+            "flat specs don't need WrongState; lint must stay silent"
+        );
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_fires() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
+            "expected missing_guard_from_takes, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_skips_when_guard_exists() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
+            "should not fire when guard exists"
+        );
+    }
+
+    #[test]
+    fn test_missing_effect_fires() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        // has lifecycle (pre/post set via make_handler) but no effect
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "missing_effect"),
+            "expected missing_effect, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// `call X.handler(...)`, `transfers { … }`, or `modifies [...]` all
+    /// count as effect-satisfying — the lint must not fire on CPI-only
+    /// handlers where state writes are the wrong abstraction.
+    #[test]
+    fn test_missing_effect_skips_when_handler_has_only_calls() {
+        let mut h = make_handler("init_mint");
+        h.takes_params = vec![("decimals".to_string(), "U64".to_string())];
+        h.guard_str = Some("decimals > 0".to_string());
+        h.calls = vec![ParsedCall {
+            target_interface: "Token".to_string(),
+            target_handler: "initialize_mint".to_string(),
+            args: vec![],
+            result_binding: None,
+            state_binders: Vec::new(),
+        }];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_effect"),
+            "missing_effect should not fire when handler has CPI calls; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    /// `modifies [field, ...]` is the frame-condition shape for handlers
+    /// whose writes the spec doesn't model further — must satisfy the lint.
+    #[test]
+    fn test_missing_effect_skips_when_handler_has_modifies() {
+        let mut h = make_handler("opaque_update");
+        h.takes_params = vec![("payload".to_string(), "U64".to_string())];
+        h.guard_str = Some("payload > 0".to_string());
+        h.modifies = Some(vec!["balance".to_string()]);
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_effect"),
+            "missing_effect should not fire when handler declares `modifies`; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_effect_skips_when_effect_exists() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "missing_effect"),
+            "should not fire when effect exists"
+        );
+    }
+
+    #[test]
+    fn test_missing_effect_uses_on_account_fields() {
+        let mut h = make_handler("borrow");
+        h.on_account = Some("Loan".to_string());
+        h.takes_params = vec![("loan_amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("loan_amount > 0".to_string());
+        h.pre_status = Some("Empty".to_string());
+        h.post_status = Some("Active".to_string());
+
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            account_types: vec![
+                ParsedAccountType {
+                    name: "Pool".to_string(),
+                    fields: vec![("total_deposits".to_string(), "U64".to_string())],
+                    lifecycle: vec!["Active".to_string()],
+                    pda_ref: None,
+                    variants: vec![],
+                },
+                ParsedAccountType {
+                    name: "Loan".to_string(),
+                    fields: vec![("loan_amount".to_string(), "U64".to_string())],
+                    lifecycle: vec!["Empty".to_string(), "Active".to_string()],
+                    pda_ref: None,
+                    variants: vec![],
+                },
+            ],
+            state_fields: vec![("total_deposits".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Empty".to_string(), "Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        let warning = warnings
+            .iter()
+            .find(|w| w.rule == "missing_effect")
+            .expect("expected missing_effect warning");
+        let example = warning
+            .example
+            .as_deref()
+            .expect("missing_effect should include example");
+        assert!(
+            example.contains("loan_amount += loan_amount"),
+            "expected account-aware suggestion, got: {}",
+            example
+        );
+        assert!(
+            !example.contains("total_deposits"),
+            "should not use fields from a different account type: {}",
+            example
+        );
+    }
+
+    #[test]
+    fn permissionless_skips_no_access_control() {
+        // `permissionless` opts out of the P1 `no_access_control` lint;
+        // without the marker, who-less handlers still fire.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_access_control"),
+            "permissionless handler must not fire no_access_control: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_access_control_still_fires_without_marker() {
+        // Control: handler with no auth and no permissionless marker still
+        // triggers the lint.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        // h.permissionless stays false
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_access_control"),
+            "who-less handler without permissionless should fire: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_with_auth_surfaces_contradictory_auth() {
+        // Both `auth X` and `permissionless` is contradictory — not a silent
+        // precedence situation. Lint surfaces a clear P1.
+        let mut h = make_handler("weird");
+        h.who = Some("authority".to_string());
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "contradictory_auth")
+            .expect("contradictory_auth should fire");
+        assert!(
+            w.message.contains("authority") && w.message.contains("permissionless"),
+            "message should name both: {}",
+            w.message
+        );
+    }
+
+    #[test]
+    fn test_no_properties_fires() {
+        let mut h = make_handler("deposit");
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_properties"),
+            "expected no_properties, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_properties_skips_with_property() {
+        let mut h = make_handler("deposit");
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("state.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_properties"),
+            "should not fire when properties exist"
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context() {
+        let mut h = make_handler("transfer");
+        // Has token program in accounts but no transfers block
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "source".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "dest".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "expected missing_cpi_for_token_context, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_on_lifecycle_init() {
+        // An `initialize` handler creating a writable token account via
+        // Anchor's `#[account(init, ...)]` needs no explicit `transfers` /
+        // `call Token.*` — the init macro handles the SPL CPI implicitly.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninitialized".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "vault".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: Some(vec!["vault".to_string(), "authority".to_string()]),
+                account_type: Some("token".to_string()),
+                authority: Some("vault_pda".to_string()),
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninitialized".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninitialized".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "lifecycle-init handler creating a token account should NOT fire \
+                 missing_cpi_for_token_context; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_on_non_canonical_init_name() {
+        // The suppression keys on "pre-state variant has no payload", not
+        // a hardcoded name list — specs naming the pre-init variant
+        // `Uninit` / `Created` / etc. must stay silent too. Mirror of the
+        // canonical-name test above with `Uninit` substituted.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninit".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "vault".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: Some(vec!["vault".to_string(), "authority".to_string()]),
+                account_type: Some("token".to_string()),
+                authority: Some("vault_pda".to_string()),
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninit".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninit".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "init handler with non-canonical pre-state variant `Uninit` \
+                 must NOT fire missing_cpi_for_token_context (v2.29.2 shape \
+                 predicate); got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_when_no_typed_token_account() {
+        // The suppression must not require a writable account typed
+        // `token`: real specs leave token accounts bare-typed and rely on
+        // Anchor's `init, associated_token::*` constraints to resolve the
+        // type. `is_lifecycle_init && !has_calls()` is sufficient.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninit".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                // Bare writable, no `type token` — Anchor would type it
+                // via an `init, associated_token::*` constraint set the
+                // spec doesn't repeat.
+                name: "pool_balance_account".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninit".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninit".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "lifecycle-init handler with token_program but no `type token` \
+                 writable account must NOT fire missing_cpi_for_token_context \
+                 (v2.29.2 — Anchor init handles SPL implicitly via constraint \
+                 set); got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_still_fires_on_non_init() {
+        // Complement to the suppression: a handler in a non-init
+        // lifecycle (e.g. Active → Active) with token_program and a
+        // writable token account but no transfers SHOULD still fire —
+        // Anchor's init macro doesn't apply, so the missing CPI is a
+        // real spec gap.
+        let mut h = make_handler("transfer");
+        h.pre_status = Some("Active".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "source".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "non-init handler with token_program and no transfers SHOULD \
+                 still fire; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_unreachable_state() {
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninitialized".to_string());
+        h.post_status = Some("Active".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Closed".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "lifecycle_unreachable_state"
+                    && w.subject.as_deref() == Some("Closed")),
+            "expected lifecycle_unreachable_state for Closed, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lifecycle_disconnected_subgraph_is_unreachable() {
+        let mut init = make_handler("initialize");
+        init.pre_status = Some("Uninitialized".to_string());
+        init.post_status = Some("Active".to_string());
+
+        let mut close = make_handler("close");
+        close.pre_status = Some("Frozen".to_string());
+        close.post_status = Some("Closed".to_string());
+
+        let spec = ParsedSpec {
+            handlers: vec![init, close],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Frozen".to_string(),
+                "Closed".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| {
+                w.rule == "lifecycle_unreachable_state" && w.subject.as_deref() == Some("Frozen")
+            }),
+            "expected disconnected state Frozen to be unreachable, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            warnings.iter().any(|w| {
+                w.rule == "lifecycle_unreachable_state" && w.subject.as_deref() == Some("Closed")
+            }),
+            "expected downstream state Closed to be unreachable, got: {:?}",
+            warnings
+                .iter()
+                .map(|w| (&w.rule, &w.subject))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_global_initial_state_seeded_when_account_lifecycle_differs() {
+        // Account lifecycle starts at "Active", but the global initial state
+        // is "Uninitialized". Without always seeding the global initial state,
+        // "Uninitialized" would be flagged as unreachable even though it is
+        // the entry point of the lifecycle.
+        let mut init = make_handler("initialize");
+        init.pre_status = Some("Uninitialized".to_string());
+        init.post_status = Some("Active".to_string());
+
+        let spec = ParsedSpec {
+            handlers: vec![init],
+            account_types: vec![ParsedAccountType {
+                name: "Pool".to_string(),
+                fields: vec![],
+                lifecycle: vec!["Active".to_string(), "Frozen".to_string()],
+                pda_ref: None,
+                variants: vec![],
+            }],
+            lifecycle_states: vec![
+                "Uninitialized".to_string(),
+                "Active".to_string(),
+                "Frozen".to_string(),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+                !warnings.iter().any(|w| {
+                    w.rule == "lifecycle_unreachable_state"
+                        && w.subject.as_deref() == Some("Uninitialized")
+                }),
+                "Uninitialized is the global initial state and should NOT be flagged as unreachable, got: {:?}",
+                warnings
+                    .iter()
+                    .filter(|w| w.rule == "lifecycle_unreachable_state")
+                    .map(|w| &w.subject)
+                    .collect::<Vec<_>>()
+            );
+    }
+
+    #[test]
+    fn test_no_errors_block_fires() {
+        let mut h = make_handler("deposit");
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_errors_block"),
+            "expected no_errors_block, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        // Build a spec that triggers multiple rules at different priorities
+        let mut h = make_handler("deposit");
+        h.who = None; // priority 1: no_access_control
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
+        // no guard → priority 1: unguarded_arithmetic + missing_guard_from_takes
+        // no properties → priority 3: no_properties
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![
+                ("authority".to_string(), "Pubkey".to_string()),
+                ("balance".to_string(), "U64".to_string()),
+            ],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        // Verify sorted ascending by priority
+        for window in warnings.windows(2) {
+            assert!(
+                window[0].priority <= window[1].priority,
+                "warnings not sorted by priority: {} ({}) should come before {} ({})",
+                window[0].rule,
+                window[0].priority,
+                window[1].rule,
+                window[1].priority
+            );
+        }
+    }
+
+    #[test]
+    fn test_complete_spec_clean() {
+        let spec_content = include_str!("../../../../../examples/rust/escrow/escrow.qedspec");
+        let spec =
+            crate::chumsky_adapter::parse_str(spec_content).expect("escrow.qedspec should parse");
+        let warnings = check_completeness(&spec);
+        // A well-formed spec should have zero `Warning`-severity findings.
+        // (P6 on Pubkey state fields is Info-only, so it never appears here.)
+        let warning_rules: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.severity == Severity::Warning)
+            .map(|w| w.rule.as_str())
+            .collect();
+        assert!(
+            warning_rules.is_empty(),
+            "escrow.qedspec should be Warning-clean but got: {:?}",
+            warning_rules
+        );
+    }
+
+    #[test]
+    fn test_write_without_read_lint() {
+        let mut h = make_handler("deposit");
+        h.guard_str = Some("amount > 0".to_string());
+        h.effects = vec![
+            ("balance".into(), "add".into(), "amount".into()),
+            ("counter".into(), "add".into(), "1".into()),
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![
+                ("authority".into(), "Pubkey".into()),
+                ("balance".into(), "U64".into()),
+                ("counter".into(), "U64".into()),
+            ],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("s.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
+                preserved_by: vec!["deposit".to_string()],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        // "counter" is written but never read in any guard or property
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read" && w.subject.as_deref() == Some("counter")),
+            "expected write_without_read for 'counter', got: {:?}",
+            warnings
+                .iter()
+                .filter(|w| w.rule == "write_without_read")
+                .map(|w| &w.subject)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_circular_lifecycle_no_terminal() {
+        let mut h1 = make_handler("advance");
+        h1.pre_status = Some("A".to_string());
+        h1.post_status = Some("B".to_string());
+        let mut h2 = make_handler("retreat");
+        h2.pre_status = Some("B".to_string());
+        h2.post_status = Some("A".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h1, h2],
+            lifecycle_states: vec!["A".to_string(), "B".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "circular_lifecycle_no_terminal"),
+            "expected circular_lifecycle_no_terminal, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // ---- write_without_read word-boundary tests ----
+
+    #[test]
+    fn test_write_without_read_no_substring_match() {
+        // Field "id" written in effects, guard only has "valid" — should NOT count as read
+        let mut h = make_handler("update");
+        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.guard_str = Some("valid > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![
+                ("id".to_string(), "U64".to_string()),
+                ("valid".to_string(), "U64".to_string()),
+            ],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.rule == "write_without_read"
+                        && w.subject.as_deref() == Some("id")),
+                "field 'id' should be flagged as write_without_read when guard only contains 'valid', got: {:?}",
+                warnings.iter().filter(|w| w.rule == "write_without_read").collect::<Vec<_>>()
+            );
+    }
+
+    #[test]
+    fn test_write_without_read_bare_word_match() {
+        // Field "balance" written in effects, guard has "balance > 0" — should count as read
+        let mut h = make_handler("deposit");
+        h.effects = vec![(
+            "balance".to_string(),
+            "add".to_string(),
+            "amount".to_string(),
+        )];
+        h.guard_str = Some("balance > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read" && w.subject.as_deref() == Some("balance")),
+            "field 'balance' should NOT be flagged when guard contains bare word 'balance', got: {:?}",
+            warnings
+                .iter()
+                .filter(|w| w.rule == "write_without_read")
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_write_without_read_prefixed_match() {
+        // Field "id" written, guard has "state.id > 0" — should count as read
+        let mut h = make_handler("update");
+        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.guard_str = Some("state.id > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("id".to_string(), "U64".to_string())],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "write_without_read" && w.subject.as_deref() == Some("id")),
+            "field 'id' should NOT be flagged when guard contains 'state.id', got: {:?}",
+            warnings
+                .iter()
+                .filter(|w| w.rule == "write_without_read")
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_fires_for_large_type() {
+        // U64 quantifier can't be exhausted — check.rs must warn so the user
+        // knows the property is being silently skipped in proptest/Kani.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "all_balances_positive".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some(
+                    "/* QEDGEN_UNSUPPORTED_QUANTIFIER: forall v : U64 \
+                         — lower at harness level */"
+                        .to_string(),
+                ),
+                rust_expression_pod: None,
+                preserved_by: vec![],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "expected unchecked_quantifier lint for U64 forall, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "unchecked_quantifier")
+            .unwrap();
+        assert_eq!(w.priority, 1, "unchecked_quantifier must be P1");
+        assert!(
+            w.message.contains("all_balances_positive"),
+            "message must name the property"
+        );
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_does_not_fire_for_u8() {
+        // U8 forall lowers to a real iterator — no lint should fire.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "bytes_nonneg".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
+                rust_expression_pod: None,
+                preserved_by: vec![],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "U8 forall must not fire unchecked_quantifier"
+        );
+    }
+
+    #[test]
+    fn build_counterexample_resolves_named_const_in_effect() {
+        let handler = ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            ..make_handler("reset")
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        let ce = build_counterexample(
+            "s.counter \u{2264} 5",
+            "bounded",
+            &["counter"],
+            &handler,
+            &["counter"],
+            &constants,
+        )
+        .expect("should produce a counterexample");
+        let post = ce
+            .post_state
+            .iter()
+            .find(|(f, _)| f == "counter")
+            .unwrap()
+            .1;
+        assert_eq!(post, 0, "ZERO should resolve to 0, not fall back to 1");
+    }
+
+    #[test]
+    fn preserved_by_all_potential_violation_fires_for_named_const_effect() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    const STEP = 5
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_small :
+      state.counter <= 3
+      preserved_by all
+    handler tick : State.Active -> State.Active {
+      permissionless
+      effect { counter := STEP }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "must warn when preserved_by all handler demonstrably violates the property"
+        );
+    }
+
+    /// Transition property `counter >= old(counter)` preserved by an `add`
+    /// handler must NOT fire — guards against the counterexample builder
+    /// misreading `s'.counter` as a constant and applying the effect to the
+    /// `old(...)` side (inverting the relation into a bogus violation).
+    #[test]
+    fn preserved_by_transition_property_silent_when_add_preserves_monotonicity() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_monotonic :
+      state.counter >= old(state.counter)
+      preserved_by all
+    handler grow (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { counter += delta }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "add preserves `counter >= old(counter)` — must not flag a violation"
+        );
+    }
+
+    /// The same transition property `counter >= old(counter)` claimed-
+    /// preserved by a `sub` handler MUST still fire — decreasing the post
+    /// side genuinely breaks monotonicity.
+    #[test]
+    fn preserved_by_transition_property_fires_when_sub_breaks_monotonicity() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_monotonic :
+      state.counter >= old(state.counter)
+      preserved_by all
+    handler shrink : State.Active -> State.Active {
+      permissionless
+      effect { counter -= 1 }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "sub breaks `counter >= old(counter)` — must flag the violation"
+        );
+    }
+
+    /// `build_fix_suggestions` must not emit a nonsensical
+    /// `requires state.counter > state.counter` guard for a transition
+    /// property (same field on both sides). Fix A is suppressed; Fix B
+    /// (add to preserved_by) still applies.
+    #[test]
+    fn build_fix_suggestions_skips_self_guard_for_transition_property() {
+        let handler = ParsedHandler {
+            name: "shrink".to_string(),
+            effects: vec![("counter".to_string(), "sub".to_string(), "1".to_string())],
+            ..make_handler("shrink")
+        };
+        let fixes = build_fix_suggestions(
+            "s'.counter \u{2265} s.counter",
+            "counter_monotonic",
+            &handler,
+            &["counter"],
+            &["counter"],
+        );
+        assert!(
+            !fixes
+                .iter()
+                .any(|f| f.snippet.contains("state.counter > state.counter")
+                    || f.snippet.contains("state.counter < state.counter")),
+            "must not suggest a self-comparison guard; got: {:?}",
+            fixes.iter().map(|f| &f.snippet).collect::<Vec<_>>()
+        );
+        assert!(
+            fixes.iter().any(|f| f.label == "Add to preserved_by"),
+            "the preserved_by fix should still be offered"
+        );
+    }
+
+    // ── P6: pubkey_state_field_unsupported ────────────────────────────────
+    //
+    // Guards the structural lowering note: a State carrying
+    // `authority : Pubkey` lowers to `[u8; 32]` in the verification State;
+    // P6 surfaces the lowering at check time.
+
+    #[test]
+    fn pubkey_state_field_lint_fires_on_account_type() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec PubkeyState
+    type State
+      | Active of {
+          authority : Pubkey,
+          balance : U64,
+        }
+    handler h : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "pubkey_state_field_unsupported")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one P6 hit: {hits:#?}");
+        let w = hits[0];
+        assert!(
+            w.message.contains("P6:") && w.message.contains("'authority'"),
+            "message must cite P6 and name the field: {}",
+            w.message
+        );
+        // P6 is Info-only: Pubkey state fields lower to `[u8; 32]`
+        // automatically; the lint just documents the lowering.
+        assert!(
+            w.message.contains("lowered to `[u8; 32]`"),
+            "message must describe the lowering: {}",
+            w.message
+        );
+        assert_eq!(w.priority, 3, "P6 is now a P3 informational");
+        assert_eq!(w.severity, Severity::Info);
+    }
+
+    #[test]
+    fn pubkey_state_field_lint_silent_without_pubkey_field() {
+        // Control: no Pubkey field in state → no P6.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec NoPubkey
+    type State | Active of { balance : U64 }
+    handler bump : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "pubkey_state_field_unsupported"),
+            "no Pubkey field → no P6, got: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn pubkey_state_field_lint_fires_per_field() {
+        // Two Pubkey fields → two P6 lints, each naming its specific
+        // field. The non-Pubkey `balance` must not appear in any hit's
+        // subject. This pins field-scoped reporting (mirrors how
+        // `wrapping_arithmetic` fires per-op).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec PubkeyMulti
+    type State
+      | Active of {
+          authority : Pubkey,
+          mint : Pubkey,
+          balance : U64,
+        }
+    handler h : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "pubkey_state_field_unsupported")
+            .collect();
+        assert_eq!(hits.len(), 2, "expected two P6 hits: {hits:#?}");
+        let subjects: Vec<&str> = hits
+            .iter()
+            .map(|w| w.subject.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            subjects.iter().any(|s| s.ends_with(".authority")),
+            "must name authority: {subjects:?}"
+        );
+        assert!(
+            subjects.iter().any(|s| s.ends_with(".mint")),
+            "must name mint: {subjects:?}"
+        );
+        assert!(
+            !subjects.iter().any(|s| s.ends_with(".balance")),
+            "must NOT name balance: {subjects:?}"
+        );
+    }
+
+    // ── P7: undeclared_state_field_in_effect ──────────────────────────────
+
+    #[test]
+    fn p7_fires_on_lhs_undeclared_field() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec P7Lhs
+    type State | Active of { balance : U64 }
+    handler bump : State.Active -> State.Active {
+      permissionless
+      effect { undeclared += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "undeclared_state_field_in_effect")
+            .collect();
+        assert!(
+            hits.iter()
+                .any(|w| w.message.contains("LHS") && w.message.contains("'undeclared'")),
+            "expected LHS hit naming `undeclared`; got: {hits:#?}"
+        );
+    }
+
+    #[test]
+    fn p7_fires_on_rhs_undeclared_state_reference() {
+        // RHS check catches `state.<field>` references inside complex
+        // expressions. A bare `state.X` RHS goes through render_effect's
+        // path-stripping shortcut (it ends up as just `X`), which is
+        // indistinguishable from a param reference at lint time — that
+        // case is caught downstream by codegen unless the user wrote
+        // any composition. We pin the composition case here.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec P7Rhs
+    type State | Active of { balance : U64 }
+    handler bump : State.Active -> State.Active {
+      permissionless
+      effect { balance := state.missing + 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "undeclared_state_field_in_effect")
+            .collect();
+        assert!(
+            hits.iter()
+                .any(|w| w.message.contains("RHS") && w.message.contains("'missing'")),
+            "expected RHS hit naming `missing`; got: {hits:#?}"
+        );
+    }
+
+    #[test]
+    fn p7_silent_when_all_fields_declared() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec P7Clean
+    type State | Active of { balance : U64, total : U64 }
+    handler add : State.Active -> State.Active {
+      permissionless
+      effect { total := state.balance }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "undeclared_state_field_in_effect"),
+            "clean spec must not fire P7, got: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn unguarded_arithmetic_accepts_cumulative_bound_across_multiple_adds() {
+        // A single `requires state.x + a + b <= U64_MAX` logically bounds
+        // both `state.x += a` and `state.x += b`; the lint must accept the
+        // cumulative form, not just per-pair patterns.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow
+
+    handler deposit (a : U64) (b : U64) : State.Active -> State.Active {
+      permissionless
+      requires state.balance + a + b <= U64_MAX
+      effect {
+        balance += a
+        balance += b
+      }
+    }
+    "#,
+        )
+        .expect("cumulative-bound spec must parse");
+        let warnings = check_completeness(&spec);
+        let arith_hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_arithmetic")
+            .collect();
+        assert!(
+            arith_hits.is_empty(),
+            "cumulative bound should satisfy unguarded_arithmetic for all adds; got: {arith_hits:#?}"
+        );
+    }
+
+    #[test]
+    fn u64_max_builtin_resolves_in_requires_clause() {
+        // `U64_MAX` (and friends) are seeded as builtin consts so users
+        // don't have to declare `const U64_MAX = …` per spec.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      requires state.balance + n <= U64_MAX
+      effect { balance += n }
+    }
+    "#,
+        )
+        .expect("U64_MAX should resolve as a builtin");
+        let warnings = check_completeness(&spec);
+        // With the U64_MAX guard, unguarded_arithmetic should be silent.
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unguarded_arithmetic"),
+            "U64_MAX builtin should satisfy unguarded_arithmetic; got: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn p7_does_not_fire_on_state_variant_promotion() {
+        // `state := .Variant { ... }` is the documented variant-promotion /
+        // whole-state-assignment form; P7 must not strip the LHS root and
+        // flag `state` as an undeclared field.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Lifecycle
+    program_id "11111111111111111111111111111111"
+    type State
+      | Setup of { x : U64 }
+      | Active of { x : U64 }
+    type Error | E
+
+    handler activate : State.Setup -> State.Active {
+      permissionless
+      effect {
+        state := .Active { x := 0 }
+      }
+    }
+    "#,
+        )
+        .expect("variant-promotion spec must parse");
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "undeclared_state_field_in_effect"),
+            "P7 must not fire on `state := .Variant {{...}}`; got: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn p7_ignores_synthetic_match_arm_handlers() {
+        // `_case_N` / `_otherwise` synthetic handlers inherit their
+        // parent's effects — they don't get a second P7 hit because
+        // the parent already covers it.
+        let mut spec = ParsedSpec::default();
+        spec.account_types.push(ParsedAccountType {
+            name: "State".into(),
+            fields: vec![("balance".into(), "U64".into())],
+            lifecycle: vec![],
+            pda_ref: None,
+            variants: vec![],
+        });
+        spec.handlers.push(ParsedHandler {
+            name: "outer_case_0".into(),
+            permissionless: true,
+            effects: vec![("undeclared".into(), "set".into(), "0".into())],
+            ..synthetic_handler_default("outer_case_0")
+        });
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "undeclared_state_field_in_effect"),
+            "P7 must not fire on `_case_N` synthetic handlers: {warnings:#?}"
+        );
+    }
+
+    fn synthetic_handler_default(name: &str) -> ParsedHandler {
+        ParsedHandler {
+            name: name.into(),
+            doc: None,
+            who: None,
+            on_account: None,
+            pre_status: None,
+            post_status: None,
+            takes_params: vec![],
+            guard_str: None,
+            guard_str_rust: None,
+            aborts_if: vec![],
+            requires: vec![],
+            ensures: vec![],
+            modifies: None,
+            let_bindings: vec![],
+            aborts_total: false,
+            permissionless: false,
+            effects: vec![],
+            effect_on_error: vec![],
+            accounts: vec![],
+            transfers: vec![],
+            emits: vec![],
+            invariants: vec![],
+            establishes: vec![],
+            properties: vec![],
+            schema_includes: vec![],
+            calls: vec![],
+            effect_branches: None,
+            abstract_binders: vec![],
+        }
+    }
+
+    // ========================================================================
+    // ParsedAccountType.variants populated for multi-variant ADTs
+    // ========================================================================
+
+    #[test]
+    fn multi_variant_adt_populates_account_variants() {
+        // Two-variant state ADT. Flat `fields` view stays the union (first
+        // occurrence wins); `variants` carries the per-variant shape so
+        // codegen can emit `pub enum State { Setup{...}, Active{...} }`.
+        let src = r#"spec Multi
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Setup of { owner : Pubkey }
+      | Active of {
+          owner : Pubkey,
+          pool  : U64,
+        }
+
+    property pool_nonneg :
+      state.pool >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let state = spec
+            .account_types
+            .iter()
+            .find(|a| a.name == "State")
+            .expect("state account type present");
+
+        assert_eq!(
+            state.variants.len(),
+            2,
+            "two-variant ADT should produce two ParsedVariant entries"
+        );
+        assert_eq!(state.variants[0].name, "Setup");
+        assert_eq!(state.variants[1].name, "Active");
+        assert_eq!(state.variants[0].fields.len(), 1);
+        assert_eq!(state.variants[1].fields.len(), 2);
+        // Flat view stays populated as the union (back-compat).
+        assert!(state.fields.iter().any(|(n, _)| n == "owner"));
+        assert!(state.fields.iter().any(|(n, _)| n == "pool"));
+    }
+
+    #[test]
+    fn no_payload_variant_keeps_empty_field_list() {
+        // A unit-style variant (no payload) should still appear in
+        // `variants` with an empty field list so codegen can emit
+        // `pub enum State { Inactive, Active{...} }`.
+        let src = r#"spec NoPayload
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Inactive
+      | Active of { pool : U64 }
+
+    property pool_nonneg :
+      state.pool >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let state = spec
+            .account_types
+            .iter()
+            .find(|a| a.name == "State")
+            .expect("state account type present");
+        assert_eq!(state.variants.len(), 2);
+        let inactive = state
+            .variants
+            .iter()
+            .find(|v| v.name == "Inactive")
+            .expect("unit variant retained");
+        assert!(
+            inactive.fields.is_empty(),
+            "no-payload variant has zero fields"
+        );
+    }
+
+    // ========================================================================
+    // Variant-prefixed effect LHS doesn't false-positive lints
+    // ========================================================================
+
+    #[test]
+    fn variant_prefixed_lhs_passes_all_effect_lints() {
+        // `Active.pool := amount` on a multi-variant ADT state must NOT
+        // trigger undeclared_state_field_in_effect (P7 LHS),
+        // write_without_read (Rule 13), or unused_field (Rule 4) — all
+        // three walk the LHS string and must not treat the variant prefix
+        // as a field name.
+        let src = r#"spec MultiVar
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Setup of { owner : Pubkey }
+      | Active of {
+          owner : Pubkey,
+          pool  : U64,
+        }
+
+    type Error
+      | MathOverflow
+
+    handler activate (amount : U64) : State.Setup -> State.Active {
+      auth owner
+      requires amount > 0
+      effect {
+        Active.pool := amount
+      }
+    }
+
+    property pool_nonneg :
+      state.pool >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_completeness(&spec);
+        let rules: Vec<&str> = warnings.iter().map(|w| w.rule.as_str()).collect();
+
+        assert!(
+                !rules.contains(&"undeclared_state_field_in_effect"),
+                "P7 should not fire on `Active.pool := amount` (Active is a variant, pool is its field) — got: {:?}",
+                rules
+            );
+        assert!(
+                !rules.contains(&"write_without_read"),
+                "write_without_read should match `pool` (read by property) to `Active.pool` (written) — got: {:?}",
+                rules
+            );
+        assert!(
+            !rules.contains(&"unused_field"),
+            "unused_field should see `pool` as modified via `Active.pool := amount` — got: {:?}",
+            rules
+        );
+    }
+
+    #[test]
+    fn variant_prefixed_lhs_still_catches_unknown_field() {
+        // A real bug: `Active.poool := amount` (typo). P7 should fire
+        // with subject `activate.Active.poool` — the variant prefix is
+        // legal, the field name behind it isn't declared anywhere.
+        let src = r#"spec MultiVarTypo
+    program_id "11111111111111111111111111111111"
+
+    type State
+      | Setup of { owner : Pubkey }
+      | Active of {
+          owner : Pubkey,
+          pool  : U64,
+        }
+
+    type Error
+      | MathOverflow
+
+    handler activate (amount : U64) : State.Setup -> State.Active {
+      auth owner
+      requires amount > 0
+      effect {
+        Active.poool := amount
+      }
+    }
+
+    property pool_nonneg :
+      state.pool >= 0
+      preserved_by all
+    "#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+        let warnings = check_completeness(&spec);
+        let p7s: Vec<&CompletenessWarning> = warnings
+            .iter()
+            .filter(|w| w.rule == "undeclared_state_field_in_effect")
+            .collect();
+        assert_eq!(
+            p7s.len(),
+            1,
+            "expected exactly one P7 hit on the misspelled `poool`, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+        assert!(
+            p7s[0].subject.as_deref().unwrap_or("").contains("poool"),
+            "P7 subject should name the misspelled field, got: {:?}",
+            p7s[0].subject
+        );
+    }
+}
