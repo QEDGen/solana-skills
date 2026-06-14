@@ -497,9 +497,10 @@ pub struct ParsedHandler {
 pub struct ParsedEffectBranches {
     /// Scrutinee expression rendered for Rust codegen.
     pub scrutinee_rust: String,
-    /// Scrutinee rendered for Quasar/Pod targets; `emit_transition_fn`
-    /// currently reads `scrutinee_rust`.
-    #[allow(dead_code)]
+    /// Scrutinee rendered for Quasar/Pod targets. Threaded into the MIR as
+    /// `BranchScrutinee::Match`'s `Expr.rust_pod` by `lower_handler`, where
+    /// the pod backends read it; the Anchor `emit_transition_fn` path uses
+    /// `scrutinee_rust`.
     pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
     pub scrutinee_lean: String,
@@ -515,10 +516,10 @@ pub struct ParsedEffectArm {
     pub is_wildcard: bool,
     pub effects: Vec<(String, String, String)>,
     /// Per-site `or <ErrorVariant>` overrides, parallel to `effects` (see
-    /// `ParsedOperation::effect_on_error`). No consumer reads it at the arm
-    /// level yet — Anchor codegen reads the flat union, proptest/kani don't
-    /// lower error variants.
-    #[allow(dead_code)]
+    /// `ParsedOperation::effect_on_error`). Consumed per-arm by
+    /// `lower_handler`'s `Stmt::Branch` lowering via `lower_effects(&arm.effects,
+    /// &arm.effect_on_error)`, so each arm's checked effects carry their own
+    /// abort error.
     pub effect_on_error: Vec<Option<String>>,
 }
 

@@ -386,131 +386,46 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
         cond_parts.push(r.pred.0.lean.clone());
     }
 
+    // Conditional effects (`effect { match … }`) lower to `Stmt::Branch`.
+    // Render a nested Lean `match` on the scrutinee so the ADT transition
+    // applies exactly one arm — the per-arm analogue of the flat-state
+    // `emit_handler_transition` (applying the *union* of arms unconditionally
+    // is semantically wrong). Returns early; the unconditional tail below
+    // handles the no-branch case.
+    if let Some((scrutinee, arms, default)) = h.body.stmts.iter().find_map(|st| match st {
+        Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } => Some((scrutinee, arms, default)),
+        _ => None,
+    }) {
+        emit_adt_branch(
+            out,
+            mir,
+            h,
+            pre,
+            post,
+            &pre_pat,
+            &pre_let_lines,
+            &cond_parts,
+            scrutinee,
+            arms,
+            default,
+        );
+        return;
+    }
+
     // Effect-derived bound checks: only `CheckedAdd`/`CheckedSub` gain
     // bounds (`Wrap*`/`Sat*` handle the boundary without aborting); the
     // field's pre-variant type picks the bound (unsigned add → overflow,
     // unsigned sub → underflow, signed skips).
-    //
-    // `Stmt::Branch` arms flatten to their union here — the ADT renderer
-    // keeps union semantics; per-arm ADT rendering is a follow-up (the
-    // flat-state `emit_handler_transition` already emits a true Lean `match`).
-    for stmt in stmts_with_branch_union(&h.body.stmts) {
-        match stmt {
-            Stmt::CheckedAdd { path, delta, .. } => {
-                let stripped = strip_variant_prefix(path, mir);
-                if let Some(ty) = pre
-                    .fields
-                    .iter()
-                    .find(|f| f.name == stripped)
-                    .map(|f| &f.ty)
-                {
-                    if let Some(max) = ty_max_const(ty) {
-                        cond_parts.push(format!(
-                            "{} + {} \u{2264} {}",
-                            safe_name(&stripped),
-                            delta.lean,
-                            max
-                        ));
-                    }
-                }
-            }
-            Stmt::CheckedSub { path, delta, .. } => {
-                let stripped = strip_variant_prefix(path, mir);
-                if let Some(ty) = pre
-                    .fields
-                    .iter()
-                    .find(|f| f.name == stripped)
-                    .map(|f| &f.ty)
-                {
-                    if !matches!(ty, crate::mir::Ty::I64 | crate::mir::Ty::I128) {
-                        cond_parts.push(format!(
-                            "{} \u{2264} {}",
-                            delta.lean,
-                            safe_name(&stripped)
-                        ));
-                    }
-                }
-            }
-            // No bound to check.
-            Stmt::Assign { .. }
-            | Stmt::WrapAdd { .. }
-            | Stmt::WrapSub { .. }
-            | Stmt::SatAdd { .. }
-            | Stmt::SatSub { .. }
-            | Stmt::RequireOrAbort { .. }
-            | Stmt::TokenTransfer { .. }
-            | Stmt::VariantPromote { .. }
-            | Stmt::Branch { .. }
-            | Stmt::Abort(_)
-            | Stmt::Cpi { .. }
-            | Stmt::Emit { .. } => {}
-        }
-    }
+    cond_parts.extend(adt_bound_conds(mir, pre, &h.body.stmts));
 
-    // Effect map keyed by stripped field name. Account-binding `.pubkey`
-    // assignments (no Lean scope) are skipped. Branch arms flatten to union.
-    let mut effect_map: std::collections::HashMap<String, (&'static str, String)> =
-        std::collections::HashMap::new();
-    for stmt in stmts_with_branch_union(&h.body.stmts) {
-        match stmt {
-            Stmt::Assign { path, rhs } => {
-                if is_account_pubkey_ref(&rhs.rust) {
-                    continue;
-                }
-                effect_map.insert(strip_variant_prefix(path, mir), ("set", rhs.lean.clone()));
-            }
-            Stmt::CheckedAdd { path, delta, .. }
-            | Stmt::WrapAdd { path, delta }
-            | Stmt::SatAdd { path, delta } => {
-                effect_map.insert(strip_variant_prefix(path, mir), ("add", delta.lean.clone()));
-            }
-            Stmt::CheckedSub { path, delta, .. }
-            | Stmt::WrapSub { path, delta }
-            | Stmt::SatSub { path, delta } => {
-                effect_map.insert(strip_variant_prefix(path, mir), ("sub", delta.lean.clone()));
-            }
-            Stmt::RequireOrAbort { .. }
-            | Stmt::TokenTransfer { .. }
-            | Stmt::VariantPromote { .. }
-            | Stmt::Branch { .. }
-            | Stmt::Abort(_)
-            | Stmt::Cpi { .. }
-            | Stmt::Emit { .. } => {}
-        }
-    }
-
-    // Build post-variant constructor args.
-    let mut unconstrained: Vec<String> = Vec::new();
-    let auth_who = handler_auth_name(h);
-    let post_args: Vec<String> = post
-        .fields
-        .iter()
-        .map(|f| {
-            if let Some((kind, value)) = effect_map.get(&f.name) {
-                return match *kind {
-                    "add" => format!("({} + {})", safe_name(&f.name), value),
-                    "sub" => format!("({} - {})", safe_name(&f.name), value),
-                    _ => value.clone(),
-                };
-            }
-            if let Some(ref who) = auth_who {
-                if *who == f.name && matches!(&f.ty, crate::mir::Ty::Pubkey) {
-                    return safe_name(who);
-                }
-            }
-            if pre.fields.iter().any(|p| p.name == f.name && p.ty == f.ty) {
-                return safe_name(&f.name);
-            }
-            unconstrained.push(f.name.clone());
-            ty_default_literal(&f.ty).to_string()
-        })
-        .collect();
-
-    let post_ctor = if post_args.is_empty() {
-        format!(".{}", post.tag)
-    } else {
-        format!(".{} {}", post.tag, post_args.join(" "))
-    };
+    // Effect map → post-variant constructor (carry-over for unmentioned
+    // matching fields; type defaults for the rest).
+    let effect_map = adt_effect_map(mir, &h.body.stmts);
+    let (post_ctor, unconstrained) = adt_post_ctor(pre, post, h, &effect_map);
 
     if !unconstrained.is_empty() {
         out.push_str(&format!(
@@ -551,6 +466,266 @@ fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::Hand
             "    if {} then some ({}) else none\n",
             if_cond, post_ctor
         ));
+    }
+    out.push_str("  | _ => none\n\n");
+}
+
+/// Effect-derived overflow/underflow bound conjuncts for one ADT statement
+/// list — the per-arm analogue used by both the unconditional ADT path and
+/// `emit_adt_branch`. Field types come from the pre-variant; only
+/// `CheckedAdd`/`CheckedSub` gain bounds (`Wrap*`/`Sat*` saturate/wrap).
+fn adt_bound_conds(
+    mir: &Mir,
+    pre: &crate::mir::StateVariant,
+    stmts: &[crate::mir::Stmt],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let mut conds: Vec<String> = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::CheckedAdd { path, delta, .. } => {
+                let stripped = strip_variant_prefix(path, mir);
+                if let Some(ty) = pre
+                    .fields
+                    .iter()
+                    .find(|f| f.name == stripped)
+                    .map(|f| &f.ty)
+                {
+                    if let Some(max) = ty_max_const(ty) {
+                        conds.push(format!(
+                            "{} + {} \u{2264} {}",
+                            safe_name(&stripped),
+                            delta.lean,
+                            max
+                        ));
+                    }
+                }
+            }
+            Stmt::CheckedSub { path, delta, .. } => {
+                let stripped = strip_variant_prefix(path, mir);
+                if let Some(ty) = pre
+                    .fields
+                    .iter()
+                    .find(|f| f.name == stripped)
+                    .map(|f| &f.ty)
+                {
+                    if !matches!(ty, crate::mir::Ty::I64 | crate::mir::Ty::I128) {
+                        conds.push(format!("{} \u{2264} {}", delta.lean, safe_name(&stripped)));
+                    }
+                }
+            }
+            // No bound to check.
+            Stmt::Assign { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
+        }
+    }
+    conds
+}
+
+/// Effect map for an ADT statement list, keyed by stripped field name →
+/// (op, Lean RHS). Account-binding `.pubkey` assignments (no Lean scope)
+/// are skipped. `set`/`add`/`sub` mirror the flat-state op set.
+fn adt_effect_map(
+    mir: &Mir,
+    stmts: &[crate::mir::Stmt],
+) -> std::collections::HashMap<String, (&'static str, String)> {
+    use crate::mir::Stmt;
+    let mut effect_map: std::collections::HashMap<String, (&'static str, String)> =
+        std::collections::HashMap::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { path, rhs } => {
+                if is_account_pubkey_ref(&rhs.rust) {
+                    continue;
+                }
+                effect_map.insert(strip_variant_prefix(path, mir), ("set", rhs.lean.clone()));
+            }
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => {
+                effect_map.insert(strip_variant_prefix(path, mir), ("add", delta.lean.clone()));
+            }
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => {
+                effect_map.insert(strip_variant_prefix(path, mir), ("sub", delta.lean.clone()));
+            }
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
+        }
+    }
+    effect_map
+}
+
+/// Post-variant constructor for the ADT transition from an effect map.
+/// `add`/`sub` reference the bound pre-field name; unmentioned fields carry
+/// over when the pre-variant has a same-typed field, else fall to a type
+/// default (collected into the returned `unconstrained` list).
+fn adt_post_ctor(
+    pre: &crate::mir::StateVariant,
+    post: &crate::mir::StateVariant,
+    h: &crate::mir::HandlerMir,
+    effect_map: &std::collections::HashMap<String, (&'static str, String)>,
+) -> (String, Vec<String>) {
+    let mut unconstrained: Vec<String> = Vec::new();
+    let auth_who = handler_auth_name(h);
+    let post_args: Vec<String> = post
+        .fields
+        .iter()
+        .map(|f| {
+            if let Some((kind, value)) = effect_map.get(&f.name) {
+                return match *kind {
+                    "add" => format!("({} + {})", safe_name(&f.name), value),
+                    "sub" => format!("({} - {})", safe_name(&f.name), value),
+                    _ => value.clone(),
+                };
+            }
+            if let Some(ref who) = auth_who {
+                if *who == f.name && matches!(&f.ty, crate::mir::Ty::Pubkey) {
+                    return safe_name(who);
+                }
+            }
+            if pre.fields.iter().any(|p| p.name == f.name && p.ty == f.ty) {
+                return safe_name(&f.name);
+            }
+            unconstrained.push(f.name.clone());
+            ty_default_literal(&f.ty).to_string()
+        })
+        .collect();
+
+    let post_ctor = if post_args.is_empty() {
+        format!(".{}", post.tag)
+    } else {
+        format!(".{} {}", post.tag, post_args.join(" "))
+    };
+    (post_ctor, unconstrained)
+}
+
+/// Render a conditional-effect (`Stmt::Branch`) ADT transition as a nested
+/// Lean `match` on the scrutinee — each arm builds the post-variant from
+/// THAT arm's effects, wrapped in the arm's own bound guards so an untaken
+/// arm never aborts. The per-arm analogue of the flat-state branch path.
+#[allow(clippy::too_many_arguments)]
+fn emit_adt_branch(
+    out: &mut String,
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    pre: &crate::mir::StateVariant,
+    post: &crate::mir::StateVariant,
+    pre_pat: &str,
+    pre_let_lines: &[String],
+    cond_parts: &[String],
+    scrutinee: &crate::mir::BranchScrutinee,
+    arms: &[crate::mir::BranchArm],
+    default: &Option<crate::mir::Block>,
+) {
+    let scrutinee_lean = match scrutinee {
+        crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
+        crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+    };
+
+    // One arm → `some (<post-ctor from this arm's effects>)`, guarded by the
+    // arm's own overflow/underflow bounds (an untaken arm must not abort).
+    let arm_line = |stmts: &[crate::mir::Stmt]| -> (String, Vec<String>) {
+        let effect_map = adt_effect_map(mir, stmts);
+        let (post_ctor, unconstrained) = adt_post_ctor(pre, post, h, &effect_map);
+        let bounds = adt_bound_conds(mir, pre, stmts);
+        let line = if bounds.is_empty() {
+            format!("some ({})", post_ctor)
+        } else {
+            let joined = bounds
+                .iter()
+                .map(|c| paren_low_prec(c))
+                .collect::<Vec<_>>()
+                .join(" \u{2227} ");
+            format!("if {} then some ({}) else none", joined, post_ctor)
+        };
+        (line, unconstrained)
+    };
+
+    // Render every arm first so unconstrained-field todos surface above the
+    // match (matching the non-branch path's comment placement).
+    let mut rendered: Vec<(String, String)> = Vec::new();
+    let mut unconstrained: Vec<String> = Vec::new();
+    for arm in arms {
+        let pat = arm
+            .pattern
+            .as_ref()
+            .map(|p| p.lean.clone())
+            .unwrap_or_else(|| "_".to_string());
+        let (line, mut u) = arm_line(&arm.block.stmts);
+        unconstrained.append(&mut u);
+        rendered.push((pat, line));
+    }
+    let default_line = match default {
+        Some(block) => {
+            let (line, mut u) = arm_line(&block.stmts);
+            unconstrained.append(&mut u);
+            line
+        }
+        // No wildcard arm in the spec — untaken scrutinee values leave the
+        // state unchanged (mirrors the Rust `_ => {}`).
+        None => {
+            let (line, mut u) = arm_line(&[]);
+            unconstrained.append(&mut u);
+            line
+        }
+    };
+
+    if !unconstrained.is_empty() {
+        unconstrained.sort();
+        unconstrained.dedup();
+        out.push_str(&format!(
+            "  -- todo!(): post-variant `{}` has unconstrained field(s) not derivable from spec: {}\n",
+            post.tag,
+            unconstrained.join(", ")
+        ));
+        out.push_str(
+            "  -- Using type defaults; add effects or handler params to constrain these.\n",
+        );
+    }
+
+    out.push_str("  match s with\n");
+    out.push_str(&format!("  | {} =>\n", pre_pat));
+    for line in pre_let_lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    // With outer guards (`requires`/auth) the scrutinee match nests under
+    // `if … then … else none`; without them it is the arm body directly.
+    let match_indent = if cond_parts.is_empty() {
+        "    "
+    } else {
+        let joined = cond_parts
+            .iter()
+            .map(|p| paren_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} ");
+        out.push_str(&format!("    if {} then\n", joined));
+        "      "
+    };
+    out.push_str(&format!("{}match {} with\n", match_indent, scrutinee_lean));
+    for (pat, line) in &rendered {
+        out.push_str(&format!("{}| {} => {}\n", match_indent, pat, line));
+    }
+    out.push_str(&format!("{}| _ => {}\n", match_indent, default_line));
+    if !cond_parts.is_empty() {
+        out.push_str("    else none\n");
     }
     out.push_str("  | _ => none\n\n");
 }
@@ -2639,26 +2814,6 @@ fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerM
         out.push_str(&format!("    {}\n", then_body));
         out.push_str("  else none\n\n");
     }
-}
-
-/// Body statements with `Stmt::Branch` arms flattened in (the union view).
-/// Used by the ADT transition renderer, which keeps union semantics.
-fn stmts_with_branch_union(stmts: &[crate::mir::Stmt]) -> Vec<&crate::mir::Stmt> {
-    let mut out = Vec::new();
-    for s in stmts {
-        match s {
-            crate::mir::Stmt::Branch { arms, default, .. } => {
-                for a in arms {
-                    out.extend(stmts_with_branch_union(&a.block.stmts));
-                }
-                if let Some(d) = default {
-                    out.extend(stmts_with_branch_union(&d.stmts));
-                }
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Assign / Add / Sub family → `{ s with … }` record-update parts for a
@@ -5613,6 +5768,58 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             out.matches("a := s.a + amount").count(),
             1,
             "arm effect rendered exactly once:\n{out}"
+        );
+    }
+
+    /// The ADT (inductive multi-variant) transition renders `Stmt::Branch`
+    /// as a NESTED Lean `match` on the scrutinee — each arm builds the
+    /// post-variant from only its OWN effects, checked-add arms carry their
+    /// own per-arm overflow guard, and untaken arms don't abort. Before this
+    /// #66 follow-up the ADT renderer flattened all arms to their union
+    /// (applying every arm's effect unconditionally — semantically wrong).
+    /// Parallel to `flat_transition_renders_branch_as_lean_match`.
+    #[test]
+    fn adt_transition_renders_branch_as_nested_lean_match() {
+        let mir = lower_fixture(
+            "crates/qedgen/tests/fixtures/regressions/issue-42-conditional/adt_router.qedspec",
+        );
+        assert!(mir.adt_state, "fixture must use `pragma state_repr = adt`");
+        let out = render(&mir);
+
+        // Pre-variant match → requires guard → nested scrutinee match.
+        assert!(
+            out.contains(
+                "  | .Active bucket_a bucket_b bucket_c =>\n    \
+                 if amount > 0 then\n      match bucket with\n"
+            ),
+            "ADT branch must nest a scrutinee match under the pre-variant + \
+             requires guard:\n{out}"
+        );
+        // Each arm applies ONLY its own field, gated by its own overflow bound.
+        assert!(
+            out.contains(
+                "      | 0 => if bucket_a + amount \u{2264} 18446744073709551615 then \
+                 some (.Active (bucket_a + amount) bucket_b bucket_c) else none"
+            ),
+            "arm 0 applies only bucket_a, guarded by its own overflow bound:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "      | 1 => if bucket_b + amount \u{2264} 18446744073709551615 then \
+                 some (.Active bucket_a (bucket_b + amount) bucket_c) else none"
+            ),
+            "arm 1 applies only bucket_b:\n{out}"
+        );
+        assert!(
+            out.contains("      | _ => some (.Active bucket_a bucket_b 0)\n    else none"),
+            "wildcard arm zeros only bucket_c; `else none` closes the requires \
+             guard:\n{out}"
+        );
+        // No union flattening: bucket_b's add appears in exactly one arm.
+        assert_eq!(
+            out.matches("(bucket_b + amount)").count(),
+            1,
+            "no union flattening — bucket_b add appears in exactly one arm:\n{out}"
         );
     }
 

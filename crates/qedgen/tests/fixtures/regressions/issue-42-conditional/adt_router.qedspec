@@ -1,0 +1,52 @@
+// #66 follow-up regression — conditional `effect { match … }` on the
+// inductive multi-variant (`pragma state_repr = adt`) State representation.
+//
+// The flat-state path (issue #42, `fee_router.qedspec`) already renders a
+// true Lean `match` with per-arm bound guards. This fixture exercises the
+// ADT analogue: `routeTransition` must emit a nested `match bucket with …`
+// inside the matched pre-variant arm, where each arm builds the post-variant
+// from ONLY its own effects and the checked-add arms (`+= amount`) carry
+// their own per-arm overflow guard — NOT the union of all arm effects applied
+// unconditionally (which is what the ADT renderer did before this fix).
+//
+// Coverage in one fixture:
+//   - ADT 2-variant State (`Uninitialized` / `Active`)
+//   - cross-variant promote (`initialize`: `state := .Active { … }`)
+//   - per-arm checked-add overflow guard (arms `0`/`1`)
+//   - wildcard-arm assign (`_ => bucket_c := 0`)
+//   - outer `requires` guard wrapping the nested scrutinee match
+
+spec AdtRouter
+
+pragma state_repr = adt
+
+program_id "11111111111111111111111111111111"
+
+type State
+  | Uninitialized
+  | Active of {
+      bucket_a : U64,
+      bucket_b : U64,
+      bucket_c : U64,
+    }
+
+type Error
+  | InvalidAmount = 6000 "amount must be positive"
+
+handler initialize : State.Uninitialized -> State.Active {
+  effect {
+    state := .Active { bucket_a := 0, bucket_b := 0, bucket_c := 0 }
+  }
+}
+
+handler route (bucket : U8) (amount : U64) : State.Active -> State.Active {
+  permissionless
+  requires amount > 0 else InvalidAmount
+  effect {
+    match bucket {
+      0 => bucket_a += amount,
+      1 => bucket_b += amount,
+      _ => bucket_c := 0,
+    }
+  }
+}
