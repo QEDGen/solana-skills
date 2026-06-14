@@ -1,0 +1,872 @@
+use super::*;
+
+/// Emit a transition per handler under the multi-variant ADT shape:
+/// `match s with | .Pre <bindings> => … | _ => none`, the arm constructing
+/// `.Post <args>` from effects + pre-variant bindings. Post-variant fields
+/// not derivable from the spec (effects, auth, carry-over) fall back to
+/// type defaults with a `todo!()` comment.
+pub(super) fn emit_transitions_adt(out: &mut String, mir: &Mir) {
+    for h in &mir.handlers {
+        emit_handler_transition_adt(out, mir, h);
+    }
+}
+
+pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate::mir::HandlerMir) {
+    use crate::mir::Stmt;
+
+    let trans_name = safe_name(&format!("{}Transition", h.name));
+    let param_sig = param_sig_str(&h.params);
+
+    out.push_str(&format!(
+        "def {} (s : State) (signer : Pubkey){} : Option State :=\n",
+        trans_name, param_sig
+    ));
+
+    let Some((pre_name, post_name)) = h.transition.clone() else {
+        out.push_str(
+            "  -- todo!(): handler has no declared pre-variant; emitting structural rejection.\n",
+        );
+        out.push_str("  none\n\n");
+        return;
+    };
+    let pre = match mir.state.variants.iter().find(|v| v.tag == pre_name) {
+        Some(p) => p,
+        None => {
+            out.push_str(&format!(
+                "  -- todo!(): unknown pre-variant `{}` in spec\n  none\n\n",
+                pre_name
+            ));
+            return;
+        }
+    };
+    let post = match mir.state.variants.iter().find(|v| v.tag == post_name) {
+        Some(p) => p,
+        None => {
+            out.push_str(&format!(
+                "  -- todo!(): unknown post-variant `{}` in spec\n  none\n\n",
+                post_name
+            ));
+            return;
+        }
+    };
+
+    // Pre-variant pattern with field-name bindings.
+    let pre_pat = if pre.fields.is_empty() {
+        format!(".{}", pre.tag)
+    } else {
+        let bindings: Vec<String> = pre.fields.iter().map(|f| safe_name(&f.name)).collect();
+        format!(".{} {}", pre.tag, bindings.join(" "))
+    };
+
+    // Auth alias: when `auth <who>` is not a pre-variant field, bind
+    // `who := signer` so downstream references resolve. When it IS a
+    // pre field, the variant-arm binding scopes it and we emit a
+    // signer-equality check instead.
+    let mut pre_let_lines: Vec<String> = Vec::new();
+    let mut cond_parts: Vec<String> = Vec::new();
+    if let Some(auth_name) = handler_auth_name(h) {
+        let pre_has_who = pre.fields.iter().any(|f| f.name == auth_name);
+        if pre_has_who {
+            cond_parts.push(format!("signer = {}", safe_name(&auth_name)));
+        } else {
+            pre_let_lines.push(format!("    let {} := signer", safe_name(&auth_name)));
+        }
+    }
+
+    // User-declared requires (`pre` + `requires_or_abort`, combined so the
+    // original spec ordering survives). Clauses mentioning a handler-account
+    // `.pubkey` / `.key()` projection are filtered: those identifiers have
+    // no Lean scope and would leave free variables in the statement.
+    for p in &h.pre {
+        if mentions_handler_account_pubkey(&p.0.lean, &h.accounts) {
+            continue;
+        }
+        cond_parts.push(p.0.lean.clone());
+    }
+    for r in &h.requires_or_abort {
+        if mentions_handler_account_pubkey(&r.pred.0.lean, &h.accounts) {
+            continue;
+        }
+        cond_parts.push(r.pred.0.lean.clone());
+    }
+
+    // Conditional effects (`effect { match … }`) lower to `Stmt::Branch`.
+    // Render a nested Lean `match` on the scrutinee so the ADT transition
+    // applies exactly one arm — the per-arm analogue of the flat-state
+    // `emit_handler_transition` (applying the *union* of arms unconditionally
+    // is semantically wrong). Returns early; the unconditional tail below
+    // handles the no-branch case.
+    if let Some((scrutinee, arms, default)) = h.body.stmts.iter().find_map(|st| match st {
+        Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } => Some((scrutinee, arms, default)),
+        _ => None,
+    }) {
+        emit_adt_branch(
+            out,
+            mir,
+            h,
+            pre,
+            post,
+            &pre_pat,
+            &pre_let_lines,
+            &cond_parts,
+            scrutinee,
+            arms,
+            default,
+        );
+        return;
+    }
+
+    // Effect-derived bound checks: only `CheckedAdd`/`CheckedSub` gain
+    // bounds (`Wrap*`/`Sat*` handle the boundary without aborting); the
+    // field's pre-variant type picks the bound (unsigned add → overflow,
+    // unsigned sub → underflow, signed skips).
+    cond_parts.extend(adt_bound_conds(mir, pre, &h.body.stmts));
+
+    // Effect map → post-variant constructor (carry-over for unmentioned
+    // matching fields; type defaults for the rest).
+    let effect_map = adt_effect_map(mir, &h.body.stmts);
+    let (post_ctor, unconstrained) = adt_post_ctor(pre, post, h, &effect_map);
+
+    if !unconstrained.is_empty() {
+        out.push_str(&format!(
+            "  -- todo!(): post-variant `{}` has unconstrained field(s) not derivable from spec: {}\n",
+            post.tag,
+            unconstrained.join(", ")
+        ));
+        out.push_str(
+            "  -- Using type defaults; add effects or handler params to constrain these.\n",
+        );
+    }
+
+    out.push_str("  match s with\n");
+    let let_block: String = if pre_let_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", pre_let_lines.join("\n"))
+    };
+    if cond_parts.is_empty() {
+        if pre_let_lines.is_empty() {
+            out.push_str(&format!("  | {} => some ({})\n", pre_pat, post_ctor));
+        } else {
+            out.push_str(&format!("  | {} =>\n", pre_pat));
+            out.push_str(&let_block);
+            out.push_str(&format!("    some ({})\n", post_ctor));
+        }
+    } else {
+        let if_cond = cond_parts
+            .iter()
+            .map(|p| paren_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} ");
+        out.push_str(&format!("  | {} =>\n", pre_pat));
+        if !pre_let_lines.is_empty() {
+            out.push_str(&let_block);
+        }
+        out.push_str(&format!(
+            "    if {} then some ({}) else none\n",
+            if_cond, post_ctor
+        ));
+    }
+    out.push_str("  | _ => none\n\n");
+}
+
+/// Effect-derived overflow/underflow bound conjuncts for one ADT statement
+/// list — the per-arm analogue used by both the unconditional ADT path and
+/// `emit_adt_branch`. Field types come from the pre-variant; only
+/// `CheckedAdd`/`CheckedSub` gain bounds (`Wrap*`/`Sat*` saturate/wrap).
+pub(super) fn adt_bound_conds(
+    mir: &Mir,
+    pre: &crate::mir::StateVariant,
+    stmts: &[crate::mir::Stmt],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let mut conds: Vec<String> = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::CheckedAdd { path, delta, .. } => {
+                let stripped = strip_variant_prefix(path, mir);
+                if let Some(ty) = pre
+                    .fields
+                    .iter()
+                    .find(|f| f.name == stripped)
+                    .map(|f| &f.ty)
+                {
+                    if let Some(max) = ty_max_const(ty) {
+                        conds.push(format!(
+                            "{} + {} \u{2264} {}",
+                            safe_name(&stripped),
+                            delta.lean,
+                            max
+                        ));
+                    }
+                }
+            }
+            Stmt::CheckedSub { path, delta, .. } => {
+                let stripped = strip_variant_prefix(path, mir);
+                if let Some(ty) = pre
+                    .fields
+                    .iter()
+                    .find(|f| f.name == stripped)
+                    .map(|f| &f.ty)
+                {
+                    if !matches!(ty, crate::mir::Ty::I64 | crate::mir::Ty::I128) {
+                        conds.push(format!("{} \u{2264} {}", delta.lean, safe_name(&stripped)));
+                    }
+                }
+            }
+            // No bound to check.
+            Stmt::Assign { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
+        }
+    }
+    conds
+}
+
+/// Effect map for an ADT statement list, keyed by stripped field name →
+/// (op, Lean RHS). Account-binding `.pubkey` assignments (no Lean scope)
+/// are skipped. `set`/`add`/`sub` mirror the flat-state op set.
+pub(super) fn adt_effect_map(
+    mir: &Mir,
+    stmts: &[crate::mir::Stmt],
+) -> std::collections::HashMap<String, (&'static str, String)> {
+    use crate::mir::Stmt;
+    let mut effect_map: std::collections::HashMap<String, (&'static str, String)> =
+        std::collections::HashMap::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { path, rhs } => {
+                if is_account_pubkey_ref(&rhs.rust) {
+                    continue;
+                }
+                effect_map.insert(strip_variant_prefix(path, mir), ("set", rhs.lean.clone()));
+            }
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => {
+                effect_map.insert(strip_variant_prefix(path, mir), ("add", delta.lean.clone()));
+            }
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => {
+                effect_map.insert(strip_variant_prefix(path, mir), ("sub", delta.lean.clone()));
+            }
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
+        }
+    }
+    effect_map
+}
+
+/// Post-variant constructor for the ADT transition from an effect map.
+/// `add`/`sub` reference the bound pre-field name; unmentioned fields carry
+/// over when the pre-variant has a same-typed field, else fall to a type
+/// default (collected into the returned `unconstrained` list).
+pub(super) fn adt_post_ctor(
+    pre: &crate::mir::StateVariant,
+    post: &crate::mir::StateVariant,
+    h: &crate::mir::HandlerMir,
+    effect_map: &std::collections::HashMap<String, (&'static str, String)>,
+) -> (String, Vec<String>) {
+    let mut unconstrained: Vec<String> = Vec::new();
+    let auth_who = handler_auth_name(h);
+    let post_args: Vec<String> = post
+        .fields
+        .iter()
+        .map(|f| {
+            if let Some((kind, value)) = effect_map.get(&f.name) {
+                return match *kind {
+                    "add" => format!("({} + {})", safe_name(&f.name), value),
+                    "sub" => format!("({} - {})", safe_name(&f.name), value),
+                    _ => value.clone(),
+                };
+            }
+            if let Some(ref who) = auth_who {
+                if *who == f.name && matches!(&f.ty, crate::mir::Ty::Pubkey) {
+                    return safe_name(who);
+                }
+            }
+            if pre.fields.iter().any(|p| p.name == f.name && p.ty == f.ty) {
+                return safe_name(&f.name);
+            }
+            unconstrained.push(f.name.clone());
+            ty_default_literal(&f.ty).to_string()
+        })
+        .collect();
+
+    let post_ctor = if post_args.is_empty() {
+        format!(".{}", post.tag)
+    } else {
+        format!(".{} {}", post.tag, post_args.join(" "))
+    };
+    (post_ctor, unconstrained)
+}
+
+/// Render a conditional-effect (`Stmt::Branch`) ADT transition as a nested
+/// Lean `match` on the scrutinee — each arm builds the post-variant from
+/// THAT arm's effects, wrapped in the arm's own bound guards so an untaken
+/// arm never aborts. The per-arm analogue of the flat-state branch path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn emit_adt_branch(
+    out: &mut String,
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    pre: &crate::mir::StateVariant,
+    post: &crate::mir::StateVariant,
+    pre_pat: &str,
+    pre_let_lines: &[String],
+    cond_parts: &[String],
+    scrutinee: &crate::mir::BranchScrutinee,
+    arms: &[crate::mir::BranchArm],
+    default: &Option<crate::mir::Block>,
+) {
+    let scrutinee_lean = match scrutinee {
+        crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
+        crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+    };
+
+    // One arm → `some (<post-ctor from this arm's effects>)`, guarded by the
+    // arm's own overflow/underflow bounds (an untaken arm must not abort).
+    let arm_line = |stmts: &[crate::mir::Stmt]| -> (String, Vec<String>) {
+        let effect_map = adt_effect_map(mir, stmts);
+        let (post_ctor, unconstrained) = adt_post_ctor(pre, post, h, &effect_map);
+        let bounds = adt_bound_conds(mir, pre, stmts);
+        let line = if bounds.is_empty() {
+            format!("some ({})", post_ctor)
+        } else {
+            let joined = bounds
+                .iter()
+                .map(|c| paren_low_prec(c))
+                .collect::<Vec<_>>()
+                .join(" \u{2227} ");
+            format!("if {} then some ({}) else none", joined, post_ctor)
+        };
+        (line, unconstrained)
+    };
+
+    // Render every arm first so unconstrained-field todos surface above the
+    // match (matching the non-branch path's comment placement).
+    let mut rendered: Vec<(String, String)> = Vec::new();
+    let mut unconstrained: Vec<String> = Vec::new();
+    for arm in arms {
+        let pat = arm
+            .pattern
+            .as_ref()
+            .map(|p| p.lean.clone())
+            .unwrap_or_else(|| "_".to_string());
+        let (line, mut u) = arm_line(&arm.block.stmts);
+        unconstrained.append(&mut u);
+        rendered.push((pat, line));
+    }
+    let default_line = match default {
+        Some(block) => {
+            let (line, mut u) = arm_line(&block.stmts);
+            unconstrained.append(&mut u);
+            line
+        }
+        // No wildcard arm in the spec — untaken scrutinee values leave the
+        // state unchanged (mirrors the Rust `_ => {}`).
+        None => {
+            let (line, mut u) = arm_line(&[]);
+            unconstrained.append(&mut u);
+            line
+        }
+    };
+
+    if !unconstrained.is_empty() {
+        unconstrained.sort();
+        unconstrained.dedup();
+        out.push_str(&format!(
+            "  -- todo!(): post-variant `{}` has unconstrained field(s) not derivable from spec: {}\n",
+            post.tag,
+            unconstrained.join(", ")
+        ));
+        out.push_str(
+            "  -- Using type defaults; add effects or handler params to constrain these.\n",
+        );
+    }
+
+    out.push_str("  match s with\n");
+    out.push_str(&format!("  | {} =>\n", pre_pat));
+    for line in pre_let_lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    // With outer guards (`requires`/auth) the scrutinee match nests under
+    // `if … then … else none`; without them it is the arm body directly.
+    let match_indent = if cond_parts.is_empty() {
+        "    "
+    } else {
+        let joined = cond_parts
+            .iter()
+            .map(|p| paren_low_prec(p))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} ");
+        out.push_str(&format!("    if {} then\n", joined));
+        "      "
+    };
+    out.push_str(&format!("{}match {} with\n", match_indent, scrutinee_lean));
+    for (pat, line) in &rendered {
+        out.push_str(&format!("{}| {} => {}\n", match_indent, pat, line));
+    }
+    out.push_str(&format!("{}| _ => {}\n", match_indent, default_line));
+    if !cond_parts.is_empty() {
+        out.push_str("    else none\n");
+    }
+    out.push_str("  | _ => none\n\n");
+}
+
+// ----------------------------------------------------------------------
+// sBPF assembly renderer. Reads `ParsedSpec` directly: the assembly domain
+// (instructions / layouts / guards over `executeFn`) has no representation
+// in the state-machine `Stmt` IR, and Lean is the only backend rendering
+// sBPF (Kani/proptest skip it). Output gated by `tests/sbpf_lean_parity.rs`.
+// ----------------------------------------------------------------------
+/// Emit one transition function per handler:
+///
+/// ```text
+/// def <name>Transition (s : State) (signer : Pubkey) <params> : Option State :=
+///   let <auth_alias> := signer  -- when `auth <who>` isn't a state field
+///   if <require-or-abort-conjunction> then
+///     some { s with <assigns>... }
+///   else
+///     none
+/// ```
+///
+/// `Stmt::RequireOrAbort` lowers into the if-condition; the Assign / Add /
+/// Sub family into the `{ s with ... }` record update. `TokenTransfer` and
+/// `Cpi` don't affect local state — separate CPI theorems discharge them.
+pub(super) fn emit_transitions(out: &mut String, mir: &Mir) {
+    for h in &mir.handlers {
+        emit_handler_transition(out, mir, h);
+    }
+}
+
+pub(super) fn emit_handler_transition(out: &mut String, mir: &Mir, h: &crate::mir::HandlerMir) {
+    use crate::mir::Stmt;
+
+    let trans_name = safe_name(&format!("{}Transition", h.name));
+    let param_sig = param_sig_str(&h.params);
+
+    out.push_str(&format!(
+        "def {} (s : State) (signer : Pubkey){} : Option State :=\n",
+        trans_name, param_sig
+    ));
+
+    let conds = build_guard_cond_parts(mir, h);
+
+    // Auth alias `let <who> := signer` only when `who` is NOT a state
+    // field (otherwise the guard conjunct already pins the relationship
+    // and an alias would shadow the field name).
+    if let Some(who) = handler_auth_name(h) {
+        let state_fields = flat_state_fields(mir);
+        let who_is_state_field = state_fields.iter().any(|(n, _)| n == &who);
+        if !who_is_state_field {
+            out.push_str(&format!("  let {} := signer\n", safe_name(&who)));
+        }
+    }
+
+    // Lifecycle promotion + ghost updates apply on every exit path
+    // (appended to the flat `{ s with … }` parts, or to every arm of a
+    // conditional-effect `match`).
+    let mut common_parts: Vec<String> = Vec::new();
+    // Lifecycle promotion: emit `status := .<post>` when the handler
+    // declares a transition arrow — but only when the lifecycle is real
+    // (≥ 2 states); single-lifecycle specs skip the marker (issue #43).
+    if let Some((_, post)) = &h.transition {
+        if mir.state.lifecycle_states.len() >= 2 {
+            common_parts.push(format!("status := .{}", safe_name(post)));
+        }
+    }
+    // Ghost field updates: a ghost with an `on <this handler>` clause
+    // assigns alongside the normal effects; ghosts without one stay
+    // unchanged (the `{ s with … }` update preserves unmentioned fields —
+    // the frame condition).
+    for ghost in &mir.ghosts {
+        if let Some(val) = ghost.updates.get(&h.name) {
+            common_parts.push(format!("{} := {}", safe_name(&ghost.name), val.lean));
+        }
+    }
+
+    let some_body = |effect_parts: Vec<String>| -> String {
+        let parts: Vec<String> = effect_parts
+            .into_iter()
+            .chain(common_parts.iter().cloned())
+            .collect();
+        if parts.is_empty() {
+            "some s".to_string()
+        } else {
+            format!("some {{ s with {} }}", parts.join(", "))
+        }
+    };
+
+    // Conditional effects: `effect { match … }` lowers to `Stmt::Branch`;
+    // render a real Lean `match` so the model applies exactly one arm
+    // (applying the *union* of arms unconditionally is semantically wrong).
+    let branch = h.body.stmts.iter().find_map(|st| match st {
+        Stmt::Branch {
+            scrutinee,
+            arms,
+            default,
+        } => Some((scrutinee, arms, default)),
+        _ => None,
+    });
+
+    if let Some((scrutinee, arms, default)) = branch {
+        let scrutinee_lean = match scrutinee {
+            crate::mir::BranchScrutinee::Match(e) => e.lean.clone(),
+            crate::mir::BranchScrutinee::Predicate(p) => p.0.lean.clone(),
+        };
+        // Per-arm: overflow/underflow bound guards for the arm's own
+        // effects move *inside* the arm (an untaken arm's bounds must
+        // not abort the transition), then the arm's record update.
+        let arm_line = |block: &crate::mir::Block| -> String {
+            let body = some_body(flat_effect_with_parts(h, &block.stmts));
+            let bounds = flat_effect_bound_conds(mir, h, &block.stmts, &conds);
+            if bounds.is_empty() {
+                body
+            } else {
+                let joined = bounds
+                    .iter()
+                    .map(|c| paren_low_prec(c))
+                    .collect::<Vec<_>>()
+                    .join(" \u{2227} ");
+                format!("if {} then {} else none", joined, body)
+            }
+        };
+        let indent = if conds.is_empty() { "  " } else { "    " };
+        let mut match_block = String::new();
+        match_block.push_str(&format!("{}match {} with\n", indent, scrutinee_lean));
+        for arm in arms {
+            let pat = arm
+                .pattern
+                .as_ref()
+                .map(|p| p.lean.clone())
+                .unwrap_or_else(|| "_".to_string());
+            match_block.push_str(&format!(
+                "{}| {} => {}\n",
+                indent,
+                pat,
+                arm_line(&arm.block)
+            ));
+        }
+        let default_line = match default {
+            Some(block) => arm_line(block),
+            // No wildcard arm in the spec — untaken scrutinee values
+            // leave the state unchanged (mirrors the Rust `_ => {}`).
+            None => some_body(Vec::new()),
+        };
+        let mut full = match_block;
+        full.push_str(&format!("{}| _ => {}\n", indent, default_line));
+
+        if conds.is_empty() {
+            out.push_str(&full);
+            out.push('\n');
+        } else {
+            let joined = conds
+                .iter()
+                .map(|c| paren_low_prec(c))
+                .collect::<Vec<_>>()
+                .join(" \u{2227} ");
+            out.push_str(&format!("  if {} then\n", joined));
+            out.push_str(&full);
+            out.push_str("  else none\n\n");
+        }
+        return;
+    }
+
+    let then_body = some_body(flat_effect_with_parts(h, &h.body.stmts));
+
+    if conds.is_empty() {
+        out.push_str(&format!("  {}\n\n", then_body));
+    } else {
+        let joined = conds
+            .iter()
+            .map(|c| paren_low_prec(c))
+            .collect::<Vec<_>>()
+            .join(" \u{2227} ");
+        out.push_str(&format!("  if {} then\n", joined));
+        out.push_str(&format!("    {}\n", then_body));
+        out.push_str("  else none\n\n");
+    }
+}
+
+/// Assign / Add / Sub family → `{ s with … }` record-update parts for a
+/// flat-state transition. Shared by the unconditional effect path and
+/// the per-arm `Stmt::Branch` rendering.
+pub(super) fn flat_effect_with_parts(
+    h: &crate::mir::HandlerMir,
+    stmts: &[crate::mir::Stmt],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let mut with_parts: Vec<String> = Vec::new();
+    for stmt in stmts {
+        match stmt {
+            Stmt::Assign { path, rhs } => {
+                // Drop `<field> := <account_binding>.pubkey` — account-
+                // binding pubkey refs have no Lean scope.
+                if is_account_pubkey_ref(&rhs.rust) {
+                    continue;
+                }
+                // Re-qualify the RHS: a bare state-field ref (e.g.
+                // `reserved := state.cap`, stripped upstream to `cap`)
+                // must render as `s.cap` — emitting `rhs.lean` verbatim
+                // yields an unknown identifier. Handler params and
+                // literals pass through unchanged.
+                with_parts.push(format!(
+                    "{} := {}",
+                    safe_name(&path_field_name(path)),
+                    effect_value_to_lean_mir(&rhs.lean, &h.params)
+                ));
+            }
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => {
+                let f = safe_name(&path_field_name(path));
+                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                with_parts.push(format!("{} := s.{} + {}", f, f, d));
+            }
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => {
+                let f = safe_name(&path_field_name(path));
+                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                with_parts.push(format!("{} := s.{} - {}", f, f, d));
+            }
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => {}
+        }
+    }
+    with_parts
+}
+
+/// Overflow/underflow bound conjuncts for one statement list — the
+/// per-arm analogue of `build_guard_cond_parts` items 3 and 5 (same
+/// formats, same all-arithmetic-kinds coverage, same dedup against
+/// already-present conjuncts). Used by the `Stmt::Branch` rendering so
+/// an arm's bounds gate only that arm.
+pub(super) fn flat_effect_bound_conds(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    stmts: &[crate::mir::Stmt],
+    outer_conds: &[String],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let state_fields = flat_state_fields(mir);
+    let mut conds: Vec<String> = Vec::new();
+
+    for stmt in stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedAdd { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        if let Some(ty) = state_fields
+            .iter()
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            if ty_max_const(&ty).is_some() {
+                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
+            }
+        }
+    }
+
+    for stmt in stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedSub { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        let ty = match state_fields
+            .iter()
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            Some(t) => t,
+            None => continue,
+        };
+        let max = match ty_max_const(&ty) {
+            Some(m) => m,
+            None => continue,
+        };
+        let sf = safe_name(&field);
+        let needle_a = format!("s.{} + {}", sf, delta.lean);
+        let needle_b = format!("{} + s.{}", delta.lean, sf);
+        let already = conds
+            .iter()
+            .chain(outer_conds.iter())
+            .any(|c| c.contains(&needle_a) || c.contains(&needle_b));
+        if already {
+            continue;
+        }
+        conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
+    }
+
+    conds
+}
+
+/// Build the if-condition conjuncts for a handler's flat-state transition.
+/// Emit-site users (transition body, aborts theorem proof indexing) share
+/// this conjunct list, so order and content are load-bearing — the `if`
+/// line, `cond_parts.iter().position(...)` lookups, and conjunction-
+/// projection paths must agree:
+///   1. `signer = s.<who>`  (only if `who` names a state field)
+///   2. `s.status = .<pre>` (lifecycle gate)
+///   3. sub-effect underflow guards (`<delta> ≤ s.<field>`, unsigned only)
+///   4. RequireOrAbort predicates (filtered: skip handler-account pubkey refs)
+///   5. add-effect overflow guards (`s.<field> + <delta> ≤ <max>`, unsigned only)
+pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> Vec<String> {
+    use crate::mir::Stmt;
+    let mut conds: Vec<String> = Vec::new();
+
+    let state_fields = flat_state_fields(mir);
+
+    let auth_name = handler_auth_name(h);
+    let who_is_state_field = auth_name
+        .as_deref()
+        .map(|w| state_fields.iter().any(|(n, _)| n == w))
+        .unwrap_or(false);
+    if let Some(who) = &auth_name {
+        if who_is_state_field {
+            conds.push(format!("signer = s.{}", safe_name(who)));
+        }
+    }
+
+    if let Some((pre, _)) = &h.transition {
+        if mir.state.lifecycle_states.len() >= 2 {
+            conds.push(format!("s.status = .{}", safe_name(pre)));
+        }
+    }
+
+    for stmt in &h.body.stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedSub { path, delta, .. }
+            | Stmt::WrapSub { path, delta }
+            | Stmt::SatSub { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedAdd { .. }
+            | Stmt::WrapAdd { .. }
+            | Stmt::SatAdd { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        if let Some(ty) = state_fields
+            .iter()
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            if ty_max_const(&ty).is_some() {
+                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
+            }
+        }
+    }
+
+    for stmt in &h.body.stmts {
+        if let Stmt::RequireOrAbort { pred, .. } = stmt {
+            if mentions_handler_account_pubkey(&pred.0.lean, &h.accounts) {
+                continue;
+            }
+            conds.push(pred.0.lean.clone());
+        }
+    }
+
+    for stmt in &h.body.stmts {
+        let (path, delta) = match stmt {
+            Stmt::CheckedAdd { path, delta, .. }
+            | Stmt::WrapAdd { path, delta }
+            | Stmt::SatAdd { path, delta } => (path, delta),
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Assign { .. }
+            | Stmt::CheckedSub { .. }
+            | Stmt::WrapSub { .. }
+            | Stmt::SatSub { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let field = path_field_name(path);
+        let ty = match state_fields
+            .iter()
+            .find(|(n, _)| n == &field)
+            .map(|(_, t)| t.clone())
+        {
+            Some(t) => t,
+            None => continue,
+        };
+        let max = match ty_max_const(&ty) {
+            Some(m) => m,
+            None => continue,
+        };
+        let sf = safe_name(&field);
+        let needle_a = format!("s.{} + {}", sf, delta.lean);
+        let needle_b = format!("{} + s.{}", delta.lean, sf);
+        let already = conds
+            .iter()
+            .any(|c| c.contains(&needle_a) || c.contains(&needle_b));
+        if already {
+            continue;
+        }
+        conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
+    }
+
+    conds
+}
