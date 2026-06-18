@@ -2,6 +2,7 @@ mod adapt;
 mod check;
 mod cli;
 mod codegen;
+mod descriptor;
 mod dispatch;
 mod mir;
 mod probe;
