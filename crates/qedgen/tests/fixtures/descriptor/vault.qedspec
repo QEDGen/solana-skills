@@ -1,6 +1,6 @@
 // Minimal vault spec matching qedsvm's vault.so fixture: {owner: Pubkey, total: U64,
-// bump: U8}. `increment` does the constant `total += 1` that the descriptor seam (v1)
-// supports; `deposit` does the parameterised `total += amount` that it must reject.
+// bump: U8}. `increment` does the constant `total += 1` (descriptor seam v1, `add_const`);
+// `deposit` does the parameterised `total += amount` (descriptor seam v2, `add_param`).
 //
 // `qedgen descriptor --spec this --handler increment --account vault` emits exactly the
 // descriptor qedsvm's tests/fixtures/vault.descriptor.json carries (name-level: no offsets;

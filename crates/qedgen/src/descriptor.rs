@@ -15,14 +15,17 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::check::ParsedSpec;
 
-/// Descriptor schema version, kept in lockstep with qedsvm's `DESCRIPTOR_SCHEMA_MAX`.
-const SCHEMA_VERSION: u32 = 1;
+/// Descriptor schema versions, kept in lockstep with qedsvm's `DESCRIPTOR_SCHEMA_MAX`.
+/// A constant delta (`add_const`) is v1; a parameter delta (`add_param`) is v2.
+const SCHEMA_VERSION_CONST: u32 = 1;
+const SCHEMA_VERSION_PARAM: u32 = 2;
 
-/// Build the v1 name-level descriptor for `handler` in `parsed`.
+/// Build the name-level descriptor for `handler` in `parsed`.
 ///
-/// Requires the handler to have exactly one effect of the form `<field> += <int literal>`
-/// (the only op surface qedsvm v1 discharges). A parameter RHS (`+= amount`), a non-`+=`
-/// op, or multiple effects are rejected with a clear error.
+/// Requires the handler to have exactly one increment effect `<field> += <rhs>`, where `<rhs>`
+/// is either an integer literal (constant delta, schema v1) or a declared parameter of the
+/// handler (parameter delta, schema v2). A non-`+=` op, multiple effects, a missing handler,
+/// or an RHS that is neither a literal nor a declared parameter are rejected with clear errors.
 pub(crate) fn build_descriptor(
     parsed: &ParsedSpec,
     handler: &str,
@@ -45,36 +48,51 @@ pub(crate) fn build_descriptor(
             )
         })?;
 
-    // Single-field constant increment: exactly one effect, op `add` (checked `+=`),
-    // integer-literal RHS. A parameter RHS (e.g. `+= amount`) parses as a non-integer and is
-    // correctly rejected — that is the "constant" check, and the soundness boundary of v1.
+    // Single-field increment: exactly one effect, op `add` (checked `+=`). The RHS is either
+    // an integer literal (constant delta, v1) or a declared parameter (parameter delta, v2).
     let (field, op, value) = match h.effects.as_slice() {
         [one] => one,
         effects => bail!(
-            "handler `{}` has {} effects; the descriptor seam (v1) supports exactly one \
-             constant-increment effect (`<field> += <int literal>`)",
+            "handler `{}` has {} effects; the descriptor seam supports exactly one \
+             increment effect (`<field> += <int literal | parameter>`)",
             handler,
             effects.len()
         ),
     };
     if op != "add" {
         bail!(
-            "handler `{}` effect on `{}` is `{}`, not a checked `+=`; v1 supports only \
-             `<field> += <int literal>`",
+            "handler `{}` effect on `{}` is `{}`, not a checked `+=`; the descriptor seam \
+             supports only `<field> += <int literal | parameter>`",
             handler,
             field,
             op
         );
     }
-    let delta: i64 = value.parse().map_err(|_| {
-        anyhow!(
-            "handler `{}` increments `{}` by `{}`, which is not an integer literal; the \
-             descriptor seam (v1) supports only a constant delta",
-            handler,
-            field,
-            value
-        )
-    })?;
+
+    // Constant delta (`+= k`) vs parameter delta (`+= amount`): an integer-literal RHS is a
+    // constant (schema v1); otherwise the RHS must be a declared parameter of the handler
+    // (schema v2). An RHS that is neither is rejected (the soundness boundary).
+    let (op_json, schema_version) = match value.parse::<i64>() {
+        Ok(delta) => (serde_json::json!({ "add_const": delta }), SCHEMA_VERSION_CONST),
+        Err(_) => {
+            if !h.takes_params.iter().any(|(p, _)| p == value) {
+                bail!(
+                    "handler `{}` increments `{}` by `{}`, which is neither an integer literal \
+                     nor a declared parameter of `{}` (params: {})",
+                    handler,
+                    field,
+                    value,
+                    handler,
+                    h.takes_params
+                        .iter()
+                        .map(|(p, _)| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            (serde_json::json!({ "add_param": value }), SCHEMA_VERSION_PARAM)
+        }
+    };
 
     // `account` resolution: explicit override, else the spec's first account type, else the
     // program name. Use the IDL account name (the override) so qedsvm resolves the offsets.
@@ -83,11 +101,11 @@ pub(crate) fn build_descriptor(
         .unwrap_or_else(|| parsed.program_name.clone());
 
     Ok(serde_json::json!({
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "account": account,
         "handler": handler,
         "mutated": field,
-        "op": { "add_const": delta },
+        "op": op_json,
     }))
 }
 
@@ -153,7 +171,12 @@ pub(crate) fn run_discharge(
 ) -> Result<()> {
     let descriptor = build_descriptor(parsed, handler, account)?;
     let mutated = descriptor["mutated"].as_str().unwrap_or("?");
-    let delta = descriptor["op"]["add_const"].as_i64().unwrap_or(0);
+    // Constant (`add_const`) or parameter (`add_param`) credit, for the printed obligation.
+    let delta_str = descriptor["op"]["add_const"]
+        .as_i64()
+        .map(|k| k.to_string())
+        .or_else(|| descriptor["op"]["add_param"].as_str().map(|p| p.to_string()))
+        .unwrap_or_else(|| "?".to_string());
     let account_name = descriptor["account"].as_str().unwrap_or("?").to_string();
     let module = module.unwrap_or_else(|| format!("{}{}", pascal(&account_name), pascal(handler)));
 
@@ -166,7 +189,7 @@ pub(crate) fn run_discharge(
 
     println!("=== qedgen discharge ===");
     println!("  spec handler : {}", handler);
-    println!("  obligation   : {}.{} += {}", account_name, mutated, delta);
+    println!("  obligation   : {}.{} += {}", account_name, mutated, delta_str);
     println!("  program      : {}", so.display());
     println!("  qedlift      : {}", qedlift.display());
 
@@ -278,16 +301,41 @@ mod tests {
         );
     }
 
-    /// A parameter delta (`total += amount`) is NOT a constant and must be refused — the v1
-    /// soundness boundary. (Real vaults deposit `+= amount`, not `+= 1`.)
+    /// A parameter delta (`total += amount`) emits an `add_param` descriptor (schema v2):
+    /// the RHS is a declared handler parameter, so it is a runtime credit, not a constant.
+    /// (Real vaults deposit `+= amount`, not `+= 1`.)
     #[test]
-    fn parameter_delta_is_rejected() {
+    fn parameter_delta_emits_add_param() {
         let parsed = parse("tests/fixtures/descriptor/vault.qedspec");
-        let err = build_descriptor(&parsed, "deposit", None)
-            .expect_err("a parameter delta must be rejected");
+        let d = build_descriptor(&parsed, "deposit", Some("vault".to_string()))
+            .expect("build deposit (parameter) descriptor");
+        assert_eq!(
+            d,
+            serde_json::json!({
+                "schema_version": 2,
+                "account": "vault",
+                "handler": "deposit",
+                "mutated": "total",
+                "op": { "add_param": "amount" }
+            })
+        );
+    }
+
+    /// An RHS that is neither an integer literal nor a declared parameter is rejected (the
+    /// soundness boundary): the producer must not emit a credit it cannot name.
+    #[test]
+    fn unknown_rhs_is_rejected() {
+        let mut parsed = parse("tests/fixtures/descriptor/vault.qedspec");
+        // Rewrite deposit's effect to credit by an undeclared symbol.
+        if let Some(h) = parsed.handlers.iter_mut().find(|h| h.name == "deposit") {
+            h.effects = vec![("total".to_string(), "add".to_string(), "mystery".to_string())];
+            h.takes_params.clear();
+        }
+        let err = build_descriptor(&parsed, "deposit", Some("vault".to_string()))
+            .expect_err("an undeclared RHS must be rejected");
         assert!(
-            err.to_string().contains("not an integer literal"),
-            "error should explain the non-constant delta, got: {err}"
+            err.to_string().contains("neither an integer literal nor a declared parameter"),
+            "error should explain the unknown RHS, got: {err}"
         );
     }
 
