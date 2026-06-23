@@ -339,6 +339,65 @@ pub(crate) enum Commands {
         output_dir: PathBuf,
     },
 
+    /// Emit a name-level refinement descriptor (JSON, to stdout) for a single
+    /// constant-increment handler: the producer half of the qedgen <-> qedsvm
+    /// discharge seam. qedsvm's qedlift consumes it via `--descriptor`
+    /// (schema: qedsvm docs/REFINEMENT_DESCRIPTOR.md). The descriptor carries
+    /// only semantics (which named field a handler mutates, by how much); the
+    /// field offsets are resolved from the IDL on the qedsvm side.
+    Descriptor {
+        /// Path to the `.qedspec`
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Handler to inspect (must have a single-field `+= <int literal>` effect)
+        #[arg(long)]
+        handler: String,
+
+        /// Account name for the descriptor (default: the spec's first account
+        /// type, else the program name). Use the IDL account name so qedsvm can
+        /// resolve the field offsets from the IDL.
+        #[arg(long)]
+        account: Option<String>,
+    },
+
+    /// Run the full spec -> byte-level proof chain for one handler: build the
+    /// name-level descriptor from the `.qedspec`, then discharge it against the
+    /// compiled `.so` via qedsvm's `qedlift`. Reports whether the handler's
+    /// effect is proven against the bytes. This is the one-command driver over
+    /// the qedgen <-> qedsvm seam (`descriptor` + qedlift `--descriptor`).
+    Discharge {
+        /// Path to the `.qedspec`
+        #[arg(long)]
+        spec: PathBuf,
+
+        /// Handler to discharge (single-field `+= <int literal>` effect)
+        #[arg(long)]
+        handler: String,
+
+        /// Account name (default: the spec's first account type / program name).
+        /// Use the IDL account name so qedlift resolves the offsets from the IDL.
+        #[arg(long)]
+        account: Option<String>,
+
+        /// Compiled program to discharge against
+        #[arg(long)]
+        so: PathBuf,
+
+        /// Codama IDL (.json) supplying the account shape (offsets)
+        #[arg(long)]
+        idl: Option<PathBuf>,
+
+        /// Path to a built qedsvm `qedlift` binary (built with
+        /// `--features qedrecover`)
+        #[arg(long)]
+        qedlift: PathBuf,
+
+        /// Lean module name for the emitted proof (default: `<Account><Handler>`)
+        #[arg(long)]
+        module: Option<String>,
+    },
+
     /// Consolidate multiple proof projects into a single Lean project
     Consolidate {
         /// Directory containing proof subdirectories (each with Best.lean)

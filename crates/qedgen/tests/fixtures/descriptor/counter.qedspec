@@ -1,0 +1,15 @@
+// Minimal counter spec (mirrors examples/sbpf/counter): the `increment` handler does
+// `counter += 1`, the constant increment the descriptor seam (v1) supports.
+
+spec Counter
+
+type State
+  | Uninitialized
+  | Active of {
+      owner   : Pubkey,
+      counter : U64,
+    }
+
+handler increment : State.Active -> State.Active {
+  effect { counter += 1 }
+}

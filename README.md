@@ -465,6 +465,26 @@ qedgen check --spec my_program.qedspec --drift programs/src/ --deep
 
 `qedgen reconcile` is the agent-friendly entry point: it combines Rust-side `spec_hash` mismatches with Lean-side orphan/missing theorem findings into one machine-readable report, ready for an LLM to consume and act on.
 
+### Discharge against pinned bytes (experimental, v3.0 target)
+
+The bundled CPI-callee `ensures` and the sBPF refinement bridge are *axiomatized against a `binary_hash` pin* today — qedgen names the bytes, but doesn't yet prove they honor the contract. The discharge seam closes that gap by handing a name-level obligation to qedsvm's `qedlift`, which proves it against the decoded program bytes (offsets resolved from the IDL on the qedsvm side). See [`docs/design/qedsvm-discharge.md`](docs/design/qedsvm-discharge.md).
+
+This is the **producer half** of that seam, scoped to the v1 soundness boundary: a single-field constant increment (`<field> += <int literal>`). Parameter deltas, non-`+=` ops, and multi-effect handlers are rejected.
+
+```bash
+# Emit the name-level refinement descriptor (JSON) qedlift consumes.
+# Carries semantics only — account, mutated field name, constant delta.
+qedgen descriptor --spec vault.qedspec --handler deposit
+
+# Chain it end to end: build the descriptor, shell out to a built qedlift,
+# and report a discharge verdict (sorry-free proof against the bytes).
+qedgen discharge --spec vault.qedspec --handler deposit \
+  --so target/deploy/vault.so --idl idl/vault.json \
+  --qedlift path/to/qedlift
+```
+
+`--account` overrides the descriptor's account (default: the spec's first account type, else the program name) — use the IDL account name so qedlift can resolve offsets. No meaning crosses the boundary: `discharge` reads only qedlift's exit status and whether it emitted a sorry-free proof.
+
 ### Consolidate proofs
 
 ```bash

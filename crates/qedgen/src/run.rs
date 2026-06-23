@@ -20,6 +20,8 @@ pub(crate) fn command_name_of(c: &Commands) -> &'static str {
         Commands::Probe { .. } => "probe",
         Commands::Ratify { .. } => "ratify",
         Commands::Spec { .. } => "spec",
+        Commands::Descriptor { .. } => "descriptor",
+        Commands::Discharge { .. } => "discharge",
         Commands::Consolidate { .. } => "consolidate",
         Commands::Asm2Lean { .. } => "asm2lean",
         Commands::Setup { .. } => "setup",
@@ -542,6 +544,37 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             std::fs::create_dir_all(&output_dir)?;
             let output_file = output_dir.join(format!("{}.qedspec", stem));
             idl2spec::generate_qedspec(&idl, &output_file)?;
+        }
+
+        Commands::Descriptor {
+            spec,
+            handler,
+            account,
+        } => {
+            let parsed = check::parse_spec_file(&spec)?;
+            let descriptor = descriptor::build_descriptor(&parsed, &handler, account)?;
+            println!("{}", serde_json::to_string_pretty(&descriptor)?);
+        }
+
+        Commands::Discharge {
+            spec,
+            handler,
+            account,
+            so,
+            idl,
+            qedlift,
+            module,
+        } => {
+            let parsed = check::parse_spec_file(&spec)?;
+            descriptor::run_discharge(
+                &parsed,
+                &handler,
+                account,
+                &so,
+                idl.as_deref(),
+                &qedlift,
+                module,
+            )?;
         }
 
         Commands::Consolidate {
