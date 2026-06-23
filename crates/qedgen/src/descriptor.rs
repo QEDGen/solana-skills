@@ -73,7 +73,10 @@ pub(crate) fn build_descriptor(
     // constant (schema v1); otherwise the RHS must be a declared parameter of the handler
     // (schema v2). An RHS that is neither is rejected (the soundness boundary).
     let (op_json, schema_version) = match value.parse::<i64>() {
-        Ok(delta) => (serde_json::json!({ "add_const": delta }), SCHEMA_VERSION_CONST),
+        Ok(delta) => (
+            serde_json::json!({ "add_const": delta }),
+            SCHEMA_VERSION_CONST,
+        ),
         Err(_) => {
             if !h.takes_params.iter().any(|(p, _)| p == value) {
                 bail!(
@@ -90,7 +93,10 @@ pub(crate) fn build_descriptor(
                         .join(", ")
                 );
             }
-            (serde_json::json!({ "add_param": value }), SCHEMA_VERSION_PARAM)
+            (
+                serde_json::json!({ "add_param": value }),
+                SCHEMA_VERSION_PARAM,
+            )
         }
     };
 
@@ -175,7 +181,11 @@ pub(crate) fn run_discharge(
     let delta_str = descriptor["op"]["add_const"]
         .as_i64()
         .map(|k| k.to_string())
-        .or_else(|| descriptor["op"]["add_param"].as_str().map(|p| p.to_string()))
+        .or_else(|| {
+            descriptor["op"]["add_param"]
+                .as_str()
+                .map(|p| p.to_string())
+        })
         .unwrap_or_else(|| "?".to_string());
     let account_name = descriptor["account"].as_str().unwrap_or("?").to_string();
     let module = module.unwrap_or_else(|| format!("{}{}", pascal(&account_name), pascal(handler)));
@@ -189,7 +199,10 @@ pub(crate) fn run_discharge(
 
     println!("=== qedgen discharge ===");
     println!("  spec handler : {}", handler);
-    println!("  obligation   : {}.{} += {}", account_name, mutated, delta_str);
+    println!(
+        "  obligation   : {}.{} += {}",
+        account_name, mutated, delta_str
+    );
     println!("  program      : {}", so.display());
     println!("  qedlift      : {}", qedlift.display());
 
@@ -328,13 +341,18 @@ mod tests {
         let mut parsed = parse("tests/fixtures/descriptor/vault.qedspec");
         // Rewrite deposit's effect to credit by an undeclared symbol.
         if let Some(h) = parsed.handlers.iter_mut().find(|h| h.name == "deposit") {
-            h.effects = vec![("total".to_string(), "add".to_string(), "mystery".to_string())];
+            h.effects = vec![(
+                "total".to_string(),
+                "add".to_string(),
+                "mystery".to_string(),
+            )];
             h.takes_params.clear();
         }
         let err = build_descriptor(&parsed, "deposit", Some("vault".to_string()))
             .expect_err("an undeclared RHS must be rejected");
         assert!(
-            err.to_string().contains("neither an integer literal nor a declared parameter"),
+            err.to_string()
+                .contains("neither an integer literal nor a declared parameter"),
             "error should explain the unknown RHS, got: {err}"
         );
     }
