@@ -186,7 +186,10 @@ pub(crate) fn run_discharge(
         let proof = std::fs::read_to_string(&refinement).unwrap_or_default();
         // sanity: a discharged proof is sorry-free.
         if proof.contains("sorry") {
-            bail!("qedlift emitted a refinement containing `sorry` for `{}`", handler);
+            bail!(
+                "qedlift emitted a refinement containing `sorry` for `{}`",
+                handler
+            );
         }
         println!(
             "  ✔ DISCHARGED : `{}` is proven against the bytes (offsets resolved from the IDL).",
