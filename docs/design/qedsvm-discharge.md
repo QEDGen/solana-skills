@@ -409,10 +409,10 @@ the offsets. So the *first* byte-level discharge is reachable now, and it is
 
 Current pins and coverage (verify before acting):
 
-- **qedsvm @ v0.6.0.** qedgen still pins `v0.4.0` (`lean_solana/lakefile.lean:17`)
-  — see §17. Descriptor seam merged in qedsvm#46; a post-v0.6.0 commit
-  (`d2cc646`) widened it to *arbitrary positive literal* deltas. Still
-  literal-only on the consumer side.
+- **qedsvm @ v0.6.0.** qedgen now pins `v0.6.0` (`lean_solana/lakefile.lean:17`,
+  bumped in PR #129 — see §17). Descriptor seam merged in qedsvm#46; a
+  post-v0.6.0 commit (`d2cc646`) widened it to *arbitrary positive literal*
+  deltas. Still literal-only on the consumer side.
 - **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
   `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
   — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
@@ -456,7 +456,7 @@ and `+= amount` single-field handlers.
 
 | # | Work item | Touch point |
 |---|---|---|
-| A1 | **ELF cache hook.** `SolanaCliFetcher::fetch` dumps bytes to a tempfile, hashes, then *discards* them. Stash content-addressed by `binary_hash` so discharge needs no re-fetch (§6.1). | `verify/upstream_check.rs:286-323` |
+| A1 | ✅ **Done (PR #130).** ELF cache hook: a verified `--check-upstream` Match stashes the bytes content-addressed by `binary_hash` under `~/.qedgen/elf-cache/<hex>.so` (best-effort; read side `read_cached_elf` staged for A2). | `verify/upstream_check.rs` (`stash_elf_in` / `read_cached_elf`) |
 | A2 | **Wire the proof into the project.** Today `run_discharge` drops `<Module>Refinement.lean` in a tempdir and prints a verdict. Instead, write it into the generated project and have the bridge emit `:= <Module>.refines …` in place of `sorry` when a discharge artifact exists. | `descriptor.rs:169` (`run_discharge`); `lean_solana/QEDGen/Solana/Bridge.lean:269-283` (`.refines` `sorry` at `:275`); `codegen/lean_sidecars.rs` |
 | A3 | **`verify --discharge` opt-in gate.** Default `--check-upstream` stays the cheap hash compare; discharge is opt-in and never on a user's default `lake build`. | `verify/mod.rs`, `cli.rs` |
 | A4 | **Trust-surface report.** Extend the `#print axioms` scan (`verify --lean`) to *expect* the discharged symbol gone and list what remains. | `verify --lean` path |
@@ -524,22 +524,24 @@ discharge must use a `+= k` (v1) op** unless the qedsvm v2 consumer lands first.
 File the qedsvm "consume `add_param` / bump schema to v2" issue alongside
 qedsvm#40.
 
-## §17 — Shared prerequisite: bump the qedsvm pin
+## §17 — Shared prerequisite: bump the qedsvm pin ✅ done (PR #129)
 
-`lean_solana/lakefile.lean:17` pins `qedsvm @ v0.4.0`. Every Mechanical
-refinement above (transfer/counter/vault/descriptor seam) lives in
-v0.5.0–v0.6.0. The Lean consumer side cannot *see* the descriptor seam until
-this bumps. Treat v0.4.0 → v0.6.0 as a standalone task (expect tactic/API churn,
-as prior qedsvm upgrades had) and a hard prerequisite for either slice.
+`lean_solana/lakefile.lean:17` now pins `qedsvm @ v0.6.0` (bumped from `v0.4.0`
+in PR #129; `lean_solana_mathlib` re-resolved to match). Every Mechanical
+refinement above (transfer/counter/vault/descriptor seam) lives in v0.5.0–v0.6.0,
+so the Lean consumer side can now *see* the descriptor seam. The bump was
+zero-churn (v0.5.0/v0.6.0 are additive over the narrow `SVM.Pubkey`/`SVM.SBPF`
+surface; toolchain unchanged at `v4.30.0`).
 
 ## §18 — Sequencing (impl)
 
-1. **Pin bump** v0.4.0 → v0.6.0 (§17) — prerequisite for everything.
+1. ✅ **Pin bump** v0.4.0 → v0.6.0 (§17, PR #129) — prerequisite for everything.
 2. **qedsvm v2 consumer** (consume `add_param`, bump `DESCRIPTOR_SCHEMA_MAX`) —
-   unblocks the already-shipped v2 producer; small, matched to #127.
-3. **Slice A** (§14): A1 ELF cache → A2 wire-into-project → A3 gate → A4 report.
-   First honest byte-level discharge. Start with a `+= k` op if step 2 hasn't
-   landed.
+   unblocks the already-shipped v2 producer; small, matched to #127. Still open;
+   until it lands, Slice A's first discharge uses a `+= k` (v1) op.
+3. **Slice A** (§14): ✅ A1 ELF cache (PR #130) → A2 wire-into-project → A3 gate
+   → A4 report. First honest byte-level discharge. Starting with a `+= k` op
+   while step 2 is pending.
 4. **Slice B** (§15): only after qedsvm widens to multi-field+param (gate 1) and
    ships the arg-carrying tactic (gate 2). Frame success-path-only from day one.
 
@@ -583,7 +585,7 @@ provenance / the qedsvm TCB (§9). The report (A4) must keep surfacing these.
   (plan), `:36-37` (`binary_hash`), `:54-64` (transfer axioms).
 - Bridge stubs: `lean_solana/QEDGen/Solana/Bridge.lean:269-283`
   (`.refines`/`.rejects` `sorry`).
-- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.4.0`).
+- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.6.0` since PR #129).
 - qedsvm (current as of 2026-06-23): `docs/COVERAGE.md` (coverage tiers /
   control-flow "Unsupported" row); issues #40 (whole-transition lift, open),
   #25 (delete `AsmRefinesToken*`, open), #24 (discharge route, closed), #46
