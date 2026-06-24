@@ -27,7 +27,7 @@
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::qed_lock::{self, LockEntry, LockFile};
@@ -244,12 +244,26 @@ pub fn check_lock(
             spec_dir.display(),
         ),
     };
+    // A1: stash verified bytes for later discharge. Skip under the test seam —
+    // `QEDGEN_UPSTREAM_FAKE_BYTES` returns synthetic payloads that aren't real
+    // programs worth caching (and keeps unit tests from touching the home dir).
+    let under_fake_seam = std::env::var(FAKE_BYTES_ENV).is_ok_and(|v| !v.is_empty());
+    let elf_cache = if under_fake_seam {
+        None
+    } else {
+        elf_cache_root().ok()
+    };
     if offline {
-        Ok(check_lock_with_fetcher(&lock, &mut OfflineFetcher))
+        Ok(check_lock_with_fetcher(
+            &lock,
+            &mut OfflineFetcher,
+            elf_cache.as_deref(),
+        ))
     } else {
         Ok(check_lock_with_fetcher(
             &lock,
             &mut SolanaCliFetcher { rpc_url },
+            elf_cache.as_deref(),
         ))
     }
 }
@@ -327,18 +341,23 @@ impl<'a> BinaryFetcher for SolanaCliFetcher<'a> {
 pub fn check_lock_with_fetcher(
     lock: &LockFile,
     fetcher: &mut dyn BinaryFetcher,
+    elf_cache: Option<&Path>,
 ) -> Vec<DepCheckResult> {
     let mut results = Vec::with_capacity(lock.dependencies.len());
     for entry in &lock.dependencies {
         results.push(DepCheckResult {
             name: entry.name.clone(),
-            outcome: check_one(entry, fetcher),
+            outcome: check_one(entry, fetcher, elf_cache),
         });
     }
     results
 }
 
-fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutcome {
+fn check_one(
+    entry: &LockEntry,
+    fetcher: &mut dyn BinaryFetcher,
+    elf_cache: Option<&Path>,
+) -> DepCheckOutcome {
     let pinned = match entry.upstream_binary_hash.as_deref() {
         Some(h) if !h.is_empty() => h,
         _ => {
@@ -383,6 +402,18 @@ fn check_one(entry: &LockEntry, fetcher: &mut dyn BinaryFetcher) -> DepCheckOutc
     };
     let on_chain = format_hash(&bytes);
     if on_chain == pinned {
+        // A1: cache the just-verified bytes content-addressed by their hash
+        // (== the pin on this branch) so a later `qedsvm_discharge` reads them
+        // without re-dumping. Best-effort — a cache-write failure must never
+        // turn a clean Match into a gating error.
+        if let Some(root) = elf_cache {
+            if let Err(e) = stash_elf_in(root, &on_chain, &bytes) {
+                eprintln!(
+                    "  · note: could not cache verified ELF for {} ({}): {}",
+                    program_id, on_chain, e
+                );
+            }
+        }
         DepCheckOutcome::Match {
             program_id,
             hash: on_chain,
@@ -424,6 +455,80 @@ pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
         .or_else(|| pinned.strip_prefix("SHA256:"))
         .unwrap_or(pinned);
     !body.is_empty() && body.chars().all(|c| c == '0')
+}
+
+// ----------------------------------------------------------------------------
+// ELF cache (discharge Slice A / A1)
+// ----------------------------------------------------------------------------
+//
+// `--check-upstream` already dumps + hashes the deployed `.so`; today it drops
+// the bytes after the compare. The discharge pipeline (docs/design/
+// qedsvm-discharge.md §6.1, §14-A1) needs those exact bytes to decode the ELF
+// at proof time. Stash them content-addressed by the verified `binary_hash` —
+// the same pin already in `qed.lock` / the `.qedspec` `upstream {}` block — so a
+// later `qedsvm_discharge` reads what `--check-upstream` proved, with no second
+// `solana program dump`. Caching is a pure optimization: every failure is
+// non-fatal and degrades to a re-fetch.
+
+/// Root of the content-addressed ELF cache: an `elf-cache/` sibling of the
+/// validation workspace under the qedgen home (`~/.qedgen/elf-cache`, override
+/// via `QEDGEN_HOME`).
+#[allow(dead_code)]
+pub(crate) fn elf_cache_root() -> Result<PathBuf> {
+    Ok(crate::validate::qedgen_home()?.join("elf-cache"))
+}
+
+/// Map a `sha256:<hex>` pin to its file path under `root`. The body must be
+/// pure hex (what [`format_hash`] emits); anything else is rejected so a
+/// malformed pin can never escape the cache directory via `..`/separators.
+#[allow(dead_code)]
+pub(crate) fn cached_elf_path_in(root: &Path, hash: &str) -> Result<PathBuf> {
+    let body = hash
+        .strip_prefix("sha256:")
+        .or_else(|| hash.strip_prefix("SHA256:"))
+        .unwrap_or(hash);
+    if body.is_empty() || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("refusing to cache ELF under non-hex binary_hash {:?}", hash);
+    }
+    Ok(root.join(format!("{}.so", body.to_ascii_lowercase())))
+}
+
+/// Stash `bytes` content-addressed by `hash` under `root`, written atomically
+/// (temp file + rename) so a concurrent reader never sees a torn file.
+/// Idempotent: the path is content-addressed, so an existing entry is the same
+/// bytes by construction and the write is skipped. Returns the cached path.
+#[allow(dead_code)]
+pub(crate) fn stash_elf_in(root: &Path, hash: &str, bytes: &[u8]) -> Result<PathBuf> {
+    use std::io::Write;
+    let path = cached_elf_path_in(root, hash)?;
+    if path.exists() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(root)
+        .with_context(|| format!("creating ELF cache dir {}", root.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".qedgen-elf-")
+        .tempfile_in(root)
+        .with_context(|| format!("creating temp file in ELF cache {}", root.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("writing ELF bytes to {}", tmp.path().display()))?;
+    tmp.flush().ok();
+    tmp.persist(&path)
+        .map_err(|e| anyhow::anyhow!("persisting cached ELF to {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
+/// Read the cached ELF for `hash` under `root`, or `None` if absent/unreadable.
+/// The read side the discharge step consumes; unused until A2 wires it.
+#[allow(dead_code)]
+pub(crate) fn read_cached_elf_in(root: &Path, hash: &str) -> Option<Vec<u8>> {
+    std::fs::read(cached_elf_path_in(root, hash).ok()?).ok()
+}
+
+/// [`read_cached_elf_in`] against the default [`elf_cache_root`].
+#[allow(dead_code)]
+pub(crate) fn read_cached_elf(hash: &str) -> Option<Vec<u8>> {
+    read_cached_elf_in(&elf_cache_root().ok()?, hash)
 }
 
 // ----------------------------------------------------------------------------
@@ -574,7 +679,7 @@ mod tests {
             dependencies: vec![entry_with_hash("no_pin", None)],
         };
         let mut fetcher = FakeFetcher::new();
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         assert_eq!(results.len(), 1);
         match &results[0].outcome {
             DepCheckOutcome::Skipped { reason } => {
@@ -596,7 +701,7 @@ mod tests {
         };
         // Empty fetcher: any fetch attempt would surface as Error.
         let mut fetcher = FakeFetcher::new();
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         match &results[0].outcome {
             DepCheckOutcome::Skipped { reason } => {
                 assert!(
@@ -634,7 +739,7 @@ mod tests {
             dependencies: vec![e],
         };
         let mut fetcher = FakeFetcher::new();
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         match &results[0].outcome {
             DepCheckOutcome::Skipped { reason } => {
                 assert!(
@@ -658,7 +763,7 @@ mod tests {
         };
         let mut fetcher =
             FakeFetcher::new().ok("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", bytes.clone());
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         match &results[0].outcome {
             DepCheckOutcome::Match {
                 program_id,
@@ -686,7 +791,7 @@ mod tests {
             dependencies: vec![e_pinned, e_unpinned],
         };
         let mut fetcher = OfflineFetcher;
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         assert!(matches!(results[0].outcome, DepCheckOutcome::Error { .. }));
         match &results[0].outcome {
             DepCheckOutcome::Error { message } => {
@@ -717,7 +822,7 @@ mod tests {
             "FakeProgramId11111111111111111111111111111111",
             on_chain_bytes.clone(),
         );
-        let results = check_lock_with_fetcher(&lock, &mut fetcher);
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, None);
         match &results[0].outcome {
             DepCheckOutcome::Mismatch {
                 pinned, on_chain, ..
@@ -1029,5 +1134,117 @@ mod tests {
             );
             assert!(!routed.any_blocking());
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // ELF cache (A1)
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn cached_elf_path_strips_prefix_lowercases_and_appends_so() {
+        let root = Path::new("/cache");
+        let p = cached_elf_path_in(root, "sha256:ABCdef01").expect("hex path");
+        assert_eq!(p, Path::new("/cache/abcdef01.so"));
+        // Bare hex (no prefix) is accepted too.
+        let p2 = cached_elf_path_in(root, "00ff").expect("bare hex path");
+        assert_eq!(p2, Path::new("/cache/00ff.so"));
+    }
+
+    #[test]
+    fn cached_elf_path_rejects_non_hex_to_prevent_path_escape() {
+        let root = Path::new("/cache");
+        for bad in [
+            "sha256:../escape",
+            "sha256:not-hex!!",
+            "sha256:",
+            "sha256:dead/beef",
+        ] {
+            assert!(
+                cached_elf_path_in(root, bad).is_err(),
+                "non-hex pin {bad:?} must be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn stash_then_read_roundtrips_and_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes = b"\x7fELF-fake-program-bytes".to_vec();
+        let hash = format_hash(&bytes);
+
+        let path = stash_elf_in(dir.path(), &hash, &bytes).expect("stash");
+        assert!(path.exists(), "cache file written");
+        assert_eq!(
+            read_cached_elf_in(dir.path(), &hash).as_deref(),
+            Some(bytes.as_slice()),
+            "read returns the stashed bytes",
+        );
+
+        // Content-addressed: a second stash is a no-op returning the same path.
+        let path2 = stash_elf_in(dir.path(), &hash, &bytes).expect("re-stash");
+        assert_eq!(path, path2);
+    }
+
+    #[test]
+    fn read_cached_elf_returns_none_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_cached_elf_in(dir.path(), &format_hash(b"never-stored")).is_none());
+    }
+
+    #[test]
+    fn match_stashes_verified_bytes_under_their_hash() {
+        let bytes = b"deployed-program-bytes".to_vec();
+        let hash = format_hash(&bytes);
+        let pid = "Tokenkeg11111111111111111111111111111111111".to_string();
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                program_id: Some(pid.clone()),
+                upstream_binary_hash: Some(hash.clone()),
+                ..entry_with_hash("spl", Some(&hash))
+            }],
+        };
+        let mut fetcher = FakeFetcher::new().ok(&pid, bytes.clone());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, Some(dir.path()));
+        assert!(matches!(results[0].outcome, DepCheckOutcome::Match { .. }));
+        assert_eq!(
+            read_cached_elf_in(dir.path(), &hash).as_deref(),
+            Some(bytes.as_slice()),
+            "a verified Match stashes the bytes content-addressed",
+        );
+    }
+
+    #[test]
+    fn mismatch_does_not_stash() {
+        let pinned = format_hash(b"pinned-v1");
+        let pid = "Tokenkeg11111111111111111111111111111111111".to_string();
+        let lock = LockFile {
+            version: LOCK_VERSION,
+            dependencies: vec![LockEntry {
+                program_id: Some(pid.clone()),
+                upstream_binary_hash: Some(pinned.clone()),
+                ..entry_with_hash("spl", Some(&pinned))
+            }],
+        };
+        // Fetcher returns different bytes → on-chain hash ≠ pin → Mismatch.
+        let on_chain = b"redeployed-v2".to_vec();
+        let mut fetcher = FakeFetcher::new().ok(&pid, on_chain.clone());
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let results = check_lock_with_fetcher(&lock, &mut fetcher, Some(dir.path()));
+        assert!(matches!(
+            results[0].outcome,
+            DepCheckOutcome::Mismatch { .. }
+        ));
+        assert!(
+            read_cached_elf_in(dir.path(), &pinned).is_none(),
+            "pinned hash not cached on mismatch",
+        );
+        assert!(
+            read_cached_elf_in(dir.path(), &format_hash(&on_chain)).is_none(),
+            "untrusted on-chain bytes are not cached",
+        );
     }
 }
