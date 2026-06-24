@@ -26,10 +26,11 @@
 
 import SVM.SBPF
 import SVM.SBPF.CPSSpec
+import SVM.Solana.Abstract.Refinement
 
 namespace QEDGen.Solana.BridgeAdapter
 
-open SVM.SBPF
+open SVM.SBPF SVM.Solana.Abstract
 
 /-- Execution bridge (A2b-1). A CU-triple covering a call-free handler block
     `entry → exitPc` (post `Q` pins `r0 = 0`) extends to a whole-run halt with
@@ -107,5 +108,33 @@ theorem halts_zero_of_block_exit
       callStack := by rw [hcsk]; exact hcompat.callStack },
     hQ⟩
 
+/-- Glue over qedlift's actual output type. `AsmRefinesFieldUpdate` is exactly a
+    `cuTripleWithinMem` with `P = setupPre ** codecCoarse base preFields` and
+    `Q = setupPost ** codecCoarse base postFields`, so it feeds
+    `halts_zero_of_block_exit` directly: a discharged field update halts the run
+    with `exitCode = some 0` and the account memory encodes `postFields`. The
+    bridge wiring (A2b-2) supplies `h_pre` (from `encodeState`/`initState2`),
+    `h_q_r0` (post pins `r0 = 0`), and `h_cs` (call-free block). -/
+theorem halts_zero_of_fieldUpdate
+    {cr : CodeReq} {nSteps nCu entry exitPc base : Nat}
+    {preFields postFields : List (Nat × FieldVal)}
+    {setupPre setupPost : Assertion} {rr : Memory.RegionTable → Prop}
+    (h : AsmRefinesFieldUpdate cr nSteps nCu entry exitPc rr base
+          preFields postFields setupPre setupPost)
+    {fetch : Nat → Option Insn} (h_cr : cr.SatisfiedBy fetch)
+    (h_exit : fetch exitPc = some .exit)
+    {s : State}
+    (h_pre : (setupPre ** codecCoarse base preFields).holdsFor s)
+    (h_pc : s.pc = entry) (h_run : s.exitCode = none)
+    (h_bud : s.cuConsumed + nSteps + nCu ≤ s.cuBudget)
+    (h_rr : rr s.regions)
+    (h_q_r0 : ∀ t : State,
+      (setupPost ** codecCoarse base postFields).holdsFor t → t.regs.get .r0 = 0)
+    (h_cs : ∀ k : Nat, (executeFn fetch s k).callStack = [])
+    (FUEL : Nat) (h_fuel : nSteps + 1 ≤ FUEL) :
+    (executeFn fetch s FUEL).exitCode = some 0 ∧
+    (setupPost ** codecCoarse base postFields).holdsFor (executeFn fetch s FUEL) := by
+  unfold AsmRefinesFieldUpdate at h
+  exact halts_zero_of_block_exit h h_cr h_exit h_pre h_pc h_run h_bud h_rr h_q_r0 h_cs FUEL h_fuel
 
 end QEDGen.Solana.BridgeAdapter
