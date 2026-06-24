@@ -554,6 +554,51 @@ whole-transition coverage (qedsvm#40 gaps 1–2, *Unsupported* in `COVERAGE.md`)
 CPI callee effects (`sol_invoke_signed_*` effect-free envelope, gap 4), and
 provenance / the qedsvm TCB (§9). The report (A4) must keep surfacing these.
 
+## §19 — A2b: the Bridge↔qedlift adapter (proof obligations)
+
+A2 ships in two halves: **A2a** (PR #132, done) persists the qedlift artifacts
+into the project; **A2b** flips the `Bridge.lean:269` `.refines` `sorry` by
+consuming them. The two surfaces are reconcilable — *not* an execution-model
+mismatch, the worry that initially looked blocking:
+
+- **Same executor.** `AsmRefinesFieldUpdate` unfolds (`Refinement.lean`) to a
+  `cuTripleWithinMem`, which is *defined* (`CPSSpec.lean:379`) over the very
+  `executeFn` the Bridge `.refines` runs. No fuel-vs-CU model gap.
+- **Same state↔mem content.** The Bridge's generated `encodeState` is a
+  per-field conjunction (`readU64/U8 mem (addr+off) = s.field`,
+  `Bridge.lean:192-211`); qedlift's post is `codecCoarse base postFields` —
+  the same atoms. Adapter gap (b) = structural unfold-and-match, using qedlift's
+  `ensures` (`u64FieldAt` projection) for the reads.
+
+**The one real gap is the epilogue, and it is exactly ONE instruction.** For the
+vault fixture the lifted program is 5 insns (`ldx; add64; stx; mov64 r0,0;
+exit`); the qedlift triple is `cuTripleWithinMem 4 0 0 4` — it covers pc 0→4 and
+stops *at* `pc=4` (the `.exit`) with `exitCode = none`. The Bridge wants whole-run
+`exitCode = some 0`. Bridge = run the `.exit` at pc 4: `r0 = 0` (set by
+`mov64 r0,0`, carried in the triple's post `Q ∋ .r0 ↦ᵣ toU64 0`) ⇒
+`exitCode = some 0`, account memory unchanged. So it is bounded, not the
+whole-program / qedsvm#40 story.
+
+**A2b‑1 — the generic adapter lemma** (`lean_solana`, proved once): from
+`AsmRefinesFieldUpdate cr nSteps nCu 0 exit rr base pre post …` derive the
+Bridge `.refines` goal. Obligations: (1) `cr.SatisfiedBy progAt` from the
+persisted `…TracedLifted` decode + `SatisfiedBy_of_union_*`; (2) instantiate the
+triple's `∀ R s` frame with the Bridge's `initState2`/`encodeState`-derived pre;
+(3) the `∃ k ≤ nSteps` run, then `executeFn_step` for the `.exit` and
+`executeFn_compose` + `executeFn_halted` to extend to the Bridge's fixed `FUEL`
+(needs `FUEL ≥ nSteps + 1`); (4) `codecCoarse base postFields` ↔ `encodeState s'`
+on the final mem. Primary remaining unknown: `step .exit` register-return
+mechanics. Tractable in-session; the SL/execution fiddliness (3) is the Leanstral
+candidate.
+
+**A2b‑2 — wire the elaborator** (mechanical): `Bridge.lean` emits
+`.refines := by exact bridge_refines_of_fieldUpdate <Module>.refines_asm …`
+instead of `sorry` when a discharge artifact is present; import the persisted
+module; add the lakefile-roots wiring deferred from A2a.
+
+**Boundary:** `.refines` (success) only; `.rejects`/abort stay `sorry`
+(qedsvm#40), per §9.
+
 ---
 
 ## Appendix — primary sources (verify before acting; cited 2026-06-14)
