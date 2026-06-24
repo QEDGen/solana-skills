@@ -396,6 +396,12 @@ pub(crate) enum Commands {
         /// Lean module name for the emitted proof (default: `<Account><Handler>`)
         #[arg(long)]
         module: Option<String>,
+
+        /// Persist the discharged proof (`<Module>TracedLifted.lean` +
+        /// `<Module>Refinement.lean`) into this directory instead of a temp
+        /// dir. Omit to keep the verdict-only (artifact-discarded) behaviour.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
 
     /// Consolidate multiple proof projects into a single Lean project
