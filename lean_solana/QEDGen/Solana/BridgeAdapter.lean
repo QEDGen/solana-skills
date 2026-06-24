@@ -16,9 +16,12 @@
 
   See docs/design/qedsvm-discharge.md §19.
 
-  STATUS: contract stated; the body is a bounded SL/execution grind (emp-framing,
-  callStack invariance, `holdsFor`-under-exitCode, r0 extraction) tracked for a
-  focused fill (Leanstral candidate per the escalation ladder).
+  STATUS: the execution-bridge core (`halts_zero_of_block_exit`) is PROVEN,
+  sorry-free and standard-axiom clean (propext / Classical.choice / Quot.sound).
+  Remaining for full A2b: the per-spec glue feeding it — unfold
+  `AsmRefinesFieldUpdate`, map `encodeState` ↔ `codecCoarse`, derive the triple's
+  `P` from the bridge's `encodeState`/`Transition` hyps — then A2b-2 wires the
+  `Bridge.lean` elaborator to emit `:= by exact …` instead of `sorry`.
 -/
 
 import SVM.SBPF
@@ -51,6 +54,58 @@ theorem halts_zero_of_block_exit
     (FUEL : Nat) (h_fuel : nSteps + 1 ≤ FUEL) :
     (executeFn fetch s FUEL).exitCode = some 0 ∧
     Q.holdsFor (executeFn fetch s FUEL) := by
-  sorry
+  -- 1. Frame the triple with R = emp and run it to the block exit.
+  have hPemp : (P ** emp).holdsFor s :=
+    (holdsFor_iff_pointwise (fun h => sepConj_emp_right h)).mpr h_pre
+  obtain ⟨k, hk_le, hk_pc, hk_ex, hk_cu, hk_post⟩ :=
+    h emp pcFree_emp fetch h_cr s hPemp h_pc h_run h_bud h_rr
+  -- 2. The block post Q holds at the exit point (drop the emp frame).
+  have hQse : Q.holdsFor (executeFn fetch s k) :=
+    (holdsFor_iff_pointwise (fun h => sepConj_emp_right h)).mp hk_post
+  -- 3. r0 = 0 and the call stack is empty at the exit point.
+  have hr0 : (executeFn fetch s k).regs.get .r0 = 0 := h_q_r0 _ hQse
+  have hcs : (executeFn fetch s k).callStack = [] := h_cs k
+  -- 4. The exit step's budget check passes: cuConsumed ≤ cuBudget at the exit.
+  have hbud_se : (executeFn fetch s k).cuConsumed ≤ (executeFn fetch s k).cuBudget := by
+    have hbudget : (executeFn fetch s k).cuBudget = s.cuBudget := by
+      simp [executeFn_preserves_cuBudget]
+    omega
+  -- 5. One `.exit` step: exitCode = some 0; regs/mem/pc/returnData/callStack
+  --    preserved (it only writes exitCode, chargeCu only cuConsumed).
+  have hstep1 : executeFn fetch (executeFn fetch s k) 1
+      = chargeCu (step .exit (executeFn fetch s k)) := by
+    have := executeFn_step fetch (executeFn fetch s k) 0 .exit hk_ex hbud_se
+      (by rw [hk_pc]; exact h_exit)
+    simpa using this
+  have he1_exit : (executeFn fetch (executeFn fetch s k) 1).exitCode = some 0 := by
+    rw [hstep1]; simp [step, chargeCu, hcs]; exact hr0
+  -- 6. Extend to the bridge's fixed FUEL: run k+1 then halt-idempotent.
+  have hfuel_eq : executeFn fetch s FUEL = executeFn fetch (executeFn fetch s k) 1 := by
+    have hsplit : FUEL = (k + 1) + (FUEL - (k + 1)) := by omega
+    rw [hsplit, executeFn_compose, executeFn_compose]
+    exact executeFn_halted fetch _ _ 0 he1_exit
+  refine ⟨by rw [hfuel_eq]; exact he1_exit, ?_⟩
+  -- 7. Q survives: the exit step preserves every field `CompatibleWith` checks
+  --    (regs/mem/pc/returnData/callStack); `holdsFor` ignores exitCode/cuConsumed.
+  rw [hfuel_eq, hstep1]
+  obtain ⟨hp, hcompat, hQ⟩ := hQse
+  have hregs : (chargeCu (step .exit (executeFn fetch s k))).regs
+      = (executeFn fetch s k).regs := by simp [chargeCu, step, hcs]
+  have hmem : (chargeCu (step .exit (executeFn fetch s k))).mem
+      = (executeFn fetch s k).mem := by simp [chargeCu, step, hcs]
+  have hpc' : (chargeCu (step .exit (executeFn fetch s k))).pc
+      = (executeFn fetch s k).pc := by simp [chargeCu, step, hcs]
+  have hrd : (chargeCu (step .exit (executeFn fetch s k))).returnData
+      = (executeFn fetch s k).returnData := by simp [chargeCu, step, hcs]
+  have hcsk : (chargeCu (step .exit (executeFn fetch s k))).callStack
+      = (executeFn fetch s k).callStack := by simp [chargeCu, step, hcs]
+  exact ⟨hp,
+    { regs := by rw [hregs]; exact hcompat.regs
+      mem := by rw [hmem]; exact hcompat.mem
+      pc := by rw [hpc']; exact hcompat.pc
+      returnData := by rw [hrd]; exact hcompat.returnData
+      callStack := by rw [hcsk]; exact hcompat.callStack },
+    hQ⟩
+
 
 end QEDGen.Solana.BridgeAdapter
