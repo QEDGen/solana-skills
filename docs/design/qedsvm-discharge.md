@@ -1,9 +1,12 @@
 # qedsvm Discharge — Design Note (v3.0 target)
 
-Status: **design** (no code yet; supersedes the forward-links in
-`docs/prds/RELEASE-v2.28.md` and the v3.0 thread in
-`project_v229_v230_sequencing`)
-Author: agent-driven exploration, 2026-06-14
+Status: **design + impl sketch** — the producer seam has landed (qedgen
+`descriptor`/`discharge` + qedsvm#46 descriptor consumer); the discharge proofs
+themselves are not yet built. Part I (§0–§11) is the architecture; Part II
+(§12–§18) is the concrete next-build, scoped to what the descriptor seam makes
+reachable today. Supersedes the forward-links in `docs/prds/RELEASE-v2.28.md`
+and the v3.0 thread in `project_v229_v230_sequencing`.
+Author: agent-driven exploration, 2026-06-14; impl sketch 2026-06-23.
 Scope: replace qedgen's two author-asserted trust surfaces — the bundled
 Tier-1 CPI callee `ensures` axioms and the sBPF refinement-bridge `sorry`
 stubs — with Lean proofs **discharged against the pinned program bytes** via
@@ -35,6 +38,11 @@ the touched account into a field list — and to wire qedgen so the trust
 surfaces consume it. The central simplification: the **bundled** callee
 packages have a *fixed* hash, so they are proven **once** at package-build
 time; only users' own programs need per-project discharge.
+
+> **Update (2026-06-23).** This framing — "gated on qedsvm#40" — is now only
+> half true. qedsvm shipped the **descriptor seam** (#46), so the *first*
+> byte-level discharge is reachable today and is **not** SPL `transfer`. See
+> Part II (§12–§18) for the concrete slices and the corrected gating.
 
 ---
 
@@ -223,6 +231,12 @@ SL spec, the lift to `AsmRefinesFieldUpdate`, ELF-decode-at-proof-time, and a
 `binary_hash`-keyed `qedsvm_discharge "<hash>" "<handler>"`. Tracked by
 qedsvm#40/#24/#25. qedgen work below is scaffolding-only until this lands for
 one handler.
+>
+> **Partially unblocked (2026-06-23).** The descriptor seam (qedsvm#46) already
+> discharges the **single-field constant-delta** shape sorry-free — a strict
+> subset of Phase 0 that does *not* need qedsvm#40. Part II §14 (Slice A) pulls
+> the first honest discharge forward onto that subset; the full Phase 0
+> (transfer, multi-field, abort arms) stays gated on qedsvm#40.
 
 **Phase 1 — Tier-1 CPI callee discharge (the headline).** Discharge the
 bundled packages once:
@@ -375,6 +389,171 @@ project shorthand to prevent the two meanings from colliding in future notes.
 
 ---
 
+# Part II — Implementation sketch (2026-06-23)
+
+Where Part I states *what must be true* for "axiomatized against a `binary_hash`"
+to become "proven against the bytes," this part states *what qedgen builds
+next*, scoped to what the descriptor seam (qedsvm#46, merged) makes reachable
+today. It updates Part I's gating: the thread is no longer wholly gated on
+qedsvm#40. Verify all file:line refs before acting.
+
+## §12 — Seam state as of 2026-06-23
+
+Part I framed the whole thread as gated on qedsvm#40 (the whole-transition
+lift). That is now **only half true**. qedsvm shipped the **descriptor seam**
+(#46): `qedlift --descriptor` builds a layout-general `AsmRefinesFieldUpdate`
+straight from a qedgen-shaped JSON obligation and proves it sorry-free against
+the decoded bytes — for the **single-field constant-delta** shape, IDL-resolving
+the offsets. So the *first* byte-level discharge is reachable now, and it is
+**not** the SPL `transfer` axiom (§13).
+
+Current pins and coverage (verify before acting):
+
+- **qedsvm @ v0.6.0.** qedgen still pins `v0.4.0` (`lean_solana/lakefile.lean:17`)
+  — see §17. Descriptor seam merged in qedsvm#46; a post-v0.6.0 commit
+  (`d2cc646`) widened it to *arbitrary positive literal* deltas. Still
+  literal-only on the consumer side.
+- **qedgen producer** (`crates/qedgen/src/descriptor.rs::build_descriptor:29`):
+  `add_const` (schema v1) plus **`add_param` (schema v2)** for parameter deltas
+  — landed via PR #127 (`c53b56d` + rustfmt `4e7fa64`), single-field, validated
+  against the handler's declared params. This is **ahead of the qedsvm
+  consumer**: qedlift `--descriptor` does not yet consume schema v2 (§16).
+- **qedsvm coverage tiers** (qedsvm `docs/COVERAGE.md`): SPL Transfer/MintTo/Burn,
+  counter increment, vault constant field update = *Mechanical* (success path,
+  single selected arm). "Path merge / whole-program arm coverage =
+  **Unsupported**." CPI (`sol_invoke_signed_*`) = *Triple only*, effect-free
+  envelope; callee effects unverified.
+
+## §13 — The reshaping constraint: `transfer` does not fit the descriptor seam
+
+`build_descriptor` lowers **exactly one** `<field> += <rhs>` effect
+(`descriptor.rs:54`, the `[one] => one` match). The bundled SPL `Token.transfer`
+contract is two fields by a parameter
+(`crates/qedgen/data/proofs/spl/Token.lean:54-64`):
+
+```lean
+axiom ensures_axiom_0 … : (from_balance post) = (from_balance pre) - amount
+axiom ensures_axiom_1 … : (to_balance   post) = (to_balance   pre) + amount
+```
+
+Two fields (`from_balance`, `to_balance`), parameter delta (`amount`). qedsvm's
+`docs/COVERAGE.md` agrees: the descriptor path "currently covers the constant
+single-field delta class; parameter deltas and multi-field writes are not yet
+emitted." Transfer's success-path refinement exists *only* via the hardcoded
+registry (`AsmRefinesTokenTransfer`, Mechanical) — which qedsvm#25 is slated to
+delete.
+
+**Consequence:** the cheapest first discharge is a **single-field increment**,
+not `transfer`. Two distinct slices follow.
+
+## §14 — Slice A: sBPF bridge increment discharge (reachable now, no new qedsvm)
+
+Target: **Surface 1.2** (§1.2) — replace a `Bridge.lean` `.refines` `sorry` for
+a counter/vault-shaped op with the qedlift-discharged refinement. This is the
+exact shape the descriptor seam already proves sorry-free (PR #126 demonstrated
+the chain end to end). With the `add_param` producer (§12) it covers both `+= k`
+and `+= amount` single-field handlers.
+
+| # | Work item | Touch point |
+|---|---|---|
+| A1 | **ELF cache hook.** `SolanaCliFetcher::fetch` dumps bytes to a tempfile, hashes, then *discards* them. Stash content-addressed by `binary_hash` so discharge needs no re-fetch (§6.1). | `verify/upstream_check.rs:286-323` |
+| A2 | **Wire the proof into the project.** Today `run_discharge` drops `<Module>Refinement.lean` in a tempdir and prints a verdict. Instead, write it into the generated project and have the bridge emit `:= <Module>.refines …` in place of `sorry` when a discharge artifact exists. | `descriptor.rs:169` (`run_discharge`); `lean_solana/QEDGen/Solana/Bridge.lean:269-283` (`.refines` `sorry` at `:275`); `codegen/lean_sidecars.rs` |
+| A3 | **`verify --discharge` opt-in gate.** Default `--check-upstream` stays the cheap hash compare; discharge is opt-in and never on a user's default `lake build`. | `verify/mod.rs`, `cli.rs` |
+| A4 | **Trust-surface report.** Extend the `#print axioms` scan (`verify --lean`) to *expect* the discharged symbol gone and list what remains. | `verify --lean` path |
+
+**Data flow** (§4 steps ①–⑥, instantiated): `binary_hash` → cached ELF (A1) →
+`qedlift --descriptor` (`descriptor.rs::qedlift_command:127`) → sorry-free
+`AsmRefinesFieldUpdate` → wired into project (A2) → `#print axioms` drops it (A4).
+
+**Exit criterion:** a generated project whose constant/parameter single-field
+bridge op type-checks with **no `sorry`** in its `.refines`, and whose `#print
+axioms` no longer lists the bridge stub.
+
+**Scope honesty:** success path, single field. Nothing from qedsvm#40.
+
+## §15 — Slice B: SPL `transfer` axiom flip (headline; one upstream gate)
+
+Target: **Surface 1.1** (§1.1) — flip `Token.transfer.ensures_axiom_{0,1}` from
+`axiom` to discharged `theorem`. The target form is already written into the
+source as the v3.0 plan (`Token.lean:22-28`):
+
+```lean
+theorem ensures_axiom_0 … := by qedsvm_discharge "<binary_hash>" "transfer"
+```
+
+**The transparency property (why this is cheap once unblocked).** Consumers are
+unchanged: `codegen/lean_gen_mir/cpi.rs:245` emits `exact
+Token.transfer.ensures_axiom_0 …` whether the symbol is an `axiom` or a
+`theorem`. Discharge is a **package-build-once** `.olean` artifact at the pinned
+hash (`Token.lean:36-37`); user projects never pay for it and never change.
+
+**Three gates — one is upstream:**
+
+1. *(qedsvm, blocking)* `transfer` must become dischargeable: descriptor widened
+   to **multi-field + parameter** delta (schema v3), or accept the registry
+   `AsmRefinesTokenTransfer` (risky — qedsvm#25 deletes it). The first is real
+   qedsvm work, partway into qedsvm#40 gap-1.
+2. *(qedsvm)* the **argument-carrying** tactic: the v0.4.0 `qedsvm_discharge`
+   macro takes no args; it must learn `"<hash>" "<handler>"` and look up the
+   cached ELF + SL spec (§4 already flags this).
+3. *(qedgen)* producer widening to **multi-field**: relax `build_descriptor`'s
+   single-effect guard (`descriptor.rs:54`, the `[one] => one` match) to a field
+   list. The parameter-delta half is already done (§12); the multi-field half is
+   not.
+
+**Even after all three, it is success-path only.** Insufficient-balance and
+other abort arms are qedsvm#40 gap-1 and stay `axiom`/`sorry`. The trust-surface
+report (A4) must say "verified on the success path," not "verified."
+
+## §16 — The schema-version contract (producer ahead of consumer)
+
+The descriptor is versioned and fail-closed (`schema_version` ↔ qedsvm's
+`DESCRIPTOR_SCHEMA_MAX`). Current state is a deliberate producer-lead:
+
+| Shape | Producer (qedgen) | Consumer (qedsvm qedlift) |
+|---|---|---|
+| `add_const` single-field (v1) | ✅ shipped | ✅ qedsvm#46 |
+| `add_param` single-field (v2) | ✅ #127 (`c53b56d`) | ❌ not yet — **matched ask** |
+| multi-field (v3, transfer) | ❌ §15 gate 3 | ❌ §15 gate 1 |
+
+**Action:** the v2 producer needs a matched qedsvm consumer (`--descriptor`
+learns `add_param` + `DESCRIPTOR_SCHEMA_MAX` → 2) before Slice A can discharge a
+`+= amount` handler. Until then the v2 producer emits a descriptor qedlift will
+reject — correct fail-closed behavior, but it means **Slice A's first green
+discharge must use a `+= k` (v1) op** unless the qedsvm v2 consumer lands first.
+File the qedsvm "consume `add_param` / bump schema to v2" issue alongside
+qedsvm#40.
+
+## §17 — Shared prerequisite: bump the qedsvm pin
+
+`lean_solana/lakefile.lean:17` pins `qedsvm @ v0.4.0`. Every Mechanical
+refinement above (transfer/counter/vault/descriptor seam) lives in
+v0.5.0–v0.6.0. The Lean consumer side cannot *see* the descriptor seam until
+this bumps. Treat v0.4.0 → v0.6.0 as a standalone task (expect tactic/API churn,
+as prior qedsvm upgrades had) and a hard prerequisite for either slice.
+
+## §18 — Sequencing (impl)
+
+1. **Pin bump** v0.4.0 → v0.6.0 (§17) — prerequisite for everything.
+2. **qedsvm v2 consumer** (consume `add_param`, bump `DESCRIPTOR_SCHEMA_MAX`) —
+   unblocks the already-shipped v2 producer; small, matched to #127.
+3. **Slice A** (§14): A1 ELF cache → A2 wire-into-project → A3 gate → A4 report.
+   First honest byte-level discharge. Start with a `+= k` op if step 2 hasn't
+   landed.
+4. **Slice B** (§15): only after qedsvm widens to multi-field+param (gate 1) and
+   ships the arg-carrying tactic (gate 2). Frame success-path-only from day one.
+
+Slice A is the value; Slice B is the headline. Do A first — it exercises the
+entire qedgen pipeline (cache → discharge → wire → report) and produces a real
+`sorry`/axiom → theorem delta with zero dependency on qedsvm#40.
+
+Out-of-scope here defers entirely to §9 and qedsvm#40: abort arms /
+whole-transition coverage (qedsvm#40 gaps 1–2, *Unsupported* in `COVERAGE.md`),
+CPI callee effects (`sol_invoke_signed_*` effect-free envelope, gap 4), and
+provenance / the qedsvm TCB (§9). The report (A4) must keep surfacing these.
+
+---
+
 ## Appendix — primary sources (verify before acting; cited 2026-06-14)
 
 - Axiom packages: `crates/qedgen/data/proofs/spl/Token.lean`,
@@ -389,3 +568,24 @@ project shorthand to prevent the two meanings from colliding in future notes.
   `…/SVM/SBPF/Tactic/Discharge.lean`.
 - Prior framing: `docs/prds/RELEASE-v2.28.md`,
   `docs/design/spec-composition.md`.
+
+### Implementation-sketch sources (Part II; cited 2026-06-23)
+
+- Descriptor producer: `crates/qedgen/src/descriptor.rs` — `build_descriptor:29`
+  (single-effect guard `[one] => one` at `:54`), `qedlift_command:127`,
+  `run_discharge:169`; `add_param`/schema-v2 landed via PR #127 (`c53b56d`,
+  rustfmt `4e7fa64`).
+- ELF cache hook point: `crates/qedgen/src/verify/upstream_check.rs:286-323`
+  (`SolanaCliFetcher::fetch` — dump → hash → discard).
+- Transparency property: `crates/qedgen/src/codegen/lean_gen_mir/cpi.rs:245`
+  (`exact …ensures_axiom_<i>` emission, axiom-or-theorem invariant).
+- Transfer axioms / v3.0 plan: `crates/qedgen/data/proofs/spl/Token.lean:22-28`
+  (plan), `:36-37` (`binary_hash`), `:54-64` (transfer axioms).
+- Bridge stubs: `lean_solana/QEDGen/Solana/Bridge.lean:269-283`
+  (`.refines`/`.rejects` `sorry`).
+- qedsvm pin: `lean_solana/lakefile.lean:17` (`qedsvm @ v0.4.0`).
+- qedsvm (current as of 2026-06-23): `docs/COVERAGE.md` (coverage tiers /
+  control-flow "Unsupported" row); issues #40 (whole-transition lift, open),
+  #25 (delete `AsmRefinesToken*`, open), #24 (discharge route, closed), #46
+  (descriptor seam, merged); commit `d2cc646` (arbitrary positive literal
+  deltas).
