@@ -564,6 +564,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             idl,
             qedlift,
             module,
+            out_dir,
         } => {
             let parsed = check::parse_spec_file(&spec)?;
             descriptor::run_discharge(
@@ -574,6 +575,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 idl.as_deref(),
                 &qedlift,
                 module,
+                out_dir.as_deref(),
             )?;
         }
 

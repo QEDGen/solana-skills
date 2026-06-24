@@ -8,7 +8,7 @@
 //! much, never byte offsets. Offsets are *shape*, owned by the IDL and resolved on the qedsvm
 //! side. So qedgen never computes a layout here; it emits pure semantics derived from the spec.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -166,6 +166,12 @@ fn pascal(s: &str) -> String {
 
 /// Build the descriptor for `handler`, then discharge it against `so` via `qedlift`. Prints a
 /// verdict (proven against the bytes / not discharged) and returns an error on failure.
+///
+/// `out_dir`: when `Some`, the discharged artifacts (`<Module>TracedLifted.lean` +
+/// `<Module>Refinement.lean`) are persisted there instead of being discarded with the temp
+/// workdir — so the byte-level proof lives in the project (A2a). When `None`, the legacy
+/// verdict-only behaviour is preserved.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_discharge(
     parsed: &ParsedSpec,
     handler: &str,
@@ -174,6 +180,7 @@ pub(crate) fn run_discharge(
     idl: Option<&Path>,
     qedlift: &Path,
     module: Option<String>,
+    out_dir: Option<&Path>,
 ) -> Result<()> {
     let descriptor = build_descriptor(parsed, handler, account)?;
     let mutated = descriptor["mutated"].as_str().unwrap_or("?");
@@ -235,8 +242,37 @@ pub(crate) fn run_discharge(
             "    qedlift emitted a sorry-free AsmRefinesFieldUpdate refinement + a \
              qedsvm_discharge'd `ensures`."
         );
-        println!("    Type-check it with `lake build` in the qedsvm project (the emitted module");
-        println!("    is identical in shape to the committed, lake-green Generated proofs).");
+        // A2a: persist the proof into the project instead of discarding it with the temp
+        // workdir, so a later `lake build` type-checks it (and A2b can consume it from the
+        // bridge). Without --out-dir, keep the legacy verdict-only behaviour.
+        match out_dir {
+            Some(dest) => {
+                let (lifted_dst, refinement_dst) =
+                    persist_discharge_artifacts(dest, &out, &refinement)?;
+                println!("    persisted    : {}", refinement_dst.display());
+                println!("                   {}", lifted_dst.display());
+                println!(
+                    "    wire it in   : `import {}Refinement` (add both modules to your lake lib",
+                    module
+                );
+                println!(
+                    "                   roots; the project must `require qedsvm` — lean_solana \
+                     projects already do)."
+                );
+            }
+            None => {
+                println!(
+                    "    Type-check it with `lake build` in the qedsvm project (the emitted module"
+                );
+                println!(
+                    "    is identical in shape to the committed, lake-green Generated proofs)."
+                );
+                println!(
+                    "    Pass `--out-dir <project>` to persist it into the project instead of a \
+                     temp dir."
+                );
+            }
+        }
         Ok(())
     } else if output.status.success() {
         bail!(
@@ -252,6 +288,31 @@ pub(crate) fn run_discharge(
             stderr_tail(&stderr)
         )
     }
+}
+
+/// Copy the qedlift artifacts out of the throwaway workdir into `dest` (created if needed), so
+/// the discharge proof lives in the project rather than vanishing with the temp dir. Returns the
+/// persisted `(lifted, refinement)` paths. Files are overwritten — re-discharging the same
+/// handler refreshes the proof in place.
+fn persist_discharge_artifacts(
+    dest: &Path,
+    lifted: &Path,
+    refinement: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("creating discharge out-dir {}", dest.display()))?;
+    let copy_into = |src: &Path| -> Result<PathBuf> {
+        let name = src
+            .file_name()
+            .ok_or_else(|| anyhow!("artifact path has no file name: {}", src.display()))?;
+        let dst = dest.join(name);
+        std::fs::copy(src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        Ok(dst)
+    };
+    let lifted_dst = copy_into(lifted)?;
+    let refinement_dst = copy_into(refinement)?;
+    Ok((lifted_dst, refinement_dst))
 }
 
 /// Last few lines of qedlift stderr (it dumps the decoded instruction list, which is noise here).
@@ -409,6 +470,72 @@ mod tests {
         assert!(
             !c2.get_args().any(|a| a == "--idl"),
             "no IDL should omit the --idl flag"
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // A2a — persist discharged artifacts into the project
+    // ------------------------------------------------------------------------
+
+    /// The persist helper copies both qedlift artifacts into `dest`, creating it
+    /// (including missing parents) and preserving contents.
+    #[test]
+    fn persist_copies_both_artifacts_into_dest() {
+        let src = tempfile::tempdir().expect("src tempdir");
+        let lifted = src.path().join("FooTracedLifted.lean");
+        let refinement = src.path().join("FooRefinement.lean");
+        std::fs::write(&lifted, "lifted-body").unwrap();
+        std::fs::write(&refinement, "refinement-body").unwrap();
+        let dest = tempfile::tempdir().expect("dest tempdir");
+        // A nested, not-yet-created subdir exercises create_dir_all.
+        let nested = dest.path().join("Generated");
+
+        let (l, r) = persist_discharge_artifacts(&nested, &lifted, &refinement).expect("persist");
+        assert_eq!(l, nested.join("FooTracedLifted.lean"));
+        assert_eq!(r, nested.join("FooRefinement.lean"));
+        assert_eq!(std::fs::read_to_string(&l).unwrap(), "lifted-body");
+        assert_eq!(std::fs::read_to_string(&r).unwrap(), "refinement-body");
+    }
+
+    /// `--out-dir` end-to-end through `run_discharge` with a fake qedlift: the
+    /// persisted proof lands in the out-dir (not a temp dir that vanishes).
+    #[cfg(unix)]
+    #[test]
+    fn discharge_persists_artifacts_to_out_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        // Fake qedlift: emit a sorry-free refinement + lifted module so the
+        // success branch fires, parsing only the args run_discharge passes.
+        const FAKE: &str = "#!/bin/sh\nout=\"\"; mod=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --output) out=\"$2\"; shift 2 ;;\n    --module) mod=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\ndir=$(dirname \"$out\")\nprintf 'theorem lifted : True := trivial\\n' > \"$out\"\nprintf 'theorem refines_asm : True := trivial\\n' > \"$dir/${mod}Refinement.lean\"\n";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join("fake-qedlift.sh");
+        std::fs::write(&fake, FAKE).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let so = tmp.path().join("counter.so");
+        std::fs::write(&so, b"\x7fELF").unwrap();
+        let out = tmp.path().join("project");
+
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        run_discharge(
+            &parsed,
+            "increment",
+            Some("Counter".to_string()),
+            &so,
+            None,
+            &fake,
+            None,
+            Some(&out),
+        )
+        .expect("discharge persists");
+
+        // Module defaults to `<Account><Handler>` = CounterIncrement.
+        assert!(
+            out.join("CounterIncrementRefinement.lean").exists(),
+            "refinement persisted into out-dir",
+        );
+        assert!(
+            out.join("CounterIncrementTracedLifted.lean").exists(),
+            "lifted module persisted into out-dir",
         );
     }
 }
