@@ -612,8 +612,9 @@ regs/mem/pc/returnData/callStack only).
    singletonMemU64 …`). Bridging `(memU64Is a v).holdsFor s ↔ readU64 s.mem a = v`
    (and the `memByteIs`/`pubkeyIs` analogues) + the `**`-composition to
    `encodeState`'s flat conjunction has **no ready-made qedsvm lemma** — it is the
-   substantive remaining work. Candidate for a focused session / Leanstral, and a
-   reusable `holdsFor_memU64Is` family likely belongs upstream in qedsvm.
+   substantive remaining work. Filed upstream as **qedsvm#48** (the
+   `holdsFor_memU64Is` family + a `holdsFor_codecCoarse` corollary belong next to
+   `account_agg`); A2b‑2 consumes it once it lands (or proves it locally meanwhile).
 
 Then the elaborator emits, per op:
 `.refines := by exact <bridge proof> <Module>.refines_asm …`; import the persisted
