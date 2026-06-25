@@ -591,9 +591,32 @@ on the final mem. Primary remaining unknown: `step .exit` register-return
 mechanics. Tractable in-session; the SL/execution fiddliness (3) is the Leanstral
 candidate.
 
-**A2b‑2 — wire the elaborator** (mechanical): `Bridge.lean` emits
-`.refines := by exact bridge_refines_of_fieldUpdate <Module>.refines_asm …`
-instead of `sorry` when a discharge artifact is present; import the persisted
+**A2b‑1 status (PROVEN).** `BridgeAdapter.lean` ships the reusable core sorry-free
++ standard-axiom clean: `halts_zero_of_block_exit` (the execution bridge —
+obligations 3+4 above, the flagged primary risk) and `halts_zero_of_fieldUpdate`
+(over qedlift's `AsmRefinesFieldUpdate`). The `step .exit` unknown resolved:
+empty call stack ⇒ `{ s with exitCode := some (regs.get .r0) }`, mem/regs/pc
+untouched; `holdsFor` ignores `exitCode`/`cuConsumed` (`CompatibleWith` checks
+regs/mem/pc/returnData/callStack only).
+
+**A2b‑2 — wire the elaborator, two findings from the tracer-bullet:**
+
+1. *The generated `.refines` statement is not provable as stated.* It quantifies
+   over a free `progAt` with no `cr.SatisfiedBy progAt` hypothesis — so it asserts
+   refinement for *any* program. A2b‑2 must thread the lifted `CodeReq` into the
+   statement (a `SatisfiedBy` hyp, discharged from the persisted
+   `…TracedLifted` decode), not merely swap the `sorry` body.
+2. *The `encodeState` ↔ `codecCoarse` mapping is a per-field-type byte-level SL
+   proof, not a structural one-liner.* `codecCoarse base [(off,fv)…]` recurses to
+   `fv.coarse (base+off) ** …`, where `.u64 v` = `memU64Is` (`= fun h => h =
+   singletonMemU64 …`). Bridging `(memU64Is a v).holdsFor s ↔ readU64 s.mem a = v`
+   (and the `memByteIs`/`pubkeyIs` analogues) + the `**`-composition to
+   `encodeState`'s flat conjunction has **no ready-made qedsvm lemma** — it is the
+   substantive remaining work. Candidate for a focused session / Leanstral, and a
+   reusable `holdsFor_memU64Is` family likely belongs upstream in qedsvm.
+
+Then the elaborator emits, per op:
+`.refines := by exact <bridge proof> <Module>.refines_asm …`; import the persisted
 module; add the lakefile-roots wiring deferred from A2a.
 
 **Boundary:** `.refines` (success) only; `.rejects`/abort stay `sorry`
