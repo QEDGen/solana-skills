@@ -59,10 +59,18 @@ trait FrameworkCodegen {
     }
 
     fn emit_guards(&self, ctx: &CodegenCtx<'_>) -> Result<()> {
-        // Guards stay ParsedSpec-based: they render account-constraint
-        // surface (signer/writable flags, pda_seeds, variant-payload fields),
-        // not effect-body `Stmt` IR (see `codegen_shared`).
-        crate::codegen_shared::generate_guards(ctx.parsed, ctx.fp, ctx.output_dir, self.target())
+        // Guards render the account-constraint surface (signer/writable flags,
+        // pda_seeds, variant-payload fields) + per-handler requires/aborts. The
+        // emitter is being migrated to read these off `&Mir` (matching the other
+        // MIR-direct emitters); `ctx.parsed` stays threaded for the not-yet-
+        // lifted reads (helpers, let-bindings) until those land.
+        crate::codegen_shared::generate_guards(
+            ctx.mir,
+            ctx.parsed,
+            ctx.fp,
+            ctx.output_dir,
+            self.target(),
+        )
     }
 
     fn emit_math(&self, ctx: &CodegenCtx<'_>) -> Result<()> {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::mir::Mir;
 
 /// True if any rendered Rust expression in the spec references one of the
 /// fixed-point helpers in `src/math.rs`. Used to gate the `use crate::math::*;`
@@ -40,6 +41,7 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
 /// spec-declared guard checks. This file is always regenerated; any edit
 /// is clobbered on the next `qedgen codegen` (by design).
 pub(crate) fn generate_guards(
+    mir: &Mir,
     spec: &ParsedSpec,
     fp: &SpecFingerprint,
     output_dir: &Path,
@@ -97,14 +99,18 @@ pub(crate) fn generate_guards(
     // `instructions/<name>.rs` and re-exports via `instructions::*`.
     out.push_str(surface.guard_accounts_import());
 
-    for handler in &spec.handlers {
+    // Walk MIR handlers in lockstep with their ParsedSpec source (1:1, same
+    // order — `mir.handlers = parsed.handlers.map(lower_handler)`). `hm` is the
+    // migration target; reads move from `handler`/`spec` to `hm`/`mir` slice by
+    // slice, gated byte-identical by `codegen_snapshot`.
+    for (hm, handler) in mir.handlers.iter().zip(&spec.handlers) {
         let pascal = to_pascal_case(&handler.name);
-        let any_mut = handler.accounts.iter().any(|a| a.is_writable);
+        let any_mut = hm.accounts.iter().any(|a| a.writable);
         let self_ref = if any_mut { "&mut " } else { "&" };
         // v2.29 — match the handler-scaffold + Accounts-struct
         // lifetime decision so the guard fn's ctx ref doesn't
         // reference an unused `<'info>` on a unit Accounts struct.
-        let handler_needs_lifetime = !handler.accounts.is_empty() || handler.who.is_some();
+        let handler_needs_lifetime = !hm.accounts.is_empty() || hm.auth.is_some();
         let lp: &str = if handler_needs_lifetime {
             &lifetime_params
         } else {
@@ -569,7 +575,7 @@ pub(crate) fn generate_guards(
         // reference an abstract binder can't run in the guard fn (the
         // binder is computed AFTER the guard fires in the handler
         // scaffold). Defer to the handler body and document the skip.
-        let abstract_binder_names: Vec<&str> = handler
+        let abstract_binder_names: Vec<&str> = hm
             .abstract_binders
             .iter()
             .map(|(n, _)| n.as_str())
