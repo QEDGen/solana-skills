@@ -62,14 +62,16 @@ asserts refinement for *any* program. Rewrite the generator to emit the
 `Pubkey → .pubkey`, value from `s.field` / `s'.field`); body = the adapter
 application (copy from `RefinesShape`), leaving the post-leg `sorry` for #48.
 
-> **GOTCHA: there is NO `qedbridge` invocation anywhere in the repo** — the
-> elaborator has never been exercised, which is why the bad `.refines` shipped
-> unnoticed. Build a **test harness** alongside the port: a file defining
-> `Vault.State` + `Vault.incrementTransition` then `qedbridge Vault where input: r1
-> fuel: 100 layout owner Pubkey at 0; total U64 at 32; bump U8 at 40; operations
-> increment discriminator 0` (syntax: `Bridge.lean:27-48`), and confirm the
-> generated `increment.refines` elaborates (with the one #48 sorry).
-> Other gotcha: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics.
+> **Test harness now exists:** `lean_solana/BridgeHarness.lean` — the first-ever
+> `qedbridge` invocation (`Vault` over {owner: Pubkey, total: u64, bump: u8} +
+> `increment`). Build it standalone: `cd lean_solana && lake env lean
+> BridgeHarness.lean` (3 expected `sorry` warnings = generated bodies, no errors).
+> Its `#check @Vault.Bridge.increment.refines` shows the current **bad** signature
+> (free `progAt`, no `cr.SatisfiedBy`). Use it to validate the port: after porting,
+> that signature should gain the `h_prog`/`h_exit`/`h_asm`/… hyps and the body
+> should close via the adapter (modulo #48).
+> Gotcha: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics. Also the
+> bridge's `Pubkey` resolves to `QEDGen.Solana.Pubkey` (= `SVM.Pubkey.Pubkey`).
 
 ### 2. qedsvm#48 — the `codecCoarse ↔ encodeState` byte-level legs
 
@@ -86,9 +88,13 @@ grind is the designated escalation).
 
 ## Recommended first action
 
-Build the `qedbridge` test harness (item 1's gotcha) — it's the missing fixture
-that unblocks *validating* the elaborator port, and it's reusable as the first
-real bridge regression test. Then port the `.refines` generator against it.
+The `qedbridge` test harness is built (`BridgeHarness.lean`). **Next: port the
+`.refines` generator** (`Bridge.lean:268-275`) to emit the `RefinesShape` shape,
+re-running `lake env lean BridgeHarness.lean` after each change until
+`@Vault.Bridge.increment.refines` matches the corrected signature and its body
+closes via `BridgeAdapter.halts_zero_of_fieldUpdate` (leaving only the #48 post
+leg). Build the `FieldVal` lists from the layout (`U64 → .u64`, `U8 → .byte`,
+`Pubkey → .pubkey`).
 
 ## Pointers
 
