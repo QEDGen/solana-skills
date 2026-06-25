@@ -1,6 +1,7 @@
 import QEDGen.Solana.CommandBuilders
 import QEDGen.Solana.Spec
 import SVM.SBPF
+import QEDGen.Solana.BridgeAdapter
 import Lean.Elab.Command
 
 /-!
@@ -64,6 +65,15 @@ private def typeReadFns (t : String) : String × String :=
   | "U8"     => ("readU8", "readU8")
   | "Pubkey" => ("pubkeyAt", "readPubkey")
   | _        => ("readU64", "readU64")
+
+/-- Map a DSL type to its `SVM.SBPF.FieldVal` constructor (dot form), for the
+    `codecCoarse` field list the discharge (`AsmRefinesFieldUpdate`) carries. -/
+private def fieldValCtor (t : String) : String :=
+  match t with
+  | "U64"    => ".u64"
+  | "U8"     => ".byte"
+  | "Pubkey" => ".pubkey"
+  | _        => ".u64"
 
 -- ============================================================================
 -- Elaborator
@@ -160,6 +170,8 @@ def elabQedbridge : CommandElab := fun stx => do
   cmds := cmds.push (mkOpen "QEDGen.Solana")
   cmds := cmds.push (mkOpen "SVM.SBPF")
   cmds := cmds.push (mkOpen "SVM.SBPF.Memory")
+  cmds := cmds.push (mkOpen "SVM.Solana.Abstract")          -- AsmRefinesFieldUpdate
+  cmds := cmds.push (mkOpen "QEDGen.Solana.BridgeAdapter")  -- halts_zero_of_fieldUpdate
 
   -- 1. Offset constants
   for (fname, _, foffset) in fields do
@@ -239,6 +251,26 @@ def elabQedbridge : CommandElab := fun stx => do
   -- 8. Refinement theorem stubs per operation
   let entryStr := if entryPc != 0 then "ENTRY" else "0"
   let initFn := if hasInsn then "initState2" else "initState"
+  -- Abstract entry pc = the init state's `pc`: `initState2` honours the entry
+  -- arg, `initState` is fixed at 0.
+  let entryArg := if hasInsn then entryStr else "0"
+
+  -- `codecCoarse` field list from the account layout (U64 → .u64, U8 → .byte,
+  -- Pubkey → .pubkey); the status byte (if any) appends as `.byte (encodeStatus
+  -- …)`, mirroring `encodeState`. Layout-derived, so identical for every op —
+  -- pre uses `s`, post uses `s'`.
+  let mkFieldList := fun (subj : String) =>
+    let core := fields.foldl (fun (acc : String) (f : String × String × Nat) =>
+      let (fname, ftype, foffset) := f
+      let entry := s!"({foffset}, {fieldValCtor ftype} {subj}.{quoteName fname})"
+      if acc.isEmpty then entry else acc ++ ", " ++ entry) ""
+    let full := if hasStatusEncoding then
+        (if core.isEmpty then "" else core ++ ", ")
+          ++ s!"({statusOffset}, .byte (encodeStatus {subj}.status))"
+      else core
+    "[" ++ full ++ "]"
+  let preFields := mkFieldList "s"
+  let postFields := mkFieldList "s'"
 
   for (opName, disc, params) in opsList do
     let qOp := quoteName opName
@@ -249,9 +281,9 @@ def elabQedbridge : CommandElab := fun stx => do
     let paramArgs := mkParamArgs params
 
     let mut hyps := ""
-    hyps := hyps ++ s!"    (h_encode : encodeState s inputAddr mem)" ++ nl
+    hyps := hyps ++ s!"    (_h_encode : encodeState s inputAddr mem)" ++ nl
     if hasInsn then
-      hyps := hyps ++ s!"    (h_disc : readU8 mem insnAddr = {disc})" ++ nl
+      hyps := hyps ++ s!"    (_h_disc : readU8 mem insnAddr = {disc})" ++ nl
 
     let initExpr := if hasInsn then
       s!"{initFn} inputAddr insnAddr mem rt {entryStr}"
@@ -263,16 +295,50 @@ def elabQedbridge : CommandElab := fun stx => do
     else
       "(inputAddr : Nat) (rt : RegionTable)"
 
-    -- Success: guards hold → exits 0 → final memory encodes updated state
-    -- Uses (s' : State) + hypothesis instead of .get! to avoid Inhabited requirement
+    -- Success: guards hold → exits 0 → final memory encodes updated state.
+    -- The discharge (`AsmRefinesFieldUpdate`) + the program constraint
+    -- (`cr.SatisfiedBy`) are threaded as hypotheses (`h_asm`, `h_prog`), so the
+    -- theorem is provable via the execution adapter — vs the old free-`progAt`
+    -- statement, which asserted refinement for *any* program (only `sorry`-true).
+    -- The body closes through `BridgeAdapter.halts_zero_of_fieldUpdate`; the sole
+    -- remaining `sorry` is the post `codecCoarse → encodeState` read-back
+    -- (qedsvm#48). Mirrors the validated `RefinesShape.increment_refines`.
     cmds := cmds.push (
-      s!"theorem {qOp}.refines (progAt : Nat → Option SVM.SBPF.Insn)" ++ nl ++
-      s!"    {addrParams} (mem : Mem) (s s' : {specName}.State) (signer : Pubkey){paramSig}" ++ nl ++
+      s!"theorem {qOp}.refines" ++ nl ++
+      s!"    (progAt : Nat → Option SVM.SBPF.Insn) (cr : CodeReq) (rr : RegionTable → Prop)" ++ nl ++
+      s!"    (nSteps nCu exitPc : Nat) (setupPre setupPost : Assertion)" ++ nl ++
+      s!"    {addrParams} (mem : Mem)" ++ nl ++
+      s!"    (s s' : {specName}.State) (signer : Pubkey){paramSig}" ++ nl ++
+      s!"    (h_prog : cr.SatisfiedBy progAt)" ++ nl ++
+      s!"    (h_exit : progAt exitPc = some .exit)" ++ nl ++
       hyps ++
-      s!"    (h_guard : {transName} s signer{paramArgs} = some s') :" ++ nl ++
-      s!"    let result := executeFn progAt ({initExpr}) FUEL" ++ nl ++
-      s!"    result.exitCode = some 0 ∧" ++ nl ++
-      s!"    encodeState s' inputAddr result.mem := sorry")
+      s!"    (_h_guard : {transName} s signer{paramArgs} = some s')" ++ nl ++
+      s!"    (h_asm : AsmRefinesFieldUpdate cr nSteps nCu {entryArg} exitPc rr inputAddr" ++ nl ++
+      s!"              {preFields}" ++ nl ++
+      s!"              {postFields}" ++ nl ++
+      s!"              setupPre setupPost)" ++ nl ++
+      s!"    (h_pre : (setupPre ** codecCoarse inputAddr" ++ nl ++
+      s!"              {preFields}).holdsFor ({initExpr}))" ++ nl ++
+      s!"    (h_cs : ∀ k : Nat, (executeFn progAt ({initExpr}) k).callStack = [])" ++ nl ++
+      s!"    (h_r0 : ∀ t : SVM.SBPF.State," ++ nl ++
+      s!"      (setupPost ** codecCoarse inputAddr" ++ nl ++
+      s!"        {postFields}).holdsFor t →" ++ nl ++
+      s!"      t.regs.get .r0 = 0)" ++ nl ++
+      s!"    (h_fuel : nSteps + 1 ≤ FUEL)" ++ nl ++
+      s!"    (h_bud : ({initExpr}).cuConsumed + nSteps + nCu" ++ nl ++
+      s!"              ≤ ({initExpr}).cuBudget)" ++ nl ++
+      s!"    (h_rr : rr ({initExpr}).regions) :" ++ nl ++
+      s!"    (executeFn progAt ({initExpr}) FUEL).exitCode = some 0 ∧" ++ nl ++
+      s!"    encodeState s' inputAddr (executeFn progAt ({initExpr}) FUEL).mem := by" ++ nl ++
+      s!"  have hpc : ({initExpr}).pc = {entryArg} := by simp [{initFn}]" ++ nl ++
+      s!"  have hrun : ({initExpr}).exitCode = none := by simp [{initFn}]" ++ nl ++
+      s!"  obtain ⟨h_halt, _h_post⟩ :=" ++ nl ++
+      s!"    halts_zero_of_fieldUpdate h_asm h_prog h_exit h_pre hpc hrun h_bud h_rr h_r0 h_cs FUEL h_fuel" ++ nl ++
+      s!"  refine ⟨h_halt, ?_⟩" ++ nl ++
+      s!"  -- post leg (qedsvm#48): `_h_post : (setupPost ** codecCoarse inputAddr postFields)" ++ nl ++
+      s!"  --   .holdsFor result` ⟹ `encodeState s' inputAddr result.mem`; needs the" ++ nl ++
+      s!"  --   `holdsFor_codecCoarse` / `holdsFor_memU64Is` read-back family." ++ nl ++
+      s!"  sorry")
 
     -- Rejection: guards fail → exits nonzero
     cmds := cmds.push (

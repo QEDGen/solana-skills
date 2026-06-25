@@ -9,9 +9,10 @@ is the "start here" for a fresh session. Verify file:line refs before acting.
 The discharge pipeline turns qedgen's sBPF-bridge `sorry` into a proof against the
 pinned program bytes. **The hard part is done and proven**: a discharged field
 update (qedlift's `AsmRefinesFieldUpdate`) is shown to halt the whole run with
-`exitCode = some 0` and the account memory encoding the post-state. What remains
-is **assembly**: port a validated `.refines` statement into the Bridge elaborator,
-and prove a family of byte-level codec lemmas (filed upstream as **qedsvm#48**).
+`exitCode = some 0` and the account memory encoding the post-state. The Bridge
+elaborator has now been **ported** to emit that provable `.refines` shape (it
+discharges via the adapter; see "Done" below). The only remaining work is a family
+of byte-level codec lemmas (filed upstream as **qedsvm#48**).
 
 ## State of the world
 
@@ -48,32 +49,38 @@ the corrected statement shape is provable via the adapter. Build it standalone:
 `cd lean_solana && lake env lean RefinesShape.lean` (expect only "declaration uses
 sorry"). Not in the lib roots.
 
-## Two remaining work items
+## Done: the corrected `.refines` is now what the elaborator emits (finding 1)
 
-### 1. Port the corrected `.refines` into the Bridge elaborator (finding 1)
+The generator (`Bridge.lean`) was rewritten to emit the
+`RefinesShape.increment_refines` shape instead of the old free-`progAt` `:= sorry`:
+it now takes params `(cr) (rr) (nSteps nCu exitPc) (setupPre setupPost)` and hyps
+`h_prog`, `h_exit`, `h_asm : AsmRefinesFieldUpdate …`, `h_pre`, `h_cs`, `h_r0`,
+`h_fuel`, `h_bud`, `h_rr`; builds the `preFields`/`postFields` `FieldVal` lists from
+the layout (`U64 → .u64`, `U8 → .byte`, `Pubkey → .pubkey`, plus a `.byte
+(encodeStatus …)` for a lifecycle status byte); and the body discharges via
+`BridgeAdapter.halts_zero_of_fieldUpdate`, leaving exactly the one post-leg `sorry`
+(qedsvm#48). The insn/`entry:` path uses `initState2` with `entry = ENTRY`; the
+no-insn path uses `initState` with `entry = 0`. `Bridge.lean` now `import`s
+`QEDGen.Solana.BridgeAdapter` and the generated namespace `open`s
+`SVM.Solana.Abstract` + `QEDGen.Solana.BridgeAdapter`, so any importer of `Bridge`
+(e.g. the harness) sees the adapter.
 
-The **currently generated** `.refines` (`Bridge.lean:269`) is **not provable**: it
-quantifies over a free `progAt` with no `cr.SatisfiedBy progAt` hypothesis, so it
-asserts refinement for *any* program. Rewrite the generator to emit the
-`RefinesShape.increment_refines` shape: add params `(cr) (rr) (nSteps nCu exitPc)
-(setupPre setupPost)` and hyps `h_prog`, `h_exit`, `h_asm : AsmRefinesFieldUpdate
-…`, `h_pre`, `h_cs`, `h_r0`, `h_fuel`, `h_bud`, `h_rr`; build the `preFields` /
-`postFields` `FieldVal` lists from the layout (`U64 → .u64`, `U8 → .byte`,
-`Pubkey → .pubkey`, value from `s.field` / `s'.field`); body = the adapter
-application (copy from `RefinesShape`), leaving the post-leg `sorry` for #48.
+> **Validated** via `lean_solana/BridgeHarness.lean` (the first-ever `qedbridge`
+> invocation): `cd lean_solana && lake env lean BridgeHarness.lean` →
+> 3 `sorry` warnings (`decode_encode`, `increment.refines` post-leg,
+> `increment.rejects`), no errors, and `#check @Vault.Bridge.increment.refines`
+> now shows the corrected signature (`h_prog : cr.SatisfiedBy progAt`, `h_asm`,
+> `h_pre`, …). Both the no-insn (`initState`) and insn+status+param (`initState2`)
+> paths were checked.
+> Gotcha: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics. The
+> bridge's `Pubkey` resolves to `QEDGen.Solana.Pubkey` (= `SVM.Pubkey.Pubkey`);
+> `State` inside the `<Spec>.Bridge` namespace resolves to the abstract
+> `<Spec>.State`, so the adapter's `State` is written fully-qualified
+> (`SVM.SBPF.State`).
 
-> **Test harness now exists:** `lean_solana/BridgeHarness.lean` — the first-ever
-> `qedbridge` invocation (`Vault` over {owner: Pubkey, total: u64, bump: u8} +
-> `increment`). Build it standalone: `cd lean_solana && lake env lean
-> BridgeHarness.lean` (3 expected `sorry` warnings = generated bodies, no errors).
-> Its `#check @Vault.Bridge.increment.refines` shows the current **bad** signature
-> (free `progAt`, no `cr.SatisfiedBy`). Use it to validate the port: after porting,
-> that signature should gain the `h_prog`/`h_exit`/`h_asm`/… hyps and the body
-> should close via the adapter (modulo #48).
-> Gotcha: `lean_solana` is **Mathlib-free** — no `set`/Mathlib tactics. Also the
-> bridge's `Pubkey` resolves to `QEDGen.Solana.Pubkey` (= `SVM.Pubkey.Pubkey`).
+## One remaining work item
 
-### 2. qedsvm#48 — the `codecCoarse ↔ encodeState` byte-level legs
+### qedsvm#48 — the `codecCoarse ↔ encodeState` byte-level legs
 
 The remaining `sorry`(s), both pre and post. The Bridge's `encodeState` is a flat
 conjunction `readU64 mem (addr+off) = s.field ∧ …`; qedlift's codec is `codecCoarse
@@ -88,19 +95,21 @@ grind is the designated escalation).
 
 ## Recommended first action
 
-The `qedbridge` test harness is built (`BridgeHarness.lean`). **Next: port the
-`.refines` generator** (`Bridge.lean:268-275`) to emit the `RefinesShape` shape,
-re-running `lake env lean BridgeHarness.lean` after each change until
-`@Vault.Bridge.increment.refines` matches the corrected signature and its body
-closes via `BridgeAdapter.halts_zero_of_fieldUpdate` (leaving only the #48 post
-leg). Build the `FieldVal` lists from the layout (`U64 → .u64`, `U8 → .byte`,
-`Pubkey → .pubkey`).
+The elaborator port is done and validated (`BridgeHarness.lean`). **Next: close
+qedsvm#48** — the `codecCoarse ↔ encodeState` read-back family. The post leg is the
+single remaining `sorry` in both `RefinesShape.increment_refines` and the generated
+`<op>.refines`. Prove `(memU64Is a v).holdsFor s ↔ readU64 s.mem a = v` (+ byte /
+pubkey analogues) and a `holdsFor_codecCoarse` corollary over the `**`-composition,
+land them upstream next to `account_agg` (or locally in `BridgeAdapter.lean` until
+they land), then replace the post-leg `sorry` in the generator with the read-back
+application. The SL byte-decode grind is the designated Leanstral escalation.
 
 ## Pointers
 
 - Adapter: `lean_solana/QEDGen/Solana/BridgeAdapter.lean`; template: `…/RefinesShape.lean`.
-- Bridge elaborator: `lean_solana/QEDGen/Solana/Bridge.lean` (`.refines` gen `:268-275`,
-  encodeState gen `:192-211`, syntax `:27-48`, parse `:76-151`).
+- Bridge elaborator: `lean_solana/QEDGen/Solana/Bridge.lean` (`.refines` gen
+  `:307` `theorem {qOp}.refines`, `FieldVal` lists `:264` `mkFieldList`,
+  encodeState gen `:223`, syntax `:40`, parse `:87`).
 - qedsvm (`.lake/packages/qedsvm/`): `SVM/SBPF/CPSSpec.lean` (`cuTripleWithinMem`),
   `SVM/SBPF/Execute.lean` (`executeFn`/`step`/`initState`), `SVM/SBPF/SepLogic.lean`
   (`holdsFor`/`CompatibleWith`/`memU64Is`), `SVM/SBPF/AccountCodec.lean`

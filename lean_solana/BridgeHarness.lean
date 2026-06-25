@@ -29,12 +29,15 @@ qedbridge Vault where
   operations
     increment discriminator 0
 
--- Regression probe for the A2b-2 elaborator port. The CURRENT generated
--- `.refines` (below) quantifies over a free `progAt` with NO `cr.SatisfiedBy
--- progAt` hypothesis — i.e. it asserts refinement for *any* program, so it is
--- only `sorry`-provable (finding 1). After the port this signature should gain
--- the `h_prog`/`h_exit`/`h_asm`/… hypotheses (cf. `RefinesShape.lean`) and its
--- body should close via `BridgeAdapter.halts_zero_of_fieldUpdate` modulo qedsvm#48.
+-- Regression fixture for the A2b-2 elaborator port (now done). The generated
+-- `.refines` (below) carries the `h_prog : cr.SatisfiedBy progAt` / `h_exit` /
+-- `h_asm : AsmRefinesFieldUpdate …` / `h_pre` / … hypotheses (cf.
+-- `RefinesShape.lean`) and its body discharges via
+-- `BridgeAdapter.halts_zero_of_fieldUpdate`, leaving the single post-leg `sorry`
+-- (qedsvm#48). The `#check` documents that corrected signature; this file
+-- elaborates with exactly 3 `sorry` warnings (decode_encode + refines + rejects)
+-- and no errors. The PRE-port statement was unprovable: it quantified over a free
+-- `progAt` with no `cr.SatisfiedBy` hypothesis (refinement for *any* program).
 #check @Vault.Bridge.increment.refines
 #check @Vault.Bridge.encodeState
 #check @Vault.Bridge.decodeState
