@@ -774,6 +774,54 @@ $QEDGEN check-upgrade --list-rules
 | `--list-rules` | bool | false | Print the catalog of R-rules applied and exit |
 | `--json` | bool | false | Machine-readable output |
 
+## Discharge (experimental — the qedgen ↔ qedsvm seam)
+
+Hands a name-level refinement obligation to qedsvm's `qedlift`, which proves it
+against the decoded program bytes (field offsets resolved from the IDL on the
+qedsvm side). Today's scope is a single-field constant-increment handler
+(`field += <int literal>`); the bundled CPI-callee `ensures` and the sBPF bridge
+are otherwise axiomatized against a `binary_hash` pin. See
+[`docs/design/qedsvm-discharge.md`](../docs/design/qedsvm-discharge.md).
+
+### `descriptor`
+Emit the name-level refinement descriptor (JSON, to stdout) — the producer half
+of the seam. Carries only semantics (which named field a handler mutates, by how
+much); offsets are resolved IDL-side. Schema: qedsvm `docs/REFINEMENT_DESCRIPTOR.md`.
+
+```bash
+$QEDGEN descriptor --spec vault.qedspec --handler increment
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | required | Path to the `.qedspec` |
+| `--handler` | String | required | Handler to inspect (single-field `+= <int literal>` effect) |
+| `--account` | String | first account type / program name | Account name for the descriptor — use the IDL account name so qedsvm resolves offsets |
+
+### `discharge`
+The one-command driver over the seam: build the descriptor from the `.qedspec`,
+then discharge it against the compiled `.so` via a built `qedlift`. Reports
+whether the handler's effect is proven against the bytes. No meaning crosses the
+boundary — `discharge` reads only qedlift's exit status and whether it emitted a
+sorry-free proof.
+
+```bash
+$QEDGEN discharge --spec vault.qedspec --handler increment \
+  --so vault.so --idl vault.codama.json --qedlift /path/to/qedlift \
+  --out-dir formal_verification/discharge
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--spec` | Path | required | Path to the `.qedspec` |
+| `--handler` | String | required | Handler to discharge (single-field `+= <int literal>` effect) |
+| `--account` | String | first account type / program name | Account name — use the IDL account name so qedlift resolves offsets |
+| `--so` | Path | required | Compiled program to discharge against |
+| `--idl` | Path | required | Codama IDL (`.json`) supplying the account shape (offsets) |
+| `--qedlift` | Path | required | Built qedsvm `qedlift` binary (built with `--features qedrecover`) |
+| `--module` | String | `<Account><Handler>` | Lean module name for the emitted proof |
+| `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into this directory |
+
 ## Utility
 
 ### `consolidate`
