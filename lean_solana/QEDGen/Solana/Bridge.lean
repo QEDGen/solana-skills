@@ -272,6 +272,56 @@ def elabQedbridge : CommandElab := fun stx => do
   let preFields := mkFieldList "s"
   let postFields := mkFieldList "s'"
 
+  -- Per-field state-validity bound hyps + the post-leg proof (also layout-
+  -- derived / op-independent). The forward codec bridges in `CodecRead.lean`
+  -- normalize (`readU64 = v % 2^64`, `readU8 = v % 256`), so each field carries
+  -- a `< width` bound — from the spec's `Valid s'` — to land encodeState's raw
+  -- read. The proof peels `setupPost` (`holdsFor_sepConj_right`), extracts each
+  -- field's coarse atom (`holdsFor_codecCoarse_field`), and bridges it; one
+  -- bullet per encodeState conjunct, in layout-then-status order. Mirrors the
+  -- validated `RefinesShape.increment_refines`.
+  let mut boundHyps : String := ""
+  let mut bullets : String := ""
+  for (fname, ftype, foffset) in fields do
+    let q := quoteName fname
+    match ftype with
+    | "Pubkey" =>
+      boundHyps := boundHyps ++
+        s!"    (hb_{fname}_0 : s'.{q}.c0 < 2 ^ 64) (hb_{fname}_1 : s'.{q}.c1 < 2 ^ 64)" ++ nl ++
+        s!"    (hb_{fname}_2 : s'.{q}.c2 < 2 ^ 64) (hb_{fname}_3 : s'.{q}.c3 < 2 ^ 64)" ++ nl
+      bullets := bullets ++
+        s!"  · have hc := holdsFor_codecCoarse_field _ hcodec (show ({foffset}, FieldVal.pubkey s'.{q}) ∈ _ by simp)" ++ nl ++
+        s!"    simp only [FieldVal.coarse] at hc" ++ nl ++
+        s!"    exact pubkeyAt_of_holdsFor_pubkeyIs hb_{fname}_0 hb_{fname}_1 hb_{fname}_2 hb_{fname}_3 hc" ++ nl
+    | "U8" =>
+      boundHyps := boundHyps ++ s!"    (hb_{fname} : s'.{q} < 256)" ++ nl
+      bullets := bullets ++
+        s!"  · have hc := holdsFor_codecCoarse_field _ hcodec (show ({foffset}, FieldVal.byte s'.{q}) ∈ _ by simp)" ++ nl ++
+        s!"    simp only [FieldVal.coarse] at hc" ++ nl ++
+        s!"    rw [readU8_of_holdsFor_memByteIs hc, Nat.mod_eq_of_lt hb_{fname}]" ++ nl
+    | _ =>
+      boundHyps := boundHyps ++ s!"    (hb_{fname} : s'.{q} < 2 ^ 64)" ++ nl
+      bullets := bullets ++
+        s!"  · have hc := holdsFor_codecCoarse_field _ hcodec (show ({foffset}, FieldVal.u64 s'.{q}) ∈ _ by simp)" ++ nl ++
+        s!"    simp only [FieldVal.coarse] at hc" ++ nl ++
+        s!"    rw [readU64_of_holdsFor_memU64Is hc, Nat.mod_eq_of_lt hb_{fname}]" ++ nl
+  if hasStatusEncoding then
+    boundHyps := boundHyps ++ s!"    (hb_status : encodeStatus s'.status < 256)" ++ nl
+    bullets := bullets ++
+      s!"  · have hc := holdsFor_codecCoarse_field _ hcodec (show ({statusOffset}, FieldVal.byte (encodeStatus s'.status)) ∈ _ by simp)" ++ nl ++
+      s!"    simp only [FieldVal.coarse] at hc" ++ nl ++
+      s!"    rw [readU8_of_holdsFor_memByteIs hc, Nat.mod_eq_of_lt hb_status]" ++ nl
+  let nConj := fields.size + (if hasStatusEncoding then 1 else 0)
+  let postLeg : String :=
+    if nConj == 0 then
+      s!"  unfold encodeState" ++ nl ++ "  trivial"
+    else
+      let refineLine := if nConj ≥ 2 then
+          s!"  refine ⟨" ++ String.intercalate ", " (List.replicate nConj "?_") ++ "⟩" ++ nl
+        else ""
+      s!"  have hcodec := holdsFor_sepConj_right h_post" ++ nl ++
+      s!"  unfold encodeState" ++ nl ++ refineLine ++ bullets
+
   for (opName, disc, params) in opsList do
     let qOp := quoteName opName
     let transName := quoteName (opName ++ "Transition")
@@ -327,18 +377,17 @@ def elabQedbridge : CommandElab := fun stx => do
       s!"    (h_fuel : nSteps + 1 ≤ FUEL)" ++ nl ++
       s!"    (h_bud : ({initExpr}).cuConsumed + nSteps + nCu" ++ nl ++
       s!"              ≤ ({initExpr}).cuBudget)" ++ nl ++
-      s!"    (h_rr : rr ({initExpr}).regions) :" ++ nl ++
+      s!"    (h_rr : rr ({initExpr}).regions)" ++ nl ++
+      boundHyps ++
+      s!"    :" ++ nl ++
       s!"    (executeFn progAt ({initExpr}) FUEL).exitCode = some 0 ∧" ++ nl ++
       s!"    encodeState s' inputAddr (executeFn progAt ({initExpr}) FUEL).mem := by" ++ nl ++
       s!"  have hpc : ({initExpr}).pc = {entryArg} := by simp [{initFn}]" ++ nl ++
       s!"  have hrun : ({initExpr}).exitCode = none := by simp [{initFn}]" ++ nl ++
-      s!"  obtain ⟨h_halt, _h_post⟩ :=" ++ nl ++
+      s!"  obtain ⟨h_halt, h_post⟩ :=" ++ nl ++
       s!"    halts_zero_of_fieldUpdate h_asm h_prog h_exit h_pre hpc hrun h_bud h_rr h_r0 h_cs FUEL h_fuel" ++ nl ++
       s!"  refine ⟨h_halt, ?_⟩" ++ nl ++
-      s!"  -- post leg (qedsvm#48): `_h_post : (setupPost ** codecCoarse inputAddr postFields)" ++ nl ++
-      s!"  --   .holdsFor result` ⟹ `encodeState s' inputAddr result.mem`; needs the" ++ nl ++
-      s!"  --   `holdsFor_codecCoarse` / `holdsFor_memU64Is` read-back family." ++ nl ++
-      s!"  sorry")
+      postLeg)
 
     -- Rejection: guards fail → exits nonzero
     cmds := cmds.push (

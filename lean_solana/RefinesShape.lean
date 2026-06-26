@@ -54,17 +54,39 @@ theorem increment_refines
     (h_fuel : nSteps + 1 ≤ FUEL)
     (h_bud : (initState inputAddr mem rt).cuConsumed + nSteps + nCu
               ≤ (initState inputAddr mem rt).cuBudget)
-    (h_rr : rr (initState inputAddr mem rt).regions) :
+    (h_rr : rr (initState inputAddr mem rt).regions)
+    -- State-validity bounds: the abstract post-state fields respect their
+    -- u64 / u8 / pubkey-limb widths. In the real pipeline these come from the
+    -- spec's `Valid s'` invariant. They reconcile the forward codec bridges
+    -- (which normalize: `readU64 = v % 2^64`, `readU8 = v % 256`) with the raw
+    -- value `encodeState` asserts.
+    (hb_owner0 : s'.owner.c0 < 2 ^ 64) (hb_owner1 : s'.owner.c1 < 2 ^ 64)
+    (hb_owner2 : s'.owner.c2 < 2 ^ 64) (hb_owner3 : s'.owner.c3 < 2 ^ 64)
+    (hb_total : s'.total < 2 ^ 64) (hb_bump : s'.bump < 256) :
     (executeFn progAt (initState inputAddr mem rt) FUEL).exitCode = some 0 ∧
     encodeState s' inputAddr (executeFn progAt (initState inputAddr mem rt) FUEL).mem := by
   have hpc : (initState inputAddr mem rt).pc = 0 := by simp [initState]
   have hrun : (initState inputAddr mem rt).exitCode = none := by simp [initState]
-  obtain ⟨h_halt, _h_post⟩ :=
+  obtain ⟨h_halt, h_post⟩ :=
     halts_zero_of_fieldUpdate h_asm h_prog h_exit h_pre hpc hrun h_bud h_rr h_r0 h_cs FUEL h_fuel
   refine ⟨h_halt, ?_⟩
-  -- `_h_post : (setupPost ** codecCoarse inputAddr postFields).holdsFor result`
-  -- ⟹ `encodeState s' inputAddr result.mem`. This is the codecCoarse→read leg
-  -- (qedsvm#48: `holdsFor_codecCoarse` / `holdsFor_memU64Is` family).
-  sorry
+  -- Post leg (qedsvm#48): drop the `setupPost` frame, extract each field's
+  -- coarse atom from `codecCoarse`, then bridge each atom to the read that
+  -- `encodeState` asserts (`CodecRead.lean` forward family).
+  have hcodec := holdsFor_sepConj_right h_post
+  unfold encodeState
+  refine ⟨?_, ?_, ?_⟩
+  · have ho := holdsFor_codecCoarse_field _ hcodec
+      (show (0, FieldVal.pubkey s'.owner) ∈ _ by simp)
+    simp only [FieldVal.coarse] at ho
+    exact pubkeyAt_of_holdsFor_pubkeyIs hb_owner0 hb_owner1 hb_owner2 hb_owner3 ho
+  · have ht := holdsFor_codecCoarse_field _ hcodec
+      (show (32, FieldVal.u64 s'.total) ∈ _ by simp)
+    simp only [FieldVal.coarse] at ht
+    rw [readU64_of_holdsFor_memU64Is ht, Nat.mod_eq_of_lt hb_total]
+  · have hbp := holdsFor_codecCoarse_field _ hcodec
+      (show (40, FieldVal.byte s'.bump) ∈ _ by simp)
+    simp only [FieldVal.coarse] at hbp
+    rw [readU8_of_holdsFor_memByteIs hbp, Nat.mod_eq_of_lt hb_bump]
 
 end RefinesShape

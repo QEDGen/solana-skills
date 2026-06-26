@@ -7,12 +7,16 @@ is the "start here" for a fresh session. Verify file:line refs before acting.
 ## TL;DR
 
 The discharge pipeline turns qedgen's sBPF-bridge `sorry` into a proof against the
-pinned program bytes. **The hard part is done and proven**: a discharged field
-update (qedlift's `AsmRefinesFieldUpdate`) is shown to halt the whole run with
-`exitCode = some 0` and the account memory encoding the post-state. The Bridge
-elaborator has now been **ported** to emit that provable `.refines` shape (it
-discharges via the adapter; see "Done" below). The only remaining work is a family
-of byte-level codec lemmas (filed upstream as **qedsvm#48**).
+pinned program bytes. **A2b's success path is now COMPLETE.** A discharged field
+update (qedlift's `AsmRefinesFieldUpdate`) halts the whole run with `exitCode =
+some 0` and the account memory encoding the post-state (the adapter); the Bridge
+elaborator emits that provable `.refines` shape; and the post `codecCoarse →
+encodeState` leg now discharges via qedsvm#48's `CodecRead.lean` family (shipped
+in **qedsvm v0.8.0**, pinned). The generated `Vault.Bridge.increment.refines` is
+**sorry-free** (`#print axioms` = `propext / Classical.choice / Quot.sound`, no
+`sorryAx`). What remains is only the **boundary** (out of A2b scope): `.rejects`
+(abort path, gated on qedsvm#40) and `decode_encode` (the round-trip lemma) stay
+`sorry`.
 
 ## State of the world
 
@@ -78,31 +82,34 @@ no-insn path uses `initState` with `entry = 0`. `Bridge.lean` now `import`s
 > `<Spec>.State`, so the adapter's `State` is written fully-qualified
 > (`SVM.SBPF.State`).
 
-## One remaining work item
+## DONE: the post leg discharges via qedsvm#48 (v0.8.0)
 
-### qedsvm#48 — the `codecCoarse ↔ encodeState` byte-level legs
+qedsvm#48 shipped as `SVM/SBPF/CodecRead.lean` in **qedsvm v0.8.0** (pin bumped
+`v0.7.0 → v0.8.0` in `lean_solana/lakefile.lean` + manifest). The forward family:
+`holdsFor_sepConj_left/right` (peel the `**` frame), `holdsFor_codecCoarse_field`
+(extract a field's coarse atom from the codec list), and the per-atom bridges
+`readU64_of_holdsFor_memU64Is` / `readU8_of_holdsFor_memByteIs` /
+`pubkeyAt_of_holdsFor_pubkeyIs`. The post leg
+(`(setupPost ** codecCoarse base postFields).holdsFor result ⟹ encodeState s'
+base result.mem`) is: `holdsFor_sepConj_right` → per field `holdsFor_codecCoarse_field`
++ `simp only [FieldVal.coarse]` + the matching bridge.
 
-The remaining `sorry`(s), both pre and post. The Bridge's `encodeState` is a flat
-conjunction `readU64 mem (addr+off) = s.field ∧ …`; qedlift's codec is `codecCoarse
-base fields` (recursing to `fv.coarse (base+off) ** …`, `.u64 v = memU64Is a v =
-fun h => h = singletonMemU64 a v`). Need `(memU64Is a v).holdsFor s ↔ readU64
-s.mem a = v` (+ `memByteIs`/`pubkeyIs` analogues) and a `holdsFor_codecCoarse`
-corollary over the `**`-composition. **No ready-made qedsvm lemma** — filed as
-[qedsvm#48](https://github.com/QEDGen/qedsvm/issues/48); belongs upstream next to
-`account_agg`. Until it lands, prove the needed direction locally in
-`BridgeAdapter.lean` (or hand the stated lemmas to Leanstral — the SL byte-decode
-grind is the designated escalation).
+**Wrinkle (load-bearing):** the forward bridges NORMALIZE — `readU64 = v % 2^64`,
+`readU8 = v % 256`. So each field needs a `< width` bound (`s'.f < 2^64` / `< 256`,
+pubkey limbs `< 2^64`) to land `encodeState`'s raw read. These are the state's
+`Valid s'` invariant; the generator emits them as `hb_<field>` hyps and the proof
+closes each via `Nat.mod_eq_of_lt`. Validated in `RefinesShape.increment_refines`
+(sorry-free) then ported to the `Bridge.lean` generator; `BridgeHarness.lean`'s
+`#print axioms Vault.Bridge.increment.refines` confirms no `sorryAx`.
 
 ## Recommended first action
 
-The elaborator port is done and validated (`BridgeHarness.lean`). **Next: close
-qedsvm#48** — the `codecCoarse ↔ encodeState` read-back family. The post leg is the
-single remaining `sorry` in both `RefinesShape.increment_refines` and the generated
-`<op>.refines`. Prove `(memU64Is a v).holdsFor s ↔ readU64 s.mem a = v` (+ byte /
-pubkey analogues) and a `holdsFor_codecCoarse` corollary over the `**`-composition,
-land them upstream next to `account_agg` (or locally in `BridgeAdapter.lean` until
-they land), then replace the post-leg `sorry` in the generator with the read-back
-application. The SL byte-decode grind is the designated Leanstral escalation.
+A2b's success path is complete and merge-ready (modulo the usual review). **Next**
+is the boundary, both out of current A2b scope: `.rejects` (the abort path) unparks
+when **qedsvm#40** lands (the lift's per-abort arms); `decode_encode` is the codec
+round-trip lemma (provable now via the same `CodecRead.lean` reverse family —
+`holdsFor_codecCoarse_of_reads` — if desired). Otherwise: open the `feat/a2b-bridge-adapter`
+PR.
 
 ## Pointers
 
