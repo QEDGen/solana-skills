@@ -596,12 +596,14 @@ fn emit_action_fn(
     op: &ParsedHandler,
     mode: InvariantMode,
 ) -> Result<()> {
-    out.push_str(&format!(
-        "    /// {} → action variant. Bodies for non-trivial\n",
-        op.name
-    ));
-    out.push_str("    /// `accounts::X { ... }` literals fall through as todo!() — fill\n");
-    out.push_str("    /// via `qedgen codegen --fill` once that hook lands for Crucible.\n");
+    out.push_str(&format!("    /// {} → action variant.\n", op.name));
+    if op.accounts.is_empty() {
+        // No IDL/spec accounts to render → the `.accounts(...)` literal is
+        // left as a `todo!()` for the agent to fill.
+        out.push_str("    /// No account list resolved — the `accounts::X { ... }` literal\n");
+        out.push_str("    /// falls through as todo!() for the agent to fill (drop an IDL\n");
+        out.push_str("    /// at the project root to auto-fill it).\n");
+    }
 
     // Pubkey-typed args are NOT exposed as action params: #[fuzz_fixture]
     // can't derive Arbitrary for Pubkey (no Arbitrary on its `Address`

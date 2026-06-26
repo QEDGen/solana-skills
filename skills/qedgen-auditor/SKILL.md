@@ -154,6 +154,76 @@ Three outcomes per CRIT/HIGH:
 
 MEDIUM and below: a repro is encouraged but not required.
 
+## Preflight — environment + target readiness (run this first)
+
+Before Phase 1, run the **instant checks** (~2s: runtime, mode, tooling)
+and kick off the **compile gate in the background** (it dominates
+wall-clock on a real Solana program — dep-fetch + first build is
+minutes, not seconds, so never block on it). Report a single status line
+and proceed straight into Phase 1's read-driven work while the build
+runs. This is **non-blocking by design** (tactile tooling, no consent
+walls): report what's available, name what degrades, proceed. The audit's
+core path — read + hand-authored Mollusk repros — needs only `qedgen`,
+`cargo`, and a program that compiles; everything else widens coverage but
+is never a gate. The point is to convert *silent mid-run failures*
+("qedgen not found", "harness build failed", "fuzz lane never ran", "old
+qedgen missing a category") into one honest up-front line, so the user
+knows what coverage they're getting before they invest attention.
+
+**The one hard stop:** an sBPF / hand-written-assembly target (`.s`
+sources, no Rust handler source). Say so plainly and stop — see
+[When to use](#when-to-use). Don't run a thin audit that implies coverage
+it doesn't have.
+
+Run the checks together (they mirror the CLI's point-of-use dependency
+gates in `crates/qedgen/src/project/deps.rs`, surfaced all at once):
+
+```bash
+# --- Instant checks (~2s) ---
+find . -path ./target -prune -o -name '*.s' -print 2>/dev/null | head -1   # any hit → sBPF: STOP, redirect
+grep -lE 'anchor-lang|solana-program|pinocchio|quasar-lang' \
+  Cargo.toml */Cargo.toml programs/*/Cargo.toml 2>/dev/null                 # runtime detect
+test -f .qedspec && echo "mode: spec-aware" || echo "mode: spec-less (brownfield default)"
+qedgen --version || echo "MISSING qedgen — audit cannot run"               # NB: confirm this is recent;
+                                                                           # a stale on-PATH qedgen runs an
+                                                                           # older category catalog and
+                                                                           # silently under-reports.
+command -v crucible >/dev/null \
+  && echo "crucible: present" \
+  || echo "crucible: ABSENT — fast fuzz lane off; install: cargo install --git https://github.com/asymmetric-research/crucible crucible-fuzz-cli"
+cargo +nightly miri --version >/dev/null 2>&1 \
+  && echo "miri: present" \
+  || echo "miri: absent — Tier-2 UB repros skipped (Mollusk lane unaffected)"
+
+# --- Compile gate: background it, don't block (minutes on a real program) ---
+cargo check --quiet 2>&1 | tail -3 &    # repros can only build/fire once this is green;
+                                        # proceed with read-driven Phase 1 meanwhile.
+```
+
+Then emit **one** status line and proceed — e.g.:
+
+> Preflight: Anchor target, compiles clean. Spec-less mode. Repro lanes:
+> Mollusk ✓, Crucible ✗ (fuzz fast-path off — `cargo install … crucible-fuzz-cli`
+> to enable), Miri ✗. Entering Phase 1.
+
+What each gate affects — read this as the time-to-win impact, not a
+checklist to satisfy:
+
+| Check | If absent | Effect |
+|-------|-----------|--------|
+| `qedgen` on PATH | **hard blocker** | No probe work-list, no `verify --probe-repros`. Stop and print the install line. A *stale* qedgen is worse than missing — it runs silently with an older category catalog and under-reports; confirm the version is current. |
+| Program compiles | **hard blocker for fired repros** | Findings can only stay structural (nothing to build a repro against). Surface the build error; offer to continue read-only with all findings marked inconclusive. |
+| `crucible` on PATH | fast auto-reproducer lane off | Lose the ~5–10 min zero-authoring crash path (`qedgen probe --fuzz`); fall back to agent-authored Mollusk repros — slower and model-gated. Often the difference between a fast first win and a slow one. |
+| `qedgen-sandbox` resolvable | Mollusk repros can't build | CRIT/HIGH stay inconclusive. Verified when the first repro builds; if it fails, say so rather than reporting a silent drop. |
+| `cargo +nightly miri` | Tier-2 UB repros skipped | Mollusk (Tier-1) lane unaffected; only `unsafe`-touching findings lose their repro lane. |
+| `.qedspec` present | — (not a gate) | Spec-aware mode (faster, more precise). Absent → spec-less brownfield default. |
+
+Set the expectation in the same breath: recall is **probabilistic**, and
+a cold run can come up dry — that's Phase 2's cue ("Phase 1 didn't fire;
+give me intent and I'll deepen"), **not** a failure of the tool. Best
+recall is on the [recommended model + reasoning budget](#recommended-model--reasoning-budget);
+on a default budget, expect surface-level pattern matching only.
+
 ## How it works
 
 1. **Detect mode and runtime.**

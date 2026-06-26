@@ -1,78 +1,99 @@
-# v2.21 Slice 1 + §S1.2 — Crucible brownfield regression fixture
+# v2.21 §S1.2 — Crucible brownfield regression fixture
 
-This fixture pins two v2.21 PRD exit criteria: the §"Slice 1" crash-
-first bear-hug (intrinsic panic / unwrap-on-None detection on a
-brownfield Anchor program without a `.qedspec`) AND the §S1.2 lamport-
-conservation companion (protocol-invariant guard around every
-`.send()`).
+This fixture pins the v2.21 §S1.2 exit criterion: the **lamport-
+conservation protocol invariant** (`assert_no_signer_inflation`) firing on
+a brownfield Anchor program **without a `.qedspec`**, end to end —
+`cargo build-sbf` → `qedgen probe --fuzz` → a fired `Finding`.
+
+It also documents, by counter-example, what crash-first does **not**
+catch — see `run` / `maybe` below.
 
 ## What's in `buggy_anchor/`
 
-A minimal Anchor program with three deliberate bugs:
+A minimal Anchor program with three handlers:
 
-1. **`run` handler** — divides a constant by zero, panicking on the
-   first invocation. Demonstrates Crucible's intrinsic panic detector
-   firing on a brownfield protocol-mode harness with an empty
-   `invariant_test()` body.
+1. **`drain` — FIRES.** Transfers half of `source`'s lamports to an
+   arbitrary `target` (a System CPI transfer) with no authorization
+   policy. Both accounts are signers, so both are in the harness's tracked
+   set; `target` *gains* lamports, tripping the §S1.2
+   `assert_no_signer_inflation` guard. The fuzzer surfaces it as a HIGH
+   `invariant_violation` on `drain`, with no spec annotation.
 
-2. **`maybe` handler** — calls `.unwrap()` on a `None`-yielding helper.
-   Demonstrates the same intrinsic detector via the panic that
-   `Option::unwrap` raises on `None`.
+2. **`run` — does NOT fire.** Divides by a runtime zero. An in-program
+   **SBF fault** surfaces as a transaction *error*, not a host-process
+   panic, so Crucible's intrinsic crash detector never sees it.
 
-3. **`drain` handler** — sweeps all `source` lamports into `target`
-   with no authority check. When the fuzzer happens to pick a tracked
-   signer pubkey for `target`, qedgen's v2.21 §S1.2 lamport-inflation
-   guard (`assert_no_signer_inflation`) fires. Surfaces the drain
-   shape without any spec annotation.
+3. **`maybe` — does NOT fire.** `Option::unwrap()` on `None`. Same story:
+   a program-side abort, not a host crash.
 
-`run` and `maybe` are reachable on **every** invocation — a working
-Crucible run finds them on iteration 1. `drain` requires the fuzzer to
-land on a `target` that overlaps the tracked signer set; coverage-
-guided search reaches that case within a typical budget.
+`run` / `maybe` are kept deliberately as controls. Crucible's "crash-
+first" detector catches host-process panics + `fuzz_assert!` invariant
+violations (like the §S1.2 guard) — **not** faults inside the sandboxed
+`.so`. The drain path is the one that fires because it trips a
+*protocol invariant the harness checks in-process*, not a program panic.
+
+> Note on `run`'s divisor: it's runtime-derived (`stub.lamports() -
+> stub.lamports()`) rather than `let zero = 0`. rustc's
+> `unconditional_panic` lint const-folds the literal form into a *compile*
+> error, so the crate would never build and `cargo build-sbf` couldn't
+> emit a `.so`.
 
 ## Running the harness
 
-Out of the box this fixture is **not** part of the cargo workspace —
-the `Cargo.toml` would otherwise drag `anchor-lang` and the Solana
-toolchain into every `cargo build` of the qedgen workspace. To run
-the live demo:
+This fixture is a standalone single crate (deliberately **not** a member
+of the qedgen cargo workspace — its `Cargo.toml` would otherwise drag
+`anchor-lang` + the Solana toolchain into every `cargo build`). It ships a
+committed **`idl.json`**, so there's no `anchor build` round-trip — only
+the program `.so` is built locally.
 
 ```bash
 # 1. Copy the fixture out of the repo so it's a standalone crate.
 cp -r crates/qedgen/tests/fixtures/regressions/v2.21-crucible-crash-first/buggy_anchor /tmp/
+cd /tmp/buggy_anchor
 
-# 2. Generate the brownfield Crucible harness (no .qedspec).
-qedgen probe --fuzz 0 --root /tmp/buggy_anchor
+# 2. Build the program .so. No Anchor workspace needed — the committed
+#    idl.json supplies the schema the harness macro consumes.
+cargo build-sbf            # → target/deploy/buggy_anchor.so
 
-# 3. Confirm the harness was emitted with the PROTOCOL banner.
-head -20 /tmp/buggy_anchor/.qed/fuzz/buggy_anchor/src/main.rs
-
-# 4. Build the program (Anchor) so target/idl/buggy_anchor.json exists,
-#    then run the fuzz with a 60-second budget. qedgen symlinks the
-#    IDL into the harness automatically.
-cd /tmp/buggy_anchor && anchor build
-qedgen probe --fuzz 60 --root /tmp/buggy_anchor
+# 3. Fuzz (needs `crucible` on PATH). qedgen emits the brownfield harness,
+#    discovers the committed idl.json (auto-filling the `accounts::*`
+#    literals and the §S1.2 tracked-signer guard — no agent-fill), builds
+#    it, and runs Crucible.
+qedgen probe --fuzz 30 --root /tmp/buggy_anchor
 ```
 
-Expected output: at least one `Finding` with `category_tag =
-"runtime_panic"` (action `run` divide-by-zero) and ideally a second
-with `category_tag = "runtime_abort"` or `"runtime_panic"` for `maybe`.
+Expected output: one `Finding` with `category_tag =
+"invariant_violation"`, `severity = "high"`, `handler = "drain"`, and an
+`investigation_hint` pointing at `crucible show … --replay`. `run` /
+`maybe` execute and fail as transaction errors, producing **no** finding
+(by design — see above).
+
+### Why a committed IDL + `cargo build-sbf` (not `anchor build`)
+
+`anchor build` requires an Anchor *workspace* (`Anchor.toml` +
+`programs/<name>/` + `overflow-checks`), produces artifacts under the
+*workspace* `target/`, and refuses a bare crate. `qedgen probe --fuzz`
+wants a single-crate `--root` whose `src/`, IDL, and `.so` all sit
+together. Committing the IDL and building the `.so` with `cargo build-sbf`
+collapses that mismatch — the same committed-IDL convention the
+`buggy_pinocchio` fixture uses. `qedgen`'s `discover_idl` falls back to
+`<root>/idl.json` precisely for this case.
 
 ## What this fixture validates
 
 - **CLI gate lift** — `qedgen probe --fuzz 0 --root <path>` exits 0
   without a `.qedspec`.
-- **Brownfield handler discovery** — both `run` and `maybe` appear as
-  `action_*` stubs in the emitted harness.
+- **Brownfield handler + account discovery** — `run` / `maybe` / `drain`
+  appear as `action_*`, and the IDL-driven path fills their
+  `accounts::*` literals (and the drain signer set) — no `todo!()`.
 - **Protocol-mode header** — the emitted `main.rs` carries the
   `Mode: PROTOCOL (no spec)` banner.
-- **Empty `invariant_test()` body** — no spec-derived `fuzz_assert!`
-  calls; crashes fire only through Crucible's intrinsic detector.
-- **`.qed/fuzz/<prog>/` location** — the emitted harness lives under
-  the user's `.qed/` ephemeral namespace, not in the program crate's
-  `src/`.
+- **§S1.2 guard wiring** — `assert_no_signer_inflation` +
+  `snapshot_lamports` helpers are emitted and the per-action inflation
+  check wraps every `.send()` once a tracked signer set exists.
+- **`.qed/fuzz/<prog>/` location** — the emitted harness lives under the
+  user's `.qed/` ephemeral namespace, not in the program crate's `src/`.
 
-The first four are covered by the unit + integration tests in
-`crates/qedgen/tests/crucible_brownfield_smoke.rs`. The fifth — the
-live fuzz finding the bug — needs Crucible on PATH; this README
-documents the manual run.
+The emission criteria are covered by the unit + integration tests in
+`crates/qedgen/tests/crucible_brownfield_smoke.rs`. The live fuzz finding
+the bug needs `crucible` on PATH; this README documents that manual run.

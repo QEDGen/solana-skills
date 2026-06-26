@@ -212,14 +212,11 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     assert!(body.contains("pub fn action_maybe"));
     assert!(body.contains("pub fn action_drain"));
     assert!(body.contains("Mode: PROTOCOL"));
-    // v2.21 §S1.2 — protocol-mode harness must carry the lamport-
-    // conservation helpers and wire the inflation check around every
-    // action_*.send(). buggy_anchor has no `auth X` declarations
-    // (handlers all take `Context<Empty>` with no signer constraint), so
-    // collect_signer_idents returns an empty set and the per-action
-    // wrap is suppressed — but the helpers are still emitted, ready for
-    // the moment the agent fills the `.accounts(...)` literal and the
-    // generated harness picks up signer pubkeys from the fixture.
+    // v2.21 §S1.2 — protocol-mode harness carries the lamport-conservation
+    // helpers AND, now that buggy_anchor ships a committed idl.json, the
+    // IDL-driven path fills the `accounts::*` literals and wires the
+    // per-action inflation check. `drain`'s `source`/`target` are signers,
+    // so they form the tracked set the guard snapshots and asserts on.
     assert!(
         body.contains("fn assert_no_signer_inflation"),
         "protocol-mode brownfield harness must emit assert_no_signer_inflation helper"
@@ -227,6 +224,21 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     assert!(
         body.contains("fn snapshot_lamports"),
         "protocol-mode brownfield harness must emit snapshot_lamports helper"
+    );
+    // IDL-driven account discovery: `drain` auto-fills its accounts literal
+    // (no `todo!()`) and the inflation guard wraps the send — this is what
+    // makes the fixture fire a real finding under `--fuzz <budget>`.
+    assert!(
+        body.contains("accounts(accounts::Drain {"),
+        "drain's accounts literal should be auto-filled from the IDL, not todo!()"
+    );
+    assert!(
+        body.contains("assert_no_signer_inflation(&self.ctx"),
+        "drain should wire the §S1.2 inflation check around .send()"
+    );
+    assert!(
+        !body.contains("todo!("),
+        "IDL-driven brownfield emit should leave no todo!() in the action bodies"
     );
 }
 

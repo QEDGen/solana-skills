@@ -105,13 +105,25 @@ fn empty_handler(name: String) -> ParsedHandler {
 }
 
 fn synthesize_anchor_family(project_root: &Path) -> Result<BrownfieldSynthesis> {
+    // Prefer a committed / `anchor build` IDL: it carries per-account
+    // `signer`/`writable` flags, so the emitter fills real `accounts::X
+    // { ... }` literals (no `todo!()`) and the §S1.2 lamport-inflation
+    // guard gets a tracked signer set to check. Without an IDL we fall back
+    // to a source scan that yields handler names only (empty accounts →
+    // agent-fill `todo!()`), preserving the v2.21 behaviour.
+    if let Some(idl_text) = discover_pinocchio_idl(project_root)? {
+        if !handlers_with_args_from_idl(&idl_text).is_empty() {
+            return synthesize_from_idl(project_root, idl_text);
+        }
+    }
     let program_name = program_name_from_root(project_root)?;
     let handlers = scan_anchor_handlers(project_root)?;
     if handlers.is_empty() {
         bail!(
-            "No `pub fn <name>(ctx: Context<X>, ...)` handlers found under {}. \
-             Brownfield mode needs at least one Anchor handler to fuzz; \
-             confirm `--root` points at the program crate (e.g. `programs/my_prog/`).",
+            "No `pub fn <name>(ctx: Context<X>, ...)` handlers found under {}, \
+             and no IDL on disk. Brownfield mode needs at least one Anchor \
+             handler to fuzz; confirm `--root` points at the program crate \
+             (e.g. `programs/my_prog/`), or drop an `idl.json` at the root.",
             project_root.display()
         );
     }
@@ -123,6 +135,42 @@ fn synthesize_anchor_family(project_root: &Path) -> Result<BrownfieldSynthesis> 
     Ok(BrownfieldSynthesis {
         spec,
         idl_json: None,
+    })
+}
+
+/// Build a brownfield [`BrownfieldSynthesis`] from a parsed IDL — handler
+/// args + per-account signer/writable/address flags. Shared by the Anchor
+/// (IDL-present) and Pinocchio paths.
+fn synthesize_from_idl(project_root: &Path, idl_text: String) -> Result<BrownfieldSynthesis> {
+    let handlers_with_args = handlers_with_args_from_idl(&idl_text);
+    let accounts_per_handler = accounts_per_handler_from_idl(&idl_text);
+    if handlers_with_args.is_empty() {
+        bail!(
+            "IDL at {} parsed but has no `instructions[]` entries. \
+             Brownfield fuzz needs at least one instruction to dispatch.",
+            project_root.display()
+        );
+    }
+    let program_name = program_name_from_idl(&idl_text)
+        .or_else(|| program_name_from_root(project_root).ok())
+        .unwrap_or_else(|| "program".to_string());
+    let handlers = handlers_with_args
+        .into_iter()
+        .map(|(name, args)| {
+            let mut h = empty_handler(name.clone());
+            h.takes_params = args;
+            h.accounts = accounts_per_handler.get(&name).cloned().unwrap_or_default();
+            h
+        })
+        .collect();
+    let spec = ParsedSpec {
+        program_name,
+        handlers,
+        ..Default::default()
+    };
+    Ok(BrownfieldSynthesis {
+        spec,
+        idl_json: Some(idl_text),
     })
 }
 
@@ -147,42 +195,11 @@ fn synthesize_pinocchio(project_root: &Path) -> Result<BrownfieldSynthesis> {
         )
     })?;
 
-    let handlers_with_args = handlers_with_args_from_idl(&idl_text);
-    let accounts_per_handler = accounts_per_handler_from_idl(&idl_text);
-    if handlers_with_args.is_empty() {
-        bail!(
-            "Codama IDL at {} parsed but has no `instructions[]` entries. \
-             Brownfield fuzz needs at least one instruction to dispatch.",
-            project_root.display()
-        );
-    }
-    // Program name must come from the IDL when present: declare_fuzz_program!
-    // derives the generated module name from the IDL's `program.name`
-    // (Codama IR) or `metadata.name` (Anchor 0.30), and the harness's
-    // `use {prog}::instruction;` must line up with that — not the Cargo
-    // workspace's leaf dir. Cargo / leaf-dir fallback is rare (Anchor IDLs
-    // always carry a name; Codama IR carries `program.name`).
-    let program_name = program_name_from_idl(&idl_text)
-        .or_else(|| program_name_from_root(project_root).ok())
-        .unwrap_or_else(|| "program".to_string());
-    let handlers = handlers_with_args
-        .into_iter()
-        .map(|(name, args)| {
-            let mut h = empty_handler(name.clone());
-            h.takes_params = args;
-            h.accounts = accounts_per_handler.get(&name).cloned().unwrap_or_default();
-            h
-        })
-        .collect();
-    let spec = ParsedSpec {
-        program_name,
-        handlers,
-        ..Default::default()
-    };
-    Ok(BrownfieldSynthesis {
-        spec,
-        idl_json: Some(idl_text),
-    })
+    // Program name comes from the IDL inside `synthesize_from_idl`:
+    // declare_fuzz_program! derives the generated module name from the
+    // IDL's `program.name` (Codama IR) or `metadata.name` (Anchor 0.30),
+    // and the harness's `use {prog}::instruction;` must line up with that.
+    synthesize_from_idl(project_root, idl_text)
 }
 
 /// Program name from an Anchor 0.30 IDL (`metadata.name`) or Codama IR
@@ -349,9 +366,16 @@ fn accounts_per_handler_from_idl(
             .iter()
             .filter_map(|a| {
                 let name = a.get("name").and_then(|n| n.as_str())?.to_string();
-                let is_signer = a.get("isSigner").and_then(|b| b.as_bool()).unwrap_or(false);
+                // Anchor ≥0.30 IDLs use `signer`/`writable`; legacy Anchor +
+                // Codama IRs use `isSigner`/`isWritable`. Accept either.
+                let is_signer = a
+                    .get("signer")
+                    .or_else(|| a.get("isSigner"))
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
                 let is_writable = a
-                    .get("isWritable")
+                    .get("writable")
+                    .or_else(|| a.get("isWritable"))
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
                 let default = a.get("defaultValue");
@@ -368,7 +392,14 @@ fn accounts_per_handler_from_idl(
                         (pk, None, true)
                     }
                     Some("pdaValueNode") => (None, Some(vec![]), false),
-                    _ => (None, None, false),
+                    // Anchor ≥0.30 emits a fixed-address account (e.g.
+                    // `Program<System>`) as a top-level `"address"` field
+                    // rather than a `defaultValue` node — treat it the same
+                    // as a publicKeyValueNode so the emitter auto-fills it.
+                    _ => match a.get("address").and_then(|k| k.as_str()) {
+                        Some(addr) => (Some(addr.to_string()), None, true),
+                        None => (None, None, false),
+                    },
                 };
                 Some(ParsedHandlerAccount {
                     name,
