@@ -12,12 +12,14 @@ catch — see `run` / `maybe` below.
 
 A minimal Anchor program with three handlers:
 
-1. **`drain` — FIRES.** Transfers half of `source`'s lamports to an
-   arbitrary `target` (a System CPI transfer) with no authorization
-   policy. Both accounts are signers, so both are in the harness's tracked
-   set; `target` *gains* lamports, tripping the §S1.2
-   `assert_no_signer_inflation` guard. The fuzzer surfaces it as a HIGH
-   `invariant_violation` on `drain`, with no spec annotation.
+1. **`drain` — FIRES.** Empties a **program-owned `vault` PDA** into the
+   calling `authority` with **no check that the caller is the legitimate
+   admin** — a textbook missing-authority-check withdraw. A program may
+   freely debit accounts it owns, so the direct lamport move succeeds for
+   any signer. `authority` is a tracked signer; it *gains* the vault's
+   lamports (which come from **outside** the tracked set), tripping the
+   §S1.2 `assert_no_signer_inflation` guard. The fuzzer surfaces it as a
+   HIGH `invariant_violation` on `drain`, with no spec annotation.
 
 2. **`run` — does NOT fire.** Divides by a runtime zero. An in-program
    **SBF fault** surfaces as a transaction *error*, not a host-process
@@ -26,14 +28,20 @@ A minimal Anchor program with three handlers:
 3. **`maybe` — does NOT fire.** `Option::unwrap()` on `None`. Same story:
    a program-side abort, not a host crash.
 
-`run` / `maybe` are kept deliberately as controls. Crucible's "crash-
-first" detector catches host-process panics + `fuzz_assert!` invariant
-violations (like the §S1.2 guard) — **not** faults inside the sandboxed
-`.so`. The drain path is the one that fires because it trips a
+`run` / `maybe` are kept deliberately as controls (each takes the
+`authority` signer so it actually executes and faults in-program).
+Crucible's "crash-first" detector catches host-process panics +
+`fuzz_assert!` invariant violations (like the §S1.2 guard) — **not** faults
+inside the sandboxed `.so`. The drain path fires because it trips a
 *protocol invariant the harness checks in-process*, not a program panic.
 
-> Note on `run`'s divisor: it's runtime-derived (`stub.lamports() -
-> stub.lamports()`) rather than `let zero = 0`. rustc's
+The harness stages the realistic topology with no spec: `qedgen` reads the
+committed IDL, sees `vault`'s `pda` node, and emits setup that creates the
+vault **program-owned and funded** (so the program can debit it) at the
+same `find_program_address(&[], program_id)` address the handler derives.
+
+> Note on `run`'s divisor: it's runtime-derived (`authority.lamports() -
+> authority.lamports()`) rather than `let zero = 0`. rustc's
 > `unconditional_panic` lint const-folds the literal form into a *compile*
 > error, so the crate would never build and `cargo build-sbf` couldn't
 > emit a `.so`.
@@ -86,6 +94,9 @@ collapses that mismatch — the same committed-IDL convention the
 - **Brownfield handler + account discovery** — `run` / `maybe` / `drain`
   appear as `action_*`, and the IDL-driven path fills their
   `accounts::*` literals (and the drain signer set) — no `todo!()`.
+- **Program-owned PDA staging** — the IDL's `pda` node makes the harness
+  `setup()` create the `vault` program-owned + funded, so `drain` can
+  actually debit it (the realistic withdraw shape).
 - **Protocol-mode header** — the emitted `main.rs` carries the
   `Mode: PROTOCOL (no spec)` banner.
 - **§S1.2 guard wiring** — `assert_no_signer_inflation` +
