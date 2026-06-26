@@ -380,26 +380,36 @@ fn accounts_per_handler_from_idl(
                     .unwrap_or(false);
                 let default = a.get("defaultValue");
                 let default_kind = default.and_then(|d| d.get("kind")).and_then(|k| k.as_str());
-                let (default_pubkey, pda_seeds, is_program) = match default_kind {
-                    Some("publicKeyValueNode") => {
-                        let pk = default
-                            .and_then(|d| d.get("publicKey"))
-                            .and_then(|k| k.as_str())
-                            .map(|s| s.to_string());
-                        // For our scope, a publicKeyValueNode pointing at a
-                        // fixed pubkey is effectively a program/sysvar
-                        // account.
-                        (pk, None, true)
+                let (default_pubkey, pda_seeds, is_program) = if a.get("pda").is_some() {
+                    // Anchor ≥0.30 marks a PDA account with a top-level
+                    // `"pda"` object (seeds live there). The emitter derives
+                    // it via `find_program_address` and the harness setup
+                    // creates it program-owned.
+                    (None, Some(vec![]), false)
+                } else {
+                    match default_kind {
+                        Some("publicKeyValueNode") => {
+                            let pk = default
+                                .and_then(|d| d.get("publicKey"))
+                                .and_then(|k| k.as_str())
+                                .map(|s| s.to_string());
+                            // For our scope, a publicKeyValueNode pointing at
+                            // a fixed pubkey is effectively a program/sysvar
+                            // account.
+                            (pk, None, true)
+                        }
+                        // Codama IR PDA node.
+                        Some("pdaValueNode") => (None, Some(vec![]), false),
+                        // Anchor ≥0.30 emits a fixed-address account (e.g.
+                        // `Program<System>`) as a top-level `"address"` field
+                        // rather than a `defaultValue` node — treat it the
+                        // same as a publicKeyValueNode so the emitter
+                        // auto-fills it.
+                        _ => match a.get("address").and_then(|k| k.as_str()) {
+                            Some(addr) => (Some(addr.to_string()), None, true),
+                            None => (None, None, false),
+                        },
                     }
-                    Some("pdaValueNode") => (None, Some(vec![]), false),
-                    // Anchor ≥0.30 emits a fixed-address account (e.g.
-                    // `Program<System>`) as a top-level `"address"` field
-                    // rather than a `defaultValue` node — treat it the same
-                    // as a publicKeyValueNode so the emitter auto-fills it.
-                    _ => match a.get("address").and_then(|k| k.as_str()) {
-                        Some(addr) => (Some(addr.to_string()), None, true),
-                        None => (None, None, false),
-                    },
                 };
                 Some(ParsedHandlerAccount {
                     name,

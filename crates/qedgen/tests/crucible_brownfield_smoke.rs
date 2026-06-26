@@ -215,8 +215,9 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     // v2.21 §S1.2 — protocol-mode harness carries the lamport-conservation
     // helpers AND, now that buggy_anchor ships a committed idl.json, the
     // IDL-driven path fills the `accounts::*` literals and wires the
-    // per-action inflation check. `drain`'s `source`/`target` are signers,
-    // so they form the tracked set the guard snapshots and asserts on.
+    // per-action inflation check. `drain`'s `authority` is a signer (the
+    // tracked set the guard snapshots) and `vault` is a program-owned PDA
+    // the harness stages so the drain can actually debit it.
     assert!(
         body.contains("fn assert_no_signer_inflation"),
         "protocol-mode brownfield harness must emit assert_no_signer_inflation helper"
@@ -239,6 +240,12 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     assert!(
         !body.contains("todo!("),
         "IDL-driven brownfield emit should leave no todo!() in the action bodies"
+    );
+    // The `vault` PDA must be staged program-owned + funded so the program
+    // can debit it — without this, drain errors and nothing fires.
+    assert!(
+        body.contains(".owner(program_id)"),
+        "vault PDA should be created program-owned in setup()"
     );
 }
 

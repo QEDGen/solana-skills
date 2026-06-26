@@ -9,12 +9,10 @@
     {
       "name": "drain",
       "docs": [
-        "Sweeps half of `source`'s lamports into `target` with no check that",
-        "`target` is an authorized recipient. Implemented as a System CPI",
-        "transfer (so it works against the harness's system-owned, funded",
-        "accounts). Because `target` is a tracked signer that GAINS lamports,",
-        "the v2.21 §S1.2 lamport-inflation guard fires — surfacing the drain",
-        "shape with no spec annotation."
+        "Drains the program-owned `vault` PDA into `authority` with **no",
+        "authority check** — the vulnerability. A program may freely debit",
+        "accounts it owns, so this direct lamport move succeeds for any",
+        "caller, draining the vault to whoever signs."
       ],
       "discriminator": [
         239,
@@ -28,25 +26,25 @@
       ],
       "accounts": [
         {
-          "name": "source",
+          "name": "vault",
           "docs": [
-            "Funds the transfer; signs the CPI."
+            "Program-owned vault (PDA, empty seeds). The program may debit it.",
+            "for the direct lamport move."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": []
+          }
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "The caller — receives the drained lamports. **Never checked against",
+            "a stored admin/authority** (the bug). A signer, so the harness",
+            "tracks it; gaining the vault's lamports trips the §S1.2 guard."
           ],
           "writable": true,
           "signer": true
-        },
-        {
-          "name": "target",
-          "docs": [
-            "Arbitrary recipient — no authorization policy (the bug). A signer",
-            "so the harness tracks it; gaining lamports trips the §S1.2 guard."
-          ],
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
         }
       ],
       "args": []
@@ -69,11 +67,13 @@
       ],
       "accounts": [
         {
-          "name": "stub",
+          "name": "authority",
           "docs": [
-            "Stand-in unchecked account; the bug fires before any account",
-            "access matters so the contents don't matter."
-          ]
+            "Pays the fee so the handler actually executes (and faults",
+            "in-program, demonstrating the crash-first limitation)."
+          ],
+          "writable": true,
+          "signer": true
         }
       ],
       "args": []
@@ -81,14 +81,13 @@
     {
       "name": "run",
       "docs": [
-        "Divides by a runtime zero. Does NOT fire under crash-first (see",
-        "the module doc): the SBF fault is a transaction error, not a host",
-        "panic.",
+        "Divides by a runtime zero. Does NOT fire under crash-first: the SBF",
+        "fault is a transaction error, not a host panic.",
         "",
-        "The divisor is runtime-derived (`stub.lamports() - stub.lamports()`)",
-        "rather than `let zero = 0`: rustc's `unconditional_panic` lint",
-        "const-folds the literal form into a *compile* error, so the program",
-        "would never build and `cargo build-sbf` couldn't emit the `.so`."
+        "The divisor is runtime-derived (`authority.lamports() -",
+        "authority.lamports()`) rather than `let zero = 0`: rustc's",
+        "`unconditional_panic` lint const-folds the literal form into a",
+        "*compile* error, so the crate would never build."
       ],
       "discriminator": [
         203,
@@ -102,11 +101,13 @@
       ],
       "accounts": [
         {
-          "name": "stub",
+          "name": "authority",
           "docs": [
-            "Stand-in unchecked account; the bug fires before any account",
-            "access matters so the contents don't matter."
-          ]
+            "Pays the fee so the handler actually executes (and faults",
+            "in-program, demonstrating the crash-first limitation)."
+          ],
+          "writable": true,
+          "signer": true
         }
       ],
       "args": []

@@ -552,6 +552,22 @@ fn emit_fixture_impl(
             ));
         }
     }
+    // PDA-derived accounts (e.g. a program-owned vault) are created owned
+    // by *the program* + funded, so the program can debit them — the
+    // realistic drain shape. The brownfield placeholder derives every PDA
+    // from empty seeds (`find_program_address(&[], program_id)`), so they
+    // collapse to a single address; create it once. Matches the per-action
+    // `accounts(...)` literal, which derives the same address.
+    let has_pda_account = spec
+        .handlers
+        .iter()
+        .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
+    if is_brownfield && has_pda_account {
+        out.push_str("        let __pda = Pubkey::find_program_address(&[], &program_id).0;\n");
+        out.push_str(
+            "        ctx.create_account()\n            .pubkey(__pda)\n            .lamports(100_000_000_000)\n            .owner(program_id)\n            .create()\n            .unwrap();\n",
+        );
+    }
 
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
     let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
