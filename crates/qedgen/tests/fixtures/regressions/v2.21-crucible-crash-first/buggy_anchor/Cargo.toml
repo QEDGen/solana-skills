@@ -20,3 +20,8 @@ idl-build = ["anchor-lang/idl-build"]
 anchor-lang = "0.30"
 
 [workspace]
+
+# `anchor build` (Anchor 1.x) refuses to build without this; `cargo
+# build-sbf` doesn't require it but we keep it so both build paths agree.
+[profile.release]
+overflow-checks = true

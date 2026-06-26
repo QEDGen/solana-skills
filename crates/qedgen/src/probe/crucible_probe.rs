@@ -333,21 +333,36 @@ fn stable_finding_id(
 // IO — shells crucible / cargo / fs
 // ============================================================================
 
-/// Symlink `target/idl/<prog>.json` into `<harness>/idls/<prog>.json` when
-/// present; `<prog>` is the harness dir leaf (= spec's snake-case
-/// program_name). Idempotent — a pre-existing IDL file is left alone.
+/// Wire the program IDL into `<harness>/idls/<prog>.json` when present;
+/// `<prog>` is the harness dir leaf (= spec's snake-case program_name).
+/// Idempotent — a pre-existing IDL file is left alone.
+///
+/// Source lookup (first match wins):
+/// 1. `<root>/target/idl/<prog>.json` — `anchor build` output.
+/// 2. `<root>/idl.json` — committed Codama-convention IDL.
+/// 3. `<root>/idl/<prog>.json` — committed Codama default output dir.
+///
+/// (2) and (3) let a brownfield crate ship a *static* IDL and skip the
+/// `anchor build` round-trip entirely — the same committed-IDL
+/// convention the Pinocchio path already honours
+/// (`crucible_brownfield::discover_pinocchio_idl`). Without it the Anchor
+/// path is hard-tied to the ephemeral, un-committable `target/idl/`.
 pub fn discover_idl(harness_dir: &Path, project_root: &Path) -> Result<()> {
     let prog = harness_dir
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or_else(|| anyhow::anyhow!("harness_dir has no leaf name"))?;
-    let target_idl = project_root
-        .join("target")
-        .join("idl")
-        .join(format!("{prog}.json"));
-    if !target_idl.exists() {
+    let candidates = [
+        project_root
+            .join("target")
+            .join("idl")
+            .join(format!("{prog}.json")),
+        project_root.join("idl.json"),
+        project_root.join("idl").join(format!("{prog}.json")),
+    ];
+    let Some(src_idl) = candidates.iter().find(|p| p.exists()) else {
         return Ok(()); // nothing to discover; user wires manually
-    }
+    };
     let dest_dir = harness_dir.join("idls");
     std::fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join(format!("{prog}.json"));
@@ -356,11 +371,11 @@ pub fn discover_idl(harness_dir: &Path, project_root: &Path) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&target_idl, &dest)?;
+        std::os::unix::fs::symlink(src_idl, &dest)?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::copy(&target_idl, &dest)?;
+        std::fs::copy(src_idl, &dest)?;
     }
     Ok(())
 }
@@ -735,6 +750,44 @@ mod tests {
         // The dest should resolve to the same content as the source.
         let read = std::fs::read_to_string(&dest).unwrap();
         assert!(read.contains("\"version\""));
+    }
+
+    #[test]
+    fn discover_idl_falls_back_to_committed_root_idl() {
+        // No `target/idl/` (no `anchor build`); a committed `<root>/idl.json`
+        // is wired in instead — the brownfield no-build path.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let harness = tmp.path().join("fuzz").join("myprog");
+        std::fs::create_dir_all(&harness).unwrap();
+        std::fs::write(tmp.path().join("idl.json"), r#"{"version":"0.30"}"#).unwrap();
+
+        discover_idl(&harness, tmp.path()).expect("discover");
+
+        let dest = harness.join("idls").join("myprog.json");
+        assert!(dest.exists(), "committed idl.json should be discovered");
+        let read = std::fs::read_to_string(&dest).unwrap();
+        assert!(read.contains("\"version\""));
+    }
+
+    #[test]
+    fn discover_idl_prefers_target_over_committed() {
+        // `anchor build` output wins over a committed copy when both exist.
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let harness = tmp.path().join("fuzz").join("myprog");
+        std::fs::create_dir_all(&harness).unwrap();
+        let idl_dir = tmp.path().join("target").join("idl");
+        std::fs::create_dir_all(&idl_dir).unwrap();
+        std::fs::write(idl_dir.join("myprog.json"), r#"{"src":"target"}"#).unwrap();
+        std::fs::write(tmp.path().join("idl.json"), r#"{"src":"committed"}"#).unwrap();
+
+        discover_idl(&harness, tmp.path()).expect("discover");
+
+        let dest = harness.join("idls").join("myprog.json");
+        let read = std::fs::read_to_string(&dest).unwrap();
+        assert!(
+            read.contains("target"),
+            "target/idl should win over committed"
+        );
     }
 
     #[test]
