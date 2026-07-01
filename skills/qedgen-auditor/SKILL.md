@@ -16,9 +16,11 @@ The auditor's §3c trust-surface walk and authority-side intent-drift
 sweep require sustained multi-step reasoning across the program's
 dependency graph and documented invariants. Use one of:
 
-- **Claude Opus 4.8 with extended thinking** (Claude Code — this
-  skill auto-injects `ultrathink` via a UserPromptSubmit hook
-  installed alongside the skill; see `hooks/README.md`).
+- **Claude Fable 5** (Claude Code — preferred; the newest flagship).
+  Falls back to **Claude Opus 4.8 with extended thinking** when Fable 5
+  isn't available. Either way this skill auto-injects `ultrathink` via a
+  UserPromptSubmit hook installed alongside the skill; see
+  `hooks/README.md`.
 - **GPT-5.5 in high-reasoning mode** (Codex / Cursor / other
   agent-skills harnesses — set the harness's reasoning budget
   manually; no auto-injection on those harnesses).
