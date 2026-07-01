@@ -1,8 +1,8 @@
 # qedgen-auditor — thinking-budget hook
 
 A Claude Code `UserPromptSubmit` hook that detects audit-trigger phrases and
-appends `ultrathink` to the prompt so Opus 4.6 / 4.7 sessions allocate maximum
-thinking budget.
+appends `ultrathink` to the prompt so Fable 5 / Opus 4.8 sessions allocate
+maximum thinking budget.
 
 ## Why
 
@@ -21,7 +21,7 @@ harness-level hook fired on user prompt submission.
 
 When the submitted prompt matches one of the trigger phrases below
 (case-insensitive), the hook appends `\n\nultrathink` to the prompt before it
-reaches the model. On Opus 4.6 / 4.7 this allocates the maximum thinking
+reaches the model. On Fable 5 / Opus 4.8 this allocates the maximum thinking
 budget; on Sonnet / Haiku the word is a no-op or a partial lift (no harm).
 
 Trigger phrases:

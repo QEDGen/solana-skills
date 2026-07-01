@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const API_URL: &str = "https://api.mistral.ai/v1/chat/completions";
-const MODEL: &str = "labs-leanstral-2603";
+const MODEL: &str = "labs-leanstral-1-5";
 const TIMEOUT_SECS: u64 = 180;
 const MAX_RETRIES: u32 = 3;
 const BACKOFF_BASE_MS: u64 = 2000;

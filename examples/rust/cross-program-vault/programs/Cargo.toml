@@ -15,6 +15,6 @@ debug = []
 [dependencies]
 anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
-qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.37.0" }
+qedgen-macros = { git = "https://github.com/qedgen/solana-skills", tag = "v2.38.0" }
 
 [workspace]
