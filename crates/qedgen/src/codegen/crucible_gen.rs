@@ -16,14 +16,22 @@ use crate::rust_codegen_util;
 ///
 /// `Spec` (default) — one `fuzz_assert!` per linked `invariant` / `property`.
 ///
-/// `Protocol` — brownfield, no spec: empty `invariant_test` body; only
-/// Crucible's intrinsic crash detectors fire (panic, `unwrap` on `None`,
-/// `BorrowMutError`, arithmetic overflow / div-by-zero in debug).
+/// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but the
+/// emitted §S1.2 signer-lamport-inflation guard (`emit_action_fn`, gated on a
+/// non-empty signer set) fires as a `fuzz_assert!` after each action. Plus
+/// any panic in the *harness/host* code.
 ///
-/// `Both` — spec assertions AND protocol crashes. Codegen-identical to
-/// `Spec` today (protocol crashes need no harness instrumentation — the
-/// LibAFL host loop catches them); kept distinct so future
-/// protocol-invariant codegen has a place to dispatch.
+/// IMPORTANT — what this does NOT catch: a fault *inside* the deployed `.so`
+/// (arithmetic overflow, div-by-zero, `unwrap` on `None`, `require!` abort)
+/// surfaces as a **transaction error**, not a host-process panic, so
+/// Crucible's host-loop crash detector never sees it. See
+/// `tests/fixtures/regressions/v2.21-crucible-crash-first/README.md`. In
+/// brownfield mode the signer-lamport guard is therefore effectively the
+/// only live detector — and only for drains landing on a tracked signer.
+///
+/// `Both` — spec `fuzz_assert!`s AND the signer-lamport guard. Kept distinct
+/// from `Spec` so protocol-invariant codegen has a place to dispatch; the
+/// guard emission is shared with `Protocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantMode {
     Spec,
@@ -349,17 +357,18 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
         InvariantMode::Spec => {}
         InvariantMode::Protocol => {
             s.push_str("//\n");
-            s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is intentionally\n");
-            s.push_str("// empty — Crucible still surfaces panics, unwrap-on-None,\n");
-            s.push_str("// BorrowMutError, and arithmetic overflow as crashes via its\n");
-            s.push_str("// host-loop crash detector. Spec-invariant assertions are not\n");
-            s.push_str("// emitted in this mode.\n");
+            s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is empty; the\n");
+            s.push_str("// live detector is the §S1.2 signer-lamport-inflation guard below\n");
+            s.push_str("// (fires only when a tracked signer GAINS lamports across a call).\n");
+            s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
+            s.push_str("// surface as TX ERRORS, not host panics — the host-loop crash\n");
+            s.push_str("// detector does NOT catch them. Only harness/host panics do.\n");
         }
         InvariantMode::Both => {
             s.push_str("//\n");
-            s.push_str("// Mode: SPEC + PROTOCOL. Spec-invariant assertions fire as usual;\n");
-            s.push_str("// protocol-level crashes (panic, unwrap-on-None, BorrowMutError,\n");
-            s.push_str("// overflow) are caught by Crucible's host-loop crash detector.\n");
+            s.push_str("// Mode: SPEC + PROTOCOL. Spec-invariant assertions fire as usual,\n");
+            s.push_str("// plus the §S1.2 signer-lamport-inflation guard below. In-program\n");
+            s.push_str("// faults still surface as TX errors, not host-loop crashes.\n");
         }
     }
     s.push_str("//\n");
@@ -799,14 +808,15 @@ fn pascal_case(s: &str) -> String {
 }
 
 fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
-    // Protocol-only: empty body naming the intrinsic detectors — the
-    // "protocol" surface is whatever Crucible's host loop already catches.
+    // Protocol-only: empty body. The live detector for this mode is the
+    // §S1.2 signer-lamport-inflation guard emitted per action, plus any
+    // harness/host panic. In-program faults are TX errors, not caught here.
     if matches!(mode, InvariantMode::Protocol) {
         out.push_str("#[invariant_test]\n");
         out.push_str(&format!("fn invariant_test(_fixture: &mut {fixture}) {{\n"));
-        out.push_str("    // Protocol mode — no spec assertions. Crucible surfaces panics,\n");
-        out.push_str("    // unwrap-on-None, BorrowMutError, and overflow as crashes via\n");
-        out.push_str("    // its host-loop detector.\n");
+        out.push_str("    // Protocol mode — no spec assertions. The signer-lamport guard\n");
+        out.push_str("    // (per action) is the live check; in-program faults (overflow,\n");
+        out.push_str("    // unwrap, require!) surface as TX errors, not host-loop crashes.\n");
         out.push_str("}\n");
         return;
     }
