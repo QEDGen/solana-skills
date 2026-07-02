@@ -1204,6 +1204,92 @@ Corpus: `damm-v2-fee-routing` Apr 2026 — quote-only intent
 unenforced, 24h crank entirely absent, `y0_total_allocation`
 stored-and-never-read.
 
+### `custody_terms_retroactive_mutation` — varies (HIGH when a retroactive change can strand or seize committed funds; MEDIUM when remediation is doc-only / bounded)
+Spec-less primary (no CLI predicate yet — candidate `qedgen probe`
+addition). A program takes custody of user value at one handler
+(deposit / lock / stake / escrow) and releases it at another
+(withdraw / claim / redeem / unlock / settle). The release handler
+decides admissibility — *whether*, *when*, or *how much* can leave —
+by reading a parameter from **mutable** program/config state (timelock
+duration, transfer-hook program, exit fee, allow/deny list, paused
+flag, oracle source). Because that parameter is read **live at release
+time** and is **not snapshotted onto the user's receipt/position at
+custody time**, a privileged handler that mutates it **after** the
+deposit retroactively changes the terms governing funds the user
+already committed: extend a lock indefinitely (strand), flip a
+hook/allowlist to deny (strand), raise an exit fee toward 100% (seize),
+or repoint an oracle (mis-price the exit).
+
+Distinct from `bounty_intent_drift` (a declared-vs-implemented gap —
+here the behavior IS implemented: the admin *can* set the param and the
+release path *does* read it) and from `flash_loan_amplified_governance`'s
+snapshot note (voting-power-at-block, not custody-terms-at-deposit). The
+defect is a **temporal authority invariant**: terms binding
+already-custodied funds must be fixed at custody, not re-read live.
+
+Three observable signals; flag when all three hold:
+
+1. **Custody/release split.** One handler takes custody of user value;
+   a different handler releases it (deposit→withdraw, lock→unlock,
+   stake→claim, escrow→settle).
+2. **Live gate, no snapshot.** The release handler's admissibility
+   decision reads the gating parameter from a config/state account
+   **live**, and the receipt/position struct created at custody stores
+   only commit-time metadata (`deposited_at`, `amount`) — **no
+   snapshot** of the gating parameter (`unlock_at`, `terms_hash`,
+   `fee_bps_at_deposit`, `hook_at_deposit`).
+3. **Post-custody mutability, no grandfather.** A privileged handler
+   (admin setter, governance, config update) can write that parameter
+   after deposits exist, with **no monotonic / grandfather guard** that
+   exempts already-committed positions ("new lock applies to future
+   deposits only", "fee can only decrease").
+
+Spec-less per-runtime:
+- **Anchor:** for each release handler, trace the admissibility
+  expression (the `require!` / `if … return Err` gating release amount
+  or timing). Does it read `config.<param>` / `pool.<param>` live, or a
+  field on the user's `Account<Receipt>` written at deposit? Then check
+  the receipt struct: a snapshot field, or only `deposited_at` /
+  `amount`? Then find admin setters (`set_*`, `update_config`,
+  `#[access_control]` handlers) writing `<param>`: monotonic/grandfather
+  guard present?
+- **Native / Pinocchio:** same shape. The receipt is a zeropod/state
+  struct created in the deposit processor; grep its fields for a terms
+  snapshot vs only `deposited_at`. The release processor's gate reads
+  the config account live. The admin processor writes the config field
+  with no per-position guard. Canonical tell: a `validate`-style fn
+  reads the **current** config duration/hook and compares against `now`
+  while the receipt carries no `unlock_at`.
+
+When to suppress / downgrade:
+- The gating parameter is **immutable after init** (no admin setter) →
+  not a finding.
+- The receipt **snapshots** the terms at custody (the safe pattern) →
+  not a finding.
+- The admin is **explicitly and intentionally trusted** and the
+  centralization assumption is **documented** as a known trust boundary
+  → downgrade to informational / MEDIUM (doc-only remediation), not a
+  fund-loss HIGH. Catch the documented-trust statement in source/README
+  before downgrading; an *undocumented* trusted-admin-can-strand stays
+  HIGH.
+
+- Compose-with-what: pairs with weak admin auth (`missing_signer` /
+  unanchored admin field → *anyone* rewrites the terms → CRIT) and with
+  single-key admin + no timelock (`authority_transfer_missing_nominate_accept`
+  neighbor) → the retroactive change is an instant rug. Safe fix:
+  **snapshot the gating terms onto the receipt at custody** (compute
+  `unlock_at = now + lock_duration` at deposit; pin `hook` / `fee_bps`
+  on the position) so later admin changes can't reach committed funds.
+
+- Corpus: a Pinocchio escrow with an admin-configurable timelock — the
+  release path's `validate` reads the **live** `lock_duration` and
+  compares to `now`, the `Receipt` stores `deposited_at` but **no
+  `unlock_at` snapshot**, and the add-timelock handler has no monotonic
+  guard, so the admin can extend the lock after a user deposits and
+  strand the funds. Remediation was doc-only (admin treated as trusted),
+  so it was firm-rated MEDIUM; the strand-funds capability is HIGH absent
+  that documented trust.
+
 ### `transfer_hook_reentrancy` — HIGH (Token-2022 only)
 Token-2022 transfer hooks can call back into the calling program
 during a transfer. Handler that updates state across a transfer
@@ -1483,9 +1569,11 @@ codegen mechanizes them by construction:
 Categories that **still apply** at the user-owned handler-body
 level: `arithmetic_overflow_wrapping`,
 `lifecycle_one_shot_violation`, `bounty_intent_drift`,
+`custody_terms_retroactive_mutation`,
 `frontrunnable_no_slippage`, `oracle_staleness` — bodies write
 math, mutate state, accept params, and read external data, all
-of which can drift from the spec.
+of which can drift from the spec (the release-admissibility gate
+and the admin setter that mutates it both live in bodies).
 
 Plus four qedgen-codegen-specific categories below.
 
@@ -1632,6 +1720,7 @@ exhaustive; use as a thinking primer, not a checklist.
 | field_chain_missing_root_anchor | + | typed-but-unanchored CPI authority field | = | forge a fake collateral chain that the validator accepts as internally-consistent → invoke privileged CPI (mint, withdraw) under the real authority (CRIT, forged-collateral-chain shape) |
 | init_config_field_unanchored | + | permissionless_state_writer init | = | frontrun legitimate init, bake attacker pubkey as stored "creator" / "authority" field, capture every fee/yield/withdraw routed through it (CRIT, DAMM-v2 OOD shape) |
 | bounty_intent_drift (mode flag accepted but unbranched) | + | permissionless caller | = | invoke the "forbidden" mode the bounty claimed it didn't allow, every time (HIGH→CRIT depending on what the mode controls) |
+| custody_terms_retroactive_mutation | + | single-key admin, no timelock | = | admin retroactively extends a lock / flips a withdrawal gate on already-deposited funds → strand or seize user custody (HIGH; CRIT if the admin field is also unanchored or the setter is permissionless) |
 | bounty_intent_drift (spec docstring claims behavior the spec body doesn't enforce) | + | qedgen-codegen mechanization | = | formal-verification artifacts (Lean / Kani / proptest) faithfully translate the broken spec — `lake build` green proves the broken behavior, **giving false confidence that the program is correct** (HIGH-CRIT depending on what the docstring claimed) |
 | spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
