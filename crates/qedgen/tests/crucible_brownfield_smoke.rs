@@ -237,6 +237,18 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
         body.contains("assert_no_signer_inflation(&self.ctx"),
         "drain should wire the §S1.2 inflation check around .send()"
     );
+    // Ownership-takeover guard: helper emitted + wired per action. The
+    // tracked set includes the program-owned vault PDA, so a handler that
+    // reassigns it out of program ownership trips this even though no signer
+    // gains lamports.
+    assert!(
+        body.contains("fn assert_no_ownership_takeover") && body.contains("fn snapshot_owners"),
+        "protocol-mode brownfield harness must emit the ownership-takeover guard"
+    );
+    assert!(
+        body.contains("assert_no_ownership_takeover(&self.ctx"),
+        "drain should wire the ownership-takeover check around .send()"
+    );
     assert!(
         !body.contains("todo!("),
         "IDL-driven brownfield emit should leave no todo!() in the action bodies"

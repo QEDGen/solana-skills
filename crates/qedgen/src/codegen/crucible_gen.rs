@@ -16,10 +16,11 @@ use crate::rust_codegen_util;
 ///
 /// `Spec` (default) — one `fuzz_assert!` per linked `invariant` / `property`.
 ///
-/// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but the
-/// emitted §S1.2 signer-lamport-inflation guard (`emit_action_fn`, gated on a
-/// non-empty signer set) fires as a `fuzz_assert!` after each action. Plus
-/// any panic in the *harness/host* code.
+/// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but two
+/// emitted per-action guards fire as `fuzz_assert!`s: the §S1.2
+/// signer-lamport-inflation guard (gated on a non-empty signer set) and the
+/// ownership-takeover guard (any tracked account's `owner` flipping across a
+/// call). Plus any panic in the *harness/host* code.
 ///
 /// IMPORTANT — what this does NOT catch: a fault *inside* the deployed `.so`
 /// (arithmetic overflow, div-by-zero, `unwrap` on `None`, `require!` abort)
@@ -29,9 +30,10 @@ use crate::rust_codegen_util;
 /// brownfield mode the signer-lamport guard is therefore effectively the
 /// only live detector — and only for drains landing on a tracked signer.
 ///
-/// `Both` — spec `fuzz_assert!`s AND the signer-lamport guard. Kept distinct
-/// from `Spec` so protocol-invariant codegen has a place to dispatch; the
-/// guard emission is shared with `Protocol`.
+/// `Both` — spec `fuzz_assert!`s AND both protocol guards (signer-lamport +
+/// ownership-takeover). Kept distinct from `Spec` so protocol-invariant
+/// codegen has a place to dispatch; the guard emission is shared with
+/// `Protocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvariantMode {
     Spec,
@@ -336,6 +338,83 @@ fn emit_protocol_invariants_helpers(out: &mut String) {
     out.push_str("        }\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
+
+    // ── Ownership-takeover guard ──────────────────────────────────────────
+    // A tracked account's `owner` flipping across a handler call is a
+    // takeover/rug signal: a program-owned vault reassigned away from the
+    // program (funds escape the protocol's custody), or a fuzzer-controlled
+    // account pulled into program ownership. Favor-coverage: ANY change on a
+    // tracked account fires. Accounts absent at snapshot (owner == default)
+    // are skipped so legitimate creation-in-a-handler doesn't self-trip.
+    out.push_str("// ── Ownership-takeover guard ──────────────────────────────────────────\n");
+    out.push_str("// A tracked account's owner flipping across a call is a takeover/rug\n");
+    out.push_str("// signal (vault reassigned out of the program, or a fuzzer account\n");
+    out.push_str("// pulled into program ownership). ANY change fires; accounts absent at\n");
+    out.push_str("// snapshot (owner == default) are skipped.\n");
+    out.push_str("// ────────────────────────────────────────────────────────────────────\n");
+    out.push_str("fn owner_of(ctx: &TestContext, pk: &Pubkey) -> Pubkey {\n");
+    out.push_str("    ctx.svm.get_account(pk).map(|a| a.owner).unwrap_or_default()\n");
+    out.push_str("}\n\n");
+    out.push_str("/// Snapshot (pubkey, owner) for the tracked set.\n");
+    out.push_str(
+        "fn snapshot_owners(ctx: &TestContext, tracked: &[Pubkey]) -> Vec<(Pubkey, Pubkey)> {\n",
+    );
+    out.push_str("    tracked.iter().map(|pk| (*pk, owner_of(ctx, pk))).collect()\n");
+    out.push_str("}\n\n");
+    out.push_str("/// Fire fuzz_assert! if any tracked pubkey's owner changed across the\n");
+    out.push_str("/// call. Names the pubkey + old/new owner so crash dumps point at the\n");
+    out.push_str("/// reassigned account.\n");
+    out.push_str("fn assert_no_ownership_takeover(\n");
+    out.push_str("    ctx: &TestContext,\n");
+    out.push_str("    before: &[(Pubkey, Pubkey)],\n");
+    out.push_str("    label: &str,\n");
+    out.push_str(") {\n");
+    out.push_str("    for (pk, owner_before) in before {\n");
+    out.push_str("        if *owner_before == Pubkey::default() {\n");
+    out.push_str("            continue;\n");
+    out.push_str("        }\n");
+    out.push_str("        let owner_after = owner_of(ctx, pk);\n");
+    out.push_str("        if owner_after != *owner_before {\n");
+    out.push_str("            fuzz_assert!(\n");
+    out.push_str("                false,\n");
+    out.push_str("                \"ownership takeover on {} in {}: {} → {}\",\n");
+    out.push_str("                pk,\n");
+    out.push_str("                label,\n");
+    out.push_str("                owner_before,\n");
+    out.push_str("                owner_after,\n");
+    out.push_str("            );\n");
+    out.push_str("        }\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+}
+
+/// Rust exprs for every account the harness created and can re-address:
+/// each fixture keypair's pubkey plus the program-owned PDA vault (when
+/// setup created one). This is the ownership-takeover tracked set — an owner
+/// change on any of these across a handler call is a candidate rug. Distinct
+/// from the lamport guard's signer-only set: an owner flip is suspicious on a
+/// non-signer writable too, and favor-coverage triage filters the rest.
+fn owner_tracked_pubkey_exprs(spec: &ParsedSpec) -> Vec<String> {
+    let mut exprs = Vec::new();
+    if spec_is_brownfield_with_idl_accounts(spec) {
+        for name in collect_brownfield_keypair_names(spec) {
+            exprs.push(format!("self.{}.pubkey()", brownfield_keypair_ident(&name)));
+        }
+        let has_pda = spec
+            .handlers
+            .iter()
+            .any(|h| h.accounts.iter().any(|a| a.pda_seeds.is_some()));
+        if has_pda {
+            // Re-derived the same way as the per-action accounts literal and
+            // the setup vault creation (empty-seed placeholder).
+            exprs.push("Pubkey::find_program_address(&[], &self.program_id).0".to_string());
+        }
+    } else {
+        for sig in collect_signer_idents(spec) {
+            exprs.push(format!("self.{sig}.pubkey()"));
+        }
+    }
+    exprs
 }
 
 fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
@@ -358,8 +437,9 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
         InvariantMode::Protocol => {
             s.push_str("//\n");
             s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is empty; the\n");
-            s.push_str("// live detector is the §S1.2 signer-lamport-inflation guard below\n");
-            s.push_str("// (fires only when a tracked signer GAINS lamports across a call).\n");
+            s.push_str("// live detectors are two per-action guards below: §S1.2 signer-\n");
+            s.push_str("// lamport inflation (signer GAINS lamports) and ownership takeover\n");
+            s.push_str("// (a tracked account's owner flips across a call).\n");
             s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
             s.push_str("// surface as TX ERRORS, not host panics — the host-loop crash\n");
             s.push_str("// detector does NOT catch them. Only harness/host panics do.\n");
@@ -695,6 +775,21 @@ fn emit_action_fn(
         );
     }
 
+    // Snapshot owners of every created account (+ the vault) before .send()
+    // (Protocol / Both). Separate tracked set from the lamport guard — owner
+    // flips matter on non-signers too.
+    let owner_tracked = owner_tracked_pubkey_exprs(spec);
+    if want_protocol && !owner_tracked.is_empty() {
+        out.push_str("        let __owner_tracked: Vec<Pubkey> = vec![\n");
+        for expr in &owner_tracked {
+            out.push_str(&format!("            {expr},\n"));
+        }
+        out.push_str("        ];\n");
+        out.push_str(
+            "        let __owners_before = snapshot_owners(&self.ctx, &__owner_tracked);\n",
+        );
+    }
+
     out.push_str("        let outcome = self.ctx.program(self.program_id)\n");
     out.push_str(&format!(
         "            .call(instruction::{ix_name} {{ {arg_inits}}})\n"
@@ -761,6 +856,15 @@ fn emit_action_fn(
             op.name,
         ));
     }
+    // Ownership-takeover check (Protocol / Both, non-empty tracked set). Like
+    // the lamport guard, runs even on a failed .send() — a reverted tx can
+    // still leave partial ownership mutations under some error shapes.
+    if want_protocol && !owner_tracked.is_empty() {
+        out.push_str(&format!(
+            "        assert_no_ownership_takeover(&self.ctx, &__owners_before, \"{}\");\n",
+            op.name,
+        ));
+    }
 
     // Shadow-state sync needs the on-chain account struct shape — emitted
     // as a structured comment for agent fill.
@@ -814,9 +918,10 @@ fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: I
     if matches!(mode, InvariantMode::Protocol) {
         out.push_str("#[invariant_test]\n");
         out.push_str(&format!("fn invariant_test(_fixture: &mut {fixture}) {{\n"));
-        out.push_str("    // Protocol mode — no spec assertions. The signer-lamport guard\n");
-        out.push_str("    // (per action) is the live check; in-program faults (overflow,\n");
-        out.push_str("    // unwrap, require!) surface as TX errors, not host-loop crashes.\n");
+        out.push_str("    // Protocol mode — no spec assertions. The per-action signer-lamport\n");
+        out.push_str("    // and ownership-takeover guards are the live checks; in-program\n");
+        out.push_str("    // faults (overflow, unwrap, require!) surface as TX errors, not\n");
+        out.push_str("    // host-loop crashes.\n");
         out.push_str("}\n");
         return;
     }
@@ -1113,6 +1218,69 @@ handler bump (delta : U64) : State.Active -> State.Active {
         assert!(
             harness.contains("assert_no_signer_inflation(&self.ctx, &__lamports_before, \"bump\")"),
             "inflation check must label by handler name"
+        );
+    }
+
+    #[test]
+    fn protocol_mode_wraps_send_with_ownership_check() {
+        let src = r#"spec Counter
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { count : U64, authority : Pubkey }
+
+type Error
+  | E
+
+handler bump (delta : U64) : State.Active -> State.Active {
+  auth authority
+  effect { count := count + delta }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        // Ownership helpers emitted once at top.
+        assert!(
+            harness.contains("fn owner_of") && harness.contains("fn snapshot_owners"),
+            "protocol mode must emit the ownership snapshot helpers"
+        );
+        assert!(
+            harness.contains("fn assert_no_ownership_takeover"),
+            "protocol mode must emit the ownership-takeover check"
+        );
+        // Action body snapshots owners before AND asserts after, labelled.
+        assert!(
+            harness.contains("let __owners_before = snapshot_owners("),
+            "protocol-mode action must snapshot owners before .send()"
+        );
+        assert!(
+            harness.contains("assert_no_ownership_takeover(&self.ctx, &__owners_before, \"bump\")"),
+            "ownership check must run after .send() and label by handler name"
+        );
+    }
+
+    #[test]
+    fn spec_mode_does_not_emit_ownership_check() {
+        let src = r#"spec Counter
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { count : U64, authority : Pubkey }
+
+type Error
+  | E
+
+handler bump (delta : U64) : State.Active -> State.Active {
+  auth authority
+  effect { count := count + delta }
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
+        assert!(
+            !harness.contains("assert_no_ownership_takeover")
+                && !harness.contains("snapshot_owners"),
+            "Spec mode must NOT emit the ownership guard — protocol-only"
         );
     }
 
