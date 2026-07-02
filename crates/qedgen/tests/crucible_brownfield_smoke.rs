@@ -212,42 +212,47 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     assert!(body.contains("pub fn action_maybe"));
     assert!(body.contains("pub fn action_drain"));
     assert!(body.contains("Mode: PROTOCOL"));
-    // v2.21 §S1.2 — protocol-mode harness carries the lamport-conservation
-    // helpers AND, now that buggy_anchor ships a committed idl.json, the
-    // IDL-driven path fills the `accounts::*` literals and wires the
-    // per-action inflation check. `drain`'s `authority` is a signer (the
-    // tracked set the guard snapshots) and `vault` is a program-owned PDA
-    // the harness stages so the drain can actually debit it.
+    // Protocol-mode harness carries the shared snapshot infra AND, now that
+    // buggy_anchor ships a committed idl.json, the IDL-driven path fills the
+    // `accounts::*` literals and wires the per-action guard suite. `drain`'s
+    // `authority` is a signer (the signer set) and `vault` is a program-owned
+    // PDA the harness stages so the drain can actually debit it.
     assert!(
-        body.contains("fn assert_no_signer_inflation"),
-        "protocol-mode brownfield harness must emit assert_no_signer_inflation helper"
-    );
-    assert!(
-        body.contains("fn snapshot_lamports"),
-        "protocol-mode brownfield harness must emit snapshot_lamports helper"
+        body.contains("fn snapshot_account_state") && body.contains("struct AccountSnapshot"),
+        "protocol-mode brownfield harness must emit the shared snapshot infra"
     );
     // IDL-driven account discovery: `drain` auto-fills its accounts literal
-    // (no `todo!()`) and the inflation guard wraps the send — this is what
-    // makes the fixture fire a real finding under `--fuzz <budget>`.
+    // (no `todo!()`) and the guard suite wraps the send — this is what makes
+    // the fixture fire a real finding under `--fuzz <budget>`.
     assert!(
         body.contains("accounts(accounts::Drain {"),
         "drain's accounts literal should be auto-filled from the IDL, not todo!()"
     );
+    // Full protocol suite emitted + the signer-lamport and ownership guards
+    // wired around .send(). The account-set guards track the program-owned
+    // vault PDA, so a handler reassigning it out of program ownership trips
+    // the ownership guard even though no signer gains lamports.
+    for assert_fn in [
+        "fn assert_no_signer_inflation",
+        "fn assert_lamports_conserved",
+        "fn assert_no_ownership_takeover",
+        "fn assert_no_discriminator_change",
+        "fn assert_closure_integrity",
+        "fn assert_rent_exemption_preserved",
+        "fn assert_no_realloc_data_leak",
+    ] {
+        assert!(
+            body.contains(assert_fn),
+            "protocol suite must emit `{assert_fn}`"
+        );
+    }
     assert!(
-        body.contains("assert_no_signer_inflation(&self.ctx"),
-        "drain should wire the §S1.2 inflation check around .send()"
+        body.contains("assert_no_signer_inflation(&self.ctx, &__signer_snap,"),
+        "drain should wire the signer-lamport guard around .send()"
     );
-    // Ownership-takeover guard: helper emitted + wired per action. The
-    // tracked set includes the program-owned vault PDA, so a handler that
-    // reassigns it out of program ownership trips this even though no signer
-    // gains lamports.
     assert!(
-        body.contains("fn assert_no_ownership_takeover") && body.contains("fn snapshot_owners"),
-        "protocol-mode brownfield harness must emit the ownership-takeover guard"
-    );
-    assert!(
-        body.contains("assert_no_ownership_takeover(&self.ctx"),
-        "drain should wire the ownership-takeover check around .send()"
+        body.contains("assert_no_ownership_takeover(&self.ctx, &__account_snap,"),
+        "drain should wire the ownership-takeover guard around .send()"
     );
     assert!(
         !body.contains("todo!("),
@@ -379,11 +384,11 @@ fn fixture_buggy_pinocchio_drives_brownfield_emit() {
         "plain writable accounts must get fixture keypairs in Protocol mode:\n{main_rs}"
     );
     assert!(
-        main_rs.contains("let __owners_before = snapshot_owners(&self.ctx, &__owner_tracked);"),
-        "ownership guard must snapshot a non-empty tracked set per action:\n{main_rs}"
+        main_rs.contains("let __account_snap = snapshot_account_state(&self.ctx, &__account_set);"),
+        "account-set guards must snapshot a non-empty tracked set per action:\n{main_rs}"
     );
     assert!(
-        main_rs.contains("assert_no_ownership_takeover(&self.ctx, &__owners_before, \"drain\")"),
+        main_rs.contains("assert_no_ownership_takeover(&self.ctx, &__account_snap, \"drain\")"),
         "drain must wire the ownership-takeover check (not vacuous):\n{main_rs}"
     );
 }

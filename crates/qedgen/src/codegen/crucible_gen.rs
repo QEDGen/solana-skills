@@ -16,22 +16,24 @@ use crate::rust_codegen_util;
 ///
 /// `Spec` (default) — one `fuzz_assert!` per linked `invariant` / `property`.
 ///
-/// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but two
-/// emitted per-action guards fire as `fuzz_assert!`s: the §S1.2
-/// signer-lamport-inflation guard (gated on a non-empty signer set) and the
-/// ownership-takeover guard (any tracked account's `owner` flipping across a
-/// call). Plus any panic in the *harness/host* code.
+/// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but the
+/// per-action protocol-invariant suite (`PROTOCOL_GUARDS`) fires as
+/// `fuzz_assert!`s — signer-lamport inflation, total-lamport conservation,
+/// ownership takeover, discriminator/type change, close-scrub integrity,
+/// rent-exemption loss, and realloc data leak. Plus any panic in the
+/// *harness/host* code.
 ///
 /// IMPORTANT — what this does NOT catch: a fault *inside* the deployed `.so`
 /// (arithmetic overflow, div-by-zero, `unwrap` on `None`, `require!` abort)
 /// surfaces as a **transaction error**, not a host-process panic, so
 /// Crucible's host-loop crash detector never sees it. See
-/// `tests/fixtures/regressions/v2.21-crucible-crash-first/README.md`. In
-/// brownfield mode the signer-lamport guard is therefore effectively the
-/// only live detector — and only for drains landing on a tracked signer.
+/// `tests/fixtures/regressions/v2.21-crucible-crash-first/README.md`. The
+/// suite only catches failure modes observable as a mechanical pre/post
+/// state diff (lamports / owner / discriminator / data); arithmetic and
+/// semantic bugs stay the Mollusk / spec lane.
 ///
-/// `Both` — spec `fuzz_assert!`s AND both protocol guards (signer-lamport +
-/// ownership-takeover). Kept distinct from `Spec` so protocol-invariant
+/// `Both` — spec `fuzz_assert!`s AND the full protocol-invariant suite
+/// (`PROTOCOL_GUARDS`). Kept distinct from `Spec` so protocol-invariant
 /// codegen has a place to dispatch; the guard emission is shared with
 /// `Protocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,107 +296,351 @@ use {prog}::accounts;
     Ok(out)
 }
 
-/// Emit the signer-lamport snapshot/check helpers, inlined into `main.rs`
-/// (Protocol / Both only — keeps the harness single-file). The check is
-/// asymmetric: signers may LOSE lamports (fees, rent reserves) but must not
-/// GAIN them during a handler call — a gain means lamports flowed in from
-/// outside the tracked set (drain → signer), a strong bug signal under a
-/// sealed fuzz harness.
+/// Emit the protocol-invariant suite helpers inline into `main.rs` (Protocol
+/// / Both only — keeps the harness single-file): the shared `AccountSnapshot`
+/// infra plus every `PROTOCOL_GUARDS` assert fn, in registry order.
 fn emit_protocol_invariants_helpers(out: &mut String) {
-    out.push_str("// ── Protocol invariants (v2.21 §S1.2 — lamport conservation) ────────\n");
-    out.push_str("// Per-signer asymmetric check: signers may LOSE lamports (fees, rent)\n");
-    out.push_str("// but must not GAIN lamports across a handler call. A gain implies\n");
-    out.push_str("// lamports flowed in from outside the tracked set — a drain shape.\n");
-    out.push_str("// ────────────────────────────────────────────────────────────────────\n");
-    out.push_str("fn lamports_of(ctx: &TestContext, pk: &Pubkey) -> u64 {\n");
-    out.push_str("    ctx.svm.get_account(pk).map(|a| a.lamports).unwrap_or(0)\n");
-    out.push_str("}\n\n");
-    out.push_str("/// Snapshot a vector of (pubkey, lamports) tuples for the tracked set.\n");
-    out.push_str(
-        "fn snapshot_lamports(ctx: &TestContext, tracked: &[Pubkey]) -> Vec<(Pubkey, u64)> {\n",
-    );
-    out.push_str("    tracked.iter().map(|pk| (*pk, lamports_of(ctx, pk))).collect()\n");
-    out.push_str("}\n\n");
-    out.push_str("/// Fire fuzz_assert! if any tracked pubkey gained lamports across the\n");
-    out.push_str("/// call. Names the pubkey + deltas in the message so crash dumps point\n");
-    out.push_str("/// at the offending account.\n");
-    out.push_str("fn assert_no_signer_inflation(\n");
-    out.push_str("    ctx: &TestContext,\n");
-    out.push_str("    before: &[(Pubkey, u64)],\n");
-    out.push_str("    label: &str,\n");
-    out.push_str(") {\n");
-    out.push_str("    for (pk, before_lamports) in before {\n");
-    out.push_str("        let after = lamports_of(ctx, pk);\n");
-    out.push_str("        if after > *before_lamports {\n");
-    out.push_str("            fuzz_assert!(\n");
-    out.push_str("                false,\n");
-    out.push_str("                \"lamport inflation on signer {} in {}: {} → {} (Δ +{})\",\n");
-    out.push_str("                pk,\n");
-    out.push_str("                label,\n");
-    out.push_str("                before_lamports,\n");
-    out.push_str("                after,\n");
-    out.push_str("                after - before_lamports,\n");
-    out.push_str("            );\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n");
-    out.push_str("}\n\n");
-
-    // ── Ownership-takeover guard ──────────────────────────────────────────
-    // A tracked account's `owner` flipping across a handler call is a
-    // takeover/rug signal: a program-owned vault reassigned away from the
-    // program (funds escape the protocol's custody), or a fuzzer-controlled
-    // account pulled into program ownership. Favor-coverage: ANY change on a
-    // tracked account fires. Accounts absent at snapshot (owner == default)
-    // are skipped so legitimate creation-in-a-handler doesn't self-trip.
-    out.push_str("// ── Ownership-takeover guard ──────────────────────────────────────────\n");
-    out.push_str("// A tracked account's owner flipping across a call is a takeover/rug\n");
-    out.push_str("// signal (vault reassigned out of the program, or a fuzzer account\n");
-    out.push_str("// pulled into program ownership). ANY change fires; accounts absent at\n");
-    out.push_str("// snapshot (owner == default) are skipped.\n");
-    out.push_str("// ────────────────────────────────────────────────────────────────────\n");
-    out.push_str("fn owner_of(ctx: &TestContext, pk: &Pubkey) -> Pubkey {\n");
-    out.push_str("    ctx.svm.get_account(pk).map(|a| a.owner).unwrap_or_default()\n");
-    out.push_str("}\n\n");
-    out.push_str("/// Snapshot (pubkey, owner) for the tracked set.\n");
-    out.push_str(
-        "fn snapshot_owners(ctx: &TestContext, tracked: &[Pubkey]) -> Vec<(Pubkey, Pubkey)> {\n",
-    );
-    out.push_str("    tracked.iter().map(|pk| (*pk, owner_of(ctx, pk))).collect()\n");
-    out.push_str("}\n\n");
-    out.push_str("/// Fire fuzz_assert! if any tracked pubkey's owner changed across the\n");
-    out.push_str("/// call. Names the pubkey + old/new owner so crash dumps point at the\n");
-    out.push_str("/// reassigned account.\n");
-    out.push_str("fn assert_no_ownership_takeover(\n");
-    out.push_str("    ctx: &TestContext,\n");
-    out.push_str("    before: &[(Pubkey, Pubkey)],\n");
-    out.push_str("    label: &str,\n");
-    out.push_str(") {\n");
-    out.push_str("    for (pk, owner_before) in before {\n");
-    out.push_str("        if *owner_before == Pubkey::default() {\n");
-    out.push_str("            continue;\n");
-    out.push_str("        }\n");
-    out.push_str("        let owner_after = owner_of(ctx, pk);\n");
-    out.push_str("        if owner_after != *owner_before {\n");
-    out.push_str("            fuzz_assert!(\n");
-    out.push_str("                false,\n");
-    out.push_str("                \"ownership takeover on {} in {}: {} → {}\",\n");
-    out.push_str("                pk,\n");
-    out.push_str("                label,\n");
-    out.push_str("                owner_before,\n");
-    out.push_str("                owner_after,\n");
-    out.push_str("            );\n");
-    out.push_str("        }\n");
-    out.push_str("    }\n");
-    out.push_str("}\n\n");
+    out.push_str(SNAPSHOT_INFRA);
+    for guard in PROTOCOL_GUARDS {
+        (guard.emit_helper)(out);
+    }
 }
 
-/// Rust exprs for every account the harness created and can re-address:
-/// each fixture keypair's pubkey plus the program-owned PDA vault (when
-/// setup created one). This is the ownership-takeover tracked set — an owner
-/// change on any of these across a handler call is a candidate rug. Distinct
-/// from the lamport guard's signer-only set: an owner flip is suspicious on a
-/// non-signer writable too, and favor-coverage triage filters the rest.
-fn owner_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
+/// Which account set a guard snapshots.
+#[derive(Clone, Copy)]
+enum TrackedSet {
+    /// Fixture signer keypairs (auth-cited / `is_signer` accounts).
+    Signer,
+    /// Every created account: fixture keypairs + the program-owned vault.
+    Account,
+}
+
+/// One entry in the crash-first protocol-invariant suite. To add a failure
+/// mode: append a `ProtocolGuard` and its `emit_helper` — the helper block
+/// and the per-action wiring both iterate `PROTOCOL_GUARDS`, so nothing else
+/// needs threading. Every guard reads only post-state and fires on a
+/// mechanical, spec-less anomaly; in-program faults are TX errors and stay
+/// out of scope (Mollusk / spec lane).
+struct ProtocolGuard {
+    /// Stable catalog identity for the guard. Not emitted today; kept as the
+    /// anchor for future per-guard config (e.g. a `--disable-guard <id>`
+    /// flag or a categorize_crash mapping).
+    #[allow(dead_code)]
+    id: &'static str,
+    /// Account set this guard snapshots + checks.
+    set: TrackedSet,
+    /// Emitted assert fn, called per action after `.send()`.
+    assert_fn: &'static str,
+    /// Emits the assert fn definition into the shared helpers block.
+    emit_helper: fn(&mut String),
+}
+
+const PROTOCOL_GUARDS: &[ProtocolGuard] = &[
+    ProtocolGuard {
+        id: "signer_lamport",
+        set: TrackedSet::Signer,
+        assert_fn: "assert_no_signer_inflation",
+        emit_helper: emit_guard_signer_inflation,
+    },
+    ProtocolGuard {
+        id: "lamport_conservation",
+        set: TrackedSet::Account,
+        assert_fn: "assert_lamports_conserved",
+        emit_helper: emit_guard_lamports_conserved,
+    },
+    ProtocolGuard {
+        id: "ownership",
+        set: TrackedSet::Account,
+        assert_fn: "assert_no_ownership_takeover",
+        emit_helper: emit_guard_ownership,
+    },
+    ProtocolGuard {
+        id: "discriminator",
+        set: TrackedSet::Account,
+        assert_fn: "assert_no_discriminator_change",
+        emit_helper: emit_guard_discriminator,
+    },
+    ProtocolGuard {
+        id: "closure",
+        set: TrackedSet::Account,
+        assert_fn: "assert_closure_integrity",
+        emit_helper: emit_guard_closure,
+    },
+    ProtocolGuard {
+        id: "rent",
+        set: TrackedSet::Account,
+        assert_fn: "assert_rent_exemption_preserved",
+        emit_helper: emit_guard_rent,
+    },
+    ProtocolGuard {
+        id: "realloc_leak",
+        set: TrackedSet::Account,
+        assert_fn: "assert_no_realloc_data_leak",
+        emit_helper: emit_guard_realloc_leak,
+    },
+];
+
+/// Shared post-state snapshot: one `get_account` pass per tracked set per
+/// action, captured as `AccountSnapshot` so every guard reads from a common
+/// pre-image. Re-fetches current state at assert time to diff.
+const SNAPSHOT_INFRA: &str = r#"// ── Protocol invariant suite (crash-first, spec-less) ─────────────────
+// Guards read only post-state (get_account: lamports / owner / data). A
+// fault INSIDE the program (overflow, unwrap, require!) surfaces as a TX
+// error, not a host panic, so it is NOT caught here — that stays the
+// Mollusk / spec lane. Favor-coverage: guards fire on any candidate shape
+// and lean on downstream triage.
+// ──────────────────────────────────────────────────────────────────────
+#[derive(Clone)]
+struct AccountSnapshot {
+    pk: Pubkey,
+    exists: bool,
+    lamports: u64,
+    owner: Pubkey,
+    disc: [u8; 8],
+    data_len: usize,
+}
+
+fn account_state(ctx: &TestContext, pk: &Pubkey) -> AccountSnapshot {
+    match ctx.svm.get_account(pk) {
+        Some(a) => {
+            let mut disc = [0u8; 8];
+            let n = a.data.len().min(8);
+            disc[..n].copy_from_slice(&a.data[..n]);
+            AccountSnapshot {
+                pk: *pk,
+                exists: true,
+                lamports: a.lamports,
+                owner: a.owner,
+                disc,
+                data_len: a.data.len(),
+            }
+        }
+        None => AccountSnapshot {
+            pk: *pk,
+            exists: false,
+            lamports: 0,
+            owner: Pubkey::default(),
+            disc: [0u8; 8],
+            data_len: 0,
+        },
+    }
+}
+
+fn snapshot_account_state(ctx: &TestContext, tracked: &[Pubkey]) -> Vec<AccountSnapshot> {
+    tracked.iter().map(|pk| account_state(ctx, pk)).collect()
+}
+
+fn rent_exempt_minimum(data_len: usize) -> u64 {
+    anchor_lang::solana_program::rent::Rent::default().minimum_balance(data_len)
+}
+
+"#;
+
+/// `missing_signer` / drain: a signer must not GAIN lamports across a call —
+/// a gain means protocol funds flowed to a fuzzer-controlled signer.
+fn emit_guard_signer_inflation(out: &mut String) {
+    out.push_str(
+        r#"/// Signer must not GAIN lamports across a call (drain → attacker signer).
+fn assert_no_signer_inflation(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists {
+            continue;
+        }
+        let after = account_state(ctx, &b.pk);
+        if after.lamports > b.lamports {
+            fuzz_assert!(
+                false,
+                "lamport inflation on signer {} in {}: {} -> {}",
+                b.pk, label, b.lamports, after.lamports
+            );
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// Lamport conservation: the pre-existing tracked accounts' total lamports
+/// must not increase — a rise means value entered the set from an untracked
+/// source (materialization / external-funded drain target).
+fn emit_guard_lamports_conserved(out: &mut String) {
+    out.push_str(
+        r#"/// Total lamports across pre-existing tracked accounts must not increase.
+fn assert_lamports_conserved(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    let sum_before: u128 = before.iter().filter(|b| b.exists).map(|b| b.lamports as u128).sum();
+    let sum_after: u128 = before
+        .iter()
+        .filter(|b| b.exists)
+        .map(|b| account_state(ctx, &b.pk).lamports as u128)
+        .sum();
+    if sum_after > sum_before {
+        fuzz_assert!(
+            false,
+            "lamport inflation in {}: tracked total {} -> {}",
+            label, sum_before, sum_after
+        );
+    }
+}
+
+"#,
+    );
+}
+
+/// `missing_owner_check` / rug: a live account's `owner` must not flip
+/// across a call (vault reassigned out, or a fuzzer account pulled in).
+fn emit_guard_ownership(out: &mut String) {
+    out.push_str(
+        r#"/// A live tracked account's owner must not flip across a call.
+fn assert_no_ownership_takeover(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists || b.owner == Pubkey::default() {
+            continue;
+        }
+        let after = account_state(ctx, &b.pk);
+        if after.exists && after.owner != b.owner {
+            fuzz_assert!(
+                false,
+                "ownership takeover on {} in {}: {} -> {}",
+                b.pk, label, b.owner, after.owner
+            );
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// `account_type_confusion` / `discriminator_collision`: a live typed
+/// account's 8-byte discriminator must not change type across a call.
+fn emit_guard_discriminator(out: &mut String) {
+    out.push_str(
+        r#"/// A live typed account's discriminator must not change type.
+fn assert_no_discriminator_change(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists || b.data_len < 8 {
+            continue;
+        }
+        let after = account_state(ctx, &b.pk);
+        if after.exists && after.data_len >= 8 && after.disc != b.disc {
+            fuzz_assert!(
+                false,
+                "discriminator change on {} in {}: {:?} -> {:?}",
+                b.pk, label, b.disc, after.disc
+            );
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// `pda_lifecycle_reuse_after_close` / close-redirection: draining an
+/// account to zero lamports must scrub it (data zeroed + owner reset to
+/// system), else it stays reusable as a live typed account.
+fn emit_guard_closure(out: &mut String) {
+    out.push_str(
+        r#"/// Closing (lamports -> 0) must scrub data + reset owner to system.
+fn assert_closure_integrity(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists || b.lamports == 0 {
+            continue;
+        }
+        if let Some(a) = ctx.svm.get_account(&b.pk) {
+            if a.lamports == 0 {
+                let data_scrubbed = a.data.iter().all(|byte| *byte == 0);
+                if !(data_scrubbed && a.owner == system_program::ID) {
+                    fuzz_assert!(
+                        false,
+                        "unscrubbed close on {} in {}: owner={} data_zeroed={}",
+                        b.pk, label, a.owner, data_scrubbed
+                    );
+                }
+            }
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// `missing_rent_exemption` / `lamport_write_demotion`: an account that was
+/// rent-exempt must not drop below the rent-exempt minimum while still live.
+fn emit_guard_rent(out: &mut String) {
+    out.push_str(
+        r#"/// A rent-exempt account must not drop below the minimum while live.
+fn assert_rent_exemption_preserved(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists || b.lamports < rent_exempt_minimum(b.data_len) {
+            continue;
+        }
+        let after = account_state(ctx, &b.pk);
+        if after.exists && after.lamports > 0 && after.lamports < rent_exempt_minimum(after.data_len) {
+            fuzz_assert!(
+                false,
+                "rent-exemption lost on {} in {}: {} < min {}",
+                b.pk, label, after.lamports, rent_exempt_minimum(after.data_len)
+            );
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// `realloc_zero_init_data_leak`: when an account grows, the new tail bytes
+/// must be zero-initialized — non-zero tail leaks prior heap contents.
+fn emit_guard_realloc_leak(out: &mut String) {
+    out.push_str(
+        r#"/// A grown account's new tail bytes must be zero-initialized.
+fn assert_no_realloc_data_leak(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    for b in before {
+        if !b.exists {
+            continue;
+        }
+        if let Some(a) = ctx.svm.get_account(&b.pk) {
+            if a.data.len() > b.data_len && a.data[b.data_len..].iter().any(|byte| *byte != 0) {
+                fuzz_assert!(
+                    false,
+                    "realloc data leak on {} in {}: bytes [{}..{}] not zero-initialized",
+                    b.pk, label, b.data_len, a.data.len()
+                );
+            }
+        }
+    }
+}
+
+"#,
+    );
+}
+
+/// Signer-set pubkey exprs (`self.<sig>.pubkey()`), brownfield-cased. The
+/// signer-lamport guard's tracked set: a signer gaining lamports is the
+/// drain-to-attacker shape.
+fn signer_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
+    let is_brownfield = uses_brownfield_accounts(spec, mode);
+    collect_signer_idents(spec)
+        .iter()
+        .map(|sig| {
+            let ident = if is_brownfield {
+                brownfield_keypair_ident(sig)
+            } else {
+                sig.clone()
+            };
+            format!("self.{ident}.pubkey()")
+        })
+        .collect()
+}
+
+/// Account-set pubkey exprs: every fixture keypair plus the program-owned
+/// PDA vault (when setup created one). The `Account`-set guards' tracked set
+/// — broader than signers because owner flips, discriminator changes, and
+/// closures matter on non-signer writables too.
+fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
     let mut exprs = Vec::new();
     if uses_brownfield_accounts(spec, mode) {
         for name in collect_brownfield_keypair_names(spec) {
@@ -437,9 +683,10 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
         InvariantMode::Protocol => {
             s.push_str("//\n");
             s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is empty; the\n");
-            s.push_str("// live detectors are two per-action guards below: §S1.2 signer-\n");
-            s.push_str("// lamport inflation (signer GAINS lamports) and ownership takeover\n");
-            s.push_str("// (a tracked account's owner flips across a call).\n");
+            s.push_str("// per-action protocol-invariant suite below is the live detector:\n");
+            s.push_str("// signer-lamport inflation, total-lamport conservation, ownership\n");
+            s.push_str("// takeover, discriminator change, close-scrub, rent-exemption loss,\n");
+            s.push_str("// realloc data leak.\n");
             s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
             s.push_str("// surface as TX ERRORS, not host panics — the host-loop crash\n");
             s.push_str("// detector does NOT catch them. Only harness/host panics do.\n");
@@ -447,8 +694,8 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
         InvariantMode::Both => {
             s.push_str("//\n");
             s.push_str("// Mode: SPEC + PROTOCOL. Spec-invariant assertions fire as usual,\n");
-            s.push_str("// plus the §S1.2 signer-lamport-inflation guard below. In-program\n");
-            s.push_str("// faults still surface as TX errors, not host-loop crashes.\n");
+            s.push_str("// plus the full protocol-invariant suite below. In-program faults\n");
+            s.push_str("// still surface as TX errors, not host-loop crashes.\n");
         }
     }
     s.push_str("//\n");
@@ -780,39 +1027,31 @@ fn emit_action_fn(
     // Tracked set = every fixture signer keypair. PDAs are NOT tracked —
     // their pubkeys are derived at runtime inside the agent-filled
     // `.accounts(...)` literal.
+    // Protocol-invariant suite (Protocol / Both). Snapshot each used tracked
+    // set once before .send(); the registry drives which guards assert after.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
-    let is_brownfield = uses_brownfield_accounts(spec, mode);
-    let signers = collect_signer_idents(spec);
-    if want_protocol && !signers.is_empty() {
-        out.push_str("        let __tracked_pubkeys: Vec<Pubkey> = vec![\n");
-        for sig in &signers {
-            // Must match the fixture's snake_cased ident — otherwise the
-            // tracker emits `self.escrowSeed` against `self.escrow_seed`.
-            let ident = if is_brownfield {
-                brownfield_keypair_ident(sig)
-            } else {
-                sig.clone()
-            };
-            out.push_str(&format!("            self.{ident}.pubkey(),\n"));
-        }
-        out.push_str("        ];\n");
-        out.push_str(
-            "        let __lamports_before = snapshot_lamports(&self.ctx, &__tracked_pubkeys);\n",
-        );
-    }
-
-    // Snapshot owners of every created account (+ the vault) before .send()
-    // (Protocol / Both). Separate tracked set from the lamport guard — owner
-    // flips matter on non-signers too.
-    let owner_tracked = owner_tracked_pubkey_exprs(spec, mode);
-    if want_protocol && !owner_tracked.is_empty() {
-        out.push_str("        let __owner_tracked: Vec<Pubkey> = vec![\n");
-        for expr in &owner_tracked {
+    let signer_exprs = signer_tracked_pubkey_exprs(spec, mode);
+    let account_exprs = account_tracked_pubkey_exprs(spec, mode);
+    let use_signer = want_protocol && !signer_exprs.is_empty();
+    let use_account = want_protocol && !account_exprs.is_empty();
+    if use_signer {
+        out.push_str("        let __signer_set: Vec<Pubkey> = vec![\n");
+        for expr in &signer_exprs {
             out.push_str(&format!("            {expr},\n"));
         }
         out.push_str("        ];\n");
         out.push_str(
-            "        let __owners_before = snapshot_owners(&self.ctx, &__owner_tracked);\n",
+            "        let __signer_snap = snapshot_account_state(&self.ctx, &__signer_set);\n",
+        );
+    }
+    if use_account {
+        out.push_str("        let __account_set: Vec<Pubkey> = vec![\n");
+        for expr in &account_exprs {
+            out.push_str(&format!("            {expr},\n"));
+        }
+        out.push_str("        ];\n");
+        out.push_str(
+            "        let __account_snap = snapshot_account_state(&self.ctx, &__account_set);\n",
         );
     }
 
@@ -873,23 +1112,22 @@ fn emit_action_fn(
         "        let success = outcome.as_ref().map(|o| o.is_success()).unwrap_or(false);\n",
     );
 
-    // Assert no signer inflation after .send() (Protocol / Both, non-empty
-    // tracked set). Runs even when .send() failed — a failed tx can still
-    // mutate state (CPI rollback isn't guaranteed for every error shape).
-    if want_protocol && !signers.is_empty() {
-        out.push_str(&format!(
-            "        assert_no_signer_inflation(&self.ctx, &__lamports_before, \"{}\");\n",
-            op.name,
-        ));
-    }
-    // Ownership-takeover check (Protocol / Both, non-empty tracked set). Like
-    // the lamport guard, runs even on a failed .send() — a reverted tx can
-    // still leave partial ownership mutations under some error shapes.
-    if want_protocol && !owner_tracked.is_empty() {
-        out.push_str(&format!(
-            "        assert_no_ownership_takeover(&self.ctx, &__owners_before, \"{}\");\n",
-            op.name,
-        ));
+    // Registry-driven asserts after .send() (Protocol / Both). Run even when
+    // .send() failed — a reverted tx can still leave partial mutations under
+    // some error shapes. Each guard reads the snapshot for its tracked set.
+    if want_protocol {
+        for guard in PROTOCOL_GUARDS {
+            let (set_used, snap_var) = match guard.set {
+                TrackedSet::Signer => (use_signer, "__signer_snap"),
+                TrackedSet::Account => (use_account, "__account_snap"),
+            };
+            if set_used {
+                out.push_str(&format!(
+                    "        {}(&self.ctx, &{}, \"{}\");\n",
+                    guard.assert_fn, snap_var, op.name,
+                ));
+            }
+        }
     }
 
     // Shadow-state sync needs the on-chain account struct shape — emitted
@@ -944,8 +1182,8 @@ fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: I
     if matches!(mode, InvariantMode::Protocol) {
         out.push_str("#[invariant_test]\n");
         out.push_str(&format!("fn invariant_test(_fixture: &mut {fixture}) {{\n"));
-        out.push_str("    // Protocol mode — no spec assertions. The per-action signer-lamport\n");
-        out.push_str("    // and ownership-takeover guards are the live checks; in-program\n");
+        out.push_str("    // Protocol mode — no spec assertions. The per-action protocol-\n");
+        out.push_str("    // invariant suite (see top of file) is the live check; in-program\n");
         out.push_str("    // faults (overflow, unwrap, require!) surface as TX errors, not\n");
         out.push_str("    // host-loop crashes.\n");
         out.push_str("}\n");
@@ -1222,71 +1460,49 @@ handler bump (delta : U64) : State.Active -> State.Active {
 "#;
         let spec = parse_str(src).expect("parse");
         let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
-        // Helpers emitted once at top.
+        // Shared snapshot infra emitted once at top.
         assert!(
-            harness.contains("fn snapshot_lamports"),
-            "protocol mode must emit the snapshot_lamports helper"
+            harness.contains("fn snapshot_account_state")
+                && harness.contains("struct AccountSnapshot"),
+            "protocol mode must emit the shared AccountSnapshot infra"
+        );
+        // Every guard's assert fn is emitted, in registry order.
+        for assert_fn in [
+            "fn assert_no_signer_inflation",
+            "fn assert_lamports_conserved",
+            "fn assert_no_ownership_takeover",
+            "fn assert_no_discriminator_change",
+            "fn assert_closure_integrity",
+            "fn assert_rent_exemption_preserved",
+            "fn assert_no_realloc_data_leak",
+        ] {
+            assert!(
+                harness.contains(assert_fn),
+                "protocol suite must emit `{assert_fn}`:\n{harness}"
+            );
+        }
+        // Both tracked sets snapshotted before .send() (Counter's `auth
+        // authority` gives a non-empty signer set; the account set falls
+        // back to signers when there's no accounts block).
+        assert!(
+            harness.contains("let __signer_snap = snapshot_account_state(")
+                && harness.contains("let __account_snap = snapshot_account_state("),
+            "protocol-mode action must snapshot both tracked sets before .send()"
+        );
+        // Signer-set guard reads __signer_snap; account-set guards read
+        // __account_snap; per-handler label threads through.
+        assert!(
+            harness.contains("assert_no_signer_inflation(&self.ctx, &__signer_snap, \"bump\")"),
+            "signer-lamport guard must read the signer snapshot, labelled by handler"
         );
         assert!(
-            harness.contains("fn assert_no_signer_inflation"),
-            "protocol mode must emit the inflation check"
-        );
-        // Action body snapshots before AND asserts after.
-        assert!(
-            harness.contains("let __lamports_before = snapshot_lamports("),
-            "protocol-mode action must snapshot before .send()"
-        );
-        assert!(
-            harness.contains("assert_no_signer_inflation(&self.ctx, &__lamports_before,"),
-            "protocol-mode action must check inflation after .send()"
-        );
-        // Per-handler label threads through.
-        assert!(
-            harness.contains("assert_no_signer_inflation(&self.ctx, &__lamports_before, \"bump\")"),
-            "inflation check must label by handler name"
-        );
-    }
-
-    #[test]
-    fn protocol_mode_wraps_send_with_ownership_check() {
-        let src = r#"spec Counter
-program_id "11111111111111111111111111111111"
-
-type State
-  | Active of { count : U64, authority : Pubkey }
-
-type Error
-  | E
-
-handler bump (delta : U64) : State.Active -> State.Active {
-  auth authority
-  effect { count := count + delta }
-}
-"#;
-        let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
-        // Ownership helpers emitted once at top.
-        assert!(
-            harness.contains("fn owner_of") && harness.contains("fn snapshot_owners"),
-            "protocol mode must emit the ownership snapshot helpers"
-        );
-        assert!(
-            harness.contains("fn assert_no_ownership_takeover"),
-            "protocol mode must emit the ownership-takeover check"
-        );
-        // Action body snapshots owners before AND asserts after, labelled.
-        assert!(
-            harness.contains("let __owners_before = snapshot_owners("),
-            "protocol-mode action must snapshot owners before .send()"
-        );
-        assert!(
-            harness.contains("assert_no_ownership_takeover(&self.ctx, &__owners_before, \"bump\")"),
-            "ownership check must run after .send() and label by handler name"
+            harness.contains("assert_no_ownership_takeover(&self.ctx, &__account_snap, \"bump\")"),
+            "account-set guard must read the account snapshot, labelled by handler"
         );
     }
 
     #[test]
-    fn spec_mode_does_not_emit_ownership_check() {
+    fn spec_mode_does_not_emit_protocol_suite() {
         let src = r#"spec Counter
 program_id "11111111111111111111111111111111"
 
@@ -1304,37 +1520,11 @@ handler bump (delta : U64) : State.Active -> State.Active {
         let spec = parse_str(src).expect("parse");
         let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
         assert!(
-            !harness.contains("assert_no_ownership_takeover")
-                && !harness.contains("snapshot_owners"),
-            "Spec mode must NOT emit the ownership guard — protocol-only"
-        );
-    }
-
-    #[test]
-    fn spec_mode_does_not_emit_lamport_check() {
-        let src = r#"spec Counter
-program_id "11111111111111111111111111111111"
-
-type State
-  | Active of { count : U64, authority : Pubkey }
-
-type Error
-  | E
-
-handler bump (delta : U64) : State.Active -> State.Active {
-  auth authority
-  effect { count := count + delta }
-}
-"#;
-        let spec = parse_str(src).expect("parse");
-        let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
-        assert!(
-            !harness.contains("snapshot_lamports"),
-            "Spec mode must NOT emit the protocol helpers — preserves v2.20 output"
-        );
-        assert!(
-            !harness.contains("assert_no_signer_inflation"),
-            "Spec mode must NOT emit the inflation check"
+            !harness.contains("snapshot_account_state")
+                && !harness.contains("assert_no_signer_inflation")
+                && !harness.contains("assert_no_ownership_takeover")
+                && !harness.contains("assert_closure_integrity"),
+            "Spec mode must NOT emit the protocol-invariant suite — protocol-only"
         );
     }
 
