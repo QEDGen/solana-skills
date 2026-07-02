@@ -1,0 +1,31 @@
+// Issue #139: bare state-field reads in `requires` guards lost the state
+// receiver in every backend (Kani/proptest `if !((active == 0))`, Lean
+// `if active = 0`) — none of which compile. Handler params (`amount`) must
+// stay bare. Filed against v2.38.0; spec shape is the reporter's repro:
+// record-form state (`type State = { … }`), no accounts block.
+
+spec GenericVault
+program_id "11111111111111111111111111111111"
+
+type State = {
+  active : U8,
+  rate   : U16,
+  fee    : U64,
+  cut    : U64,
+}
+
+type Error | Unauthorized
+
+handler execute (amount : U64) : State -> State {
+  permissionless
+  requires active == 0 else Unauthorized
+  requires amount > 0 else Unauthorized
+  effect {
+    fee := amount
+    cut := fee
+  }
+}
+
+property conservation :
+  (state.cut + state.fee) == state.fee
+  preserved_by all

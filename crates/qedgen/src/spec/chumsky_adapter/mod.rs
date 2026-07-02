@@ -21,6 +21,7 @@ use crate::check::{
 // items so the existing `crate::chumsky_adapter::<name>` call sites — and the
 // cross-submodule references — continue to resolve unchanged.
 mod adapt;
+mod canon;
 mod effects;
 mod lean;
 mod rust;
@@ -29,6 +30,8 @@ mod typecheck;
 pub use adapt::{adapt, parse_str};
 pub use typecheck::typecheck_spec;
 
+pub(in crate::spec::chumsky_adapter) use canon::*;
+pub(crate) use canon::{collect_guard_path_refs, GuardPathRef};
 pub(in crate::spec::chumsky_adapter) use effects::*;
 pub(in crate::spec::chumsky_adapter) use lean::*;
 pub(in crate::spec::chumsky_adapter) use rust::*;

@@ -421,3 +421,26 @@ fn render_emits_mod_wrapping_for_multi_account() {
         "expected `}} // mod loan` close"
     );
 }
+
+/// Issue #139: bare state-field names in `requires` must reach the Kani
+/// transition fn and guard-rejection assumes with the `s.` receiver —
+/// bare `active` is a compile error inside `fn execute(s: &mut State, …)`.
+#[test]
+fn bare_state_field_requires_reach_harness_with_receiver() {
+    let (mir, parsed) = lower_fixture(
+        "crates/qedgen/tests/fixtures/regressions/issue-139-bare-state-refs/generic_vault.qedspec",
+    );
+    let out = render(&mir, &parsed);
+    assert!(
+        out.contains("if !((s.active == 0) && (amount > 0))"),
+        "transition guard must read state through `s`:\n{out}"
+    );
+    assert!(
+        out.contains("kani::assume(!((s.active == 0) && (amount > 0)));"),
+        "guard-rejection assume must read state through `s`:\n{out}"
+    );
+    assert!(
+        !out.contains("(active == 0)"),
+        "bare state-field guard leaked into the harness:\n{out}"
+    );
+}
