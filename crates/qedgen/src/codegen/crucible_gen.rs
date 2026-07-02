@@ -284,7 +284,7 @@ use {prog}::accounts;
         emit_protocol_invariants_helpers(&mut out);
     }
 
-    emit_fixture_struct(&mut out, spec, &fixture);
+    emit_fixture_struct(&mut out, spec, &fixture, mode);
     out.push('\n');
     emit_fixture_impl(&mut out, spec, &fixture, mode)?;
     out.push('\n');
@@ -394,9 +394,9 @@ fn emit_protocol_invariants_helpers(out: &mut String) {
 /// change on any of these across a handler call is a candidate rug. Distinct
 /// from the lamport guard's signer-only set: an owner flip is suspicious on a
 /// non-signer writable too, and favor-coverage triage filters the rest.
-fn owner_tracked_pubkey_exprs(spec: &ParsedSpec) -> Vec<String> {
+fn owner_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
     let mut exprs = Vec::new();
-    if spec_is_brownfield_with_idl_accounts(spec) {
+    if uses_brownfield_accounts(spec, mode) {
         for name in collect_brownfield_keypair_names(spec) {
             exprs.push(format!("self.{}.pubkey()", brownfield_keypair_ident(&name)));
         }
@@ -473,7 +473,7 @@ fn fixture_name(spec: &ParsedSpec) -> String {
     format!("{head}Fixture")
 }
 
-fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str) {
+fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
     out.push_str("/// Fixture state. Includes Crucible test infrastructure plus shadow\n");
     out.push_str("/// fields mirroring spec state — invariants read from these instead of\n");
     out.push_str("/// from LiteSVM accounts directly so the body translation matches the\n");
@@ -483,7 +483,7 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str) {
     out.push_str("    ctx: TestContext,\n");
     out.push_str("    program_id: Pubkey,\n");
 
-    if spec_is_brownfield_with_idl_accounts(spec) {
+    if uses_brownfield_accounts(spec, mode) {
         // Brownfield: one Keypair per non-default, non-PDA account (signers
         // AND user-provided writables). Field idents are snake_cased; the
         // IDL's camelCase name stays on `ParsedHandlerAccount` to match the
@@ -520,6 +520,32 @@ fn spec_is_brownfield_with_idl_accounts(spec: &ParsedSpec) -> bool {
             .iter()
             .any(|a| a.default_pubkey.is_some() || a.pda_seeds.is_some())
     })
+}
+
+/// Whether to emit fixture accounts the brownfield way (one Keypair per
+/// non-default, non-PDA account — signers AND writables) rather than the
+/// spec-mode signers-only way.
+///
+/// The `spec_is_brownfield_with_idl_accounts` proxy alone under-fires: a
+/// brownfield program whose handlers take only plain writable accounts (no
+/// default address, no PDA seed — e.g. a raw `drain(source, target)`) looks
+/// spec-shaped and emits no keypairs, leaving both protocol guards with an
+/// empty tracked set. `InvariantMode::Protocol` is unconditionally brownfield
+/// by construction (the `--root` path with no spec passes it), so treat it as
+/// brownfield too — but only when there ARE account entries to derive
+/// keypairs from. An auth-only handler (`auth X`, no accounts block) has no
+/// account list; it must keep the signer path so the `auth X` signer still
+/// gets a keypair (the brownfield collector reads the account list, not
+/// `who`). `Both` keeps the proxy — it carries a real spec whose accounts
+/// block drives account handling.
+fn uses_brownfield_accounts(spec: &ParsedSpec, mode: InvariantMode) -> bool {
+    spec_is_brownfield_with_idl_accounts(spec)
+        || (matches!(mode, InvariantMode::Protocol) && spec_has_account_entries(spec))
+}
+
+/// Any handler declares a non-empty account list.
+fn spec_has_account_entries(spec: &ParsedSpec) -> bool {
+    spec.handlers.iter().any(|h| !h.accounts.is_empty())
 }
 
 /// DSL type → Rust shadow type. Primitives + Pubkey only; compound types
@@ -599,7 +625,7 @@ fn emit_fixture_impl(
     mode: InvariantMode,
 ) -> Result<()> {
     let prog = spec_program_name(spec);
-    let is_brownfield = spec_is_brownfield_with_idl_accounts(spec);
+    let is_brownfield = uses_brownfield_accounts(spec, mode);
     let signers = collect_signer_idents(spec);
     let brownfield_names = if is_brownfield {
         collect_brownfield_keypair_names(spec)
@@ -755,7 +781,7 @@ fn emit_action_fn(
     // their pubkeys are derived at runtime inside the agent-filled
     // `.accounts(...)` literal.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
-    let is_brownfield = spec_is_brownfield_with_idl_accounts(spec);
+    let is_brownfield = uses_brownfield_accounts(spec, mode);
     let signers = collect_signer_idents(spec);
     if want_protocol && !signers.is_empty() {
         out.push_str("        let __tracked_pubkeys: Vec<Pubkey> = vec![\n");
@@ -778,7 +804,7 @@ fn emit_action_fn(
     // Snapshot owners of every created account (+ the vault) before .send()
     // (Protocol / Both). Separate tracked set from the lamport guard — owner
     // flips matter on non-signers too.
-    let owner_tracked = owner_tracked_pubkey_exprs(spec);
+    let owner_tracked = owner_tracked_pubkey_exprs(spec, mode);
     if want_protocol && !owner_tracked.is_empty() {
         out.push_str("        let __owner_tracked: Vec<Pubkey> = vec![\n");
         for expr in &owner_tracked {
@@ -1083,7 +1109,7 @@ handler increment : State.Active -> State.Active {
     fn emits_fixture_with_state_shadow_fields() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
         let mut out = String::new();
-        emit_fixture_struct(&mut out, &spec, "CounterFixture");
+        emit_fixture_struct(&mut out, &spec, "CounterFixture", InvariantMode::Spec);
         assert!(out.contains("#[derive(Clone)]"));
         assert!(out.contains("struct CounterFixture {"));
         assert!(out.contains("ctx: TestContext,"));

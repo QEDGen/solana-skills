@@ -362,15 +362,29 @@ fn fixture_buggy_pinocchio_drives_brownfield_emit() {
             "expected `{action}` in emitted harness; got:\n{main_rs}"
         );
     }
-    // Protocol-mode banner + lamport-conservation guard from v2.21 §S1.2
-    // still ship for Pinocchio brownfield (same emitter path).
     assert!(
         main_rs.contains("Mode: PROTOCOL"),
         "Pinocchio brownfield should emit PROTOCOL-mode harness"
     );
+    // Its accounts (`source`, `target`) carry no default address or PDA
+    // seed, so the old `spec_is_brownfield_with_idl_accounts` proxy
+    // mis-classified this program as spec-mode and emitted NO keypairs —
+    // both protocol guards then had an empty tracked set and fired nothing
+    // (a green-but-vacuous test). Since Protocol mode is now treated as
+    // brownfield unconditionally, `source`/`target` get fixture keypairs and
+    // the ownership-takeover guard wires a real tracked set + per-action
+    // check. Assert the guard is WIRED, not merely that a helper is present.
     assert!(
-        main_rs.contains("fn snapshot_lamports"),
-        "lamport-conservation guard should ship for Pinocchio brownfield"
+        main_rs.contains("source: Rc<Keypair>,") && main_rs.contains("target: Rc<Keypair>,"),
+        "plain writable accounts must get fixture keypairs in Protocol mode:\n{main_rs}"
+    );
+    assert!(
+        main_rs.contains("let __owners_before = snapshot_owners(&self.ctx, &__owner_tracked);"),
+        "ownership guard must snapshot a non-empty tracked set per action:\n{main_rs}"
+    );
+    assert!(
+        main_rs.contains("assert_no_ownership_takeover(&self.ctx, &__owners_before, \"drain\")"),
+        "drain must wire the ownership-takeover check (not vacuous):\n{main_rs}"
     );
 }
 
