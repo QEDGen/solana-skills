@@ -1599,6 +1599,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // error variants, silently breaking every `error_codes` consumer. P0.
     warnings.extend(check_error_declared_as_record(spec));
 
+    // A `requires` name that resolves to nothing renders verbatim into
+    // every backend and fails to compile there — fail at check instead. P0.
+    warnings.extend(check_unknown_guard_identifier(spec));
+
     // `modifies [X]` with no effect write and no `ensures` reference: the
     // field is completely unconstrained — Lean frame proofs allow any
     // post-value, the impl-fill site has nothing to verify against. P0.

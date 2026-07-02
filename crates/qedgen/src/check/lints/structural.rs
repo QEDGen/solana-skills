@@ -684,4 +684,172 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
     }
+
+    #[test]
+    fn unknown_guard_identifier_fires_on_typos_only() {
+        let src = r#"spec TypoVault
+program_id "11111111111111111111111111111111"
+
+const LIMIT = 100
+
+type State = {
+  active : U8,
+  fee : U64,
+}
+
+type Error | Unauthorized
+
+handler execute (amount : U64) : State -> State {
+  permissionless
+  requires actve == 0 else Unauthorized
+  requires state.fe > 0 else Unauthorized
+  requires active == 0 else Unauthorized
+  requires amount > 0 else Unauthorized
+  requires state.fee < LIMIT else Unauthorized
+  effect { fee := amount }
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        let warnings = check_unknown_guard_identifier(&spec);
+        let subjects: Vec<&str> = warnings
+            .iter()
+            .filter(|w| w.rule == "unknown_guard_identifier")
+            .map(|w| w.message.as_str())
+            .collect();
+        assert_eq!(
+            subjects.len(),
+            2,
+            "exactly the two typos fire — resolvable refs (state field, \
+             param, const) stay silent; got: {subjects:?}"
+        );
+        assert!(subjects.iter().any(|m| m.contains("`actve`")));
+        assert!(subjects.iter().any(|m| m.contains("`state.fe`")));
+        assert!(warnings
+            .iter()
+            .all(|w| w.severity == Severity::Error && w.priority == 0));
+    }
+
+    #[test]
+    fn unknown_guard_identifier_skips_sbpf_specs() {
+        let src = r#"spec SbpfCounter
+program_id "11111111111111111111111111111111"
+
+pragma sbpf {}
+
+type State
+  | Uninitialized
+  | Active
+
+type Error | BadPda
+
+handler initialize : State.Uninitialized -> State.Active {
+  permissionless
+  requires pda_derivation_succeeds else BadPda
+}
+"#;
+        let spec = crate::chumsky_adapter::parse_str(src).expect("spec parses");
+        assert!(
+            check_unknown_guard_identifier(&spec).is_empty(),
+            "sBPF requires vocabulary resolves against the input layout, not state"
+        );
+    }
+}
+
+/// `unknown_guard_identifier` (issue #139 follow-up): a `requires` clause
+/// references a name that resolves to nothing — not a state field (those
+/// were canonicalized to `state.`-rooted paths at adapt time), not a param,
+/// account, const, `let` binding, abstract binder, CPI result binding, or
+/// auth actor. The string projections carry the name verbatim, so every
+/// generated backend (Lean transition, Kani harness, proptest model) fails
+/// to compile while `check` used to stay green. Also catches `state.<typo>`
+/// where the field segment isn't declared.
+///
+/// sBPF specs are exempt: their handler requires speak a runtime-input
+/// vocabulary (`instruction_data_len`, `pda_derivation_succeeds`,
+/// `derived_pda`, account attrs) that resolves against the input layout,
+/// not the state model.
+pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    use crate::chumsky_adapter::GuardPathRef;
+
+    let mut warnings = Vec::new();
+    if spec.is_assembly_target() {
+        return warnings;
+    }
+
+    // Every declared state-field name, across representations: flat view,
+    // per-account-type fields + ADT variant fields, and ghosts (rendered as
+    // state fields).
+    let mut state_fields: std::collections::BTreeSet<&str> =
+        spec.state_fields.iter().map(|(n, _)| n.as_str()).collect();
+    for at in &spec.account_types {
+        state_fields.extend(at.fields.iter().map(|(n, _)| n.as_str()));
+        for v in &at.variants {
+            state_fields.extend(v.fields.iter().map(|(n, _)| n.as_str()));
+        }
+    }
+    if let Some(r) = spec.records.iter().find(|r| r.name == "State") {
+        state_fields.extend(r.fields.iter().map(|(n, _)| n.as_str()));
+    }
+    state_fields.extend(spec.ghosts.iter().map(|g| g.name.as_str()));
+
+    let consts: std::collections::BTreeSet<&str> =
+        spec.constants.iter().map(|(n, _)| n.as_str()).collect();
+
+    for h in &spec.handlers {
+        let mut known: std::collections::BTreeSet<&str> = consts.clone();
+        known.extend(h.takes_params.iter().map(|(n, _)| n.as_str()));
+        known.extend(h.accounts.iter().map(|a| a.name.as_str()));
+        known.extend(h.let_bindings.iter().map(|(n, _, _)| n.as_str()));
+        known.extend(h.abstract_binders.iter().map(|(n, _)| n.as_str()));
+        known.extend(h.calls.iter().filter_map(|c| c.result_binding.as_deref()));
+        if let Some(who) = &h.who {
+            known.insert(who.as_str());
+        }
+
+        // Dedup per handler: one finding per unresolved name.
+        let mut reported: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for req in &h.requires {
+            let Some(ast) = &req.ast_body else { continue };
+            for r in crate::chumsky_adapter::collect_guard_path_refs(ast) {
+                let (name, is_state_ref) = match r {
+                    GuardPathRef::Bare(n) => (n, false),
+                    GuardPathRef::StateField(f) => (f, true),
+                };
+                let resolves = if is_state_ref {
+                    state_fields.contains(name.as_str())
+                } else {
+                    known.contains(name.as_str()) || state_fields.contains(name.as_str())
+                };
+                if resolves || !reported.insert(name.clone()) {
+                    continue;
+                }
+                let display = if is_state_ref {
+                    format!("state.{name}")
+                } else {
+                    name.clone()
+                };
+                warnings.push(CompletenessWarning {
+                    rule: "unknown_guard_identifier".to_string(),
+                    severity: Severity::Error,
+                    priority: 0,
+                    message: format!(
+                        "handler '{}' references `{}` in a `requires` clause, but it \
+                         resolves to nothing — not a state field, parameter, account, \
+                         const, or binding. Generated code carries the name verbatim \
+                         and won't compile in any backend.",
+                        h.name, display
+                    ),
+                    subject: Some(h.name.clone()),
+                    fix: format!(
+                        "Declare `{name}` (state field, param, or const) or fix the \
+                         reference to an existing name."
+                    ),
+                    example: None,
+                    counterexample: None,
+                    fix_options: vec![],
+                });
+            }
+        }
+    }
+    warnings
 }

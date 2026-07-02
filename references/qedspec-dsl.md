@@ -606,6 +606,16 @@ handler transfer_sol { ... }
 | `takes { ... }` | Parameters (sugar, prefer signature) | `takes amount : U64` |
 | `abstract` (v2.29) | Existentially-quantified value the handler refers to in `requires` / `effect` / `ensures` without expressing how it was computed. | `abstract d : U64` |
 
+**Name resolution in `requires` / `ensures` / `let`:** a bare identifier
+resolves innermost-binding-first — expression binders (`forall` / `exists` /
+`sum` / `let … in` / match-arm payloads), then handler params, `let`
+bindings, `abstract` binders, account names, and consts — and finally falls
+back to the state fields, where `active` reads the same slot as
+`state.active` (both render through the state receiver: `s.active` in
+Rust-side harnesses, `s.active` in the Lean transition). A name that
+resolves to nothing is a check error (`unknown_guard_identifier`) rather
+than non-compiling generated code.
+
 #### `abstract <name> : <Type>` (v2.29)
 
 When a handler's spec depends on a value that comes from a library call or

@@ -644,3 +644,22 @@ fn render_pilot_fixtures_no_panic() {
         assert!(out.contains("end "), "{}", fixture);
     }
 }
+
+/// Issue #139: a `requires` written with bare state-field names must render
+/// the transition guard through the `s` receiver — `if s.active = 0`, not
+/// the non-elaborating `if active = 0`. Params stay bare.
+#[test]
+fn bare_state_field_requires_render_with_receiver() {
+    let mir = lower_fixture(
+        "crates/qedgen/tests/fixtures/regressions/issue-139-bare-state-refs/generic_vault.qedspec",
+    );
+    let out = render(&mir);
+    assert!(
+        out.contains("if s.active = 0 ∧ amount > 0 then"),
+        "transition guard must read state through `s`:\n{out}"
+    );
+    assert!(
+        !out.contains("if active = 0"),
+        "bare state-field guard leaked into the transition:\n{out}"
+    );
+}

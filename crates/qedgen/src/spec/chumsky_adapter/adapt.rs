@@ -999,6 +999,7 @@ fn expand_handler(
 
     // Build a shared base handler (parent without the branch clause).
     let base = adapt_handler(h, consts, env);
+    let canon = canon_scope_for_handler(h, consts, env);
 
     // Accumulate negated guards so that earlier arms' failure implies
     // later arms' precondition (first-match semantics). Triple is
@@ -1026,6 +1027,7 @@ fn expand_handler(
         // Current arm's guard (if any) becomes a requires; negation is
         // recorded for subsequent arms.
         if let Some(guard) = &arm.guard {
+            let guard = canonicalize_state_refs(guard, &canon);
             let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, env);
             let rust = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env));
             let rust_pod = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env));
@@ -1034,7 +1036,7 @@ fn expand_handler(
                 rust_expr: rust.clone(),
                 rust_expr_pod: rust_pod.clone(),
                 error_name: None,
-                ast_body: Some(guard.clone()),
+                ast_body: Some(guard),
             });
             prior_conds.push((
                 format!("\u{00AC}({})", lean),
@@ -1185,6 +1187,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         .iter()
         .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
         .collect();
+    let canon = canon_scope_for_handler(h, consts, env);
 
     // `on_account` is the type prefix of the pre-state ref, if qualified.
     //   `Loan.Active` → on_account = Some("Loan"), pre_status = Some("Active")
@@ -1275,15 +1278,17 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 }
             }
             a::HandlerClause::Requires { guard, on_fail } => {
+                let guard = canonicalize_state_refs(guard, &canon);
                 handler.requires.push(ParsedRequires {
                     lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
                     rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
                     error_name: on_fail.clone(),
-                    ast_body: Some(guard.clone()),
+                    ast_body: Some(guard),
                 });
             }
             a::HandlerClause::Ensures(e) => {
+                let e = canonicalize_state_refs(e, &canon);
                 handler.ensures.push(ParsedEnsures {
                     lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
                     rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
@@ -1302,6 +1307,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 handler.modifies = Some(fs.clone());
             }
             a::HandlerClause::Let { name, value } => {
+                let value = canonicalize_state_refs(value, &canon);
                 let rust = expr_to_rust(&value.node, Ctx::Guard, consts, opts_native(env));
                 // Narrow `let X = mul_div_*(...)` to U64 at the binding
                 // site — the spec-level operation is U64 → U64 but the

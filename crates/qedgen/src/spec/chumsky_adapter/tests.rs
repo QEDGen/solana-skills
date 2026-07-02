@@ -1579,3 +1579,79 @@ handler accept (total : U64) (fee_bps : U64) : State.Active -> State.Active {
         "parenthesised mul_div RHS must still narrow; got: {fee_rhs}"
     );
 }
+
+/// Issue #139: bare state-field reads in `requires` must pick up the state
+/// receiver in both string projections (Kani/proptest read `rust_expr`, the
+/// Lean transition reads `lean_expr`). Handler params stay bare.
+#[test]
+fn bare_state_field_refs_in_requires_get_state_receiver() {
+    let src = r#"spec GenericVault
+program_id "11111111111111111111111111111111"
+
+type State = {
+  active : U8,
+  fee : U64,
+}
+
+type Error | Unauthorized
+
+handler execute (amount : U64) : State -> State {
+  permissionless
+  requires active == 0 else Unauthorized
+  requires amount > 0 else Unauthorized
+  ensures fee == amount
+  effect { fee := amount }
+}
+"#;
+    let spec = parse_str(src).expect("parse");
+    let h = &spec.handlers[0];
+    assert_eq!(h.requires[0].rust_expr, "s.active == 0");
+    assert_eq!(h.requires[0].lean_expr, "s.active = 0");
+    // Param ref stays bare.
+    assert_eq!(h.requires[1].rust_expr, "amount > 0");
+    // Ensures: bare state field reads post-state.
+    assert!(
+        h.ensures[0].lean_expr.contains("s'.fee"),
+        "ensures must canonicalize bare state refs; got: {}",
+        h.ensures[0].lean_expr
+    );
+}
+
+/// Names bound closer than state win: handler params, quantifier binders,
+/// `let … in` binders, declared consts, and handler accounts all suppress
+/// the `state.` rewrite even when they collide with a state field name.
+#[test]
+fn bound_names_shadow_state_fields_in_requires() {
+    let src = r#"spec ShadowVault
+program_id "11111111111111111111111111111111"
+
+const LIMIT = 100
+
+type State = {
+  fee : U64,
+  slots : U64,
+}
+
+type Error | Bad
+
+handler pay (fee : U64) : State -> State {
+  permissionless
+  requires fee > 0 else Bad
+  requires slots < LIMIT else Bad
+  requires forall slots : U8, slots >= 0
+  effect { fee := fee }
+}
+"#;
+    let spec = parse_str(src).expect("parse");
+    let h = &spec.handlers[0];
+    // `fee` is a param — stays bare despite the state field of the same name.
+    assert_eq!(h.requires[0].rust_expr, "fee > 0");
+    // `slots` is only a state field — canonicalized; `LIMIT` substitutes.
+    assert_eq!(h.requires[1].rust_expr, "s.slots < 100");
+    // Quantifier binder shadows the state field inside its body.
+    assert!(
+        h.requires[2].rust_expr.contains("|slots| slots >= 0"),
+        "binder must shadow state field; got: {}",
+        h.requires[2].rust_expr
+    );
+}
