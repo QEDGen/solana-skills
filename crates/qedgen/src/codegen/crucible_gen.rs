@@ -20,8 +20,8 @@ use crate::rust_codegen_util;
 /// per-action protocol-invariant suite (`PROTOCOL_GUARDS`) fires as
 /// `fuzz_assert!`s — signer-lamport inflation, total-lamport conservation,
 /// ownership takeover, discriminator/type change, close-scrub integrity,
-/// rent-exemption loss, and realloc data leak. Plus any panic in the
-/// *harness/host* code.
+/// rent-exemption loss, realloc data leak, and SPL token-balance
+/// conservation. Plus any panic in the *harness/host* code.
 ///
 /// IMPORTANT — what this does NOT catch: a fault *inside* the deployed `.so`
 /// (arithmetic overflow, div-by-zero, `unwrap` on `None`, `require!` abort)
@@ -378,6 +378,12 @@ const PROTOCOL_GUARDS: &[ProtocolGuard] = &[
         assert_fn: "assert_no_realloc_data_leak",
         emit_helper: emit_guard_realloc_leak,
     },
+    ProtocolGuard {
+        id: "token_conservation",
+        set: TrackedSet::Account,
+        assert_fn: "assert_token_balance_conserved",
+        emit_helper: emit_guard_token_conservation,
+    },
 ];
 
 /// Shared post-state snapshot: one `get_account` pass per tracked set per
@@ -398,6 +404,19 @@ struct AccountSnapshot {
     owner: Pubkey,
     disc: [u8; 8],
     data_len: usize,
+    // SPL / Token-2022 account fields (Some when owner is a token program and
+    // data is at least the 165-byte base account layout). mint @ 0, amount @ 64.
+    token_mint: Option<Pubkey>,
+    token_amount: u64,
+}
+
+/// SPL Token + Token-2022 program ids (base58). Compared against `owner` to
+/// classify token accounts spec-lessly. String compare avoids a FromStr
+/// dependency and is cheap enough for a fuzz harness.
+fn is_token_program(owner: &Pubkey) -> bool {
+    let s = owner.to_string();
+    s == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        || s == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
 }
 
 fn account_state(ctx: &TestContext, pk: &Pubkey) -> AccountSnapshot {
@@ -406,6 +425,17 @@ fn account_state(ctx: &TestContext, pk: &Pubkey) -> AccountSnapshot {
             let mut disc = [0u8; 8];
             let n = a.data.len().min(8);
             disc[..n].copy_from_slice(&a.data[..n]);
+            // Token account = owned by a token program with the 165-byte base
+            // layout (mints are 82 bytes, so they're excluded).
+            let (token_mint, token_amount) = if is_token_program(&a.owner) && a.data.len() >= 165 {
+                let mut mint = [0u8; 32];
+                mint.copy_from_slice(&a.data[0..32]);
+                let mut amt = [0u8; 8];
+                amt.copy_from_slice(&a.data[64..72]);
+                (Some(Pubkey::new_from_array(mint)), u64::from_le_bytes(amt))
+            } else {
+                (None, 0)
+            };
             AccountSnapshot {
                 pk: *pk,
                 exists: true,
@@ -413,6 +443,8 @@ fn account_state(ctx: &TestContext, pk: &Pubkey) -> AccountSnapshot {
                 owner: a.owner,
                 disc,
                 data_len: a.data.len(),
+                token_mint,
+                token_amount,
             }
         }
         None => AccountSnapshot {
@@ -422,6 +454,8 @@ fn account_state(ctx: &TestContext, pk: &Pubkey) -> AccountSnapshot {
             owner: Pubkey::default(),
             disc: [0u8; 8],
             data_len: 0,
+            token_mint: None,
+            token_amount: 0,
         },
     }
 }
@@ -618,6 +652,41 @@ fn assert_no_realloc_data_leak(ctx: &TestContext, before: &[AccountSnapshot], la
     );
 }
 
+/// `arithmetic`/mint-authority manifestation: per-mint SPL token balances
+/// summed across tracked accounts must not increase — tokens materializing
+/// (mint without authority, or transfer-in from an untracked account).
+fn emit_guard_token_conservation(out: &mut String) {
+    out.push_str(
+        r#"/// Per-mint token balance summed across tracked accounts must not increase.
+fn assert_token_balance_conserved(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+    use std::collections::BTreeMap;
+    let mut before_by_mint: BTreeMap<Pubkey, u128> = BTreeMap::new();
+    let mut after_by_mint: BTreeMap<Pubkey, u128> = BTreeMap::new();
+    for b in before {
+        if let Some(mint) = b.token_mint {
+            *before_by_mint.entry(mint).or_default() += b.token_amount as u128;
+            let after = account_state(ctx, &b.pk);
+            if let Some(after_mint) = after.token_mint {
+                *after_by_mint.entry(after_mint).or_default() += after.token_amount as u128;
+            }
+        }
+    }
+    for (mint, before_sum) in &before_by_mint {
+        let after_sum = after_by_mint.get(mint).copied().unwrap_or(0);
+        if after_sum > *before_sum {
+            fuzz_assert!(
+                false,
+                "token inflation for mint {} in {}: {} -> {}",
+                mint, label, before_sum, after_sum
+            );
+        }
+    }
+}
+
+"#,
+    );
+}
+
 /// Signer-set pubkey exprs (`self.<sig>.pubkey()`), brownfield-cased. The
 /// signer-lamport guard's tracked set: a signer gaining lamports is the
 /// drain-to-attacker shape.
@@ -686,7 +755,7 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
             s.push_str("// per-action protocol-invariant suite below is the live detector:\n");
             s.push_str("// signer-lamport inflation, total-lamport conservation, ownership\n");
             s.push_str("// takeover, discriminator change, close-scrub, rent-exemption loss,\n");
-            s.push_str("// realloc data leak.\n");
+            s.push_str("// realloc data leak, SPL token-balance conservation.\n");
             s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
             s.push_str("// surface as TX ERRORS, not host panics — the host-loop crash\n");
             s.push_str("// detector does NOT catch them. Only harness/host panics do.\n");
@@ -1330,6 +1399,62 @@ handler increment : State.Active -> State.Active {
 }
 "#;
 
+    /// A multi-handler, multi-account spec exercising the full account-set
+    /// guard wiring (signers + writables + a PDA vault) — the shape the
+    /// parse gate below must keep valid.
+    const MULTI_ACCOUNT_SPEC: &str = r#"spec Vault
+program_id "11111111111111111111111111111111"
+
+type State
+  | Active of { balance : U64, admin : Pubkey }
+
+type Error
+  | E
+
+handler deposit (amount : U64) : State.Active -> State.Active {
+  accounts { user : signer, writable
+             vault : writable }
+  effect { balance := balance + amount }
+}
+
+handler withdraw (amount : U64) : State.Active -> State.Active {
+  accounts { admin : signer, writable
+             vault : writable }
+  requires state.balance >= amount
+  effect { balance := balance - amount }
+}
+"#;
+
+    /// Compile/parse gate: the emitted harness must be syntactically valid
+    /// Rust in every mode. `syn::parse_file` validates syntax without the
+    /// crucible git deps or the Solana toolchain (a full `crucible run` build
+    /// stays a manual step — see the fixture READMEs), so this runs in CI as
+    /// the regression guard against codegen that emits non-compiling Rust.
+    #[test]
+    fn emitted_harness_parses_as_valid_rust() {
+        let cases = [
+            (MINIMAL_SPEC, InvariantMode::Spec, "minimal/spec"),
+            (MINIMAL_SPEC, InvariantMode::Protocol, "minimal/protocol"),
+            (
+                MULTI_ACCOUNT_SPEC,
+                InvariantMode::Protocol,
+                "multi-account/protocol",
+            ),
+            (
+                MULTI_ACCOUNT_SPEC,
+                InvariantMode::Both,
+                "multi-account/both",
+            ),
+        ];
+        for (src, mode, label) in cases {
+            let spec = parse_str(src).expect("parse spec");
+            let harness = emit_harness(&spec, mode).expect("emit harness");
+            if let Err(e) = syn::parse_file(&harness) {
+                panic!("emitted harness ({label}) is not valid Rust: {e}\n---\n{harness}");
+            }
+        }
+    }
+
     #[test]
     fn emits_cargo_toml_with_pinned_crucible_deps() {
         let spec = parse_str(MINIMAL_SPEC).expect("parse");
@@ -1475,6 +1600,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
             "fn assert_closure_integrity",
             "fn assert_rent_exemption_preserved",
             "fn assert_no_realloc_data_leak",
+            "fn assert_token_balance_conserved",
         ] {
             assert!(
                 harness.contains(assert_fn),

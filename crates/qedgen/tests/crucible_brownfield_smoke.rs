@@ -240,6 +240,7 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
         "fn assert_closure_integrity",
         "fn assert_rent_exemption_preserved",
         "fn assert_no_realloc_data_leak",
+        "fn assert_token_balance_conserved",
     ] {
         assert!(
             body.contains(assert_fn),
