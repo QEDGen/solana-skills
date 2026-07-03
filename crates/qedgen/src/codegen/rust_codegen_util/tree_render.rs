@@ -35,6 +35,12 @@ pub enum Binder<'a> {
     /// Two-state harness positions: `state.x` → `post.x`,
     /// `old(state.x)` → `pre.x`.
     PrePost,
+    /// Conformance-harness expected values: state reads bind to the flat
+    /// pre-state snapshot locals — `state.x` → `pre_x` (no receiver;
+    /// `old(...)` collapses, everything is pre-state here). The harness
+    /// snapshots every mutable field as `let pre_<f> = s.<f>;` before the
+    /// transition call, so an expected value must never read post-state.
+    PreLocal,
 }
 
 /// Arithmetic policy for `Arith` / `MulDiv*` nodes.
@@ -355,16 +361,24 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
         }
     }
     let mut out = String::new();
+    // PreLocal folds the first field segment into the flat snapshot-local
+    // name (`pre_balance`); the remaining segments render normally.
+    let mut segs: &[TreeSeg] = &p.segments;
     match &p.binding {
-        BindingKind::StateField | BindingKind::Ghost => {
-            let prefix = match (cx.binder, inside_old) {
-                (Binder::S, _) => "s",
-                (Binder::SelfAcct(name), _) => name,
-                (Binder::PrePost, true) => "pre",
-                (Binder::PrePost, false) => "post",
-            };
-            out.push_str(prefix);
-        }
+        BindingKind::StateField | BindingKind::Ghost => match (cx.binder, inside_old) {
+            (Binder::S, _) => out.push('s'),
+            (Binder::SelfAcct(name), _) => out.push_str(name),
+            (Binder::PrePost, true) => out.push_str("pre"),
+            (Binder::PrePost, false) => out.push_str("post"),
+            (Binder::PreLocal, _) => {
+                out.push_str("pre");
+                if let Some(TreeSeg::Field(first)) = p.segments.first() {
+                    out.push('_');
+                    out.push_str(first);
+                    segs = &p.segments[1..];
+                }
+            }
+        },
         BindingKind::Account => {
             // Scaffold-guard positions: bare `<acct>` and `<acct>.pubkey`
             // both lower to the runtime key load (`ctx.<name>.key()` on
@@ -398,7 +412,7 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
         | BindingKind::ExprBinder
         | BindingKind::Unresolved => out.push_str(&p.root),
     }
-    for seg in &p.segments {
+    for seg in segs {
         match seg {
             TreeSeg::Field(f) => {
                 out.push('.');

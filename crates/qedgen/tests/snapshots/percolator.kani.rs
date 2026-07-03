@@ -1832,7 +1832,7 @@ fn verify_close_account_effect_V() {
     let pre_F = s.F;
     let pre_accounts = s.accounts;
     if close_account(&mut s, i) {
-        assert!(s.V == pre_V.wrapping_sub(accounts[i].capital), "V must decrement by accounts[i].capital");
+        assert!(s.V == pre_V.wrapping_sub(pre_accounts[(i) as usize].capital), "V must decrement by pre_accounts[(i) as usize].capital");
         assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
         assert!(s.I == pre_I, "I must not change");
         assert!(s.F == pre_F, "F must not change");
