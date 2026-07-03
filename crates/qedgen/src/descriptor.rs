@@ -147,6 +147,32 @@ pub(crate) fn qedlift_command(
     c
 }
 
+/// Assemble the `qedlift --transition ...` invocation (qedsvm #40 whole-
+/// transition mode, v0.9.0). Same seam discipline as [`qedlift_command`]:
+/// qedgen passes the name-level descriptor and where to write; trace
+/// discovery (`<stem>_<path>.pcs` beside the `.so`), path lifting, and the
+/// bundle theorem are qedlift's business.
+pub(crate) fn qedlift_transition_command(
+    qedlift: &Path,
+    descriptor_json: &Path,
+    so: &Path,
+    idl: Option<&Path>,
+    output_dir: &Path,
+) -> Command {
+    let mut c = Command::new(qedlift);
+    c.arg("--so")
+        .arg(so)
+        .arg("--descriptor")
+        .arg(descriptor_json)
+        .arg("--transition")
+        .arg("--output-dir")
+        .arg(output_dir);
+    if let Some(idl) = idl {
+        c.arg("--idl").arg(idl);
+    }
+    c
+}
+
 /// PascalCase a name for the default Lean module (`vault` -> `Vault`, `increment` -> `Increment`).
 fn pascal(s: &str) -> String {
     let mut out = String::new();
@@ -288,6 +314,107 @@ pub(crate) fn run_discharge(
             stderr_tail(&stderr)
         )
     }
+}
+
+/// Whole-transition discharge (qedsvm #40, v0.9.0): build the descriptor, then drive
+/// `qedlift --transition` — every path of the program is lifted from its discovered
+/// `<stem>_<path>.pcs` trace, each carrying an `AsmRefinesTransitionPath` (success: exit code +
+/// tracked fields pre→post) or `AsmRefinesTransitionFault` (typed abort/panic/OOB, no post)
+/// corollary, plus the ONE bundle theorem covering all paths under their branch guards.
+///
+/// The bundle module is `<StemPascal>Transition.lean` in `out_dir` (qedlift writes directly —
+/// no temp-dir copy dance). Verdict = qedlift succeeded ∧ bundle exists ∧ sorry-free.
+pub(crate) fn run_discharge_transition(
+    parsed: &ParsedSpec,
+    handler: &str,
+    account: Option<String>,
+    so: &Path,
+    idl: Option<&Path>,
+    qedlift: &Path,
+    out_dir: Option<&Path>,
+) -> Result<()> {
+    let descriptor = build_descriptor(parsed, handler, account)?;
+    let account_name = descriptor["account"].as_str().unwrap_or("?").to_string();
+    let mutated = descriptor["mutated"].as_str().unwrap_or("?");
+
+    let out_dir = out_dir.ok_or_else(|| {
+        anyhow!(
+            "--transition requires --out-dir: qedlift writes one module per path plus the \
+             bundle theorem directly into the project"
+        )
+    })?;
+
+    let work = tempfile::tempdir().context("create temp workdir for discharge")?;
+    let desc_path = work.path().join("descriptor.json");
+    std::fs::write(&desc_path, serde_json::to_string_pretty(&descriptor)?)
+        .context("write temp descriptor")?;
+
+    let stem_snake = so.file_stem().and_then(|s| s.to_str()).unwrap_or("program");
+    let bundle_module = format!("{}Transition", pascal(stem_snake));
+    let bundle_path = out_dir.join(format!("{}.lean", bundle_module));
+
+    println!("=== qedgen discharge (whole-transition) ===");
+    println!("  spec handler : {}", handler);
+    println!("  tracked      : {}.{}", account_name, mutated);
+    println!("  program      : {}", so.display());
+    println!("  qedlift      : {}", qedlift.display());
+
+    let output = qedlift_transition_command(qedlift, &desc_path, so, idl, out_dir)
+        .output()
+        .map_err(|e| {
+            anyhow!(
+                "could not run qedlift at {}: {} (build it with `cargo build \
+                 --features qedrecover --bin qedlift` in the qedsvm repo)",
+                qedlift.display(),
+                e
+            )
+        })?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() {
+        bail!(
+            "qedlift --transition failed ({}):\n{}",
+            output.status,
+            stderr_tail(&stderr)
+        );
+    }
+    if !bundle_path.exists() {
+        bail!(
+            "NOT DISCHARGED: qedlift ran but emitted no transition bundle for `{}` (expected \
+             {}; are there >= 2 `<stem>_<path>.pcs` traces beside the .so?).\n{}",
+            handler,
+            bundle_path.display(),
+            stderr_tail(&stderr)
+        );
+    }
+    let bundle = std::fs::read_to_string(&bundle_path).unwrap_or_default();
+    if bundle.contains("sorry") {
+        bail!(
+            "qedlift emitted a transition bundle containing `sorry` for `{}`",
+            handler
+        );
+    }
+    println!(
+        "  ✔ DISCHARGED : `{}` whole-transition bundle proven against the bytes.",
+        handler
+    );
+    println!("    bundle       : {}", bundle_path.display());
+    println!(
+        "    Every discovered path carries its own *_transition_path / *_transition_fault \
+         corollary"
+    );
+    println!(
+        "    (success: exit code + tracked field pre→post; fault: typed error, no tracked \
+         writes)."
+    );
+    println!(
+        "    wire it in   : `import {}` (add the emitted modules to your lake lib roots; the",
+        bundle_module
+    );
+    println!(
+        "                   project must `require qedsvm` — lean_solana projects already do)."
+    );
+    Ok(())
 }
 
 /// Copy the qedlift artifacts out of the throwaway workdir into `dest` (created if needed), so
@@ -537,5 +664,100 @@ mod tests {
             out.join("CounterIncrementTracedLifted.lean").exists(),
             "lifted module persisted into out-dir",
         );
+    }
+
+    /// Transition-command wiring: `--transition` + `--output-dir` (no
+    /// `--module`/`--output` — qedlift names per-path modules itself).
+    #[test]
+    fn transition_command_wires_args() {
+        let c = qedlift_transition_command(
+            Path::new("/bin/qedlift"),
+            Path::new("/tmp/d.json"),
+            Path::new("/tmp/counter.so"),
+            Some(Path::new("/tmp/idl.json")),
+            Path::new("/tmp/out"),
+        );
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--so",
+                "/tmp/counter.so",
+                "--descriptor",
+                "/tmp/d.json",
+                "--transition",
+                "--output-dir",
+                "/tmp/out",
+                "--idl",
+                "/tmp/idl.json",
+            ]
+        );
+    }
+
+    /// Whole-transition end-to-end with a fake qedlift: verdict requires the
+    /// `<StemPascal>Transition.lean` bundle in the out-dir, sorry-free.
+    #[cfg(unix)]
+    #[test]
+    fn discharge_transition_requires_sorry_free_bundle() {
+        use std::os::unix::fs::PermissionsExt;
+        // Fake qedlift --transition: writes one path module + the bundle
+        // into --output-dir, parsing only the args the driver passes.
+        const FAKE: &str = "#!/bin/sh\nod=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --output-dir) od=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$od\"\nprintf 'theorem counter_success_transition_path : True := trivial\\n' > \"$od/CounterSuccessLifted.lean\"\nprintf 'theorem counter_transition_bundle : True := trivial\\n' > \"$od/CounterTransition.lean\"\n";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join("fake-qedlift.sh");
+        std::fs::write(&fake, FAKE).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let so = tmp.path().join("counter.so");
+        std::fs::write(&so, b"\x7fELF").unwrap();
+        let out = tmp.path().join("project");
+
+        let parsed = parse("tests/fixtures/descriptor/counter.qedspec");
+        run_discharge_transition(
+            &parsed,
+            "increment",
+            Some("Counter".to_string()),
+            &so,
+            None,
+            &fake,
+            Some(&out),
+        )
+        .expect("transition discharge succeeds with bundle present");
+        assert!(out.join("CounterTransition.lean").exists());
+
+        // Without --out-dir the driver refuses up front.
+        let err = run_discharge_transition(
+            &parsed,
+            "increment",
+            Some("Counter".to_string()),
+            &so,
+            None,
+            &fake,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--out-dir"), "{err}");
+
+        // A bundle carrying `sorry` is refused.
+        let sorry_out = tmp.path().join("sorry-project");
+        std::fs::create_dir_all(&sorry_out).unwrap();
+        const FAKE_SORRY: &str = "#!/bin/sh\nod=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --output-dir) od=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$od\"\nprintf 'theorem b : True := by sorry\\n' > \"$od/CounterTransition.lean\"\n";
+        let fake_sorry = tmp.path().join("fake-qedlift-sorry.sh");
+        std::fs::write(&fake_sorry, FAKE_SORRY).unwrap();
+        std::fs::set_permissions(&fake_sorry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = run_discharge_transition(
+            &parsed,
+            "increment",
+            Some("Counter".to_string()),
+            &so,
+            None,
+            &fake_sorry,
+            Some(&sorry_out),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("sorry"), "{err}");
     }
 }

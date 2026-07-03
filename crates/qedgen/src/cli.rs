@@ -402,6 +402,16 @@ pub(crate) enum Commands {
         /// dir. Omit to keep the verdict-only (artifact-discarded) behaviour.
         #[arg(long)]
         out_dir: Option<PathBuf>,
+
+        /// Whole-transition mode (qedsvm #40, v0.9.0): lift EVERY path of
+        /// the program from discovered `<stem>_<path>.pcs` traces beside the
+        /// `.so` and emit per-path `*_transition_path` /
+        /// `*_transition_fault` corollaries plus the one bundle theorem
+        /// covering success and abort paths under their branch guards.
+        /// Requires `--out-dir` (qedlift writes the modules directly) and
+        /// >= 2 traces beside the binary.
+        #[arg(long)]
+        transition: bool,
     },
 
     /// Consolidate multiple proof projects into a single Lean project
