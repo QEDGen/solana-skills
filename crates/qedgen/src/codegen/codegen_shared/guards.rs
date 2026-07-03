@@ -28,14 +28,14 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         }
         // Effect RHS can call the helpers directly (`fee := mul_div_floor(…)`)
         // — probe the Rust-form values the harness transition bodies emit.
-        if h.effects_rust.iter().any(|r| probe(r)) {
+        if h.effects.iter().any(|e| probe(&e.value_rust)) {
             any = true;
         }
         if let Some(br) = &h.effect_branches {
             if br
                 .arms
                 .iter()
-                .any(|arm| arm.effects_rust.iter().any(|r| probe(r)))
+                .any(|arm| arm.effects.iter().any(|e| probe(&e.value_rust)))
             {
                 any = true;
             }

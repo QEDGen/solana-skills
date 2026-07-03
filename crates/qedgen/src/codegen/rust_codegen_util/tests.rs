@@ -45,7 +45,7 @@ handler churn (amount : U64) (who : Pubkey) {
         let want: Vec<(String, String, String)> = op
             .effects
             .iter()
-            .map(|(f, k, v)| (f.clone(), k.clone(), v.clone()))
+            .map(|e| (e.field.clone(), e.op.clone(), e.value.clone()))
             .collect();
         assert_eq!(
             got, want,
@@ -163,7 +163,7 @@ fn stmt_effect_triples_round_trip_bundled_examples() {
             let want: Vec<(String, String, String)> = op
                 .effects
                 .iter()
-                .map(|(f, k, v)| (f.clone(), k.clone(), v.clone()))
+                .map(|e| (e.field.clone(), e.op.clone(), e.value.clone()))
                 .collect();
             assert_eq!(
                 got, want,

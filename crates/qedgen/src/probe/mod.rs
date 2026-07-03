@@ -961,7 +961,8 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
 /// reproducer-bearing version.
 fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Finding> {
     let mut out = Vec::new();
-    for (field, op, _value) in &handler.effects {
+    for eff in &handler.effects {
+        let (field, op) = (&eff.field, &eff.op);
         let (severity, kind) = match op.as_str() {
             "add_wrap" | "sub_wrap" => (Severity::High, "wrapping"),
             "add_sat" | "sub_sat" => (Severity::Medium, "saturating"),
@@ -1079,7 +1080,7 @@ fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
         let used_in_effect = handler
             .effects
             .iter()
-            .any(|(_, _, value)| param_referenced(value, pname));
+            .any(|e| param_referenced(&e.value, pname));
         if !used_in_transfer && !used_in_effect {
             continue;
         }
@@ -1139,7 +1140,7 @@ fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Find
         return None;
     }
 
-    let mutated_fields: Vec<&str> = handler.effects.iter().map(|(f, _, _)| f.as_str()).collect();
+    let mutated_fields: Vec<&str> = handler.effects.iter().map(|e| e.field.as_str()).collect();
 
     Some(Finding {
         id: stable_id(&handler.name, "permissionless_state_writer"),
@@ -1250,8 +1251,8 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
     // Step 1: collect every field name that any handler `effect` writes.
     let mut written: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for h in &spec.handlers {
-        for (field, _, _) in &h.effects {
-            written.insert(field.as_str());
+        for eff in &h.effects {
+            written.insert(eff.field.as_str());
         }
     }
     // PDA-seed fields are bound implicitly by codegen at init; treat as
@@ -1314,8 +1315,8 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
 
                 // effect RHS reads (e.g. `field := s.other_field + 1`).
                 if !is_reader {
-                    for (_, _, rhs) in &h.effects {
-                        if needles.iter().any(|n| rhs.contains(n.as_str())) {
+                    for eff in &h.effects {
+                        if needles.iter().any(|n| eff.value.contains(n.as_str())) {
                             is_reader = true;
                             break;
                         }
@@ -1498,9 +1499,6 @@ mod tests {
             aborts_total: false,
             permissionless,
             effects: vec![],
-            effects_rust: vec![],
-            effect_on_error: vec![],
-            effects_tree: vec![],
             accounts: vec![],
             transfers: vec![],
             emits: vec![],
@@ -1609,8 +1607,9 @@ mod tests {
     #[test]
     fn arith_predicate_fires_on_wrap() {
         let mut h = make_handler("tick", Some("crank"), false);
-        h.effects
-            .push(("epoch".to_string(), "add_wrap".to_string(), "1".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "epoch", "add_wrap", "1",
+        ));
         let findings = predicate_arithmetic_overflow_wrapping(&h);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].category_tag, "arithmetic_overflow_wrapping");
@@ -1620,10 +1619,8 @@ mod tests {
     #[test]
     fn arith_predicate_fires_on_saturating() {
         let mut h = make_handler("apply", Some("user"), false);
-        h.effects.push((
-            "balance".to_string(),
-            "add_sat".to_string(),
-            "delta".to_string(),
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "balance", "add_sat", "delta",
         ));
         let findings = predicate_arithmetic_overflow_wrapping(&h);
         assert_eq!(findings.len(), 1);
@@ -1633,25 +1630,27 @@ mod tests {
     #[test]
     fn arith_predicate_silent_on_default_checked() {
         let mut h = make_handler("deposit", Some("user"), false);
-        h.effects
-            .push(("total".to_string(), "add".to_string(), "amount".to_string()));
-        h.effects.push((
-            "fee_pool".to_string(),
-            "sub".to_string(),
-            "amount".to_string(),
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "total", "add", "amount",
         ));
-        h.effects
-            .push(("balance".to_string(), "set".to_string(), "x".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "fee_pool", "sub", "amount",
+        ));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "balance", "set", "x",
+        ));
         assert!(predicate_arithmetic_overflow_wrapping(&h).is_empty());
     }
 
     #[test]
     fn arith_predicate_fires_per_op() {
         let mut h = make_handler("complex", Some("user"), false);
-        h.effects
-            .push(("a".to_string(), "add_wrap".to_string(), "1".to_string()));
-        h.effects
-            .push(("b".to_string(), "add_sat".to_string(), "delta".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "a", "add_wrap", "1",
+        ));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "b", "add_sat", "delta",
+        ));
         let findings = predicate_arithmetic_overflow_wrapping(&h);
         assert_eq!(findings.len(), 2);
     }
@@ -1659,8 +1658,9 @@ mod tests {
     #[test]
     fn lifecycle_predicate_fires_when_state_mutating_no_pre_status() {
         let mut h = make_handler("withdraw", Some("user"), false);
-        h.effects
-            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "balance", "set", "0",
+        ));
         let f =
             predicate_lifecycle_one_shot_violation(&h, true).expect("expected lifecycle finding");
         assert_eq!(f.category_tag, "lifecycle_one_shot_violation");
@@ -1670,8 +1670,9 @@ mod tests {
     fn lifecycle_predicate_silent_when_pre_status_declared() {
         let mut h = make_handler("withdraw", Some("user"), false);
         h.pre_status = Some("Active".to_string());
-        h.effects
-            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "balance", "set", "0",
+        ));
         assert!(predicate_lifecycle_one_shot_violation(&h, true).is_none());
     }
 
@@ -1679,15 +1680,16 @@ mod tests {
     fn lifecycle_predicate_silent_when_permissionless() {
         let mut h = make_handler("crank", None, true);
         h.effects
-            .push(("x".to_string(), "set".to_string(), "1".to_string()));
+            .push(crate::check::ParsedEffect::from_triple("x", "set", "1"));
         assert!(predicate_lifecycle_one_shot_violation(&h, true).is_none());
     }
 
     #[test]
     fn lifecycle_predicate_silent_when_spec_has_no_lifecycle() {
         let mut h = make_handler("withdraw", Some("user"), false);
-        h.effects
-            .push(("balance".to_string(), "set".to_string(), "0".to_string()));
+        h.effects.push(crate::check::ParsedEffect::from_triple(
+            "balance", "set", "0",
+        ));
         assert!(predicate_lifecycle_one_shot_violation(&h, false).is_none());
     }
 

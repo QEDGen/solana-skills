@@ -22,6 +22,22 @@ pub(super) struct RenderedEffect {
     pub tree: Option<crate::mir::ExprTree>,
 }
 
+impl RenderedEffect {
+    /// Convert into the self-contained per-site effect the IR carries
+    /// (#151 Slice 4 — one struct instead of four parallel arrays).
+    pub fn into_parsed_effect(self) -> crate::check::ParsedEffect {
+        let (field, op, value) = self.triple;
+        crate::check::ParsedEffect {
+            field,
+            op,
+            value,
+            value_rust: self.value_rust,
+            on_error: self.on_error,
+            tree: self.tree,
+        }
+    }
+}
+
 /// Render an `EffectStmt` to the `(field, op, value)` triple consumed by
 /// every backend, plus the per-site error-variant override codegen reads
 /// when lowering checked `+=` / `-=`. Override is always `None` for

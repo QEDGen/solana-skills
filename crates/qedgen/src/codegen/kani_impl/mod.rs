@@ -56,10 +56,10 @@ pub fn handler_triggers_impl_harness(handler: &ParsedHandler) -> bool {
     let effect_lhs: std::collections::BTreeSet<String> = handler
         .effects
         .iter()
-        .map(|(lhs, _, _)| {
+        .map(|e| {
             // Strip the array-index suffix so `lp_supply[i]` doesn't
             // false-positive against a bare `lp_supply` in `modifies`.
-            let bare = crate::rust_codegen_util::effect_target_base(lhs);
+            let bare = crate::rust_codegen_util::effect_target_base(&e.field);
             bare.to_string()
         })
         .collect();

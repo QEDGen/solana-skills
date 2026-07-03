@@ -343,7 +343,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 g
             };
 
-            for (field, kind, val) in &op.effects {
+            for eff in &op.effects {
+                let (field, kind, val) = (&eff.field, &eff.op, &eff.value);
                 if kind != "add" {
                     continue;
                 }
@@ -441,8 +442,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         // `pool.balance += amount`) — matching only whole-field LHS gave
         // false-positive `unused_field` on every Map field.
         let modified = spec.handlers.iter().any(|op| {
-            op.effects.iter().any(|(f, _, _)| {
-                let lhs = normalize_lhs(f);
+            op.effects.iter().any(|e| {
+                let lhs = normalize_lhs(&e.field);
                 if lhs == *fname {
                     return true;
                 }
@@ -819,7 +820,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
         // (a) LHS check
         for op in &spec.handlers {
-            for (lhs, _kind, _rhs) in &op.effects {
+            for eff in &op.effects {
+                let lhs = &eff.field;
                 let root = strip_root(lhs);
                 if root.is_empty() || declared.contains(&root) {
                     continue;
@@ -868,8 +870,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         for op in &spec.handlers {
             let mut seen_rhs: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for (_lhs, _kind, rhs) in &op.effects {
-                for caps in state_path_re.captures_iter(rhs) {
+            for eff in &op.effects {
+                for caps in state_path_re.captures_iter(&eff.value) {
                     let name = caps.get(1).unwrap().as_str().to_string();
                     if declared.contains(&name) || !seen_rhs.insert(name.clone()) {
                         continue;
@@ -982,11 +984,11 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         let mut modified_fields: std::collections::HashMap<&str, Vec<&str>> =
             std::collections::HashMap::new();
         for op in &spec.handlers {
-            for (field, kind, _) in &op.effects {
+            for eff in &op.effects {
                 modified_fields
-                    .entry(field.as_str())
+                    .entry(eff.field.as_str())
                     .or_default()
-                    .push(kind.as_str());
+                    .push(eff.op.as_str());
             }
         }
         let conservation_candidates: Vec<&str> = modified_fields
@@ -1167,8 +1169,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         let mut written_fields: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for op in &spec.handlers {
-            for (field, _, _) in &op.effects {
-                let normalized = normalize_lhs(field);
+            for eff in &op.effects {
+                let normalized = normalize_lhs(&eff.field);
                 written_fields.insert(normalized.clone());
                 // Also seed every dotted segment / index root so
                 // nested-path writes count for the read-side bare-
@@ -1388,8 +1390,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     let covered_modified: Vec<&str> = op
                         .effects
                         .iter()
-                        .filter(|(f, _, _)| prop_fields.contains(&f.as_str()))
-                        .map(|(f, _, _)| f.as_str())
+                        .filter(|e| prop_fields.contains(&e.field.as_str()))
+                        .map(|e| e.field.as_str())
                         .collect();
                     if !covered_modified.is_empty() {
                         // Skip when any `requires` references a property
@@ -1436,8 +1438,8 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 let modified_prop_fields: Vec<&str> = op
                     .effects
                     .iter()
-                    .filter(|(f, _, _)| prop_fields.contains(&f.as_str()))
-                    .map(|(f, _, _)| f.as_str())
+                    .filter(|e| prop_fields.contains(&e.field.as_str()))
+                    .map(|e| e.field.as_str())
                     .collect();
 
                 if !modified_prop_fields.is_empty() {
@@ -1447,10 +1449,10 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                         let all_safe = op
                             .effects
                             .iter()
-                            .filter(|(f, _, _)| modified_prop_fields.contains(&f.as_str()))
-                            .all(|(f, kind, _)| {
-                                let on_lhs = f.as_str() == lhs;
-                                match (kind.as_str(), op_sym, on_lhs) {
+                            .filter(|e| modified_prop_fields.contains(&e.field.as_str()))
+                            .all(|e| {
+                                let on_lhs = e.field.as_str() == lhs;
+                                match (e.op.as_str(), op_sym, on_lhs) {
                                     ("sub", "≤", true) | ("sub", "<=", true) => true, // decreasing LHS of ≤
                                     ("add", "≥", true) | ("add", ">=", true) => true, // increasing LHS of ≥
                                     ("sub", "≥", false) | ("sub", ">=", false) => true, // decreasing RHS of ≥
@@ -1803,11 +1805,7 @@ mod tests {
         let mut h = make_handler("deposit");
         h.takes_params = vec![("amount".to_string(), "U64".to_string())];
         h.guard_str = Some("amount > 0".to_string());
-        h.effects = vec![(
-            "balance".to_string(),
-            "add".to_string(),
-            "amount".to_string(),
-        )];
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         let spec = ParsedSpec {
             handlers: vec![h],
             state_fields: vec![("balance".to_string(), "U64".to_string())],
@@ -1938,11 +1936,7 @@ mod tests {
     #[test]
     fn test_no_properties_fires() {
         let mut h = make_handler("deposit");
-        h.effects = vec![(
-            "balance".to_string(),
-            "add".to_string(),
-            "amount".to_string(),
-        )];
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -1961,11 +1955,7 @@ mod tests {
     #[test]
     fn test_no_properties_skips_with_property() {
         let mut h = make_handler("deposit");
-        h.effects = vec![(
-            "balance".to_string(),
-            "add".to_string(),
-            "amount".to_string(),
-        )];
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         h.guard_str = Some("amount > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -2487,11 +2477,7 @@ mod tests {
         let mut h = make_handler("deposit");
         h.who = None; // priority 1: no_access_control
         h.takes_params = vec![("amount".to_string(), "U64".to_string())];
-        h.effects = vec![(
-            "balance".to_string(),
-            "add".to_string(),
-            "amount".to_string(),
-        )];
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         // no guard → priority 1: unguarded_arithmetic + missing_guard_from_takes
         // no properties → priority 3: no_properties
         let spec = ParsedSpec {
@@ -2542,8 +2528,8 @@ mod tests {
         let mut h = make_handler("deposit");
         h.guard_str = Some("amount > 0".to_string());
         h.effects = vec![
-            ("balance".into(), "add".into(), "amount".into()),
-            ("counter".into(), "add".into(), "1".into()),
+            ParsedEffect::from_triple("balance", "add", "amount"),
+            ParsedEffect::from_triple("counter", "add", "1"),
         ];
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -2612,7 +2598,7 @@ mod tests {
     fn test_write_without_read_no_substring_match() {
         // Field "id" written in effects, guard only has "valid" — should NOT count as read
         let mut h = make_handler("update");
-        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.effects = vec![ParsedEffect::from_triple("id", "set", "1")];
         h.guard_str = Some("valid > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -2637,11 +2623,7 @@ mod tests {
     fn test_write_without_read_bare_word_match() {
         // Field "balance" written in effects, guard has "balance > 0" — should count as read
         let mut h = make_handler("deposit");
-        h.effects = vec![(
-            "balance".to_string(),
-            "add".to_string(),
-            "amount".to_string(),
-        )];
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         h.guard_str = Some("balance > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -2665,7 +2647,7 @@ mod tests {
     fn test_write_without_read_prefixed_match() {
         // Field "id" written, guard has "state.id > 0" — should count as read
         let mut h = make_handler("update");
-        h.effects = vec![("id".to_string(), "set".to_string(), "1".to_string())];
+        h.effects = vec![ParsedEffect::from_triple("id", "set", "1")];
         h.guard_str = Some("state.id > 0".to_string());
         let spec = ParsedSpec {
             handlers: vec![h],
@@ -2756,7 +2738,7 @@ mod tests {
     fn build_counterexample_resolves_named_const_in_effect() {
         let handler = ParsedHandler {
             name: "reset".to_string(),
-            effects: vec![("counter".to_string(), "set".to_string(), "ZERO".to_string())],
+            effects: vec![ParsedEffect::from_triple("counter", "set", "ZERO")],
             ..make_handler("reset")
         };
         let constants = vec![("ZERO".to_string(), "0".to_string())];
@@ -2869,7 +2851,7 @@ mod tests {
     fn build_fix_suggestions_skips_self_guard_for_transition_property() {
         let handler = ParsedHandler {
             name: "shrink".to_string(),
-            effects: vec![("counter".to_string(), "sub".to_string(), "1".to_string())],
+            effects: vec![ParsedEffect::from_triple("counter", "sub", "1")],
             ..make_handler("shrink")
         };
         let fixes = build_fix_suggestions(
@@ -3188,7 +3170,7 @@ mod tests {
         spec.handlers.push(ParsedHandler {
             name: "outer_case_0".into(),
             permissionless: true,
-            effects: vec![("undeclared".into(), "set".into(), "0".into())],
+            effects: vec![ParsedEffect::from_triple("undeclared", "set", "0")],
             ..synthetic_handler_default("outer_case_0")
         });
         let warnings = check_completeness(&spec);
@@ -3219,9 +3201,6 @@ mod tests {
             aborts_total: false,
             permissionless: false,
             effects: vec![],
-            effects_rust: vec![],
-            effect_on_error: vec![],
-            effects_tree: vec![],
             accounts: vec![],
             transfers: vec![],
             emits: vec![],

@@ -61,7 +61,7 @@ pub(crate) fn build_descriptor(
     // Single-field increment: exactly one effect, op `add` (checked `+=`). The RHS is either
     // an integer literal (constant delta, v1) or a declared parameter (parameter delta, v2).
     let (field, op, value) = match h.effects.as_slice() {
-        [one] => one,
+        [one] => (&one.field, &one.op, &one.value),
         effects => bail!(
             "handler `{}` has {} effects; the descriptor seam supports exactly one \
              increment effect (`<field> += <int literal | parameter>`)",
@@ -539,10 +539,8 @@ mod tests {
         let mut parsed = parse("tests/fixtures/descriptor/vault.qedspec");
         // Rewrite deposit's effect to credit by an undeclared symbol.
         if let Some(h) = parsed.handlers.iter_mut().find(|h| h.name == "deposit") {
-            h.effects = vec![(
-                "total".to_string(),
-                "add".to_string(),
-                "mystery".to_string(),
+            h.effects = vec![crate::check::ParsedEffect::from_triple(
+                "total", "add", "mystery",
             )];
             h.takes_params.clear();
         }

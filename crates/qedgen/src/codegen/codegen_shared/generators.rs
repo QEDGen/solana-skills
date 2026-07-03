@@ -442,12 +442,12 @@ pub(crate) fn emit_pinocchio_effect_body(
     let scalar: Vec<(String, &str, &str)> = handler
         .effects
         .iter()
-        .filter_map(|(lhs, op, rhs)| {
-            let field = strip_variant_prefix(lhs, spec);
+        .filter_map(|e| {
+            let field = strip_variant_prefix(&e.field, spec);
             if field.contains('.') || field.contains('[') {
                 None
             } else {
-                Some((field, op.as_str(), rhs.as_str()))
+                Some((field, e.op.as_str(), e.value.as_str()))
             }
         })
         .collect();

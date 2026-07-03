@@ -193,8 +193,8 @@ fn canonical_handler(handler: &crate::check::ParsedHandler) -> String {
     if let Some(ref g) = handler.guard_str {
         c.push_str(&format!("guard={}\n", g));
     }
-    for (field, kind, val) in &handler.effects {
-        c.push_str(&format!("effect={} {} {}\n", field, kind, val));
+    for eff in &handler.effects {
+        c.push_str(&format!("effect={} {} {}\n", eff.field, eff.op, eff.value));
     }
     // Conditional-effect structure: the flat `effects` union above is
     // identical under arm-reordering, so hash the arms explicitly
@@ -203,10 +203,10 @@ fn canonical_handler(handler: &crate::check::ParsedHandler) -> String {
         c.push_str(&format!("effect_match_on={}\n", branches.scrutinee_lean));
         for (idx, arm) in branches.arms.iter().enumerate() {
             c.push_str(&format!("effect_arm[{}]={}\n", idx, arm.pattern_lean));
-            for (field, kind, val) in &arm.effects {
+            for eff in &arm.effects {
                 c.push_str(&format!(
                     "effect_arm[{}]_eff={} {} {}\n",
-                    idx, field, kind, val
+                    idx, eff.field, eff.op, eff.value
                 ));
             }
         }

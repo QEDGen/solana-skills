@@ -245,25 +245,23 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
 /// LLM or human fills the body.
 ///
-/// `tree` is the typed RHS (parallel `effects_tree` slot); `None` falls
-/// back to the legacy string whitelist + `resolve_value` (IDL ingest,
-/// probes, hand-built fixtures).
+/// `effect.tree` is the typed RHS; `None` falls back to the legacy string
+/// whitelist + `resolve_value` (IDL ingest, probes, hand-built fixtures).
 ///
-/// `on_error` is the per-site override (`pool += amount or X`) for the
-/// `checked_add` / `checked_sub` error variant; when `None`, fall back to
-/// the `pragma checked_{over,under}flow_error =` default, then built-in
+/// `effect.on_error` is the per-site override (`pool += amount or X`) for
+/// the `checked_add` / `checked_sub` error variant; when `None`, fall back
+/// to the `pragma checked_{over,under}flow_error =` default, then built-in
 /// `MathOverflow` / `MathUnderflow`. Always `None` for non-checked ops.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn mechanize_effect(
-    effect: &(String, String, String),
-    tree: Option<&crate::mir::ExprTree>,
-    on_error: Option<&str>,
+    effect: &crate::check::ParsedEffect,
     state_acct: &crate::check::ParsedHandlerAccount,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     target: Target,
 ) -> Option<String> {
-    let (field, op_kind, value) = effect;
+    let (field, op_kind, value) = (&effect.field, &effect.op, &effect.value);
+    let tree = effect.tree.as_ref();
+    let on_error = effect.on_error.as_deref();
 
     // Refuse complex RHS — structural on the tree (#151 Slice 3); the
     // char-whitelist fallback covers tree-less handlers. A simple param /
@@ -413,13 +411,13 @@ pub(crate) fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
 /// so emit `*pool = …` / `pool[i] = …`. `None` for shapes the caller
 /// routes to a per-effect `todo!()`.
 pub(crate) fn mechanize_effect_destructured(
-    effect: &(String, String, String),
-    tree: Option<&crate::mir::ExprTree>,
-    on_error: Option<&str>,
+    effect: &crate::check::ParsedEffect,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
 ) -> Option<String> {
-    let (field_raw, op_kind, value) = effect;
+    let (field_raw, op_kind, value) = (&effect.field, &effect.op, &effect.value);
+    let tree = effect.tree.as_ref();
+    let on_error = effect.on_error.as_deref();
     // The destructured binding is the bare field root — `pool[i]` keeps
     // the indexing; scalars need a `*` deref to write through `&mut T`.
     let field = strip_variant_prefix(field_raw, spec);
@@ -562,8 +560,8 @@ pub(crate) fn emit_variant_state_handler_body(
     // any `[…]` indexing). These go into the match destructure
     // pattern so the inner block can rebind them.
     let mut mutated_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (lhs, _, _) in &handler.effects {
-        let stripped = strip_variant_prefix(lhs, spec);
+    for eff in &handler.effects {
+        let stripped = strip_variant_prefix(&eff.field, spec);
         let bare = strip_array_index_suffix(&stripped);
         // Only fields that actually live on the post variant get
         // destructured. References that don't match are a spec
@@ -636,10 +634,8 @@ pub(crate) fn emit_variant_state_handler_body(
         "            {}::{} {{ {}, .. }} => {{\n",
         inner_name, post, destructure
     ));
-    for (idx, effect) in handler.effects.iter().enumerate() {
-        let on_error = handler.effect_on_error.get(idx).and_then(|o| o.as_deref());
-        let tree = handler.effects_tree.get(idx).and_then(|t| t.as_ref());
-        let line = mechanize_effect_destructured(effect, tree, on_error, handler, spec)?;
+    for effect in &handler.effects {
+        let line = mechanize_effect_destructured(effect, handler, spec)?;
         out.push_str(&line);
     }
 
@@ -787,8 +783,9 @@ pub(crate) fn emit_cross_variant_promotion(
     // (no pre value to read).
     let mut field_rhs: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    for (lhs, op_kind, rhs) in &handler.effects {
-        if op_kind != "set" {
+    for eff in &handler.effects {
+        let (lhs, rhs) = (&eff.field, &eff.value);
+        if eff.op != "set" {
             return None;
         }
         let stripped = strip_variant_prefix(lhs, spec);

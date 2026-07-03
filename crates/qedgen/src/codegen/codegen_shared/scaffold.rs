@@ -146,7 +146,7 @@ pub(crate) fn render_handler_scaffold(
             || handler
                 .effects
                 .iter()
-                .any(|(_, op_kind, _)| op_kind == "add" || op_kind == "sub"));
+                .any(|e| e.op == "add" || e.op == "sub"));
     if body_uses_error_enum {
         out.push_str("use crate::errors::*;\n");
     }
@@ -348,21 +348,15 @@ pub(crate) fn render_handler_scaffold(
             any_unmechanized = true;
         }
     } else {
-        for (idx, effect) in handler.effects.iter().enumerate() {
-            // Per-site error-variant override and typed RHS tree, indexed
-            // parallel to `effects`; missing entries fall back inside
-            // mechanize_effect.
-            let on_error = handler.effect_on_error.get(idx).and_then(|o| o.as_deref());
-            let tree = handler.effects_tree.get(idx).and_then(|t| t.as_ref());
-            let mechanized = state_acct
-                .and_then(|sa| mechanize_effect(effect, tree, on_error, sa, handler, spec, target));
+        for effect in &handler.effects {
+            let mechanized =
+                state_acct.and_then(|sa| mechanize_effect(effect, sa, handler, spec, target));
             match mechanized {
                 Some(line) => out.push_str(&line),
                 None => {
-                    let (field, op_kind, value) = effect;
                     out.push_str(&format!(
                         "        // Spec effect (needs fill): {} {} {}\n",
-                        field, op_kind, value
+                        effect.field, effect.op, effect.value
                     ));
                     any_unmechanized = true;
                 }
@@ -379,8 +373,8 @@ pub(crate) fn render_handler_scaffold(
         if let (Some(modifies), Some(sa)) = (handler.modifies.as_ref(), state_acct) {
             let mut effect_fields: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for (lhs, _, _) in &handler.effects {
-                let stripped = strip_variant_prefix(lhs, spec);
+            for eff in &handler.effects {
+                let stripped = strip_variant_prefix(&eff.field, spec);
                 let bare = strip_array_index_suffix(&stripped);
                 effect_fields.insert(bare);
             }

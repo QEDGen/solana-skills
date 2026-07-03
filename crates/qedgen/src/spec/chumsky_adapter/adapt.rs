@@ -1152,10 +1152,7 @@ fn expand_handler(
                         env,
                         tcx,
                     ) {
-                        synth.effects.push(eff.triple);
-                        synth.effects_rust.push(eff.value_rust);
-                        synth.effect_on_error.push(eff.on_error);
-                        synth.effects_tree.push(eff.tree);
+                        synth.effects.push(eff.into_parsed_effect());
                     }
                 }
             }
@@ -1209,10 +1206,7 @@ fn expand_handler(
                         env,
                         tcx,
                     ) {
-                        synth.effects.push(eff.triple);
-                        synth.effects_rust.push(eff.value_rust);
-                        synth.effect_on_error.push(eff.on_error);
-                        synth.effects_tree.push(eff.tree);
+                        synth.effects.push(eff.into_parsed_effect());
                     }
                 }
             }
@@ -1318,9 +1312,6 @@ fn adapt_handler(
         aborts_total: false,
         permissionless: false,
         effects: Vec::new(),
-        effects_rust: Vec::new(),
-        effect_on_error: Vec::new(),
-        effects_tree: Vec::new(),
         accounts: Vec::new(),
         transfers: Vec::new(),
         emits: Vec::new(),
@@ -1466,19 +1457,13 @@ fn adapt_handler(
                             for eff in render_effect_or_expand_variant_promotion(
                                 stmt, &params, consts, &canon, env, tcx,
                             ) {
-                                handler.effects.push(eff.triple);
-                                handler.effects_rust.push(eff.value_rust);
-                                handler.effect_on_error.push(eff.on_error);
-                                handler.effects_tree.push(eff.tree);
+                                handler.effects.push(eff.into_parsed_effect());
                             }
                         }
                         a::EffectBlock::Match { scrutinee, arms } => {
                             let mut parsed_arms: Vec<crate::check::ParsedEffectArm> = Vec::new();
                             for arm in arms {
-                                let mut arm_effects = Vec::new();
-                                let mut arm_effects_rust: Vec<String> = Vec::new();
-                                let mut arm_on_error: Vec<Option<String>> = Vec::new();
-                                let mut arm_trees: Vec<Option<crate::mir::ExprTree>> = Vec::new();
+                                let mut arm_effects: Vec<crate::check::ParsedEffect> = Vec::new();
                                 for nested in &arm.body {
                                     let mut leaves = Vec::new();
                                     nested.node.collect_leaves(&mut leaves);
@@ -1486,17 +1471,12 @@ fn adapt_handler(
                                         for eff in render_effect_or_expand_variant_promotion(
                                             stmt, &params, consts, &canon, env, tcx,
                                         ) {
+                                            let eff = eff.into_parsed_effect();
                                             // Mirror into union so flat
                                             // readers see this potential
                                             // write.
-                                            handler.effects.push(eff.triple.clone());
-                                            handler.effects_rust.push(eff.value_rust.clone());
-                                            handler.effect_on_error.push(eff.on_error.clone());
-                                            handler.effects_tree.push(eff.tree.clone());
-                                            arm_effects.push(eff.triple);
-                                            arm_effects_rust.push(eff.value_rust);
-                                            arm_on_error.push(eff.on_error);
-                                            arm_trees.push(eff.tree);
+                                            handler.effects.push(eff.clone());
+                                            arm_effects.push(eff);
                                         }
                                     }
                                 }
@@ -1513,9 +1493,6 @@ fn adapt_handler(
                                     pattern_lean,
                                     is_wildcard,
                                     effects: arm_effects,
-                                    effects_rust: arm_effects_rust,
-                                    effect_on_error: arm_on_error,
-                                    effects_tree: arm_trees,
                                 });
                             }
                             branches = Some(crate::check::ParsedEffectBranches {

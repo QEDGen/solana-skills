@@ -200,8 +200,9 @@ pub fn emit_add_strict_bounds(
     properties: &[ParsedProperty],
     assume_fmt: &str,
 ) {
-    for (field, eff_op, _) in &op.effects {
-        if eff_op == "add" {
+    for eff in &op.effects {
+        let field = &eff.field;
+        if eff.op == "add" {
             if let Some(bound) = find_upper_bound_field(field, properties) {
                 out.push_str(
                     &assume_fmt
