@@ -27,6 +27,7 @@
 import SVM.SBPF
 import SVM.SBPF.CPSSpec
 import SVM.Solana.Abstract.Refinement
+import SVM.Solana.Abstract.Transition
 
 namespace QEDGen.Solana.BridgeAdapter
 
@@ -136,5 +137,44 @@ theorem halts_zero_of_fieldUpdate
     (setupPost ** codecCoarse base postFields).holdsFor (executeFn fetch s FUEL) := by
   unfold AsmRefinesFieldUpdate at h
   exact halts_zero_of_block_exit h h_cr h_exit h_pre h_pc h_run h_bud h_rr h_q_r0 h_cs FUEL h_fuel
+
+/-- Every fault sentinel is a large nonzero constant (`0xFFFFFFFFFFFFFFxx`) —
+    a fault can never masquerade as the success exit code. -/
+theorem toSentinel_ne_zero (e : VmError) : e.toSentinel ≠ 0 := by
+  cases e <;> decide
+
+/-- Fault-side execution bridge (qedsvm#40 / v0.9.0, the `.rejects` analog of
+    `halts_zero_of_fieldUpdate`). A discharged `AsmRefinesTransitionFault` —
+    one FAULT path of the whole-transition bundle, under this path's guard
+    hypotheses — runs to the typed fault and stays halted for any larger
+    fuel: `exitCode = some e.toSentinel` (never `some 0`) and
+    `vmError = some e`. A faulted instruction is rolled back wholesale at the
+    chain level, so no post-memory claim is made (or needed). -/
+theorem faults_of_transitionFault
+    {cr : CodeReq} {nSteps nCu entry : Nat}
+    {accts : List AccountFields} {setupPre : Assertion}
+    {rr : Memory.RegionTable → Prop} {e : VmError}
+    (h : AsmRefinesTransitionFault cr nSteps nCu entry rr e accts setupPre)
+    {fetch : Nat → Option Insn} (h_cr : cr.SatisfiedBy fetch)
+    {s : State}
+    (h_pre : (setupPre ** codecsPre accts).holdsFor s)
+    (h_pc : s.pc = entry) (h_run : s.exitCode = none)
+    (h_bud : s.cuConsumed + nSteps + nCu ≤ s.cuBudget)
+    (h_rr : rr s.regions)
+    (FUEL : Nat) (h_fuel : nSteps ≤ FUEL) :
+    (executeFn fetch s FUEL).exitCode = some e.toSentinel ∧
+    (executeFn fetch s FUEL).vmError = some e := by
+  unfold AsmRefinesTransitionFault at h
+  -- 1. Frame with emp and run the fault triple to its halt point.
+  have hPemp : ((setupPre ** codecsPre accts) ** emp).holdsFor s :=
+    (holdsFor_iff_pointwise (fun h => sepConj_emp_right h)).mpr h_pre
+  obtain ⟨k, hk_le, hk_code, hk_err, _⟩ :=
+    h emp pcFree_emp fetch h_cr s hPemp h_pc h_run h_bud h_rr
+  -- 2. Halt idempotence extends the fault to the bridge's fixed FUEL.
+  have hfe : executeFn fetch s FUEL = executeFn fetch s k := by
+    have hsplit : FUEL = k + (FUEL - k) := by omega
+    rw [hsplit, executeFn_compose]
+    exact executeFn_halted fetch _ _ _ hk_code
+  exact ⟨by rw [hfe]; exact hk_code, by rw [hfe]; exact hk_err⟩
 
 end QEDGen.Solana.BridgeAdapter

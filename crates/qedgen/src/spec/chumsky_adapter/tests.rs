@@ -81,7 +81,7 @@ handler initialize : State.Uninitialized -> State.Setup {
     // The single `state := .Setup { ... }` effect should have
     // expanded into two per-field effects with variant-prefixed
     // LHS, not a single bare-state effect.
-    let lhs_strs: Vec<&String> = handler.effects.iter().map(|(lhs, _, _)| lhs).collect();
+    let lhs_strs: Vec<&String> = handler.effects.iter().map(|e| &e.field).collect();
     assert!(
         lhs_strs.iter().any(|s| s.as_str() == "Setup.admin"),
         "expected Setup.admin in effect LHS list; got: {:?}",
@@ -894,11 +894,12 @@ handler refresh : State.Active -> State.Active {
     // Effect RHS for complex expressions is captured in Lean form
     // (consumed by lean_gen). `now()` lowers to the bare `now` symbol
     // which resolves at elaboration via QEDGen.Solana.Valid.now.
-    let (_field, _kind, rhs) = h
+    let rhs = &h
         .effects
         .iter()
-        .find(|(f, _, _)| f == "last_update")
-        .expect("last_update effect");
+        .find(|e| e.field == "last_update")
+        .expect("last_update effect")
+        .value;
     assert_eq!(
         rhs.trim(),
         "now",
@@ -1654,4 +1655,216 @@ handler pay (fee : U64) : State -> State {
         "binder must shadow state field; got: {}",
         h.requires[2].rust_expr
     );
+}
+
+// ============================================================================
+// ExprTree construction (#151 Slice 0)
+// ============================================================================
+
+mod expr_tree_slice0 {
+    use super::*;
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeCmpOp, TreeSeg};
+    use crate::mir::Ty;
+
+    const TREE_SPEC: &str = r#"spec TreeDemo
+program_id "11111111111111111111111111111111"
+
+const LIMIT = 100
+
+type State = {
+  balance : U64,
+  pnl : I128,
+  active : U64,
+}
+
+type Error | Bad | Overflow
+
+handler pay (amount : U64) : State -> State {
+  auth owner
+  accounts {
+    owner : signer,
+    vault : writable,
+  }
+  requires amount > 0 else Bad
+  requires active < LIMIT else Bad
+  ensures state.balance == old(state.balance) + amount
+  effect {
+    balance += amount else Overflow,
+    active := active + 1,
+  }
+}
+
+property solvent :
+  state.balance >= 0
+  preserved_by all
+"#;
+
+    /// Requires trees resolve every binding class: params stay `Param`,
+    /// canonicalized bare state reads become `StateField` with the real
+    /// declared `Ty`, consts carry their resolved value.
+    #[test]
+    fn requires_tree_resolves_bindings_and_types() {
+        let spec = parse_str(TREE_SPEC).expect("parse");
+        let h = &spec.handlers[0];
+
+        // `amount > 0` — LHS is a Param with Ty::U64 from the signature.
+        let t0 = h.requires[0].tree.as_ref().expect("requires[0] tree");
+        let ExprTree::Cmp { op, lhs, .. } = t0 else {
+            panic!("expected Cmp, got {t0:?}");
+        };
+        assert_eq!(*op, TreeCmpOp::Gt);
+        let ExprTree::Path(p) = lhs.as_ref() else {
+            panic!("expected Path LHS, got {lhs:?}");
+        };
+        assert_eq!(p.binding, BindingKind::Param);
+        assert_eq!(p.root, "amount");
+        assert_eq!(p.ty, Some(Ty::U64));
+
+        // `active < LIMIT` — bare `active` canonicalized to a StateField
+        // read; `LIMIT` resolves to Const("100").
+        let t1 = h.requires[1].tree.as_ref().expect("requires[1] tree");
+        let ExprTree::Cmp { lhs, rhs, .. } = t1 else {
+            panic!("expected Cmp, got {t1:?}");
+        };
+        let ExprTree::Path(state_read) = lhs.as_ref() else {
+            panic!("expected Path LHS, got {lhs:?}");
+        };
+        assert_eq!(state_read.binding, BindingKind::StateField);
+        assert_eq!(state_read.root, "state");
+        assert_eq!(
+            state_read.segments,
+            vec![TreeSeg::Field("active".to_string())]
+        );
+        assert_eq!(state_read.ty, Some(Ty::U64));
+        let ExprTree::Path(limit) = rhs.as_ref() else {
+            panic!("expected Path RHS, got {rhs:?}");
+        };
+        assert_eq!(limit.binding, BindingKind::Const("100".to_string()));
+    }
+
+    /// Ensures trees keep `old(...)` structural — one tree serves the
+    /// unary and binary render modes.
+    #[test]
+    fn ensures_tree_keeps_old_node() {
+        let spec = parse_str(TREE_SPEC).expect("parse");
+        let h = &spec.handlers[0];
+        let t = h.ensures[0].tree.as_ref().expect("ensures tree");
+        let ExprTree::Cmp { rhs, .. } = t else {
+            panic!("expected Cmp, got {t:?}");
+        };
+        let ExprTree::Arith { lhs, .. } = rhs.as_ref() else {
+            panic!("expected Arith RHS, got {rhs:?}");
+        };
+        assert!(
+            matches!(lhs.as_ref(), ExprTree::Old(_)),
+            "old(state.balance) must stay a structural Old node; got {lhs:?}"
+        );
+    }
+
+    /// Effect RHS trees ride on each `ParsedEffect`, for both the
+    /// simple shape (`amount` — historically skipped canonicalization) and
+    /// the compound shape (`active + 1`).
+    #[test]
+    fn effect_rhs_trees_parallel_to_triples() {
+        let spec = parse_str(TREE_SPEC).expect("parse");
+        let h = &spec.handlers[0];
+
+        let t0 = h.effects[0].tree.as_ref().expect("effect[0] tree");
+        let ExprTree::Path(p) = t0 else {
+            panic!("expected Path, got {t0:?}");
+        };
+        assert_eq!(p.binding, BindingKind::Param);
+
+        let t1 = h.effects[1].tree.as_ref().expect("effect[1] tree");
+        let ExprTree::Arith { lhs, .. } = t1 else {
+            panic!("expected Arith, got {t1:?}");
+        };
+        let ExprTree::Path(active) = lhs.as_ref() else {
+            panic!("expected Path, got {lhs:?}");
+        };
+        assert_eq!(
+            active.binding,
+            BindingKind::StateField,
+            "bare `active` in effect RHS canonicalizes into a state read"
+        );
+    }
+
+    /// Property bodies get spec-level trees; the tree-native kind
+    /// inference agrees with the declared field type.
+    #[test]
+    fn property_tree_present_with_kind_inference() {
+        let spec = parse_str(TREE_SPEC).expect("parse");
+        let prop = &spec.properties[0];
+        let t = prop.tree.as_ref().expect("property tree");
+        assert_eq!(t.num_kind(), crate::mir::expr_tree::NumKind::Bool);
+    }
+
+    /// Auth-actor and account names resolve to `Account`; quantifier
+    /// binders shadow same-named state fields as `ExprBinder`.
+    #[test]
+    fn account_and_shadow_binding_kinds() {
+        let src = r#"spec Shadow
+program_id "11111111111111111111111111111111"
+
+type State = { active : U64, }
+type Error | Bad
+
+handler close : State -> State {
+  auth owner
+  accounts { owner : signer, }
+  requires owner.pubkey == owner.pubkey else Bad
+  requires forall active : U8, active >= 0
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let h = &spec.handlers[0];
+
+        let t0 = h.requires[0].tree.as_ref().expect("tree");
+        let ExprTree::Cmp { lhs, .. } = t0 else {
+            panic!("expected Cmp, got {t0:?}");
+        };
+        let ExprTree::Path(owner) = lhs.as_ref() else {
+            panic!("expected Path, got {lhs:?}");
+        };
+        assert_eq!(owner.binding, BindingKind::Account);
+
+        let t1 = h.requires[1].tree.as_ref().expect("tree");
+        let ExprTree::Quant { body, .. } = t1 else {
+            panic!("expected Quant, got {t1:?}");
+        };
+        let ExprTree::Cmp { lhs, .. } = body.as_ref() else {
+            panic!("expected Cmp body, got {body:?}");
+        };
+        let ExprTree::Path(binder_ref) = lhs.as_ref() else {
+            panic!("expected Path, got {lhs:?}");
+        };
+        assert_eq!(
+            binder_ref.binding,
+            BindingKind::ExprBinder,
+            "quantifier binder must shadow the same-named state field"
+        );
+    }
+
+    /// Mixed-kind arithmetic (U64 state field + I128 state field) infers
+    /// `Int` from the tree alone — no TypeEnv at the call site.
+    #[test]
+    fn tree_kind_inference_mixed_arith() {
+        let src = r#"spec Mixed
+program_id "11111111111111111111111111111111"
+
+type State = { balance : U64, pnl : I128, }
+type Error | Bad
+
+handler check : State -> State {
+  permissionless
+  requires state.balance + state.pnl >= 0 else Bad
+}
+"#;
+        let spec = parse_str(src).expect("parse");
+        let t = spec.handlers[0].requires[0].tree.as_ref().expect("tree");
+        let ExprTree::Cmp { lhs, .. } = t else {
+            panic!("expected Cmp, got {t:?}");
+        };
+        assert_eq!(lhs.num_kind(), crate::mir::expr_tree::NumKind::Int);
+    }
 }

@@ -565,18 +565,31 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             qedlift,
             module,
             out_dir,
+            transition,
         } => {
             let parsed = check::parse_spec_file(&spec)?;
-            descriptor::run_discharge(
-                &parsed,
-                &handler,
-                account,
-                &so,
-                idl.as_deref(),
-                &qedlift,
-                module,
-                out_dir.as_deref(),
-            )?;
+            if transition {
+                descriptor::run_discharge_transition(
+                    &parsed,
+                    &handler,
+                    account,
+                    &so,
+                    idl.as_deref(),
+                    &qedlift,
+                    out_dir.as_deref(),
+                )?;
+            } else {
+                descriptor::run_discharge(
+                    &parsed,
+                    &handler,
+                    account,
+                    &so,
+                    idl.as_deref(),
+                    &qedlift,
+                    module,
+                    out_dir.as_deref(),
+                )?;
+            }
         }
 
         Commands::Consolidate {

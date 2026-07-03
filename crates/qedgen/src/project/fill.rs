@@ -326,7 +326,8 @@ fn build_prompt(
     let state_acct_name = state_account_name(handler);
     let mut mechanized_lines = Vec::new();
     let mut unfilled_effects = Vec::new();
-    for (field, op_kind, value) in &handler.effects {
+    for eff in &handler.effects {
+        let (field, op_kind, value) = (&eff.field, &eff.op, &eff.value);
         let simple_rhs = value
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-');

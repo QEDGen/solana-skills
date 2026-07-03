@@ -448,8 +448,8 @@ fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
             fields.insert(f.clone());
         }
     }
-    for (lhs, _, _) in &handler.effects {
-        let bare = crate::rust_codegen_util::effect_target_base(lhs);
+    for eff in &handler.effects {
+        let bare = crate::rust_codegen_util::effect_target_base(&eff.field);
         fields.insert(bare.to_string());
     }
     // v2.27 Track A — pick up every caller-side field referenced by a

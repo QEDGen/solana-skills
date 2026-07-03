@@ -178,6 +178,11 @@ pub(super) fn emit_handler_transition_adt(out: &mut String, mir: &Mir, h: &crate
 /// list — the per-arm analogue used by both the unconditional ADT path and
 /// `emit_adt_branch`. Field types come from the pre-variant; only
 /// `CheckedAdd`/`CheckedSub` gain bounds (`Wrap*`/`Sat*` saturate/wrap).
+/// The #148 effect-RHS tree guards (`effect_tree_bound_conds`) do NOT
+/// apply here: ADT arms bind fields as bare pattern binders, while the
+/// tree renderer emits `s.<field>` receivers — the guards would carry
+/// out-of-scope identifiers. Extend when the ADT renderer grows a
+/// binder-aware render context.
 pub(super) fn adt_bound_conds(
     mir: &Mir,
     pre: &crate::mir::StateVariant,
@@ -626,29 +631,27 @@ pub(super) fn flat_effect_with_parts(
                 if is_account_pubkey_ref(&rhs.rust) {
                     continue;
                 }
-                // Re-qualify the RHS: a bare state-field ref (e.g.
-                // `reserved := state.cap`, stripped upstream to `cap`)
-                // must render as `s.cap` — emitting `rhs.lean` verbatim
-                // yields an unknown identifier. Handler params and
-                // literals pass through unchanged.
+                // Tree-native RHS (#151 Slice 2): the resolved tree knows
+                // a state read from a param from a literal — the legacy
+                // string path re-derived that from shape heuristics.
                 with_parts.push(format!(
                     "{} := {}",
                     safe_name(&path_field_name(path)),
-                    effect_value_to_lean_mir(&rhs.lean, &h.params)
+                    effect_rhs_lean(rhs, &h.params)
                 ));
             }
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                let d = effect_rhs_lean(delta, &h.params);
                 with_parts.push(format!("{} := s.{} + {}", f, f, d));
             }
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                let d = effect_rhs_lean(delta, &h.params);
                 with_parts.push(format!("{} := s.{} - {}", f, f, d));
             }
             Stmt::RequireOrAbort { .. }
@@ -664,7 +667,7 @@ pub(super) fn flat_effect_with_parts(
 }
 
 /// Overflow/underflow bound conjuncts for one statement list — the
-/// per-arm analogue of `build_guard_cond_parts` items 3 and 5 (same
+/// per-arm analogue of `build_guard_cond_parts` items 3, 5, and 6 (same
 /// formats, same all-arithmetic-kinds coverage, same dedup against
 /// already-present conjuncts). Used by the `Stmt::Branch` rendering so
 /// an arm's bounds gate only that arm.
@@ -751,6 +754,13 @@ pub(super) fn flat_effect_bound_conds(
         conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
     }
 
+    // Item-6 analogue: effect-RHS bound guards for the arm's own bare
+    // arithmetic (#148), deduped against both the arm's and the outer
+    // guard conjuncts.
+    let seen: Vec<String> = conds.iter().chain(outer_conds.iter()).cloned().collect();
+    let tree_conds = effect_tree_bound_conds(mir, stmts, &seen);
+    conds.extend(tree_conds);
+
     conds
 }
 
@@ -764,6 +774,8 @@ pub(super) fn flat_effect_bound_conds(
 ///   3. sub-effect underflow guards (`<delta> ≤ s.<field>`, unsigned only)
 ///   4. RequireOrAbort predicates (filtered: skip handler-account pubkey refs)
 ///   5. add-effect overflow guards (`s.<field> + <delta> ≤ <max>`, unsigned only)
+///   6. effect-RHS bound guards for bare arithmetic (#148 — see
+///      [`effect_tree_bound_conds`])
 pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> Vec<String> {
     use crate::mir::Stmt;
     let mut conds: Vec<String> = Vec::new();
@@ -868,5 +880,242 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
         conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
     }
 
+    let tree_conds = effect_tree_bound_conds(mir, &h.body.stmts, &conds);
+    conds.extend(tree_conds);
+
     conds
+}
+
+/// #148 — auto bound-guards for bare arithmetic inside effect values.
+///
+/// The Kani/proptest lane renders every effect value under
+/// `ArithMode::Checked` (`rust_codegen_util::effect::emit_one_effect`):
+/// bare `-` lowers to `checked_sub(..)?`, `/`/`%` to
+/// `checked_div/checked_rem(..)?`, and `+`/`*` to `checked_add/mul(..)?`
+/// — the harness transition REJECTS on underflow / overflow /
+/// division-by-zero. The Lean model computes over `Nat`, where `-` is
+/// monus (truncates at 0) and `/`, `%` are total (`x / 0 = 0`,
+/// `x % 0 = x`); without matching guard conjuncts the two models diverge
+/// on the rejection path (#146 / #148). Per effect value carrying a typed
+/// tree (tree-less `Expr`s — IDL ingest, probes — keep the legacy
+/// no-guard behavior):
+///
+///   * every `-` node whose kind joins to `Nat` → `<rhs> ≤ <lhs>`
+///     (Int subtraction doesn't truncate in Lean — skipped);
+///   * every `/` / `%` node (and the `mul_div_floor/ceil` divisor) →
+///     `<divisor> ≠ 0`, unless the divisor is a nonzero literal/const;
+///   * an `Assign` RHS containing `+` / `*` / `mul_div_*` when the target
+///     field's type is bounded → `<rhs> ≤ <MAX>` (final-value bound —
+///     the checked ops abort above the field width; Lean `Nat` doesn't).
+///     Approximate for mixed shapes (an intermediate `checked_add`
+///     overflow under a later `-` isn't captured) — issue #148 specifies
+///     the final-value bound.
+///
+/// Add/sub-family deltas are walked too (their compound arithmetic
+/// renders checked in the harness just like an `Assign` RHS); their
+/// OUTER op is already guarded by items 3/5 of
+/// [`build_guard_cond_parts`], so only interior nodes contribute here —
+/// no duplication, and no extra MAX bound (item 5 owns the add bound).
+///
+/// Only unconditionally-evaluated positions are walked: arithmetic in an
+/// `if`/`match` arm is checked in Rust only when that arm is taken, so an
+/// unconditional Lean guard would over-constrain the model (reject
+/// executions the harness accepts). Binder-introducing bodies (`let … in`
+/// bodies, `sum`, quantifiers, match arms) are skipped for scope: a guard
+/// rendered from under a binder would carry an out-of-scope identifier.
+pub(super) fn effect_tree_bound_conds(
+    mir: &Mir,
+    stmts: &[crate::mir::Stmt],
+    existing: &[String],
+) -> Vec<String> {
+    use crate::mir::expr_tree::NumKind;
+    use crate::mir::Stmt;
+
+    let cx = tree_render::LeanCx::guard().with_application_subscripts();
+    let state_fields = flat_state_fields(mir);
+    let mut conds: Vec<String> = Vec::new();
+
+    for stmt in stmts {
+        let (value, assign_target_ty): (&crate::mir::Expr, Option<crate::mir::Ty>) = match stmt {
+            Stmt::Assign { path, rhs } => {
+                // Account-binding pubkey refs are dropped from the effect
+                // body (no Lean scope) — no guard either.
+                if is_account_pubkey_ref(&rhs.rust) {
+                    continue;
+                }
+                let field = path_field_name(path);
+                (
+                    rhs,
+                    state_fields
+                        .iter()
+                        .find(|(n, _)| n == &field)
+                        .map(|(_, t)| t.clone()),
+                )
+            }
+            Stmt::CheckedAdd { delta, .. }
+            | Stmt::CheckedSub { delta, .. }
+            | Stmt::WrapAdd { delta, .. }
+            | Stmt::WrapSub { delta, .. }
+            | Stmt::SatAdd { delta, .. }
+            | Stmt::SatSub { delta, .. } => (delta, None),
+            // Branch arms are guarded per-arm (`flat_effect_bound_conds`);
+            // the rest carry no effect value.
+            Stmt::RequireOrAbort { .. }
+            | Stmt::TokenTransfer { .. }
+            | Stmt::VariantPromote { .. }
+            | Stmt::Branch { .. }
+            | Stmt::Abort(_)
+            | Stmt::Cpi { .. }
+            | Stmt::Emit { .. } => continue,
+        };
+        let Some(tree) = &value.tree else { continue };
+
+        let saw_growth = collect_tree_bound_guards(tree, cx, existing, &mut conds);
+
+        if saw_growth && tree.num_kind() == NumKind::Nat {
+            if let Some(ty) = &assign_target_ty {
+                if let Some(max) = ty_max_const(ty) {
+                    push_unique_cond(
+                        format!("{} \u{2264} {}", tree_render::render_lean(tree, cx), max),
+                        existing,
+                        &mut conds,
+                    );
+                }
+            }
+        }
+    }
+
+    conds
+}
+
+/// Post-order walk collecting the #148 guard conjuncts for one effect
+/// value; returns whether an unconditionally-evaluated growth node
+/// (`+` / `*` / `mul_div_*`) was seen (drives the caller's final-value
+/// MAX bound). Post-order keeps chained guards cumulative: `a - b - c`
+/// yields `b ≤ a` then `c ≤ a - b`. Exhaustive over `ExprTree` — no `_`
+/// arms (see the enum doc in `mir::expr_tree`).
+fn collect_tree_bound_guards(
+    e: &crate::mir::expr_tree::ExprTree,
+    cx: tree_render::LeanCx,
+    existing: &[String],
+    conds: &mut Vec<String>,
+) -> bool {
+    use crate::mir::expr_tree::{ExprTree, NumKind, TreeArithOp};
+
+    let walk = |sub: &ExprTree, conds: &mut Vec<String>| -> bool {
+        collect_tree_bound_guards(sub, cx, existing, conds)
+    };
+
+    match e {
+        ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => false,
+        ExprTree::Old(inner) | ExprTree::Not(inner) => walk(inner, conds),
+        // Binder-introducing bodies — out-of-scope identifiers in a guard.
+        ExprTree::Sum { .. } | ExprTree::Quant { .. } => false,
+        // Rust `&&` / `||` short-circuit: only the lhs is unconditional.
+        ExprTree::BoolOp { lhs, .. } => walk(lhs, conds),
+        ExprTree::Cmp { lhs, rhs, .. } => {
+            let l = walk(lhs, conds);
+            let r = walk(rhs, conds);
+            l || r
+        }
+        ExprTree::Arith { op, lhs, rhs } => {
+            let l = walk(lhs, conds);
+            let r = walk(rhs, conds);
+            let growth = l || r;
+            match op {
+                TreeArithOp::Sub => {
+                    if e.num_kind() == NumKind::Nat {
+                        push_unique_cond(
+                            format!(
+                                "{} \u{2264} {}",
+                                tree_render::render_lean(rhs, cx),
+                                tree_render::render_lean(lhs, cx)
+                            ),
+                            existing,
+                            conds,
+                        );
+                    }
+                    growth
+                }
+                TreeArithOp::Div | TreeArithOp::Mod => {
+                    push_divisor_guard(rhs, cx, existing, conds);
+                    growth
+                }
+                TreeArithOp::Add | TreeArithOp::Mul => true,
+            }
+        }
+        // The u128-widened helpers narrow back to the declared width
+        // fallibly (`try_into()?`) and divide checked — growth + divisor
+        // guard, same divergence class as bare `*` / `/`.
+        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+            walk(a, conds);
+            walk(b, conds);
+            walk(d, conds);
+            push_divisor_guard(d, cx, existing, conds);
+            true
+        }
+        // Scrutinee is unconditional; arm bodies are taken conditionally
+        // AND may bind payload identifiers — skipped.
+        ExprTree::Match { scrutinee, .. } => walk(scrutinee, conds),
+        ExprTree::Ctor { payload, .. } => match payload {
+            Some(p) => walk(p, conds),
+            None => false,
+        },
+        ExprTree::RecordLit(fields) => {
+            let mut growth = false;
+            for (_, v) in fields {
+                growth |= walk(v, conds);
+            }
+            growth
+        }
+        ExprTree::RecordUpdate { base, updates } => {
+            let mut growth = walk(base, conds);
+            for (_, v) in updates {
+                growth |= walk(v, conds);
+            }
+            growth
+        }
+        ExprTree::IsVariant { scrutinee, .. } => walk(scrutinee, conds),
+        ExprTree::App { args, .. } => {
+            let mut growth = false;
+            for a in args {
+                growth |= walk(a, conds);
+            }
+            growth
+        }
+        ExprTree::Field { base, .. } => walk(base, conds),
+        // The let VALUE is unconditional; the body references the binder
+        // (out of guard scope) — skipped.
+        ExprTree::Let { value, .. } => walk(value, conds),
+        // Branches are conditionally evaluated — only the condition walks.
+        ExprTree::IfThenElse { cond, .. } => walk(cond, conds),
+    }
+}
+
+/// `<divisor> ≠ 0` unless the divisor renders to a nonzero integer
+/// literal (covers `x / 2` and `x / CONST` — `Const` bindings render
+/// their resolved value).
+fn push_divisor_guard(
+    d: &crate::mir::expr_tree::ExprTree,
+    cx: tree_render::LeanCx,
+    existing: &[String],
+    conds: &mut Vec<String>,
+) {
+    let rendered = tree_render::render_lean(d, cx);
+    if let Ok(v) = rendered.replace('_', "").parse::<u128>() {
+        if v != 0 {
+            return;
+        }
+    }
+    push_unique_cond(format!("{} \u{2260} 0", rendered), existing, conds);
+}
+
+/// Push `cond` unless an identical conjunct is already present (either
+/// collected in this pass or in the caller's existing guard list — e.g.
+/// a user-written `requires` spelling the same bound).
+fn push_unique_cond(cond: String, existing: &[String], conds: &mut Vec<String>) {
+    if existing.iter().any(|c| c == &cond) || conds.iter().any(|c| c == &cond) {
+        return;
+    }
+    conds.push(cond);
 }

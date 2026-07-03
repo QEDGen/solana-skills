@@ -28,14 +28,14 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         }
         // Effect RHS can call the helpers directly (`fee := mul_div_floor(…)`)
         // — probe the Rust-form values the harness transition bodies emit.
-        if h.effects_rust.iter().any(|r| probe(r)) {
+        if h.effects.iter().any(|e| probe(&e.value_rust)) {
             any = true;
         }
         if let Some(br) = &h.effect_branches {
             if br
                 .arms
                 .iter()
-                .any(|arm| arm.effects_rust.iter().any(|r| probe(r)))
+                .any(|arm| arm.effects.iter().any(|e| probe(&e.value_rust)))
             {
                 any = true;
             }
@@ -620,7 +620,33 @@ pub(crate) fn generate_guards(
             out.push_str(&format!("    let {} = {};\n", binding_name, rewritten));
         }
 
+        // #151 Slice 3 — tree-native requires rendering. One render under
+        // `Binder::SelfAcct("ctx.<state>")` (state receiver) +
+        // `AcctKeyStyle` (account key loads) replaces `bind_state`'s
+        // two-pass string rewrite. The tree path fires only where it
+        // reproduces the legacy receivers exactly:
+        //   - flat state (multi-variant ADT fields route through the
+        //     `.inner.<field>()` accessor — a spec-indexed rewrite the
+        //     Copy render context can't carry), and
+        //   - key-style account reads only (imported-account field reads
+        //     need the `crate::imported` mirror dispatch).
+        // Everything else — and tree-less clauses (IDL ingest, probes) —
+        // keeps the legacy string path.
+        let acct_key_style = match target {
+            Target::Anchor => crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx,
+            Target::Quasar | Target::Pinocchio => {
+                // Pinocchio never reaches here (dedicated emitter above).
+                crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx
+            }
+        };
+        let guard_receiver = state_acct.map(|sa| format!("ctx.{}", sa.name));
+        let spec_is_adt = is_multi_variant_adt_state(spec);
+
         for req in &handler.requires {
+            use crate::rust_codegen_util::tree_render::{
+                account_reads_are_key_style, render_rust, tree_references_abstract_binder, Binder,
+                RustCx,
+            };
             // Emit as a comment for human readers + an executable check.
             out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
             let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
@@ -634,11 +660,17 @@ pub(crate) fn generate_guards(
             // before the user's handler body computes the binder; the
             // verifier still enforces this clause via the binder's
             // symbolic value. The user should re-assert it in their
-            // handler body after the binder is computed.
-            let references_abstract = !abstract_binder_names.is_empty()
-                && abstract_binder_names
-                    .iter()
-                    .any(|name| contains_word_boundary(raw, name));
+            // handler body after the binder is computed. Structural on
+            // the tree; word-boundary substring scan for legacy strings.
+            let references_abstract = match &req.tree {
+                Some(tree) => tree_references_abstract_binder(tree),
+                None => {
+                    !abstract_binder_names.is_empty()
+                        && abstract_binder_names
+                            .iter()
+                            .any(|name| contains_word_boundary(raw, name))
+                }
+            };
             if references_abstract {
                 out.push_str(
                     "    //   DEFERRED — references an `abstract` binder; verifier still\n",
@@ -652,7 +684,27 @@ pub(crate) fn generate_guards(
                 continue;
             }
 
-            let rust = bind_state(raw);
+            let rust = match &req.tree {
+                Some(tree) if !spec_is_adt && account_reads_are_key_style(tree) => {
+                    let binder = match &guard_receiver {
+                        Some(receiver) => Binder::SelfAcct(receiver),
+                        // No resolvable state account: the legacy path
+                        // leaves `s.` unbound for the caller to hand-edit
+                        // (R12); `Binder::S` renders the same form.
+                        None => Binder::S,
+                    };
+                    let cx = RustCx::native()
+                        .with_binder(binder)
+                        .with_acct_key(Some(acct_key_style));
+                    let cx = if pod_target {
+                        RustCx { pod: true, ..cx }
+                    } else {
+                        cx
+                    };
+                    render_rust(tree, cx)
+                }
+                Some(_) | None => bind_state(raw),
+            };
             if let Some(err) = &req.error_name {
                 out.push_str(&format!(
                     "    if !({}) {{ return Err({}); }}\n",

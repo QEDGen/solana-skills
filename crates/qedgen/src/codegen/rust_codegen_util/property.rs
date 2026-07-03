@@ -4,6 +4,38 @@
 
 use super::*;
 
+/// A property body as a Rust predicate — tree-native (#151 Slice 1).
+/// Renders from the typed tree under the math-exact policy (`Widened`)
+/// with the class-appropriate state binder (`Unary` → `s`, `Binary` →
+/// `pre`/`post`); falls back to the pre-rendered strings, then to
+/// text-massaging the Lean form, for properties without a tree
+/// (hand-built fixtures, legacy ingest). `None` = description-only.
+pub fn property_predicate_rust(prop: &ParsedProperty, wrapping_fallback: bool) -> Option<String> {
+    use super::tree_render::{render_rust, ArithMode, Binder, RustCx};
+    if let Some(tree) = &prop.tree {
+        let binder = match prop.class {
+            crate::check::PropertyClass::Unary => Binder::S,
+            crate::check::PropertyClass::Binary => Binder::PrePost,
+        };
+        return Some(render_rust(
+            tree,
+            RustCx::native()
+                .with_binder(binder)
+                .with_arith(ArithMode::Widened),
+        ));
+    }
+    prop.rust_expression_math
+        .as_deref()
+        .filter(|r| !r.is_empty())
+        .or(prop.rust_expression.as_deref())
+        .map(|r| r.to_string())
+        .or_else(|| {
+            prop.expression
+                .as_deref()
+                .map(|e| translate_property_to_rust(e, wrapping_fallback))
+        })
+}
+
 /// Translate a qedspec property expression to Rust.
 pub fn translate_property_to_rust(expr: &str, wrapping: bool) -> String {
     let result = expr
@@ -168,8 +200,9 @@ pub fn emit_add_strict_bounds(
     properties: &[ParsedProperty],
     assume_fmt: &str,
 ) {
-    for (field, eff_op, _) in &op.effects {
-        if eff_op == "add" {
+    for eff in &op.effects {
+        let field = &eff.field;
+        if eff.op == "add" {
             if let Some(bound) = find_upper_bound_field(field, properties) {
                 out.push_str(
                     &assume_fmt

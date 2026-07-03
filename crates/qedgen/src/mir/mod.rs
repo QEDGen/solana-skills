@@ -32,6 +32,12 @@
 use crate::check::ParsedSpec;
 use std::collections::BTreeMap;
 
+/// Typed expression tree (#151 Slice 0) — structural carrier that will
+/// replace the pre-rendered string fields on `Expr` (slices 1–4).
+pub mod expr_tree;
+
+pub use expr_tree::ExprTree;
+
 // ----------------------------------------------------------------------
 // Top-level
 // ----------------------------------------------------------------------
@@ -506,6 +512,13 @@ pub struct Expr {
     pub rust_math: String,
     /// Binary-mode math-exact rendering; fallback is `rust_binary`.
     pub rust_binary_math: String,
+    /// Typed, name-resolved expression tree (#151 Slice 0). `Some` for
+    /// expressions that flowed through the chumsky adapter (requires,
+    /// ensures, properties, invariants, effect RHS, CPI args); `None` for
+    /// synthetic strings and legacy ingest paths (IDL, probes). New
+    /// consumers must prefer the tree and treat the strings as the
+    /// deprecated fallback — the strings are deleted in Slice 4.
+    pub tree: Option<ExprTree>,
     /// Source span when available; lints may read it, codegens shouldn't.
     pub source_span: Option<SourceSpan>,
 }
@@ -845,6 +858,7 @@ impl Expr {
             rust_binary: String::new(),
             rust_math: req.rust_expr_math.clone(),
             rust_binary_math: String::new(),
+            tree: req.tree.clone(),
             source_span: None,
         }
     }
@@ -859,13 +873,14 @@ impl Expr {
             rust_binary: ens.rust_expr_binary.clone(),
             rust_math: String::new(),
             rust_binary_math: ens.rust_expr_binary_math.clone(),
+            tree: ens.tree.clone(),
             source_span: None,
         }
     }
 
     /// From a raw single-form string (effect value, transfer amount, seed):
-    /// the same string fills every form. Proper multi-form rendering at
-    /// lowering time requires parser changes, deferred to v3.0.
+    /// the same string fills every form and no tree is available. Slice 4
+    /// (#151) retires the remaining callers.
     pub fn from_raw(s: impl Into<String>) -> Self {
         let s = s.into();
         Expr {
@@ -875,6 +890,7 @@ impl Expr {
             rust_binary: String::new(),
             rust_math: String::new(),
             rust_binary_math: String::new(),
+            tree: None,
             source_span: None,
         }
     }
@@ -979,6 +995,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                     rust_binary: String::new(),
                     rust_math: p.rust_expression_math.clone().unwrap_or_default(),
                     rust_binary_math: String::new(),
+                    tree: p.tree.clone(),
                     source_span: None,
                 }),
                 preserved_by: p.preserved_by.clone(),
@@ -1219,6 +1236,7 @@ fn lower_invariants(parsed: &ParsedSpec) -> Vec<InvariantMir> {
                 Predicate(Expr {
                     lean: lean.clone(),
                     rust: inv.rust_expr.clone().unwrap_or_default(),
+                    tree: inv.tree.clone(),
                     ..Default::default()
                 })
             }),
@@ -1487,11 +1505,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     //    arms (parser back-compat view) and the real statements live on the
     //    step-7 `Stmt::Branch` — lowering both would double-emit.
     if h.effect_branches.is_none() {
-        stmts.extend(lower_effects(
-            &h.effects,
-            &h.effect_on_error,
-            &h.effects_rust,
-        ));
+        stmts.extend(lower_effects(&h.effects));
     }
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
@@ -1529,6 +1543,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                             lean: a.lean_expr.clone(),
                             rust: a.rust_expr.clone(),
                             rust_pod: a.rust_expr_pod.clone(),
+                            tree: a.tree.clone(),
                             ..Default::default()
                         },
                     })
@@ -1560,7 +1575,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         let mut default = None;
         for arm in &br.arms {
             let block = Block {
-                stmts: lower_effects(&arm.effects, &arm.effect_on_error, &arm.effects_rust),
+                stmts: lower_effects(&arm.effects),
             };
             if arm.is_wildcard {
                 default = Some(block);
@@ -1581,6 +1596,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 lean: br.scrutinee_lean.clone(),
                 rust: br.scrutinee_rust.clone(),
                 rust_pod: br.scrutinee_rust_pod.clone(),
+                tree: br.scrutinee_tree.clone(),
                 ..Default::default()
             }),
             arms,
@@ -1591,36 +1607,40 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     Block { stmts }
 }
 
-/// Lower effect triples into typed `Stmt`s; `on_error[i]` supplies per-site
-/// error names for checked variants, `values_rust[i]` the Rust-form RHS
-/// (adapter-rendered; see `ParsedHandler::effects_rust`). Shared by the
-/// flat-effects path and per-arm `Stmt::Branch` lowering.
-fn lower_effects(
-    effects: &[(String, String, String)],
-    on_error: &[Option<String>],
-    values_rust: &[String],
-) -> Vec<Stmt> {
+/// Lower `ParsedEffect`s into typed `Stmt`s. Each effect is self-contained
+/// (#151 Slice 4): `on_error` supplies the per-site error name for checked
+/// variants, `value_rust` the Rust-form RHS (adapter-rendered; see
+/// `ParsedEffect::value_rust`), `tree` the typed RHS tree (#151). Shared by
+/// the flat-effects path and per-arm `Stmt::Branch` lowering.
+fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
     let mut stmts = Vec::new();
-    for (i, (field, op_kind, value)) in effects.iter().enumerate() {
-        let err_override = on_error.get(i).and_then(|o| o.clone());
-        let path = parse_field_path(field);
-        // The triple's value doubles as the Lean form; the Rust form comes
-        // from the parallel adapter rendering when present (empty for
-        // ParsedHandlers built outside the chumsky adapter — IDL ingest,
-        // probes — where the single string is all we have).
-        let rhs = match values_rust.get(i).filter(|r| !r.is_empty()) {
-            Some(rust) => Expr {
+    for eff in effects {
+        let err_override = eff.on_error.clone();
+        let path = parse_field_path(&eff.field);
+        let tree = eff.tree.clone();
+        let value = &eff.value;
+        // `value` doubles as the Lean form; the Rust form comes from the
+        // adapter rendering when present (empty for ParsedHandlers built
+        // outside the chumsky adapter — IDL ingest, probes — where the
+        // single string is all we have).
+        let rhs = if eff.value_rust.is_empty() {
+            Expr {
+                tree,
+                ..Expr::from_raw(value.clone())
+            }
+        } else {
+            Expr {
                 lean: value.clone(),
-                rust: rust.clone(),
-                rust_pod: rust.clone(),
+                rust: eff.value_rust.clone(),
+                rust_pod: eff.value_rust.clone(),
                 rust_binary: String::new(),
                 rust_math: String::new(),
                 rust_binary_math: String::new(),
+                tree,
                 source_span: None,
-            },
-            None => Expr::from_raw(value.clone()),
+            }
         };
-        let stmt = match op_kind.as_str() {
+        let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },
             "add" => Stmt::CheckedAdd {
                 path,
@@ -1661,7 +1681,10 @@ fn parse_field_path(s: &str) -> Path {
 
 /// Parse a DSL type string into a `Ty`. Best-effort — unknown forms
 /// become `Ty::Custom(name)`. v3.0 will type-check this rigorously.
-fn parse_ty(s: &str) -> Ty {
+/// `pub(crate)`: the adapter's tree builder (`chumsky_adapter::tree`)
+/// routes `TypeRef::Named` through it so `Custom` spellings stay
+/// consistent across lowering and tree annotation.
+pub(crate) fn parse_ty(s: &str) -> Ty {
     match s.trim() {
         "U8" => Ty::U8,
         "U16" => Ty::U16,
@@ -2169,6 +2192,72 @@ handler route (fee_type : U8) (amount : U64) : State.Active -> State.Active {
             "escrow should have no lifted imports; got: {:?}",
             mir.imports.keys().collect::<Vec<_>>()
         );
+    }
+
+    // ---- ExprTree carriage (#151 Slice 0) ----
+
+    /// Every adapter-built expression position must carry a typed tree
+    /// through lowering: RequireOrAbort predicates, `pre` hypotheses,
+    /// `post` ensures, effect-statement RHS, and property bodies. The
+    /// pilot fixtures exercise the full DSL surface, so a `None` here
+    /// means an adapt site forgot to build its tree.
+    #[test]
+    fn lower_carries_expr_trees_across_pilots() {
+        for fixture in &[
+            "examples/rust/escrow/escrow.qedspec",
+            "examples/rust/lending/lending.qedspec",
+            "examples/rust/multisig/multisig.qedspec",
+            "examples/rust/bundled-stdlib-demo/pool.qedspec",
+        ] {
+            let mir = lower_fixture(fixture);
+            for h in &mir.handlers {
+                for p in h.pre.iter().chain(h.post.iter()) {
+                    assert!(
+                        p.0.tree.is_some(),
+                        "{fixture}: handler {} pre/post missing tree: {:?}",
+                        h.name,
+                        p.0.lean
+                    );
+                }
+                for s in &h.body.stmts {
+                    let rhs = match s {
+                        Stmt::RequireOrAbort { pred, .. } => Some(&pred.0),
+                        Stmt::Assign { rhs, .. } => Some(rhs),
+                        Stmt::CheckedAdd { delta, .. }
+                        | Stmt::CheckedSub { delta, .. }
+                        | Stmt::WrapAdd { delta, .. }
+                        | Stmt::WrapSub { delta, .. }
+                        | Stmt::SatAdd { delta, .. }
+                        | Stmt::SatSub { delta, .. } => Some(delta),
+                        // Transfers / CPI / events / branches / aborts carry
+                        // trees in later slices (or none applies).
+                        Stmt::TokenTransfer { .. }
+                        | Stmt::VariantPromote { .. }
+                        | Stmt::Branch { .. }
+                        | Stmt::Abort(_)
+                        | Stmt::Cpi { .. }
+                        | Stmt::Emit { .. } => None,
+                    };
+                    if let Some(expr) = rhs {
+                        assert!(
+                            expr.tree.is_some(),
+                            "{fixture}: handler {} stmt missing tree: {:?}",
+                            h.name,
+                            expr.lean
+                        );
+                    }
+                }
+            }
+            for prop in &mir.properties {
+                if let Some(e) = &prop.expression {
+                    assert!(
+                        e.tree.is_some(),
+                        "{fixture}: property {} missing tree",
+                        prop.name
+                    );
+                }
+            }
+        }
     }
 }
 

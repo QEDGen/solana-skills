@@ -821,6 +821,15 @@ $QEDGEN discharge --spec vault.qedspec --handler increment \
 | `--qedlift` | Path | required | Built qedsvm `qedlift` binary (built with `--features qedrecover`) |
 | `--module` | String | `<Account><Handler>` | Lean module name for the emitted proof |
 | `--out-dir` | Path | temp dir (artifacts discarded) | Persist `<Module>TracedLifted.lean` + `<Module>Refinement.lean` into this directory |
+| `--transition` | flag | off | Whole-transition mode (qedsvm v0.9.0, #40): lift **every** path from discovered `<stem>_<path>.pcs` traces beside the `.so`; emits per-path `*_transition_path` / `*_transition_fault` corollaries + the one bundle theorem (`<StemPascal>Transition.lean`) covering success and abort paths. Requires `--out-dir` and ≥ 2 traces |
+
+Whole-transition example:
+
+```bash
+$QEDGEN discharge --spec counter.qedspec --handler increment \
+  --so counter.so --qedlift /path/to/qedlift \
+  --transition --out-dir formal_verification/discharge
+```
 
 ## Utility
 

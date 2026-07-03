@@ -191,33 +191,90 @@ pub(crate) fn resolve_call_arg_for_amount(
     rust_expr.to_string()
 }
 
+/// Structural "is simple" gate + bare rendering for the mechanize paths
+/// (#151 Slice 3) — the typed replacement for the char-whitelist test over
+/// the pre-rendered value string. Admits exactly the shapes the whitelist
+/// admitted (the adapter keeps simple values as bare strings): integer /
+/// boolean literals, bare params / `let`-bound locals / abstract binders,
+/// consts (substituted to their resolved value, mirroring `resolve_value`),
+/// and single-segment state-field reads (rendered bare — the destructured
+/// ADT path binds the field name as a local; `mechanize_effect` re-renders
+/// with its `self.<acct>` receiver via `Binder::SelfAcct`). `None` for
+/// every compound shape — the caller falls through to a `todo!()`.
+pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeSeg};
+    match tree {
+        ExprTree::Int(v) => Some(v.to_string()),
+        ExprTree::Bool(b) => Some(b.to_string()),
+        ExprTree::Path(p) => match &p.binding {
+            BindingKind::StateField | BindingKind::Ghost => match p.segments.as_slice() {
+                [TreeSeg::Field(f)] => Some(f.clone()),
+                _ => None,
+            },
+            BindingKind::Const(value) => p.segments.is_empty().then(|| value.clone()),
+            BindingKind::Param
+            | BindingKind::LetBound
+            | BindingKind::Account
+            | BindingKind::AbstractBinder
+            | BindingKind::ExprBinder
+            | BindingKind::Unresolved => p.segments.is_empty().then(|| p.root.clone()),
+        },
+        ExprTree::Old(_)
+        | ExprTree::Sum { .. }
+        | ExprTree::Quant { .. }
+        | ExprTree::BoolOp { .. }
+        | ExprTree::Not(_)
+        | ExprTree::Cmp { .. }
+        | ExprTree::Arith { .. }
+        | ExprTree::MulDivFloor { .. }
+        | ExprTree::MulDivCeil { .. }
+        | ExprTree::Match { .. }
+        | ExprTree::Ctor { .. }
+        | ExprTree::RecordLit(_)
+        | ExprTree::RecordUpdate { .. }
+        | ExprTree::IsVariant { .. }
+        | ExprTree::App { .. }
+        | ExprTree::Field { .. }
+        | ExprTree::Let { .. }
+        | ExprTree::IfThenElse { .. } => None,
+    }
+}
+
 /// Try to translate a single effect tuple to a real Rust statement. Returns
 /// None when the RHS is too complex for mechanical expansion (match/arith/
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
 /// LLM or human fills the body.
 ///
-/// `on_error` is the per-site override (`pool += amount or X`) for the
-/// `checked_add` / `checked_sub` error variant; when `None`, fall back to
-/// the `pragma checked_{over,under}flow_error =` default, then built-in
+/// `effect.tree` is the typed RHS; `None` falls back to the legacy string
+/// whitelist + `resolve_value` (IDL ingest, probes, hand-built fixtures).
+///
+/// `effect.on_error` is the per-site override (`pool += amount or X`) for
+/// the `checked_add` / `checked_sub` error variant; when `None`, fall back
+/// to the `pragma checked_{over,under}flow_error =` default, then built-in
 /// `MathOverflow` / `MathUnderflow`. Always `None` for non-checked ops.
 pub(crate) fn mechanize_effect(
-    effect: &(String, String, String),
-    on_error: Option<&str>,
+    effect: &crate::check::ParsedEffect,
     state_acct: &crate::check::ParsedHandlerAccount,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
     target: Target,
 ) -> Option<String> {
-    let (field, op_kind, value) = effect;
+    let (field, op_kind, value) = (&effect.field, &effect.op, &effect.value);
+    let tree = effect.tree.as_ref();
+    let on_error = effect.on_error.as_deref();
 
-    // Refuse complex RHS. `render_effect` pre-renders match/record/arith into
-    // Lean string form; those start looking nothing like Rust identifiers.
-    // A simple param / literal / constant is what's always safe.
-    let simple_rhs = value
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-    if !simple_rhs {
-        return None;
+    // Refuse complex RHS — structural on the tree (#151 Slice 3); the
+    // char-whitelist fallback covers tree-less handlers. A simple param /
+    // literal / constant / bare state-field read is what's always safe.
+    if let Some(t) = tree {
+        tree_bare_rhs(t)?;
+    } else {
+        let simple_rhs = value
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        if !simple_rhs {
+            return None;
+        }
     }
     // Multi-variant ADT state on Anchor: the wrapper carries only
     // `inner` + `bump`, so the flat `self.<acct>.<field>` lowering
@@ -236,9 +293,21 @@ pub(crate) fn mechanize_effect(
     // Anchor / Quasar handler bodies bind state as `self.<acct>.<field>`,
     // so a bare state-field RHS (e.g. `bid_buyer := state.rfp_buyer` after
     // upstream strips `state.`) needs to resolve to `self.<acct>.rfp_buyer`.
+    // Tree path: one render under `Binder::SelfAcct` replaces
+    // `resolve_value`'s binder surgery (name resolution already happened
+    // at adapt time).
     let acct = &state_acct.name;
-    let acct_binder = format!("self.{}.", acct);
-    let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec, Some(&acct_binder));
+    let rhs = match tree {
+        Some(t) => {
+            use crate::rust_codegen_util::tree_render::{render_rust, Binder, RustCx};
+            let receiver = format!("self.{}", acct);
+            render_rust(t, RustCx::native().with_binder(Binder::SelfAcct(&receiver)))
+        }
+        None => {
+            let acct_binder = format!("self.{}.", acct);
+            crate::rust_codegen_util::resolve_value(value, handler, spec, Some(&acct_binder))
+        }
+    };
     // Cast index expressions in the LHS path to `usize`. `render_effect`
     // emits the field as `voted[member_index]` (Lean-friendly); on the
     // Rust side, indexing `[u8; N]` with `u8`/`u16`/Fin fails — Rust
@@ -342,18 +411,13 @@ pub(crate) fn strip_variant_prefix(lhs: &str, spec: &ParsedSpec) -> String {
 /// so emit `*pool = …` / `pool[i] = …`. `None` for shapes the caller
 /// routes to a per-effect `todo!()`.
 pub(crate) fn mechanize_effect_destructured(
-    effect: &(String, String, String),
-    on_error: Option<&str>,
+    effect: &crate::check::ParsedEffect,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
 ) -> Option<String> {
-    let (field_raw, op_kind, value) = effect;
-    let simple_rhs = value
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-    if !simple_rhs {
-        return None;
-    }
+    let (field_raw, op_kind, value) = (&effect.field, &effect.op, &effect.value);
+    let tree = effect.tree.as_ref();
+    let on_error = effect.on_error.as_deref();
     // The destructured binding is the bare field root — `pool[i]` keeps
     // the indexing; scalars need a `*` deref to write through `&mut T`.
     let field = strip_variant_prefix(field_raw, spec);
@@ -361,9 +425,21 @@ pub(crate) fn mechanize_effect_destructured(
     let is_indexed = field.contains('[');
     // The destructure binding shadows the field name in scope, so a
     // bare-identifier RHS that names a sibling state field resolves
-    // directly (no `self.<acct>.` prefix). For params, the resolver
-    // already returns the bare name.
-    let rhs = crate::rust_codegen_util::resolve_value(value, handler, spec, None);
+    // directly (no `self.<acct>.` prefix) — `tree_bare_rhs` emits exactly
+    // that shape (structural gate + render in one; #151 Slice 3). Legacy
+    // whitelist + `resolve_value` for tree-less handlers.
+    let rhs = match tree {
+        Some(t) => tree_bare_rhs(t)?,
+        None => {
+            let simple_rhs = value
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+            if !simple_rhs {
+                return None;
+            }
+            crate::rust_codegen_util::resolve_value(value, handler, spec, None)
+        }
+    };
 
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
     let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
@@ -484,8 +560,8 @@ pub(crate) fn emit_variant_state_handler_body(
     // any `[…]` indexing). These go into the match destructure
     // pattern so the inner block can rebind them.
     let mut mutated_fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (lhs, _, _) in &handler.effects {
-        let stripped = strip_variant_prefix(lhs, spec);
+    for eff in &handler.effects {
+        let stripped = strip_variant_prefix(&eff.field, spec);
         let bare = strip_array_index_suffix(&stripped);
         // Only fields that actually live on the post variant get
         // destructured. References that don't match are a spec
@@ -558,9 +634,8 @@ pub(crate) fn emit_variant_state_handler_body(
         "            {}::{} {{ {}, .. }} => {{\n",
         inner_name, post, destructure
     ));
-    for (idx, effect) in handler.effects.iter().enumerate() {
-        let on_error = handler.effect_on_error.get(idx).and_then(|o| o.as_deref());
-        let line = mechanize_effect_destructured(effect, on_error, handler, spec)?;
+    for effect in &handler.effects {
+        let line = mechanize_effect_destructured(effect, handler, spec)?;
         out.push_str(&line);
     }
 
@@ -708,8 +783,9 @@ pub(crate) fn emit_cross_variant_promotion(
     // (no pre value to read).
     let mut field_rhs: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
-    for (lhs, op_kind, rhs) in &handler.effects {
-        if op_kind != "set" {
+    for eff in &handler.effects {
+        let (lhs, rhs) = (&eff.field, &eff.value);
+        if eff.op != "set" {
             return None;
         }
         let stripped = strip_variant_prefix(lhs, spec);

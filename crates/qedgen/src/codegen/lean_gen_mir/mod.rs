@@ -23,9 +23,11 @@ mod overflow;
 mod properties;
 mod sbpf;
 mod state;
+// #151 Slice 2: no glob re-export until the lean_gen_mir emission port lands.
 #[cfg(test)]
 mod tests;
 mod transitions;
+pub(crate) mod tree_render;
 mod util;
 
 #[allow(unused_imports)]

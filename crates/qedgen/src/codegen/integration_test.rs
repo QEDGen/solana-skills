@@ -335,10 +335,10 @@ fn emit_happy_path_test(
                 ));
             }
         }
-        for (field, kind, value) in &handler.effects {
+        for eff in &handler.effects {
             out.push_str(&format!(
                 "    // Spec effect: {} {} {}\n",
-                field, kind, value
+                eff.field, eff.op, eff.value
             ));
         }
     }

@@ -47,7 +47,8 @@ pub(super) fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<Completenes
         };
         // Set of bare field names written by the effect block.
         let mut effect_fields: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        for (lhs, _, _) in &h.effects {
+        for eff in &h.effects {
+            let lhs = &eff.field;
             // Strip a leading `Variant.` prefix (multi-variant ADT specs
             // use Variant-qualified LHS) and any `[idx]` subscript so the
             // bare field name lines up with the modifies list.
@@ -199,8 +200,9 @@ pub(super) fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<Completene
         return warnings;
     }
     for handler in &spec.handlers {
-        for (lhs, op_kind, _) in &handler.effects {
-            if op_kind != "add" {
+        for eff in &handler.effects {
+            let lhs = &eff.field;
+            if eff.op != "add" {
                 continue;
             }
             // Scalar increment — no subscript on the LHS.
@@ -287,7 +289,8 @@ pub(super) fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<Complet
         }
         // Does any effect LHS use one of the index params?
         let mut indexed_effect_param: Option<&str> = None;
-        for (lhs, _, _) in &handler.effects {
+        for eff in &handler.effects {
+            let lhs = &eff.field;
             for p in &index_params {
                 let needle = format!("[{}]", p);
                 if lhs.contains(&needle) {

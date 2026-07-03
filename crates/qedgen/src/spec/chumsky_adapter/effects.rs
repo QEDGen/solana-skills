@@ -13,11 +13,29 @@ use super::*;
 /// `Expr.rust`. For simple RHS shapes (literal / bare path) `value_rust`
 /// equals the triple's value so binder-specific resolution downstream
 /// (`resolve_value`) keeps working; compound shapes render through the
-/// canonicalized typed AST (issues #143/#144/#146).
+/// canonicalized typed AST (issues #143/#144/#146). `tree` is the typed
+/// RHS carrier (#151 Slice 0) — built for every shape, simple or compound.
 pub(super) struct RenderedEffect {
     pub triple: (String, String, String),
     pub on_error: Option<String>,
     pub value_rust: String,
+    pub tree: Option<crate::mir::ExprTree>,
+}
+
+impl RenderedEffect {
+    /// Convert into the self-contained per-site effect the IR carries
+    /// (#151 Slice 4 — one struct instead of four parallel arrays).
+    pub fn into_parsed_effect(self) -> crate::check::ParsedEffect {
+        let (field, op, value) = self.triple;
+        crate::check::ParsedEffect {
+            field,
+            op,
+            value,
+            value_rust: self.value_rust,
+            on_error: self.on_error,
+            tree: self.tree,
+        }
+    }
 }
 
 /// Render an `EffectStmt` to the `(field, op, value)` triple consumed by
@@ -31,6 +49,7 @@ fn render_effect(
     consts: ConstTable,
     canon: &CanonScope,
     env: &TypeEnv,
+    tcx: &TreeCx,
 ) -> RenderedEffect {
     // Field name: preserve subscript syntax as-is (e.g., `accounts[i].capital`).
     // Both Lean and Rust consumers read this string; Rust-side `as usize`
@@ -79,7 +98,8 @@ fn render_effect(
     // `expr_to_lean` (state reads become `s.X`), Rust via `expr_to_rust`
     // in checked mode (issues #143/#144/#146 — previously the Lean form
     // leaked into the Kani/proptest harnesses verbatim).
-    let (value, value_rust) = render_effect_rhs_forms(&stmt.rhs, params, consts, canon, env);
+    let (value, value_rust, tree) =
+        render_effect_rhs_forms(&stmt.rhs, params, consts, canon, env, tcx);
     // Keep the per-site override only for ops that can fail (checked
     // Add / Sub); saturating / wrapping / Set can't trigger an error
     // variant, so drop any parser-captured override here.
@@ -91,21 +111,26 @@ fn render_effect(
         triple: (field, op.to_string(), value),
         on_error,
         value_rust,
+        tree,
     }
 }
 
-/// Render an effect RHS to its `(lean_or_simple, rust)` string pair — see
-/// the comment at the `render_effect` call site for the split. Factored
-/// out for the variant-promotion desugaring.
+/// Render an effect RHS to its `(lean_or_simple, rust, tree)` forms — see
+/// the comment at the `render_effect` call site for the string split.
+/// Factored out for the variant-promotion desugaring. The tree is built
+/// from the canonicalized AST for *every* shape (the strings keep the
+/// legacy simple/compound split for byte-stability during the #151 port).
 fn render_effect_rhs_forms(
     rhs: &Node<Expr>,
     params: &[(String, String)],
     consts: ConstTable,
     canon: &CanonScope,
     env: &TypeEnv,
-) -> (String, String) {
+    tcx: &TreeCx,
+) -> (String, String, Option<crate::mir::ExprTree>) {
+    let tree = Some(build_expr_tree(&canonicalize_state_refs(rhs, canon), tcx));
     match &rhs.node {
-        Expr::Int(v) => (v.to_string(), v.to_string()),
+        Expr::Int(v) => (v.to_string(), v.to_string(), tree),
         Expr::Path(p) => {
             let is_param = p.segments.is_empty() && params.iter().any(|(n, _)| n == &p.root);
             let s = if is_param {
@@ -147,7 +172,7 @@ fn render_effect_rhs_forms(
                 }
                 s
             };
-            (s.clone(), s)
+            (s.clone(), s, tree)
         }
         // Compound RHS: canonicalize bare state refs once, then render
         // both backend forms from the same AST.
@@ -160,7 +185,7 @@ fn render_effect_rhs_forms(
                 consts,
                 opts_native(env).with_checked_arith(),
             );
-            (lean, rust)
+            (lean, rust, tree)
         }
     }
 }
@@ -178,6 +203,7 @@ pub(super) fn render_effect_or_expand_variant_promotion(
     consts: ConstTable,
     canon: &CanonScope,
     env: &TypeEnv,
+    tcx: &TreeCx,
 ) -> Vec<RenderedEffect> {
     if matches!(stmt.op, a::EffectOp::Set)
         && stmt.lhs.root == "state"
@@ -197,12 +223,14 @@ pub(super) fn render_effect_or_expand_variant_promotion(
                             .iter()
                             .map(|(fname, fvalue)| {
                                 let lhs_str = format!("{}.{}", variant, fname);
-                                let (value_str, value_rust) =
-                                    render_effect_rhs_forms(fvalue, params, consts, canon, env);
+                                let (value_str, value_rust, tree) = render_effect_rhs_forms(
+                                    fvalue, params, consts, canon, env, tcx,
+                                );
                                 RenderedEffect {
                                     triple: (lhs_str, "set".to_string(), value_str),
                                     on_error: None,
                                     value_rust,
+                                    tree,
                                 }
                             })
                             .collect();
@@ -216,7 +244,7 @@ pub(super) fn render_effect_or_expand_variant_promotion(
             }
         }
     }
-    vec![render_effect(stmt, params, consts, canon, env)]
+    vec![render_effect(stmt, params, consts, canon, env, tcx)]
 }
 
 // ============================================================================

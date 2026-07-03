@@ -243,23 +243,13 @@ pub fn emit_property_predicates_with(
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) {
     for prop in properties {
-        // Prefer the math-exact AST-rendered form (arithmetic widened so
-        // evaluating the predicate can't overflow-panic — issue #146),
-        // then the plain AST-rendered Rust form (handles implies/forall,
-        // embeds the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker); fall back to
-        // translating the Lean form for callers without an AST.
-        let rendered = prop
-            .rust_expression_math
-            .as_deref()
-            .filter(|r| !r.is_empty())
-            .or(prop.rust_expression.as_deref())
-            .map(|r| r.to_string())
-            .or_else(|| {
-                prop.expression
-                    .as_deref()
-                    .map(|e| translate_property_to_rust(e, wrapping))
-            });
-        let Some(rust_expr) = rendered else { continue };
+        // Tree-native math-exact rendering (arithmetic widened so
+        // evaluating the predicate can't overflow-panic — issue #146);
+        // string fallbacks for tree-less properties (see
+        // `property_predicate_rust`).
+        let Some(rust_expr) = property_predicate_rust(prop, wrapping) else {
+            continue;
+        };
         let doc = prop.expression.as_deref().unwrap_or("");
         out.push_str(&format!("/// {}: {}\n", prop.name, doc));
         // Binary properties (body contains `old(...)`) take `(pre, post)`;

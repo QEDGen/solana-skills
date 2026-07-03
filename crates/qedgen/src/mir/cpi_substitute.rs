@@ -214,6 +214,7 @@ mod tests {
                     lean_expr: expr.to_string(),
                     rust_expr: expr.to_string(),
                     rust_expr_pod: expr.to_string(),
+                    tree: None,
                 })
                 .collect(),
             result_binding: None,

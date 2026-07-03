@@ -510,8 +510,10 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
         "guard arithmetic must widen to u128:\n{out}"
     );
     // … and the property predicate can't overflow while being evaluated.
+    // (No parens around the sum: redundant source parens don't survive the
+    // #151 tree — grouping is structural.)
     assert!(
-        out.contains("(((s.cut) as u128) + ((s.residual) as u128)) == ((s.fee) as u128)"),
+        out.contains("((s.cut) as u128) + ((s.residual) as u128) == ((s.fee) as u128)"),
         "property arithmetic must widen to u128:\n{out}"
     );
 

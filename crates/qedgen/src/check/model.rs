@@ -95,6 +95,10 @@ pub struct ParsedRequires {
     /// Source AST body for AST-level lints (e.g. `old_in_single_state_context`).
     /// `None` for synthetic requires from `match`-arm desugaring.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed, name-resolved expression tree (#151 Slice 0), built from the
+    /// canonicalized AST at adapt time. `None` only for legacy ingest
+    /// paths (IDL, probes) and hand-built test fixtures.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed ensures clause: post-condition relating pre and post state.
@@ -115,6 +119,9 @@ pub struct ParsedEnsures {
     /// Binary-mode + math-exact rendering (see
     /// `ParsedRequires::rust_expr_math`) for harness asserts (issue #146).
     pub rust_expr_binary_math: String,
+    /// Typed expression tree (#151 Slice 0); `old(...)` stays a structural
+    /// `Old` node — renderer context decides the pre/post receivers.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed cover block (reachability).
@@ -156,6 +163,8 @@ pub struct ParsedInvariant {
     /// Source AST body for the `old_in_single_state_context` lint.
     /// `None` for the description-only form.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed expression tree (#151 Slice 0); `None` for description-only.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed environment block (external state).
@@ -250,6 +259,9 @@ pub struct ParsedProperty {
     /// AST body for downstream walks (e.g. `vacuous_property_lowering` gates
     /// on `Expr::Old(_)`). `None` only on hand-built test fixtures.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed expression tree (#151 Slice 0). `None` only on hand-built
+    /// test fixtures.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Per-slot rendering of a `forall <binder> : <T>, body` property; see
@@ -428,6 +440,59 @@ pub struct ParsedErrorCode {
 // Unified handler types (v3 — target-agnostic)
 // ============================================================================
 
+/// One effect statement, fully self-contained — replaces the four
+/// index-aligned parallel arrays (#151 Slice 4).
+#[derive(Debug, Clone)]
+pub struct ParsedEffect {
+    /// Target field path (`counter`, `accounts[i].capital`, `Variant.field`).
+    pub field: String,
+    /// Op kind: "set" | "add" | "add_sat" | "add_wrap" | "sub" | "sub_sat" |
+    /// "sub_wrap". "add"/"sub" are the checked defaults; `_sat` / `_wrap`
+    /// carry the explicit opt-in from `+=!` / `+=?`.
+    pub op: String,
+    /// Legacy single-form value string (the old triple's third slot).
+    pub value: String,
+    /// Adapter-rendered Rust RHS (the old `effects_rust` slot). Compound RHS
+    /// (ref_impl calls, conditionals, arithmetic) is rendered from the
+    /// canonicalized typed AST via `expr_to_rust`, so the Kani/proptest
+    /// harnesses receive compilable Rust instead of the Lean-form string in
+    /// `value` (issues #143/#144). Simple values (params, literals, bare
+    /// fields) carry the same string as `value` so binder-specific
+    /// resolution (`resolve_value`) keeps working. Empty for handlers built
+    /// outside the chumsky adapter (IDL ingest, probes) — MIR lowering
+    /// falls back to `value`.
+    pub value_rust: String,
+    /// Per-site `else <ErrorVariant>` override (checked add/sub only).
+    /// See `ParsedOperation::effect_on_error`.
+    pub on_error: Option<String>,
+    /// Typed RHS tree (#151); `None` for legacy ingest and hand-built
+    /// fixtures.
+    pub tree: Option<crate::mir::ExprTree>,
+}
+
+impl ParsedEffect {
+    /// Build a legacy-shaped effect from the old `(field, op, value)`
+    /// triple — no adapter Rust rendering, no per-site override, no typed
+    /// tree. Used by hand-built test fixtures; MIR lowering falls back to
+    /// `value` when `value_rust` is empty. (Test-only today — drop the cfg
+    /// if a non-adapter ingest path starts producing effects.)
+    #[cfg(test)]
+    pub fn from_triple(
+        field: impl Into<String>,
+        op: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        ParsedEffect {
+            field: field.into(),
+            op: op.into(),
+            value: value.into(),
+            value_rust: String::new(),
+            on_error: None,
+            tree: None,
+        }
+    }
+}
+
 /// A unified handler — replaces both ParsedOperation (Quasar) and
 /// ParsedInstruction (sBPF). Represents any callable entry point with
 /// guards, effects, accounts, and properties.
@@ -465,24 +530,9 @@ pub struct ParsedHandler {
     /// Deliberately permissionless — no `auth` required. Mutually exclusive
     /// with `who` (check.rs rejects both); opts out of the `no_access_control` P1 lint.
     pub permissionless: bool,
-    /// State effects: (field, op, value) where op is
-    /// "set" | "add" | "add_sat" | "add_wrap" | "sub" | "sub_sat" | "sub_wrap".
-    /// "add"/"sub" are the checked defaults; `_sat` / `_wrap` carry the
-    /// explicit opt-in from `+=!` / `+=?`.
-    pub effects: Vec<(String, String, String)>,
-    /// Rust-form effect RHS values, parallel to `effects`. Compound RHS
-    /// (ref_impl calls, conditionals, arithmetic) is rendered from the
-    /// canonicalized typed AST via `expr_to_rust`, so the Kani/proptest
-    /// harnesses receive compilable Rust instead of the Lean-form string in
-    /// the triple (issues #143/#144). Simple values (params, literals, bare
-    /// fields) carry the same string as the triple so binder-specific
-    /// resolution (`resolve_value`) keeps working. Empty for ParsedHandlers
-    /// built outside the chumsky adapter (IDL ingest, probes) — MIR
-    /// lowering falls back to the triple's value.
-    pub effects_rust: Vec<String>,
-    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`.
-    /// See `ParsedOperation::effect_on_error`.
-    pub effect_on_error: Vec<Option<String>>,
+    /// State effects, one self-contained `ParsedEffect` per site (#151
+    /// Slice 4 — replaces the four index-aligned parallel arrays).
+    pub effects: Vec<ParsedEffect>,
     /// IDL-level account descriptors.
     pub accounts: Vec<ParsedHandlerAccount>,
     /// Token transfer intents.
@@ -528,6 +578,8 @@ pub struct ParsedEffectBranches {
     pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
     pub scrutinee_lean: String,
+    /// Typed scrutinee tree (#151 Slice 0).
+    pub scrutinee_tree: Option<crate::mir::ExprTree>,
     pub arms: Vec<ParsedEffectArm>,
 }
 
@@ -538,16 +590,10 @@ pub struct ParsedEffectArm {
     pub pattern_lean: String,
     /// `true` for a wildcard arm.
     pub is_wildcard: bool,
-    pub effects: Vec<(String, String, String)>,
-    /// Rust-form RHS values, parallel to `effects` — same contract as
-    /// `ParsedHandler::effects_rust`.
-    pub effects_rust: Vec<String>,
-    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects` (see
-    /// `ParsedOperation::effect_on_error`). Consumed per-arm by
-    /// `lower_handler`'s `Stmt::Branch` lowering via `lower_effects(&arm.effects,
-    /// &arm.effect_on_error)`, so each arm's checked effects carry their own
-    /// abort error.
-    pub effect_on_error: Vec<Option<String>>,
+    /// Per-arm effects, one self-contained `ParsedEffect` per site (#151
+    /// Slice 4). Consumed per-arm by `lower_handler`'s `Stmt::Branch`
+    /// lowering, so each arm's checked effects carry their own abort error.
+    pub effects: Vec<ParsedEffect>,
 }
 
 /// A resolved `call Target.handler(...)` site inside a handler body. The
@@ -579,6 +625,8 @@ pub struct ParsedCallArg {
     pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
+    /// Typed argument tree (#151 Slice 0).
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// One entry in a `call X.y(state_binders { ... })` block: maps a callee-side

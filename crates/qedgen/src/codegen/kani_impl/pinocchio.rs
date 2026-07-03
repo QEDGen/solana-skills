@@ -1512,8 +1512,9 @@ fn pinocchio_state_assertions(
     };
     let account = to_snake_case(&account.name);
 
-    for (field, op, value) in &handler.effects {
-        if op != "set" {
+    for eff in &handler.effects {
+        let (field, value) = (&eff.field, &eff.value);
+        if eff.op != "set" {
             continue;
         }
         let field_name = to_snake_case(field);

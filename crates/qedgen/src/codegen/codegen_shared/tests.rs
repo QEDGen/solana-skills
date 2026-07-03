@@ -1536,8 +1536,8 @@ handler bump (n : U64) : State.Active -> State.Active {
     let handler = spec.handlers.iter().find(|h| h.name == "bump").unwrap();
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().unwrap();
-    let rendered = mechanize_effect(effect, None, state_acct, handler, &spec, Target::Anchor)
-        .expect("mechanized");
+    let rendered =
+        mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
     // Pre-F8 this said `ErrorCode::MathOverflow` (a non-existent enum).
     // F8: it now says `<ProgramName>Error::MathOverflow`, matching the
     // user's declared Error sum.
@@ -1562,9 +1562,7 @@ fn mechanize_first_effect(src: &str, handler_name: &str) -> String {
         .expect("handler not found");
     let state_acct = find_state_account(handler).expect("state account");
     let effect = handler.effects.first().expect("at least one effect");
-    let on_error = handler.effect_on_error.first().and_then(|o| o.as_deref());
-    mechanize_effect(effect, on_error, state_acct, handler, &spec, Target::Anchor)
-        .expect("mechanized")
+    mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized")
 }
 
 #[test]
@@ -2320,5 +2318,104 @@ handler read_via_writable_decoy (amt : U64) : State.Active -> State.Active {
         "v2.29.2 canonical-fallback rewrite must produce \
              `self.pool_config.balance` even when pool_config is \
              readonly in this handler; got: `{rewritten}`"
+    );
+}
+
+// ----- #151 Slice 3: structural "is simple" gate for the mechanize paths -----
+
+#[test]
+fn tree_bare_rhs_admits_exactly_the_legacy_whitelist_shapes() {
+    use crate::mir::expr_tree::{BindingKind, ExprTree, TreeArithOp, TreePath, TreeSeg};
+    let path = |root: &str, binding: BindingKind, segments: Vec<TreeSeg>| {
+        ExprTree::Path(TreePath {
+            root: root.into(),
+            binding,
+            segments,
+            ty: None,
+        })
+    };
+    // Literals and bare params render verbatim.
+    assert_eq!(tree_bare_rhs(&ExprTree::Int(42)).as_deref(), Some("42"));
+    assert_eq!(
+        tree_bare_rhs(&ExprTree::Bool(true)).as_deref(),
+        Some("true")
+    );
+    assert_eq!(
+        tree_bare_rhs(&path("amount", BindingKind::Param, vec![])).as_deref(),
+        Some("amount")
+    );
+    // Consts substitute their resolved value (mirrors `resolve_value`).
+    assert_eq!(
+        tree_bare_rhs(&path("LIMIT", BindingKind::Const("100".into()), vec![])).as_deref(),
+        Some("100")
+    );
+    // Single state-field reads render bare — callers add the receiver.
+    assert_eq!(
+        tree_bare_rhs(&path(
+            "state",
+            BindingKind::StateField,
+            vec![TreeSeg::Field("rfp_buyer".into())]
+        ))
+        .as_deref(),
+        Some("rfp_buyer")
+    );
+    // Indexed / nested state reads and compound shapes stay agent-fill.
+    assert_eq!(
+        tree_bare_rhs(&path(
+            "state",
+            BindingKind::StateField,
+            vec![TreeSeg::Field("voted".into()), TreeSeg::Index("i".into())]
+        )),
+        None
+    );
+    assert_eq!(
+        tree_bare_rhs(&path(
+            "buyer",
+            BindingKind::Account,
+            vec![TreeSeg::Field("pubkey".into())]
+        )),
+        None
+    );
+    assert_eq!(
+        tree_bare_rhs(&ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs: Box::new(path("pool", BindingKind::StateField, vec![])),
+            rhs: Box::new(path("amount", BindingKind::Param, vec![])),
+        }),
+        None
+    );
+}
+
+#[test]
+fn mechanize_effect_tree_path_binds_state_field_rhs_through_receiver() {
+    // `bid_buyer := state.rfp_buyer` — the tree path must produce the same
+    // `self.<acct>.<field>` receiver the legacy `resolve_value` surgery did.
+    let spec = crate::chumsky_adapter::parse_str(
+        r#"spec Rfp
+program_id "11111111111111111111111111111111"
+type State | Active of { rfp_buyer : Pubkey, bid_buyer : Pubkey }
+
+handler set_bid : State.Active -> State.Active {
+  permissionless
+  accounts {
+    state : writable
+  }
+  effect { bid_buyer := state.rfp_buyer }
+}
+"#,
+    )
+    .unwrap();
+    let handler = spec.handlers.iter().find(|h| h.name == "set_bid").unwrap();
+    let state_acct = find_state_account(handler).expect("state account");
+    let effect = handler.effects.first().unwrap();
+    assert!(
+        effect.tree.is_some(),
+        "adapter must carry a tree for this RHS"
+    );
+    let rendered =
+        mechanize_effect(effect, state_acct, handler, &spec, Target::Anchor).expect("mechanized");
+    assert_eq!(
+        rendered,
+        "        self.state.bid_buyer = self.state.rfp_buyer;\n"
     );
 }

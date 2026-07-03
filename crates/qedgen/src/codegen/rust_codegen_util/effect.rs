@@ -15,12 +15,12 @@ pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
         || op
             .effects
             .iter()
-            .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+            .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
         || op.effect_branches.as_ref().is_some_and(|branches| {
             branches.arms.iter().any(|arm| {
                 arm.effects
                     .iter()
-                    .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+                    .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
             })
         })
 }
@@ -195,30 +195,22 @@ pub fn strip_variant_prefix_for_flat_state(path: &str, spec: &ParsedSpec) -> Str
 /// exhaustive by discipline (no `_` arm; see the `Stmt` enum doc): a new
 /// `Stmt` variant is a compile error here, forcing an explicit decision
 /// for the Kani/proptest backends.
-pub fn stmt_effect_triple(stmt: &crate::mir::Stmt) -> Option<(String, &'static str, &str)> {
+pub fn stmt_effect_triple(
+    stmt: &crate::mir::Stmt,
+) -> Option<(String, &'static str, &crate::mir::Expr)> {
     use crate::mir::Stmt;
     match stmt {
-        Stmt::Assign { path, rhs } => Some((path.segments.join("."), "set", rhs.rust.as_str())),
+        Stmt::Assign { path, rhs } => Some((path.segments.join("."), "set", rhs)),
         Stmt::CheckedAdd { path, delta, .. } => {
             // The lowered per-site error name is Lean/scaffold surface;
             // the pure model signals overflow via `return false`.
-            Some((path.segments.join("."), "add", delta.rust.as_str()))
+            Some((path.segments.join("."), "add", delta))
         }
-        Stmt::CheckedSub { path, delta, .. } => {
-            Some((path.segments.join("."), "sub", delta.rust.as_str()))
-        }
-        Stmt::SatAdd { path, delta } => {
-            Some((path.segments.join("."), "add_sat", delta.rust.as_str()))
-        }
-        Stmt::SatSub { path, delta } => {
-            Some((path.segments.join("."), "sub_sat", delta.rust.as_str()))
-        }
-        Stmt::WrapAdd { path, delta } => {
-            Some((path.segments.join("."), "add_wrap", delta.rust.as_str()))
-        }
-        Stmt::WrapSub { path, delta } => {
-            Some((path.segments.join("."), "sub_wrap", delta.rust.as_str()))
-        }
+        Stmt::CheckedSub { path, delta, .. } => Some((path.segments.join("."), "sub", delta)),
+        Stmt::SatAdd { path, delta } => Some((path.segments.join("."), "add_sat", delta)),
+        Stmt::SatSub { path, delta } => Some((path.segments.join("."), "sub_sat", delta)),
+        Stmt::WrapAdd { path, delta } => Some((path.segments.join("."), "add_wrap", delta)),
+        Stmt::WrapSub { path, delta } => Some((path.segments.join("."), "sub_wrap", delta)),
         // Guard surface: `requires X else Err` folds into the guard
         // conjunction via `collect_full_guard*`, not the body.
         Stmt::RequireOrAbort { .. } => None,
@@ -246,15 +238,22 @@ pub fn stmt_effect_triple(stmt: &crate::mir::Stmt) -> Option<(String, &'static s
 /// `Stmt::Branch` arms are NOT descended (per-arm rendering owns
 /// those); use [`block_effect_triples_deep`] for analyses that must
 /// see conditionally-applied effects.
-pub fn block_effect_triples(body: &crate::mir::Block) -> Vec<(String, &'static str, &str)> {
+pub fn block_effect_triples(
+    body: &crate::mir::Block,
+) -> Vec<(String, &'static str, &crate::mir::Expr)> {
     body.stmts.iter().filter_map(stmt_effect_triple).collect()
 }
 
 /// Like [`block_effect_triples`] but descends into `Stmt::Branch`
 /// arms/default. For *may-this-effect-fire* analyses (overflow filters
 /// and tests) where a conditionally-applied effect counts.
-pub fn block_effect_triples_deep(body: &crate::mir::Block) -> Vec<(String, &'static str, &str)> {
-    fn walk<'a>(stmts: &'a [crate::mir::Stmt], out: &mut Vec<(String, &'static str, &'a str)>) {
+pub fn block_effect_triples_deep(
+    body: &crate::mir::Block,
+) -> Vec<(String, &'static str, &crate::mir::Expr)> {
+    fn walk<'a>(
+        stmts: &'a [crate::mir::Stmt],
+        out: &mut Vec<(String, &'static str, &'a crate::mir::Expr)>,
+    ) {
         for s in stmts {
             if let Some(t) = stmt_effect_triple(s) {
                 out.push(t);
@@ -285,7 +284,7 @@ pub fn emit_one_effect(
     wrapping: bool,
     field: &str,
     op_kind: &str,
-    value: &str,
+    value: &crate::mir::Expr,
     indent: &str,
 ) {
     emit_one_effect_inner(out, op, spec, wrapping, field, op_kind, value, indent, None);
@@ -299,26 +298,49 @@ fn emit_one_effect_inner(
     wrapping: bool,
     field: &str,
     op_kind: &str,
-    value: &str,
+    value: &crate::mir::Expr,
     indent: &str,
     account_binder: Option<&str>,
 ) {
+    use super::tree_render::{self, ArithMode, RustCx};
+
     // Harnesses run against a flat `State` (union-of-variant-fields view):
     // strip the variant prefix so `Variant.field := …` emits `s.field = …`;
     // the variant itself is tracked via `s.status`.
     let field_owned = strip_variant_prefix_for_flat_state(field, spec);
     let field = field_owned.as_str();
-    // Body binds state as `s` — pass that binder so a bare state-field RHS
-    // renders as `s.<field>`.
-    let rust_value = resolve_value_with_account_env(value, op, spec, Some("s."), account_binder);
-    // Checked-expression RHS (bare arithmetic lowered to `checked_*` + `?`
-    // by the adapter — see `RustOpts::checked_arith`): give the `?` ops an
-    // `Option` context via an immediately-invoked closure; `None`
-    // (over/underflow, div-by-zero, failed narrowing) rejects the
-    // transition, matching the checked `+=`/`-=` doctrine (issue #146).
-    // The return-type annotation pins inference for `try_into()`-narrowed
-    // helpers; unresolvable field types fall back to inference.
-    let rust_value = if rust_value.contains('?') {
+    // Tree-native RHS (#151 Slice 1): one render call replaces the
+    // adapter's pre-rendered string + `resolve_value`'s binder surgery +
+    // the account-pubkey substring rewrite. Fallibility is structural,
+    // not a `contains('?')` scan. Legacy string path stays for
+    // ParsedHandlers without trees (IDL ingest, probes).
+    let (rust_value, fallible) = match &value.tree {
+        Some(tree) => {
+            let cx = RustCx::native()
+                .with_arith(ArithMode::Checked)
+                .with_acct_env(account_binder.map(|b| b.trim_end_matches('.')));
+            (
+                tree_render::render_rust(tree, cx),
+                tree_render::contains_fallible_arith(tree),
+            )
+        }
+        None => {
+            // Body binds state as `s` — pass that binder so a bare
+            // state-field RHS renders as `s.<field>`.
+            let resolved =
+                resolve_value_with_account_env(&value.rust, op, spec, Some("s."), account_binder);
+            let fallible = resolved.contains('?');
+            (resolved, fallible)
+        }
+    };
+    // Checked-expression RHS (bare arithmetic lowered to `checked_*` + `?`):
+    // give the `?` ops an `Option` context via an immediately-invoked
+    // closure; `None` (over/underflow, div-by-zero, failed narrowing)
+    // rejects the transition, matching the checked `+=`/`-=` doctrine
+    // (issue #146). The return-type annotation pins inference for
+    // `try_into()`-narrowed helpers; unresolvable field types fall back
+    // to inference.
+    let rust_value = if fallible {
         match field_rust_scalar_ty(spec, field) {
             Some(ty) => format!(
                 "match (|| -> Option<{ty}> {{ Some({rust_value}) }})() {{ Some(__rhs) => __rhs, None => return false }}"
@@ -384,7 +406,8 @@ fn emit_one_effect_inner(
         }
         _ => {
             out.push_str(&format!(
-                "{indent}// unknown effect: {field} {op_kind} {value}\n"
+                "{indent}// unknown effect: {field} {op_kind} {}\n",
+                value.rust
             ));
         }
     }
@@ -398,7 +421,7 @@ pub fn emit_one_effect_with_account_env(
     wrapping: bool,
     field: &str,
     op_kind: &str,
-    value: &str,
+    value: &crate::mir::Expr,
     indent: &str,
     account_binder: &str,
 ) {
@@ -460,7 +483,8 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
     }
 
     for handler in &spec.handlers {
-        for (field, _kind, _value) in &handler.effects {
+        for eff in &handler.effects {
+            let field = &eff.field;
             let base = effect_target_base(field);
             // Variant-prefixed: the root is a variant name, so check
             // the field beneath it against that variant's payload.

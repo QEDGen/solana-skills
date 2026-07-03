@@ -37,11 +37,18 @@ qedbridge Vault where
 -- the halt, then the qedsvm#48 `CodecRead.lean` forward family
 -- (`holdsFor_sepConj_right` → `holdsFor_codecCoarse_field` →
 -- `readU64_of_holdsFor_memU64Is` / `readU8_of_holdsFor_memByteIs` /
--- `pubkeyAt_of_holdsFor_pubkeyIs`) for the post leg. So this file now elaborates
--- with exactly 2 `sorry` warnings (decode_encode + rejects) and no errors.
+-- `pubkeyAt_of_holdsFor_pubkeyIs`) for the post leg. The generated `.rejects`
+-- now closes sorry-free too (qedsvm#40 / v0.9.0): it threads
+-- `h_asm : AsmRefinesTransitionFault …` (one FAULT path of the
+-- whole-transition bundle) and discharges through
+-- `BridgeAdapter.faults_of_transitionFault` + `toSentinel_ne_zero`. So this
+-- file now elaborates with exactly 1 `sorry` warning (decode_encode) and no
+-- errors.
 #check @Vault.Bridge.increment.refines
+#check @Vault.Bridge.increment.rejects
 #check @Vault.Bridge.encodeState
 #check @Vault.Bridge.decodeState
--- `.refines` is sorry-free: expect only the standard axioms
+-- `.refines` and `.rejects` are sorry-free: expect only the standard axioms
 -- (propext / Classical.choice / Quot.sound), NO `sorryAx`.
 #print axioms Vault.Bridge.increment.refines
+#print axioms Vault.Bridge.increment.rejects

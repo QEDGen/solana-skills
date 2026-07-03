@@ -196,8 +196,8 @@ pub(crate) fn emit_one_conformance_harness(
     field_type_lookup: &std::collections::HashMap<&str, &str>,
     harness_name: &str,
     assume_lines: &[String],
-    (field, op_kind, value): (&str, &str, &str),
-    sibling_triples: &[(String, &'static str, &str)],
+    (field, op_kind, value): (&str, &str, &crate::mir::Expr),
+    sibling_triples: &[(String, &'static str, &crate::mir::Expr)],
 ) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -210,7 +210,7 @@ pub(crate) fn emit_one_conformance_harness(
     }
 
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
-    let solver = util::pick_kani_solver_for_effect(field_type, value, op);
+    let solver = util::pick_kani_solver_for_effect(field_type, &value.rust, op);
 
     out.push_str("#[kani::proof]\n");
     out.push_str("#[kani::unwind(2)]\n");
@@ -279,17 +279,38 @@ pub(crate) fn emit_one_conformance_harness(
     );
     out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
 
-    let resolved = util::resolve_value_with_account_env(
-        value,
-        op,
-        parsed,
-        Some("pre_"),
-        util::handler_needs_account_env(op).then_some("accounts"),
-    );
+    // Expected-value RHS reads PRE-state — the flat `pre_<field>` snapshot
+    // locals taken before the transition call. Tree-native (#151 Slice 4):
+    // the legacy `resolve_value` path only rebound BARE field names, so a
+    // compound or indexed RHS leaked unbound (`accounts[i].capital`) or
+    // post-state (`s.x`) reads into the assert. Tree-less values (IDL
+    // ingest, probes) keep the legacy resolution.
+    let resolved = match &value.tree {
+        Some(tree) => {
+            use crate::rust_codegen_util::tree_render::{ArithMode, Binder, RustCx};
+            crate::rust_codegen_util::tree_render::render_rust(
+                tree,
+                RustCx::native()
+                    .with_binder(Binder::PreLocal)
+                    .with_arith(ArithMode::Checked)
+                    .with_acct_env(util::handler_needs_account_env(op).then_some("accounts")),
+            )
+        }
+        None => util::resolve_value_with_account_env(
+            &value.rust,
+            op,
+            parsed,
+            Some("pre_"),
+            util::handler_needs_account_env(op).then_some("accounts"),
+        ),
+    };
     // Checked-expression RHS carries `?` ops (see `RustOpts::checked_arith`):
     // compare inside an `Option` context — the harness only reaches this
     // assert when the transition returned true, so the RHS must be `Some`.
-    let has_try = resolved.contains('?');
+    let has_try = match &value.tree {
+        Some(tree) => crate::rust_codegen_util::tree_render::contains_fallible_arith(tree),
+        None => resolved.contains('?'),
+    };
     let expected_eq = |expected: &str| -> String {
         if has_try {
             format!("Some(s.{field}) == (|| Some({expected}))()")

@@ -2,8 +2,10 @@ use super::*;
 
 /// `(root_field, idx)` → `Vec<(inner_field, op_kind, value)>` — groups
 /// multiple writes to the same `Map` slot into one `Function.update`.
-pub(super) type IndexedEffectsByRoot =
-    std::collections::BTreeMap<(String, String), Vec<(String, String, String)>>;
+/// The value is the typed MIR `Expr` (#151 Slice 2): rendering happens at
+/// emission with the tree, not from the pre-rendered string.
+pub(super) type IndexedEffectsByRoot<'a> =
+    std::collections::BTreeMap<(String, String), Vec<(String, String, &'a crate::mir::Expr)>>;
 
 /// Map a scalar DSL type string to its Lean type (record fields carry
 /// string types, not the typed `Ty`).
@@ -479,13 +481,13 @@ pub(super) fn emit_indexed_transition(
 
     for stmt in &h.body.stmts {
         let (path, op_kind, val) = match stmt {
-            Stmt::Assign { path, rhs } => (path, "set", rhs.lean.as_str()),
+            Stmt::Assign { path, rhs } => (path, "set", rhs),
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
-            | Stmt::SatAdd { path, delta } => (path, "add", delta.lean.as_str()),
+            | Stmt::SatAdd { path, delta } => (path, "add", delta),
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
-            | Stmt::SatSub { path, delta } => (path, "sub", delta.lean.as_str()),
+            | Stmt::SatSub { path, delta } => (path, "sub", delta),
             Stmt::RequireOrAbort { .. }
             | Stmt::TokenTransfer { .. }
             | Stmt::VariantPromote { .. }
@@ -496,7 +498,7 @@ pub(super) fn emit_indexed_transition(
         };
         // Drop `<field> := <account_binding>.pubkey` — no Lean scope
         // for account-binding pubkey refs.
-        if op_kind == "set" && is_account_pubkey_ref(val) {
+        if op_kind == "set" && is_account_pubkey_ref(&val.lean) {
             continue;
         }
         // Reconstruct the full dotted LHS: an indexed-record-field write
@@ -511,17 +513,13 @@ pub(super) fn emit_indexed_transition(
                 indexed_by_root
                     .entry((root.to_string(), idx.to_string()))
                     .or_default()
-                    .push((
-                        inner_field.to_string(),
-                        op_kind.to_string(),
-                        val.to_string(),
-                    ));
+                    .push((inner_field.to_string(), op_kind.to_string(), val));
                 continue;
             }
         }
         // Plain scalar effect.
         let sf = safe_name(&lhs);
-        let val_lean = effect_value_to_lean_mir(val, &h.params);
+        let val_lean = effect_rhs_lean(val, &h.params);
         match op_kind {
             "add" => scalar_parts.push(format!("{} := s.{} + {}", sf, sf, val_lean)),
             "sub" => scalar_parts.push(format!("{} := s.{} - {}", sf, sf, val_lean)),
@@ -535,12 +533,20 @@ pub(super) fn emit_indexed_transition(
         let whole_entry = ops.len() == 1 && ops[0].0.is_empty();
         let update = if whole_entry {
             let (_, _, value) = &ops[0];
-            let val_lean = rewrite_subscripts_lean(value);
+            // Whole-entry writes never took the s.-prefix heuristic —
+            // subscript rewriting only; the tree path renders directly.
+            let val_lean = match &value.tree {
+                Some(t) => super::tree_render::render_lean(
+                    t,
+                    super::tree_render::LeanCx::guard().with_application_subscripts(),
+                ),
+                None => rewrite_subscripts_lean(&value.lean),
+            };
             format!("Function.update s.{root} {idx} ({val})", val = val_lean)
         } else {
             let mut inner_updates: Vec<String> = Vec::new();
             for (fname, op_kind, value) in ops {
-                let val_lean = effect_value_to_lean_mir(value, &h.params);
+                let val_lean = effect_rhs_lean(value, &h.params);
                 let rhs = match op_kind.as_str() {
                     "add" => format!("(s.{root} {idx}).{fname} + {val_lean}"),
                     "sub" => format!("(s.{root} {idx}).{fname} - {val_lean}"),

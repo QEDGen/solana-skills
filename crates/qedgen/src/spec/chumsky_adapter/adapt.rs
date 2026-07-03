@@ -215,6 +215,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
     // Build the type environment for arithmetic coercion.
     let env = TypeEnv::from_spec(spec);
 
+    // Ghost names + spec-level tree context for expression positions that
+    // live outside any handler (properties, invariants, schemas). Handler
+    // positions build their own `TreeCx::for_handler` in `expand_handler`.
+    let ghosts = ghost_names(spec);
+    let spec_tcx = TreeCx::spec_level(&env, consts, ghosts.clone());
+
     let mut constants = Vec::new();
 
     for Node { node, .. } in &spec.items {
@@ -314,7 +320,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Handler(h) => {
                 // If the handler has a `match` clause, expand into one
                 // synthetic handler per arm. Otherwise, single handler.
-                let expanded = expand_handler(h, consts, &env);
+                let expanded = expand_handler(h, consts, &env, &ghosts);
                 out.handlers.extend(expanded);
             }
             TopItem::Property(p) => {
@@ -445,6 +451,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     quantifier_lint,
                     class,
                     ast_body: Some(p.body.clone()),
+                    tree: Some(build_expr_tree(&p.body, &spec_tcx)),
                 });
             }
             TopItem::Cover(c) => {
@@ -490,6 +497,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             lean_expr: Some(lean),
                             rust_expr: Some(rust),
                             ast_body: Some(e.clone()),
+                            tree: Some(build_expr_tree(e, &spec_tcx)),
                         }
                     }
                     a::InvariantBody::Description(s) => crate::check::ParsedInvariant {
@@ -498,6 +506,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                         lean_expr: None,
                         rust_expr: None,
                         ast_body: None,
+                        tree: None,
                     },
                 };
                 out.invariants.push(parsed);
@@ -630,6 +639,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                         ),
                         error_name: on_fail.clone(),
                         ast_body: Some(guard.clone()),
+                        tree: Some(build_expr_tree(guard, &spec_tcx)),
                     })
                     .collect();
                 out.schemas.push(crate::check::ParsedSchema {
@@ -987,6 +997,22 @@ fn desugar_dotted_auth(spec: &mut ParsedSpec) {
         // (multi-variant ADT) at codegen time.
         let lean_expr = format!("{}.{} = {}.pubkey", acct_name, field, signer);
         let rust_expr = format!("{}.{} == {}.pubkey", acct_name, field, signer);
+        // Hand-built tree for the synthesized guard: both sides are
+        // account-field reads (`<acct>.<field>` / `<signer>.pubkey`), so
+        // the structural form needs no scope resolution.
+        let acct_path = |root: &str, field: &str| {
+            crate::mir::ExprTree::Path(crate::mir::expr_tree::TreePath {
+                root: root.to_string(),
+                binding: crate::mir::expr_tree::BindingKind::Account,
+                segments: vec![crate::mir::expr_tree::TreeSeg::Field(field.to_string())],
+                ty: None,
+            })
+        };
+        let tree = crate::mir::ExprTree::Cmp {
+            op: crate::mir::expr_tree::TreeCmpOp::Eq,
+            lhs: Box::new(acct_path(acct_name, field)),
+            rhs: Box::new(acct_path(&signer, "pubkey")),
+        };
         let synthesized = crate::check::ParsedRequires {
             lean_expr,
             rust_expr: rust_expr.clone(),
@@ -994,6 +1020,7 @@ fn desugar_dotted_auth(spec: &mut ParsedSpec) {
             rust_expr_math: rust_expr,
             error_name: Some("Unauthorized".to_string()),
             ast_body: None,
+            tree: Some(tree),
         };
         handler.requires.insert(0, synthesized);
         // Rewrite `who` to the signer so downstream consumers see a
@@ -1011,6 +1038,7 @@ fn expand_handler(
     h: &a::HandlerDecl,
     consts: ConstTable,
     base_env: &TypeEnv,
+    ghosts: &std::collections::BTreeSet<String>,
 ) -> Vec<ParsedHandler> {
     // Per-handler env carries the handler's params for bare-ident lookup.
     let env = TypeEnv {
@@ -1020,6 +1048,8 @@ fn expand_handler(
         aliases: base_env.aliases.clone(),
     };
     let env = &env;
+    let tcx = TreeCx::for_handler(h, env, consts, ghosts.clone());
+    let tcx = &tcx;
     // Detect a single branch clause (phase 1: at most one branch per handler).
     let match_clause: Option<&a::MatchClause> = h.clauses.iter().find_map(|c| match &c.node {
         a::HandlerClause::Match(b) => Some(b),
@@ -1027,17 +1057,19 @@ fn expand_handler(
     });
 
     let Some(branch) = match_clause else {
-        return vec![adapt_handler(h, consts, env)];
+        return vec![adapt_handler(h, consts, env, tcx)];
     };
 
     // Build a shared base handler (parent without the branch clause).
-    let base = adapt_handler(h, consts, env);
+    let base = adapt_handler(h, consts, env, tcx);
     let canon = canon_scope_for_handler(h, consts, env);
 
     // Accumulate negated guards so that earlier arms' failure implies
     // later arms' precondition (first-match semantics). Tuple is
-    // (lean, rust_native, rust_pod, rust_math).
-    let mut prior_conds: Vec<(String, String, String, String)> = Vec::new();
+    // (lean, rust_native, rust_pod, rust_math, tree).
+    #[allow(clippy::type_complexity)]
+    let mut prior_conds: Vec<(String, String, String, String, Option<crate::mir::ExprTree>)> =
+        Vec::new();
     let mut out = Vec::with_capacity(branch.arms.len());
 
     for arm in &branch.arms {
@@ -1045,7 +1077,7 @@ fn expand_handler(
         synth.name = format!("{}_{}", h.name, arm.label);
 
         // Add all prior-arm negations to this arm's requires.
-        for (lean_neg, rust_neg, rust_pod_neg, rust_math_neg) in &prior_conds {
+        for (lean_neg, rust_neg, rust_pod_neg, rust_math_neg, tree_neg) in &prior_conds {
             synth.requires.push(ParsedRequires {
                 lean_expr: lean_neg.clone(),
                 rust_expr: rust_neg.clone(),
@@ -1055,6 +1087,7 @@ fn expand_handler(
                 // Synthetic (prior arms' negations, no single source AST
                 // node); the `old_in_single_state_context` lint skips these.
                 ast_body: None,
+                tree: tree_neg.clone(),
             });
         }
 
@@ -1071,6 +1104,7 @@ fn expand_handler(
                 consts,
                 opts_native(env).with_widen_arith(),
             );
+            let guard_tree = build_expr_tree(&guard, tcx);
             synth.requires.push(ParsedRequires {
                 lean_expr: lean.clone(),
                 rust_expr: rust.clone(),
@@ -1078,12 +1112,14 @@ fn expand_handler(
                 rust_expr_math: rust_math.clone(),
                 error_name: None,
                 ast_body: Some(guard),
+                tree: Some(guard_tree.clone()),
             });
             prior_conds.push((
                 format!("\u{00AC}({})", lean),
                 format!("!({})", rust),
                 format!("!({})", rust_pod),
                 format!("!({})", rust_math),
+                Some(crate::mir::ExprTree::Not(Box::new(guard_tree))),
             ));
         }
 
@@ -1101,8 +1137,9 @@ fn expand_handler(
                     rust_expr_math: "false".to_string(),
                     error_name: Some(err.clone()),
                     // Synthetic: arm-abort lowers to literal `false` with no
-                    // source AST; lint skips.
+                    // source AST; lint skips. The tree carries the literal.
                     ast_body: None,
+                    tree: Some(crate::mir::ExprTree::Bool(false)),
                 });
             }
             a::MatchBody::Effect(stmts) => {
@@ -1113,10 +1150,9 @@ fn expand_handler(
                         consts,
                         &canon,
                         env,
+                        tcx,
                     ) {
-                        synth.effects.push(eff.triple);
-                        synth.effects_rust.push(eff.value_rust);
-                        synth.effect_on_error.push(eff.on_error);
+                        synth.effects.push(eff.into_parsed_effect());
                     }
                 }
             }
@@ -1148,6 +1184,7 @@ fn expand_handler(
                             consts,
                             opts_pod(env),
                         ),
+                        tree: Some(build_expr_tree(&arg.value, tcx)),
                     })
                     .collect();
                 synth.calls.push(ParsedCall {
@@ -1167,10 +1204,9 @@ fn expand_handler(
                         consts,
                         &canon,
                         env,
+                        tcx,
                     ) {
-                        synth.effects.push(eff.triple);
-                        synth.effects_rust.push(eff.value_rust);
-                        synth.effect_on_error.push(eff.on_error);
+                        synth.effects.push(eff.into_parsed_effect());
                     }
                 }
             }
@@ -1234,7 +1270,12 @@ fn extract_state_field(e: &Expr) -> Option<String> {
     }
 }
 
-fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> ParsedHandler {
+fn adapt_handler(
+    h: &a::HandlerDecl,
+    consts: ConstTable,
+    env: &TypeEnv,
+    tcx: &TreeCx,
+) -> ParsedHandler {
     let params: Vec<(String, String)> = h
         .params
         .iter()
@@ -1271,8 +1312,6 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         aborts_total: false,
         permissionless: false,
         effects: Vec::new(),
-        effects_rust: Vec::new(),
-        effect_on_error: Vec::new(),
         accounts: Vec::new(),
         transfers: Vec::new(),
         emits: Vec::new(),
@@ -1344,6 +1383,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                         opts_native(env).with_widen_arith(),
                     ),
                     error_name: on_fail.clone(),
+                    tree: Some(build_expr_tree(&guard, tcx)),
                     ast_body: Some(guard),
                 });
             }
@@ -1369,6 +1409,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                             .with_state_mode(StateMode::Binary)
                             .with_widen_arith(),
                     ),
+                    tree: Some(build_expr_tree(&e, tcx)),
                 });
             }
             a::HandlerClause::Modifies(fs) => {
@@ -1414,35 +1455,28 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     match block {
                         a::EffectBlock::Stmt(stmt) => {
                             for eff in render_effect_or_expand_variant_promotion(
-                                stmt, &params, consts, &canon, env,
+                                stmt, &params, consts, &canon, env, tcx,
                             ) {
-                                handler.effects.push(eff.triple);
-                                handler.effects_rust.push(eff.value_rust);
-                                handler.effect_on_error.push(eff.on_error);
+                                handler.effects.push(eff.into_parsed_effect());
                             }
                         }
                         a::EffectBlock::Match { scrutinee, arms } => {
                             let mut parsed_arms: Vec<crate::check::ParsedEffectArm> = Vec::new();
                             for arm in arms {
-                                let mut arm_effects = Vec::new();
-                                let mut arm_effects_rust: Vec<String> = Vec::new();
-                                let mut arm_on_error: Vec<Option<String>> = Vec::new();
+                                let mut arm_effects: Vec<crate::check::ParsedEffect> = Vec::new();
                                 for nested in &arm.body {
                                     let mut leaves = Vec::new();
                                     nested.node.collect_leaves(&mut leaves);
                                     for stmt in leaves {
                                         for eff in render_effect_or_expand_variant_promotion(
-                                            stmt, &params, consts, &canon, env,
+                                            stmt, &params, consts, &canon, env, tcx,
                                         ) {
+                                            let eff = eff.into_parsed_effect();
                                             // Mirror into union so flat
                                             // readers see this potential
                                             // write.
-                                            handler.effects.push(eff.triple.clone());
-                                            handler.effects_rust.push(eff.value_rust.clone());
-                                            handler.effect_on_error.push(eff.on_error.clone());
-                                            arm_effects.push(eff.triple);
-                                            arm_effects_rust.push(eff.value_rust);
-                                            arm_on_error.push(eff.on_error);
+                                            handler.effects.push(eff.clone());
+                                            arm_effects.push(eff);
                                         }
                                     }
                                 }
@@ -1459,8 +1493,6 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                                     pattern_lean,
                                     is_wildcard,
                                     effects: arm_effects,
-                                    effects_rust: arm_effects_rust,
-                                    effect_on_error: arm_on_error,
                                 });
                             }
                             branches = Some(crate::check::ParsedEffectBranches {
@@ -1482,6 +1514,10 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                                     consts,
                                     env,
                                 ),
+                                scrutinee_tree: Some(build_expr_tree(
+                                    &canonicalize_state_refs(scrutinee, &canon),
+                                    tcx,
+                                )),
                                 arms: parsed_arms,
                             });
                         }
@@ -1583,6 +1619,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                             consts,
                             opts_pod(env),
                         ),
+                        tree: Some(build_expr_tree(&arg.value, tcx)),
                     })
                     .collect();
                 handler.calls.push(ParsedCall {
@@ -1644,6 +1681,7 @@ fn adapt_interface_handler<'a>(
     consts: ConstTable<'a>,
     env: &TypeEnv<'a>,
 ) -> ParsedInterfaceHandler {
+    let tcx = TreeCx::for_interface_handler(h, env, consts);
     let mut out = ParsedInterfaceHandler {
         name: h.name.clone(),
         doc: h.doc.clone(),
@@ -1717,6 +1755,7 @@ fn adapt_interface_handler<'a>(
                     ),
                     error_name: on_fail.clone(),
                     ast_body: Some(guard.clone()),
+                    tree: Some(build_expr_tree(guard, &tcx)),
                 });
             }
             a::InterfaceHandlerClause::Ensures(e) => {
@@ -1738,6 +1777,7 @@ fn adapt_interface_handler<'a>(
                             .with_state_mode(StateMode::Binary)
                             .with_widen_arith(),
                     ),
+                    tree: Some(build_expr_tree(e, &tcx)),
                 });
             }
         }

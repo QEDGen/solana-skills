@@ -105,7 +105,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         }
         let (op_state_name, _) = resolve_state_for_op(op, &spec, is_multi);
         // Prefix unused params with _ to suppress warnings
-        let effect_values: Vec<&str> = op.effects.iter().map(|(_, _, v)| v.as_str()).collect();
+        let effect_values: Vec<&str> = op.effects.iter().map(|e| e.value.as_str()).collect();
         let params: Vec<String> = op
             .takes_params
             .iter()
@@ -129,8 +129,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "fn apply_{}(state: &mut {}{}) {{\n",
             op.name, op_state_name, param_sig
         ));
-        for (field, kind, value) in &op.effects {
-            match kind.as_str() {
+        for eff in &op.effects {
+            let (field, value) = (&eff.field, &eff.value);
+            match eff.op.as_str() {
                 "set" => {
                     out.push_str(&format!("    state.{} = {};\n", field, value));
                 }
@@ -143,7 +144,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 _ => {
                     out.push_str(&format!(
                         "    // unknown effect: {} {} {}\n",
-                        field, kind, value
+                        field, eff.op, value
                     ));
                 }
             }
@@ -475,8 +476,9 @@ fn generate_effect_test(
     }
 
     // Snapshot pre-state
-    for (field, kind, _) in &op.effects {
-        if kind == "add" || kind == "sub" {
+    for eff in &op.effects {
+        let field = &eff.field;
+        if eff.op == "add" || eff.op == "sub" {
             out.push_str(&format!("        let pre_{} = state.{};\n", field, field));
         }
     }
@@ -487,8 +489,9 @@ fn generate_effect_test(
         call_args(op)
     ));
 
-    for (field, kind, value) in &op.effects {
-        match kind.as_str() {
+    for eff in &op.effects {
+        let (field, value) = (&eff.field, &eff.value);
+        match eff.op.as_str() {
             "set" => {
                 out.push_str(&format!(
                     "        assert_eq!(state.{}, {});\n",
@@ -670,7 +673,7 @@ fn generate_unchanged_test(
     state_name: &str,
     spec: &ParsedSpec,
 ) -> Result<()> {
-    let affected: Vec<&str> = op.effects.iter().map(|(f, _, _)| f.as_str()).collect();
+    let affected: Vec<&str> = op.effects.iter().map(|e| e.field.as_str()).collect();
     let unchanged: Vec<&(String, String)> = fields
         .iter()
         .filter(|(f, t)| !affected.contains(&f.as_str()) && t != "Pubkey")
