@@ -16,6 +16,10 @@ mod expr;
 mod guards;
 mod property;
 mod pubkey;
+// #151 Slice 1: no glob re-export (an unused glob trips `-D warnings`
+// until the Kani/proptest emission port lands); path in via
+// `rust_codegen_util::tree_render::{render_rust, RustCx, ...}`.
+pub(crate) mod tree_render;
 
 pub(crate) use effect::*;
 pub(crate) use emit::*;

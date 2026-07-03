@@ -177,7 +177,7 @@ fn close_account(s: &mut State, i: usize) -> bool {
     if s.status != Status::Active {
         return false;
     }
-    s.V = s.V.wrapping_sub(accounts[i].capital);
+    s.V = s.V.wrapping_sub(s.accounts[(i) as usize].capital);
     s.accounts[i].capital = 0;
     s.accounts[i].active = 0;
     s.status = Status::Active;

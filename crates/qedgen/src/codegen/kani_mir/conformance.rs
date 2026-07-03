@@ -196,8 +196,8 @@ pub(crate) fn emit_one_conformance_harness(
     field_type_lookup: &std::collections::HashMap<&str, &str>,
     harness_name: &str,
     assume_lines: &[String],
-    (field, op_kind, value): (&str, &str, &str),
-    sibling_triples: &[(String, &'static str, &str)],
+    (field, op_kind, value): (&str, &str, &crate::mir::Expr),
+    sibling_triples: &[(String, &'static str, &crate::mir::Expr)],
 ) -> Result<()> {
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
@@ -210,7 +210,7 @@ pub(crate) fn emit_one_conformance_harness(
     }
 
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
-    let solver = util::pick_kani_solver_for_effect(field_type, value, op);
+    let solver = util::pick_kani_solver_for_effect(field_type, &value.rust, op);
 
     out.push_str("#[kani::proof]\n");
     out.push_str("#[kani::unwind(2)]\n");
@@ -280,7 +280,7 @@ pub(crate) fn emit_one_conformance_harness(
     out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
 
     let resolved = util::resolve_value_with_account_env(
-        value,
+        &value.rust,
         op,
         parsed,
         Some("pre_"),

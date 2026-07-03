@@ -150,7 +150,7 @@ fn close_account(s: &mut State, i: usize) -> bool {
     if s.status != Status::Active {
         return false;
     }
-    match s.V.checked_sub(accounts[i].capital) {
+    match s.V.checked_sub(s.accounts[(i) as usize].capital) {
         Some(__v) => s.V = __v,
         None => return false,
     }

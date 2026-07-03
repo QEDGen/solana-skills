@@ -40,7 +40,7 @@ handler churn (amount : U64) (who : Pubkey) {
         let body = mir.handler_block(&op.name).expect("mir body");
         let got: Vec<(String, String, String)> = block_effect_triples(body)
             .into_iter()
-            .map(|(f, k, v)| (f, k.to_string(), v.to_string()))
+            .map(|(f, k, v)| (f, k.to_string(), v.rust.clone()))
             .collect();
         let want: Vec<(String, String, String)> = op
             .effects
@@ -158,7 +158,7 @@ fn stmt_effect_triples_round_trip_bundled_examples() {
                 .unwrap_or_else(|| panic!("MIR missing `{}` in {:?}", op.name, spec_path));
             let got: Vec<(String, String, String)> = block_effect_triples(body)
                 .into_iter()
-                .map(|(f, k, v)| (f, k.to_string(), v.to_string()))
+                .map(|(f, k, v)| (f, k.to_string(), v.rust.clone()))
                 .collect();
             let want: Vec<(String, String, String)> = op
                 .effects
