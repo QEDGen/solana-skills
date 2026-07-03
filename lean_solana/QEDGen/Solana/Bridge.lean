@@ -389,13 +389,37 @@ def elabQedbridge : CommandElab := fun stx => do
       s!"  refine ⟨h_halt, ?_⟩" ++ nl ++
       postLeg)
 
-    -- Rejection: guards fail → exits nonzero
+    -- Rejection: guards fail → the run faults with a typed error, so it can
+    -- never exit 0. Like `.refines` (A2b), the discharge is threaded as a
+    -- hypothesis — `h_asm : AsmRefinesTransitionFault …` is one FAULT path of
+    -- the qedsvm#40 whole-transition bundle (`qedgen discharge --transition`),
+    -- under this path's guard hypotheses carried by `setupPre` — vs the old
+    -- free-`progAt` statement (any failing state, ANY program → nonzero),
+    -- which was only `sorry`-true. The body closes sorry-free through
+    -- `BridgeAdapter.faults_of_transitionFault` + `toSentinel_ne_zero`.
     cmds := cmds.push (
-      s!"theorem {qOp}.rejects (progAt : Nat → Option SVM.SBPF.Insn)" ++ nl ++
+      s!"theorem {qOp}.rejects" ++ nl ++
+      s!"    (progAt : Nat → Option SVM.SBPF.Insn) (cr : CodeReq) (rr : RegionTable → Prop)" ++ nl ++
+      s!"    (nSteps nCu : Nat) (e : SVM.SBPF.VmError)" ++ nl ++
+      s!"    (accts : List AccountFields) (setupPre : Assertion)" ++ nl ++
       s!"    {addrParams} (mem : Mem) (s : {specName}.State) (signer : Pubkey){paramSig}" ++ nl ++
+      s!"    (h_prog : cr.SatisfiedBy progAt)" ++ nl ++
       hyps ++
-      s!"    (h_fail : {transName} s signer{paramArgs} = none) :" ++ nl ++
-      s!"    (executeFn progAt ({initExpr}) FUEL).exitCode ≠ some 0 := sorry")
+      s!"    (_h_fail : {transName} s signer{paramArgs} = none)" ++ nl ++
+      s!"    (h_asm : AsmRefinesTransitionFault cr nSteps nCu {entryArg} rr e accts setupPre)" ++ nl ++
+      s!"    (h_pre : (setupPre ** codecsPre accts).holdsFor ({initExpr}))" ++ nl ++
+      s!"    (h_bud : ({initExpr}).cuConsumed + nSteps + nCu" ++ nl ++
+      s!"              ≤ ({initExpr}).cuBudget)" ++ nl ++
+      s!"    (h_rr : rr ({initExpr}).regions)" ++ nl ++
+      s!"    (h_fuel : nSteps ≤ FUEL) :" ++ nl ++
+      s!"    (executeFn progAt ({initExpr}) FUEL).exitCode ≠ some 0 := by" ++ nl ++
+      s!"  have hpc : ({initExpr}).pc = {entryArg} := by simp [{initFn}]" ++ nl ++
+      s!"  have hrun : ({initExpr}).exitCode = none := by simp [{initFn}]" ++ nl ++
+      s!"  obtain ⟨h_code, _⟩ :=" ++ nl ++
+      s!"    faults_of_transitionFault h_asm h_prog h_pre hpc hrun h_bud h_rr FUEL h_fuel" ++ nl ++
+      s!"  intro h_zero" ++ nl ++
+      s!"  rw [h_code] at h_zero" ++ nl ++
+      s!"  exact toSentinel_ne_zero e (Option.some.inj h_zero)")
 
   cmds := cmds.push (mkEnd s!"{specName}.Bridge")
 
