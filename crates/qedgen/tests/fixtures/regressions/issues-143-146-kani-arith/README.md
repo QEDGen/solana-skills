@@ -26,7 +26,8 @@ The fix renders effect RHS per-backend from the canonicalized typed AST
 predicate rendering (`RustOpts::widen_arith`) plus checked effect-RHS
 lowering (`RustOpts::checked_arith`).
 
-Known model divergence (documented, follow-up tracked in the issue
-thread): Lean's `Nat` subtraction is monus (clamps at 0) while the
-harness rejects the transition on underflow; aligning Lean via auto
-bound-guards on bare-arithmetic RHS is future work.
+The Lean/harness underflow divergence (Lean `Nat` monus vs `checked_sub`
+rejection) is closed by #148: the Lean transition auto-emits bound
+guards for bare arithmetic in effect values (`s.cut ≤ s.fee` here), so
+both models reject the underflow path. See
+`lean_gen_mir/transitions.rs::effect_tree_bound_conds`.

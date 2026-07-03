@@ -687,4 +687,188 @@ fn compound_effect_rhs_lean_is_fully_state_qualified() {
         !lean.contains("- cut") && !lean.contains("(rate)"),
         "bare state-field read leaked into the Lean transition:\n{lean}"
     );
+    // #148: `residual := fee - cut` lowers checked in the harness
+    // (`checked_sub` → reject on underflow); the Lean transition must
+    // carry the matching bound guard so the two models agree on the
+    // underflow path.
+    assert!(
+        lean.contains("s.cut \u{2264} s.fee"),
+        "bare-sub effect RHS must push an underflow guard into the \
+             transition condition (#148):\n{lean}"
+    );
+}
+
+/// Shared harness for the #148 bound-guard tests: parse a one-handler
+/// spec and render its flat-state transition.
+fn transition_for(src: &str) -> String {
+    let spec = crate::chumsky_adapter::parse_str(src).expect("parse");
+    let mir = crate::mir::lower(&spec);
+    let mut out = String::new();
+    emit_handler_transition(&mut out, &mir, &mir.handlers[0]);
+    out
+}
+
+/// #148: bare param subtraction in a `:=` effect RHS gains an underflow
+/// bound guard (`rhs ≤ lhs`), aligning the Lean transition with the
+/// checked harness lowering (`checked_sub` → reject); a chained
+/// left-associative sub gains cumulative guards.
+#[test]
+fn assign_rhs_bare_sub_gains_bound_guards() {
+    let out = transition_for(
+        "spec SubGuard\n\
+             type State = { x : U64, y : U64 }\n\
+             type Error | E\n\
+             handler f (a : U64) (b : U64) (c : U64) : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect { x := a - b\n\
+             \x20          y := a - b - c }\n\
+             }\n",
+    );
+    assert!(
+        out.contains("if b \u{2264} a \u{2227} c \u{2264} a - b then"),
+        "expected cumulative underflow guards `b ≤ a ∧ c ≤ a - b`:\n{out}"
+    );
+    assert!(
+        out.contains("x := a - b") && out.contains("y := a - b - c"),
+        "effect body must keep the plain Nat subtraction:\n{out}"
+    );
+}
+
+/// #148: a sub under an add (`cap - used + bonus`) keeps its per-node
+/// underflow guard AND — because the RHS contains a growth op on a
+/// bounded target — the final-value MAX bound.
+#[test]
+fn assign_rhs_sub_under_add_gains_underflow_and_max_guards() {
+    let out = transition_for(
+        "spec MixGuard\n\
+             type State = { cap : U64, used : U64, total : U64 }\n\
+             type Error | E\n\
+             handler f (bonus : U64) : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect { total := cap - used + bonus }\n\
+             }\n",
+    );
+    assert!(
+        out.contains("s.used \u{2264} s.cap"),
+        "sub node under an add must keep its underflow guard:\n{out}"
+    );
+    assert!(
+        out.contains("s.cap - s.used + bonus \u{2264} 18446744073709551615"),
+        "growth RHS on a bounded target must carry the final-value MAX \
+             bound:\n{out}"
+    );
+}
+
+/// #148 (`/`/`%` totalization): a non-literal divisor gains a `≠ 0`
+/// guard (checked_div/checked_rem reject; Lean totalizes to 0/x); a
+/// nonzero literal divisor does not.
+#[test]
+fn assign_rhs_division_gains_nonzero_divisor_guard() {
+    let out = transition_for(
+        "spec DivGuard\n\
+             type State = { q : U64, r : U64, h : U64 }\n\
+             type Error | E\n\
+             handler f (a : U64) (b : U64) : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect { q := a / b\n\
+             \x20          r := a % b\n\
+             \x20          h := a / 2 }\n\
+             }\n",
+    );
+    assert!(
+        out.contains("b \u{2260} 0"),
+        "non-literal divisor must gain a `≠ 0` guard:\n{out}"
+    );
+    assert_eq!(
+        out.matches("\u{2260} 0").count(),
+        1,
+        "one deduped divisor guard for `b`, none for the literal `2`:\n{out}"
+    );
+}
+
+/// #148 scope boundaries: (a) arithmetic inside an `if … then … else`
+/// RHS is conditionally evaluated in the harness — an unconditional Lean
+/// guard would over-constrain the model, so none is emitted; (b) signed
+/// (Int-kinded) subtraction doesn't truncate in Lean — no guard.
+#[test]
+fn assign_rhs_conditional_and_int_sub_stay_unguarded() {
+    let out = transition_for(
+        "spec CondSkip\n\
+             type State = { flag : U8, x : U64, pnl : I128, d : I128 }\n\
+             type Error | E\n\
+             handler f (a : U64) (b : U64) (delta : I128) : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect { x := if flag == 1 then a - b else 0\n\
+             \x20          d := pnl - delta }\n\
+             }\n",
+    );
+    assert!(
+        !out.contains("b \u{2264} a"),
+        "sub inside a conditional branch must NOT emit an unconditional \
+             guard:\n{out}"
+    );
+    assert!(
+        !out.contains("delta \u{2264}"),
+        "Int-kinded subtraction must NOT emit an underflow guard:\n{out}"
+    );
+}
+
+/// #148 interaction with the `field -= delta` shape: the existing
+/// top-level guard (`<delta> ≤ s.<field>`) already covers compound
+/// deltas; the tree walk adds guards only for arithmetic INSIDE the
+/// delta — no duplication of the outer bound.
+#[test]
+fn checked_sub_compound_delta_gains_interior_guard_only() {
+    let out = transition_for(
+        "spec DeltaGuard\n\
+             type State = { total : U64, fee : U64, cut : U64 }\n\
+             type Error | E\n\
+             handler f : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect { total -= fee - cut }\n\
+             }\n",
+    );
+    assert!(
+        out.contains("s.fee - s.cut \u{2264} s.total"),
+        "existing top-level underflow guard must survive for compound \
+             deltas:\n{out}"
+    );
+    assert!(
+        out.contains("s.cut \u{2264} s.fee"),
+        "sub inside a compound delta must gain its own guard (#148):\n{out}"
+    );
+    assert_eq!(
+        out.matches("s.fee - s.cut \u{2264} s.total").count(),
+        1,
+        "outer bound must not duplicate:\n{out}"
+    );
+}
+
+/// #148 in conditional effects: a `match` arm's bare-sub RHS guard gates
+/// only that arm (untaken arms must not abort), mirroring the per-arm
+/// checked-add bounds.
+#[test]
+fn branch_arm_assign_sub_guard_gates_only_its_arm() {
+    let out = transition_for(
+        "spec ArmGuard\n\
+             type State = { x : U64, y : U64 }\n\
+             type Error | E\n\
+             handler f (mode : U8) (a : U64) (b : U64) : State -> State {\n\
+             \x20 permissionless\n\
+             \x20 effect {\n\
+             \x20   match mode {\n\
+             \x20     0 => x := a - b,\n\
+             \x20     _ => y := 0,\n\
+             \x20   }\n\
+             \x20 }\n\
+             }\n",
+    );
+    assert!(
+        out.contains("| 0 => if b \u{2264} a then some { s with x := a - b } else none"),
+        "arm's sub guard must gate only that arm:\n{out}"
+    );
+    assert!(
+        out.contains("| _ => some { s with y := 0 }"),
+        "untaken arm must stay unguarded:\n{out}"
+    );
 }

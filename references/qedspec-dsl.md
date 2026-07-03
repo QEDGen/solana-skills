@@ -791,11 +791,18 @@ checked doctrine in the harness lane (issues #143–#146):
   model computes and can never overflow-panic on unconstrained symbolic
   state. The Anchor/Quasar scaffold guards keep native-width rendering.
 
-Known divergence (tracked upstream): Lean's `Nat` subtraction in a `:=`
-RHS is monus (clamps at 0) while the harness rejects the transition on
-underflow. If the distinction matters for your invariant, write the
-guard explicitly (`requires fee >= cut`) — that makes both models agree
-and documents the intent.
+The Lean transition carries matching **auto bound-guards** (#148): each
+bare `-` over unsigned kinds adds `<rhs> ≤ <lhs>` to the guard
+conjunction (cumulative for chains: `a - b - c` guards `b ≤ a` and
+`c ≤ a - b`), each `/` / `%` with a non-literal divisor adds
+`<divisor> ≠ 0`, and a `:=` RHS containing `+` / `*` / `mul_div_*` on a
+bounded target field adds a final-value `≤ MAX` bound — so the Lean
+model rejects (`none`) exactly where the checked harness returns
+`false`. Guards apply only to unconditionally-evaluated positions:
+arithmetic inside an `if`/`match` arm of the RHS is checked in Rust only
+when that arm is taken, so it gains no unconditional Lean guard — if the
+distinction matters there, write the bound explicitly
+(`requires fee >= cut`).
 
 ### `permissionless` clause
 
