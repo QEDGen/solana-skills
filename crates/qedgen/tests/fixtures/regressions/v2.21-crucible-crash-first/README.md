@@ -1,7 +1,7 @@
 # v2.21 §S1.2 — Crucible brownfield regression fixture
 
 This fixture pins the v2.21 §S1.2 exit criterion: the **lamport-
-conservation protocol invariant** (`assert_no_signer_inflation`) firing on
+conservation protocol invariant** (`assert_no_wallet_inflation`) firing on
 a brownfield Anchor program **without a `.qedspec`**, end to end —
 `cargo build-sbf` → `qedgen probe --fuzz` → a fired `Finding`.
 
@@ -16,9 +16,9 @@ A minimal Anchor program with three handlers:
    calling `authority` with **no check that the caller is the legitimate
    admin** — a textbook missing-authority-check withdraw. A program may
    freely debit accounts it owns, so the direct lamport move succeeds for
-   any signer. `authority` is a tracked signer; it *gains* the vault's
+   any signer. `authority` is a tracked wallet; it *gains* the vault's
    lamports (which come from **outside** the tracked set), tripping the
-   §S1.2 `assert_no_signer_inflation` guard. The fuzzer surfaces it as a
+   §S1.2 `assert_no_wallet_inflation` guard. The fuzzer surfaces it as a
    HIGH `invariant_violation` on `drain`, with no spec annotation.
 
 2. **`run` — does NOT fire.** Divides by a runtime zero. An in-program
@@ -99,9 +99,9 @@ collapses that mismatch — the same committed-IDL convention the
   actually debit it (the realistic withdraw shape).
 - **Protocol-mode header** — the emitted `main.rs` carries the
   `Mode: PROTOCOL (no spec)` banner.
-- **§S1.2 guard wiring** — `assert_no_signer_inflation` +
+- **§S1.2 guard wiring** — `assert_no_wallet_inflation` +
   `snapshot_lamports` helpers are emitted and the per-action inflation
-  check wraps every `.send()` once a tracked signer set exists.
+  check wraps every `.send()` once a tracked wallet set exists.
 - **`.qed/fuzz/<prog>/` location** — the emitted harness lives under the
   user's `.qed/` ephemeral namespace, not in the program crate's `src/`.
 

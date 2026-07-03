@@ -18,7 +18,7 @@ use crate::rust_codegen_util;
 ///
 /// `Protocol` — brownfield, no spec: `invariant_test` body is empty, but the
 /// per-action protocol-invariant suite (`PROTOCOL_GUARDS`) fires as
-/// `fuzz_assert!`s — signer-lamport inflation, total-lamport conservation,
+/// `fuzz_assert!`s — wallet-lamport inflation, total-lamport conservation,
 /// ownership takeover, discriminator/type change, close-scrub integrity,
 /// rent-exemption loss, realloc data leak, and SPL token-balance
 /// conservation. Plus any panic in the *harness/host* code.
@@ -309,8 +309,13 @@ fn emit_protocol_invariants_helpers(out: &mut String) {
 /// Which account set a guard snapshots.
 #[derive(Clone, Copy)]
 enum TrackedSet {
-    /// Fixture signer keypairs (auth-cited / `is_signer` accounts).
-    Signer,
+    /// Fuzzer-controlled wallets: every fixture keypair (brownfield: signers
+    /// AND non-signer writables) EXCLUDING the program-owned PDA vault. A
+    /// wallet gaining lamports is the drain-to-attacker shape, and the drain
+    /// destination need not be a signer — a plain writable `recipient` is the
+    /// classic missing-authority withdraw target. Spec mode has no non-signer
+    /// keypairs, so this equals the signer set there.
+    Wallet,
     /// Every created account: fixture keypairs + the program-owned vault.
     Account,
 }
@@ -337,10 +342,10 @@ struct ProtocolGuard {
 
 const PROTOCOL_GUARDS: &[ProtocolGuard] = &[
     ProtocolGuard {
-        id: "signer_lamport",
-        set: TrackedSet::Signer,
-        assert_fn: "assert_no_signer_inflation",
-        emit_helper: emit_guard_signer_inflation,
+        id: "wallet_lamport",
+        set: TrackedSet::Wallet,
+        assert_fn: "assert_no_wallet_inflation",
+        emit_helper: emit_guard_wallet_inflation,
     },
     ProtocolGuard {
         id: "lamport_conservation",
@@ -470,12 +475,18 @@ fn rent_exempt_minimum(data_len: usize) -> u64 {
 
 "#;
 
-/// `missing_signer` / drain: a signer must not GAIN lamports across a call —
-/// a gain means protocol funds flowed to a fuzzer-controlled signer.
-fn emit_guard_signer_inflation(out: &mut String) {
+/// `missing_signer` / drain: a fuzzer-controlled wallet must not GAIN lamports
+/// across a call — a gain means protocol funds flowed to an attacker account.
+/// The wallet set spans EVERY fixture keypair (signers and non-signer
+/// writables), so a drain that credits a plain `recipient: AccountInfo` (the
+/// textbook missing-authority withdraw, which credits no signer) still fires;
+/// the program-owned PDA vault is excluded because it legitimately receives
+/// rent/deposits.
+fn emit_guard_wallet_inflation(out: &mut String) {
     out.push_str(
-        r#"/// Signer must not GAIN lamports across a call (drain → attacker signer).
-fn assert_no_signer_inflation(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
+        r#"/// A fuzzer wallet must not GAIN lamports across a call (drain → attacker).
+/// Spans signers AND non-signer writables — a drain need not credit a signer.
+fn assert_no_wallet_inflation(ctx: &TestContext, before: &[AccountSnapshot], label: &str) {
     for b in before {
         if !b.exists {
             continue;
@@ -484,7 +495,7 @@ fn assert_no_signer_inflation(ctx: &TestContext, before: &[AccountSnapshot], lab
         if after.lamports > b.lamports {
             fuzz_assert!(
                 false,
-                "lamport inflation on signer {} in {}: {} -> {}",
+                "lamport inflation on wallet {} in {}: {} -> {}",
                 b.pk, label, b.lamports, after.lamports
             );
         }
@@ -687,22 +698,25 @@ fn assert_token_balance_conserved(ctx: &TestContext, before: &[AccountSnapshot],
     );
 }
 
-/// Signer-set pubkey exprs (`self.<sig>.pubkey()`), brownfield-cased. The
-/// signer-lamport guard's tracked set: a signer gaining lamports is the
-/// drain-to-attacker shape.
-fn signer_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
-    let is_brownfield = uses_brownfield_accounts(spec, mode);
-    collect_signer_idents(spec)
-        .iter()
-        .map(|sig| {
-            let ident = if is_brownfield {
-                brownfield_keypair_ident(sig)
-            } else {
-                sig.clone()
-            };
-            format!("self.{ident}.pubkey()")
-        })
-        .collect()
+/// Wallet-set pubkey exprs (`self.<ident>.pubkey()`). The wallet-lamport
+/// guard's tracked set: any fuzzer-controlled wallet gaining lamports is the
+/// drain-to-attacker shape. Brownfield tracks EVERY fixture keypair (signers
+/// and non-signer writables) so a drain to a plain `recipient` fires too; the
+/// program-owned PDA vault is intentionally absent (it legitimately gains
+/// rent, and `account_tracked_pubkey_exprs` is where the PDA is tracked).
+/// Spec mode has no non-signer keypairs, so this collapses to the signer set.
+fn wallet_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<String> {
+    if uses_brownfield_accounts(spec, mode) {
+        collect_brownfield_keypair_names(spec)
+            .iter()
+            .map(|name| format!("self.{}.pubkey()", brownfield_keypair_ident(name)))
+            .collect()
+    } else {
+        collect_signer_idents(spec)
+            .iter()
+            .map(|sig| format!("self.{sig}.pubkey()"))
+            .collect()
+    }
 }
 
 /// Account-set pubkey exprs: every fixture keypair plus the program-owned
@@ -753,7 +767,7 @@ fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
             s.push_str("//\n");
             s.push_str("// Mode: PROTOCOL (no spec). invariant_test() body is empty; the\n");
             s.push_str("// per-action protocol-invariant suite below is the live detector:\n");
-            s.push_str("// signer-lamport inflation, total-lamport conservation, ownership\n");
+            s.push_str("// wallet-lamport inflation, total-lamport conservation, ownership\n");
             s.push_str("// takeover, discriminator change, close-scrub, rent-exemption loss,\n");
             s.push_str("// realloc data leak, SPL token-balance conservation.\n");
             s.push_str("// NOTE: in-program faults (overflow, div-by-zero, unwrap, require!)\n");
@@ -1092,25 +1106,26 @@ fn emit_action_fn(
             }
         })
         .collect();
-    // Snapshot signer lamports before .send() (Protocol / Both only).
-    // Tracked set = every fixture signer keypair. PDAs are NOT tracked —
-    // their pubkeys are derived at runtime inside the agent-filled
-    // `.accounts(...)` literal.
+    // Snapshot wallet lamports before .send() (Protocol / Both only). Tracked
+    // set = every fuzzer-controlled fixture keypair (signers AND non-signer
+    // writables), so a drain to a plain `recipient` is caught, not just a
+    // drain that credits a signer. The program-owned PDA vault is NOT in this
+    // set (it legitimately gains rent) — the account-set guards track it.
     // Protocol-invariant suite (Protocol / Both). Snapshot each used tracked
     // set once before .send(); the registry drives which guards assert after.
     let want_protocol = matches!(mode, InvariantMode::Protocol | InvariantMode::Both);
-    let signer_exprs = signer_tracked_pubkey_exprs(spec, mode);
+    let wallet_exprs = wallet_tracked_pubkey_exprs(spec, mode);
     let account_exprs = account_tracked_pubkey_exprs(spec, mode);
-    let use_signer = want_protocol && !signer_exprs.is_empty();
+    let use_wallet = want_protocol && !wallet_exprs.is_empty();
     let use_account = want_protocol && !account_exprs.is_empty();
-    if use_signer {
-        out.push_str("        let __signer_set: Vec<Pubkey> = vec![\n");
-        for expr in &signer_exprs {
+    if use_wallet {
+        out.push_str("        let __wallet_set: Vec<Pubkey> = vec![\n");
+        for expr in &wallet_exprs {
             out.push_str(&format!("            {expr},\n"));
         }
         out.push_str("        ];\n");
         out.push_str(
-            "        let __signer_snap = snapshot_account_state(&self.ctx, &__signer_set);\n",
+            "        let __wallet_snap = snapshot_account_state(&self.ctx, &__wallet_set);\n",
         );
     }
     if use_account {
@@ -1187,7 +1202,7 @@ fn emit_action_fn(
     if want_protocol {
         for guard in PROTOCOL_GUARDS {
             let (set_used, snap_var) = match guard.set {
-                TrackedSet::Signer => (use_signer, "__signer_snap"),
+                TrackedSet::Wallet => (use_wallet, "__wallet_snap"),
                 TrackedSet::Account => (use_account, "__account_snap"),
             };
             if set_used {
@@ -1246,8 +1261,9 @@ fn pascal_case(s: &str) -> String {
 
 fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
     // Protocol-only: empty body. The live detector for this mode is the
-    // §S1.2 signer-lamport-inflation guard emitted per action, plus any
-    // harness/host panic. In-program faults are TX errors, not caught here.
+    // wallet-lamport-inflation guard (plus the rest of the protocol suite)
+    // emitted per action, plus any harness/host panic. In-program faults are
+    // TX errors, not caught here.
     if matches!(mode, InvariantMode::Protocol) {
         out.push_str("#[invariant_test]\n");
         out.push_str(&format!("fn invariant_test(_fixture: &mut {fixture}) {{\n"));
@@ -1563,7 +1579,7 @@ handler withdraw (amount : U64) : State.Active -> State.Active {
         assert!(out.contains("fixture.count"));
     }
 
-    // Protocol/Both wrap every `.send()` with a signer-lamport snapshot +
+    // Protocol/Both wrap every `.send()` with a wallet-lamport snapshot +
     // inflation assertion; Spec mode must NOT emit the wrap.
     #[test]
     fn protocol_mode_wraps_send_with_lamport_check() {
@@ -1593,7 +1609,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
         );
         // Every guard's assert fn is emitted, in registry order.
         for assert_fn in [
-            "fn assert_no_signer_inflation",
+            "fn assert_no_wallet_inflation",
             "fn assert_lamports_conserved",
             "fn assert_no_ownership_takeover",
             "fn assert_no_discriminator_change",
@@ -1608,22 +1624,70 @@ handler bump (delta : U64) : State.Active -> State.Active {
             );
         }
         // Both tracked sets snapshotted before .send() (Counter's `auth
-        // authority` gives a non-empty signer set; the account set falls
+        // authority` gives a non-empty wallet set; the account set falls
         // back to signers when there's no accounts block).
         assert!(
-            harness.contains("let __signer_snap = snapshot_account_state(")
+            harness.contains("let __wallet_snap = snapshot_account_state(")
                 && harness.contains("let __account_snap = snapshot_account_state("),
             "protocol-mode action must snapshot both tracked sets before .send()"
         );
-        // Signer-set guard reads __signer_snap; account-set guards read
+        // Wallet-set guard reads __wallet_snap; account-set guards read
         // __account_snap; per-handler label threads through.
         assert!(
-            harness.contains("assert_no_signer_inflation(&self.ctx, &__signer_snap, \"bump\")"),
-            "signer-lamport guard must read the signer snapshot, labelled by handler"
+            harness.contains("assert_no_wallet_inflation(&self.ctx, &__wallet_snap, \"bump\")"),
+            "wallet-lamport guard must read the wallet snapshot, labelled by handler"
         );
         assert!(
             harness.contains("assert_no_ownership_takeover(&self.ctx, &__account_snap, \"bump\")"),
             "account-set guard must read the account snapshot, labelled by handler"
+        );
+    }
+
+    // The broadened wallet-lamport guard tracks NON-signer writables too: a
+    // drain that credits a plain `recipient` (the textbook missing-authority
+    // withdraw — no signer gains) must still land in the tracked set. The
+    // signer-only predecessor missed this shape entirely (recipient credited,
+    // no signer inflates, and the account-set total is conserved because the
+    // recipient is inside it).
+    #[test]
+    fn wallet_guard_tracks_non_signer_recipient() {
+        let authority = crate::check::ParsedHandlerAccount {
+            name: "authority".into(),
+            is_signer: true,
+            is_writable: true,
+            ..Default::default()
+        };
+        let recipient = crate::check::ParsedHandlerAccount {
+            name: "recipient".into(),
+            is_signer: false, // plain writable — NOT a signer
+            is_writable: true,
+            ..Default::default()
+        };
+        let mut handler = synthetic_handler();
+        handler.name = "drain".into();
+        handler.accounts = vec![authority, recipient];
+        let spec = ParsedSpec {
+            program_name: "vault".into(),
+            handlers: vec![handler],
+            ..Default::default()
+        };
+        let harness = emit_harness(&spec, InvariantMode::Protocol).expect("emit protocol harness");
+        // The non-signer writable still gets a fixture keypair …
+        assert!(
+            harness.contains("recipient: Rc<Keypair>,"),
+            "non-signer writable must get a fixture keypair:\n{harness}"
+        );
+        // … and joins the wallet snapshot set (both accounts, not just the signer).
+        assert!(
+            harness.contains("let __wallet_set: Vec<Pubkey> = vec![")
+                && harness.contains("self.authority.pubkey(),")
+                && harness.contains("self.recipient.pubkey(),"),
+            "wallet set must include the non-signer recipient:\n{harness}"
+        );
+        // … and the broadened guard is wired around the drain's .send().
+        assert!(
+            harness.contains("assert_no_wallet_inflation(&self.ctx, &__wallet_snap, \"drain\")"),
+            "drain must wire the broadened wallet-lamport guard:\n{harness}"
         );
     }
 
@@ -1647,7 +1711,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
         let harness = emit_harness(&spec, InvariantMode::Spec).expect("emit spec harness");
         assert!(
             !harness.contains("snapshot_account_state")
-                && !harness.contains("assert_no_signer_inflation")
+                && !harness.contains("assert_no_wallet_inflation")
                 && !harness.contains("assert_no_ownership_takeover")
                 && !harness.contains("assert_closure_integrity"),
             "Spec mode must NOT emit the protocol-invariant suite — protocol-only"
@@ -1680,7 +1744,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
         // Spec invariant flows in.
         assert!(harness.contains("fuzz_assert!"));
         // Plus the protocol-invariant lamport check.
-        assert!(harness.contains("assert_no_signer_inflation"));
+        assert!(harness.contains("assert_no_wallet_inflation"));
     }
 
     #[test]

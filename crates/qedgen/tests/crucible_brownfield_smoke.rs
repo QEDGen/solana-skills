@@ -215,8 +215,8 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
     // Protocol-mode harness carries the shared snapshot infra AND, now that
     // buggy_anchor ships a committed idl.json, the IDL-driven path fills the
     // `accounts::*` literals and wires the per-action guard suite. `drain`'s
-    // `authority` is a signer (the signer set) and `vault` is a program-owned
-    // PDA the harness stages so the drain can actually debit it.
+    // `authority` is a signer (part of the wallet set) and `vault` is a
+    // program-owned PDA the harness stages so the drain can actually debit it.
     assert!(
         body.contains("fn snapshot_account_state") && body.contains("struct AccountSnapshot"),
         "protocol-mode brownfield harness must emit the shared snapshot infra"
@@ -228,12 +228,12 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
         body.contains("accounts(accounts::Drain {"),
         "drain's accounts literal should be auto-filled from the IDL, not todo!()"
     );
-    // Full protocol suite emitted + the signer-lamport and ownership guards
+    // Full protocol suite emitted + the wallet-lamport and ownership guards
     // wired around .send(). The account-set guards track the program-owned
     // vault PDA, so a handler reassigning it out of program ownership trips
-    // the ownership guard even though no signer gains lamports.
+    // the ownership guard even though no wallet gains lamports.
     for assert_fn in [
-        "fn assert_no_signer_inflation",
+        "fn assert_no_wallet_inflation",
         "fn assert_lamports_conserved",
         "fn assert_no_ownership_takeover",
         "fn assert_no_discriminator_change",
@@ -248,8 +248,8 @@ fn fixture_buggy_anchor_drives_brownfield_emit() {
         );
     }
     assert!(
-        body.contains("assert_no_signer_inflation(&self.ctx, &__signer_snap,"),
-        "drain should wire the signer-lamport guard around .send()"
+        body.contains("assert_no_wallet_inflation(&self.ctx, &__wallet_snap,"),
+        "drain should wire the wallet-lamport guard around .send()"
     );
     assert!(
         body.contains("assert_no_ownership_takeover(&self.ctx, &__account_snap,"),

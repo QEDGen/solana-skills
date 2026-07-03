@@ -59,8 +59,9 @@ pub fn process_maybe(_accounts: &[AccountInfo], _instruction_data: &[u8]) -> Pro
 }
 
 /// Sweeps every lamport from `source` into `target` with no authority
-/// check. Crucible surfaces this as `assert_no_signer_inflation` when
-/// the fuzzer picks a tracked signer as `target`.
+/// check. Crucible surfaces this as `assert_no_wallet_inflation`: `target`
+/// is a tracked wallet regardless of whether it signs, so the credit fires
+/// the guard even though the drain names no signer.
 pub fn process_drain(accounts: &[AccountInfo], _instruction_data: &[u8]) -> ProgramResult {
     let [source, target, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);

@@ -7,9 +7,9 @@
 //!   * `drain`  — empties a **program-owned PDA vault** into the calling
 //!                `authority` with no check that the caller is the
 //!                legitimate admin. Any signer can drain the vault to
-//!                itself. `authority` is a tracked signer that GAINS the
+//!                itself. `authority` is a tracked wallet that GAINS the
 //!                vault's lamports (which come from outside the tracked
-//!                set), tripping the §S1.2 `assert_no_signer_inflation`
+//!                set), tripping the §S1.2 `assert_no_wallet_inflation`
 //!                guard. **This is the finding the fixture fires** — a
 //!                textbook missing-authority-check withdraw.
 //!   * `run`    — divides by a runtime zero. **Does NOT fire**: an
