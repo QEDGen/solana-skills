@@ -17,6 +17,16 @@ use crate::check::ParsedSpec;
 
 /// Descriptor schema versions, kept in lockstep with qedsvm's `DESCRIPTOR_SCHEMA_MAX`.
 /// A constant delta (`add_const`) is v1; a parameter delta (`add_param`) is v2.
+///
+/// v2.40 scope note (#124): the whole-transition mode (qedsvm v0.9.0
+/// `--transition`) consumes this SAME v1/v2 shape — paths, guards, and abort
+/// codes come from the discovered `.pcs` traces, not the descriptor. A richer
+/// descriptor (guard cascade, multi-field effects, per-abort codes — built
+/// from the #151 `ExprTree`) is a schema v3 the current consumer would refuse
+/// fail-closed (`DESCRIPTOR_SCHEMA_MAX = 2`); it lands in lockstep with a
+/// qedsvm-side bump. Layout stays out of the producer entirely: offsets are
+/// shape, owned by the IDL (inline `layout` remains a hand-authored escape
+/// hatch for fixtures).
 const SCHEMA_VERSION_CONST: u32 = 1;
 const SCHEMA_VERSION_PARAM: u32 = 2;
 

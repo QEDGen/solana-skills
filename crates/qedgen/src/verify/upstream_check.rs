@@ -519,7 +519,11 @@ pub(crate) fn stash_elf_in(root: &Path, hash: &str, bytes: &[u8]) -> Result<Path
 }
 
 /// Read the cached ELF for `hash` under `root`, or `None` if absent/unreadable.
-/// The read side the discharge step consumes; unused until A2 wires it.
+/// The read side the discharge step consumes. Explicitly re-deferred in
+/// v2.40 (#124): `qedgen discharge` takes `--so` directly today; wiring the
+/// cache read means discharging against the *pinned upstream* binary by
+/// `binary_hash` — do it when the aggregate trust report folds in per-handler
+/// discharge verdicts (the same consumer).
 #[allow(dead_code)]
 pub(crate) fn read_cached_elf_in(root: &Path, hash: &str) -> Option<Vec<u8>> {
     std::fs::read(cached_elf_path_in(root, hash).ok()?).ok()
