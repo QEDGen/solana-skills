@@ -14,7 +14,7 @@ package qedgenSupport
 -- come from qedsvm's frozen `SVM` surface (see qedsvm docs/API.md).
 -- Pin an exact tag pre-1.0.
 require qedsvm from git
-  "https://github.com/QEDGen/qedsvm.git" @ "v0.4.0"
+  "https://github.com/QEDGen/qedsvm.git" @ "v0.9.0"
 
 @[default_target]
 lean_lib QEDGen where

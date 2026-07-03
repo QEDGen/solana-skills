@@ -25,9 +25,10 @@
 //!    (`require qedsvm`, `SVM.SBPF.*`).
 //!
 //! Lowering reads `ParsedSpec` / `ParsedHandler` shapes (see check.rs).
-//! Effect triples are `(field, op_kind, value)` with op_kind ∈ {"set", "add",
-//! "add_sat", "add_wrap", "sub", "sub_sat", "sub_wrap"}; `transfers {…}`
-//! blocks lower to `Stmt::TokenTransfer`, explicit `call`s to `Stmt::Cpi`.
+//! Effects arrive as self-contained `ParsedEffect`s (#151 Slice 4 replaced
+//! the parallel triple arrays) with op ∈ {"set", "add", "add_sat",
+//! "add_wrap", "sub", "sub_sat", "sub_wrap"}; `transfers {…}` blocks lower
+//! to `Stmt::TokenTransfer`, explicit `call`s to `Stmt::Cpi`.
 
 use crate::check::ParsedSpec;
 use std::collections::BTreeMap;
