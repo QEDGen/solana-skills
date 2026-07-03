@@ -28,6 +28,7 @@ pub(crate) fn make_handler(name: &str) -> ParsedHandler {
         effects: vec![],
         effects_rust: vec![],
         effect_on_error: vec![],
+        effects_tree: vec![],
         accounts: vec![],
         transfers: vec![],
         emits: vec![],

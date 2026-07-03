@@ -741,6 +741,7 @@ mod tests {
             quantifier_lint: None,
             class: PropertyClass::Unary,
             ast_body: None,
+            tree: None,
         });
         let warnings = check_vacuous_property_lowering(&spec);
         assert!(
@@ -771,6 +772,7 @@ mod tests {
             quantifier_lint: None,
             class: PropertyClass::Unary,
             ast_body: None,
+            tree: None,
         });
         let warnings = check_vacuous_property_lowering(&spec);
         assert!(

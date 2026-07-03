@@ -395,6 +395,7 @@ pub(super) fn synthesize_parsed_call(
                 lean_expr: a.value.lean.clone(),
                 rust_expr: a.value.rust.clone(),
                 rust_expr_pod: a.value.rust_pod.clone(),
+                tree: a.value.tree.clone(),
             })
             .collect(),
         result_binding: result_binding.clone(),

@@ -95,6 +95,10 @@ pub struct ParsedRequires {
     /// Source AST body for AST-level lints (e.g. `old_in_single_state_context`).
     /// `None` for synthetic requires from `match`-arm desugaring.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed, name-resolved expression tree (#151 Slice 0), built from the
+    /// canonicalized AST at adapt time. `None` only for legacy ingest
+    /// paths (IDL, probes) and hand-built test fixtures.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed ensures clause: post-condition relating pre and post state.
@@ -115,6 +119,9 @@ pub struct ParsedEnsures {
     /// Binary-mode + math-exact rendering (see
     /// `ParsedRequires::rust_expr_math`) for harness asserts (issue #146).
     pub rust_expr_binary_math: String,
+    /// Typed expression tree (#151 Slice 0); `old(...)` stays a structural
+    /// `Old` node — renderer context decides the pre/post receivers.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed cover block (reachability).
@@ -156,6 +163,8 @@ pub struct ParsedInvariant {
     /// Source AST body for the `old_in_single_state_context` lint.
     /// `None` for the description-only form.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed expression tree (#151 Slice 0); `None` for description-only.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Parsed environment block (external state).
@@ -250,6 +259,9 @@ pub struct ParsedProperty {
     /// AST body for downstream walks (e.g. `vacuous_property_lowering` gates
     /// on `Expr::Old(_)`). `None` only on hand-built test fixtures.
     pub ast_body: Option<crate::ast::Node<crate::ast::Expr>>,
+    /// Typed expression tree (#151 Slice 0). `None` only on hand-built
+    /// test fixtures.
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// Per-slot rendering of a `forall <binder> : <T>, body` property; see
@@ -483,6 +495,13 @@ pub struct ParsedHandler {
     /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`.
     /// See `ParsedOperation::effect_on_error`.
     pub effect_on_error: Vec<Option<String>>,
+    /// Typed RHS trees, parallel to `effects` (#151 Slice 0) — built from
+    /// the canonicalized AST with the handler's scope resolved. Empty for
+    /// ParsedHandlers built outside the chumsky adapter (IDL ingest,
+    /// probes). Transitional: Slice 4 collapses the parallel arrays
+    /// (`effects` / `effects_rust` / `effect_on_error` / `effects_tree`)
+    /// into one `Vec<Effect>`.
+    pub effects_tree: Vec<Option<crate::mir::ExprTree>>,
     /// IDL-level account descriptors.
     pub accounts: Vec<ParsedHandlerAccount>,
     /// Token transfer intents.
@@ -528,6 +547,8 @@ pub struct ParsedEffectBranches {
     pub scrutinee_rust_pod: String,
     /// Scrutinee expression rendered for Lean.
     pub scrutinee_lean: String,
+    /// Typed scrutinee tree (#151 Slice 0).
+    pub scrutinee_tree: Option<crate::mir::ExprTree>,
     pub arms: Vec<ParsedEffectArm>,
 }
 
@@ -548,6 +569,9 @@ pub struct ParsedEffectArm {
     /// &arm.effect_on_error)`, so each arm's checked effects carry their own
     /// abort error.
     pub effect_on_error: Vec<Option<String>>,
+    /// Typed RHS trees, parallel to `effects` (#151 Slice 0). Transitional:
+    /// Slice 4 collapses the parallel arrays into one `Vec<Effect>`.
+    pub effects_tree: Vec<Option<crate::mir::ExprTree>>,
 }
 
 /// A resolved `call Target.handler(...)` site inside a handler body. The
@@ -579,6 +603,8 @@ pub struct ParsedCallArg {
     pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
+    /// Typed argument tree (#151 Slice 0).
+    pub tree: Option<crate::mir::ExprTree>,
 }
 
 /// One entry in a `call X.y(state_binders { ... })` block: maps a callee-side

@@ -25,6 +25,7 @@ mod canon;
 mod effects;
 mod lean;
 mod rust;
+mod tree;
 mod typecheck;
 
 pub use adapt::{adapt, parse_str};
@@ -35,6 +36,7 @@ pub(crate) use canon::{collect_guard_path_refs, GuardPathRef};
 pub(in crate::spec::chumsky_adapter) use effects::*;
 pub(in crate::spec::chumsky_adapter) use lean::*;
 pub(in crate::spec::chumsky_adapter) use rust::*;
+pub(in crate::spec::chumsky_adapter) use tree::*;
 pub(in crate::spec::chumsky_adapter) use typecheck::collect_uninterpreted_helpers;
 
 #[cfg(test)]

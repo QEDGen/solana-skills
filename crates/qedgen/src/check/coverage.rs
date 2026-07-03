@@ -177,6 +177,7 @@ mod tests {
                 quantifier_lint: None,
                 class: PropertyClass::Unary,
                 ast_body: None,
+                tree: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()

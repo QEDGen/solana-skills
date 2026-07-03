@@ -1981,6 +1981,7 @@ mod tests {
                 quantifier_lint: None,
                 class: PropertyClass::Unary,
                 ast_body: None,
+                tree: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -2562,6 +2563,7 @@ mod tests {
                 quantifier_lint: None,
                 class: PropertyClass::Unary,
                 ast_body: None,
+                tree: None,
             }],
             lifecycle_states: vec!["Active".to_string()],
             ..empty_spec()
@@ -2703,6 +2705,7 @@ mod tests {
                 quantifier_lint: None,
                 class: PropertyClass::Unary,
                 ast_body: None,
+                tree: None,
             }],
             ..empty_spec()
         };
@@ -2738,6 +2741,7 @@ mod tests {
                 quantifier_lint: None,
                 class: PropertyClass::Unary,
                 ast_body: None,
+                tree: None,
             }],
             ..empty_spec()
         };
@@ -3217,6 +3221,7 @@ mod tests {
             effects: vec![],
             effects_rust: vec![],
             effect_on_error: vec![],
+            effects_tree: vec![],
             accounts: vec![],
             transfers: vec![],
             emits: vec![],

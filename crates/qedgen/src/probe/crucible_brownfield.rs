@@ -92,6 +92,7 @@ fn empty_handler(name: String) -> ParsedHandler {
         effects: vec![],
         effects_rust: vec![],
         effect_on_error: vec![],
+        effects_tree: vec![],
         accounts: vec![],
         transfers: vec![],
         emits: vec![],
