@@ -17,12 +17,6 @@
 //! Matches over `ExprTree` / `BindingKind` are exhaustive by discipline —
 //! no `_` arms (see `mir::expr_tree` module docs).
 
-// "IR ahead of consumers" (same ratified pattern as `mir::mod`): the
-// effect/guard/property lanes consume the renderer today; the remaining
-// dead surface (`Binder::SelfAcct`, `ArithMode::Native` outside tests) is
-// the Slice 3 scaffold port's entry point. Remove with Slice 3.
-#![allow(dead_code)]
-
 use crate::mir::expr_tree::{
     BindingKind, ExprTree, NumKind, QuantKind, TreeArithOp, TreeBoolOp, TreeCmpOp, TreePath,
     TreeSeg,
@@ -66,6 +60,29 @@ pub enum ArithMode {
     Wrapping,
 }
 
+/// How handler-account reads lower in scaffold guard positions (#151
+/// Slice 3): bare `<acct>` and `<acct>.pubkey` both mean "this account's
+/// runtime address", loaded off the guard fn's `ctx` param. Tree-native
+/// replacement for `bind_state`'s account-ident string rewrite; the
+/// rendered forms MUST stay in sync with
+/// `FrameworkSurface::account_key_expr`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcctKeyStyle {
+    /// Anchor: `ctx.<name>.key()`.
+    AnchorCtx,
+    /// Quasar: `(*ctx.<name>.to_account_view().address())`.
+    QuasarCtx,
+}
+
+impl AcctKeyStyle {
+    fn render(self, name: &str) -> String {
+        match self {
+            AcctKeyStyle::AnchorCtx => format!("ctx.{}.key()", name),
+            AcctKeyStyle::QuasarCtx => format!("(*ctx.{}.to_account_view().address())", name),
+        }
+    }
+}
+
 /// Render context — the Slice 1 collapse of the six string forms.
 #[derive(Debug, Clone, Copy)]
 pub struct RustCx<'a> {
@@ -79,6 +96,11 @@ pub struct RustCx<'a> {
     /// struct (`accounts.owner.pubkey`). Tree-native replacement for
     /// `rewrite_account_pubkey_refs`'s string substitution.
     pub acct_env: Option<&'a str>,
+    /// Scaffold-guard account lowering: bare `<acct>` / `<acct>.pubkey`
+    /// render as the target's runtime key load (see [`AcctKeyStyle`]).
+    /// Mutually exclusive with `acct_env` by construction (guards vs
+    /// harness positions).
+    pub acct_key: Option<AcctKeyStyle>,
 }
 
 impl<'a> RustCx<'a> {
@@ -88,8 +110,12 @@ impl<'a> RustCx<'a> {
             arith: ArithMode::Native,
             pod: false,
             acct_env: None,
+            acct_key: None,
         }
     }
+    /// Test-only convenience (corpus parity + mode tests); non-test
+    /// consumers set `pod` via struct update on a mode-specific context.
+    #[cfg(test)]
     pub fn pod() -> Self {
         RustCx {
             pod: true,
@@ -104,6 +130,9 @@ impl<'a> RustCx<'a> {
     }
     pub fn with_acct_env(self, acct_env: Option<&'a str>) -> Self {
         RustCx { acct_env, ..self }
+    }
+    pub fn with_acct_key(self, acct_key: Option<AcctKeyStyle>) -> Self {
+        RustCx { acct_key, ..self }
     }
 }
 
@@ -337,6 +366,19 @@ fn render_path(p: &TreePath, cx: RustCx, inside_old: bool) -> String {
             out.push_str(prefix);
         }
         BindingKind::Account => {
+            // Scaffold-guard positions: bare `<acct>` and `<acct>.pubkey`
+            // both lower to the runtime key load (`ctx.<name>.key()` on
+            // Anchor) — the `.pubkey` segment is consumed by the load, so
+            // return early. Other projections fall through to the plain
+            // path rendering, matching the legacy rewrite's "keep the `.`
+            // access path" rule.
+            if let Some(style) = cx.acct_key {
+                let is_pubkey_read = p.segments.is_empty()
+                    || matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey");
+                if is_pubkey_read {
+                    return style.render(&p.root);
+                }
+            }
             // Pubkey reads route through the generated account env when
             // one is bound (`owner.pubkey` → `accounts.owner.pubkey`) —
             // scoped to the exact `.pubkey` shape the legacy string
@@ -887,6 +929,104 @@ pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
     }
 }
 
+/// Walk every [`TreePath`] in `e`, pre-order. Shared spine for the
+/// path-shape predicates below (one exhaustive match instead of one per
+/// predicate).
+pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
+    match e {
+        ExprTree::Path(p) => f(p),
+        ExprTree::Int(_) | ExprTree::Bool(_) => {}
+        ExprTree::Old(inner) | ExprTree::Not(inner) => for_each_path(inner, f),
+        ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => for_each_path(body, f),
+        ExprTree::BoolOp { lhs, rhs, .. }
+        | ExprTree::Cmp { lhs, rhs, .. }
+        | ExprTree::Arith { lhs, rhs, .. } => {
+            for_each_path(lhs, f);
+            for_each_path(rhs, f);
+        }
+        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+            for_each_path(a, f);
+            for_each_path(b, f);
+            for_each_path(d, f);
+        }
+        ExprTree::Match { scrutinee, arms } => {
+            for_each_path(scrutinee, f);
+            for arm in arms {
+                for_each_path(&arm.body, f);
+            }
+        }
+        ExprTree::Ctor { payload, .. } => {
+            if let Some(p) = payload {
+                for_each_path(p, f);
+            }
+        }
+        ExprTree::RecordLit(fields) => {
+            for (_, v) in fields {
+                for_each_path(v, f);
+            }
+        }
+        ExprTree::RecordUpdate { base, updates } => {
+            for_each_path(base, f);
+            for (_, v) in updates {
+                for_each_path(v, f);
+            }
+        }
+        ExprTree::IsVariant { scrutinee, .. } => for_each_path(scrutinee, f),
+        ExprTree::App { args, .. } => {
+            for a in args {
+                for_each_path(a, f);
+            }
+        }
+        ExprTree::Field { base, .. } => for_each_path(base, f),
+        ExprTree::Let { value, body, .. } => {
+            for_each_path(value, f);
+            for_each_path(body, f);
+        }
+        ExprTree::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            for_each_path(cond, f);
+            for_each_path(then_branch, f);
+            for_each_path(else_branch, f);
+        }
+    }
+}
+
+/// Every handler-account read in `e` is key-style — bare `<acct>` or
+/// `<acct>.pubkey` — i.e. a shape [`AcctKeyStyle`] can lower. Gate for the
+/// scaffold-guards tree path: other account projections (imported-account
+/// field reads like `<acct>.<field>`) still need the legacy mirror rewrite
+/// in `bind_state`, so those clauses fall back to the string path.
+pub fn account_reads_are_key_style(e: &ExprTree) -> bool {
+    let mut ok = true;
+    for_each_path(e, &mut |p| {
+        if matches!(p.binding, BindingKind::Account) {
+            let key_style = p.segments.is_empty()
+                || matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey");
+            if !key_style {
+                ok = false;
+            }
+        }
+    });
+    ok
+}
+
+/// Does `e` read an `abstract <name> : <Type>` existential binder?
+/// Structural replacement for the guards emitter's word-boundary substring
+/// scan — the binder is computed AFTER the guard fn runs, so referencing
+/// clauses are deferred to the handler body.
+pub fn tree_references_abstract_binder(e: &ExprTree) -> bool {
+    let mut found = false;
+    for_each_path(e, &mut |p| {
+        if matches!(p.binding, BindingKind::AbstractBinder) {
+            found = true;
+        }
+    });
+    found
+}
+
 /// Immediate conjuncts of the top node: `And(l, r)` → `[l, r]`, anything
 /// else → `[e]`. Deliberately NON-recursive — the legacy string splitter
 /// only broke the *top-level* `&&` (nested conjunctions sit inside the
@@ -1334,5 +1474,109 @@ mod tests {
             render_rust(&e, RustCx::native().with_arith(ArithMode::Checked)),
             "(mul_div_floor_u128(((total) as u128), ((bps) as u128), ((10000) as u128))).try_into().ok()?"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // #151 Slice 3 — scaffold-guard account lowering + path predicates
+    // ------------------------------------------------------------------
+
+    fn acct_pubkey(name: &str) -> ExprTree {
+        ExprTree::Path(TreePath {
+            root: name.into(),
+            binding: BindingKind::Account,
+            segments: vec![TreeSeg::Field("pubkey".into())],
+            ty: None,
+        })
+    }
+
+    fn acct_bare(name: &str) -> ExprTree {
+        ExprTree::Path(TreePath {
+            root: name.into(),
+            binding: BindingKind::Account,
+            segments: vec![],
+            ty: None,
+        })
+    }
+
+    #[test]
+    fn acct_key_style_lowers_pubkey_and_bare_account_reads() {
+        // `<acct>.pubkey` and bare `<acct>` both mean the account's
+        // runtime address in guard positions; the rendered forms must
+        // match `FrameworkSurface::account_key_expr` byte-for-byte.
+        let anchor = RustCx::native().with_acct_key(Some(AcctKeyStyle::AnchorCtx));
+        let quasar = RustCx::native().with_acct_key(Some(AcctKeyStyle::QuasarCtx));
+        assert_eq!(
+            render_rust(&acct_pubkey("buyer"), anchor),
+            "ctx.buyer.key()"
+        );
+        assert_eq!(render_rust(&acct_bare("buyer"), anchor), "ctx.buyer.key()");
+        assert_eq!(
+            render_rust(&acct_pubkey("buyer"), quasar),
+            "(*ctx.buyer.to_account_view().address())"
+        );
+        // Combined with the SelfAcct state receiver — the scaffold-guards
+        // composite (`requires buyer.pubkey == state.authority`).
+        let cmp = ExprTree::Cmp {
+            op: TreeCmpOp::Eq,
+            lhs: Box::new(acct_pubkey("buyer")),
+            rhs: Box::new(state_field("authority", Ty::Pubkey)),
+        };
+        let cx = anchor.with_binder(Binder::SelfAcct("ctx.escrow"));
+        assert_eq!(
+            render_rust(&cmp, cx),
+            "ctx.buyer.key() == ctx.escrow.authority"
+        );
+        // Without the style, account reads keep the plain path form
+        // (harness positions).
+        assert_eq!(
+            render_rust(&acct_pubkey("buyer"), RustCx::native()),
+            "buyer.pubkey"
+        );
+    }
+
+    #[test]
+    fn account_reads_are_key_style_gates_field_projections() {
+        assert!(account_reads_are_key_style(&acct_pubkey("buyer")));
+        assert!(account_reads_are_key_style(&acct_bare("buyer")));
+        assert!(account_reads_are_key_style(&state_field("pool", Ty::U64)));
+        // Imported-account field read (`config.fee`) needs the legacy
+        // mirror rewrite — the gate must reject it.
+        let field_read = ExprTree::Path(TreePath {
+            root: "config".into(),
+            binding: BindingKind::Account,
+            segments: vec![TreeSeg::Field("fee".into())],
+            ty: None,
+        });
+        assert!(!account_reads_are_key_style(&field_read));
+        let nested = ExprTree::Cmp {
+            op: TreeCmpOp::Gt,
+            lhs: Box::new(field_read),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert!(!account_reads_are_key_style(&nested));
+    }
+
+    #[test]
+    fn abstract_binder_detection_is_structural() {
+        let binder_read = ExprTree::Path(TreePath {
+            root: "lp_out".into(),
+            binding: BindingKind::AbstractBinder,
+            segments: vec![],
+            ty: None,
+        });
+        let cmp = ExprTree::Cmp {
+            op: TreeCmpOp::Gt,
+            lhs: Box::new(binder_read),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert!(tree_references_abstract_binder(&cmp));
+        // A state field that merely shares the binder's name must NOT
+        // defer — the legacy substring scan couldn't tell these apart.
+        let same_name_field = ExprTree::Cmp {
+            op: TreeCmpOp::Gt,
+            lhs: Box::new(state_field("lp_out", Ty::U64)),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert!(!tree_references_abstract_binder(&same_name_field));
     }
 }

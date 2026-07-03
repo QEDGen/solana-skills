@@ -349,11 +349,13 @@ pub(crate) fn render_handler_scaffold(
         }
     } else {
         for (idx, effect) in handler.effects.iter().enumerate() {
-            // Per-site error-variant override, indexed parallel to
-            // `effects`; missing entry falls back inside mechanize_effect.
+            // Per-site error-variant override and typed RHS tree, indexed
+            // parallel to `effects`; missing entries fall back inside
+            // mechanize_effect.
             let on_error = handler.effect_on_error.get(idx).and_then(|o| o.as_deref());
+            let tree = handler.effects_tree.get(idx).and_then(|t| t.as_ref());
             let mechanized = state_acct
-                .and_then(|sa| mechanize_effect(effect, on_error, sa, handler, spec, target));
+                .and_then(|sa| mechanize_effect(effect, tree, on_error, sa, handler, spec, target));
             match mechanized {
                 Some(line) => out.push_str(&line),
                 None => {
