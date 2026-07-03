@@ -15,12 +15,12 @@ pub fn handler_needs_account_env(op: &ParsedHandler) -> bool {
         || op
             .effects
             .iter()
-            .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+            .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
         || op.effect_branches.as_ref().is_some_and(|branches| {
             branches.arms.iter().any(|arm| {
                 arm.effects
                     .iter()
-                    .any(|(_, _, value)| is_account_pubkey_ref(value.trim(), &op.accounts))
+                    .any(|e| is_account_pubkey_ref(e.value.trim(), &op.accounts))
             })
         })
 }
@@ -483,7 +483,8 @@ pub fn check_effect_targets(spec: &ParsedSpec) -> anyhow::Result<()> {
     }
 
     for handler in &spec.handlers {
-        for (field, _kind, _value) in &handler.effects {
+        for eff in &handler.effects {
+            let field = &eff.field;
             let base = effect_target_base(field);
             // Variant-prefixed: the root is a variant name, so check
             // the field beneath it against that variant's payload.

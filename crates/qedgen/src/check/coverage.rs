@@ -159,9 +159,9 @@ mod tests {
     #[test]
     fn test_coverage_matrix_detects_gaps() {
         let mut h_covered = make_handler("deposit");
-        h_covered.effects = vec![("balance".into(), "add".into(), "amount".into())];
+        h_covered.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
         let mut h_uncovered = make_handler("withdraw");
-        h_uncovered.effects = vec![("balance".into(), "sub".into(), "amount".into())];
+        h_uncovered.effects = vec![ParsedEffect::from_triple("balance", "sub", "amount")];
 
         let spec = ParsedSpec {
             handlers: vec![h_covered, h_uncovered],

@@ -75,12 +75,11 @@ pub(super) fn check_checked_arith_needs_math_overflow(
 
     for h in &spec.handlers {
         let mut handler_fires = false;
-        for (idx, (_, op_kind, _)) in h.effects.iter().enumerate() {
-            let on_error = h.effect_on_error.get(idx).and_then(|o| o.as_deref());
-            if on_error.is_some() {
+        for eff in &h.effects {
+            if eff.on_error.is_some() {
                 continue; // per-site override handled elsewhere
             }
-            match op_kind.as_str() {
+            match eff.op.as_str() {
                 "add" => {
                     if pragma_overflow.is_some() {
                         continue;
@@ -160,7 +159,8 @@ pub(super) fn check_checked_arith_needs_math_overflow(
 pub(super) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for op in &spec.handlers {
-        for (field, kind, _value) in &op.effects {
+        for eff in &op.effects {
+            let (field, kind) = (&eff.field, &eff.op);
             let (severity, priority, label, default_op) = match kind.as_str() {
                 "add_wrap" => (Severity::Warning, 1, "wrapping", "+="),
                 "sub_wrap" => (Severity::Warning, 1, "wrapping", "-="),
@@ -286,7 +286,8 @@ pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
 
     // Effect LHS validation: any `name[i]...` must refer to a Map-typed field.
     for op in &spec.handlers {
-        for (field, _, _) in &op.effects {
+        for eff in &op.effects {
+            let field = &eff.field;
             if let Some(bracket) = field.find('[') {
                 let root = &field[..bracket];
                 if !map_fields.contains_key(root) {
@@ -325,7 +326,7 @@ mod tests {
         let mut spec = empty_spec();
         let mut h = make_handler("tick");
         h.effects
-            .push(("epoch".to_string(), "add_wrap".to_string(), "1".to_string()));
+            .push(ParsedEffect::from_triple("epoch", "add_wrap", "1"));
         spec.handlers.push(h);
         let warnings = check_wrapping_arithmetic_opt_in(&spec);
         assert_eq!(warnings.len(), 1);
@@ -338,11 +339,8 @@ mod tests {
     fn wrapping_arithmetic_lint_fires_on_saturating() {
         let mut spec = empty_spec();
         let mut h = make_handler("apply");
-        h.effects.push((
-            "balance".to_string(),
-            "add_sat".to_string(),
-            "delta".to_string(),
-        ));
+        h.effects
+            .push(ParsedEffect::from_triple("balance", "add_sat", "delta"));
         spec.handlers.push(h);
         let warnings = check_wrapping_arithmetic_opt_in(&spec);
         assert_eq!(warnings.len(), 1);
@@ -355,12 +353,9 @@ mod tests {
         let mut spec = empty_spec();
         let mut h = make_handler("deposit");
         h.effects
-            .push(("total".to_string(), "add".to_string(), "amount".to_string()));
-        h.effects.push((
-            "fee_pool".to_string(),
-            "sub".to_string(),
-            "amount".to_string(),
-        ));
+            .push(ParsedEffect::from_triple("total", "add", "amount"));
+        h.effects
+            .push(ParsedEffect::from_triple("fee_pool", "sub", "amount"));
         spec.handlers.push(h);
         assert!(check_wrapping_arithmetic_opt_in(&spec).is_empty());
     }
@@ -370,9 +365,9 @@ mod tests {
         let mut spec = empty_spec();
         let mut h = make_handler("complex");
         h.effects
-            .push(("a".to_string(), "add_wrap".to_string(), "1".to_string()));
+            .push(ParsedEffect::from_triple("a", "add_wrap", "1"));
         h.effects
-            .push(("b".to_string(), "sub_sat".to_string(), "1".to_string()));
+            .push(ParsedEffect::from_triple("b", "sub_sat", "1"));
         spec.handlers.push(h);
         let warnings = check_wrapping_arithmetic_opt_in(&spec);
         assert_eq!(warnings.len(), 2);

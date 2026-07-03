@@ -83,7 +83,7 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
 
     // Per-site `or X` references.
     for h in &spec.handlers {
-        for on_error in h.effect_on_error.iter().flatten() {
+        for on_error in h.effects.iter().filter_map(|e| e.on_error.as_ref()) {
             if !has_decl(on_error) {
                 warnings.push(CompletenessWarning {
                     rule: "unknown_error_variant".to_string(),

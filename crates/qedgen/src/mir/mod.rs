@@ -1505,12 +1505,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     //    arms (parser back-compat view) and the real statements live on the
     //    step-7 `Stmt::Branch` — lowering both would double-emit.
     if h.effect_branches.is_none() {
-        stmts.extend(lower_effects(
-            &h.effects,
-            &h.effect_on_error,
-            &h.effects_rust,
-            &h.effects_tree,
-        ));
+        stmts.extend(lower_effects(&h.effects));
     }
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
@@ -1580,12 +1575,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         let mut default = None;
         for arm in &br.arms {
             let block = Block {
-                stmts: lower_effects(
-                    &arm.effects,
-                    &arm.effect_on_error,
-                    &arm.effects_rust,
-                    &arm.effects_tree,
-                ),
+                stmts: lower_effects(&arm.effects),
             };
             if arm.is_wildcard {
                 default = Some(block);
@@ -1617,43 +1607,40 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     Block { stmts }
 }
 
-/// Lower effect triples into typed `Stmt`s; `on_error[i]` supplies per-site
-/// error names for checked variants, `values_rust[i]` the Rust-form RHS
-/// (adapter-rendered; see `ParsedHandler::effects_rust`), `trees[i]` the
-/// typed RHS tree (#151). Shared by the flat-effects path and per-arm
-/// `Stmt::Branch` lowering.
-fn lower_effects(
-    effects: &[(String, String, String)],
-    on_error: &[Option<String>],
-    values_rust: &[String],
-    trees: &[Option<ExprTree>],
-) -> Vec<Stmt> {
+/// Lower `ParsedEffect`s into typed `Stmt`s. Each effect is self-contained
+/// (#151 Slice 4): `on_error` supplies the per-site error name for checked
+/// variants, `value_rust` the Rust-form RHS (adapter-rendered; see
+/// `ParsedEffect::value_rust`), `tree` the typed RHS tree (#151). Shared by
+/// the flat-effects path and per-arm `Stmt::Branch` lowering.
+fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
     let mut stmts = Vec::new();
-    for (i, (field, op_kind, value)) in effects.iter().enumerate() {
-        let err_override = on_error.get(i).and_then(|o| o.clone());
-        let path = parse_field_path(field);
-        let tree = trees.get(i).cloned().flatten();
-        // The triple's value doubles as the Lean form; the Rust form comes
-        // from the parallel adapter rendering when present (empty for
-        // ParsedHandlers built outside the chumsky adapter — IDL ingest,
-        // probes — where the single string is all we have).
-        let rhs = match values_rust.get(i).filter(|r| !r.is_empty()) {
-            Some(rust) => Expr {
+    for eff in effects {
+        let err_override = eff.on_error.clone();
+        let path = parse_field_path(&eff.field);
+        let tree = eff.tree.clone();
+        let value = &eff.value;
+        // `value` doubles as the Lean form; the Rust form comes from the
+        // adapter rendering when present (empty for ParsedHandlers built
+        // outside the chumsky adapter — IDL ingest, probes — where the
+        // single string is all we have).
+        let rhs = if eff.value_rust.is_empty() {
+            Expr {
+                tree,
+                ..Expr::from_raw(value.clone())
+            }
+        } else {
+            Expr {
                 lean: value.clone(),
-                rust: rust.clone(),
-                rust_pod: rust.clone(),
+                rust: eff.value_rust.clone(),
+                rust_pod: eff.value_rust.clone(),
                 rust_binary: String::new(),
                 rust_math: String::new(),
                 rust_binary_math: String::new(),
                 tree,
                 source_span: None,
-            },
-            None => Expr {
-                tree,
-                ..Expr::from_raw(value.clone())
-            },
+            }
         };
-        let stmt = match op_kind.as_str() {
+        let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },
             "add" => Stmt::CheckedAdd {
                 path,

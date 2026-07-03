@@ -1224,7 +1224,8 @@ fn emit_action_fn(
         out.push_str(
             "            //   let acc = self.ctx.read_anchor_account::<StateAcct>(&pda).unwrap();\n",
         );
-        for (field, _kind, _rhs) in &op.effects {
+        for eff in &op.effects {
+            let field = &eff.field;
             out.push_str(&format!("            //   self.{field} = acc.{field};\n"));
         }
         out.push_str("        }\n");
@@ -1777,9 +1778,6 @@ handler bump (delta : U64) : State.Active -> State.Active {
             aborts_total: false,
             permissionless: false,
             effects: vec![],
-            effects_rust: vec![],
-            effect_on_error: vec![],
-            effects_tree: vec![],
             accounts: vec![],
             transfers: vec![],
             emits: vec![],

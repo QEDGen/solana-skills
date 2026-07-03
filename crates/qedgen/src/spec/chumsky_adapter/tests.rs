@@ -81,7 +81,7 @@ handler initialize : State.Uninitialized -> State.Setup {
     // The single `state := .Setup { ... }` effect should have
     // expanded into two per-field effects with variant-prefixed
     // LHS, not a single bare-state effect.
-    let lhs_strs: Vec<&String> = handler.effects.iter().map(|(lhs, _, _)| lhs).collect();
+    let lhs_strs: Vec<&String> = handler.effects.iter().map(|e| &e.field).collect();
     assert!(
         lhs_strs.iter().any(|s| s.as_str() == "Setup.admin"),
         "expected Setup.admin in effect LHS list; got: {:?}",
@@ -894,11 +894,12 @@ handler refresh : State.Active -> State.Active {
     // Effect RHS for complex expressions is captured in Lean form
     // (consumed by lean_gen). `now()` lowers to the bare `now` symbol
     // which resolves at elaboration via QEDGen.Solana.Valid.now.
-    let (_field, _kind, rhs) = h
+    let rhs = &h
         .effects
         .iter()
-        .find(|(f, _, _)| f == "last_update")
-        .expect("last_update effect");
+        .find(|e| e.field == "last_update")
+        .expect("last_update effect")
+        .value;
     assert_eq!(
         rhs.trim(),
         "now",
@@ -1760,22 +1761,21 @@ property solvent :
         );
     }
 
-    /// Effect RHS trees ride parallel to the string triples, for both the
+    /// Effect RHS trees ride on each `ParsedEffect`, for both the
     /// simple shape (`amount` — historically skipped canonicalization) and
     /// the compound shape (`active + 1`).
     #[test]
     fn effect_rhs_trees_parallel_to_triples() {
         let spec = parse_str(TREE_SPEC).expect("parse");
         let h = &spec.handlers[0];
-        assert_eq!(h.effects.len(), h.effects_tree.len(), "parallel arrays");
 
-        let t0 = h.effects_tree[0].as_ref().expect("effect[0] tree");
+        let t0 = h.effects[0].tree.as_ref().expect("effect[0] tree");
         let ExprTree::Path(p) = t0 else {
             panic!("expected Path, got {t0:?}");
         };
         assert_eq!(p.binding, BindingKind::Param);
 
-        let t1 = h.effects_tree[1].as_ref().expect("effect[1] tree");
+        let t1 = h.effects[1].tree.as_ref().expect("effect[1] tree");
         let ExprTree::Arith { lhs, .. } = t1 else {
             panic!("expected Arith, got {t1:?}");
         };

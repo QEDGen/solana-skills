@@ -176,8 +176,8 @@ pub(crate) fn build_counterexample(
     let effect_triples: Vec<(&str, &str, &str)> = op
         .effects
         .iter()
-        .filter(|(f, _, _)| modified_fields.contains(&f.as_str()))
-        .map(|(f, k, v)| (f.as_str(), k.as_str(), v.as_str()))
+        .filter(|e| modified_fields.contains(&e.field.as_str()))
+        .map(|e| (e.field.as_str(), e.op.as_str(), e.value.as_str()))
         .collect();
 
     if effect_triples.is_empty() {
@@ -328,7 +328,8 @@ pub(crate) fn build_fix_suggestions(
     // property (`counter ≥ old(counter)`) has the same field on both sides,
     // where a `requires state.counter > state.counter` guard is nonsensical.
     if let Some((lhs, op_sym, rhs)) = relation.filter(|&(l, _, r)| l != r) {
-        for (field, kind, _value) in &op.effects {
+        for eff in &op.effects {
+            let (field, kind) = (&eff.field, &eff.op);
             if !modified_fields.contains(&field.as_str()) {
                 continue;
             }

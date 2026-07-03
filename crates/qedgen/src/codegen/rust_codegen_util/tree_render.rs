@@ -1199,8 +1199,8 @@ mod tests {
                         &e.rust_expr_binary_math,
                     );
                 }
-                for (i, t) in h.effects_tree.iter().enumerate() {
-                    let Some(t) = t else { continue };
+                for (i, eff) in h.effects.iter().enumerate() {
+                    let Some(t) = &eff.tree else { continue };
                     // Simple shapes (bare path / literal) keep the legacy
                     // state-stripped string for `resolve_value`; only
                     // compound shapes were adapter-rendered (issues
@@ -1208,11 +1208,8 @@ mod tests {
                     if matches!(t, ExprTree::Path(_) | ExprTree::Int(_)) {
                         continue;
                     }
-                    let Some(legacy) = h.effects_rust.get(i) else {
-                        continue;
-                    };
                     let at = format!("{fixture} {} effect[{i}]", h.name);
-                    check(&mut mismatches, &at, t, cx_checked, legacy);
+                    check(&mut mismatches, &at, t, cx_checked, &eff.value_rust);
                 }
             }
             for p in &spec.properties {

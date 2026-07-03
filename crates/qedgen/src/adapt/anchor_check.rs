@@ -156,7 +156,7 @@ pub fn check_effect_coverage(
         let leaves = collect_mutated_field_leaves(block);
 
         // Sort for deterministic output.
-        let mut field_names: Vec<&String> = handler.effects.iter().map(|(f, _, _)| f).collect();
+        let mut field_names: Vec<&String> = handler.effects.iter().map(|e| &e.field).collect();
         field_names.sort();
         field_names.dedup();
         for field in field_names {
