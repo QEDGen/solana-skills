@@ -91,7 +91,7 @@ fn threshold_bounded(s: &State) -> bool {
 
 /// votes_bounded: s.approval_count + s.rejection_count ≤ s.member_count
 fn votes_bounded(s: &State) -> bool {
-    s.approval_count + s.rejection_count <= s.member_count
+    ((s.approval_count) as u128) + ((s.rejection_count) as u128) <= ((s.member_count) as u128)
 }
 
 fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
@@ -159,7 +159,7 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !((s.member_count.saturating_sub(s.rejection_count) < s.threshold)) {
+    if !(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -454,7 +454,7 @@ proptest! {
     #[test]
     fn cancel_proposal_rejects_invalid(s in arb_boundary_state()) {
         let mut s = s;
-        prop_assume!(!((s.member_count.saturating_sub(s.rejection_count) < s.threshold)));
+        prop_assume!(!(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))));
         prop_assert!(!cancel_proposal(&mut s),
             "cancel_proposal must reject when guard is violated");
     }

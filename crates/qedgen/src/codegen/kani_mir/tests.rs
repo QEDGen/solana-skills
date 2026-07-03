@@ -444,3 +444,80 @@ fn bare_state_field_requires_reach_harness_with_receiver() {
         "bare state-field guard leaked into the harness:\n{out}"
     );
 }
+
+/// Issues #143–#146: compound effect RHS and predicate arithmetic reach
+/// the Kani harness as compilable, model-faithful Rust.
+///   #143 — ref_impl calls in effect RHS render Rust call syntax with the
+///          `s.` receiver, not ML application syntax.
+///   #144 — `if … then … else` RHS lowers to a Rust conditional.
+///   #145 — the `mul_div_floor_u128` helper is emitted when only a
+///          ref_impl body references it, and the ref_impl narrows back
+///          to its declared return width.
+///   #146 — bare `-` in effect RHS lowers checked (reject on underflow);
+///          bare `+` inside guard / property comparisons widens to u128
+///          so predicate evaluation can't overflow-panic.
+#[test]
+fn compound_effect_rhs_and_arith_predicates_render_soundly() {
+    let (mir, parsed) = lower_fixture(
+        "crates/qedgen/tests/fixtures/regressions/issues-143-146-kani-arith/vault.qedspec",
+    );
+    let out = render(&mir, &parsed);
+
+    // #143 — Rust call syntax, state-qualified args.
+    assert!(
+        out.contains("s.fee = bps_mul(amount, s.rate);"),
+        "ref_impl call in effect RHS must render as Rust:\n{out}"
+    );
+    assert!(
+        !out.contains("(bps_mul (amount)"),
+        "ML application syntax leaked into the harness:\n{out}"
+    );
+
+    // #144 — Rust conditional expression.
+    assert!(
+        out.contains("s.cut = (if s.flag == 1 { bps_mul(s.fee, s.rate) } else { 0 });"),
+        "conditional effect RHS must lower to a Rust if-else:\n{out}"
+    );
+    assert!(
+        !out.contains(" then "),
+        "ML `then` keyword leaked into the harness:\n{out}"
+    );
+
+    // #145 — helper emitted for a ref_impl-only use, body narrowed to the
+    // declared U64 return.
+    assert!(
+        out.contains("fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {"),
+        "mul_div_floor_u128 definition must be emitted:\n{out}"
+    );
+    assert!(
+        out.contains(
+            "(mul_div_floor_u128(((amount) as u128), ((bps) as u128), ((10000) as u128))) as u64"
+        ),
+        "ref_impl body must narrow the u128 helper to the declared width:\n{out}"
+    );
+
+    // #146 — checked effect subtraction rejects instead of panicking …
+    assert!(
+        out.contains(
+            "s.residual = match (|| -> Option<u64> { Some((s.fee).checked_sub(s.cut)?) })() \
+             { Some(__rhs) => __rhs, None => return false };"
+        ),
+        "bare `-` in effect RHS must lower to a checked rejection:\n{out}"
+    );
+    // … guard addition evaluates in u128 (matches the Lean Nat model) …
+    assert!(
+        out.contains("(((now) as u128) >= ((s.start) as u128) + ((s.period) as u128))"),
+        "guard arithmetic must widen to u128:\n{out}"
+    );
+    // … and the property predicate can't overflow while being evaluated.
+    assert!(
+        out.contains("(((s.cut) as u128) + ((s.residual) as u128)) == ((s.fee) as u128)"),
+        "property arithmetic must widen to u128:\n{out}"
+    );
+
+    // The whole harness must be syntactically valid Rust — the four
+    // issues above all shipped as emitted-code parse errors.
+    if let Err(e) = syn::parse_file(&out) {
+        panic!("emitted Kani harness fails to parse as Rust: {e}\n{out}");
+    }
+}

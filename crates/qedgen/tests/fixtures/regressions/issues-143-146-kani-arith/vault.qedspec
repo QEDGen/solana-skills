@@ -1,0 +1,49 @@
+// Regression fixture for xeroc's Kani-codegen quartet (#143–#146):
+//   #143 — ref_impl call in effect RHS must render Rust call syntax
+//          (`bps_mul(amount, s.rate)`), not ML application
+//          (`(bps_mul (amount) (rate))`).
+//   #144 — `if … then … else` in effect RHS must lower to a Rust
+//          conditional expression (`if c { a } else { b }`).
+//   #145 — `mul_div_floor` inside a ref_impl body must emit the
+//          `mul_div_floor_u128` helper definition alongside the call,
+//          and the ref_impl body must narrow back to its declared
+//          return width.
+//   #146 — bare `-` in effect RHS lowers checked (`checked_sub` →
+//          reject); bare `+` inside guard / property comparisons
+//          widens to u128 so evaluating the predicate can't
+//          overflow-panic on unconstrained symbolic state.
+spec GenericVault
+program_id "11111111111111111111111111111111"
+
+type State = {
+  active   : U8,
+  flag     : U8,
+  rate     : U16,
+  start    : U64,
+  period   : U64,
+  fee      : U64,
+  cut      : U64,
+  residual : U64,
+}
+
+type Error | Unauthorized
+
+const BPS_DENOMINATOR = 10000
+
+ref_impl bps_mul (amount : U64) (bps : U16) : U64 =
+  mul_div_floor(amount, bps, BPS_DENOMINATOR)
+
+handler execute (amount : U64) (now : U64) : State -> State {
+  permissionless
+  requires active == 0 else Unauthorized
+  requires now >= start + period else Unauthorized
+  effect {
+    fee := bps_mul(amount, rate)
+    cut := if flag == 1 then bps_mul(fee, rate) else 0
+    residual := fee - cut
+  }
+}
+
+property conservation :
+  (state.cut + state.residual) == state.fee
+  preserved_by all

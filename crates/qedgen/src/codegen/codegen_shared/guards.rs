@@ -26,12 +26,34 @@ pub(crate) fn guards_use_math_helpers(spec: &ParsedSpec) -> bool {
         if h.let_bindings.iter().any(|(_, _, r)| probe(r)) {
             any = true;
         }
+        // Effect RHS can call the helpers directly (`fee := mul_div_floor(…)`)
+        // — probe the Rust-form values the harness transition bodies emit.
+        if h.effects_rust.iter().any(|r| probe(r)) {
+            any = true;
+        }
+        if let Some(br) = &h.effect_branches {
+            if br
+                .arms
+                .iter()
+                .any(|arm| arm.effects_rust.iter().any(|r| probe(r)))
+            {
+                any = true;
+            }
+        }
     }
     for prop in &spec.properties {
         if let Some(ref r) = prop.rust_expression {
             if probe(r) {
                 any = true;
             }
+        }
+    }
+    // `ref_impl` bodies lower to standalone fns that call the helpers
+    // (`fn bps_mul(…) { mul_div_floor_u128(…) }`) — without this probe the
+    // helper definition is never emitted alongside them (issue #145).
+    for r in &spec.ref_impls {
+        if probe(&r.rust_body) {
+            any = true;
         }
     }
     any

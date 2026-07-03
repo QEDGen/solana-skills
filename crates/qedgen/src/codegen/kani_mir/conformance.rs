@@ -286,28 +286,42 @@ pub(crate) fn emit_one_conformance_harness(
         Some("pre_"),
         util::handler_needs_account_env(op).then_some("accounts"),
     );
+    // Checked-expression RHS carries `?` ops (see `RustOpts::checked_arith`):
+    // compare inside an `Option` context — the harness only reaches this
+    // assert when the transition returned true, so the RHS must be `Some`.
+    let has_try = resolved.contains('?');
+    let expected_eq = |expected: &str| -> String {
+        if has_try {
+            format!("Some(s.{field}) == (|| Some({expected}))()")
+        } else {
+            format!("s.{field} == {expected}")
+        }
+    };
     match op_kind {
         "set" => {
-            let assertion = util::rewrite_kani_pubkey_comparisons(
-                &format!("s.{field} == {resolved}"),
-                op,
-                parsed,
-            );
+            let assertion =
+                util::rewrite_kani_pubkey_comparisons(&expected_eq(&resolved), op, parsed);
             out.push_str(&format!(
                 "        assert!({}, \"{} must equal {}\");\n",
-                assertion, field, resolved
+                assertion,
+                field,
+                resolved.escape_default()
             ));
         }
         "add" => {
             out.push_str(&format!(
-                "        assert!(s.{} == pre_{}.wrapping_add({}), \"{} must increment by {}\");\n",
-                field, field, resolved, field, resolved
+                "        assert!({}, \"{} must increment by {}\");\n",
+                expected_eq(&format!("pre_{}.wrapping_add({})", field, resolved)),
+                field,
+                resolved.escape_default()
             ));
         }
         "sub" => {
             out.push_str(&format!(
-                "        assert!(s.{} == pre_{}.wrapping_sub({}), \"{} must decrement by {}\");\n",
-                field, field, resolved, field, resolved
+                "        assert!({}, \"{} must decrement by {}\");\n",
+                expected_eq(&format!("pre_{}.wrapping_sub({})", field, resolved)),
+                field,
+                resolved.escape_default()
             ));
         }
         _ => {}

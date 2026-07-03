@@ -7,6 +7,19 @@ use super::*;
 // Effect rendering: (field_name, op, value_string)
 // ============================================================================
 
+/// One rendered effect: the legacy `(field, op, value)` triple every
+/// backend consumes, the per-site error override, and the Rust-form RHS
+/// (`value_rust`) the Kani/proptest harness lane reads via MIR
+/// `Expr.rust`. For simple RHS shapes (literal / bare path) `value_rust`
+/// equals the triple's value so binder-specific resolution downstream
+/// (`resolve_value`) keeps working; compound shapes render through the
+/// canonicalized typed AST (issues #143/#144/#146).
+pub(super) struct RenderedEffect {
+    pub triple: (String, String, String),
+    pub on_error: Option<String>,
+    pub value_rust: String,
+}
+
 /// Render an `EffectStmt` to the `(field, op, value)` triple consumed by
 /// every backend, plus the per-site error-variant override codegen reads
 /// when lowering checked `+=` / `-=`. Override is always `None` for
@@ -16,7 +29,9 @@ fn render_effect(
     stmt: &a::EffectStmt,
     params: &[(String, String)],
     consts: ConstTable,
-) -> ((String, String, String), Option<String>) {
+    canon: &CanonScope,
+    env: &TypeEnv,
+) -> RenderedEffect {
     // Field name: preserve subscript syntax as-is (e.g., `accounts[i].capital`).
     // Both Lean and Rust consumers read this string; Rust-side `as usize`
     // index casting is applied at the codegen.rs::mechanize_effect site
@@ -54,13 +69,46 @@ fn render_effect(
         a::EffectOp::SubWrap => "sub_wrap",
         a::EffectOp::Set => "set",
     };
-    // Value string — match pest's effect_value_to_string which strips
-    // `state.` prefix for qualified refs and leaves bare idents / integers.
-    let value = match &stmt.rhs.node {
-        Expr::Int(v) => v.to_string(),
+    // Value strings. Simple shapes (literal / bare path) keep the legacy
+    // single-form rendering: the triple's value is stripped of `state.`
+    // (matching pest output) and `value_rust` mirrors it, so downstream
+    // binder-specific resolution (`resolve_value`) is unchanged. Compound
+    // shapes (calls / conditionals / arithmetic / match / records) are
+    // canonicalized (`active` → `state.active`, issue #139 seam) and
+    // rendered per-backend with the real type env: Lean via
+    // `expr_to_lean` (state reads become `s.X`), Rust via `expr_to_rust`
+    // in checked mode (issues #143/#144/#146 — previously the Lean form
+    // leaked into the Kani/proptest harnesses verbatim).
+    let (value, value_rust) = render_effect_rhs_forms(&stmt.rhs, params, consts, canon, env);
+    // Keep the per-site override only for ops that can fail (checked
+    // Add / Sub); saturating / wrapping / Set can't trigger an error
+    // variant, so drop any parser-captured override here.
+    let on_error = match stmt.op {
+        a::EffectOp::Add | a::EffectOp::Sub => stmt.on_error.clone(),
+        _ => None,
+    };
+    RenderedEffect {
+        triple: (field, op.to_string(), value),
+        on_error,
+        value_rust,
+    }
+}
+
+/// Render an effect RHS to its `(lean_or_simple, rust)` string pair — see
+/// the comment at the `render_effect` call site for the split. Factored
+/// out for the variant-promotion desugaring.
+fn render_effect_rhs_forms(
+    rhs: &Node<Expr>,
+    params: &[(String, String)],
+    consts: ConstTable,
+    canon: &CanonScope,
+    env: &TypeEnv,
+) -> (String, String) {
+    match &rhs.node {
+        Expr::Int(v) => (v.to_string(), v.to_string()),
         Expr::Path(p) => {
             let is_param = p.segments.is_empty() && params.iter().any(|(n, _)| n == &p.root);
-            if is_param {
+            let s = if is_param {
                 p.root.clone()
             } else if p.root == "state" {
                 // state.X → X (strip prefix, matches pest output)
@@ -98,89 +146,21 @@ fn render_effect(
                     }
                 }
                 s
-            }
+            };
+            (s.clone(), s)
         }
-        // Complex RHS (match / ctor / record update / arithmetic):
-        // render in Lean form. The effect value is consumed by lean_gen,
-        // so Lean-form rendering is what matters. Build a minimal type env
-        // for coercion — params only; spec-wide types would require the
-        // full env but aren't usually relevant on effect RHS.
-        other => {
-            let env = TypeEnv::default().with_params(&[]);
-            let params_slice: Vec<(String, a::TypeRef)> = params
-                .iter()
-                .map(|(n, t)| (n.clone(), string_to_typeref_best_effort(t)))
-                .collect();
-            let _ = params_slice; // future: plumb real params here for coercion
-            expr_to_lean(other, Ctx::Guard, consts, &env)
-        }
-    };
-    // Keep the per-site override only for ops that can fail (checked
-    // Add / Sub); saturating / wrapping / Set can't trigger an error
-    // variant, so drop any parser-captured override here.
-    let on_error = match stmt.op {
-        a::EffectOp::Add | a::EffectOp::Sub => stmt.on_error.clone(),
-        _ => None,
-    };
-    ((field, op.to_string(), value), on_error)
-}
-
-/// Best-effort reconstruction of a `TypeRef` from its rendered string form,
-/// used only inside `render_effect` where we don't have the original AST.
-fn string_to_typeref_best_effort(s: &str) -> a::TypeRef {
-    a::TypeRef::Named(s.trim().to_string())
-}
-
-/// Render an effect RHS to the same string form `render_effect` uses —
-/// factored out for the variant-promotion desugaring. Mirrors
-/// `render_effect`'s value branch exactly.
-fn render_effect_rhs_value(rhs: &Expr, params: &[(String, String)], consts: ConstTable) -> String {
-    match rhs {
-        Expr::Int(v) => v.to_string(),
-        Expr::Path(p) => {
-            let is_param = p.segments.is_empty() && params.iter().any(|(n, _)| n == &p.root);
-            if is_param {
-                p.root.clone()
-            } else if p.root == "state" {
-                let mut s = String::new();
-                for seg in &p.segments {
-                    match seg {
-                        a::PathSeg::Field(f) => {
-                            if !s.is_empty() {
-                                s.push('.');
-                            }
-                            s.push_str(f);
-                        }
-                        a::PathSeg::Index(i) => {
-                            s.push('[');
-                            s.push_str(i);
-                            s.push(']');
-                        }
-                    }
-                }
-                s
-            } else {
-                let mut s = p.root.clone();
-                for seg in &p.segments {
-                    match seg {
-                        a::PathSeg::Field(f) => {
-                            s.push('.');
-                            s.push_str(f);
-                        }
-                        a::PathSeg::Index(i) => {
-                            s.push('[');
-                            s.push_str(i);
-                            s.push(']');
-                        }
-                    }
-                }
-                s
-            }
-        }
-        other => {
-            let env = TypeEnv::default().with_params(&[]);
-            let _ = params;
-            expr_to_lean(other, Ctx::Guard, consts, &env)
+        // Compound RHS: canonicalize bare state refs once, then render
+        // both backend forms from the same AST.
+        _ => {
+            let canon_rhs = canonicalize_state_refs(rhs, canon);
+            let lean = expr_to_lean(&canon_rhs.node, Ctx::Guard, consts, env);
+            let rust = expr_to_rust(
+                &canon_rhs.node,
+                Ctx::Guard,
+                consts,
+                opts_native(env).with_checked_arith(),
+            );
+            (lean, rust)
         }
     }
 }
@@ -196,7 +176,9 @@ pub(super) fn render_effect_or_expand_variant_promotion(
     stmt: &a::EffectStmt,
     params: &[(String, String)],
     consts: ConstTable,
-) -> Vec<((String, String, String), Option<String>)> {
+    canon: &CanonScope,
+    env: &TypeEnv,
+) -> Vec<RenderedEffect> {
     if matches!(stmt.op, a::EffectOp::Set)
         && stmt.lhs.root == "state"
         && stmt.lhs.segments.is_empty()
@@ -215,9 +197,13 @@ pub(super) fn render_effect_or_expand_variant_promotion(
                             .iter()
                             .map(|(fname, fvalue)| {
                                 let lhs_str = format!("{}.{}", variant, fname);
-                                let value_str =
-                                    render_effect_rhs_value(&fvalue.node, params, consts);
-                                ((lhs_str, "set".to_string(), value_str), None)
+                                let (value_str, value_rust) =
+                                    render_effect_rhs_forms(fvalue, params, consts, canon, env);
+                                RenderedEffect {
+                                    triple: (lhs_str, "set".to_string(), value_str),
+                                    on_error: None,
+                                    value_rust,
+                                }
                             })
                             .collect();
                     }
@@ -230,7 +216,7 @@ pub(super) fn render_effect_or_expand_variant_promotion(
             }
         }
     }
-    vec![render_effect(stmt, params, consts)]
+    vec![render_effect(stmt, params, consts, canon, env)]
 }
 
 // ============================================================================

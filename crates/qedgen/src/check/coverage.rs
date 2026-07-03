@@ -171,6 +171,7 @@ mod tests {
                 expression: Some("state.balance >= 0".to_string()),
                 rust_expression: Some("s.balance >= 0".to_string()),
                 rust_expression_pod: Some("s.balance >= 0".to_string()),
+                rust_expression_math: None,
                 preserved_by: vec!["deposit".to_string()], // only covers deposit
                 per_slot: None,
                 quantifier_lint: None,

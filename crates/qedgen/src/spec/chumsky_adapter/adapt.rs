@@ -338,6 +338,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let pod_opts = opts_pod(&env).with_state_mode(property_state_mode);
                 let rust = expr_to_rust(&p.body.node, Ctx::Guard, consts, native_opts);
                 let rust_pod = expr_to_rust(&p.body.node, Ctx::Guard, consts, pod_opts);
+                let rust_math = expr_to_rust(
+                    &p.body.node,
+                    Ctx::Guard,
+                    consts,
+                    native_opts.with_widen_arith(),
+                );
                 let preserved = match &p.preserved_by {
                     // `preserved_by all` — kept as the sentinel "all".
                     // Expanded to the full handler-name list below after all
@@ -433,6 +439,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     expression: Some(lean),
                     rust_expression: Some(rust),
                     rust_expression_pod: Some(rust_pod),
+                    rust_expression_math: Some(rust_math),
                     preserved_by: preserved,
                     per_slot,
                     quantifier_lint,
@@ -615,6 +622,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             consts,
                             opts_pod(&env),
                         ),
+                        rust_expr_math: expr_to_rust(
+                            &guard.node,
+                            Ctx::Guard,
+                            consts,
+                            opts_native(&env).with_widen_arith(),
+                        ),
                         error_name: on_fail.clone(),
                         ast_body: Some(guard.clone()),
                     })
@@ -636,6 +649,25 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .collect();
                 let lean_body = expr_to_lean(&r.body.node, Ctx::Guard, consts, &env);
                 let rust_body = expr_to_rust(&r.body.node, Ctx::Guard, consts, opts_native(&env));
+                // Narrow a `mul_div_*`-rooted body back to the declared
+                // return width: the helpers are u128-typed for intermediate
+                // precision, but the emitted `fn` signature carries the
+                // spec's return type — without the cast the generated fn
+                // doesn't compile (issue #145). Same precedent as the
+                // `let X = mul_div_*(…)` narrowing in `adapt_handler`.
+                let rust_body = if is_mul_div_let_rhs(&r.body.node) {
+                    match type_ref_to_string(&r.return_type).as_str() {
+                        "U128" => rust_body,
+                        "U8" => format!("({}) as u8", rust_body),
+                        "U16" => format!("({}) as u16", rust_body),
+                        "U32" => format!("({}) as u32", rust_body),
+                        "I64" => format!("({}) as i64", rust_body),
+                        "I128" => format!("({}) as i128", rust_body),
+                        _ => format!("({}) as u64", rust_body),
+                    }
+                } else {
+                    rust_body
+                };
                 out.ref_impls.push(crate::check::ParsedRefImpl {
                     name: r.name.clone(),
                     doc: r.doc.clone(),
@@ -958,7 +990,8 @@ fn desugar_dotted_auth(spec: &mut ParsedSpec) {
         let synthesized = crate::check::ParsedRequires {
             lean_expr,
             rust_expr: rust_expr.clone(),
-            rust_expr_pod: rust_expr,
+            rust_expr_pod: rust_expr.clone(),
+            rust_expr_math: rust_expr,
             error_name: Some("Unauthorized".to_string()),
             ast_body: None,
         };
@@ -1002,9 +1035,9 @@ fn expand_handler(
     let canon = canon_scope_for_handler(h, consts, env);
 
     // Accumulate negated guards so that earlier arms' failure implies
-    // later arms' precondition (first-match semantics). Triple is
-    // (lean, rust_native, rust_pod).
-    let mut prior_conds: Vec<(String, String, String)> = Vec::new();
+    // later arms' precondition (first-match semantics). Tuple is
+    // (lean, rust_native, rust_pod, rust_math).
+    let mut prior_conds: Vec<(String, String, String, String)> = Vec::new();
     let mut out = Vec::with_capacity(branch.arms.len());
 
     for arm in &branch.arms {
@@ -1012,11 +1045,12 @@ fn expand_handler(
         synth.name = format!("{}_{}", h.name, arm.label);
 
         // Add all prior-arm negations to this arm's requires.
-        for (lean_neg, rust_neg, rust_pod_neg) in &prior_conds {
+        for (lean_neg, rust_neg, rust_pod_neg, rust_math_neg) in &prior_conds {
             synth.requires.push(ParsedRequires {
                 lean_expr: lean_neg.clone(),
                 rust_expr: rust_neg.clone(),
                 rust_expr_pod: rust_pod_neg.clone(),
+                rust_expr_math: rust_math_neg.clone(),
                 error_name: None,
                 // Synthetic (prior arms' negations, no single source AST
                 // node); the `old_in_single_state_context` lint skips these.
@@ -1031,10 +1065,17 @@ fn expand_handler(
             let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, env);
             let rust = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env));
             let rust_pod = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env));
+            let rust_math = expr_to_rust(
+                &guard.node,
+                Ctx::Guard,
+                consts,
+                opts_native(env).with_widen_arith(),
+            );
             synth.requires.push(ParsedRequires {
                 lean_expr: lean.clone(),
                 rust_expr: rust.clone(),
                 rust_expr_pod: rust_pod.clone(),
+                rust_expr_math: rust_math.clone(),
                 error_name: None,
                 ast_body: Some(guard),
             });
@@ -1042,6 +1083,7 @@ fn expand_handler(
                 format!("\u{00AC}({})", lean),
                 format!("!({})", rust),
                 format!("!({})", rust_pod),
+                format!("!({})", rust_math),
             ));
         }
 
@@ -1056,6 +1098,7 @@ fn expand_handler(
                     lean_expr: "0 = 1".to_string(),
                     rust_expr: "false".to_string(),
                     rust_expr_pod: "false".to_string(),
+                    rust_expr_math: "false".to_string(),
                     error_name: Some(err.clone()),
                     // Synthetic: arm-abort lowers to literal `false` with no
                     // source AST; lint skips.
@@ -1064,11 +1107,16 @@ fn expand_handler(
             }
             a::MatchBody::Effect(stmts) => {
                 for Node { node: stmt, .. } in stmts {
-                    for (triple, on_error) in
-                        render_effect_or_expand_variant_promotion(stmt, &base.takes_params, consts)
-                    {
-                        synth.effects.push(triple);
-                        synth.effect_on_error.push(on_error);
+                    for eff in render_effect_or_expand_variant_promotion(
+                        stmt,
+                        &base.takes_params,
+                        consts,
+                        &canon,
+                        env,
+                    ) {
+                        synth.effects.push(eff.triple);
+                        synth.effects_rust.push(eff.value_rust);
+                        synth.effect_on_error.push(eff.on_error);
                     }
                 }
             }
@@ -1113,11 +1161,16 @@ fn expand_handler(
                     state_binders: lower_state_binders(&call.state_binders),
                 });
                 for Node { node: stmt, .. } in effects {
-                    for (triple, on_error) in
-                        render_effect_or_expand_variant_promotion(stmt, &base.takes_params, consts)
-                    {
-                        synth.effects.push(triple);
-                        synth.effect_on_error.push(on_error);
+                    for eff in render_effect_or_expand_variant_promotion(
+                        stmt,
+                        &base.takes_params,
+                        consts,
+                        &canon,
+                        env,
+                    ) {
+                        synth.effects.push(eff.triple);
+                        synth.effects_rust.push(eff.value_rust);
+                        synth.effect_on_error.push(eff.on_error);
                     }
                 }
             }
@@ -1218,6 +1271,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         aborts_total: false,
         permissionless: false,
         effects: Vec::new(),
+        effects_rust: Vec::new(),
         effect_on_error: Vec::new(),
         accounts: Vec::new(),
         transfers: Vec::new(),
@@ -1283,6 +1337,12 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                     lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
                     rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
+                    rust_expr_math: expr_to_rust(
+                        &guard.node,
+                        Ctx::Guard,
+                        consts,
+                        opts_native(env).with_widen_arith(),
+                    ),
                     error_name: on_fail.clone(),
                     ast_body: Some(guard),
                 });
@@ -1300,6 +1360,14 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                         Ctx::Ensures,
                         consts,
                         opts_native(env).with_state_mode(StateMode::Binary),
+                    ),
+                    rust_expr_binary_math: expr_to_rust(
+                        &e.node,
+                        Ctx::Ensures,
+                        consts,
+                        opts_native(env)
+                            .with_state_mode(StateMode::Binary)
+                            .with_widen_arith(),
                     ),
                 });
             }
@@ -1345,34 +1413,36 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                 for Node { node: block, .. } in blocks {
                     match block {
                         a::EffectBlock::Stmt(stmt) => {
-                            for (triple, on_error) in
-                                render_effect_or_expand_variant_promotion(stmt, &params, consts)
-                            {
-                                handler.effects.push(triple);
-                                handler.effect_on_error.push(on_error);
+                            for eff in render_effect_or_expand_variant_promotion(
+                                stmt, &params, consts, &canon, env,
+                            ) {
+                                handler.effects.push(eff.triple);
+                                handler.effects_rust.push(eff.value_rust);
+                                handler.effect_on_error.push(eff.on_error);
                             }
                         }
                         a::EffectBlock::Match { scrutinee, arms } => {
                             let mut parsed_arms: Vec<crate::check::ParsedEffectArm> = Vec::new();
                             for arm in arms {
                                 let mut arm_effects = Vec::new();
+                                let mut arm_effects_rust: Vec<String> = Vec::new();
                                 let mut arm_on_error: Vec<Option<String>> = Vec::new();
                                 for nested in &arm.body {
                                     let mut leaves = Vec::new();
                                     nested.node.collect_leaves(&mut leaves);
                                     for stmt in leaves {
-                                        for (triple, on_error) in
-                                            render_effect_or_expand_variant_promotion(
-                                                stmt, &params, consts,
-                                            )
-                                        {
+                                        for eff in render_effect_or_expand_variant_promotion(
+                                            stmt, &params, consts, &canon, env,
+                                        ) {
                                             // Mirror into union so flat
                                             // readers see this potential
                                             // write.
-                                            handler.effects.push(triple.clone());
-                                            handler.effect_on_error.push(on_error.clone());
-                                            arm_effects.push(triple);
-                                            arm_on_error.push(on_error);
+                                            handler.effects.push(eff.triple.clone());
+                                            handler.effects_rust.push(eff.value_rust.clone());
+                                            handler.effect_on_error.push(eff.on_error.clone());
+                                            arm_effects.push(eff.triple);
+                                            arm_effects_rust.push(eff.value_rust);
+                                            arm_on_error.push(eff.on_error);
                                         }
                                     }
                                 }
@@ -1389,6 +1459,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
                                     pattern_lean,
                                     is_wildcard,
                                     effects: arm_effects,
+                                    effects_rust: arm_effects_rust,
                                     effect_on_error: arm_on_error,
                                 });
                             }
@@ -1638,6 +1709,12 @@ fn adapt_interface_handler<'a>(
                     lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
                     rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
                     rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
+                    rust_expr_math: expr_to_rust(
+                        &guard.node,
+                        Ctx::Guard,
+                        consts,
+                        opts_native(env).with_widen_arith(),
+                    ),
                     error_name: on_fail.clone(),
                     ast_body: Some(guard.clone()),
                 });
@@ -1652,6 +1729,14 @@ fn adapt_interface_handler<'a>(
                         Ctx::Ensures,
                         consts,
                         opts_native(env).with_state_mode(StateMode::Binary),
+                    ),
+                    rust_expr_binary_math: expr_to_rust(
+                        &e.node,
+                        Ctx::Ensures,
+                        consts,
+                        opts_native(env)
+                            .with_state_mode(StateMode::Binary)
+                            .with_widen_arith(),
                     ),
                 });
             }

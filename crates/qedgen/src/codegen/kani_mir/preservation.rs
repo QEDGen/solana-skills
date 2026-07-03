@@ -398,8 +398,15 @@ pub(crate) fn emit_ensures_preservation_harnesses(
                 }
             }
 
-            let ensures_expr =
-                util::rewrite_kani_pubkey_comparisons(&ensures.rust_expr_binary, op, parsed);
+            // Math-exact form preferred: the assert evaluates on symbolic
+            // post-state, so internal arithmetic must not overflow-panic
+            // (issue #146).
+            let ensures_src = if ensures.rust_expr_binary_math.is_empty() {
+                &ensures.rust_expr_binary
+            } else {
+                &ensures.rust_expr_binary_math
+            };
+            let ensures_expr = util::rewrite_kani_pubkey_comparisons(ensures_src, op, parsed);
             out.push_str(&format!("        assert!({},\n", ensures_expr));
             out.push_str(&format!(
                 "            \"ensures clause {} on {} violated by spec-translated transition\");\n",

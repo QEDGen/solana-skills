@@ -56,7 +56,10 @@ pub fn collect_full_guard_with_account_env(
         {
             continue;
         }
-        let translated = translate_guard_to_rust(&req.rust_expr, wrapping);
+        // Harness predicates evaluate on unconstrained symbolic state —
+        // prefer the math-exact form (arithmetic widened to u128/i128) so
+        // the guard itself can't overflow-panic (issue #146).
+        let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
         let translated = account_binder
             .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
             .unwrap_or(translated);
@@ -66,6 +69,16 @@ pub fn collect_full_guard_with_account_env(
         None
     } else {
         Some(parts.join(" && "))
+    }
+}
+
+/// The math-exact predicate form when rendered, else the plain Rust form
+/// (ParsedRequires built outside the chumsky adapter leave it empty).
+fn requires_math_or_rust(req: &crate::check::ParsedRequires) -> &str {
+    if req.rust_expr_math.is_empty() {
+        &req.rust_expr
+    } else {
+        &req.rust_expr_math
     }
 }
 
@@ -87,7 +100,7 @@ pub fn collect_guard_terms_with_account_env(
         {
             continue;
         }
-        let translated = translate_guard_to_rust(&req.rust_expr, wrapping);
+        let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
         let translated = account_binder
             .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
             .unwrap_or(translated);

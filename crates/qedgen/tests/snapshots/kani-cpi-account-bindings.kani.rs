@@ -625,7 +625,7 @@ fn verify_bound_transfer_ensures_0() {
         // CPI ensures-as-fact (Token.transfer):
         kani::assume(post.pool_balance == pre.pool_balance - amount);
         kani::assume(post.user_balance == pre.user_balance + amount);
-        assert!(post.pool_balance.checked_add(amount) == Some(pre.pool_balance),
+        assert!(((post.pool_balance) as u128) + ((amount) as u128) == ((pre.pool_balance) as u128),
             "ensures clause 0 on bound_transfer violated by spec-translated transition");
     }
 }

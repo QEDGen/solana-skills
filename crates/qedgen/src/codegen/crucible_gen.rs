@@ -1777,6 +1777,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
             aborts_total: false,
             permissionless: false,
             effects: vec![],
+            effects_rust: vec![],
             effect_on_error: vec![],
             accounts: vec![],
             transfers: vec![],

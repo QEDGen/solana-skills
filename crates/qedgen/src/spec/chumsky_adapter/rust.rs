@@ -14,6 +14,18 @@ pub(super) struct RustOpts<'a, 'env> {
     env: &'a TypeEnv<'env>,
     state_mode: StateMode,
     inside_old: bool,
+    /// Math-exact predicate rendering (issue #146): arithmetic inside the
+    /// expression widens to u128/i128 (`-` on Nat kinds saturates), so a
+    /// guard / property / ensures predicate can't overflow-panic when
+    /// evaluated on unconstrained symbolic state. Matches the Lean `Nat`
+    /// model. Off for scaffold-facing renders.
+    widen_arith: bool,
+    /// Checked value rendering for effect RHS (issue #146): `a - b` →
+    /// `(a).checked_sub(b)?` etc. The emitted string uses `?`, so the
+    /// consumer must evaluate it inside an `Option` context (the Kani /
+    /// proptest transition emitters wrap it in an `(|| Some(…))()`
+    /// closure and `return false` on `None`). Off everywhere else.
+    checked_arith: bool,
 }
 
 impl<'a, 'env> RustOpts<'a, 'env> {
@@ -32,6 +44,22 @@ impl<'a, 'env> RustOpts<'a, 'env> {
     pub(super) fn with_state_mode(self, state_mode: StateMode) -> Self {
         RustOpts { state_mode, ..self }
     }
+
+    /// Copy with math-exact predicate widening on (see `widen_arith`).
+    pub(super) fn with_widen_arith(self) -> Self {
+        RustOpts {
+            widen_arith: true,
+            ..self
+        }
+    }
+
+    /// Copy with checked effect-RHS arithmetic on (see `checked_arith`).
+    pub(super) fn with_checked_arith(self) -> Self {
+        RustOpts {
+            checked_arith: true,
+            ..self
+        }
+    }
 }
 
 /// `RustOpts` matching the legacy non-Pod-aware behavior. Used for the
@@ -43,6 +71,8 @@ pub(super) fn opts_native<'a, 'env>(env: &'a TypeEnv<'env>) -> RustOpts<'a, 'env
         env,
         state_mode: StateMode::Unary,
         inside_old: false,
+        widen_arith: false,
+        checked_arith: false,
     }
 }
 
@@ -54,6 +84,8 @@ pub(super) fn opts_pod<'a, 'env>(env: &'a TypeEnv<'env>) -> RustOpts<'a, 'env> {
         env,
         state_mode: StateMode::Unary,
         inside_old: false,
+        widen_arith: false,
+        checked_arith: false,
     }
 }
 
@@ -155,10 +187,46 @@ pub(super) fn expr_to_rust(
                 a::CmpOp::Lt => "<",
                 a::CmpOp::Gt => ">",
             };
+            // Math-exact predicate mode: a comparison whose spine carries
+            // bare arithmetic evaluates both sides widened (u128/i128), so
+            // the predicate itself can't overflow-panic on unconstrained
+            // symbolic state — the Lean `Nat` model computes these exactly
+            // (issue #146). Non-numeric comparisons (Pubkey, Bool) and
+            // arithmetic-free ones keep the native rendering byte-for-byte.
+            if opts.widen_arith && (spine_has_arith(&lhs.node) || spine_has_arith(&rhs.node)) {
+                let lk = rust_infer_kind(opts.env, &lhs.node);
+                let rk = rust_infer_kind(opts.env, &rhs.node);
+                if matches!(lk, Kind::Nat | Kind::Int) && matches!(rk, Kind::Nat | Kind::Int) {
+                    let wide = if matches!(lk, Kind::Int) || matches!(rk, Kind::Int) {
+                        "i128"
+                    } else {
+                        "u128"
+                    };
+                    let l = render_widened_term(&lhs.node, ctx, consts, opts, wide);
+                    let r = render_widened_term(&rhs.node, ctx, consts, opts, wide);
+                    return format!("{} {} {}", l, sym, r);
+                }
+            }
             let (l_str, r_str) = render_rust_binary_with_coercion(lhs, rhs, ctx, consts, opts);
             format!("{} {} {}", l_str, sym, r_str)
         }
         Expr::Arith { op, lhs, rhs } => {
+            let (l_str, r_str) = render_rust_binary_with_coercion(lhs, rhs, ctx, consts, opts);
+            // Checked effect-RHS mode (issue #146): bare arithmetic lowers
+            // to `checked_*`+`?`, matching the DSL's checked-by-default
+            // `+=`/`-=` doctrine — over/underflow makes the transition
+            // return false instead of panicking. The consumer wraps the
+            // whole RHS in an `Option` closure (see `RustOpts::checked_arith`).
+            if opts.checked_arith {
+                let method = match op {
+                    a::ArithOp::Add => "checked_add",
+                    a::ArithOp::Sub => "checked_sub",
+                    a::ArithOp::Mul => "checked_mul",
+                    a::ArithOp::Div => "checked_div",
+                    a::ArithOp::Mod => "checked_rem",
+                };
+                return format!("({}).{}({})?", l_str, method, r_str);
+            }
             let sym = match op {
                 a::ArithOp::Add => " + ",
                 a::ArithOp::Sub => " - ",
@@ -166,7 +234,6 @@ pub(super) fn expr_to_rust(
                 a::ArithOp::Div => " / ",
                 a::ArithOp::Mod => " % ",
             };
-            let (l_str, r_str) = render_rust_binary_with_coercion(lhs, rhs, ctx, consts, opts);
             format!("{}{}{}", l_str, sym, r_str)
         }
         Expr::Paren(inner) => format!("({})", expr_to_rust(&inner.node, ctx, consts, opts)),
@@ -180,18 +247,36 @@ pub(super) fn expr_to_rust(
         // to U64 explicitly when the spec writes `let X = mul_div_*(…)`,
         // because the binding's spec-declared type is U64 and downstream
         // U64 uses (e.g. `total - X`) need to typecheck.
-        Expr::MulDivFloor { a, b, d } => format!(
-            "mul_div_floor_u128({}, {}, {})",
-            render_helper_arg(&a.node, ctx, consts, opts),
-            render_helper_arg(&b.node, ctx, consts, opts),
-            render_helper_arg(&d.node, ctx, consts, opts)
-        ),
-        Expr::MulDivCeil { a, b, d } => format!(
-            "mul_div_ceil_u128({}, {}, {})",
-            render_helper_arg(&a.node, ctx, consts, opts),
-            render_helper_arg(&b.node, ctx, consts, opts),
-            render_helper_arg(&d.node, ctx, consts, opts)
-        ),
+        Expr::MulDivFloor { a, b, d } => {
+            let call = format!(
+                "mul_div_floor_u128({}, {}, {})",
+                render_helper_arg(&a.node, ctx, consts, opts),
+                render_helper_arg(&b.node, ctx, consts, opts),
+                render_helper_arg(&d.node, ctx, consts, opts)
+            );
+            // Checked effect-RHS mode: the helper is u128-typed but the
+            // assignment target is the field's native width — narrow with
+            // a fallible conversion so an out-of-range result rejects the
+            // transition instead of truncating.
+            if opts.checked_arith {
+                format!("({}).try_into().ok()?", call)
+            } else {
+                call
+            }
+        }
+        Expr::MulDivCeil { a, b, d } => {
+            let call = format!(
+                "mul_div_ceil_u128({}, {}, {})",
+                render_helper_arg(&a.node, ctx, consts, opts),
+                render_helper_arg(&b.node, ctx, consts, opts),
+                render_helper_arg(&d.node, ctx, consts, opts)
+            );
+            if opts.checked_arith {
+                format!("({}).try_into().ok()?", call)
+            } else {
+                call
+            }
+        }
         Expr::Match { scrutinee, arms } => {
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             let mut out = format!("match {} {{", sc);
@@ -329,6 +414,101 @@ pub(super) fn is_mul_div_let_rhs(e: &Expr) -> bool {
         Expr::Paren(inner) => is_mul_div_let_rhs(&inner.node),
         Expr::Old(inner) => is_mul_div_let_rhs(&inner.node),
         _ => false,
+    }
+}
+
+/// True iff the expression is bare arithmetic at its spine — an `Arith`
+/// node, possibly under `Paren`/`Old` wrappers or nested in another
+/// `Arith`. `mul_div_*` doesn't count (the u128 helpers guard zero and
+/// saturate internally — they can't panic), and arithmetic buried inside
+/// call args / quantifier bodies doesn't count either: those positions
+/// need native types and keep their own rendering.
+fn spine_has_arith(e: &Expr) -> bool {
+    match e {
+        // `(a * b) / 10000` is exempt: the Kani backend rewrites that
+        // exact shape to its solver-tuned `mul_bps_floor_u128` helper
+        // (`rewrite_kani_bps_mul_div`); widening here would hide the
+        // pattern and replace a q/r-decomposed helper with generic
+        // 256-bit multiplication.
+        e if is_bps_div_shape(e) => false,
+        Expr::Arith { .. } => true,
+        Expr::Paren(inner) | Expr::Old(inner) => spine_has_arith(&inner.node),
+        _ => false,
+    }
+}
+
+/// `(a * b) / 10000` — possibly under `Paren`/`Old` — the shape
+/// `rewrite_kani_bps_mul_div` recognizes. See `spine_has_arith`.
+fn is_bps_div_shape(e: &Expr) -> bool {
+    fn is_mul(e: &Expr) -> bool {
+        match e {
+            Expr::Paren(inner) | Expr::Old(inner) => is_mul(&inner.node),
+            Expr::Arith {
+                op: a::ArithOp::Mul,
+                ..
+            } => true,
+            _ => false,
+        }
+    }
+    match e {
+        Expr::Paren(inner) | Expr::Old(inner) => is_bps_div_shape(&inner.node),
+        Expr::Arith {
+            op: a::ArithOp::Div,
+            lhs,
+            rhs,
+        } => matches!(&rhs.node, Expr::Int(10000)) && is_mul(&lhs.node),
+        _ => false,
+    }
+}
+
+/// Render a numeric term so its Rust type is exactly `wide` (`u128` /
+/// `i128`), evaluating internal arithmetic without panics: `+` is exact
+/// (u64-range operands can't overflow the wide type), `-` on `u128`
+/// saturates (Lean `Nat` monus), `*` saturates at the wide MAX, `/` and
+/// `%` follow the Lean total-function convention (`x / 0 = 0`,
+/// `x % 0 = x`). Leaves render natively and cast up.
+fn render_widened_term(
+    e: &Expr,
+    ctx: Ctx,
+    consts: ConstTable,
+    opts: RustOpts<'_, '_>,
+    wide: &str,
+) -> String {
+    match e {
+        Expr::Paren(inner) => format!(
+            "({})",
+            render_widened_term(&inner.node, ctx, consts, opts, wide)
+        ),
+        Expr::Old(inner) => {
+            render_widened_term(&inner.node, ctx, consts, opts.with_inside_old(), wide)
+        }
+        Expr::Arith { op, lhs, rhs } => {
+            let l = render_widened_term(&lhs.node, ctx, consts, opts, wide);
+            let r = render_widened_term(&rhs.node, ctx, consts, opts, wide);
+            match op {
+                a::ArithOp::Add => format!("{} + {}", l, r),
+                a::ArithOp::Sub => {
+                    if wide == "u128" {
+                        format!("({}).saturating_sub({})", l, r)
+                    } else {
+                        format!("{} - {}", l, r)
+                    }
+                }
+                a::ArithOp::Mul => format!("({}).saturating_mul({})", l, r),
+                a::ArithOp::Div => format!("({}).checked_div({}).unwrap_or(0)", l, r),
+                a::ArithOp::Mod => format!("({}).checked_rem({}).unwrap_or({})", l, r, l),
+            }
+        }
+        // Already u128-typed helpers — cast only when the wide type differs.
+        Expr::MulDivFloor { .. } | Expr::MulDivCeil { .. } => {
+            let s = expr_to_rust(e, ctx, consts, opts);
+            if wide == "u128" {
+                s
+            } else {
+                format!("(({}) as {})", s, wide)
+            }
+        }
+        _ => format!("(({}) as {})", expr_to_rust(e, ctx, consts, opts), wide),
     }
 }
 

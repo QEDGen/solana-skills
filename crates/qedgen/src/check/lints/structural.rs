@@ -636,6 +636,7 @@ mod tests {
             expression: Some("True".to_string()),
             rust_expression: Some("true".to_string()),
             rust_expression_pod: Some("true".to_string()),
+            rust_expression_math: None,
             preserved_by: vec![],
             per_slot: None,
             quantifier_lint: None,
@@ -665,6 +666,7 @@ mod tests {
                 QEDGEN_UNSUPPORTED_MARKER
             )),
             rust_expression_pod: Some("true".to_string()),
+            rust_expression_math: None,
             preserved_by: vec![],
             per_slot: None,
             quantifier_lint: None,
