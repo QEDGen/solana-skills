@@ -115,7 +115,7 @@ prop_compose! {
 
 /// conservation: s.V ≥ ((∑ i : AccountIdx, s.accounts[i].capital)) + ((∑ i : AccountIdx, s.accounts[i].reserved_pnl)) + s.I + s.F
 fn conservation(s: &State) -> bool {
-    ((s.V) as u128) >= (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128)) + (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128)) + ((s.I) as u128) + ((s.F) as u128)
+    ((s.V) as u128) >= ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128) + ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128) + ((s.I) as u128) + ((s.F) as u128)
 }
 
 /// vault_bounded: s.V ≤ 10000000000000000
@@ -177,7 +177,7 @@ fn close_account(s: &mut State, i: usize) -> bool {
     if s.status != Status::Active {
         return false;
     }
-    s.V = s.V.wrapping_sub(accounts[i].capital);
+    s.V = s.V.wrapping_sub(s.accounts[(i) as usize].capital);
     s.accounts[i].capital = 0;
     s.accounts[i].active = 0;
     s.status = Status::Active;
@@ -273,7 +273,7 @@ fn liquidate_case_0(s: &mut State, i: usize) -> bool {
 }
 
 fn liquidate_case_1(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))) {
+    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)) >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))) {
         return false;
     }
     if s.status != Status::Active {
@@ -285,7 +285,7 @@ fn liquidate_case_1(s: &mut State, i: usize) -> bool {
 }
 
 fn liquidate_otherwise(s: &mut State, i: usize) -> bool {
-    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) + ((s.I) as i128) >= ((0) as i128))) && (false)) {
+    if !((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)) >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))) && (false)) {
         return false;
     }
     if s.status != Status::Active {
@@ -1048,7 +1048,7 @@ proptest! {
     #[test]
     fn liquidate_case_1_rejects_invalid(s in arb_boundary_state(), i in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))));
+        prop_assume!(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)) >= ((0) as i128))) && (((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))));
         prop_assert!(!liquidate_case_1(&mut s, i),
             "liquidate_case_1 must reject when guard is violated");
     }
@@ -1059,7 +1059,7 @@ proptest! {
     #[test]
     fn liquidate_otherwise_rejects_invalid(s in arb_boundary_state(), i in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128) + ((s.I) as i128) >= ((0) as i128))) && (false)));
+        prop_assume!(!((s.accounts[(i) as usize].active == 1) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)) >= ((0) as i128))) && (!(((s.accounts[(i) as usize].capital) as i128).wrapping_add(((s.accounts[(i) as usize].pnl) as i128)).wrapping_add(((s.I) as i128)) >= ((0) as i128))) && (false)));
         prop_assert!(!liquidate_otherwise(&mut s, i),
             "liquidate_otherwise must reject when guard is violated");
     }

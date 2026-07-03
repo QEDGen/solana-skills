@@ -80,7 +80,7 @@ struct State {
 
 /// conservation: s.V ≥ ((∑ i : AccountIdx, s.accounts[i].capital)) + ((∑ i : AccountIdx, s.accounts[i].reserved_pnl)) + s.I + s.F
 fn conservation(s: &State) -> bool {
-    ((s.V) as u128) >= (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128)) + (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128)) + ((s.I) as u128) + ((s.F) as u128)
+    ((s.V) as u128) >= ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128) + ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128) + ((s.I) as u128) + ((s.F) as u128)
 }
 
 /// vault_bounded: s.V ≤ 10000000000000000
@@ -150,7 +150,7 @@ fn close_account(s: &mut State, i: usize) -> bool {
     if s.status != Status::Active {
         return false;
     }
-    match s.V.checked_sub(accounts[i].capital) {
+    match s.V.checked_sub(s.accounts[(i) as usize].capital) {
         Some(__v) => s.V = __v,
         None => return false,
     }
@@ -1832,7 +1832,7 @@ fn verify_close_account_effect_V() {
     let pre_F = s.F;
     let pre_accounts = s.accounts;
     if close_account(&mut s, i) {
-        assert!(s.V == pre_V.wrapping_sub(accounts[i].capital), "V must decrement by accounts[i].capital");
+        assert!(s.V == pre_V.wrapping_sub(pre_accounts[(i) as usize].capital), "V must decrement by pre_accounts[(i) as usize].capital");
         assert!(pubkey_eq(&s.authority, &pre_authority), "authority must not change");
         assert!(s.I == pre_I, "I must not change");
         assert!(s.F == pre_F, "F must not change");
