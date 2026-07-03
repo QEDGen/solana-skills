@@ -775,6 +775,28 @@ effect {
 }
 ```
 
+#### Bare arithmetic in `:=` RHS and predicates
+
+Bare `+` / `-` (outside the `+=`-family operators) follows the same
+checked doctrine in the harness lane (issues #143–#146):
+
+- **`:=` RHS** (`residual := fee - cut`): the Kani/proptest transition
+  evaluates the expression with `checked_*` ops — over/underflow (and
+  division by zero) makes the transition **return false** instead of
+  panicking, matching the `+=` checked default.
+- **Guard / property / ensures comparisons** (`requires now >= start +
+  period`, `property (cut + residual) == fee`): the harness evaluates
+  the arithmetic **widened to u128/i128** (subtraction on unsigned kinds
+  saturates), so the predicate computes exactly what the Lean `Nat`
+  model computes and can never overflow-panic on unconstrained symbolic
+  state. The Anchor/Quasar scaffold guards keep native-width rendering.
+
+Known divergence (tracked upstream): Lean's `Nat` subtraction in a `:=`
+RHS is monus (clamps at 0) while the harness rejects the transition on
+underflow. If the distinction matters for your invariant, write the
+guard explicitly (`requires fee >= cut`) — that makes both models agree
+and documents the intent.
+
 ### `permissionless` clause
 
 Marks a handler as deliberately unauthenticated. Opts out of the P1

@@ -506,9 +506,16 @@ fn emit_account_section(
         .collect();
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
-            // Prefer the AST-rendered Rust form (handles `implies`/`forall`);
-            // fall back to text-massaging the Lean body for legacy callers.
-            let rust_expr = match prop.rust_expression.as_deref() {
+            // Prefer the math-exact AST-rendered form (arithmetic widened —
+            // issue #146), then the plain AST-rendered Rust form (handles
+            // `implies`/`forall`); fall back to text-massaging the Lean
+            // body for legacy callers.
+            let rust_expr = match prop
+                .rust_expression_math
+                .as_deref()
+                .filter(|r| !r.is_empty())
+                .or(prop.rust_expression.as_deref())
+            {
                 Some(r) => r.to_string(),
                 None => match prop.expression.as_deref() {
                     Some(e) => rust_codegen_util::translate_property_to_rust(e, true),

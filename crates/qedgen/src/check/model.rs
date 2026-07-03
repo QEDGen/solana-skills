@@ -84,6 +84,13 @@ pub struct ParsedRequires {
     pub lean_expr: String,
     pub rust_expr: String,
     pub rust_expr_pod: String,
+    /// Math-exact Rust rendering for harness predicates: integer arithmetic
+    /// inside comparisons is widened to u128/i128 (and `-` saturates), so
+    /// evaluating the predicate can't overflow-panic on unconstrained
+    /// symbolic state. Matches the Lean `Nat` model exactly; the Kani /
+    /// proptest guard positions consume this, the Anchor/Quasar scaffolds
+    /// keep `rust_expr` (issue #146).
+    pub rust_expr_math: String,
     pub error_name: Option<String>,
     /// Source AST body for AST-level lints (e.g. `old_in_single_state_context`).
     /// `None` for synthetic requires from `match`-arm desugaring.
@@ -105,6 +112,9 @@ pub struct ParsedEnsures {
     /// `s.x`, losing the pre/post distinction.
     #[allow(dead_code)]
     pub rust_expr_binary: String,
+    /// Binary-mode + math-exact rendering (see
+    /// `ParsedRequires::rust_expr_math`) for harness asserts (issue #146).
+    pub rust_expr_binary_math: String,
 }
 
 /// Parsed cover block (reachability).
@@ -220,6 +230,10 @@ pub struct ParsedProperty {
     pub rust_expression: Option<String>,
     /// Pod-aware Rust body for Quasar (mirrors `rust_expr_pod`).
     pub rust_expression_pod: Option<String>,
+    /// Math-exact Rust body (see `ParsedRequires::rust_expr_math`): the
+    /// Kani/proptest property predicate fns consume this so evaluating a
+    /// property with internal arithmetic can't overflow-panic (issue #146).
+    pub rust_expression_math: Option<String>,
     pub preserved_by: Vec<String>,
     /// For `forall <binder> : <T>, body` with a binder too wide to exhaust
     /// (U16+, Fin[N>256]): body rendered with the binder free. proptest_gen
@@ -456,6 +470,16 @@ pub struct ParsedHandler {
     /// "add"/"sub" are the checked defaults; `_sat` / `_wrap` carry the
     /// explicit opt-in from `+=!` / `+=?`.
     pub effects: Vec<(String, String, String)>,
+    /// Rust-form effect RHS values, parallel to `effects`. Compound RHS
+    /// (ref_impl calls, conditionals, arithmetic) is rendered from the
+    /// canonicalized typed AST via `expr_to_rust`, so the Kani/proptest
+    /// harnesses receive compilable Rust instead of the Lean-form string in
+    /// the triple (issues #143/#144). Simple values (params, literals, bare
+    /// fields) carry the same string as the triple so binder-specific
+    /// resolution (`resolve_value`) keeps working. Empty for ParsedHandlers
+    /// built outside the chumsky adapter (IDL ingest, probes) — MIR
+    /// lowering falls back to the triple's value.
+    pub effects_rust: Vec<String>,
     /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`.
     /// See `ParsedOperation::effect_on_error`.
     pub effect_on_error: Vec<Option<String>>,
@@ -515,6 +539,9 @@ pub struct ParsedEffectArm {
     /// `true` for a wildcard arm.
     pub is_wildcard: bool,
     pub effects: Vec<(String, String, String)>,
+    /// Rust-form RHS values, parallel to `effects` — same contract as
+    /// `ParsedHandler::effects_rust`.
+    pub effects_rust: Vec<String>,
     /// Per-site `or <ErrorVariant>` overrides, parallel to `effects` (see
     /// `ParsedOperation::effect_on_error`). Consumed per-arm by
     /// `lower_handler`'s `Stmt::Branch` lowering via `lower_effects(&arm.effects,

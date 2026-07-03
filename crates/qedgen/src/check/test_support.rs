@@ -26,6 +26,7 @@ pub(crate) fn make_handler(name: &str) -> ParsedHandler {
         aborts_total: false,
         permissionless: false,
         effects: vec![],
+        effects_rust: vec![],
         effect_on_error: vec![],
         accounts: vec![],
         transfers: vec![],

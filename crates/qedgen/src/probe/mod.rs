@@ -1498,6 +1498,7 @@ mod tests {
             aborts_total: false,
             permissionless,
             effects: vec![],
+            effects_rust: vec![],
             effect_on_error: vec![],
             accounts: vec![],
             transfers: vec![],

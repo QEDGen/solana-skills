@@ -243,12 +243,16 @@ pub fn emit_property_predicates_with(
     map_type_fn: impl Fn(&str) -> anyhow::Result<String>,
 ) {
     for prop in properties {
-        // Prefer the AST-rendered Rust form (handles implies/forall, embeds
-        // the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker); fall back to
+        // Prefer the math-exact AST-rendered form (arithmetic widened so
+        // evaluating the predicate can't overflow-panic — issue #146),
+        // then the plain AST-rendered Rust form (handles implies/forall,
+        // embeds the `QEDGEN_UNSUPPORTED_QUANTIFIER` marker); fall back to
         // translating the Lean form for callers without an AST.
         let rendered = prop
-            .rust_expression
+            .rust_expression_math
             .as_deref()
+            .filter(|r| !r.is_empty())
+            .or(prop.rust_expression.as_deref())
             .map(|r| r.to_string())
             .or_else(|| {
                 prop.expression

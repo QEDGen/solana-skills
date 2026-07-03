@@ -498,6 +498,14 @@ pub struct Expr {
     /// Binary-mode rendering for ensures (`state.x` → `post.x`,
     /// `old(state.x)` → `pre.x`); empty where the distinction doesn't apply.
     pub rust_binary: String,
+    /// Math-exact Rust rendering for harness *predicate* positions:
+    /// arithmetic inside comparisons widens to u128/i128 so evaluation
+    /// can't overflow-panic — matches the Lean `Nat` model (issue #146).
+    /// Empty where the math form wasn't rendered; consumers fall back to
+    /// `rust` via [`Expr::rust_math_or_rust`].
+    pub rust_math: String,
+    /// Binary-mode math-exact rendering; fallback is `rust_binary`.
+    pub rust_binary_math: String,
     /// Source span when available; lints may read it, codegens shouldn't.
     pub source_span: Option<SourceSpan>,
 }
@@ -835,11 +843,13 @@ impl Expr {
             rust: req.rust_expr.clone(),
             rust_pod: req.rust_expr_pod.clone(),
             rust_binary: String::new(),
+            rust_math: req.rust_expr_math.clone(),
+            rust_binary_math: String::new(),
             source_span: None,
         }
     }
 
-    /// From a `ParsedEnsures` — all four render forms, including
+    /// From a `ParsedEnsures` — all render forms, including
     /// `rust_expr_binary` for the pre/post split.
     pub fn from_ensures(ens: &crate::check::ParsedEnsures) -> Self {
         Expr {
@@ -847,6 +857,8 @@ impl Expr {
             rust: ens.rust_expr.clone(),
             rust_pod: ens.rust_expr_pod.clone(),
             rust_binary: ens.rust_expr_binary.clone(),
+            rust_math: String::new(),
+            rust_binary_math: ens.rust_expr_binary_math.clone(),
             source_span: None,
         }
     }
@@ -861,7 +873,29 @@ impl Expr {
             rust: s.clone(),
             rust_pod: s.clone(),
             rust_binary: String::new(),
+            rust_math: String::new(),
+            rust_binary_math: String::new(),
             source_span: None,
+        }
+    }
+
+    /// The math-exact predicate form when rendered, else the plain Rust
+    /// form. Harness predicate positions (guards, property bodies,
+    /// aborts assumes) read through this.
+    pub fn rust_math_or_rust(&self) -> &str {
+        if self.rust_math.is_empty() {
+            &self.rust
+        } else {
+            &self.rust_math
+        }
+    }
+
+    /// Binary-mode analogue of [`Expr::rust_math_or_rust`].
+    pub fn rust_binary_math_or_binary(&self) -> &str {
+        if self.rust_binary_math.is_empty() {
+            &self.rust_binary
+        } else {
+            &self.rust_binary_math
         }
     }
 }
@@ -907,8 +941,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                         lean: a.lean.clone(),
                         rust: a.rust.clone(),
                         rust_pod: a.rust.clone(),
-                        rust_binary: String::new(),
-                        source_span: None,
+                        ..Default::default()
                     })
                     .collect(),
             })
@@ -944,6 +977,8 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                     rust: p.rust_expression.clone().unwrap_or_default(),
                     rust_pod: p.rust_expression_pod.clone().unwrap_or_default(),
                     rust_binary: String::new(),
+                    rust_math: p.rust_expression_math.clone().unwrap_or_default(),
+                    rust_binary_math: String::new(),
                     source_span: None,
                 }),
                 preserved_by: p.preserved_by.clone(),
@@ -1184,9 +1219,7 @@ fn lower_invariants(parsed: &ParsedSpec) -> Vec<InvariantMir> {
                 Predicate(Expr {
                     lean: lean.clone(),
                     rust: inv.rust_expr.clone().unwrap_or_default(),
-                    rust_pod: String::new(),
-                    rust_binary: String::new(),
-                    source_span: None,
+                    ..Default::default()
                 })
             }),
         })
@@ -1329,8 +1362,7 @@ fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
                 lean: a.lean_expr.clone(),
                 rust: a.rust_expr.clone(),
                 rust_pod: a.rust_expr_pod.clone(),
-                rust_binary: String::new(),
-                source_span: None,
+                ..Default::default()
             }),
             err: a.error_name.clone(),
         })
@@ -1455,7 +1487,11 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
     //    arms (parser back-compat view) and the real statements live on the
     //    step-7 `Stmt::Branch` — lowering both would double-emit.
     if h.effect_branches.is_none() {
-        stmts.extend(lower_effects(&h.effects, &h.effect_on_error));
+        stmts.extend(lower_effects(
+            &h.effects,
+            &h.effect_on_error,
+            &h.effects_rust,
+        ));
     }
 
     // 4. Transfers — desugar each into a TokenTransfer Stmt.
@@ -1493,8 +1529,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                             lean: a.lean_expr.clone(),
                             rust: a.rust_expr.clone(),
                             rust_pod: a.rust_expr_pod.clone(),
-                            rust_binary: String::new(),
-                            source_span: None,
+                            ..Default::default()
                         },
                     })
                     .collect(),
@@ -1525,7 +1560,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
         let mut default = None;
         for arm in &br.arms {
             let block = Block {
-                stmts: lower_effects(&arm.effects, &arm.effect_on_error),
+                stmts: lower_effects(&arm.effects, &arm.effect_on_error, &arm.effects_rust),
             };
             if arm.is_wildcard {
                 default = Some(block);
@@ -1535,8 +1570,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                         lean: arm.pattern_lean.clone(),
                         rust: arm.pattern_rust.clone(),
                         rust_pod: arm.pattern_rust.clone(),
-                        rust_binary: String::new(),
-                        source_span: None,
+                        ..Default::default()
                     }),
                     block,
                 });
@@ -1547,8 +1581,7 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 lean: br.scrutinee_lean.clone(),
                 rust: br.scrutinee_rust.clone(),
                 rust_pod: br.scrutinee_rust_pod.clone(),
-                rust_binary: String::new(),
-                source_span: None,
+                ..Default::default()
             }),
             arms,
             default,
@@ -1559,14 +1592,34 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
 }
 
 /// Lower effect triples into typed `Stmt`s; `on_error[i]` supplies per-site
-/// error names for checked variants. Shared by the flat-effects path and
-/// per-arm `Stmt::Branch` lowering.
-fn lower_effects(effects: &[(String, String, String)], on_error: &[Option<String>]) -> Vec<Stmt> {
+/// error names for checked variants, `values_rust[i]` the Rust-form RHS
+/// (adapter-rendered; see `ParsedHandler::effects_rust`). Shared by the
+/// flat-effects path and per-arm `Stmt::Branch` lowering.
+fn lower_effects(
+    effects: &[(String, String, String)],
+    on_error: &[Option<String>],
+    values_rust: &[String],
+) -> Vec<Stmt> {
     let mut stmts = Vec::new();
     for (i, (field, op_kind, value)) in effects.iter().enumerate() {
         let err_override = on_error.get(i).and_then(|o| o.clone());
         let path = parse_field_path(field);
-        let rhs = Expr::from_raw(value.clone());
+        // The triple's value doubles as the Lean form; the Rust form comes
+        // from the parallel adapter rendering when present (empty for
+        // ParsedHandlers built outside the chumsky adapter — IDL ingest,
+        // probes — where the single string is all we have).
+        let rhs = match values_rust.get(i).filter(|r| !r.is_empty()) {
+            Some(rust) => Expr {
+                lean: value.clone(),
+                rust: rust.clone(),
+                rust_pod: rust.clone(),
+                rust_binary: String::new(),
+                rust_math: String::new(),
+                rust_binary_math: String::new(),
+                source_span: None,
+            },
+            None => Expr::from_raw(value.clone()),
+        };
         let stmt = match op_kind.as_str() {
             "set" => Stmt::Assign { path, rhs },
             "add" => Stmt::CheckedAdd {

@@ -96,6 +96,31 @@ pub fn resolve_value_with_account_env(
     resolve_value(value, op, spec, state_binder)
 }
 
+/// Rust scalar type of a flat state field, for annotating the checked-RHS
+/// `Option` closure. `None` for indexed / dotted / non-scalar targets —
+/// callers fall back to unannotated inference.
+fn field_rust_scalar_ty(spec: &ParsedSpec, field: &str) -> Option<&'static str> {
+    if field.contains('[') || field.contains('.') {
+        return None;
+    }
+    let dsl_ty = spec
+        .state_fields
+        .iter()
+        .chain(spec.account_types.iter().flat_map(|a| a.fields.iter()))
+        .find(|(n, _)| n == field)
+        .map(|(_, t)| t.as_str())?;
+    match dsl_ty.trim() {
+        "U8" => Some("u8"),
+        "U16" => Some("u16"),
+        "U32" => Some("u32"),
+        "U64" => Some("u64"),
+        "U128" => Some("u128"),
+        "I64" => Some("i64"),
+        "I128" => Some("i128"),
+        _ => None,
+    }
+}
+
 /// True when the bare identifier names a state field in the flat
 /// `state_fields` list or any `account_types[*].fields` (multi-account).
 fn is_state_field(name: &str, spec: &ParsedSpec) -> bool {
@@ -286,6 +311,25 @@ fn emit_one_effect_inner(
     // Body binds state as `s` — pass that binder so a bare state-field RHS
     // renders as `s.<field>`.
     let rust_value = resolve_value_with_account_env(value, op, spec, Some("s."), account_binder);
+    // Checked-expression RHS (bare arithmetic lowered to `checked_*` + `?`
+    // by the adapter — see `RustOpts::checked_arith`): give the `?` ops an
+    // `Option` context via an immediately-invoked closure; `None`
+    // (over/underflow, div-by-zero, failed narrowing) rejects the
+    // transition, matching the checked `+=`/`-=` doctrine (issue #146).
+    // The return-type annotation pins inference for `try_into()`-narrowed
+    // helpers; unresolvable field types fall back to inference.
+    let rust_value = if rust_value.contains('?') {
+        match field_rust_scalar_ty(spec, field) {
+            Some(ty) => format!(
+                "match (|| -> Option<{ty}> {{ Some({rust_value}) }})() {{ Some(__rhs) => __rhs, None => return false }}"
+            ),
+            None => format!(
+                "match (|| Some({rust_value}))() {{ Some(__rhs) => __rhs, None => return false }}"
+            ),
+        }
+    } else {
+        rust_value
+    };
     match op_kind {
         "set" => {
             out.push_str(&format!("{indent}s.{field} = {rust_value};\n"));

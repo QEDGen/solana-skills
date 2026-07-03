@@ -60,7 +60,7 @@ fn threshold_bounded(s: &State) -> bool {
 
 /// votes_bounded: s.approval_count + s.rejection_count ≤ s.member_count
 fn votes_bounded(s: &State) -> bool {
-    s.approval_count + s.rejection_count <= s.member_count
+    ((s.approval_count) as u128) + ((s.rejection_count) as u128) <= ((s.member_count) as u128)
 }
 
 // ============================================================================
@@ -141,7 +141,7 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !((s.member_count - s.rejection_count < s.threshold)) {
+    if !(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -288,7 +288,7 @@ fn verify_cancel_proposal_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::HasProposal);
-    kani::assume(!((s.member_count - s.rejection_count < s.threshold)));
+    kani::assume(!(((((s.member_count) as u128)).saturating_sub(((s.rejection_count) as u128)) < ((s.threshold) as u128))));
     kani::cover!(true, "guard-violation domain is satisfiable");
     assert!(!cancel_proposal(&mut s),
         "cancel_proposal must reject when guard is violated");

@@ -69,7 +69,14 @@ pub(super) fn effect_value_to_lean_mir(
         || trimmed.contains("match ")
         || trimmed.contains("=> ")
         || trimmed.contains(" with ")
-        || trimmed.contains(".{");
+        || trimmed.contains(".{")
+        // Any compound expression (spaces / call parens) arrives from the
+        // adapter already canonicalized — state reads are `s.X`-qualified
+        // (issue #139 seam) — so front-prefixing the whole string (the
+        // legacy heuristic below) would corrupt it: `amount + 1` must not
+        // become `s.amount + 1`.
+        || trimmed.contains(' ')
+        || trimmed.contains('(');
     if looks_prerendered {
         return rewrite_subscripts_lean(trimmed);
     }

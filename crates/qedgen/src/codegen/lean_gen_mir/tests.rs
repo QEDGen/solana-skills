@@ -663,3 +663,28 @@ fn bare_state_field_requires_render_with_receiver() {
         "bare state-field guard leaked into the transition:\n{out}"
     );
 }
+
+/// Issues #143/#146 (Lean side): compound effect RHS is canonicalized at
+/// the adapter, so state reads arrive `s.`-qualified — previously
+/// `residual := fee - cut` rendered `s.fee - cut` (only the string's
+/// front got the heuristic prefix; `cut` was unbound and the module
+/// failed to elaborate).
+#[test]
+fn compound_effect_rhs_lean_is_fully_state_qualified() {
+    let mir = lower_fixture(
+        "crates/qedgen/tests/fixtures/regressions/issues-143-146-kani-arith/vault.qedspec",
+    );
+    let lean = render(&mir);
+    assert!(
+        lean.contains("residual := s.fee - s.cut"),
+        "every state read in a compound effect RHS must be `s.`-qualified:\n{lean}"
+    );
+    assert!(
+        lean.contains("fee := (bps_mul (amount) (s.rate))"),
+        "ref_impl call args must be state-qualified:\n{lean}"
+    );
+    assert!(
+        !lean.contains("- cut") && !lean.contains("(rate)"),
+        "bare state-field read leaked into the Lean transition:\n{lean}"
+    );
+}
