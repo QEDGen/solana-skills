@@ -41,10 +41,26 @@ pub(super) fn strip_variant_prefix(path: &crate::mir::Path, mir: &Mir) -> String
     path.segments.join(".")
 }
 
+/// Effect RHS for a transition body — tree-native (#151 Slice 2): one
+/// `render_lean` call with application-style subscripts replaces the
+/// shape heuristics below. The string path stays only for `Expr`s
+/// without trees (IDL ingest, probes).
+pub(super) fn effect_rhs_lean(
+    expr: &crate::mir::Expr,
+    params: &[(crate::mir::Symbol, crate::mir::Ty)],
+) -> String {
+    use super::tree_render::{render_lean, LeanCx};
+    match &expr.tree {
+        Some(tree) => render_lean(tree, LeanCx::guard().with_application_subscripts()),
+        None => effect_value_to_lean_mir(&expr.lean, params),
+    }
+}
+
 /// Render an effect RHS for the indexed-state transition body. Bare
 /// numeric literals and bare param refs pass through; pre-rendered Lean
 /// compounds (starting with `s.`, `(`, `match`, etc.) get subscript
 /// rewriting only; bare field names take an `s.` prefix + rewriting.
+/// Legacy fallback for tree-less `Expr`s — prefer [`effect_rhs_lean`].
 pub(super) fn effect_value_to_lean_mir(
     value: &str,
     params: &[(crate::mir::Symbol, crate::mir::Ty)],

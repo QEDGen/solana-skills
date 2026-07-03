@@ -626,29 +626,27 @@ pub(super) fn flat_effect_with_parts(
                 if is_account_pubkey_ref(&rhs.rust) {
                     continue;
                 }
-                // Re-qualify the RHS: a bare state-field ref (e.g.
-                // `reserved := state.cap`, stripped upstream to `cap`)
-                // must render as `s.cap` — emitting `rhs.lean` verbatim
-                // yields an unknown identifier. Handler params and
-                // literals pass through unchanged.
+                // Tree-native RHS (#151 Slice 2): the resolved tree knows
+                // a state read from a param from a literal — the legacy
+                // string path re-derived that from shape heuristics.
                 with_parts.push(format!(
                     "{} := {}",
                     safe_name(&path_field_name(path)),
-                    effect_value_to_lean_mir(&rhs.lean, &h.params)
+                    effect_rhs_lean(rhs, &h.params)
                 ));
             }
             Stmt::CheckedAdd { path, delta, .. }
             | Stmt::WrapAdd { path, delta }
             | Stmt::SatAdd { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                let d = effect_rhs_lean(delta, &h.params);
                 with_parts.push(format!("{} := s.{} + {}", f, f, d));
             }
             Stmt::CheckedSub { path, delta, .. }
             | Stmt::WrapSub { path, delta }
             | Stmt::SatSub { path, delta } => {
                 let f = safe_name(&path_field_name(path));
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
+                let d = effect_rhs_lean(delta, &h.params);
                 with_parts.push(format!("{} := s.{} - {}", f, f, d));
             }
             Stmt::RequireOrAbort { .. }

@@ -36,21 +36,41 @@ pub enum LeanBinder {
     SPrime,
 }
 
+/// How `Map` subscripts render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeanSubscript {
+    /// `x[i]` — the adapter's surface form (requires/ensures strings).
+    Brackets,
+    /// `(x i)` — the MIR Lean model represents `Map[N] T` fields as
+    /// functions; transition bodies apply them. Replaces the
+    /// `rewrite_subscripts_lean` string pass.
+    Application,
+}
+
 /// Render context for Lean emission.
 #[derive(Debug, Clone, Copy)]
 pub struct LeanCx {
     pub binder: LeanBinder,
+    pub subscript: LeanSubscript,
 }
 
 impl LeanCx {
     pub fn guard() -> Self {
         LeanCx {
             binder: LeanBinder::S,
+            subscript: LeanSubscript::Brackets,
         }
     }
     pub fn ensures() -> Self {
         LeanCx {
             binder: LeanBinder::SPrime,
+            subscript: LeanSubscript::Brackets,
+        }
+    }
+    pub fn with_application_subscripts(self) -> Self {
+        LeanCx {
+            subscript: LeanSubscript::Application,
+            ..self
         }
     }
 }
@@ -403,11 +423,16 @@ fn render_path(p: &TreePath, cx: LeanCx, inside_old: bool) -> String {
                 out.push('.');
                 out.push_str(f);
             }
-            TreeSeg::Index(i) => {
-                out.push('[');
-                out.push_str(i);
-                out.push(']');
-            }
+            TreeSeg::Index(i) => match cx.subscript {
+                LeanSubscript::Brackets => {
+                    out.push('[');
+                    out.push_str(i);
+                    out.push(']');
+                }
+                LeanSubscript::Application => {
+                    out = format!("({} {})", out, i);
+                }
+            },
         }
     }
     out
