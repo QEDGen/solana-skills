@@ -80,7 +80,7 @@ struct State {
 
 /// conservation: s.V ≥ ((∑ i : AccountIdx, s.accounts[i].capital)) + ((∑ i : AccountIdx, s.accounts[i].reserved_pnl)) + s.I + s.F
 fn conservation(s: &State) -> bool {
-    ((s.V) as u128) >= (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128)) + (((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128)) + ((s.I) as u128) + ((s.F) as u128)
+    ((s.V) as u128) >= ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].capital)) as u128) + ((sum_over::<AccountIdx>(|i| s.accounts[(i) as usize].reserved_pnl)) as u128) + ((s.I) as u128) + ((s.F) as u128)
 }
 
 /// vault_bounded: s.V ≤ 10000000000000000

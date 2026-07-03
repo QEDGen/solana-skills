@@ -506,21 +506,11 @@ fn emit_account_section(
         .collect();
     if !props_with_expr.is_empty() {
         for prop in &props_with_expr {
-            // Prefer the math-exact AST-rendered form (arithmetic widened —
-            // issue #146), then the plain AST-rendered Rust form (handles
-            // `implies`/`forall`); fall back to text-massaging the Lean
-            // body for legacy callers.
-            let rust_expr = match prop
-                .rust_expression_math
-                .as_deref()
-                .filter(|r| !r.is_empty())
-                .or(prop.rust_expression.as_deref())
-            {
-                Some(r) => r.to_string(),
-                None => match prop.expression.as_deref() {
-                    Some(e) => rust_codegen_util::translate_property_to_rust(e, true),
-                    None => continue,
-                },
+            // Tree-native math-exact rendering (issue #146); string
+            // fallbacks for tree-less properties (see
+            // `property_predicate_rust`).
+            let Some(rust_expr) = rust_codegen_util::property_predicate_rust(prop, true) else {
+                continue;
             };
             let doc = prop.expression.as_deref().unwrap_or("");
             out.push_str(&format!("/// {}: {}\n", prop.name, doc));

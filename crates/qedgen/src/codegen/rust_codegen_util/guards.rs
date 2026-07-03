@@ -52,23 +52,72 @@ pub fn collect_full_guard_with_account_env(
         parts.push(format!("({})", translated));
     }
     for req in &op.requires {
-        if account_binder.is_none() && mentions_handler_account_pubkey(&req.rust_expr, &op.accounts)
-        {
+        if suppress_requires(req, op, account_binder) {
             continue;
         }
-        // Harness predicates evaluate on unconstrained symbolic state —
-        // prefer the math-exact form (arithmetic widened to u128/i128) so
-        // the guard itself can't overflow-panic (issue #146).
-        let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
-        let translated = account_binder
-            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
-            .unwrap_or(translated);
-        parts.push(format!("({})", translated));
+        parts.push(format!(
+            "({})",
+            render_requires(req, op, wrapping, account_binder)
+        ));
     }
     if parts.is_empty() {
         None
     } else {
         Some(parts.join(" && "))
+    }
+}
+
+/// Accounts-only requires are dropped from the pure-model projection when
+/// no account env is bound (the harness `State` carries no handler
+/// accounts). Structural on the tree; substring scan for legacy strings.
+fn suppress_requires(
+    req: &crate::check::ParsedRequires,
+    op: &ParsedHandler,
+    account_binder: Option<&str>,
+) -> bool {
+    if account_binder.is_some() {
+        return false;
+    }
+    match &req.tree {
+        Some(tree) => super::tree_render::tree_mentions_account_pubkey(tree),
+        None => mentions_handler_account_pubkey(&req.rust_expr, &op.accounts),
+    }
+}
+
+/// One requires clause as a Rust predicate. Tree-native (#151 Slice 1):
+/// one render call under the right arithmetic policy — `Widened`
+/// (math-exact; issue #146) or the `Wrapping` proptest-guard composite —
+/// replaces the pre-rendered math string + `translate_guard_to_rust` +
+/// `rewrite_account_pubkey_refs` chain. Legacy string path stays for
+/// tree-less clauses (IDL ingest, probes).
+fn render_requires(
+    req: &crate::check::ParsedRequires,
+    op: &ParsedHandler,
+    wrapping: bool,
+    account_binder: Option<&str>,
+) -> String {
+    use super::tree_render::{render_rust, ArithMode, RustCx};
+    match &req.tree {
+        Some(tree) => {
+            let arith = if wrapping {
+                ArithMode::Wrapping
+            } else {
+                ArithMode::Widened
+            };
+            let cx = RustCx::native()
+                .with_arith(arith)
+                .with_acct_env(account_binder);
+            render_rust(tree, cx)
+        }
+        None => {
+            // Harness predicates evaluate on unconstrained symbolic state —
+            // prefer the math-exact form (arithmetic widened to u128/i128)
+            // so the guard itself can't overflow-panic (issue #146).
+            let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
+            account_binder
+                .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+                .unwrap_or(translated)
+        }
     }
 }
 
@@ -87,6 +136,8 @@ pub fn collect_guard_terms_with_account_env(
     wrapping: bool,
     account_binder: Option<&str>,
 ) -> Vec<GuardTerm> {
+    use super::tree_render::{render_rust, top_conjuncts, ArithMode, RustCx};
+
     let mut terms = Vec::new();
     if let Some(ref guard) = op.guard_str {
         let translated = translate_guard_to_rust(guard, wrapping);
@@ -96,21 +147,47 @@ pub fn collect_guard_terms_with_account_env(
         push_split_guard_terms(&mut terms, GuardTermSource::Guard, &translated);
     }
     for req in &op.requires {
-        if account_binder.is_none() && mentions_handler_account_pubkey(&req.rust_expr, &op.accounts)
-        {
+        if suppress_requires(req, op, account_binder) {
             continue;
         }
-        let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
-        let translated = account_binder
-            .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
-            .unwrap_or(translated);
-        push_split_guard_terms(
-            &mut terms,
-            GuardTermSource::Requires {
-                error_name: req.error_name.clone(),
-            },
-            &translated,
-        );
+        let source = GuardTermSource::Requires {
+            error_name: req.error_name.clone(),
+        };
+        match &req.tree {
+            // Tree-native conjunct split: the top `And` node's operands,
+            // matching the legacy top-level `&&` string split (each
+            // operand keeps the parens the bool-op rendering gave it).
+            Some(tree) => {
+                let arith = if wrapping {
+                    ArithMode::Wrapping
+                } else {
+                    ArithMode::Widened
+                };
+                let cx = RustCx::native()
+                    .with_arith(arith)
+                    .with_acct_env(account_binder);
+                let conjuncts = top_conjuncts(tree);
+                let multi = conjuncts.len() > 1;
+                for c in conjuncts {
+                    let rendered = render_rust(c, cx);
+                    terms.push(GuardTerm {
+                        source: source.clone(),
+                        rust_expr: if multi {
+                            format!("({})", rendered)
+                        } else {
+                            rendered
+                        },
+                    });
+                }
+            }
+            None => {
+                let translated = translate_guard_to_rust(requires_math_or_rust(req), wrapping);
+                let translated = account_binder
+                    .map(|binder| rewrite_account_pubkey_refs(&translated, &op.accounts, binder))
+                    .unwrap_or(translated);
+                push_split_guard_terms(&mut terms, source, &translated);
+            }
+        }
     }
     terms
 }

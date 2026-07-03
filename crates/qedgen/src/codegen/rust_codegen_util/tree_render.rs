@@ -17,10 +17,10 @@
 //! Matches over `ExprTree` / `BindingKind` are exhaustive by discipline —
 //! no `_` arms (see `mir::expr_tree` module docs).
 
-// Renderer lands ahead of its consumers (same ratified pattern as
-// `mir::mod`): the Kani/proptest emission port is the second half of
-// Slice 1 and removes this allow. The corpus parity test below is the
-// current consumer keeping the renderer honest.
+// "IR ahead of consumers" (same ratified pattern as `mir::mod`): the
+// effect/guard/property lanes consume the renderer today; the remaining
+// dead surface (`Binder::SelfAcct`, `ArithMode::Native` outside tests) is
+// the Slice 3 scaffold port's entry point. Remove with Slice 3.
 #![allow(dead_code)]
 
 use crate::mir::expr_tree::{
@@ -56,7 +56,13 @@ pub enum ArithMode {
     /// comparisons widens to `u128`/`i128` so evaluation can't
     /// overflow-panic; matches the Lean `Nat` model.
     Widened,
-    /// Wrapping operators (`+=?` scaffold lowering; Slice 3 consumer).
+    /// The proptest guard composite — `Widened` plus the legacy
+    /// `wrap_arithmetic` pass: the *top-level* `+` spine of each
+    /// comparison side lowers to `.wrapping_add(…)` (recursing left,
+    /// matching Lean's left-associative chains), a top-level `i128` `-`
+    /// to `.saturating_sub(…)`; arithmetic nested under method calls
+    /// keeps the plain `Widened` form. Byte-compatible with
+    /// `wrap_arithmetic(translate_guard_to_rust(rust_expr_math))`.
     Wrapping,
 }
 
@@ -546,11 +552,14 @@ fn render_cmp(
     inside_old: bool,
 ) -> String {
     let sym = cmp_sym(op);
-    // Math-exact predicate mode: a comparison whose spine carries bare
+    // Math-exact predicate modes: a comparison whose spine carries bare
     // arithmetic evaluates both sides widened so the predicate can't
-    // overflow-panic (issue #146). Non-numeric and arithmetic-free
-    // comparisons keep the native rendering.
-    if cx.arith == ArithMode::Widened && (spine_has_arith(lhs) || spine_has_arith(rhs)) {
+    // overflow-panic (issue #146); `Wrapping` further lowers the
+    // top-level `+`/`-` spine to method chains. Non-numeric and
+    // arithmetic-free comparisons keep the native rendering.
+    if matches!(cx.arith, ArithMode::Widened | ArithMode::Wrapping)
+        && (spine_has_arith(lhs) || spine_has_arith(rhs))
+    {
         let lk = rust_num_kind(lhs);
         let rk = rust_num_kind(rhs);
         if matches!(lk, NumKind::Nat | NumKind::Int) && matches!(rk, NumKind::Nat | NumKind::Int) {
@@ -559,8 +568,18 @@ fn render_cmp(
             } else {
                 "u128"
             };
-            let l = render_widened_term(lhs, cx, inside_old, wide);
-            let r = render_widened_term(rhs, cx, inside_old, wide);
+            let term = |e: &ExprTree| {
+                if cx.arith == ArithMode::Wrapping {
+                    (
+                        render_pred_wrapped_term(e, cx, inside_old, wide),
+                        Prec::Atom,
+                    )
+                } else {
+                    render_widened_term(e, cx, inside_old, wide)
+                }
+            };
+            let l = term(lhs);
+            let r = term(rhs);
             return format!(
                 "{} {} {}",
                 strict_atom_for(Prec::Cmp, l),
@@ -571,6 +590,57 @@ fn render_cmp(
     }
     let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Cmp);
     format!("{} {} {}", l, sym, r)
+}
+
+/// `Wrapping`-mode comparison side: the top-level `+` spine chains
+/// `.wrapping_add(…)` left-associatively; a top-level `i128` `-` chains
+/// `.saturating_sub(…)` (`u128` subtraction already saturates in the
+/// `Widened` form); everything below the spine keeps the `Widened`
+/// rendering — arithmetic nested under a method call stays plain, exactly
+/// like the legacy `wrap_arithmetic` pass that only rewrote top-level
+/// operators of each comparison side.
+fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -> String {
+    match e {
+        ExprTree::Old(inner) => render_pred_wrapped_term(inner, cx, true, wide),
+        ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs,
+            rhs,
+        } => format!(
+            "{}.wrapping_add({})",
+            render_pred_wrapped_term(lhs, cx, inside_old, wide),
+            render_widened_term(rhs, cx, inside_old, wide).0
+        ),
+        ExprTree::Arith {
+            op: TreeArithOp::Sub,
+            lhs,
+            rhs,
+        } if wide == "i128" => format!(
+            "{}.saturating_sub({})",
+            render_pred_wrapped_term(lhs, cx, inside_old, wide),
+            render_widened_term(rhs, cx, inside_old, wide).0
+        ),
+        ExprTree::Int(_)
+        | ExprTree::Bool(_)
+        | ExprTree::Path(_)
+        | ExprTree::Sum { .. }
+        | ExprTree::Quant { .. }
+        | ExprTree::BoolOp { .. }
+        | ExprTree::Not(_)
+        | ExprTree::Cmp { .. }
+        | ExprTree::Arith { .. }
+        | ExprTree::MulDivFloor { .. }
+        | ExprTree::MulDivCeil { .. }
+        | ExprTree::Match { .. }
+        | ExprTree::Ctor { .. }
+        | ExprTree::RecordLit(_)
+        | ExprTree::RecordUpdate { .. }
+        | ExprTree::IsVariant { .. }
+        | ExprTree::App { .. }
+        | ExprTree::Field { .. }
+        | ExprTree::Let { .. }
+        | ExprTree::IfThenElse { .. } => render_widened_term(e, cx, inside_old, wide).0,
+    }
 }
 
 fn render_arith(
@@ -593,17 +663,10 @@ fn render_arith(
         let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
         return (format!("({}).{}({})?", l, method, r), Prec::Atom);
     }
-    if cx.arith == ArithMode::Wrapping {
-        let method = match op {
-            TreeArithOp::Add => "wrapping_add",
-            TreeArithOp::Sub => "wrapping_sub",
-            TreeArithOp::Mul => "wrapping_mul",
-            TreeArithOp::Div => "wrapping_div",
-            TreeArithOp::Mod => "wrapping_rem",
-        };
-        let (l, r) = render_pair_with_coercion(lhs, rhs, cx, inside_old, Prec::Or);
-        return (format!("({}).{}({})", l, method, r), Prec::Atom);
-    }
+    // `Wrapping` only rewrites the comparison-side spine (see
+    // `render_pred_wrapped_term`); an `Arith` outside any comparison
+    // renders native — matching the legacy pass, which never touched
+    // arithmetic outside a `cmp` atom.
     let prec = match op {
         TreeArithOp::Add | TreeArithOp::Sub => Prec::AddSub,
         TreeArithOp::Mul | TreeArithOp::Div | TreeArithOp::Mod => Prec::MulDiv,
@@ -765,6 +828,77 @@ fn render_mul_div(
         format!("({}).try_into().ok()?", call)
     } else {
         call
+    }
+}
+
+/// Does the tree read any handler-account pubkey (`<acct>.pubkey`)?
+/// Structural replacement for `mentions_handler_account_pubkey`'s
+/// substring scan — used to suppress accounts-only requires from the
+/// pure-model harness projection (the harness `State` carries no handler
+/// accounts) when no account env is bound.
+pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
+    match e {
+        ExprTree::Path(p) => {
+            matches!(p.binding, BindingKind::Account)
+                && matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey")
+        }
+        ExprTree::Int(_) | ExprTree::Bool(_) => false,
+        ExprTree::Old(inner) | ExprTree::Not(inner) => tree_mentions_account_pubkey(inner),
+        ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => {
+            tree_mentions_account_pubkey(body)
+        }
+        ExprTree::BoolOp { lhs, rhs, .. }
+        | ExprTree::Cmp { lhs, rhs, .. }
+        | ExprTree::Arith { lhs, rhs, .. } => {
+            tree_mentions_account_pubkey(lhs) || tree_mentions_account_pubkey(rhs)
+        }
+        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
+            tree_mentions_account_pubkey(a)
+                || tree_mentions_account_pubkey(b)
+                || tree_mentions_account_pubkey(d)
+        }
+        ExprTree::Match { scrutinee, arms } => {
+            tree_mentions_account_pubkey(scrutinee)
+                || arms.iter().any(|a| tree_mentions_account_pubkey(&a.body))
+        }
+        ExprTree::Ctor { payload, .. } => payload
+            .as_ref()
+            .is_some_and(|p| tree_mentions_account_pubkey(p)),
+        ExprTree::RecordLit(fields) => fields.iter().any(|(_, v)| tree_mentions_account_pubkey(v)),
+        ExprTree::RecordUpdate { base, updates } => {
+            tree_mentions_account_pubkey(base)
+                || updates.iter().any(|(_, v)| tree_mentions_account_pubkey(v))
+        }
+        ExprTree::IsVariant { scrutinee, .. } => tree_mentions_account_pubkey(scrutinee),
+        ExprTree::App { args, .. } => args.iter().any(tree_mentions_account_pubkey),
+        ExprTree::Field { base, .. } => tree_mentions_account_pubkey(base),
+        ExprTree::Let { value, body, .. } => {
+            tree_mentions_account_pubkey(value) || tree_mentions_account_pubkey(body)
+        }
+        ExprTree::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            tree_mentions_account_pubkey(cond)
+                || tree_mentions_account_pubkey(then_branch)
+                || tree_mentions_account_pubkey(else_branch)
+        }
+    }
+}
+
+/// Immediate conjuncts of the top node: `And(l, r)` → `[l, r]`, anything
+/// else → `[e]`. Deliberately NON-recursive — the legacy string splitter
+/// only broke the *top-level* `&&` (nested conjunctions sit inside the
+/// bool-op's own parens), and per-term guard emission must match it.
+pub fn top_conjuncts(e: &ExprTree) -> Vec<&ExprTree> {
+    match e {
+        ExprTree::BoolOp {
+            op: TreeBoolOp::And,
+            lhs,
+            rhs,
+        } => vec![lhs, rhs],
+        _ => vec![e],
     }
 }
 
@@ -1036,8 +1170,50 @@ mod tests {
             render_rust(&e, RustCx::native().with_arith(ArithMode::Checked)),
             "(s.balance).checked_sub(amount)?"
         );
-        let wrapped = render_rust(&e, RustCx::native().with_arith(ArithMode::Wrapping));
-        assert_eq!(wrapped, "(s.balance).wrapping_sub(amount)");
+    }
+
+    #[test]
+    fn wrapping_mode_chains_top_level_adds() {
+        // The proptest guard composite: `a + b + c <= cap` chains
+        // wrapping_add left-associatively over widened operands; nested
+        // arithmetic under the saturating_sub method call stays plain.
+        let sum = ExprTree::Arith {
+            op: TreeArithOp::Add,
+            lhs: Box::new(ExprTree::Arith {
+                op: TreeArithOp::Add,
+                lhs: Box::new(param("a", Ty::U64)),
+                rhs: Box::new(param("b", Ty::U64)),
+            }),
+            rhs: Box::new(param("c", Ty::U64)),
+        };
+        let cmp = ExprTree::Cmp {
+            op: TreeCmpOp::Le,
+            lhs: Box::new(sum),
+            rhs: Box::new(param("cap", Ty::U64)),
+        };
+        assert_eq!(
+            render_rust(&cmp, RustCx::native().with_arith(ArithMode::Wrapping)),
+            "((a) as u128).wrapping_add(((b) as u128)).wrapping_add(((c) as u128)) <= ((cap) as u128)"
+        );
+        // u128 subtraction saturates via the Widened form; the `+` under
+        // it stays plain (legacy wrap never descended into method args).
+        let sub = ExprTree::Cmp {
+            op: TreeCmpOp::Ge,
+            lhs: Box::new(ExprTree::Arith {
+                op: TreeArithOp::Sub,
+                lhs: Box::new(ExprTree::Arith {
+                    op: TreeArithOp::Add,
+                    lhs: Box::new(param("a", Ty::U64)),
+                    rhs: Box::new(param("b", Ty::U64)),
+                }),
+                rhs: Box::new(param("c", Ty::U64)),
+            }),
+            rhs: Box::new(ExprTree::Int(0)),
+        };
+        assert_eq!(
+            render_rust(&sub, RustCx::native().with_arith(ArithMode::Wrapping)),
+            "(((a) as u128) + ((b) as u128)).saturating_sub(((c) as u128)) >= ((0) as u128)"
+        );
     }
 
     #[test]
