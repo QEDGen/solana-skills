@@ -13,6 +13,19 @@ open SVM.SBPF
 abbrev TOKEN_ACCOUNT_BALANCE : Int := 0xa0
 abbrev MINIMUM_BALANCE : Int := 0x2918
 
+/-! ## .rodata symbols
+
+Laid out in the program region: `BYTECODE_START` (0x100000000) + .text size
+(12 binary slots × 8 bytes; `lddw` occupies 2 slots). Deployed VAs additionally
+include ELF header/section offsets a source-level lift cannot see, so proofs
+MUST reference these symbols by name — a corrected base only shifts the
+numerals. Fidelity to the deployed binary is the binary lane's job (qedlift). -/
+
+/-- `e` at rodata offset 0x0: "Slippage exceeded" -/
+abbrev RODATA_e : Nat := 0x100000060
+abbrev RODATA_e_LEN : Nat := 17
+def RODATA_e_BYTES : ByteArray := ⟨#[0x53, 0x6c, 0x69, 0x70, 0x70, 0x61, 0x67, 0x65, 0x20, 0x65, 0x78, 0x63, 0x65, 0x65, 0x64, 0x65, 0x64]⟩
+
 /-! ## effectiveAddr lemmas -/
 
 section EffectiveAddr
@@ -27,6 +40,10 @@ open SVM.SBPF.Memory
 
 end EffectiveAddr
 
+/-! ## toU64 bridge lemmas (lddw constants) -/
+
+@[simp] theorem bridge_RODATA_e : toU64 (↑RODATA_e : Int) = RODATA_e := by native_decide
+
 /-! ## Program -/
 
 @[simp] def prog : Program := #[
@@ -34,7 +51,7 @@ end EffectiveAddr
   .ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE,       -- 1
   .jge .r3 (.reg .r4) 4,                           -- 2
   .exit,                                           -- 3
-  .lddw .r1 0 /- undefined: e -/,                  -- 4: end
+  .lddw .r1 RODATA_e,                              -- 4: end
   .lddw .r2 17,                                    -- 5
   .call .sol_log_,                                 -- 6
   .lddw .r0 1,                                     -- 7
@@ -46,7 +63,7 @@ end EffectiveAddr
   | 1 => some (.ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE)
   | 2 => some (.jge .r3 (.reg .r4) 4)
   | 3 => some (.exit)
-  | 4 => some (.lddw .r1 0 /- undefined: e -/)
+  | 4 => some (.lddw .r1 RODATA_e)
   | 5 => some (.lddw .r2 17)
   | 6 => some (.call .sol_log_)
   | 7 => some (.lddw .r0 1)
@@ -59,7 +76,7 @@ end EffectiveAddr
 @[simp] theorem insn_1 : progAt 1 = some (.ldx .dword .r4 .r1 TOKEN_ACCOUNT_BALANCE) := by native_decide
 @[simp] theorem insn_2 : progAt 2 = some (.jge .r3 (.reg .r4) 4) := by native_decide
 @[simp] theorem insn_3 : progAt 3 = some (.exit) := by native_decide
-@[simp] theorem insn_4 : progAt 4 = some (.lddw .r1 0 /- undefined: e -/) := by native_decide
+@[simp] theorem insn_4 : progAt 4 = some (.lddw .r1 RODATA_e) := by native_decide
 @[simp] theorem insn_5 : progAt 5 = some (.lddw .r2 17) := by native_decide
 @[simp] theorem insn_6 : progAt 6 = some (.call .sol_log_) := by native_decide
 @[simp] theorem insn_7 : progAt 7 = some (.lddw .r0 1) := by native_decide

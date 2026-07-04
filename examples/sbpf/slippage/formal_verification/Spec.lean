@@ -26,10 +26,9 @@ the program MUST exit with code 1.
 
 The reject path logs "Slippage exceeded" before exiting. qedsvm ≥ v0.9.0
 models `sol_log_` faithfully (guarded 17-byte read at r1, log push) instead
-of a no-op, so the proof needs the message region readable. `h_rt_log` is
-stated at address 0 because asm2lean resolves the `.rodata` symbol `e` to 0
-(the lift does not lay out rodata); the hypothesis tracks the lifted
-program, not the deployed VA. -/
+of a no-op, so the proof needs the message region readable: `h_rt_log`
+covers `RODATA_e` (the asm2lean-laid-out address of the `.rodata` string
+in the program region — see the layout note in Program.lean). -/
 
 set_option maxHeartbeats 800000 in
 theorem rejects_insufficient_balance
@@ -37,7 +36,7 @@ theorem rejects_insufficient_balance
     (minBal tokenBal : Nat)
     (h_rt_min : rt.containsRange (inputAddr + 10520) 8 = true)
     (h_rt_tok : rt.containsRange (inputAddr + 160) 8 = true)
-    (h_rt_log : rt.containsRange 0 17 = true)
+    (h_rt_log : rt.containsRange RODATA_e RODATA_e_LEN = true)
     (h_min : readU64 mem (inputAddr + 10520) = minBal)
     (h_tok : readU64 mem (inputAddr + 160) = tokenBal)
     (h_slip : minBal ≥ tokenBal) :

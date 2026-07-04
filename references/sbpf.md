@@ -31,11 +31,14 @@ $QEDGEN asm2lean --input src/program.s --output formal_verification/ProgramProg.
 
 This generates:
 - `abbrev` definitions for all `.equ` constants (offsets as `Int`, values as `Nat`)
+- `RODATA_<sym>` / `RODATA_<sym>_LEN` / `RODATA_<sym>_BYTES` for each `.rodata` symbol (`.ascii`/`.asciz`/`.byte`/`.short`/`.word`/`.quad`), laid out at `BYTECODE_START` + .text size (lddw = 2 slots). Reference these by NAME in proofs — the numeral approximates the deployed VA (ELF header/section offsets are invisible to a source lift); exact fidelity is the binary lane's job
 - `@[simp] def prog : Program` with named constants and index comments
 - For large programs (>64 instructions): `def progAt : Nat -> Option Insn` — chunked function-based lookup for O(1) simp performance
 - `@[simp] theorem ea_NAME` — effectiveAddr lemmas for each offset symbol
-- `@[simp] theorem bridge_NAME` — toU64 bridge lemmas for Nat lddw constants
+- `@[simp] theorem bridge_NAME` — toU64 bridge lemmas for Nat lddw constants (including rodata addresses)
 - `@[simp] theorem insn_N` — instruction fetch cache via `native_decide`
+
+Programs that `call sol_log_` on a rodata string need `rt.containsRange RODATA_<sym> RODATA_<sym>_LEN = true` as a hypothesis (qedsvm ≥ v0.9.0 models the guarded read); pin the logged bytes with `readBytes mem RODATA_<sym> RODATA_<sym>_LEN = RODATA_<sym>_BYTES` when the property needs message content.
 
 ### Assembly syntax reference
 
