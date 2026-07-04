@@ -76,10 +76,19 @@ theorem rejects_insufficient_lamports
     (executeFn progAt (initState inputAddr mem rt) 20).exitCode = some E_INSUFFICIENT_LAMPORTS := by
   wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
 
-/-! ## P3: happy path → exit 0
+/-! ## P3: happy path → reaches the CPI boundary
 
-   All checks pass, balance sufficient → normal exit.
-   The program invokes sol_invoke_signed (CPI) then exits with r0 = 0. -/
+   All checks pass, balance sufficient → after the 15-instruction
+   validation prefix, control sits AT the `sol_invoke_signed` call
+   (pc 15) with no error, r2 = sender balance, r4 = transfer amount.
+
+   qedsvm ≥ v0.9.0 models the proof-facing CPI fail-closed (`Cpi.exec`
+   aborts rather than fabricate a successful no-effect invoke — audit
+   C4/C5), so the pre-v0.9 "exit 0 through the CPI" statement is no
+   longer provable, and was never sound. The boundary statement is the
+   honest claim this file's scope (the validation prefix) supports;
+   what the invoke is HANDED can be pinned with `SVM.Solana.cpiEnvelope`
+   once the CPI construction is lifted (the .s elides it). -/
 
 set_option maxHeartbeats 16000000 in
 theorem accepts_valid_transfer
@@ -102,8 +111,12 @@ theorem accepts_valid_transfer
     (h_amt   : readU64 mem (inputAddr + 31040) = amount)
     (h_bal   : readU64 mem (inputAddr + 80) = senderLamports)
     (h_suf   : senderLamports ≥ amount) :
-    (executeFn progAt (initState inputAddr mem rt) 20).exitCode = some 0 := by
+    (executeFn progAt (initState inputAddr mem rt) 15).pc = 15 ∧
+    (executeFn progAt (initState inputAddr mem rt) 15).exitCode = none ∧
+    (executeFn progAt (initState inputAddr mem rt) 15).regs.r2 = senderLamports ∧
+    (executeFn progAt (initState inputAddr mem rt) 15).regs.r4 = amount := by
   have h_not_lt : ¬(senderLamports < amount) := by omega
-  wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;>
+    wp_exec [progAt] [ea_0, ea_88, ea_10344, ea_10424, ea_20680, ea_31032, ea_31040, ea_80]
 
 end TransferProofs

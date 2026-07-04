@@ -20,7 +20,10 @@ set_option maxRecDepth 4096
 /-! ## Initial state
 
    The tree program reads both r1 (input accounts buffer) and r2 (instruction
-   data pointer). Standard initState only sets r1. -/
+   data pointer). Standard initState only sets r1. (qedsvm ≥ v0.9.0 ships
+   `initState2` for this shape; kept local for the wp_exec bracket.)
+   `cuBudget` must be nonzero: runs are budget-metered (H5) and the field
+   defaults to 0, which halts after one step. 200000 = the tx default. -/
 
 @[simp] def treeInit (accts insn : Nat) (mem : Mem) (rt : RegionTable) : State where
   regs := { r1 := accts, r2 := insn, r10 := STACK_START + 0x1000 }
@@ -28,6 +31,7 @@ set_option maxRecDepth 4096
   regions := rt
   pc := 0
   exitCode := none
+  cuBudget := 200000
 
 /-! ## effectiveAddr helper for negative offset -/
 
