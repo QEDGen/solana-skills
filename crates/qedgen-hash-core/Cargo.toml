@@ -1,0 +1,19 @@
+[package]
+name = "qedgen-hash-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["abishekk92"]
+description = "Canonical spec/body hashing shared by the qedgen CLI and the #[qed] proc macro"
+license = "MIT"
+
+# Keep this dependency list minimal: the proc-macro crate depends on this
+# crate, so everything here rides on every user's compile path.
+[dependencies]
+proc-macro2 = { workspace = true }
+sha2 = { workspace = true }
+
+# Dev-only: the stamp cross-check test parses checked-in example programs
+# to re-derive `#[qed(verified, hash = …)]` values. Never ships.
+[dev-dependencies]
+syn = { workspace = true }
+quote = { workspace = true }

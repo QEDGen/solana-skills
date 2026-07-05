@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/qedgen",
+    "crates/qedgen-hash-core",
     "crates/qedgen-macros",
     "crates/qedgen-sandbox",
     "crates/qed-drift-fixture",

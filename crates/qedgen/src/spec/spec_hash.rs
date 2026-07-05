@@ -1,87 +1,46 @@
 //! Handler-block extraction + SHA-256-hex16 spec/body hashing.
 //!
-//! The algorithms here MUST match `qedgen-macros` (which recomputes the
-//! emitted `hash = "..."` / `spec_hash = "..."` values at compile time):
-//!   - `spec_hash_for_handler` ↔ `qedgen-macros/src/spec_bind.rs`
-//!   - `body_hash_for_fn`      ↔ `qedgen-macros/src/verified.rs::content_hash`
-//!
-//! Any divergence yields spurious drift — a change here breaks both crates.
+//! The canonical algorithms live in the shared `qedgen-hash-core` crate,
+//! which `qedgen-macros` also depends on — so the CLI and the proc-macro's
+//! compile-time recomputation of `hash = "..."` / `spec_hash = "..."` agree
+//! by construction (they used to be hand-kept mirrors; that drift class bit
+//! once via `--update-hashes`). This module keeps the syn-dependent wrappers
+//! (`body_hash_for_*`, `accounts_struct_hash`) and re-exports the rest so
+//! `crate::spec_hash::…` call sites are unchanged.
 
 use quote::ToTokens;
-use sha2::{Digest, Sha256};
 
-fn sha256_hex16(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let full = format!("{:x}", hasher.finalize());
-    full[..16].to_string()
-}
+// `spec_hash_for_handler` has call sites across drift/reconcile/fill/
+// scaffold; the other three are part of this module's historical API and
+// are exercised by the test module below (qedgen is a binary crate, so
+// rustc flags re-exports without non-test callers — hence the allow).
+use qedgen_hash_core::token_stream_hash;
+#[allow(unused_imports)]
+pub use qedgen_hash_core::{
+    extract_handler_block, normalize_spec_block, spec_context_digest, spec_hash_for_handler,
+};
 
-/// Body hash of a `syn::ItemFn`. MUST match
-/// `qedgen-macros::verified::content_hash` byte-for-byte: strip all outer
-/// attributes, normalize via `to_token_stream()`, sha256-hex16.
+/// Body hash of a `syn::ItemFn`: strip all outer attributes, then hash the
+/// canonical token stream. Same composition as
+/// `qedgen-macros::verified::FnLike::content_hash` — both delegate to
+/// `qedgen_hash_core::token_stream_hash`.
 pub fn body_hash_for_fn(func: &syn::ItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
-    sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
+    token_stream_hash(&stripped.to_token_stream())
 }
 
-/// Body hash for an impl method; same algorithm as `body_hash_for_fn`.
-/// Mirrors `qedgen-macros::verified::FnLike`'s Impl-arm hash (method-shape
-/// `#[qed]` annotations).
+/// Body hash for an impl method; same algorithm as `body_hash_for_fn`
+/// (method-shape `#[qed]` annotations).
 pub fn body_hash_for_impl_fn(func: &syn::ImplItemFn) -> String {
     let mut stripped = func.clone();
     stripped.attrs.clear();
-    sha256_hex16(&canonical_token_string(&stripped.to_token_stream()))
+    token_stream_hash(&stripped.to_token_stream())
 }
 
-/// Canonical token string: each token in order, single-space separated.
-/// MUST mirror `qedgen-macros::canonical_token_string` byte-for-byte —
-/// rustc-vs-from_str spacing divergence forces this hand-rolled traversal.
-fn canonical_token_string(stream: &proc_macro2::TokenStream) -> String {
-    use proc_macro2::{Delimiter, TokenTree};
-    let mut out = String::new();
-    fn walk(stream: proc_macro2::TokenStream, out: &mut String) {
-        for tt in stream {
-            match tt {
-                TokenTree::Group(g) => {
-                    let (open, close) = match g.delimiter() {
-                        Delimiter::Brace => ('{', '}'),
-                        Delimiter::Bracket => ('[', ']'),
-                        Delimiter::Parenthesis => ('(', ')'),
-                        Delimiter::None => (' ', ' '),
-                    };
-                    if g.delimiter() != Delimiter::None {
-                        out.push(open);
-                        out.push(' ');
-                    }
-                    walk(g.stream(), out);
-                    if g.delimiter() != Delimiter::None {
-                        out.push(close);
-                        out.push(' ');
-                    }
-                }
-                TokenTree::Ident(i) => {
-                    out.push_str(&i.to_string());
-                    out.push(' ');
-                }
-                TokenTree::Literal(l) => {
-                    out.push_str(&l.to_string());
-                    out.push(' ');
-                }
-                TokenTree::Punct(p) => {
-                    out.push(p.as_char());
-                    out.push(' ');
-                }
-            }
-        }
-    }
-    walk(stream.clone(), &mut out);
-    out
-}
-
-/// Hash a `pub struct <name>` from Rust source. MUST match
-/// `qedgen-macros::spec_bind::accounts_struct_hash_in`. Seals the handler's
+/// Hash a `pub struct <name>` from Rust source. Same syn walk as
+/// `qedgen-macros::spec_bind::accounts_struct_hash_in`; the hash itself is
+/// the shared `token_stream_hash`. Seals the handler's
 /// `#[derive(Accounts)]` struct so constraint edits (`#[account(mut)]`,
 /// `has_one`, `seeds`) trip `compile_error!` like body edits do.
 ///
@@ -104,8 +63,7 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
                 // (rustc vs from_str). Raw `to_token_stream().to_string()`
                 // carries per-`Punct` `Spacing` from source spacing — hidden
                 // drift between the binary and the macro on the same file.
-                let canonical = canonical_token_string(&stripped.to_token_stream());
-                return Some(sha256_hex16(&canonical));
+                return Some(token_stream_hash(&stripped.to_token_stream()));
             }
             syn::Item::Mod(item_mod) => {
                 if let Some((_, sub_items)) = &item_mod.content {
@@ -118,327 +76,6 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
         }
     }
     None
-}
-
-/// Extract the raw text of a `handler <name> { ... }` block (braces included)
-/// via keyword search + balanced-brace scanning, treating `//`, `/* */`, and
-/// `"…"` as opaque regions.
-pub fn extract_handler_block(source: &str, handler_name: &str) -> Option<String> {
-    let needle = "handler";
-    let bytes = source.as_bytes();
-    let mut search_from = 0;
-    while let Some(pos) = source[search_from..].find(needle) {
-        let abs = search_from + pos;
-        let prev_ok = abs == 0 || bytes[abs - 1].is_ascii_whitespace();
-        let after = abs + needle.len();
-        if !prev_ok || after >= bytes.len() || !bytes[after].is_ascii_whitespace() {
-            search_from = abs + 1;
-            continue;
-        }
-        let rest = &source[after..];
-        let rest_trimmed = rest.trim_start();
-        let ws_consumed = rest.len() - rest_trimmed.len();
-        let mut id_end = 0;
-        for (i, c) in rest_trimmed.char_indices() {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                id_end = i + c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        if id_end == 0 {
-            search_from = abs + 1;
-            continue;
-        }
-        let ident = &rest_trimmed[..id_end];
-        if ident != handler_name {
-            search_from = abs + 1;
-            continue;
-        }
-        let body_search_start = after + ws_consumed + id_end;
-        let mut cursor = body_search_start;
-        while cursor < bytes.len() && bytes[cursor] != b'{' {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() {
-            return None;
-        }
-        let block_start = cursor;
-        let mut depth = 0i32;
-        let mut in_line_comment = false;
-        let mut in_block_comment = false;
-        let mut in_str = false;
-        while cursor < bytes.len() {
-            let b = bytes[cursor];
-            if in_line_comment {
-                if b == b'\n' {
-                    in_line_comment = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_block_comment {
-                if b == b'*' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' {
-                    in_block_comment = false;
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_str {
-                if b == b'\\' && cursor + 1 < bytes.len() {
-                    cursor += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_str = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if b == b'/' && cursor + 1 < bytes.len() {
-                let nxt = bytes[cursor + 1];
-                if nxt == b'/' {
-                    in_line_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-                if nxt == b'*' {
-                    in_block_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-            }
-            if b == b'"' {
-                in_str = true;
-                cursor += 1;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(source[block_start..cursor + 1].to_string());
-                }
-            }
-            cursor += 1;
-        }
-        return None;
-    }
-    None
-}
-
-/// Normalize a handler block before hashing so cosmetic edits don't fire
-/// drift while semantic edits do: strip `//` and `/* */` comments, collapse
-/// whitespace runs outside strings to one space, trim; string literals
-/// (incl. `\"` escapes) pass through verbatim — interior spaces are
-/// semantic. MUST match `qedgen-macros::spec_bind::normalize_spec_block`.
-pub fn normalize_spec_block(block: &str) -> String {
-    let bytes = block.as_bytes();
-    let mut out = String::with_capacity(block.len());
-    let mut i = 0;
-    let mut in_str = false;
-    let mut last_emit_was_ws = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_str {
-            out.push(b as char);
-            if b == b'\\' && i + 1 < bytes.len() {
-                out.push(bytes[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_str = false;
-            }
-            i += 1;
-            last_emit_was_ws = false;
-            continue;
-        }
-        // Line comment
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            // The newline ends the comment; fall through so the
-            // whitespace-collapse arm below treats it as a separator.
-            continue;
-        }
-        // Block comment
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = i.saturating_add(2);
-            // Treat the comment gap as a single whitespace separator
-            // unless we'd otherwise emit two spaces in a row.
-            if !out.is_empty() && !last_emit_was_ws {
-                out.push(' ');
-                last_emit_was_ws = true;
-            }
-            continue;
-        }
-        if b == b'"' {
-            in_str = true;
-            out.push('"');
-            i += 1;
-            last_emit_was_ws = false;
-            continue;
-        }
-        if b.is_ascii_whitespace() {
-            if !out.is_empty() && !last_emit_was_ws {
-                out.push(' ');
-                last_emit_was_ws = true;
-            }
-            i += 1;
-            continue;
-        }
-        out.push(b as char);
-        last_emit_was_ws = false;
-        i += 1;
-    }
-    out.trim().to_string()
-}
-
-/// Digest of everything in `source` *except* handler blocks. Handler blocks
-/// are sealed individually by `spec_hash_for_handler`; all other top-level
-/// items are shared context that changes every handler's effective contract,
-/// so this digest is folded into each handler's spec_hash.
-///
-/// Algorithm: balanced-brace scan (as `extract_handler_block`, collecting
-/// all ranges), remove handler ranges, normalize, sha256-hex16.
-///
-/// Conservative-by-design: a top-level change NO handler references still
-/// invalidates every hash — over-invalidates vs. dataflow analysis, but
-/// simple and deterministic.
-///
-/// MUST mirror `qedgen-macros::spec_bind::spec_context_digest`.
-pub fn spec_context_digest(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut search_from = 0;
-    let mut last_emit = 0usize;
-    let needle = "handler";
-
-    while let Some(pos) = source[search_from..].find(needle) {
-        let abs = search_from + pos;
-        let prev_ok = abs == 0 || bytes[abs - 1].is_ascii_whitespace();
-        let after = abs + needle.len();
-        if !prev_ok || after >= bytes.len() || !bytes[after].is_ascii_whitespace() {
-            search_from = abs + 1;
-            continue;
-        }
-        // Skip past `handler <name>` to find the opening brace, if any.
-        let mut cursor = after;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        // Identifier
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
-        {
-            cursor += 1;
-        }
-        // Whitespace + optional `(...)` params + `:` + lifecycle clause —
-        // everything up to the first `{` that opens the body.
-        while cursor < bytes.len() && bytes[cursor] != b'{' {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() {
-            search_from = abs + 1;
-            continue;
-        }
-        let block_start = abs;
-        let body_start = cursor;
-        let mut depth = 0i32;
-        let mut in_line_comment = false;
-        let mut in_block_comment = false;
-        let mut in_str = false;
-        cursor = body_start;
-        while cursor < bytes.len() {
-            let b = bytes[cursor];
-            if in_line_comment {
-                if b == b'\n' {
-                    in_line_comment = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_block_comment {
-                if b == b'*' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' {
-                    in_block_comment = false;
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_str {
-                if b == b'\\' && cursor + 1 < bytes.len() {
-                    cursor += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_str = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if b == b'/' && cursor + 1 < bytes.len() {
-                let nxt = bytes[cursor + 1];
-                if nxt == b'/' {
-                    in_line_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-                if nxt == b'*' {
-                    in_block_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-            }
-            if b == b'"' {
-                in_str = true;
-                cursor += 1;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    let block_end = cursor + 1;
-                    out.push_str(&source[last_emit..block_start]);
-                    out.push(' ');
-                    last_emit = block_end;
-                    search_from = block_end;
-                    break;
-                }
-            }
-            cursor += 1;
-        }
-        if depth != 0 {
-            // Unterminated handler block — bail out, hash what we have.
-            break;
-        }
-    }
-    out.push_str(&source[last_emit..]);
-    sha256_hex16(&normalize_spec_block(&out))
-}
-
-/// Spec hash for a handler. `None` if the block is absent or the handler is
-/// bodyless (`handler foo : A -> B` with no braces — an empty contract; the
-/// macro side also computes `None`). The block is normalized before hashing,
-/// and `spec_context_digest(source)` is folded in so top-level shared
-/// declarations propagate into every handler's hash.
-pub fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    let block = extract_handler_block(source, handler_name)?;
-    let normalized = normalize_spec_block(&block);
-    let context = spec_context_digest(source);
-    Some(sha256_hex16(&format!("{}:{}", normalized, context)))
 }
 
 #[cfg(test)]
