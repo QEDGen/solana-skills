@@ -209,7 +209,6 @@ pub struct AccountTable {
     pub pdas: BTreeMap<Symbol, PdaDeclaration>,
     /// Reserved for spec-level account shapes shared across handlers; today
     /// every binding is handler-scoped (`HandlerMir.accounts`).
-    #[allow(dead_code)]
     pub spec_level_bindings: BTreeMap<Symbol, AccountBindingShape>,
 }
 

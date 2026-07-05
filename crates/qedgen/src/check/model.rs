@@ -107,14 +107,11 @@ pub struct ParsedRequires {
 #[derive(Debug, Clone)]
 pub struct ParsedEnsures {
     pub lean_expr: String,
-    #[allow(dead_code)]
     pub rust_expr: String,
-    #[allow(dead_code)]
     pub rust_expr_pod: String,
     /// Binary-mode rendering (`state.x` → `post.x`, `old(state.x)` → `pre.x`)
     /// for the ensures-preservation Kani harness; `rust_expr` flattens both to
     /// `s.x`, losing the pre/post distinction.
-    #[allow(dead_code)]
     pub rust_expr_binary: String,
     /// Binary-mode + math-exact rendering (see
     /// `ParsedRequires::rust_expr_math`) for harness asserts (issue #146).
@@ -158,7 +155,6 @@ pub struct ParsedInvariant {
     /// Lean form of the predicate. `None` for description-only.
     pub lean_expr: Option<String>,
     /// Rust form of the predicate. `None` for description-only.
-    #[allow(dead_code)]
     pub rust_expr: Option<String>,
     /// Source AST body for the `old_in_single_state_context` lint.
     /// `None` for the description-only form.
@@ -261,7 +257,6 @@ pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
 
 /// PDA seed declaration from a qedspec block.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedPda {
     pub name: String,
     pub seeds: Vec<String>,
@@ -269,37 +264,9 @@ pub struct ParsedPda {
 
 /// Event declaration from a qedspec block.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedEvent {
     pub name: String,
     pub fields: Vec<(String, String)>,
-}
-
-/// Account entry within an operation's context: block.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedAccountEntry {
-    pub name: String,
-    pub account_type: String,
-    pub inner_type: Option<String>,
-    pub is_mut: bool,
-    pub is_init: bool,
-    pub is_init_if_needed: bool,
-    pub payer: Option<String>,
-    pub seeds_ref: Option<String>,
-    pub has_bump: bool,
-    pub close_target: Option<String>,
-    pub has_one: Option<String>,
-    pub token_mint: Option<String>,
-    pub token_authority: Option<String>,
-}
-
-/// Per-operation account context.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedContext {
-    pub operation: String,
-    pub accounts: Vec<ParsedAccountEntry>,
 }
 
 // ============================================================================
@@ -308,7 +275,6 @@ pub struct ParsedContext {
 
 /// Known pubkey as 4-chunk U64 representation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedPubkey {
     pub name: String,
     pub chunks: Vec<String>, // 4 U64 values as strings
@@ -316,17 +282,16 @@ pub struct ParsedPubkey {
 
 /// A field in an input/instruction layout with byte offset.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedLayoutField {
     pub name: String,
     pub field_type: String,
     pub offset: i64,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
 /// An sBPF validation guard.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedGuard {
     pub name: String,
     pub doc: Option<String>,
@@ -338,16 +303,16 @@ pub struct ParsedGuard {
 
 /// An sBPF property (memory safety, data flow, CPI correctness, etc).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedSbpfProperty {
     pub name: String,
     pub doc: Option<String>,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub kind: SbpfPropertyKind,
 }
 
 /// The different kinds of sBPF properties.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
 pub enum SbpfPropertyKind {
     /// Memory safety — scope over guards or named list
     Scope { targets: Vec<String> },
@@ -367,7 +332,7 @@ pub enum SbpfPropertyKind {
 
 /// Sub-kinds of data flow properties.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
 pub enum FlowKind {
     FromSeeds(Vec<String>),
     Through(Vec<String>),
@@ -375,10 +340,11 @@ pub enum FlowKind {
 
 /// A single instruction handler in an sBPF program.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInstruction {
     pub name: String,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub discriminant: Option<String>,
     pub entry: Option<u64>,
     pub constants: Vec<(String, String)>,
@@ -391,10 +357,10 @@ pub struct ParsedInstruction {
 
 /// Error code with optional numeric value and description.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedErrorCode {
     pub name: String,
     pub value: Option<u64>,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
@@ -475,9 +441,6 @@ pub struct ParsedHandler {
     pub takes_params: Vec<(String, String)>,
     /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
     pub guard_str: Option<String>,
-    /// Legacy guard expression (Rust form). Deprecated: use `requires` instead.
-    #[allow(dead_code)]
-    pub guard_str_rust: Option<String>,
     /// Legacy abort conditions. Deprecated: use `requires ... else` instead.
     pub aborts_if: Vec<ParsedAbort>,
     /// Requires clauses: guard + optional abort. When error_name is Some,
@@ -516,7 +479,6 @@ pub struct ParsedHandler {
     pub properties: Vec<String>,
     /// `call Interface.handler(name = expr, ...)` sites resolved against a
     /// top-level `interface` block. Empty for handlers that don't CPI.
-    #[allow(dead_code)]
     pub calls: Vec<ParsedCall>,
     /// Conditional-effect tree: `Some` when the spec uses `match` inside
     /// `effect { … }`. The flat `effects` field still holds the union of
@@ -564,7 +526,6 @@ pub struct ParsedEffectArm {
 /// target is split into interface + handler name for easier lookup; args
 /// carry both Lean and Rust renderings so backends can pick their form.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedCall {
     pub target_interface: String,
     pub target_handler: String,
@@ -583,7 +544,6 @@ pub struct ParsedCall {
 }
 
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedCallArg {
     pub name: String,
     pub lean_expr: String,
@@ -601,7 +561,6 @@ pub struct ParsedCallArg {
 /// for v3.0. Substitution helpers synthesize `pre.` / `post.` prefixes and
 /// Lean `(·.<caller_field>)` at use sites.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedStateBinder {
     /// Callee abstract field name, matched verbatim (word-boundary) in the
     /// callee's `ensures` text.
@@ -698,29 +657,16 @@ pub struct ParsedSpec {
     // Legacy fields — populated by forward bridge for backward compat.
     pub invariants: Vec<ParsedInvariant>,
     pub properties: Vec<ParsedProperty>,
-    #[allow(dead_code)]
-    pub has_u64_fields: bool,
-    #[allow(dead_code)]
-    pub u64_field_names: Vec<String>,
-    #[allow(dead_code)]
     pub program_id: Option<String>,
-    #[allow(dead_code)]
     pub program_name: String,
     /// Flat union of state fields across account types (single-account: the
     /// account's fields; multi-account: the primary account's).
-    #[allow(dead_code)]
     pub state_fields: Vec<(String, String)>,
     /// Flat lifecycle states (union across all account types for backward compat).
-    #[allow(dead_code)]
     pub lifecycle_states: Vec<String>,
-    #[allow(dead_code)]
     pub pdas: Vec<ParsedPda>,
-    #[allow(dead_code)]
     pub events: Vec<ParsedEvent>,
-    #[allow(dead_code)]
     pub error_codes: Vec<String>,
-    #[allow(dead_code)]
-    pub contexts: Vec<ParsedContext>,
     /// Named account types with per-account fields and lifecycle.
     /// Empty for single-account specs that use bare `state {}`.
     pub account_types: Vec<ParsedAccountType>,
@@ -737,29 +683,22 @@ pub struct ParsedSpec {
     pub sum_types: Vec<ParsedSumType>,
 
     /// Known pubkeys as 4-chunk U64 representations.
-    #[allow(dead_code)]
     pub pubkeys: Vec<ParsedPubkey>,
     /// Instruction handlers (sBPF mode).
-    #[allow(dead_code)]
     pub instructions: Vec<ParsedInstruction>,
     /// Global error codes with values (sBPF `Name = value "desc"` syntax).
-    #[allow(dead_code)]
     pub valued_errors: Vec<ParsedErrorCode>,
     /// Global named constants (`const NAME = VALUE`).
-    #[allow(dead_code)]
     pub constants: Vec<(String, String)>,
     /// Type aliases: `type AccountIdx = Fin[MAX_ACCOUNTS]` etc.
     /// Stored as (alias_name, rendered_target). Target is `Fin[N]`, `Nat`,
     /// a record name, etc. — whatever `TypeRef` the source points at.
     pub type_aliases: Vec<(String, String)>,
     /// Cover blocks (reachability properties).
-    #[allow(dead_code)]
     pub covers: Vec<ParsedCover>,
     /// Liveness properties (leads-to).
-    #[allow(dead_code)]
     pub liveness_props: Vec<ParsedLiveness>,
     /// Environment blocks (external state).
-    #[allow(dead_code)]
     pub environments: Vec<ParsedEnvironment>,
 
     /// Callee contracts for CPI (docs/design/spec-composition.md §2).
@@ -788,7 +727,6 @@ pub struct ParsedSpec {
     /// bundles. Handlers reference them via `include <name>`, expanded into
     /// the handler's `requires` at parse time so downstream lints/codegen
     /// see the union as if inlined.
-    #[allow(dead_code)]
     pub schemas: Vec<ParsedSchema>,
 
     /// Helper functions referenced by name but not declared in the spec, as
@@ -801,7 +739,6 @@ pub struct ParsedSpec {
     /// from `ensures`. Lower to Lean `def`s and inline at Kani assertion
     /// sites. Unlike `uninterpreted_helpers` (axiomatic), these carry an
     /// executable body.
-    #[allow(dead_code)]
     pub ref_impls: Vec<ParsedRefImpl>,
 
     /// `ghost <name> : <Ty> { init {…} on H {…} }` spec-only auxiliary
@@ -821,21 +758,18 @@ pub struct ParsedSpec {
     /// sibling axiom module and emits a `require` directive;
     /// `lint_pinned_imports` emits `cpi_unverified_callee` P2 for pinned
     /// imports NOT in this set (the Stance-1 trust gap).
-    #[allow(dead_code)]
     pub verified_callees: std::collections::BTreeMap<String, std::path::PathBuf>,
 
     /// proof_hash drift detected during qed.lock reconciliation in Frozen
     /// mode; empty in Auto/Skip (lock auto-writes) and in Frozen without
     /// drift. main.rs routes these via `upstream_check::route_findings` —
     /// P2 by default, CRIT under `--strict`.
-    #[allow(dead_code)]
     pub proof_hash_findings: Vec<crate::upstream_check::DepCheckResult>,
 
     /// Proof-package dirs of every imported interface in the transitive
     /// closure that ships a Lake-buildable proof package (DFS-pre-order,
     /// deduped). `qedgen verify --recursive` builds each bottom-up so "dep
     /// graph fully proven" reduces to "every layer's Lake build succeeds."
-    #[allow(dead_code)]
     pub verified_proof_pkgs: Vec<std::path::PathBuf>,
 
     /// Per-import account-type bookkeeping: local name (alias or source
@@ -844,7 +778,6 @@ pub struct ParsedSpec {
     /// empty for interface-only imports (bundled stdlib stubs). Drives
     /// `codegen_mir::emit_imported_mirror` (`src/imported/<ns>.rs`) and
     /// `<ns>.<Type>` resolution in account-binding positions.
-    #[allow(dead_code)]
     pub imported_namespaces: std::collections::BTreeMap<String, ImportedNamespace>,
 }
 
@@ -852,7 +785,6 @@ pub struct ParsedSpec {
 /// so the body lowers into Spec.lean (`def`) and the impl-targeted Kani
 /// harness (inlined at the assertion site).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedRefImpl {
     pub name: String,
     pub doc: Option<String>,
@@ -909,7 +841,6 @@ pub enum ParsedHookKind {
 pub struct ParsedHookAssert {
     /// Lean rendering, retained for the deferred Lean enforcement path
     /// (qedsvm). Not consumed today — Lean ignores hooks.
-    #[allow(dead_code)]
     pub lean: String,
     pub rust: String,
 }
@@ -950,7 +881,6 @@ impl ParsedSpec {
 /// `from` keys into `qed.toml`'s `[dependencies]`. The local name at
 /// `call ...` sites is `as_name.unwrap_or(name)`.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedImport {
     pub name: String,
     pub from: String,
@@ -964,7 +894,6 @@ pub struct ParsedImport {
 /// `<ns>::<Type>` without depending on the foreign crate. Interface-only
 /// imports (bundled stdlib stubs) leave the map empty.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ImportedNamespace {
     /// Manifest dep key (`from "..."` value); cited in the generated
     /// mirror's banner comment for traceability.
@@ -977,20 +906,11 @@ pub struct ImportedNamespace {
     pub records: Vec<ParsedRecordType>,
 }
 
-impl ParsedImport {
-    /// Name used at `call <X>.handler(...)` sites; falls back to `name`
-    /// when no alias is declared.
-    #[allow(dead_code)]
-    pub fn local_name(&self) -> &str {
-        self.as_name.as_deref().unwrap_or(&self.name)
-    }
-}
-
 /// Callee contract: program ID + per-handler shape (and optional effects).
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInterface {
     pub name: String,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<ParsedUpstream>,
@@ -1007,14 +927,18 @@ pub struct ParsedInterface {
 /// backends that were actually run; `"lean"` appears only when the callee is
 /// genuinely proven, not axiomatized.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedUpstream {
+    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub package: Option<String>,
     pub version: Option<String>,
+    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub source: Option<String>,
     pub binary_hash: Option<String>,
+    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub idl_hash: Option<String>,
+    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_with: Vec<String>,
+    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_at: Option<String>,
 }
 
@@ -1022,9 +946,9 @@ pub struct ParsedUpstream {
 /// are empty for Tier-0 (shape-only) interfaces. Populated for Tier-1
 /// (hand-authored) and Tier-2 (imported) interfaces.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInterfaceHandler {
     pub name: String,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub params: Vec<(String, String)>,
     pub discriminant: Option<String>,
@@ -1045,9 +969,9 @@ pub struct ParsedInterfaceHandler {
 /// Parsed `schema` block: a named bundle of `requires` clauses handlers
 /// reference via `include <name>` (pause gating, time-window checks, …).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedSchema {
     pub name: String,
+    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     /// One entry per `requires expr else Err` clause; same shape as
     /// `ParsedHandler.requires` so the adapter can clone-and-append.

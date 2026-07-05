@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 /// One discovered instruction. Manual `Debug` prints just the name —
 /// `syn::ItemFn` lacks `Debug` without the heavy `extra-traits` feature.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Instruction {
     /// Pub fn ident inside the `#[program]` mod — the ABI name a
     /// `.qedspec` handler block should match.
@@ -30,7 +29,6 @@ impl std::fmt::Debug for Instruction {
 
 /// A user's Anchor program crate, as discovered via syn-based parsing.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct AnchorProject {
     /// Absolute path to the program's `lib.rs`.
     pub lib_rs_path: PathBuf,
@@ -43,7 +41,6 @@ pub struct AnchorProject {
 /// Parse the Anchor project rooted at `program_root` (the dir holding the
 /// program's `Cargo.toml`). Errors clearly on: missing `src/lib.rs`, Rust
 /// parse failure, no `#[program]` mod, or an instruction-less program mod.
-#[allow(dead_code)]
 pub fn parse_anchor_project(program_root: &Path) -> Result<AnchorProject> {
     let lib_rs = program_root.join("src").join("lib.rs");
     if !lib_rs.is_file() {
@@ -59,7 +56,6 @@ pub fn parse_anchor_project(program_root: &Path) -> Result<AnchorProject> {
 
 /// Parse a lib.rs source string; exposed for tests (production callers go
 /// through `parse_anchor_project`).
-#[allow(dead_code)]
 pub fn parse_lib_rs(lib_rs_path: &Path, source: &str) -> Result<AnchorProject> {
     let file: syn::File = syn::parse_str(source).map_err(|e| {
         anyhow!(

@@ -12,7 +12,6 @@ use crate::anchor_project::Instruction;
 
 /// Where the actual handler body lives.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub enum HandlerLocation {
     /// The `#[program]` mod fn itself is the handler — no forwarder.
     Inline {
@@ -67,7 +66,6 @@ impl std::fmt::Debug for HandlerLocation {
 
 /// Resolve where an instruction's handler body lives. `lib_rs_path` backs
 /// the Inline case; `program_root` roots the source walk for forwarders.
-#[allow(dead_code)]
 pub fn resolve_handler(
     instruction: &Instruction,
     lib_rs_path: &Path,

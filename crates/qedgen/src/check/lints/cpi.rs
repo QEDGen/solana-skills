@@ -289,7 +289,6 @@ pub(super) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<Completeness
 /// --require-verified` would reject; carries enough context for main.rs to
 /// render a CRIT line and exit non-zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct UnverifiedCallee {
     pub interface_name: String,
     pub fix_hint: String,
@@ -305,7 +304,6 @@ pub(crate) struct UnverifiedCallee {
 /// discharged by the validator itself, so counting them "unverified" would
 /// fail every spec that imports them. Empty vec = dep graph fully proven
 /// from a Stance-2 standpoint; mirrors `check_cpi_unverified_callee`.
-#[allow(dead_code)]
 pub(crate) fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
     let import_iface_names: std::collections::HashSet<&str> = spec
         .imports

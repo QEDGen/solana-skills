@@ -686,7 +686,6 @@ pub fn deposit() {}
     fn scan_ignores_non_qed_attrs() {
         let src = r#"
 #[derive(Debug)]
-#[allow(dead_code)]
 #[qed(verified, spec = "a.qedspec", handler = "h", spec_hash = "cc")]
 pub fn h() {}
 "#;

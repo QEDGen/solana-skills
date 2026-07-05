@@ -38,7 +38,7 @@ pub struct RegenDriftReport {
 }
 
 impl RegenDriftReport {
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // production reads the fields directly; kept as the test-side summary
     pub fn has_issues(&self) -> bool {
         !self.missing_manifests.is_empty() || !self.drift.is_empty()
     }
@@ -52,7 +52,7 @@ struct Example {
 }
 
 /// Default Check-mode entrypoint kept for test consumers.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production passes an explicit WriteMode via check_examples_with; kept as the test entry
 pub fn check_examples(examples_root: &Path) -> Result<RegenDriftReport> {
     check_examples_with(examples_root, WriteMode::Check)
 }

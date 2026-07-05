@@ -41,7 +41,6 @@ pub const LOCK_VERSION: u32 = 1;
 
 /// Top-level structure of `qed.lock`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct LockFile {
     pub version: u32,
     /// Sorted by `name` for a deterministic on-disk form.
@@ -52,7 +51,6 @@ pub struct LockFile {
 /// One resolved dependency snapshot. `ref` is a Rust keyword, so the field
 /// is `git_ref`, renamed to `ref` on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct LockEntry {
     /// Manifest dep key (the `from "..."` value in `import` statements).
     pub name: String,
@@ -112,14 +110,12 @@ pub struct LockEntry {
 
 /// `skip_serializing_if` predicate for default-false bools (serde has no
 /// `Option::is_none` analogue for plain `bool`).
-#[allow(dead_code)]
 fn is_false(b: &bool) -> bool {
     !*b
 }
 
 impl LockFile {
     /// Empty lock with the current schema version.
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             version: LOCK_VERSION,
@@ -129,7 +125,6 @@ impl LockFile {
 
     /// Sort by name (idempotent); call before serializing or comparing for
     /// determinism.
-    #[allow(dead_code)]
     pub fn sort_dependencies(&mut self) {
         self.dependencies.sort_by(|a, b| a.name.cmp(&b.name));
     }
@@ -147,7 +142,6 @@ impl Default for LockFile {
 
 /// What to do when the on-disk lock differs from the computed one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum LockMode {
     /// Write the new lock if it's missing or stale. Default.
     #[default]
@@ -155,7 +149,9 @@ pub enum LockMode {
     /// Error if the lock is missing or stale. Used in CI by
     /// `qedgen check --frozen` to detect un-bumped deps.
     Frozen,
-    /// Don't read or write the lock at all.
+    /// Don't read or write the lock at all. No production caller today —
+    /// parse paths pass Auto/Frozen; kept as the documented opt-out mode.
+    #[cfg_attr(not(test), allow(dead_code))]
     Skip,
 }
 
@@ -167,7 +163,6 @@ pub enum LockMode {
 /// hashed in sorted-path order with a separator between fragments so a
 /// dep that splits one file into two with no content change still
 /// changes the hash.
-#[allow(dead_code)]
 pub fn compute_spec_hash(sources: &[(std::path::PathBuf, String)]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -183,7 +178,6 @@ pub fn compute_spec_hash(sources: &[(std::path::PathBuf, String)]) -> String {
 /// `compute_spec_hash`. Lands in `LockEntry.proof_hash` so `--frozen`
 /// notices proof changes. `None` when the root is missing or has no `.lean`
 /// files (resolver would have set `has_proofs = false`; defensive).
-#[allow(dead_code)]
 pub fn compute_proof_hash(proof_pkg_root: &std::path::Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     if !proof_pkg_root.is_dir() {
@@ -214,7 +208,6 @@ pub fn compute_proof_hash(proof_pkg_root: &std::path::Path) -> Option<String> {
 /// Build a single lock entry from a resolved import + its manifest dep
 /// descriptor + the imported interface (which carries its `program_id`
 /// and optional `upstream` block).
-#[allow(dead_code)]
 pub fn entry_for_resolved(
     resolved: &crate::import_resolver::ResolvedImport,
     dep: &crate::qed_manifest::Dependency,
@@ -265,7 +258,6 @@ pub fn entry_for_resolved(
 /// Lock entry for a bundled-stdlib builtin import: no manifest dep exists,
 /// so source is `builtin:<key>` and version fields come from the imported
 /// interface's `upstream` block (when present).
-#[allow(dead_code)]
 pub fn entry_for_builtin(
     resolved: &crate::import_resolver::ResolvedImport,
     iface: &crate::check::ParsedInterface,
@@ -307,7 +299,6 @@ pub fn entry_for_builtin(
 /// via [`crate::upstream_check::route_findings`]). Frozen bails on
 /// structural drift (any other field, or added/removed entries); Auto
 /// writes the new lock either way.
-#[allow(dead_code)]
 pub fn handle_lock(
     spec_dir: &Path,
     computed: &LockFile,
@@ -383,7 +374,6 @@ fn structurally_equal(a: &LockFile, b: &LockFile) -> bool {
 /// `verified` entry (matched by name) whose proof_hash differs. Adds /
 /// removes are structural drift handled elsewhere — excluded here so the
 /// routing layer doesn't false-positive on them.
-#[allow(dead_code)]
 pub fn detect_proof_hash_drift_from_locks(
     on_disk: &LockFile,
     computed: &LockFile,
@@ -524,7 +514,6 @@ fn describe_lock_diff(existing: Option<&LockFile>, computed: &LockFile) -> Strin
 
 /// Read `<spec_dir>/qed.lock` if present. Returns `Ok(None)` when the
 /// file doesn't exist (the caller decides whether that's an error).
-#[allow(dead_code)]
 pub fn read(spec_dir: &Path) -> Result<Option<LockFile>> {
     let path = spec_dir.join(LOCK_FILENAME);
     if !path.exists() {
@@ -547,7 +536,6 @@ pub fn read(spec_dir: &Path) -> Result<Option<LockFile>> {
 
 /// Write `qed.lock` to `<spec_dir>/qed.lock`, sorting dependencies by
 /// name first so the on-disk form is deterministic.
-#[allow(dead_code)]
 pub fn write(spec_dir: &Path, lock: &LockFile) -> Result<()> {
     let mut to_write = lock.clone();
     to_write.sort_dependencies();

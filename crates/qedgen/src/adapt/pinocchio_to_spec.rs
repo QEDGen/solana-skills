@@ -84,7 +84,7 @@ impl ProgramAdapter for NativeAdapter<'_> {
 
 /// Takes handler names directly so rendering is testable independent of the
 /// source walker.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production goes through render_skeleton_from_model; kept as the test entry
 pub fn render_skeleton_from_handlers(handlers: &[String], program_name: &str) -> String {
     let model = program_model_from_handlers(handlers, program_name, ProgramFramework::Pinocchio);
     render_skeleton_from_model(&model)
