@@ -538,13 +538,7 @@ pub(crate) fn emit_pinocchio_effect_body(
 /// emission (`pragma state_repr = adt` via `state_repr_is_adt`).
 /// Single-record account types, single-variant ADTs, multi-account specs,
 /// and non-opted specs all stay on the flat-fields + `Status`-enum path.
-/// Public re-export of `is_multi_variant_adt_state` for check.rs's
-/// seeds-suppression logic.
-pub fn is_multi_variant_adt_state_pub(spec: &ParsedSpec) -> bool {
-    is_multi_variant_adt_state(spec)
-}
-
-pub(crate) fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
+pub fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
     spec.state_repr_is_adt()
         && spec.account_types.len() == 1
         && spec

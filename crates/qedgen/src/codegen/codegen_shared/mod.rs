@@ -23,6 +23,7 @@ pub(crate) use std::path::Path;
 /// error instead of shipping silently.
 pub(crate) const BODY_HASH_PLACEHOLDER: &str = "QEDGEN_FIXUP_BODY_HASH";
 
+mod account_attr;
 mod cargo_toml;
 mod cpi;
 mod effect;
@@ -31,6 +32,7 @@ mod guards;
 mod scaffold;
 mod types;
 
+pub(crate) use account_attr::*;
 pub(crate) use cargo_toml::*;
 pub(crate) use cpi::*;
 pub(crate) use effect::*;

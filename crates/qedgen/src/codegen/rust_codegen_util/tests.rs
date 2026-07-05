@@ -374,7 +374,7 @@ type State
 handler close : State.Open -> State.Closed { effect { x := 0 } }
 "#;
     let spec = parse_str(src).expect("parse");
-    let mutable = mutable_fields(&spec.state_fields);
+    let mutable = field_refs(&spec.state_fields);
     let mut out = String::new();
     emit_state_struct_with_lifecycle(
         &mut out,

@@ -6,4 +6,3 @@ pub(crate) mod idl2spec;
 pub(crate) mod import_resolver;
 pub(crate) mod quantifier;
 pub(crate) mod spec_hash;
-pub(crate) mod validate;

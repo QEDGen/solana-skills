@@ -2,18 +2,47 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CONSOLIDATED_LAKEFILE: &str = r#"import Lake
+/// Lakefile for the consolidated project. `name` follows the same
+/// `package <name>Proofs` / `lean_lib <Name>Proofs` convention as
+/// `init.rs::generate_lakefile` (this was previously hardcoded to
+/// `escrowProofs` for every project).
+fn consolidated_lakefile(name: &str) -> String {
+    let pascal = to_namespace(name);
+    format!(
+        r#"import Lake
 open Lake DSL
 
-package escrowProofs
+package {name}Proofs
 
 require qedgenSupport from
   "./lean_solana"
 
 @[default_target]
-lean_lib EscrowProofs where
-  roots := #[`EscrowProofs]
-"#;
+lean_lib {pascal}Proofs where
+  roots := #[`{pascal}Proofs]
+"#
+    )
+}
+
+/// Project name for the consolidated lakefile: the output directory's
+/// basename, sanitized to a Lean-identifier-safe form (separators become
+/// `_`, anything else non-alphanumeric is dropped).
+fn consolidated_project_name(output_dir: &Path) -> String {
+    let raw = output_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("consolidated");
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c == '-' || c == ' ' { '_' } else { c })
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if cleaned.trim_matches('_').is_empty() {
+        "consolidated".to_string()
+    } else {
+        cleaned
+    }
+}
 
 const CONSOLIDATED_README: &str = r#"# Solana Program Lean Proofs
 
@@ -182,7 +211,11 @@ pub fn consolidate_proofs(input_dir: &Path, output_dir: &Path) -> Result<()> {
     let toolchain = include_str!("../../../../lean_solana/lean-toolchain");
     fs::write(output_dir.join("lean-toolchain"), toolchain)?;
 
-    fs::write(output_dir.join("lakefile.lean"), CONSOLIDATED_LAKEFILE)?;
+    let project_name = consolidated_project_name(output_dir);
+    fs::write(
+        output_dir.join("lakefile.lean"),
+        consolidated_lakefile(&project_name),
+    )?;
     fs::write(output_dir.join("README.md"), CONSOLIDATED_README)?;
     fs::write(output_dir.join(".gitignore"), CONSOLIDATED_GITIGNORE)?;
 

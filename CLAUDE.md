@@ -32,7 +32,7 @@ cargo test                                                      # Rust unit + sn
 cd lean_solana && lake build                                    # Lean support library
 ```
 
-Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references. Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>` — but `rm bin/qedgen` and rebuild first (snapshots run the built binary and won't auto-rebuild a stale one). Full command + flag reference: [`references/cli.md`](references/cli.md).
+Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references; the shared harness lives in `tests/common/mod.rs` and rebuilds `qedgen` before driving it (no stale-binary footgun). Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>`. Full command + flag reference: [`references/cli.md`](references/cli.md).
 
 ## Crate map
 

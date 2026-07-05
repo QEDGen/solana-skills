@@ -913,7 +913,7 @@ pub(crate) fn emit_variant_auth_guard(
     let Some(ref who) = handler.who else {
         return String::new();
     };
-    if !crate::check::is_multi_variant_adt_with_field_in_variant(spec, who) {
+    if !is_multi_variant_adt_with_field_in_variant(spec, who) {
         return String::new();
     }
     let Some(ref pre) = handler.pre_status else {

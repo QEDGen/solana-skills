@@ -28,7 +28,7 @@ pub(super) fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a
             // `b"vault"` byte-string literals and the latter as
             // `<name>.key().as_ref()` Pubkey accessors. We mark literals by
             // re-attaching the quote chars; the consumer in
-            // `check.rs::quasar_account_attr` splits on leading `"`.
+            // `codegen_shared::quasar_account_attr` splits on leading `"`.
             choice((
                 string_lit().map(|s| format!("\"{}\"", s)),
                 non_keyword_ident(),

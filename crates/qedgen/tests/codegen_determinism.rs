@@ -9,37 +9,12 @@
 //! the unified diff so the offending file is obvious. Single-spec and
 //! multi-spec (directory-of-fragments) shapes both exercised.
 
+mod common;
+
+use common::{ensure_qedgen_built, qedgen_bin, repo_root};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("qedgen crate at <repo>/crates/qedgen")
-        .to_path_buf()
-}
-
-fn qedgen_bin() -> PathBuf {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    repo_root().join("target").join(profile).join("qedgen")
-}
-
-fn ensure_qedgen_built() {
-    if !qedgen_bin().exists() {
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "qedgen"])
-            .current_dir(repo_root())
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "cargo build qedgen failed");
-    }
-}
 
 /// Collect file contents under `dir` keyed by their relative path, so two
 /// directory trees can be compared as ordered maps.

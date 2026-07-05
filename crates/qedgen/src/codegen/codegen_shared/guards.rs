@@ -181,7 +181,7 @@ pub(crate) fn generate_guards(
         // Anchor `has_one` attribute under multi-variant ADT
         // because the macro can't reach `wrapper.inner.<variant>.X`
         // (see `is_multi_variant_adt_with_field_in_variant` in
-        // check.rs). Replace it with an explicit destructure-then-
+        // account_attr.rs). Replace it with an explicit destructure-then-
         // compare guard so the auth check still fires at runtime.
         // Requires:
         //   - multi-variant ADT spec

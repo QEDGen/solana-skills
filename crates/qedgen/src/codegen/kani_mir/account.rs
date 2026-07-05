@@ -48,7 +48,7 @@ pub(crate) fn emit_account_section_structural(
         .collect();
     let state_fields: &[(String, String)] = &state_fields_with_ghosts;
 
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
     let has_lifecycle = lifecycle.len() >= 2;
 
     util::emit_record_structs(out, parsed, "Clone, Copy, kani::Arbitrary", |t| {

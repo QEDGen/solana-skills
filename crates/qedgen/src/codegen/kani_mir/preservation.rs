@@ -44,7 +44,7 @@ pub(crate) fn emit_property_preservation_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -291,7 +291,7 @@ pub(crate) fn emit_ensures_preservation_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -479,7 +479,7 @@ pub(crate) fn emit_invariant_preservation_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",

@@ -38,10 +38,10 @@ pub(crate) use probe::{
 };
 pub(crate) use project::{
     consolidate, deps, feedback, fill, init, proofs_bootstrap, qed_lock, qed_manifest, reconcile,
+    validate,
 };
 pub(crate) use spec::{
     ast, chumsky_adapter, chumsky_parser, idl, idl2spec, import_resolver, quantifier, spec_hash,
-    validate,
 };
 pub(crate) use verify::{
     drift, miri_verify, ratchet, regen_drift, sbpf_verify, upstream_check, verify_counterexample,
