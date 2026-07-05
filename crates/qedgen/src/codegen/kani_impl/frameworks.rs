@@ -1,18 +1,84 @@
 use super::*;
 
-/// Emit the Anchor impl-targeted harness: symbolic `Context<X>` +
-/// `crate::<Pascal>` accounts struct, calling the user's real handler.
-pub(crate) fn emit_kani_impl_anchor(
+/// Framework descriptor for the struct-based (Anchor / Quasar) impl
+/// harness emitters. The two scaffolds are byte-identical in shape — the
+/// Quasar scaffold emits the user's handler as `impl <Pascal> { pub fn
+/// handler(&mut self, …) }` exactly like Anchor's, and its `#[program]`
+/// `Ctx<X>` dispatcher just forwards `ctx.accounts.handler(…)` — so one
+/// emitter serves both, with the fingerprint key + header prose as data.
+pub(crate) struct StructImplFramework {
+    /// `compute_fingerprint` file key. Anchor emits under `tests/`;
+    /// Quasar under `src/` (per design doc §11a: `cargo kani` only
+    /// discovers `#[kani::proof]` in the lib for that target, and the
+    /// harness's `crate::<Pascal>` references only resolve from inside
+    /// the lib crate — the CLI's `redirect_kani_impl_to_src` rewrites
+    /// the output path accordingly).
+    pub(crate) fingerprint_key: &'static str,
+    /// Framework label passed to `emit_symbolic_accounts_module`.
+    pub(crate) label: &'static str,
+    /// Header prose between the banner's `//` separator and the shared
+    /// "Pairs with `tests/kani.rs`" block.
+    pub(crate) intro: &'static str,
+    /// Extra placement note emitted after the "Pairs with" block
+    /// (includes its own leading `//` separator); empty for Anchor.
+    pub(crate) placement: &'static str,
+}
+
+pub(crate) const ANCHOR_IMPL_FRAMEWORK: StructImplFramework = StructImplFramework {
+    fingerprint_key: "tests/kani_impl.rs",
+    label: "Anchor",
+    intro: "\
+// Impl-targeted Kani harnesses — call the user's real Anchor handler\n\
+// against a symbolic `Accounts` context and assert the spec's\n\
+// `ensures` clauses against pre/post account-field snapshots.\n",
+    placement: "",
+};
+
+pub(crate) const QUASAR_IMPL_FRAMEWORK: StructImplFramework = StructImplFramework {
+    fingerprint_key: "src/kani_impl.rs",
+    label: "Quasar",
+    intro: "\
+// Impl-targeted Kani harnesses for a Quasar (`#[program]`) program.\n\
+// Calls the user's real handler — the `impl <Pascal> { fn handler\n\
+// (&mut self, …) }` method that the `Ctx<X>` dispatcher forwards to —\n\
+// against a symbolic accounts struct, asserting the spec's `ensures`\n\
+// clauses against pre/post account-field snapshots.\n",
+    placement: "\
+//\n\
+// PLACEMENT (per the M1 smoke-test findings, design doc §11a):\n\
+//   1. This file lives in the program crate's `src/` (NOT `tests/`):\n\
+//      `cargo kani` only discovers `#[kani::proof]` in the lib, and\n\
+//      the `crate::<Pascal>` references below only resolve there.\n\
+//   2. Add this line to the crate root (`src/lib.rs`):\n\
+//        #[cfg(kani)] mod kani_impl;\n\
+//      A Quasar crate is `std` on the host target Kani builds for, so\n\
+//      — unlike Pinocchio — no `extern crate kani` is needed.\n",
+};
+
+/// Emit the struct-based impl-targeted harness for `fw`: symbolic
+/// accounts struct + `.handler(<params>)` call against the user's real
+/// handler.
+///
+/// One `build_<handler>()` per emit target (see
+/// `emit_symbolic_accounts_module`): a fully-symbolic accounts context
+/// where PDA-derived addresses bind to the spec's declared `pda <name>
+/// [seeds]` and account-data fields are `kani::any()`. The shape mirrors
+/// what `tests/integration_tests.rs` builds at runtime, but with
+/// `kani::any()` substituted for concrete keypair init; the handler is
+/// called via `accounts.handler(<params>)` — the same method signature
+/// the integration test invokes.
+pub(crate) fn emit_kani_impl_struct_framework(
     spec: &ParsedSpec,
     output_path: &Path,
     emit_targets: &[&ParsedHandler],
     auto_handlers: &[&str],
     explicit_flag: bool,
+    fw: &StructImplFramework,
 ) -> Result<()> {
     let fp = crate::fingerprint::compute_fingerprint(spec);
     let hash = fp
         .file_hashes
-        .get("tests/kani_impl.rs")
+        .get(fw.fingerprint_key)
         .cloned()
         .unwrap_or_default();
 
@@ -21,14 +87,13 @@ pub(crate) fn emit_kani_impl_anchor(
     // ── File header ──────────────────────────────────────────────────────
     out.push_str(&crate::banner::banner(None, &hash));
     out.push_str("//\n");
-    out.push_str("// Impl-targeted Kani harnesses — call the user's real Anchor handler\n");
-    out.push_str("// against a symbolic `Accounts` context and assert the spec's\n");
-    out.push_str("// `ensures` clauses against pre/post account-field snapshots.\n");
+    out.push_str(fw.intro);
     out.push_str("//\n");
     out.push_str("// Pairs with `tests/kani.rs` (spec-model harness) — that file checks\n");
     out.push_str("// the spec's effect block satisfies its own ensures; this file checks\n");
     out.push_str("// the user's Rust impl does. A counterexample here blames the impl,\n");
     out.push_str("// not the spec.\n");
+    out.push_str(fw.placement);
     if !explicit_flag {
         out.push_str("//\n");
         out.push_str("// Auto-triggered: the following handlers declare `modifies` fields\n");
@@ -49,16 +114,7 @@ pub(crate) fn emit_kani_impl_anchor(
     out.push_str("#![cfg(kani)]\n\n");
 
     // ── Symbolic-accounts builder module ────────────────────────────────
-    //
-    // One `build_<handler>()` per emit target. Each builds a fully-symbolic
-    // Anchor accounts context: PDA-derived addresses bind to the spec's
-    // declared `pda <name> [seeds]`; account-data fields are `kani::any()`.
-    //
-    // The shape mirrors what `tests/integration_tests.rs` builds at runtime,
-    // but with `kani::any()` substituted for concrete keypair init. The
-    // user's handler is called via `accounts.handler(<params>)` — same
-    // method signature the integration test invokes.
-    emit_symbolic_accounts_module(&mut out, spec, emit_targets, "Anchor")?;
+    emit_symbolic_accounts_module(&mut out, spec, emit_targets, fw.label)?;
 
     // ── Per-handler proof harnesses ─────────────────────────────────────
     out.push_str(
@@ -89,120 +145,3 @@ pub(crate) fn emit_kani_impl_anchor(
 
     Ok(())
 }
-
-// ============================================================================
-// Quasar impl-targeted harness (slice 5)
-// ============================================================================
-
-/// Emit the Quasar impl-targeted harness. The Quasar scaffold emits the
-/// user's handler as `impl <Pascal> { pub fn handler(&mut self, …) ->
-/// Result<(), ProgramError> }` — byte-identical in shape to the Anchor
-/// scaffold — and the `#[program]` mod's `Ctx<X>` dispatcher just forwards
-/// `ctx.accounts.handler(…)`. So this harness reuses the same struct-based
-/// symbolic-accounts builder (`emit_symbolic_accounts_module`) and
-/// per-handler proof emitter (`emit_handler_harness`) as the Anchor
-/// branch; only the file header (framework name, placement note, the
-/// `Ctx<X>` forwarding context) differs.
-///
-/// **Placement** (per design doc §11a, target-independent): the harness
-/// lives in the program crate's `src/` as `mod kani_impl`, NOT `tests/`.
-/// `cargo kani` only discovers `#[kani::proof]` in the lib, and the
-/// harness's `crate::<Pascal>` references only resolve from inside the lib
-/// crate. The CLI's `redirect_kani_impl_to_src` rewrites the default
-/// `…/tests/kani_impl.rs` path to `…/src/kani_impl.rs` for Quasar the same
-/// way it does for Pinocchio. Unlike Pinocchio, a Quasar crate is `std`
-/// on the host target Kani builds for (its `no_std` cfg gates on
-/// `target_os = "solana"`), so no `extern crate kani` is required.
-pub(crate) fn emit_kani_impl_quasar(
-    spec: &ParsedSpec,
-    output_path: &Path,
-    emit_targets: &[&ParsedHandler],
-    auto_handlers: &[&str],
-    explicit_flag: bool,
-) -> Result<()> {
-    let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("src/kani_impl.rs")
-        .cloned()
-        .unwrap_or_default();
-
-    let mut out = String::new();
-
-    // ── File header ──────────────────────────────────────────────────────
-    out.push_str(&crate::banner::banner(None, &hash));
-    out.push_str("//\n");
-    out.push_str("// Impl-targeted Kani harnesses for a Quasar (`#[program]`) program.\n");
-    out.push_str("// Calls the user's real handler — the `impl <Pascal> { fn handler\n");
-    out.push_str("// (&mut self, …) }` method that the `Ctx<X>` dispatcher forwards to —\n");
-    out.push_str("// against a symbolic accounts struct, asserting the spec's `ensures`\n");
-    out.push_str("// clauses against pre/post account-field snapshots.\n");
-    out.push_str("//\n");
-    out.push_str("// Pairs with `tests/kani.rs` (spec-model harness) — that file checks\n");
-    out.push_str("// the spec's effect block satisfies its own ensures; this file checks\n");
-    out.push_str("// the user's Rust impl does. A counterexample here blames the impl,\n");
-    out.push_str("// not the spec.\n");
-    out.push_str("//\n");
-    out.push_str("// PLACEMENT (per the M1 smoke-test findings, design doc §11a):\n");
-    out.push_str("//   1. This file lives in the program crate's `src/` (NOT `tests/`):\n");
-    out.push_str("//      `cargo kani` only discovers `#[kani::proof]` in the lib, and\n");
-    out.push_str("//      the `crate::<Pascal>` references below only resolve there.\n");
-    out.push_str("//   2. Add this line to the crate root (`src/lib.rs`):\n");
-    out.push_str("//        #[cfg(kani)] mod kani_impl;\n");
-    out.push_str("//      A Quasar crate is `std` on the host target Kani builds for, so\n");
-    out.push_str("//      — unlike Pinocchio — no `extern crate kani` is needed.\n");
-    if !explicit_flag {
-        out.push_str("//\n");
-        out.push_str("// Auto-triggered: the following handlers declare `modifies` fields\n");
-        out.push_str("// that are NOT written in their `effect` block (the v2.25 LP-shape\n");
-        out.push_str("// signal). The agent-fill `todo!()` site is expected to compute\n");
-        out.push_str("// those fields against the spec's ensures; this harness verifies\n");
-        out.push_str("// the result.\n");
-        for name in auto_handlers {
-            out.push_str(&format!("//   - {}\n", name));
-        }
-        out.push_str("//\n");
-        out.push_str("// Pass `--kani-impl` to `qedgen codegen` to force emission for\n");
-        out.push_str("// every handler with `ensures`, regardless of the modifies-diff.\n");
-    }
-    out.push_str("//\n");
-    out.push_str("// To run:  cargo kani --harness <name>   (requires cargo-kani)\n");
-    out.push_str("// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n");
-    out.push_str("#![cfg(kani)]\n\n");
-
-    // ── Symbolic-accounts builder module (shared with the Anchor branch) ──
-    emit_symbolic_accounts_module(&mut out, spec, emit_targets, "Quasar")?;
-
-    // ── Per-handler proof harnesses (shared with the Anchor branch) ──────
-    out.push_str(
-        "// ============================================================================\n",
-    );
-    out.push_str("// Impl-targeted ensures-preservation proofs\n");
-    out.push_str(
-        "// ============================================================================\n\n",
-    );
-
-    let mut emitted_count = 0;
-    for handler in emit_targets {
-        for (idx, ensures) in handler.ensures.iter().enumerate() {
-            emit_handler_harness(&mut out, handler, idx, ensures, spec)?;
-            emitted_count += 1;
-        }
-    }
-
-    out.push_str("// ---- GENERATED BY QEDGEN — DO NOT EDIT BELOW THIS LINE ----\n");
-
-    crate::codegen_shared::write_generated_file(output_path, &out)?;
-
-    eprintln!(
-        "Generated {} impl-targeted Kani harness(es) in {}",
-        emitted_count,
-        output_path.display()
-    );
-
-    Ok(())
-}
-
-// ============================================================================
-// Pinocchio impl-targeted harness (slice 8 M3)
-// ============================================================================

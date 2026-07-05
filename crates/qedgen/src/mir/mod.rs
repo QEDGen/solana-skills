@@ -1698,14 +1698,14 @@ pub(crate) fn parse_ty(s: &str) -> Ty {
         "Pubkey" => Ty::Pubkey,
         other => {
             // `Map[N] T`: numeric literal or constant-name capacity, passed
-            // through as a string (see `Ty::Map`).
-            if let Some(rest) = other.strip_prefix("Map[") {
-                if let Some(close) = rest.find(']') {
-                    let cap_str = rest[..close].trim().to_string();
-                    let inner = rest[close + 1..].trim();
+            // through as a string (see `Ty::Map`). Gated on the strict
+            // `Map[` prefix — a spaced `Map [N] T` stays `Ty::Custom`,
+            // matching the parser's canonical spelling.
+            if other.starts_with("Map[") {
+                if let Some((cap_str, inner)) = crate::codegen_shared::split_map_type(other) {
                     if !cap_str.is_empty() {
                         return Ty::Map {
-                            capacity: cap_str,
+                            capacity: cap_str.to_string(),
                             value: Box::new(parse_ty(inner)),
                         };
                     }

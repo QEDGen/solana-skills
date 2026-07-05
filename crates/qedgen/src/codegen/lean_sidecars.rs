@@ -378,8 +378,8 @@ fn render_interface_axiom_module(iface: &crate::check::ParsedInterface) -> Strin
                         .state_fields
                         .iter()
                         .find(|(n, _)| n == field)
-                        .map(|(_, t)| map_type(t.as_str()))
-                        .unwrap_or("Nat");
+                        .map(|(_, t)| map_dsl_ty(t.as_str()))
+                        .unwrap_or_else(|| "Nat".to_string());
                     sig.push_str(&format!(" ({} : State \u{2192} {})", field, codomain));
                 }
                 let body = rewrite_axiom_body_to_accessors(&ensures.lean_expr);
@@ -520,76 +520,29 @@ fn update_lakefile_roots(
 }
 
 // ----------------------------------------------------------------------
-// Leaf helpers — private copies so this module stays self-contained.
+// Leaf helpers — shared with `lean_gen_mir` via `crate::lean_names`.
 // ----------------------------------------------------------------------
 
+use crate::lean_names::{map_dsl_ty, safe_name};
+
 /// True iff an interface handler is Tier-1/2 pinned: it declares
-/// `ensures` AND its interface carries a non-empty `binary_hash`.
+/// `ensures` AND its interface carries a non-empty `binary_hash`
+/// (parse-layer twin of `lean_gen_mir::handler_is_pinned_mir` — the
+/// pin predicate itself is `lean_names::binary_hash_is_pinned`).
 fn handler_is_pinned(
     iface: &crate::check::ParsedInterface,
     handler: &crate::check::ParsedInterfaceHandler,
 ) -> bool {
-    if handler.ensures.is_empty() {
-        return false;
-    }
-    match &iface.upstream {
-        Some(u) => u
-            .binary_hash
-            .as_deref()
-            .is_some_and(|h| !h.trim().is_empty()),
-        None => false,
-    }
-}
-
-/// Map DSL numeric types to their Lean codomain.
-fn map_type(t: &str) -> &str {
-    match t {
-        "U8" | "U16" | "U32" | "U64" | "U128" => "Nat",
-        "I8" | "I16" | "I32" | "I64" | "I128" => "Int",
-        _ => t,
-    }
-}
-
-/// Quote Lean keywords as «name» so they survive as identifiers.
-fn safe_name(name: &str) -> String {
-    let keywords = [
-        "open",
-        "close",
-        "initialize",
-        "import",
-        "namespace",
-        "end",
-        "where",
-        "with",
-        "do",
-        "let",
-        "if",
-        "then",
-        "else",
-        "match",
-        "return",
-        "in",
-        "for",
-    ];
-    if keywords.contains(&name) {
-        format!("\u{00AB}{}\u{00BB}", name)
-    } else {
-        name.to_string()
-    }
+    !handler.ensures.is_empty()
+        && crate::lean_names::binary_hash_is_pinned(
+            iface.upstream.as_ref().and_then(|u| u.binary_hash.as_deref()),
+        )
 }
 
 /// Build a parameter signature string (` (n : T)` per param) for axiom
 /// statements.
 fn param_sig_str(params: &[(String, String)]) -> String {
-    if params.is_empty() {
-        String::new()
-    } else {
-        let parts: Vec<String> = params
-            .iter()
-            .map(|(n, t)| format!(" ({} : {})", n, map_type(t)))
-            .collect();
-        parts.join("")
-    }
+    crate::lean_names::param_sig_str_with(params, |t| map_dsl_ty(t))
 }
 
 #[cfg(test)]

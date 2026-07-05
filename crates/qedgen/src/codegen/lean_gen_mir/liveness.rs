@@ -13,20 +13,17 @@ impl WitnessState {
     fn new(state: &crate::mir::StateAdt) -> Self {
         // Union of all variant fields forms the witness's flat-field view;
         // the first variant defines order, later variants append.
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut fields: Vec<(String, String)> = Vec::new();
-        for v in &state.variants {
-            for f in &v.fields {
-                if seen.insert(f.name.clone()) {
-                    let val = match &f.ty {
-                        crate::mir::Ty::Pubkey => "pk".to_string(),
-                        crate::mir::Ty::Bool => "false".to_string(),
-                        _ => "0".to_string(),
-                    };
-                    fields.push((f.name.clone(), val));
-                }
-            }
-        }
+        let fields: Vec<(String, String)> = state_field_union(state)
+            .into_iter()
+            .map(|(name, ty)| {
+                let val = match ty {
+                    crate::mir::Ty::Pubkey => "pk".to_string(),
+                    crate::mir::Ty::Bool => "false".to_string(),
+                    _ => "0".to_string(),
+                };
+                (name, val)
+            })
+            .collect();
         WitnessState {
             fields,
             status: state.lifecycle_states.first().cloned(),

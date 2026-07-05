@@ -477,34 +477,15 @@ pub(super) fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Group properties by which account's fields they reference, then
-/// emit each group through the per-account scoped path.
+/// Group properties by which account's fields they reference (via
+/// `group_properties_by_account`), then emit each group through the
+/// per-account scoped path.
 pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir) {
-    use std::collections::BTreeMap;
-
     if mir.properties.is_empty() || mir.account_states.is_empty() {
         return;
     }
 
-    let mut groups: BTreeMap<String, Vec<crate::mir::PropertyMir>> = BTreeMap::new();
-    let primary_name = mir.account_states[0].name.clone();
-
-    for prop in &mir.properties {
-        let target = if let Some(expr) = &prop.expression {
-            mir.account_states
-                .iter()
-                .find(|a| {
-                    a.fields
-                        .iter()
-                        .any(|f| expr.lean.contains(&format!("s.{}", f.name)))
-                })
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| primary_name.clone())
-        } else {
-            primary_name.clone()
-        };
-        groups.entry(target).or_default().push(prop.clone());
-    }
+    let groups = group_properties_by_account(mir);
 
     for (acct_name, props) in groups {
         let acct = mir

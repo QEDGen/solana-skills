@@ -71,15 +71,7 @@ pub(super) fn emit_state_status_accessor_adt(out: &mut String, mir: &Mir) {
 /// the union of variant fields. Each arm returns the bound field when the
 /// variant carries it; the type default otherwise.
 pub(super) fn emit_state_field_accessors_adt(out: &mut String, mir: &Mir) {
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut fields: Vec<(String, crate::mir::Ty)> = Vec::new();
-    for v in &mir.state.variants {
-        for f in &v.fields {
-            if seen.insert(f.name.clone()) {
-                fields.push((f.name.clone(), f.ty.clone()));
-            }
-        }
-    }
+    let fields = flat_state_fields(mir);
     for (fname, fty) in &fields {
         let lean_ty = render_ty(fty);
         let default = ty_default_literal(fty);
@@ -289,25 +281,9 @@ pub(super) fn emit_state_struct(out: &mut String, mir: &Mir) {
 
     let has_lifecycle = mir.state.lifecycle_states.len() >= 2;
 
-    // Union fields across all variants, preserving declaration order
-    // and de-duping by name.
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut unique_fields: Vec<&crate::mir::FieldDecl> = Vec::new();
-    for v in &mir.state.variants {
-        for f in &v.fields {
-            if seen.insert(f.name.clone()) {
-                unique_fields.push(f);
-            }
-        }
-    }
-
     out.push_str("structure State where\n");
-    for field in &unique_fields {
-        out.push_str(&format!(
-            "  {} : {}\n",
-            safe_name(&field.name),
-            render_ty(&field.ty)
-        ));
+    for (fname, fty) in &flat_state_fields(mir) {
+        out.push_str(&format!("  {} : {}\n", safe_name(fname), render_ty(fty)));
     }
     if has_lifecycle {
         out.push_str("  status : Status\n");

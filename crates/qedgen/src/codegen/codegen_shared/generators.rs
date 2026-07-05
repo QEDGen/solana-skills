@@ -554,6 +554,128 @@ pub(crate) fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
             .unwrap_or(false)
 }
 
+/// Index an ADT account's variant fields: field name → every
+/// `(variant_name, declared_type)` occurrence, in name-sorted (BTreeMap)
+/// order. Raw view — includes fields whose type differs across variants;
+/// see [`consistent_variant_fields`] for the accessor-eligible subset.
+pub(crate) fn variant_field_index(
+    acct: &crate::check::ParsedAccountType,
+) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for variant in &acct.variants {
+        for (fname, ftype) in &variant.fields {
+            field_index
+                .entry(fname.clone())
+                .or_default()
+                .push((variant.name.clone(), ftype.clone()));
+        }
+    }
+    field_index
+}
+
+/// Fields shared across an ADT account's variants with a *consistent*
+/// declared type: field name → (type, carrying variants), name-sorted.
+/// This is the single source of truth for which fields get a wrapper
+/// accessor — emission (`render_adt_inner_enum`) and consumption
+/// (`generate_guards` / `rewrite_state_refs_for_self`) must agree, or a
+/// guard would call an accessor that was never emitted.
+pub(crate) fn consistent_variant_fields(
+    acct: &crate::check::ParsedAccountType,
+) -> std::collections::BTreeMap<String, (String, Vec<String>)> {
+    variant_field_index(acct)
+        .into_iter()
+        .filter_map(|(fname, occurrences)| {
+            let first_ty = occurrences[0].1.clone();
+            if occurrences.iter().any(|(_, t)| t != &first_ty) {
+                return None;
+            }
+            let variants = occurrences.into_iter().map(|(v, _)| v).collect();
+            Some((fname, (first_ty, variants)))
+        })
+        .collect()
+}
+
+/// Accessor-eligible field names for the spec's (single) multi-variant
+/// ADT account; empty for flat-state specs.
+pub(crate) fn adt_accessor_field_names(spec: &ParsedSpec) -> std::collections::HashSet<String> {
+    if !is_multi_variant_adt_state(spec) {
+        return std::collections::HashSet::new();
+    }
+    let Some(acct) = spec.account_types.first() else {
+        return std::collections::HashSet::new();
+    };
+    consistent_variant_fields(acct).into_keys().collect()
+}
+
+/// Render the multi-variant ADT inner enum + its consistent-field
+/// accessors (the shared tail of the wrapper-struct emission — the
+/// wrapper struct itself differs per site and stays with the caller).
+/// `inner_doc` is the full doc-comment block above the enum;
+/// `accessor_doc` renders the per-field doc block; `blank_after_impl`
+/// matches each site's historical trailing-newline shape.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_adt_inner_enum(
+    out: &mut String,
+    acct: &crate::check::ParsedAccountType,
+    inner_name: &str,
+    inner_doc: &str,
+    accessor_doc: &dyn Fn(&str) -> String,
+    parsed: &ParsedSpec,
+    target: Target,
+    blank_after_impl: bool,
+) -> Result<()> {
+    out.push_str(inner_doc);
+    out.push_str(
+        "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]\n",
+    );
+    out.push_str(&format!("pub enum {} {{\n", inner_name));
+    for variant in &acct.variants {
+        if variant.fields.is_empty() {
+            out.push_str(&format!("    {},\n", variant.name));
+        } else {
+            out.push_str(&format!("    {} {{\n", variant.name));
+            for (fname, ftype) in &variant.fields {
+                out.push_str(&format!(
+                    "        {}: {},\n",
+                    fname,
+                    map_type_for_target(ftype, parsed, target)?
+                ));
+            }
+            out.push_str("    },\n");
+        }
+    }
+    out.push_str("}\n\n");
+
+    // Accessors for fields shared (with consistent type) across variants.
+    if !variant_field_index(acct).is_empty() {
+        out.push_str(&format!("impl {} {{\n", inner_name));
+        for (fname, (first_ty, variants)) in &consistent_variant_fields(acct) {
+            let rust_ty = map_type_for_target(first_ty, parsed, target)?;
+            out.push_str(&accessor_doc(fname));
+            out.push_str(&format!(
+                "    pub fn {}(&self) -> &{} {{\n        match self {{\n",
+                fname, rust_ty
+            ));
+            for variant_name in variants {
+                out.push_str(&format!(
+                    "            Self::{} {{ {}, .. }} => {},\n",
+                    variant_name, fname, fname
+                ));
+            }
+            if variants.len() < acct.variants.len() {
+                out.push_str(&format!(
+                    "            _ => panic!(\"{}::{}() called on a variant without `{}`\"),\n",
+                    inner_name, fname, fname
+                ));
+            }
+            out.push_str("        }\n    }\n");
+        }
+        out.push_str(if blank_after_impl { "}\n\n" } else { "}\n" });
+    }
+    Ok(())
+}
+
 /// Identifier-character predicate for the word-bounded rewrites: ASCII
 /// alphanumerics plus underscore.
 pub(crate) fn is_ident_char(b: u8) -> bool {
@@ -802,11 +924,10 @@ pub(crate) fn find_state_account_filtered(
     // matches the ADT (lowercase) — otherwise two writable PDA candidates
     // would return None and leave guard refs un-rewritten.
     if let Some(adt) = handler.on_account.as_deref() {
-        let lower = adt.to_lowercase();
         if let Some(matched) = candidates
             .iter()
             .copied()
-            .find(|a| a.name == lower || a.name.starts_with(&lower))
+            .find(|a| account_name_matches_adt(adt, &a.name))
         {
             return Some(matched);
         }

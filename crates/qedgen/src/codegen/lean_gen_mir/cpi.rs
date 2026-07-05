@@ -341,21 +341,17 @@ pub(super) fn emit_cpi_theorems(out: &mut String, mir: &Mir) -> std::collections
 }
 
 /// True iff the callee has a non-empty `upstream.binary_hash` pin AND
-/// at least one `ensures` clause.
+/// at least one `ensures` clause (MIR twin of `lean_sidecars::
+/// handler_is_pinned` — the pin predicate is `lean_names::
+/// binary_hash_is_pinned`).
 pub(super) fn handler_is_pinned_mir(
     import: &crate::mir::ImportedSpecMir,
     callee: &crate::mir::InterfaceMethod,
 ) -> bool {
-    if callee.ensures.is_empty() {
-        return false;
-    }
-    match &import.upstream {
-        Some(u) => u
-            .binary_hash
-            .as_deref()
-            .is_some_and(|h| !h.trim().is_empty()),
-        None => false,
-    }
+    !callee.ensures.is_empty()
+        && crate::lean_names::binary_hash_is_pinned(
+            import.upstream.as_ref().and_then(|u| u.binary_hash.as_deref()),
+        )
 }
 
 /// Build a label for an `AccountRef` suitable for doc-comment use.

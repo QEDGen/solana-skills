@@ -21,24 +21,7 @@ pub(crate) fn emit_guard_enforcement_harnesses(
 
     const GUARD_REJECTION_SPLIT_THRESHOLD: usize = 8;
 
-    // Resolve view — same logic as `emit_account_section_structural`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
     let mutable = util::mutable_fields(state_fields);
 
     let guard_ops: Vec<&crate::check::ParsedHandler> =
@@ -149,7 +132,6 @@ pub(crate) fn emit_guard_rejection_harness(
     out: &mut String,
     ctx: GuardRejectionHarness<'_>,
 ) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
     let parsed = ctx.parsed;
     let op = ctx.op;
@@ -161,26 +143,22 @@ pub(crate) fn emit_guard_rejection_harness(
     let assert_message = ctx.assert_message;
     let direct_negated_assume = ctx.direct_negated_assume;
 
-    out.push_str("#[kani::proof]\n");
-    out.push_str("#[kani::unwind(2)]\n");
-    out.push_str("#[kani::solver(cadical)]\n");
-    out.push_str(&format!("fn {harness_name}() {{\n"));
-
-    util::emit_state_init_symbolic(out, mutable, lifecycle);
-    util::emit_pre_status_assume(out, op, lifecycle);
-
-    for (pname, ptype) in &op.takes_params {
-        out.push_str(&format!(
-            "    let {}: {} = kani::any();\n",
-            pname,
-            map_type(ptype, parsed)?
-        ));
-    }
-
-    // Deliberate double-emit of abstract binders — bug-for-bug parity with
-    // the snapshot-pinned output; cleanup deferred to v3.0.
-    util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
-    util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+    emit_proof_preamble(
+        out,
+        parsed,
+        Some(op),
+        mutable,
+        lifecycle,
+        PreambleOpts {
+            harness_name,
+            unwind: 2,
+            solver: "cadical",
+            zeroed_init: false,
+            pre_status_assume: true,
+        },
+    );
+    // binder_emits: 2 — deliberate double-emit of abstract binders.
+    emit_symbolic_params(out, parsed, op, 2)?;
 
     emit_kani_account_env_binding(out, op, "accounts", "    ");
     let mut helper_binding_counter = 0usize;
@@ -283,27 +261,9 @@ pub(crate) fn guard_term_slug(expr: &str) -> String {
 /// (the condition that should trigger abortion), then
 /// `assert!(!<handler>(...))` — handler must reject.
 pub(crate) fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSpec) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
-    // Resolve view — same logic as `emit_account_section_structural`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
     let mutable = util::mutable_fields(state_fields);
 
     let abort_ops: Vec<&crate::check::ParsedHandler> = parsed
@@ -326,27 +286,22 @@ pub(crate) fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSp
 
     for op in &abort_ops {
         for abort in &op.aborts_if {
-            out.push_str("#[kani::proof]\n");
-            out.push_str("#[kani::unwind(2)]\n");
-            out.push_str("#[kani::solver(cadical)]\n");
-            out.push_str(&format!(
-                "fn verify_{}_aborts_if_{}() {{\n",
-                op.name, abort.error_name
-            ));
-
-            util::emit_state_init_symbolic(out, &mutable, lifecycle);
-            util::emit_pre_status_assume(out, op, lifecycle);
-
-            for (pname, ptype) in &op.takes_params {
-                out.push_str(&format!(
-                    "    let {}: {} = kani::any();\n",
-                    pname,
-                    map_type(ptype, parsed)?
-                ));
-            }
-            // Deliberate double-emit — see guard-enforcement comment.
-            util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
-            util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+            emit_proof_preamble(
+                out,
+                parsed,
+                Some(op),
+                &mutable,
+                lifecycle,
+                PreambleOpts {
+                    harness_name: &format!("verify_{}_aborts_if_{}", op.name, abort.error_name),
+                    unwind: 2,
+                    solver: "cadical",
+                    zeroed_init: false,
+                    pre_status_assume: true,
+                },
+            );
+            // binder_emits: 2 — see guard-enforcement double-emit comment.
+            emit_symbolic_params(out, parsed, op, 2)?;
 
             emit_kani_account_env_binding(out, op, "accounts", "    ");
             let abort_expr =

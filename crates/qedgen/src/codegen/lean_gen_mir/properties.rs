@@ -107,7 +107,6 @@ pub(super) fn preservation_proof_script(
     h: &crate::mir::HandlerMir,
     prop: &crate::mir::PropertyMir,
 ) -> String {
-    use crate::mir::Stmt;
     let trans_name = safe_name(&format!("{}Transition", h.name));
 
     let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
@@ -130,23 +129,8 @@ pub(super) fn preservation_proof_script(
     // Handler touches a property field when (a) any effect mutates a
     // field the property reads, or (b) the handler's lifecycle arrow
     // updates `status` and the property mentions `status`.
-    let touches_prop_field = h.body.stmts.iter().any(|s| match s {
-        Stmt::Assign { path, .. }
-        | Stmt::CheckedAdd { path, .. }
-        | Stmt::CheckedSub { path, .. }
-        | Stmt::WrapAdd { path, .. }
-        | Stmt::WrapSub { path, .. }
-        | Stmt::SatAdd { path, .. }
-        | Stmt::SatSub { path, .. } => prop_fields.iter().any(|f| f == &path_field_name(path)),
-        Stmt::RequireOrAbort { .. }
-        | Stmt::TokenTransfer { .. }
-        | Stmt::VariantPromote { .. }
-        | Stmt::Branch { .. }
-        | Stmt::Abort(_)
-        | Stmt::Cpi { .. }
-        | Stmt::Emit { .. } => false,
-    }) || (h.transition.is_some()
-        && prop_fields.iter().any(|f| f == "status"));
+    let touches_prop_field = handler_touches_fields(&h.body.stmts, &prop_fields)
+        || (h.transition.is_some() && prop_fields.iter().any(|f| f == "status"));
 
     let has_cond = !build_guard_cond_parts(mir, h).is_empty();
 
@@ -193,7 +177,6 @@ pub(super) fn preservation_proof_script(
 ///     property field; otherwise discharge via `unfold + dsimp; omega`
 ///     under the transition's split structure.
 pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::PropertyMir) -> String {
-    use crate::mir::Stmt;
     let mut proof = String::from(" := by\n  cases op with\n");
 
     let body_lean = prop.expression.as_ref().map(|e| e.lean.clone());
@@ -220,24 +203,7 @@ pub(super) fn master_inductive_proof_script(mir: &Mir, prop: &crate::mir::Proper
             ));
         } else {
             let trans_name = safe_name(&format!("{}Transition", h.name));
-            let touches_prop_field = h.body.stmts.iter().any(|s| match s {
-                Stmt::Assign { path, .. }
-                | Stmt::CheckedAdd { path, .. }
-                | Stmt::CheckedSub { path, .. }
-                | Stmt::WrapAdd { path, .. }
-                | Stmt::WrapSub { path, .. }
-                | Stmt::SatAdd { path, .. }
-                | Stmt::SatSub { path, .. } => {
-                    prop_fields.iter().any(|f| f == &path_field_name(path))
-                }
-                Stmt::RequireOrAbort { .. }
-                | Stmt::TokenTransfer { .. }
-                | Stmt::VariantPromote { .. }
-                | Stmt::Branch { .. }
-                | Stmt::Abort(_)
-                | Stmt::Cpi { .. }
-                | Stmt::Emit { .. } => false,
-            });
+            let touches_prop_field = handler_touches_fields(&h.body.stmts, &prop_fields);
             if !touches_prop_field {
                 proof.push_str(&format!(
                     "  | {}{} =>\n    simp [applyOp, {}] at h\n    obtain \u{27E8}_, h_eq\u{27E9} := h\n    subst h_eq; exact h_inv\n",
@@ -384,18 +350,7 @@ pub(super) fn emit_frame_conditions(out: &mut String, mir: &Mir) {
     );
 
     // All declared state-field names across every variant.
-    let all_fields: Vec<String> = {
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut out_fields = Vec::new();
-        for v in &mir.state.variants {
-            for f in &v.fields {
-                if seen.insert(f.name.clone()) {
-                    out_fields.push(f.name.clone());
-                }
-            }
-        }
-        out_fields
-    };
+    let all_fields: Vec<String> = flat_state_fields(mir).into_iter().map(|(n, _)| n).collect();
 
     for h in &mir.handlers {
         let Some(modified) = &h.modifies else {

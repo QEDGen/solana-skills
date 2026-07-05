@@ -26,7 +26,7 @@ pub(crate) use adapt::{
 pub(crate) use cli::{AristotleCommands, Cli, Commands, RuntimeOverride, Target};
 pub(crate) use codegen::{
     asm2lean, banner, codegen_mir, codegen_shared, crucible_gen, fingerprint, integration_test,
-    interface_gen, kani_impl, kani_mir, lean_gen_mir, lean_sidecars, proptest_gen_mir,
+    interface_gen, kani_impl, kani_mir, lean_gen_mir, lean_names, lean_sidecars, proptest_gen_mir,
     rust_codegen_util, unit_test,
 };
 pub(crate) use dispatch::{api, aristotle};

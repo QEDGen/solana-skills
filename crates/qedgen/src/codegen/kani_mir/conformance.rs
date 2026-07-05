@@ -35,24 +35,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
         return Ok(());
     }
 
-    // Resolve view.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
     let mutable = util::mutable_fields(state_fields);
     let properties: Vec<&crate::check::ParsedProperty> = parsed.properties.iter().collect();
 
@@ -83,16 +66,18 @@ pub(crate) fn emit_effect_conformance_harnesses(
             let harness_name = format!("verify_{}_effect_{}", op.name, sanitize_ident(&field));
             emit_one_conformance_harness(
                 out,
-                parsed,
-                op,
-                &mutable,
-                lifecycle,
-                &properties,
-                &field_type_lookup,
-                &harness_name,
-                &[],
-                (&field, op_kind, value),
-                &triples,
+                ConformanceHarness {
+                    parsed,
+                    op,
+                    mutable: &mutable,
+                    lifecycle,
+                    properties: &properties,
+                    field_type_lookup: &field_type_lookup,
+                    harness_name: &harness_name,
+                    assume_lines: &[],
+                    effect: (&field, op_kind, value),
+                    sibling_triples: &triples,
+                },
             )?;
         }
 
@@ -134,16 +119,18 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     );
                     emit_one_conformance_harness(
                         out,
-                        parsed,
-                        op,
-                        &mutable,
-                        lifecycle,
-                        &properties,
-                        &field_type_lookup,
-                        &harness_name,
-                        &assume,
-                        (&field, op_kind, value),
-                        &arm_triples,
+                        ConformanceHarness {
+                            parsed,
+                            op,
+                            mutable: &mutable,
+                            lifecycle,
+                            properties: &properties,
+                            field_type_lookup: &field_type_lookup,
+                            harness_name: &harness_name,
+                            assume_lines: &assume,
+                            effect: (&field, op_kind, value),
+                            sibling_triples: &arm_triples,
+                        },
                     )?;
                 }
             }
@@ -161,16 +148,18 @@ pub(crate) fn emit_effect_conformance_harnesses(
                     );
                     emit_one_conformance_harness(
                         out,
-                        parsed,
-                        op,
-                        &mutable,
-                        lifecycle,
-                        &properties,
-                        &field_type_lookup,
-                        &harness_name,
-                        &assumes,
-                        (&field, op_kind, value),
-                        &default_triples,
+                        ConformanceHarness {
+                            parsed,
+                            op,
+                            mutable: &mutable,
+                            lifecycle,
+                            properties: &properties,
+                            field_type_lookup: &field_type_lookup,
+                            harness_name: &harness_name,
+                            assume_lines: &assumes,
+                            effect: (&field, op_kind, value),
+                            sibling_triples: &default_triples,
+                        },
                     )?;
                 }
             }
@@ -180,27 +169,46 @@ pub(crate) fn emit_effect_conformance_harnesses(
     Ok(())
 }
 
+/// Carrier for `emit_one_conformance_harness` (same pattern as
+/// `GuardRejectionHarness` — the positional-arg list had grown to 11).
+pub(crate) struct ConformanceHarness<'a> {
+    pub(crate) parsed: &'a ParsedSpec,
+    pub(crate) op: &'a crate::check::ParsedHandler,
+    pub(crate) mutable: &'a [&'a (String, String)],
+    pub(crate) lifecycle: &'a [String],
+    pub(crate) properties: &'a [&'a crate::check::ParsedProperty],
+    pub(crate) field_type_lookup: &'a std::collections::HashMap<&'a str, &'a str>,
+    pub(crate) harness_name: &'a str,
+    pub(crate) assume_lines: &'a [String],
+    /// The target effect: `(field, op_kind, value)`.
+    pub(crate) effect: (&'a str, &'a str, &'a crate::mir::Expr),
+    /// The effect set that can legally fire alongside the target — the
+    /// whole flat body, or one Branch arm.
+    pub(crate) sibling_triples: &'a [(String, &'static str, &'a crate::mir::Expr)],
+}
+
 /// One effect-conformance harness: symbolic (or zeroed-init) state,
 /// symbolic params, optional scrutinee-pin assumes (per-arm sites),
 /// transition call, post-state assertion for the target effect, and the
-/// frame check over `sibling_triples` (the effect set that can legally
-/// fire alongside the target — the whole flat body, or one Branch arm).
-#[allow(clippy::too_many_arguments)]
+/// frame check over `sibling_triples`.
 pub(crate) fn emit_one_conformance_harness(
     out: &mut String,
-    parsed: &ParsedSpec,
-    op: &crate::check::ParsedHandler,
-    mutable: &[&(String, String)],
-    lifecycle: &[String],
-    properties: &[&crate::check::ParsedProperty],
-    field_type_lookup: &std::collections::HashMap<&str, &str>,
-    harness_name: &str,
-    assume_lines: &[String],
-    (field, op_kind, value): (&str, &str, &crate::mir::Expr),
-    sibling_triples: &[(String, &'static str, &crate::mir::Expr)],
+    ctx: ConformanceHarness<'_>,
 ) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
+
+    let ConformanceHarness {
+        parsed,
+        op,
+        mutable,
+        lifecycle,
+        properties,
+        field_type_lookup,
+        harness_name,
+        assume_lines,
+        effect: (field, op_kind, value),
+        sibling_triples,
+    } = ctx;
 
     let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
@@ -212,26 +220,21 @@ pub(crate) fn emit_one_conformance_harness(
     let field_type = field_type_lookup.get(field).copied().unwrap_or("");
     let solver = util::pick_kani_solver_for_effect(field_type, &value.rust, op);
 
-    out.push_str("#[kani::proof]\n");
-    out.push_str("#[kani::unwind(2)]\n");
-    out.push_str(&format!("#[kani::solver({})]\n", solver));
-    out.push_str(&format!("fn {}() {{\n", harness_name));
-
-    if is_init {
-        util::emit_state_init_zeroed(out, mutable, lifecycle, parsed);
-    } else {
-        util::emit_state_init_symbolic(out, mutable, lifecycle);
-        util::emit_pre_status_assume(out, op, lifecycle);
-    }
-
-    for (pname, ptype) in &op.takes_params {
-        out.push_str(&format!(
-            "    let {}: {} = kani::any();\n",
-            pname,
-            map_type(ptype, parsed)?
-        ));
-    }
-    util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+    emit_proof_preamble(
+        out,
+        parsed,
+        Some(op),
+        mutable,
+        lifecycle,
+        PreambleOpts {
+            harness_name,
+            unwind: 2,
+            solver,
+            zeroed_init: is_init,
+            pre_status_assume: true,
+        },
+    );
+    emit_symbolic_params(out, parsed, op, 1)?;
 
     // Pin the scrutinee to this arm (or away from every literal pattern,
     // for the wildcard arm) before any state is read.
@@ -383,7 +386,6 @@ pub(crate) fn emit_overflow_detection_harnesses(
     mir: &Mir,
     parsed: &ParsedSpec,
 ) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
@@ -408,24 +410,7 @@ pub(crate) fn emit_overflow_detection_harnesses(
         return Ok(());
     }
 
-    // Resolve view.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
     let mutable = util::mutable_fields(state_fields);
 
     out.push_str(
@@ -437,22 +422,21 @@ pub(crate) fn emit_overflow_detection_harnesses(
     );
 
     for op in &overflow_ops {
-        out.push_str("#[kani::proof]\n");
-        out.push_str("#[kani::unwind(2)]\n");
-        out.push_str("#[kani::solver(cadical)]\n");
-        out.push_str(&format!("fn verify_{}_no_overflow() {{\n", op.name));
-
-        util::emit_state_init_symbolic(out, &mutable, lifecycle);
-        util::emit_pre_status_assume(out, op, lifecycle);
-
-        for (pname, ptype) in &op.takes_params {
-            out.push_str(&format!(
-                "    let {}: {} = kani::any();\n",
-                pname,
-                map_type(ptype, parsed)?
-            ));
-        }
-        util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+        emit_proof_preamble(
+            out,
+            parsed,
+            Some(op),
+            &mutable,
+            lifecycle,
+            PreambleOpts {
+                harness_name: &format!("verify_{}_no_overflow", op.name),
+                unwind: 2,
+                solver: "cadical",
+                zeroed_init: false,
+                pre_status_assume: true,
+            },
+        );
+        emit_symbolic_params(out, parsed, op, 1)?;
 
         emit_kani_account_env_binding(out, op, "accounts", "    ");
         let args = transition_call_args(
@@ -486,20 +470,7 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
-    // Resolve view — same logic as `emit_account_section_structural`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else {
-            // Zero account types — flat state form.
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
     let mutable = util::mutable_fields(state_fields);
     let has_lifecycle = lifecycle.len() >= 2;
 
@@ -520,13 +491,20 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 } else {
                     String::new()
                 };
-                out.push_str("#[kani::proof]\n");
-                let unwind = trace.len() + 1;
-                out.push_str(&format!("#[kani::unwind({})]\n", unwind));
-                out.push_str("#[kani::solver(cadical)]\n");
-                out.push_str(&format!("fn cover_{}{}() {{\n", cover.name, suffix));
-
-                util::emit_state_init_symbolic(out, &mutable, lifecycle);
+                emit_proof_preamble(
+                    out,
+                    parsed,
+                    None,
+                    &mutable,
+                    lifecycle,
+                    PreambleOpts {
+                        harness_name: &format!("cover_{}{}", cover.name, suffix),
+                        unwind: trace.len() + 1,
+                        solver: "cadical",
+                        zeroed_init: false,
+                        pre_status_assume: false,
+                    },
+                );
 
                 let mut indent = "    ".to_string();
                 for (j, op_name) in trace.iter().enumerate() {
@@ -600,12 +578,20 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 continue;
             }
 
-            out.push_str("#[kani::proof]\n");
-            out.push_str(&format!("#[kani::unwind({})]\n", bound + 1));
-            out.push_str("#[kani::solver(cadical)]\n");
-            out.push_str(&format!("fn verify_liveness_{}() {{\n", liveness.name));
-
-            util::emit_state_init_symbolic(out, &mutable, lifecycle);
+            emit_proof_preamble(
+                out,
+                parsed,
+                None,
+                &mutable,
+                lifecycle,
+                PreambleOpts {
+                    harness_name: &format!("verify_liveness_{}", liveness.name),
+                    unwind: bound + 1,
+                    solver: "cadical",
+                    zeroed_init: false,
+                    pre_status_assume: false,
+                },
+            );
 
             // Assume the from-state so via-ops can fire.
             out.push_str(&format!(
@@ -676,15 +662,20 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 }
                 let rust_constraints: &[String] = &env.constraints_rust;
 
-                out.push_str("#[kani::proof]\n");
-                out.push_str("#[kani::unwind(2)]\n");
-                out.push_str("#[kani::solver(cadical)]\n");
-                out.push_str(&format!(
-                    "fn verify_{}_under_{}() {{\n",
-                    prop.name, env.name
-                ));
-
-                util::emit_state_init_symbolic(out, &mutable, lifecycle);
+                emit_proof_preamble(
+                    out,
+                    parsed,
+                    None,
+                    &mutable,
+                    lifecycle,
+                    PreambleOpts {
+                        harness_name: &format!("verify_{}_under_{}", prop.name, env.name),
+                        unwind: 2,
+                        solver: "cadical",
+                        zeroed_init: false,
+                        pre_status_assume: false,
+                    },
+                );
                 out.push_str(&format!("    kani::assume({}(&s));\n", prop.name));
 
                 for (field, ftype) in &env.mutates {
