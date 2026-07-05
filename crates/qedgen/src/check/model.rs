@@ -176,44 +176,6 @@ pub struct ParsedEnvironment {
     pub constraints_rust: Vec<String>,  // rust form
 }
 
-/// Parsed operation from a qedspec block.
-///
-/// Fields are shared across backends (kani/proptest/lean/codegen) to avoid
-/// re-parsing; struct-level `allow(dead_code)` covers fields not all
-/// feature sets touch.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedOperation {
-    pub name: String,
-    pub doc: Option<String>,
-    pub who: Option<String>,
-    /// Which account type this operation targets (from `on` clause).
-    /// None means the default (first/only) account.
-    pub on_account: Option<String>,
-    pub has_when: bool,
-    pub pre_status: Option<String>,
-    pub post_status: Option<String>,
-    pub has_calls: bool,
-    pub program_id: Option<String>,
-    pub has_u64_fields: bool,
-    pub has_takes: bool,
-    pub has_guard: bool,
-    pub guard_str: Option<String>,
-    pub has_effect: bool,
-    pub takes_params: Vec<(String, String)>,
-    pub effects: Vec<(String, String, String)>,
-    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`
-    /// (`effect_on_error[i]` overrides `effects[i]`). `None` without an
-    /// explicit `or`, and for saturating / wrapping / `Set` effects where
-    /// overrides are meaningless.
-    pub effect_on_error: Vec<Option<String>>,
-    pub calls_accounts: Vec<(String, String)>,
-    pub calls_discriminator: Option<String>,
-    pub emits: Vec<String>,
-    /// Abort conditions: (lean_expr, rust_expr, error_name)
-    pub aborts_if: Vec<ParsedAbort>,
-}
-
 /// Temporal shape of a property body, computed at parse time: any
 /// `Expr::Old(_)` anywhere in the body ⇒ `Binary`, else `Unary`
 /// (`expr_contains_old` in `chumsky_adapter.rs`). Drives proptest/kani
@@ -462,8 +424,9 @@ pub struct ParsedEffect {
     /// outside the chumsky adapter (IDL ingest, probes) — MIR lowering
     /// falls back to `value`.
     pub value_rust: String,
-    /// Per-site `else <ErrorVariant>` override (checked add/sub only).
-    /// See `ParsedOperation::effect_on_error`.
+    /// Per-site `or <ErrorVariant>` override (checked add/sub only).
+    /// `None` without an explicit `or`, and for saturating / wrapping /
+    /// `Set` effects where overrides are meaningless.
     pub on_error: Option<String>,
     /// Typed RHS tree (#151); `None` for legacy ingest and hand-built
     /// fixtures.
@@ -493,9 +456,10 @@ impl ParsedEffect {
     }
 }
 
-/// A unified handler — replaces both ParsedOperation (Quasar) and
-/// ParsedInstruction (sBPF). Represents any callable entry point with
-/// guards, effects, accounts, and properties.
+/// A unified handler — replaced the pre-unification per-frontend shapes
+/// (`ParsedOperation` for Quasar, `ParsedInstruction` for sBPF, both since
+/// deleted). Represents any callable entry point with guards, effects,
+/// accounts, and properties.
 #[derive(Debug, Clone)]
 pub struct ParsedHandler {
     pub name: String,
@@ -976,8 +940,6 @@ pub struct ParsedSpec {
     pub handlers: Vec<ParsedHandler>,
 
     // Legacy fields — populated by forward bridge for backward compat.
-    #[allow(dead_code)]
-    pub operations: Vec<ParsedOperation>,
     pub invariants: Vec<ParsedInvariant>,
     pub properties: Vec<ParsedProperty>,
     #[allow(dead_code)]
@@ -1124,8 +1086,8 @@ pub struct ParsedSpec {
     /// `bound_name`) → `ImportedNamespace`. Populated when an imported
     /// source carries `type` declarations beyond the interface-stub shape;
     /// empty for interface-only imports (bundled stdlib stubs). Drives
-    /// `generate_imported_mirror` (`src/imported/<ns>.rs`) and `<ns>.<Type>`
-    /// resolution in account-binding positions.
+    /// `codegen_mir::emit_imported_mirror` (`src/imported/<ns>.rs`) and
+    /// `<ns>.<Type>` resolution in account-binding positions.
     #[allow(dead_code)]
     pub imported_namespaces: std::collections::BTreeMap<String, ImportedNamespace>,
 }

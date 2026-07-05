@@ -14,20 +14,6 @@ pub fn parse_spec_file(path: &Path) -> Result<ParsedSpec> {
     )
 }
 
-/// Parse with explicit qed.lock mode (e.g. `qedgen check --frozen` passes
-/// `LockMode::Frozen`). Thin wrapper kept for existing external callers.
-#[allow(dead_code)]
-pub fn parse_spec_file_with_lock(
-    path: &Path,
-    lock_mode: crate::qed_lock::LockMode,
-) -> Result<ParsedSpec> {
-    parse_spec_file_with_opts(
-        path,
-        lock_mode,
-        crate::import_resolver::CacheOpts::default(),
-    )
-}
-
 /// Full-control entry: explicit lock mode + cache policy.
 /// `qedgen check --frozen --no-cache` calls this with both overrides.
 pub fn parse_spec_file_with_opts(
@@ -362,7 +348,7 @@ fn resolve_and_merge_imports(
         // with empty `account_types`. `imported_namespaces` is the canonical
         // parse-layer truth for "every imported source"; the empty case is
         // meaningful (Tier-0 stubs), not a suppression signal — "anything to
-        // mirror?" is codegen's call (`generate_imported_mirror`). Local
+        // mirror?" is codegen's call (`codegen_mir::emit_imported_mirror`). Local
         // name follows the same alias-or-bound-name rule as the interface
         // merge so type refs match call names.
         let ns = ImportedNamespace {
@@ -794,27 +780,36 @@ handler h : State.A -> State.A { effect { x := 1 } }
     }
 
     #[test]
-    fn parse_spec_file_with_lock_frozen_errors_when_lock_missing() {
+    fn parse_spec_file_frozen_errors_when_lock_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let consumer = write_simple_path_dep_setup(tmp.path());
 
         // Frozen mode + no lock on disk → error.
         let err = format!(
             "{:#}",
-            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+            parse_spec_file_with_opts(
+                &consumer,
+                crate::qed_lock::LockMode::Frozen,
+                crate::import_resolver::CacheOpts::default(),
+            )
+            .unwrap_err()
         );
         assert!(err.contains("stale (--frozen)"), "got: {err}");
     }
 
     #[test]
-    fn parse_spec_file_with_lock_frozen_succeeds_when_lock_current() {
+    fn parse_spec_file_frozen_succeeds_when_lock_current() {
         let tmp = tempfile::tempdir().unwrap();
         let consumer = write_simple_path_dep_setup(tmp.path());
 
         // Auto first to write the lock, then Frozen to verify it stays current.
         parse_spec_file(&consumer).unwrap();
-        parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen)
-            .expect("frozen should pass when lock is current");
+        parse_spec_file_with_opts(
+            &consumer,
+            crate::qed_lock::LockMode::Frozen,
+            crate::import_resolver::CacheOpts::default(),
+        )
+        .expect("frozen should pass when lock is current");
     }
 
     #[test]
@@ -1050,7 +1045,7 @@ handler h : State.A -> State.A { effect { x := 1 } }
     }
 
     #[test]
-    fn parse_spec_file_with_lock_frozen_errors_when_imported_source_changed() {
+    fn parse_spec_file_frozen_errors_when_imported_source_changed() {
         let tmp = tempfile::tempdir().unwrap();
         let consumer = write_simple_path_dep_setup(tmp.path());
 
@@ -1078,7 +1073,12 @@ interface Token {
         .unwrap();
         let err = format!(
             "{:#}",
-            parse_spec_file_with_lock(&consumer, crate::qed_lock::LockMode::Frozen).unwrap_err()
+            parse_spec_file_with_opts(
+                &consumer,
+                crate::qed_lock::LockMode::Frozen,
+                crate::import_resolver::CacheOpts::default(),
+            )
+            .unwrap_err()
         );
         assert!(err.contains("spec_hash"), "got: {err}");
     }

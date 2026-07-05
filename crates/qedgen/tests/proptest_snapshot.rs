@@ -1,20 +1,14 @@
-//! Phase 5 proptest-MIR snapshot equivalence — `docs/design/qedgen-mir-sketch.md`
-//! §"Phase 5".
+//! Proptest snapshot gate for the MIR proptest codegen
+//! (`proptest_gen_mir` — the sole proptest path since the v2.32
+//! legacy-codegen deletion).
 //!
 //! For every pilot fixture (`examples/rust/{escrow, escrow-split,
 //! lending, multisig, bundled-stdlib-demo, percolator}`),
-//! regenerates the MIR-rendered `tests/proptest.rs` and compares
-//! against a checked-in snapshot at
-//! `crates/qedgen/tests/snapshots/<fixture>.proptest.rs`.
-//!
-//! The Phase 5 MIR scaffold delegates the full emit to legacy
-//! `proptest_gen::generate`; the snapshot therefore locks the
-//! legacy output as the MIR-default reference. Any unintended
-//! drift between routes (e.g. future legacy edits that don't
-//! flow through the MIR scaffold) fails the gate immediately.
-//! `QEDGEN_LEGACY_PROPTEST` is explicitly cleared so a parent
-//! shell can't accidentally force the snapshot tests onto the
-//! legacy path.
+//! regenerates the MIR-rendered `tests/proptest.rs` via the built
+//! `qedgen` binary and compares against a checked-in snapshot at
+//! `crates/qedgen/tests/snapshots/<fixture>.proptest.rs`. Any
+//! unintended output drift fails the gate immediately; refresh via
+//! `UPDATE_SNAPSHOTS=1 cargo test --test proptest_snapshot`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,7 +86,6 @@ fn render_mir_proptest(fixture_dir: &str, spec_arg: &str) -> String {
         .arg("--spec")
         .arg(spec_arg)
         .arg("--proptest")
-        .env_remove("QEDGEN_LEGACY_PROPTEST")
         .current_dir(tmp.path())
         .status()
         .expect("spawn qedgen codegen");

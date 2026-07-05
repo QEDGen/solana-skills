@@ -20,13 +20,6 @@ pub(super) fn wsc<'a>() -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
     choice((ws, line_comment)).repeated().ignored()
 }
 
-/// Pad a parser's trailing whitespace/comments.
-pub(super) fn tok<'a, O: 'a>(
-    p: impl Parser<'a, &'a str, O, Err<'a>> + Clone + 'a,
-) -> impl Parser<'a, &'a str, O, Err<'a>> + Clone + 'a {
-    p.then_ignore(wsc())
-}
-
 /// Match a keyword with a word boundary on the trailing side — rejects
 /// `justify` matching `just`. Consumes trailing ws/comments.
 pub(super) fn kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
