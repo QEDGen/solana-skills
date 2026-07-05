@@ -891,56 +891,18 @@ fn render_mul_div(
 /// Structural replacement for `mentions_handler_account_pubkey`'s
 /// substring scan — used to suppress accounts-only requires from the
 /// pure-model harness projection (the harness `State` carries no handler
-/// accounts) when no account env is bound.
+/// accounts) when no account env is bound. Rides the `for_each_path`
+/// spine below, so new `ExprTree` variants are handled in one place.
 pub fn tree_mentions_account_pubkey(e: &ExprTree) -> bool {
-    match e {
-        ExprTree::Path(p) => {
-            matches!(p.binding, BindingKind::Account)
-                && matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey")
+    let mut found = false;
+    for_each_path(e, &mut |p| {
+        if matches!(p.binding, BindingKind::Account)
+            && matches!(p.segments.as_slice(), [TreeSeg::Field(f)] if f == "pubkey")
+        {
+            found = true;
         }
-        ExprTree::Int(_) | ExprTree::Bool(_) => false,
-        ExprTree::Old(inner) | ExprTree::Not(inner) => tree_mentions_account_pubkey(inner),
-        ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => {
-            tree_mentions_account_pubkey(body)
-        }
-        ExprTree::BoolOp { lhs, rhs, .. }
-        | ExprTree::Cmp { lhs, rhs, .. }
-        | ExprTree::Arith { lhs, rhs, .. } => {
-            tree_mentions_account_pubkey(lhs) || tree_mentions_account_pubkey(rhs)
-        }
-        ExprTree::MulDivFloor { a, b, d } | ExprTree::MulDivCeil { a, b, d } => {
-            tree_mentions_account_pubkey(a)
-                || tree_mentions_account_pubkey(b)
-                || tree_mentions_account_pubkey(d)
-        }
-        ExprTree::Match { scrutinee, arms } => {
-            tree_mentions_account_pubkey(scrutinee)
-                || arms.iter().any(|a| tree_mentions_account_pubkey(&a.body))
-        }
-        ExprTree::Ctor { payload, .. } => payload
-            .as_ref()
-            .is_some_and(|p| tree_mentions_account_pubkey(p)),
-        ExprTree::RecordLit(fields) => fields.iter().any(|(_, v)| tree_mentions_account_pubkey(v)),
-        ExprTree::RecordUpdate { base, updates } => {
-            tree_mentions_account_pubkey(base)
-                || updates.iter().any(|(_, v)| tree_mentions_account_pubkey(v))
-        }
-        ExprTree::IsVariant { scrutinee, .. } => tree_mentions_account_pubkey(scrutinee),
-        ExprTree::App { args, .. } => args.iter().any(tree_mentions_account_pubkey),
-        ExprTree::Field { base, .. } => tree_mentions_account_pubkey(base),
-        ExprTree::Let { value, body, .. } => {
-            tree_mentions_account_pubkey(value) || tree_mentions_account_pubkey(body)
-        }
-        ExprTree::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            tree_mentions_account_pubkey(cond)
-                || tree_mentions_account_pubkey(then_branch)
-                || tree_mentions_account_pubkey(else_branch)
-        }
-    }
+    });
+    found
 }
 
 /// Walk every [`TreePath`] in `e`, pre-order. Shared spine for the

@@ -645,7 +645,7 @@ fn emit_state(
     target: Target,
 ) -> Result<()> {
     use crate::codegen_shared::{
-        is_multi_variant_adt_state_pub, map_type_for_target, map_type_pod, to_pascal_case,
+        is_multi_variant_adt_state, map_type_for_target, map_type_pod, to_pascal_case,
         FrameworkSurface,
     };
 
@@ -750,7 +750,7 @@ fn emit_state(
                 out.push_str("}\n\n");
             }
         }
-    } else if is_multi_variant_adt_state_pub(parsed) && matches!(target, Target::Anchor) {
+    } else if is_multi_variant_adt_state(parsed) && matches!(target, Target::Anchor) {
         // Multi-variant ADT: wrapper struct + inner enum + accessors.
         let state_name = format!("{}Account", to_pascal_case(&mir.name));
         let inner_name = format!("{}Inner", state_name);
@@ -1158,7 +1158,7 @@ fn emit_errors(
     // equivalent.
     let needs_invalid_pda = (matches!(target, Target::Quasar)
         || (matches!(target, Target::Anchor)
-            && crate::codegen_shared::is_multi_variant_adt_state_pub(parsed)))
+            && crate::codegen_shared::is_multi_variant_adt_state(parsed)))
         && parsed.handlers.iter().any(|h| {
             let bound: std::collections::HashSet<&str> =
                 h.accounts.iter().map(|a| a.name.as_str()).collect();

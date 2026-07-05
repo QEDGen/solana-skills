@@ -53,7 +53,7 @@ pub(crate) fn emit_effect_conformance_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
     let properties: Vec<&crate::check::ParsedProperty> = parsed.properties.iter().collect();
 
     out.push_str(
@@ -426,7 +426,7 @@ pub(crate) fn emit_overflow_detection_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -500,7 +500,7 @@ pub(crate) fn emit_file_level_features(out: &mut String, parsed: &ParsedSpec) ->
                 parsed.lifecycle_states.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
     let has_lifecycle = lifecycle.len() >= 2;
 
     // ── Cover properties ──────────────────────────────────────────

@@ -160,7 +160,7 @@ pub(crate) fn emit_multi_account_sections(
     use crate::rust_codegen_util as util;
 
     for acct in &parsed.account_types {
-        let acct_fields_view = util::mutable_fields(&acct.fields);
+        let acct_fields_view = util::field_refs(&acct.fields);
         if acct_fields_view.is_empty() {
             continue;
         }

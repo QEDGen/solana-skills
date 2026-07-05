@@ -39,7 +39,7 @@ pub(crate) fn emit_guard_enforcement_harnesses(
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     let guard_ops: Vec<&crate::check::ParsedHandler> =
         parsed.handlers.iter().filter(|op| op.has_guard()).collect();
@@ -304,7 +304,7 @@ pub(crate) fn emit_abort_condition_harnesses(out: &mut String, parsed: &ParsedSp
                 parsed.account_types[0].lifecycle.as_slice(),
             )
         };
-    let mutable = util::mutable_fields(state_fields);
+    let mutable = util::field_refs(state_fields);
 
     let abort_ops: Vec<&crate::check::ParsedHandler> = parsed
         .handlers

@@ -832,7 +832,7 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode:
 
     // Shadow fields for mutable state — read after each action.
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
-    let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+    let mutable_fields = rust_codegen_util::field_refs(state_fields);
     for (fname, ftype) in &mutable_fields {
         let rust_ty = map_simple_type(ftype);
         out.push_str(&format!("    {fname}: {rust_ty},\n"));
@@ -1015,7 +1015,7 @@ fn emit_fixture_impl(
     }
 
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
-    let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+    let mutable_fields = rust_codegen_util::field_refs(state_fields);
 
     out.push_str("        Self {\n");
     out.push_str("            ctx,\n");

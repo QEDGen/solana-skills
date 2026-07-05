@@ -310,11 +310,11 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
     // against a 99-field flat State) only above 32 fields so small specs
     // keep the rustc default; bigger specs fail with the same clear
     // diagnostic and can override locally.
-    let total_field_count: usize = rust_codegen_util::mutable_fields(&spec.state_fields).len()
+    let total_field_count: usize = rust_codegen_util::field_refs(&spec.state_fields).len()
         + spec
             .account_types
             .iter()
-            .map(|a| rust_codegen_util::mutable_fields(&a.fields).len())
+            .map(|a| rust_codegen_util::field_refs(&a.fields).len())
             .sum::<usize>();
     if total_field_count > 32 {
         out.push_str("#![recursion_limit = \"512\"]\n\n");
@@ -351,7 +351,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     if is_multi {
         // Multi-account: generate per-account sections in separate modules
         for acct in &spec.account_types {
-            let acct_fields = rust_codegen_util::mutable_fields(&acct.fields);
+            let acct_fields = rust_codegen_util::field_refs(&acct.fields);
             if acct_fields.is_empty() {
                 continue;
             }
@@ -406,7 +406,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             .chain(spec.ghosts.iter().map(|g| (g.name.clone(), g.ty.clone())))
             .collect();
         let state_fields: &[(String, String)] = &state_fields_owned;
-        let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+        let mutable_fields = rust_codegen_util::field_refs(state_fields);
         let all_handlers: Vec<&ParsedHandler> = spec.handlers.iter().collect();
         let all_props: Vec<&ParsedProperty> = spec.properties.iter().collect();
         emit_account_section(
