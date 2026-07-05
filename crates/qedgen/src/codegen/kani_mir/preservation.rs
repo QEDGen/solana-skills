@@ -414,20 +414,10 @@ pub(crate) fn emit_ensures_preservation_harnesses(
             ));
             out.push_str("    }\n");
             out.push_str("}\n\n");
-
-            // Intentional no-op — see `pre_unused_workaround_needed`.
-            let _ = pre_unused_workaround_needed(ensures);
         }
     }
 
     Ok(())
-}
-
-/// No-op stub for the `pre`-binding lint workaround: deliberately emits
-/// nothing extra (underscoring `pre` conditionally proved too brittle);
-/// the call marks intent to keep the snapshot-pinned byte-exact shape.
-pub(crate) fn pre_unused_workaround_needed(_ensures: &crate::check::ParsedEnsures) -> bool {
-    false
 }
 
 /// Emit `#[kani::proof] fn verify_<handler>_(preserves|establishes)_<invariant>()`

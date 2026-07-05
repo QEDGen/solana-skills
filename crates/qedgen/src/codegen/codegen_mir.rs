@@ -1571,4 +1571,161 @@ handler poke : State.Active -> State.Active {
             "no Anchor/Quasar prelude leakage; got:\n{rendered}"
         );
     }
+
+    /// v2.29 Slice H — when a spec's `imported_namespaces` carries an
+    /// account type, codegen emits `src/imported/<ns>.rs` with the
+    /// mirrored struct plus a `src/imported/mod.rs` re-exporter.
+    /// Bundled-stub-only imports leave the map empty and the mirror
+    /// dir is never created.
+    #[test]
+    fn imported_namespace_emits_local_mirror() {
+        use crate::check::{ImportedNamespace, ParsedAccountType};
+
+        let mut spec = ParsedSpec {
+            program_name: "ConsumerProgram".into(),
+            ..ParsedSpec::default()
+        };
+        spec.account_types.push(ParsedAccountType {
+            name: "Consumer".into(),
+            fields: vec![("balance".into(), "U64".into())],
+            lifecycle: vec![],
+            pda_ref: None,
+            variants: vec![],
+        });
+        // Inject an imported namespace by hand (the resolver path is
+        // exercised by check.rs tests; this test focuses on the
+        // codegen-side mirror emission).
+        let imported = ImportedNamespace {
+            dep_key: "foreign_dep".into(),
+            account_types: vec![ParsedAccountType {
+                name: "ForeignState".into(),
+                fields: vec![
+                    ("admin".into(), "Pubkey".into()),
+                    ("counter".into(), "U64".into()),
+                ],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![],
+            }],
+            records: vec![],
+        };
+        spec.imported_namespaces.insert("Foreign".into(), imported);
+
+        let mir = crate::mir::lower(&spec);
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("programs");
+        std::fs::create_dir_all(out_dir.join("src")).unwrap();
+
+        emit_imported_mirror(&mir, &spec, &fp, &out_dir, Target::Anchor)
+            .expect("imported mirror generation should succeed");
+
+        let ns_file = out_dir.join("src/imported/Foreign.rs");
+        let body =
+            std::fs::read_to_string(&ns_file).expect("namespace mirror file should be written");
+        assert!(
+            body.contains("pub struct ForeignState"),
+            "expected `ForeignState` mirror struct; got:\n{body}"
+        );
+        assert!(
+            body.contains("pub admin: Pubkey,"),
+            "expected `admin: Pubkey` field; got:\n{body}"
+        );
+        assert!(
+            body.contains("#[account]"),
+            "expected `#[account]` attr (Anchor target); got:\n{body}"
+        );
+
+        let mod_file = out_dir.join("src/imported/mod.rs");
+        let mod_body =
+            std::fs::read_to_string(&mod_file).expect("imported mod.rs should be written");
+        assert!(
+            mod_body.contains("pub mod Foreign;"),
+            "expected `pub mod Foreign;` re-export; got:\n{mod_body}"
+        );
+    }
+
+    /// v2.29 Slice H — multi-variant imported account types lower to
+    /// the wrapper-struct + inner-enum shape and emit accessor
+    /// methods on the inner enum (mirrors `emit_state`'s Slice B
+    /// accessor work).
+    #[test]
+    fn imported_multi_variant_namespace_emits_accessors() {
+        use crate::check::{ImportedNamespace, ParsedAccountType, ParsedVariant};
+
+        let mut spec = ParsedSpec {
+            program_name: "Consumer".into(),
+            ..ParsedSpec::default()
+        };
+        spec.account_types.push(ParsedAccountType {
+            name: "Local".into(),
+            fields: vec![("x".into(), "U64".into())],
+            lifecycle: vec![],
+            pda_ref: None,
+            variants: vec![],
+        });
+        let imported = ImportedNamespace {
+            dep_key: "amm_dep".into(),
+            account_types: vec![ParsedAccountType {
+                name: "Pool".into(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Open".into(),
+                        fields: vec![
+                            ("admin".into(), "Pubkey".into()),
+                            ("balance".into(), "U64".into()),
+                        ],
+                    },
+                    ParsedVariant {
+                        name: "Closed".into(),
+                        fields: vec![("admin".into(), "Pubkey".into())],
+                    },
+                ],
+            }],
+            records: vec![],
+        };
+        spec.imported_namespaces.insert("AMM".into(), imported);
+
+        let mir = crate::mir::lower(&spec);
+        let fp = crate::fingerprint::compute_fingerprint(&spec);
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("programs");
+        std::fs::create_dir_all(out_dir.join("src")).unwrap();
+
+        emit_imported_mirror(&mir, &spec, &fp, &out_dir, Target::Anchor)
+            .expect("imported mirror generation should succeed");
+
+        let body = std::fs::read_to_string(out_dir.join("src/imported/AMM.rs"))
+            .expect("AMM mirror file should be written");
+        assert!(
+            body.contains("pub struct Pool"),
+            "expected wrapper struct; got:\n{body}"
+        );
+        assert!(
+            body.contains("pub inner: PoolInner,"),
+            "expected `inner: PoolInner` field; got:\n{body}"
+        );
+        assert!(
+            body.contains("pub enum PoolInner"),
+            "expected inner enum; got:\n{body}"
+        );
+        // `admin` exists in both variants — accessor emitted, no
+        // panic arm because the match exhausts.
+        assert!(
+            body.contains("pub fn admin(&self) -> &Pubkey"),
+            "expected `admin` accessor; got:\n{body}"
+        );
+        // `balance` only in Open — accessor emits with a panic arm.
+        assert!(
+            body.contains("pub fn balance(&self) -> &u64"),
+            "expected `balance` accessor; got:\n{body}"
+        );
+        assert!(
+            body.contains("PoolInner::balance() called on a variant without `balance`"),
+            "expected panic message for missing variant; got:\n{body}"
+        );
+    }
 }

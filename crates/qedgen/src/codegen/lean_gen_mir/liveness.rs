@@ -330,9 +330,6 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
             for (j, op_name) in trace.iter().enumerate() {
                 let handler = mir.handlers.iter().find(|h| h.name == *op_name);
                 let trans = safe_name(&format!("{}Transition", op_name));
-                let param_args = handler
-                    .map(|h| param_args_str(&h.params))
-                    .unwrap_or_default();
                 let extra_exists = handler
                     .map(|h| {
                         h.params
@@ -344,9 +341,7 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
                     })
                     .unwrap_or_default();
 
-                // Call sites use the existentially-bound `v{j}_{k}` names;
-                // the declared-name `param_args` is unused here.
-                let _ = param_args;
+                // Call sites use the existentially-bound `v{j}_{k}` names.
                 let positional_args = handler
                     .map(|h| {
                         h.params

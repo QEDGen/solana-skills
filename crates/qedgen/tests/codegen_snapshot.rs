@@ -22,9 +22,7 @@
 //!
 //! When the snapshot diverges, the test prints the unified diff and
 //! fails. Refresh via `UPDATE_SNAPSHOTS=1 cargo test --test
-//! codegen_snapshot`. `QEDGEN_LEGACY_CODEGEN` is explicitly cleared
-//! so a parent shell can't accidentally force the snapshot tests
-//! onto the legacy path.
+//! codegen_snapshot`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -103,7 +101,6 @@ fn render_mir_codegen(fixture_dir: &str, spec_arg: &str) -> String {
         .arg("codegen")
         .arg("--spec")
         .arg(spec_arg)
-        .env_remove("QEDGEN_LEGACY_CODEGEN")
         .current_dir(tmp.path())
         .status()
         .expect("spawn qedgen codegen");

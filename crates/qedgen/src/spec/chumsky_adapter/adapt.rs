@@ -819,10 +819,6 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     .cloned()
                     .collect();
             }
-            continue;
-        }
-        if prop.preserved_by.len() == 1 && prop.preserved_by[0] == "all" {
-            prop.preserved_by = all_handler_names.clone();
         }
     }
 
