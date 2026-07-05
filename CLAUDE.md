@@ -36,7 +36,9 @@ Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fix
 
 ## Crate map
 
-**`crates/qedgen-macros/`** — `#[qed]` proc macro: compile-time drift detection (`lib.rs` entry, `verified.rs` content-hash + `compile_error!`).
+**`crates/qedgen-hash-core/`** — canonical spec/body hashing (`sha256_hex16`, `canonical_token_string`, `extract_handler_block`, `normalize_spec_block`, `spec_context_digest`, `scan_balanced_block`) shared by the CLI and the proc macro — agreement by construction, no hand-kept mirrors. `tests/stamp_crosscheck.rs` hard-asserts checked-in `#[qed(verified, hash = …)]` stamps.
+
+**`crates/qedgen-macros/`** — `#[qed]` proc macro: compile-time drift detection (`lib.rs` entry, `verified.rs` content-hash + `compile_error!`); hashing delegated to `qedgen-hash-core`.
 
 **`crates/qedgen/src/`** — CLI, parsers, codegens. Directory modules by pipeline stage (post-v2.35 reorg; root re-exports in `main.rs` keep `crate::<module>` paths stable):
 - `main.rs` / `cli.rs` / `run.rs` / `run_helpers.rs` — CLI surface (split out of `main.rs` in v2.36): `main.rs` (binary entry + the `crate::<module>` re-export hub), `cli.rs` (clap arg defs for every subcommand: init, setup, check, codegen, verify, reconcile, generate, fill-sorry, aristotle, spec, asm2lean, consolidate, probe, adapt, interface, readiness, check-upgrade, …), `run.rs` (`command_name_of` + the `dispatch` match), `run_helpers.rs` (dispatch-support glue)

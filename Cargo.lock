@@ -2224,12 +2224,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "qedgen-macros"
+name = "qedgen-hash-core"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
  "sha2 0.10.9",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "qedgen-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "qedgen-hash-core",
+ "quote",
  "syn 2.0.117",
 ]
 
@@ -2252,6 +2262,7 @@ dependencies = [
  "clap",
  "flate2",
  "proc-macro2",
+ "qedgen-hash-core",
  "quote",
  "regex",
  "reqwest",
