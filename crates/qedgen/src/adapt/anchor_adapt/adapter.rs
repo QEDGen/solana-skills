@@ -55,7 +55,7 @@ pub(crate) fn looks_like_anchor(program_root: &Path) -> bool {
 /// Generate a starter `.qedspec` for the Anchor program at `program_root`
 /// (the crate dir holding `src/`). `overrides` points unrecognized handlers
 /// at their actual implementation.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production goes through the FrameworkAdapter trait; kept as the test entry
 pub fn adapt(program_root: &Path, overrides: &HashMap<String, HandlerOverride>) -> Result<String> {
     let adapter = AnchorAdapter::new(overrides);
     adapter.adapt(program_root)
@@ -97,7 +97,7 @@ pub fn extract_program_model(
 }
 
 /// Convenience wrapper: write the adapted `.qedspec` to disk.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production goes through the FrameworkAdapter trait; kept as the test entry
 pub fn adapt_to_file(
     program_root: &Path,
     output_path: &Path,

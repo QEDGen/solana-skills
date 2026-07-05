@@ -20,7 +20,6 @@ use crate::qed_manifest::{Dependency, GitRef, Manifest};
 /// fragments. The `commit` field is `Some(hash)` for GitHub sources and
 /// `None` for path sources.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ResolvedImport {
     /// Source-side interface name — what the imported `.qedspec`
     /// declares as `interface <bound_name> { ... }`. The merge step
@@ -47,7 +46,6 @@ pub struct ResolvedImport {
 
 /// Cache-handling options for github fetches.
 #[derive(Debug, Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct CacheOpts {
     /// `--no-cache`: forcibly clear and refetch every github source.
     /// Path sources are unaffected.
@@ -57,7 +55,7 @@ pub struct CacheOpts {
 /// Resolve every `import` statement against the manifest, fetch sources,
 /// and return them. Errors carry enough context to point the user at the
 /// offending import or manifest entry.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production passes explicit CacheOpts via resolve_imports_with_opts; kept as the test entry
 pub fn resolve_imports(
     imports: &[ParsedImport],
     manifest: &Manifest,
@@ -76,7 +74,6 @@ pub fn resolve_imports(
 /// - Same dep key → *different* canonical paths: hard-error with both
 ///   paths and the import chain.
 /// - Cycle (path re-encountered on the current chain): hard-error.
-#[allow(dead_code)]
 pub fn resolve_imports_with_opts(
     imports: &[ParsedImport],
     manifest: &Manifest,

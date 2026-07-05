@@ -21,15 +21,17 @@ const MAX_POLL_FAILURE_SECS: u64 = 600;
 const MAX_ARCHIVE_SIZE_BYTES: usize = 500 * 1024 * 1024; // 500 MB
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct Project {
     pub project_id: String,
     pub status: String,
     pub created_at: String,
     pub last_updated_at: String,
     pub percent_complete: Option<i32>,
+    #[allow(dead_code)] // Aristotle API wire-shape field; deserialized but unread today
     pub input_prompt: Option<String>,
+    #[allow(dead_code)] // Aristotle API wire-shape field; deserialized but unread today
     pub file_name: Option<String>,
+    #[allow(dead_code)] // Aristotle API wire-shape field; deserialized but unread today
     pub description: Option<String>,
     pub output_summary: Option<String>,
 }
@@ -37,7 +39,7 @@ pub struct Project {
 #[derive(Debug, Deserialize)]
 struct ListResponse {
     projects: Vec<Project>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Aristotle API wire-shape field; list is rendered unpaginated today
     pagination_key: Option<String>,
 }
 

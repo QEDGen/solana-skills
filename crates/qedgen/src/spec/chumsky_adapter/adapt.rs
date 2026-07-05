@@ -1299,7 +1299,6 @@ fn adapt_handler(
         post_status: h.post.as_ref().and_then(|p| p.0.last().cloned()),
         takes_params: params.clone(),
         guard_str: None,
-        guard_str_rust: None,
         aborts_if: Vec::new(),
         requires: Vec::new(),
         ensures: Vec::new(),

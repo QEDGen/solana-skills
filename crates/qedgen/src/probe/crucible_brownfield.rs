@@ -81,7 +81,6 @@ fn empty_handler(name: String) -> ParsedHandler {
         post_status: None,
         takes_params: vec![],
         guard_str: None,
-        guard_str_rust: None,
         aborts_if: vec![],
         requires: vec![],
         ensures: vec![],
