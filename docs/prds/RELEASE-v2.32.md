@@ -65,7 +65,7 @@ close the gaps, prove parity, delete last.
 - The full sBPF renderer (instruction blocks / guard theorems / `ea_*` lemmas /
   completeness `structure Spec`) is gated by a golden test
   (`lean_gen_mir::tests::sbpf_render_matches_golden`, fixture
-  `dropset_sbpf.qedspec`); the sibling axiom-module writer by
+  `the old-syntax sbpf fixture`); the sibling axiom-module writer by
   `lean_sidecars::tests::axiom_module_matches_golden`. Both goldens were proven
   byte-identical to the legacy renderers before deletion.
 - `scripts/check-lake-build.sh --strict` (CI, cold Mathlib) — proves the

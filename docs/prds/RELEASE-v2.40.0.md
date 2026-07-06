@@ -109,7 +109,7 @@ their lifted programs hit the v0.9 fail-closed ISA model
 (`ERR_UNSUPPORTED_INSTRUCTION` where v0.4.0 executed; `tree` needs a full
 re-proof). These three had not built full-fat since the un-vendoring
 (cold caches masked it — the v2.39.0 lesson cut both ways). Same posture
-as the dropset precedent: proof migration is tracked in #154, not a ship gate.
+as the the-vendored-sbpf-example precedent: proof migration is tracked in #154, not a ship gate.
 The support library itself compiles green in all three projects; only the
 example proof bodies lag.
 

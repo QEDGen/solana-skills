@@ -44,15 +44,15 @@ fn run_codegen(dir: &Path, args: &[&str]) -> std::process::Output {
 /// branch was reached.
 #[test]
 fn sbpf_old_syntax_lean_regen_path_works() {
-    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/dropset_sbpf.qedspec");
-    let tmp = sbpf_project(&spec_src, "dropset.qedspec");
+    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/vault_lock_sbpf.qedspec");
+    let tmp = sbpf_project(&spec_src, "vault_lock.qedspec");
 
     let out = run_codegen(
         tmp.path(),
         &[
             "--lean",
             "--spec",
-            "dropset.qedspec",
+            "vault_lock.qedspec",
             "--lean-output",
             "formal_verification/Spec.lean",
         ],
@@ -89,10 +89,10 @@ fn sbpf_old_syntax_lean_regen_path_works() {
 /// artifact is suppressed rather than erroring.
 #[test]
 fn sbpf_codegen_all_emits_only_lean_and_ci() {
-    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/dropset_sbpf.qedspec");
-    let tmp = sbpf_project(&spec_src, "dropset.qedspec");
+    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/vault_lock_sbpf.qedspec");
+    let tmp = sbpf_project(&spec_src, "vault_lock.qedspec");
 
-    let out = run_codegen(tmp.path(), &["--all", "--spec", "dropset.qedspec"]);
+    let out = run_codegen(tmp.path(), &["--all", "--spec", "vault_lock.qedspec"]);
     assert!(
         out.status.success(),
         "codegen --all failed on sBPF spec:\nstdout: {}\nstderr: {}",

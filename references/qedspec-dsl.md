@@ -1673,7 +1673,7 @@ generates guard-chain infrastructure. This is the Lean-side companion to
 ```lean
 import QEDGen.Solana.Guards
 
-qedguards Dropset where
+qedguards VaultLock where
   prog: progAt
   chunks progAt_0 progAt_1 progAt_2
 
@@ -1687,7 +1687,7 @@ qedguards Dropset where
 
   guard P1 "wrong discriminant"
     offset: DISCRIMINANT_OFFSET
-    expected: DISCRIMINANT_REGISTER_MARKET
+    expected: DISCRIMINANT_LOCK_VAULT
     fuel 8
     error E_DISCRIMINANT
     proof auto

@@ -126,30 +126,30 @@ fn adt_transition_renders_branch_as_nested_lean_match() {
 
 /// sBPF Lean codegen regression gate. The bundled `examples/sbpf/*`
 /// specs use modern `handler` syntax with no `instruction` blocks and
-/// only exercise `render_sbpf`'s header path; this old-syntax `Dropset`
+/// only exercise `render_sbpf`'s header path; this old-syntax `VaultLock`
 /// fixture exercises the full renderer: per-instruction namespaces,
 /// offset/`ea_*` lemmas, guard theorem stubs (`==`, `>=`,
 /// field-vs-field RHS, no-`checks`), the completeness `structure Spec`,
 /// and property stubs. Regenerate intentionally:
 /// `UPDATE_SBPF_GOLDEN=1 cargo test sbpf_render_matches_golden`.
-const DROPSET_SBPF_SPEC: &str = include_str!("../../../tests/fixtures/dropset_sbpf.qedspec");
-const DROPSET_SBPF_GOLDEN: &str =
-    include_str!("../../../tests/fixtures/dropset_sbpf.Spec.lean.golden");
+const VAULT_LOCK_SBPF_SPEC: &str = include_str!("../../../tests/fixtures/vault_lock_sbpf.qedspec");
+const VAULT_LOCK_SBPF_GOLDEN: &str =
+    include_str!("../../../tests/fixtures/vault_lock_sbpf.Spec.lean.golden");
 
 #[test]
 fn sbpf_render_matches_golden() {
-    let parsed =
-        crate::chumsky_adapter::parse_str(DROPSET_SBPF_SPEC).expect("parse dropset sBPF fixture");
+    let parsed = crate::chumsky_adapter::parse_str(VAULT_LOCK_SBPF_SPEC)
+        .expect("parse vault-lock sBPF fixture");
     assert!(
         parsed.is_assembly_target(),
-        "dropset fixture should be an assembly target"
+        "vault-lock fixture should be an assembly target"
     );
     let ported = render_sbpf(&parsed);
 
     if std::env::var("UPDATE_SBPF_GOLDEN").is_ok() {
         std::fs::write(
             format!(
-                "{}/tests/fixtures/dropset_sbpf.Spec.lean.golden",
+                "{}/tests/fixtures/vault_lock_sbpf.Spec.lean.golden",
                 std::env::var("CARGO_MANIFEST_DIR").unwrap()
             ),
             &ported,
@@ -160,7 +160,7 @@ fn sbpf_render_matches_golden() {
 
     // Guard against a vacuous golden: the full renderer must fire.
     for marker in [
-        "namespace RegisterMarket",
+        "namespace LockVault",
         "@[simp] theorem ea_",
         "theorem rejects_invalid_discriminant",
         "structure Spec (progAt",
@@ -173,7 +173,7 @@ fn sbpf_render_matches_golden() {
     }
 
     assert_eq!(
-        DROPSET_SBPF_GOLDEN, ported,
+        VAULT_LOCK_SBPF_GOLDEN, ported,
         "render_sbpf output drifted from the golden — \
              regenerate with UPDATE_SBPF_GOLDEN=1 if intentional"
     );

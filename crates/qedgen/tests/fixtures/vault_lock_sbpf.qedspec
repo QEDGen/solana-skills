@@ -1,0 +1,111 @@
+spec VaultLock
+
+pragma sbpf {
+  const DISC_LOCK_VAULT       = 0
+  const ACCT_NON_DUP_MARKER   = 255
+  const DATA_LEN_ZERO         = 0
+  const SIZE_OF_VAULT_HEADER  = 40
+
+  pubkey RENT [
+    5_862_609_301_215_225_606,
+    9_219_231_539_345_853_473,
+    4_971_307_250_928_769_624,
+    2_329_533_411
+  ]
+
+  errors [
+    InvalidDiscriminant        = 1  "Discriminant is not LOCK_VAULT",
+    InvalidInstructionLength   = 2  "Instruction data is not 1 byte",
+    InvalidNumberOfAccounts    = 3  "Fewer than 4 accounts provided",
+    OwnerHasData               = 4  "Owner account already has data",
+    VaultAccountIsDuplicate    = 5  "Vault account is a duplicate",
+    InvalidVaultPubkey         = 6  "Vault pubkey does not match derived PDA",
+    RentSysvarIsDuplicate      = 7  "Rent sysvar account is a duplicate",
+    InvalidRentSysvarPubkey    = 8  "Rent sysvar pubkey is wrong"
+  ]
+
+  /// Validates accounts, derives vault PDA, creates vault account via CPI
+  instruction LockVault {
+  discriminant DISC_LOCK_VAULT
+  entry 24
+
+  const ACCOUNTS_REQUIRED    = 4
+  const INSTRUCTION_DATA_LEN = 1
+
+  input_layout {
+    n_accounts     : U64    @ 0       "Number of accounts in input buffer"
+    owner_data_len : U64    @ 88      "Data length of owner account"
+    vault_dup      : U8     @ 10344   "Vault account duplicate flag"
+    vault_data_len : U64    @ 10424   "Vault account data length"
+    vault_pubkey   : Pubkey @ 10352   "Vault account address (4 chunks)"
+  }
+
+  insn_layout {
+    insn_len       : U64    @ -8      "Instruction data length"
+    discriminant   : U8     @ 0       "Instruction discriminant byte"
+  }
+
+  /// Instruction byte must be LOCK_VAULT
+  guard rejects_invalid_discriminant {
+    checks discriminant == DISC_LOCK_VAULT
+    error InvalidDiscriminant
+    fuel 8
+  }
+  guard rejects_invalid_account_count {
+    checks n_accounts >= ACCOUNTS_REQUIRED
+    error InvalidNumberOfAccounts
+    fuel 10
+  }
+  guard rejects_invalid_instruction_length {
+    checks insn_len == INSTRUCTION_DATA_LEN
+    error InvalidInstructionLength
+    fuel 12
+  }
+  guard rejects_owner_has_data {
+    checks owner_data_len == DATA_LEN_ZERO
+    error OwnerHasData
+    fuel 14
+  }
+  guard rejects_vault_duplicate {
+    checks vault_dup == ACCT_NON_DUP_MARKER
+    error VaultAccountIsDuplicate
+    fuel 16
+  }
+  guard rejects_invalid_vault_pubkey {
+    checks vault_pubkey == derived_pda
+    error InvalidVaultPubkey
+    fuel 30
+  }
+  guard rejects_rent_sysvar_duplicate {
+    error RentSysvarIsDuplicate
+    fuel 40
+  }
+  guard rejects_invalid_rent_sysvar_pubkey {
+    checks rent_pubkey == RENT
+    error InvalidRentSysvarPubkey
+    fuel 52
+  }
+
+  property memory_safety {
+    scope guards
+  }
+  property pda_derivation {
+    flow vault_pda from seeds [owner_addr, seed_nonce]
+  }
+  property account_pointer_flow {
+    flow r9 through [vault, system_program, rent_sysvar]
+  }
+  property cpi_create_account {
+    cpi system_program CreateAccount {
+      payer        owner
+      target       vault_pda
+      space        SIZE_OF_VAULT_HEADER
+      signer_seeds [owner_addr, bump]
+    }
+  }
+  property accepts_valid_input {
+    after all guards
+    exit 0
+  }
+}
+}

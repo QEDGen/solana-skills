@@ -67,7 +67,7 @@ The release narrative shifts from "scaffolds compile on bundled fixtures" to **"
 4. ✅ `cargo test` — 449 unit tests, all integration tests, 4-fixture compile + proptest smoke.
 5. ✅ `bash scripts/check-readme-drift.sh` — 17/17 commands documented.
 6. ✅ `lake build` for `examples/rust/lending/formal_verification/` (the only example regen'd inside this branch's proof-fill work). Other Lean-bearing examples were untouched.
-7. ✅ Zero unfilled `sorry` in user proofs. The 4 remaining `:= by sorry` in `examples/rust/escrow-split/formal_verification/Spec.lean` are sanctioned v2.8 G3 CPI ensures-as-axiom theorems (each carries the `Token.transfer.ensures @ <handler>` marker). Other matches in `lean_solana/QEDGen/Solana/{Spec,CommandBuilders}.lean` and `dropset/Spec.lean` are inside code comments / macro docstrings.
+7. ✅ Zero unfilled `sorry` in user proofs. The 4 remaining `:= by sorry` in `examples/rust/escrow-split/formal_verification/Spec.lean` are sanctioned v2.8 G3 CPI ensures-as-axiom theorems (each carries the `Token.transfer.ensures @ <handler>` marker). Other matches in `lean_solana/QEDGen/Solana/{Spec,CommandBuilders}.lean` and `the-vendored-sbpf-example/Spec.lean` are inside code comments / macro docstrings.
 8. ✅ `qedgen check --frozen` clean against all 5 bundled `qed.toml` fixtures.
 9. ✅ Doc/code drift sweep complete:
    - `references/cli.md` covers `--regen-drift` + `--examples-root`.
