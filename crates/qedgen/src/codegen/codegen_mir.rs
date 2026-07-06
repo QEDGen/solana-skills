@@ -765,80 +765,29 @@ fn emit_state(
         }
         out.push_str("}\n\n");
 
-        out.push_str(&format!(
-            "/// Variant-payload state for {0}. The Anchor wrapper above\n\
-             /// carries the account discriminator; this enum carries the\n\
-             /// state-machine variant + per-variant payload fields.\n",
-            state_name
-        ));
-        out.push_str(
-            "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]\n",
-        );
-        out.push_str(&format!("pub enum {} {{\n", inner_name));
-        for variant in &acct.variants {
-            if variant.fields.is_empty() {
-                out.push_str(&format!("    {},\n", variant.name));
-            } else {
-                out.push_str(&format!("    {} {{\n", variant.name));
-                for (fname, ftype) in &variant.fields {
-                    out.push_str(&format!(
-                        "        {}: {},\n",
-                        fname,
-                        map_type_for_target(ftype, parsed, target)?
-                    ));
-                }
-                out.push_str("    },\n");
-            }
-        }
-        out.push_str("}\n\n");
-
-        // Accessors for fields shared (with consistent type) across variants.
-        let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
-            std::collections::BTreeMap::new();
-        for variant in &acct.variants {
-            for (fname, ftype) in &variant.fields {
-                field_index
-                    .entry(fname.clone())
-                    .or_default()
-                    .push((variant.name.clone(), ftype.clone()));
-            }
-        }
-        if !field_index.is_empty() {
-            out.push_str(&format!("impl {} {{\n", inner_name));
-            for (fname, occurrences) in &field_index {
-                let first_ty = &occurrences[0].1;
-                if occurrences.iter().any(|(_, t)| t != first_ty) {
-                    continue;
-                }
-                let rust_ty = map_type_for_target(first_ty, parsed, target)?;
-                out.push_str(&format!(
+        crate::codegen_shared::render_adt_inner_enum(
+            &mut out,
+            acct,
+            &inner_name,
+            &format!(
+                "/// Variant-payload state for {0}. The Anchor wrapper above\n\
+                 /// carries the account discriminator; this enum carries the\n\
+                 /// state-machine variant + per-variant payload fields.\n",
+                state_name
+            ),
+            &|fname| {
+                format!(
                     "    /// v2.29 Slice B accessor for `{0}`. Panics on variants\n\
                      /// that don't carry the field — guarded against by the\n\
                      /// per-handler lifecycle check that fires before any\n\
                      /// `requires` emission in `crate::guards`.\n",
                     fname
-                ));
-                out.push_str(&format!(
-                    "    pub fn {}(&self) -> &{} {{\n        match self {{\n",
-                    fname, rust_ty
-                ));
-                for (variant_name, _) in occurrences {
-                    out.push_str(&format!(
-                        "            Self::{} {{ {}, .. }} => {},\n",
-                        variant_name, fname, fname
-                    ));
-                }
-                let all_variants = acct.variants.len();
-                if occurrences.len() < all_variants {
-                    out.push_str(&format!(
-                        "            _ => panic!(\"{}::{}() called on a variant without `{}`\"),\n",
-                        inner_name, fname, fname
-                    ));
-                }
-                out.push_str("        }\n    }\n");
-            }
-            out.push_str("}\n");
-        }
+                )
+            },
+            parsed,
+            target,
+            /* blank_after_impl */ false,
+        )?;
     } else {
         // Flat single-account fallback.
         let state_name = format!("{}Account", to_pascal_case(&mir.name));
@@ -1012,78 +961,27 @@ fn emit_imported_mirror(
             out.push_str(&format!("    pub inner: {},\n", inner_name));
             out.push_str("}\n\n");
 
-            out.push_str(&format!(
-                "/// Variant-payload state for `{0}` (mirrored from `{1}`).\n",
-                acct.name, dep_key
-            ));
-            out.push_str(
-                "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]\n",
-            );
-            out.push_str(&format!("pub enum {} {{\n", inner_name));
-            for variant in &acct.variants {
-                if variant.fields.is_empty() {
-                    out.push_str(&format!("    {},\n", variant.name));
-                } else {
-                    out.push_str(&format!("    {} {{\n", variant.name));
-                    for (fname, ftype) in &variant.fields {
-                        out.push_str(&format!(
-                            "        {}: {},\n",
-                            fname,
-                            crate::codegen_shared::map_type_for_target(ftype, parsed, target)?
-                        ));
-                    }
-                    out.push_str("    },\n");
-                }
-            }
-            out.push_str("}\n\n");
-
-            // Accessors for fields with consistent type across variants.
-            let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
-                std::collections::BTreeMap::new();
-            for variant in &acct.variants {
-                for (fname, ftype) in &variant.fields {
-                    field_index
-                        .entry(fname.clone())
-                        .or_default()
-                        .push((variant.name.clone(), ftype.clone()));
-                }
-            }
-            if !field_index.is_empty() {
-                out.push_str(&format!("impl {} {{\n", inner_name));
-                for (fname, occurrences) in &field_index {
-                    let first_ty = &occurrences[0].1;
-                    if occurrences.iter().any(|(_, t)| t != first_ty) {
-                        continue;
-                    }
-                    let rust_ty =
-                        crate::codegen_shared::map_type_for_target(first_ty, parsed, target)?;
-                    out.push_str(&format!(
+            crate::codegen_shared::render_adt_inner_enum(
+                &mut out,
+                acct,
+                &inner_name,
+                &format!(
+                    "/// Variant-payload state for `{0}` (mirrored from `{1}`).\n",
+                    acct.name, dep_key
+                ),
+                &|fname| {
+                    format!(
                         "    /// v2.29 Slice H accessor for `{0}`. Panics on variants\n\
                          /// that don't carry the field — the per-handler lifecycle\n\
                          /// check at the top of each `crate::guards::*` fn prevents\n\
                          /// the panic arm from being reached at runtime.\n",
                         fname
-                    ));
-                    out.push_str(&format!(
-                        "    pub fn {}(&self) -> &{} {{\n        match self {{\n",
-                        fname, rust_ty
-                    ));
-                    for (variant_name, _) in occurrences {
-                        out.push_str(&format!(
-                            "            Self::{} {{ {}, .. }} => {},\n",
-                            variant_name, fname, fname
-                        ));
-                    }
-                    if occurrences.len() < acct.variants.len() {
-                        out.push_str(&format!(
-                            "            _ => panic!(\"{}::{}() called on a variant without `{}`\"),\n",
-                            inner_name, fname, fname
-                        ));
-                    }
-                    out.push_str("        }\n    }\n");
-                }
-                out.push_str("}\n\n");
-            }
+                    )
+                },
+                parsed,
+                target,
+                /* blank_after_impl */ true,
+            )?;
         }
 
         out.push_str("// ---- END GENERATED ----\n");
@@ -1153,53 +1051,25 @@ fn emit_errors(
         !pre.is_empty() && !is_init
     });
 
-    // R28: runtime PDA verification auto-adds `InvalidPda`. The predicate
-    // walks pda_seeds against variant fields — no single-call MIR
-    // equivalent.
-    let needs_invalid_pda = (matches!(target, Target::Quasar)
-        || (matches!(target, Target::Anchor)
-            && crate::codegen_shared::is_multi_variant_adt_state(parsed)))
-        && parsed.handlers.iter().any(|h| {
-            let bound: std::collections::HashSet<&str> =
-                h.accounts.iter().map(|a| a.name.as_str()).collect();
-            let is_init_handler = matches!(
-                h.pre_status.as_deref(),
-                Some("Uninitialized") | Some("Empty")
-            );
-            h.accounts.iter().any(|acct| {
-                let Some(seeds) = &acct.pda_seeds else {
-                    return false;
-                };
-                if acct.is_signer {
-                    return false;
-                }
-                let on_account_matches = match h.on_account.as_deref() {
-                    Some(adt) => {
-                        let lower = adt.to_lowercase();
-                        acct.name == lower || acct.name.starts_with(&lower)
-                    }
-                    None => true,
-                };
-                if is_init_handler && on_account_matches {
-                    return false;
-                }
-                seeds.iter().any(|seed| {
-                    let is_literal = seed.starts_with('"') && seed.ends_with('"');
-                    if is_literal || bound.contains(seed.as_str()) {
-                        return false;
-                    }
-                    if matches!(target, Target::Anchor) {
-                        parsed.account_types.iter().any(|a| {
-                            a.variants
-                                .iter()
-                                .any(|v| v.fields.iter().any(|(n, _)| n == seed))
-                        })
-                    } else {
-                        true
-                    }
-                })
-            })
-        });
+    // R28: runtime PDA verification auto-adds `InvalidPda`. Shares the
+    // firing predicate with `generate_guards` so the emitted check and
+    // this enum variant can't drift apart.
+    let needs_invalid_pda = parsed.handlers.iter().any(|h| {
+        let bound: std::collections::HashSet<&str> =
+            h.accounts.iter().map(|a| a.name.as_str()).collect();
+        h.accounts.iter().any(|acct| {
+            let Some(seeds) = &acct.pda_seeds else {
+                return false;
+            };
+            if acct.is_signer {
+                return false;
+            }
+            if crate::codegen_shared::handler_is_init_for(h, &acct.name) {
+                return false;
+            }
+            crate::codegen_shared::r28_pda_check_fires(target, parsed, seeds, &bound)
+        })
+    });
 
     let mut codes: Vec<String> = mir.errors.variants.clone();
     if needs_lifecycle && !codes.iter().any(|c| c == "InvalidLifecycle") {

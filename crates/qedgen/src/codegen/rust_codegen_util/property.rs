@@ -36,23 +36,10 @@ pub fn property_predicate_rust(prop: &ParsedProperty, wrapping_fallback: bool) -
         })
 }
 
-/// Translate a qedspec property expression to Rust.
+/// Translate a qedspec property expression to Rust — identical grammar
+/// to guard expressions; alias of [`translate_guard_to_rust`].
 pub fn translate_property_to_rust(expr: &str, wrapping: bool) -> String {
-    let result = expr
-        .replace("state.", "s.")
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
-        .replace(" and ", " && ")
-        .replace(" or ", " || ");
-    let result = fix_equality_operator(&result);
-    if wrapping {
-        wrap_arithmetic(&result)
-    } else {
-        result
-    }
+    translate_guard_to_rust(expr, wrapping)
 }
 
 /// Fix standalone ` = ` (Lean equality) to ` == ` (Rust equality),

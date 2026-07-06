@@ -1244,20 +1244,9 @@ fn infer_range_attr(_spec: &ParsedSpec, _ptype: &str) -> String {
 }
 
 /// snake_case → PascalCase (used for Anchor `instruction::Foo` / `accounts::Foo`).
+/// Alias of the shared `codegen_shared::to_pascal_case`.
 fn pascal_case(s: &str) -> String {
-    let mut out = String::new();
-    let mut upper_next = true;
-    for c in s.chars() {
-        if c == '_' {
-            upper_next = true;
-        } else if upper_next {
-            out.push(c.to_ascii_uppercase());
-            upper_next = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    crate::codegen_shared::to_pascal_case(s)
 }
 
 fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {

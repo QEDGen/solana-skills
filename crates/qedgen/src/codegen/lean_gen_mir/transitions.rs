@@ -666,16 +666,14 @@ pub(super) fn flat_effect_with_parts(
     with_parts
 }
 
-/// Overflow/underflow bound conjuncts for one statement list — the
-/// per-arm analogue of `build_guard_cond_parts` items 3, 5, and 6 (same
-/// formats, same all-arithmetic-kinds coverage, same dedup against
-/// already-present conjuncts). Used by the `Stmt::Branch` rendering so
-/// an arm's bounds gate only that arm.
-pub(super) fn flat_effect_bound_conds(
+/// Underflow guard conjuncts (`<delta> ≤ s.<field>`, unsigned fields
+/// only) for every sub-kind statement in `stmts` — item 3 of
+/// `build_guard_cond_parts`, shared with the per-arm
+/// `flat_effect_bound_conds`.
+pub(super) fn sub_underflow_conds(
     mir: &Mir,
     h: &crate::mir::HandlerMir,
     stmts: &[crate::mir::Stmt],
-    outer_conds: &[String],
 ) -> Vec<String> {
     use crate::mir::Stmt;
     let state_fields = flat_state_fields(mir);
@@ -711,6 +709,24 @@ pub(super) fn flat_effect_bound_conds(
         }
     }
 
+    conds
+}
+
+/// Overflow guard conjuncts (`s.<field> + <delta> ≤ <max>`, unsigned
+/// fields only) for every add-kind statement in `stmts` — item 5 of
+/// `build_guard_cond_parts`, shared with the per-arm
+/// `flat_effect_bound_conds`. Deduped against both the conjuncts
+/// accumulated inside this pass and every slice in `already` (the
+/// caller's earlier conjuncts).
+pub(super) fn add_overflow_conds(
+    mir: &Mir,
+    stmts: &[crate::mir::Stmt],
+    already: &[&[String]],
+) -> Vec<String> {
+    use crate::mir::Stmt;
+    let state_fields = flat_state_fields(mir);
+    let mut conds: Vec<String> = Vec::new();
+
     for stmt in stmts {
         let (path, delta) = match stmt {
             Stmt::CheckedAdd { path, delta, .. }
@@ -744,15 +760,34 @@ pub(super) fn flat_effect_bound_conds(
         let sf = safe_name(&field);
         let needle_a = format!("s.{} + {}", sf, delta.lean);
         let needle_b = format!("{} + s.{}", delta.lean, sf);
-        let already = conds
+        let dup = conds
             .iter()
-            .chain(outer_conds.iter())
+            .chain(already.iter().flat_map(|s| s.iter()))
             .any(|c| c.contains(&needle_a) || c.contains(&needle_b));
-        if already {
+        if dup {
             continue;
         }
         conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
     }
+
+    conds
+}
+
+/// Overflow/underflow bound conjuncts for one statement list — the
+/// per-arm analogue of `build_guard_cond_parts` items 3, 5, and 6 (same
+/// formats, same all-arithmetic-kinds coverage, same dedup against
+/// already-present conjuncts). Used by the `Stmt::Branch` rendering so
+/// an arm's bounds gate only that arm.
+pub(super) fn flat_effect_bound_conds(
+    mir: &Mir,
+    h: &crate::mir::HandlerMir,
+    stmts: &[crate::mir::Stmt],
+    outer_conds: &[String],
+) -> Vec<String> {
+    let mut conds = sub_underflow_conds(mir, h, stmts);
+
+    let adds = add_overflow_conds(mir, stmts, &[&conds, outer_conds]);
+    conds.extend(adds);
 
     // Item-6 analogue: effect-RHS bound guards for the arm's own bare
     // arithmetic (#148), deduped against both the arm's and the outer
@@ -799,35 +834,7 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
         }
     }
 
-    for stmt in &h.body.stmts {
-        let (path, delta) = match stmt {
-            Stmt::CheckedSub { path, delta, .. }
-            | Stmt::WrapSub { path, delta }
-            | Stmt::SatSub { path, delta } => (path, delta),
-            Stmt::RequireOrAbort { .. }
-            | Stmt::TokenTransfer { .. }
-            | Stmt::VariantPromote { .. }
-            | Stmt::Assign { .. }
-            | Stmt::CheckedAdd { .. }
-            | Stmt::WrapAdd { .. }
-            | Stmt::SatAdd { .. }
-            | Stmt::Branch { .. }
-            | Stmt::Abort(_)
-            | Stmt::Cpi { .. }
-            | Stmt::Emit { .. } => continue,
-        };
-        let field = path_field_name(path);
-        if let Some(ty) = state_fields
-            .iter()
-            .find(|(n, _)| n == &field)
-            .map(|(_, t)| t.clone())
-        {
-            if ty_max_const(&ty).is_some() {
-                let d = effect_value_to_lean_mir(&delta.lean, &h.params);
-                conds.push(format!("{} \u{2264} s.{}", d, safe_name(&field)));
-            }
-        }
-    }
+    conds.extend(sub_underflow_conds(mir, h, &h.body.stmts));
 
     for stmt in &h.body.stmts {
         if let Stmt::RequireOrAbort { pred, .. } = stmt {
@@ -838,47 +845,8 @@ pub(super) fn build_guard_cond_parts(mir: &Mir, h: &crate::mir::HandlerMir) -> V
         }
     }
 
-    for stmt in &h.body.stmts {
-        let (path, delta) = match stmt {
-            Stmt::CheckedAdd { path, delta, .. }
-            | Stmt::WrapAdd { path, delta }
-            | Stmt::SatAdd { path, delta } => (path, delta),
-            Stmt::RequireOrAbort { .. }
-            | Stmt::TokenTransfer { .. }
-            | Stmt::VariantPromote { .. }
-            | Stmt::Assign { .. }
-            | Stmt::CheckedSub { .. }
-            | Stmt::WrapSub { .. }
-            | Stmt::SatSub { .. }
-            | Stmt::Branch { .. }
-            | Stmt::Abort(_)
-            | Stmt::Cpi { .. }
-            | Stmt::Emit { .. } => continue,
-        };
-        let field = path_field_name(path);
-        let ty = match state_fields
-            .iter()
-            .find(|(n, _)| n == &field)
-            .map(|(_, t)| t.clone())
-        {
-            Some(t) => t,
-            None => continue,
-        };
-        let max = match ty_max_const(&ty) {
-            Some(m) => m,
-            None => continue,
-        };
-        let sf = safe_name(&field);
-        let needle_a = format!("s.{} + {}", sf, delta.lean);
-        let needle_b = format!("{} + s.{}", delta.lean, sf);
-        let already = conds
-            .iter()
-            .any(|c| c.contains(&needle_a) || c.contains(&needle_b));
-        if already {
-            continue;
-        }
-        conds.push(format!("s.{} + {} \u{2264} {}", sf, delta.lean, max));
-    }
+    let adds = add_overflow_conds(mir, &h.body.stmts, &[&conds]);
+    conds.extend(adds);
 
     let tree_conds = effect_tree_bound_conds(mir, &h.body.stmts, &conds);
     conds.extend(tree_conds);

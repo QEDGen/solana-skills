@@ -172,7 +172,8 @@ pub(super) fn emit_liveness_multi(out: &mut String, mir: &Mir) {
 /// tracking which `apply<Account>Ops` helpers we've already emitted so
 /// we don't repeat them. The helper itself + the theorem are written
 /// with bare `State` / `Operation` / `applyOp` identifiers, then
-/// renamed in one pass at the end.
+/// renamed in one pass at the end. Theorem rendering is the shared
+/// `emit_liveness_body` (single source with `emit_liveness_inner`).
 pub(super) fn emit_liveness_inner_body(
     out: &mut String,
     scoped: &Mir,
@@ -194,63 +195,11 @@ pub(super) fn emit_liveness_inner_body(
         emitted_helpers.insert(helper_key);
     }
 
-    // `emit_liveness_inner_no_header` skips both the section header (already
-    // written by the caller) and the applyOps helper (managed above).
-    let mut tmp = String::new();
-    emit_liveness_inner_no_header(&mut tmp, scoped, /* adt_form */ false);
-    buf.push_str(&tmp);
+    // Shared theorem rendering; the section header (already written by
+    // the caller) and the applyOps helper (managed above) are skipped.
+    emit_liveness_body(&mut buf, scoped, /* adt_form */ false);
 
     out.push_str(&rename_state_idents(&buf, account_name));
-}
-
-/// Body of `emit_liveness_inner` minus the section header and the
-/// helper-emit (handled by `emit_liveness_multi` /
-/// `emit_liveness_inner_body`). Keep in sync with `emit_liveness_inner`.
-pub(super) fn emit_liveness_inner_no_header(out: &mut String, mir: &Mir, adt_form: bool) {
-    for liveness in &mir.liveness_props {
-        let bound = liveness.within_steps.unwrap_or(10);
-        out.push_str(&format!(
-            "/-- {} \u{2014} from {} leads to {} within {} steps via [{}]. -/\n",
-            liveness.name,
-            liveness.from_state,
-            liveness.leads_to_state,
-            bound,
-            liveness.via_ops.join(", ")
-        ));
-        out.push_str(&format!(
-            "theorem liveness_{} (s : State) (signer : Pubkey)\n",
-            liveness.name
-        ));
-        out.push_str(&format!(
-            "    (h : s.status = .{}) :\n",
-            liveness.from_state
-        ));
-        if adt_form {
-            out.push_str(&format!(
-                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer ops = some s' \u{2192} s'.status = .{} := by sorry\n\n",
-                bound, liveness.leads_to_state
-            ));
-            continue;
-        }
-        let path = find_liveness_path(
-            &liveness.from_state,
-            &liveness.leads_to_state,
-            &liveness.via_ops,
-            &mir.handlers,
-        );
-        if let Some(ref ops_path) = path {
-            let proof = liveness_proof_script(ops_path, &mir.handlers);
-            out.push_str(&format!(
-                "    \u{2203} ops, ops.length \u{2264} {} \u{2227} \u{2200} s', applyOps s signer ops = some s' \u{2192} s'.status = .{}{}\n",
-                bound, liveness.leads_to_state, proof
-            ));
-        } else {
-            out.push_str(&format!(
-                "    \u{2203} ops s', ops.length \u{2264} {} \u{2227} applyOps s signer ops = some s' \u{2227} s'.status = .{} := by sorry\n\n",
-                bound, liveness.leads_to_state
-            ));
-        }
-    }
 }
 
 /// Multi-account environment emit. Each property × environment cross
@@ -279,82 +228,8 @@ pub(super) fn emit_environments_multi(out: &mut String, mir: &Mir) {
         scoped.properties = props.clone();
         scoped.environments = mir.environments.clone();
         let mut block = String::new();
-        emit_environments_no_header(&mut block, &scoped);
+        emit_environments_body(&mut block, &scoped);
         out.push_str(&rename_state_idents(&block, &acct.name));
-    }
-}
-
-/// Body of `emit_environments` minus the section header (written by
-/// `emit_environments_multi`). Per-theorem rendering stays in lockstep
-/// with the single-account path, including the bare-field-name rewrite
-/// the spec's `constraint <field> > 0` form needs.
-pub(super) fn emit_environments_no_header(out: &mut String, mir: &Mir) {
-    for env in &mir.environments {
-        for prop in &mir.properties {
-            let prop_expr = match &prop.expression {
-                Some(e) => e,
-                None => continue,
-            };
-            let param_sig: String = env
-                .mutates
-                .iter()
-                .map(|(name, ty)| format!(" (new_{} : {})", name, render_ty(ty)))
-                .collect();
-
-            let constraint_hyps: String = env
-                .constraints
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    let mut expr = c.0.lean.clone();
-                    for (field, _) in &env.mutates {
-                        expr = expr
-                            .replace(&format!("s.{}", field), &format!("new_{}", field))
-                            .replace(&format!("state.{}", field), &format!("new_{}", field));
-                        // Bare field-name reference (e.g.
-                        // `constraint interest_rate > 0`). Use word
-                        // boundary so `interest_rate_pct` isn't
-                        // captured by `interest_rate`.
-                        let pat = format!(r"\b{}\b", regex::escape(field));
-                        let re = regex::Regex::new(&pat).expect("static regex");
-                        expr = re
-                            .replace_all(&expr, regex::NoExpand(&format!("new_{}", field)))
-                            .into_owned();
-                    }
-                    format!("\n    (h_c{} : {})", i, expr)
-                })
-                .collect();
-
-            let with_parts: String = env
-                .mutates
-                .iter()
-                .map(|(name, _)| format!("{} := new_{}", safe_name(name), name))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            out.push_str(&format!(
-                "theorem {}_under_{} (s : State){}{}\n",
-                prop.name, env.name, param_sig, constraint_hyps
-            ));
-            out.push_str(&format!("    (h_inv : {} s) :\n", prop.name));
-
-            let mutated_overlap = env.mutates.iter().any(|(field, _)| {
-                prop_expr.lean.contains(&format!("s.{}", safe_name(field)))
-                    || prop_expr.lean.contains(&format!("state.{}", field))
-            });
-
-            if !mutated_overlap {
-                out.push_str(&format!(
-                    "    {} {{ s with {} }} := by\n  unfold {} at h_inv \u{22A2}; dsimp; exact h_inv\n\n",
-                    prop.name, with_parts, prop.name
-                ));
-            } else {
-                out.push_str(&format!(
-                    "    {} {{ s with {} }} := sorry\n\n",
-                    prop.name, with_parts
-                ));
-            }
-        }
     }
 }
 
@@ -477,34 +352,15 @@ pub(super) fn emit_invariants_as_comments(out: &mut String, mir: &Mir) {
     }
 }
 
-/// Group properties by which account's fields they reference, then
-/// emit each group through the per-account scoped path.
+/// Group properties by which account's fields they reference (via
+/// `group_properties_by_account`), then emit each group through the
+/// per-account scoped path.
 pub(super) fn emit_properties_multi(out: &mut String, mir: &Mir) {
-    use std::collections::BTreeMap;
-
     if mir.properties.is_empty() || mir.account_states.is_empty() {
         return;
     }
 
-    let mut groups: BTreeMap<String, Vec<crate::mir::PropertyMir>> = BTreeMap::new();
-    let primary_name = mir.account_states[0].name.clone();
-
-    for prop in &mir.properties {
-        let target = if let Some(expr) = &prop.expression {
-            mir.account_states
-                .iter()
-                .find(|a| {
-                    a.fields
-                        .iter()
-                        .any(|f| expr.lean.contains(&format!("s.{}", f.name)))
-                })
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| primary_name.clone())
-        } else {
-            primary_name.clone()
-        };
-        groups.entry(target).or_default().push(prop.clone());
-    }
+    let groups = group_properties_by_account(mir);
 
     for (acct_name, props) in groups {
         let acct = mir
@@ -585,22 +441,9 @@ pub(super) fn emit_covers_multi(out: &mut String, mir: &Mir, primary_scoped: &Mi
     if !kept.is_empty() {
         let mut scoped = primary_scoped.clone();
         scoped.covers = kept;
-        // emit_covers writes its own section header; we've already
-        // emitted it. Render to a buffer and strip the duplicate
-        // header block (3 lines).
-        let mut buf = String::new();
-        emit_covers(&mut buf, &scoped);
-        let stripped: String = buf
-            .lines()
-            .skip_while(|l| {
-                l.starts_with("-- ===") || l.contains("Cover properties") || l.is_empty()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !stripped.is_empty() {
-            out.push_str(&stripped);
-            out.push('\n');
-        }
+        // The section header is already written above; render the
+        // theorem bodies directly through the shared emitter.
+        emit_covers_body(out, &scoped, /* adt_form */ false);
     }
 }
 

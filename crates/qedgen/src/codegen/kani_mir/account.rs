@@ -16,27 +16,7 @@ pub(crate) fn emit_account_section_structural(
     use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
-    // Resolve view: single `type Account` block → its fields + lifecycle;
-    // none → `resolve_state_fields` + `spec.lifecycle_states`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            // Multi-account reaching this path: best-effort primary-account
-            // view (multi-mode dispatch passes a single-account scoped spec).
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
 
     // Ghosts are spec-only verification-State fields: present in the Kani
     // State struct + symbolic init + transitions (BMC can read them,

@@ -431,6 +431,18 @@ pub(crate) enum TypeMapContext {
     Quasar,
 }
 
+/// Split a `Map[BOUND] T` DSL compound into `(bound_src, inner_src)`,
+/// both trimmed. Tolerates whitespace between `Map` and `[`. `None` when
+/// the string isn't a well-formed Map compound — callers own their
+/// malformed-input policy (bail / return-None / fall through), which is
+/// why this returns an Option instead of erroring.
+pub(crate) fn split_map_type(dsl_type: &str) -> Option<(&str, &str)> {
+    let rest = dsl_type.strip_prefix("Map")?;
+    let rest = rest.trim_start().strip_prefix('[')?;
+    let close = rest.find(']')?;
+    Some((rest[..close].trim(), rest[close + 1..].trim()))
+}
+
 /// Map a DSL type to its standalone Rust equivalent: primitives,
 /// `Map[N] T` → `[T; N]` (N = literal or declared constant; inner T
 /// recurses), `Fin[N]` → `usize`, transitive type aliases, and record /
@@ -512,21 +524,16 @@ pub(crate) fn map_type_with_context(
     let dsl_type = dsl_type.trim();
 
     // Compound type: Map[BOUND] T → [T; N]
-    if let Some(rest) = dsl_type.strip_prefix("Map") {
-        let rest = rest.trim_start();
-        if let Some(rest) = rest.strip_prefix('[') {
-            if let Some(close) = rest.find(']') {
-                let bound_src = rest[..close].trim();
-                let inner_src = rest[close + 1..].trim();
-                let n = resolve_map_bound(bound_src, spec)?;
-                let inner_rust = map_type_with_context(inner_src, spec, context)?;
-                return Ok(format!("[{inner_rust}; {n}]"));
-            }
-        }
-        anyhow::bail!(
-            "malformed Map type `{}` — expected `Map[BOUND] T`",
-            dsl_type
-        );
+    if dsl_type.starts_with("Map") {
+        let Some((bound_src, inner_src)) = split_map_type(dsl_type) else {
+            anyhow::bail!(
+                "malformed Map type `{}` — expected `Map[BOUND] T`",
+                dsl_type
+            );
+        };
+        let n = resolve_map_bound(bound_src, spec)?;
+        let inner_rust = map_type_with_context(inner_src, spec, context)?;
+        return Ok(format!("[{inner_rust}; {n}]"));
     }
 
     // Fin[N] → usize. N is informational (bound for index-type safety in
@@ -676,16 +683,11 @@ pub(crate) fn resolve_map_bound(bound: &str, spec: &ParsedSpec) -> Result<String
 pub(crate) fn default_value_for_type(dsl_type: &str, spec: &ParsedSpec) -> Option<String> {
     let dsl_type = dsl_type.trim();
 
-    if let Some(rest) = dsl_type.strip_prefix("Map") {
-        let rest = rest.trim_start();
-        if let Some(rest) = rest.strip_prefix('[') {
-            if let Some(close) = rest.find(']') {
-                let bound_src = rest[..close].trim();
-                let inner_src = rest[close + 1..].trim();
-                if let Ok(n) = resolve_map_bound(bound_src, spec) {
-                    let inner_default = default_value_for_type(inner_src, spec)?;
-                    return Some(format!("[{}; {}]", inner_default, n));
-                }
+    if dsl_type.starts_with("Map") {
+        if let Some((bound_src, inner_src)) = split_map_type(dsl_type) {
+            if let Ok(n) = resolve_map_bound(bound_src, spec) {
+                let inner_default = default_value_for_type(inner_src, spec)?;
+                return Some(format!("[{}; {}]", inner_default, n));
             }
         }
         return None;

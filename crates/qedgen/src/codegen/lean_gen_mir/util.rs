@@ -105,25 +105,16 @@ pub(super) fn effect_value_to_lean_mir(
     rewrite_subscripts_lean(&prefixed)
 }
 
-/// Map a DSL type-string to its Lean form (scalar cases only). Unknown
-/// forms — including compounds like `Map[N] T`, `Fin[N]` — pass through
-/// unchanged; add compound support when a fixture demands it.
-pub(super) fn map_dsl_ty(s: &str) -> String {
-    match s.trim() {
-        "U8" | "U16" | "U32" | "U64" | "U128" => "Nat".to_string(),
-        "I8" | "I16" | "I32" | "I64" | "I128" => "Int".to_string(),
-        other => other.to_string(),
-    }
-}
+// Shared Lean naming/type helpers (single source with `lean_sidecars`).
+pub(super) use crate::lean_names::{map_dsl_ty, safe_name};
 
-/// Union of (field-name, type) pairs across every state variant —
-/// matches the flat-state `emit_state_struct` projection. Used by
-/// `emit_handler_transition` to look up field types for the auth
-/// gate and the auto overflow/underflow guards.
-pub(super) fn flat_state_fields(mir: &Mir) -> Vec<(String, crate::mir::Ty)> {
+/// Union of (field-name, type) pairs across every variant of a
+/// `StateAdt`, preserving declaration order and de-duping by name —
+/// matches the flat-state `emit_state_struct` projection.
+pub(super) fn state_field_union(state: &crate::mir::StateAdt) -> Vec<(String, crate::mir::Ty)> {
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut out: Vec<(String, crate::mir::Ty)> = Vec::new();
-    for v in &mir.state.variants {
+    for v in &state.variants {
         for f in &v.fields {
             if seen.insert(f.name.clone()) {
                 out.push((f.name.clone(), f.ty.clone()));
@@ -131,6 +122,37 @@ pub(super) fn flat_state_fields(mir: &Mir) -> Vec<(String, crate::mir::Ty)> {
         }
     }
     out
+}
+
+/// [`state_field_union`] over the Mir's own state. The single source for
+/// every union-of-variant-fields view in this module (state struct,
+/// accessors, guard-bound lookups, frame conditions, overflow fields).
+pub(super) fn flat_state_fields(mir: &Mir) -> Vec<(String, crate::mir::Ty)> {
+    state_field_union(&mir.state)
+}
+
+/// True when any effect statement in `stmts` mutates one of
+/// `prop_fields` — the "does this handler touch what the property
+/// reads?" test shared by the preservation and master-inductive proof
+/// scripts.
+pub(super) fn handler_touches_fields(stmts: &[crate::mir::Stmt], prop_fields: &[String]) -> bool {
+    use crate::mir::Stmt;
+    stmts.iter().any(|s| match s {
+        Stmt::Assign { path, .. }
+        | Stmt::CheckedAdd { path, .. }
+        | Stmt::CheckedSub { path, .. }
+        | Stmt::WrapAdd { path, .. }
+        | Stmt::WrapSub { path, .. }
+        | Stmt::SatAdd { path, .. }
+        | Stmt::SatSub { path, .. } => prop_fields.iter().any(|f| f == &path_field_name(path)),
+        Stmt::RequireOrAbort { .. }
+        | Stmt::TokenTransfer { .. }
+        | Stmt::VariantPromote { .. }
+        | Stmt::Branch { .. }
+        | Stmt::Abort(_)
+        | Stmt::Cpi { .. }
+        | Stmt::Emit { .. } => false,
+    })
 }
 
 /// Scan `s.<ident>` occurrences and return each unique field name.
@@ -273,14 +295,7 @@ pub(super) fn render_ty(ty: &crate::mir::Ty) -> String {
 /// Build a parameter signature string for transition function
 /// declarations: `" (p1 : T1) (p2 : T2) ..."`; empty when `params` is.
 pub(super) fn param_sig_str(params: &[(crate::mir::Symbol, crate::mir::Ty)]) -> String {
-    if params.is_empty() {
-        return String::new();
-    }
-    params
-        .iter()
-        .map(|(n, t)| format!(" ({} : {})", n, render_ty(t)))
-        .collect::<Vec<_>>()
-        .join("")
+    crate::lean_names::param_sig_str_with(params, render_ty)
 }
 
 /// Extract the auth-account name for the alias-let, if any. `None` for
@@ -364,37 +379,6 @@ pub(super) fn has_top_level_op(expr: &str, ops: &[&str]) -> bool {
         }
     }
     false
-}
-
-/// Quote Lean reserved names as `«name»`. Extend as fixtures surface
-/// collisions; keep in sync with `lean_sidecars::safe_name`.
-pub(super) fn safe_name(name: &str) -> String {
-    // Reserved words that collide with common qedspec identifiers
-    // (notably `initialize`).
-    const LEAN_RESERVED: &[&str] = &[
-        "open",
-        "close",
-        "initialize",
-        "import",
-        "namespace",
-        "end",
-        "where",
-        "with",
-        "do",
-        "let",
-        "if",
-        "then",
-        "else",
-        "match",
-        "return",
-        "in",
-        "for",
-    ];
-    if LEAN_RESERVED.contains(&name) {
-        format!("\u{00AB}{}\u{00BB}", name)
-    } else {
-        name.to_string()
-    }
 }
 
 // ----------------------------------------------------------------------

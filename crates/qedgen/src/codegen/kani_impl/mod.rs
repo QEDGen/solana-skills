@@ -183,12 +183,13 @@ fn generate_from_spec_with_context(
     // emit-targets) is target-agnostic; only the harness body shape
     // differs per framework.
     match target {
-        Target::Anchor => emit_kani_impl_anchor(
+        Target::Anchor => emit_kani_impl_struct_framework(
             spec,
             output_path,
             &emit_targets,
             &auto_handlers,
             explicit_flag,
+            &ANCHOR_IMPL_FRAMEWORK,
         ),
         Target::Pinocchio => emit_kani_impl_pinocchio(
             spec,
@@ -198,12 +199,13 @@ fn generate_from_spec_with_context(
             explicit_flag,
             spec_path,
         ),
-        Target::Quasar => emit_kani_impl_quasar(
+        Target::Quasar => emit_kani_impl_struct_framework(
             spec,
             output_path,
             &emit_targets,
             &auto_handlers,
             explicit_flag,
+            &QUASAR_IMPL_FRAMEWORK,
         ),
     }
 }

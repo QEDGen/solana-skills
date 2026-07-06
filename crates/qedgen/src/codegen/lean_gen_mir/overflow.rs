@@ -35,37 +35,18 @@ pub(super) fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
 
     // Numeric state fields unioned across variants in declaration order
     // (same union pass as `emit_state_struct`).
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut numeric_fields: Vec<(String, Ty)> = Vec::new();
-    for v in &mir.state.variants {
-        for f in &v.fields {
-            if !matches!(
-                f.ty,
+    let numeric_fields: Vec<(String, Ty)> = flat_state_fields(mir)
+        .into_iter()
+        .filter(|(_, ty)| {
+            matches!(
+                ty,
                 Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128
-            ) {
-                continue;
-            }
-            if seen.insert(f.name.clone()) {
-                numeric_fields.push((f.name.clone(), f.ty.clone()));
-            }
-        }
-    }
+            )
+        })
+        .collect();
     if numeric_fields.is_empty() {
         return;
     }
-
-    let valid_fn = |ty: &Ty| -> &'static str {
-        match ty {
-            Ty::U8 => "valid_u8",
-            Ty::U16 => "valid_u16",
-            Ty::U32 => "valid_u32",
-            Ty::U64 => "valid_u64",
-            Ty::U128 => "valid_u128",
-            Ty::I64 => "valid_i64",
-            Ty::I128 => "valid_i128",
-            _ => "valid_u64",
-        }
-    };
 
     out.push_str(
         "-- ============================================================================\n",
@@ -84,11 +65,11 @@ pub(super) fn emit_overflow_inner(out: &mut String, mir: &Mir, adt_form: bool) {
 
         let pre_parts: Vec<String> = numeric_fields
             .iter()
-            .map(|(n, t)| format!("{} s.{}", valid_fn(t), safe_name(n)))
+            .map(|(n, t)| format!("{} s.{}", valid_fn_for(t), safe_name(n)))
             .collect();
         let post_parts: Vec<String> = numeric_fields
             .iter()
-            .map(|(n, t)| format!("{} s'.{}", valid_fn(t), safe_name(n)))
+            .map(|(n, t)| format!("{} s'.{}", valid_fn_for(t), safe_name(n)))
             .collect();
 
         // Invariant hypotheses: properties this handler preserves. Binary
