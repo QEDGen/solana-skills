@@ -320,7 +320,7 @@ fn emit_findings(grants: &[AuthorityGrant], closes: &[CloseSite]) -> Vec<Finding
                  after the program-owned PDA is closed.",
                 close.fn_name
             ),
-            category_tag: "external_authority_not_revoked_on_close".to_string(),
+            category_tag: Category::ExternalAuthorityNotRevokedOnClose.tag().to_string(),
             reproducer: Some(Reproducer::MolluskPrompt {
                 template_path:
                     "references/probes/lifecycle/external_authority_not_revoked_on_close.md#reproducer"

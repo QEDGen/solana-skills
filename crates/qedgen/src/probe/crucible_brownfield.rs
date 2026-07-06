@@ -74,31 +74,8 @@ pub fn synthesize_spec(project_root: &Path, runtime: Runtime) -> Result<Brownfie
 fn empty_handler(name: String) -> ParsedHandler {
     ParsedHandler {
         name,
-        doc: None,
-        who: None,
-        on_account: None,
-        pre_status: None,
-        post_status: None,
-        takes_params: vec![],
-        guard_str: None,
-        aborts_if: vec![],
-        requires: vec![],
-        ensures: vec![],
-        modifies: None,
-        let_bindings: vec![],
-        aborts_total: false,
         permissionless: true,
-        effects: vec![],
-        accounts: vec![],
-        transfers: vec![],
-        emits: vec![],
-        invariants: vec![],
-        establishes: vec![],
-        schema_includes: vec![],
-        properties: vec![],
-        calls: vec![],
-        effect_branches: None,
-        abstract_binders: vec![],
+        ..Default::default()
     }
 }
 

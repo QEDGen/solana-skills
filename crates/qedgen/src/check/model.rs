@@ -426,7 +426,7 @@ impl ParsedEffect {
 /// (`ParsedOperation` for Quasar, `ParsedInstruction` for sBPF, both since
 /// deleted). Represents any callable entry point with guards, effects,
 /// accounts, and properties.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsedHandler {
     pub name: String,
     pub doc: Option<String>,
@@ -1041,6 +1041,48 @@ pub struct CompletenessWarning {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub fix_options: Vec<FixOption>,
+}
+
+impl CompletenessWarning {
+    /// Builder seed — rule / severity / priority / message; the remaining
+    /// fields default (no subject/example/counterexample, empty fix, no fix
+    /// options). Chain `.subject()` / `.fix()` / `.example()` /
+    /// `.counterexample()` as needed (or struct-update over the base for
+    /// `Option`-typed locals). Lint rules use the `warn(...)` shorthand in
+    /// `lints::shared`.
+    pub fn new(rule: &str, severity: Severity, priority: u8, message: impl Into<String>) -> Self {
+        CompletenessWarning {
+            rule: rule.to_string(),
+            severity,
+            priority,
+            message: message.into(),
+            subject: None,
+            fix: String::new(),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        }
+    }
+
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    pub fn fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = fix.into();
+        self
+    }
+
+    pub fn example(mut self, example: impl Into<String>) -> Self {
+        self.example = Some(example.into());
+        self
+    }
+
+    pub fn counterexample(mut self, ce: Counterexample) -> Self {
+        self.counterexample = Some(ce);
+        self
+    }
 }
 
 /// Drift status for a generated code file.

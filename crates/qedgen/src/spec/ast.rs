@@ -733,6 +733,45 @@ pub struct Path {
     pub segments: Vec<PathSeg>,
 }
 
+impl Path {
+    /// Render as source syntax: `root.field[idx].field`. The single source
+    /// of truth for Path→string spelling — renderers that need a prefix
+    /// swap (Lean `s.`/`s'.`) keep their own root handling.
+    pub fn to_source_string(&self) -> String {
+        let mut s = self.root.clone();
+        push_segments_source(&mut s, &self.segments);
+        s
+    }
+
+    /// Segments-only render (no root) — the `state.`-stripped form:
+    /// `state.a[i].b` → `a[i].b`.
+    pub fn segments_source_string(&self) -> String {
+        let mut s = String::new();
+        push_segments_source(&mut s, &self.segments);
+        s
+    }
+}
+
+/// Append `.field` / `[idx]` segments to `s`; the leading `.` is elided
+/// when `s` is empty (segments-only render).
+fn push_segments_source(s: &mut String, segments: &[PathSeg]) {
+    for seg in segments {
+        match seg {
+            PathSeg::Field(f) => {
+                if !s.is_empty() {
+                    s.push('.');
+                }
+                s.push_str(f);
+            }
+            PathSeg::Index(i) => {
+                s.push('[');
+                s.push_str(i);
+                s.push(']');
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PathSeg {
     /// `.field`

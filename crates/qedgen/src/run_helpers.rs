@@ -563,20 +563,15 @@ mod tests {
 
     #[test]
     fn plain_text_lint_output_includes_priority() {
-        let warning = CompletenessWarning {
-            rule: "missing_effect".to_string(),
-            severity: Severity::Warning,
-            priority: 2,
-            message: "operation 'borrow' takes params and transitions state but has no effect"
-                .to_string(),
-            subject: Some("borrow".to_string()),
-            fix: "Add an effect block to describe state changes".to_string(),
-            example: Some(
-                "  operation borrow\n    effect: loan_amount add loan_amount".to_string(),
-            ),
-            counterexample: None,
-            fix_options: vec![],
-        };
+        let warning = CompletenessWarning::new(
+            "missing_effect",
+            Severity::Warning,
+            2,
+            "operation 'borrow' takes params and transitions state but has no effect",
+        )
+        .subject("borrow".to_string())
+        .fix("Add an effect block to describe state changes")
+        .example("  operation borrow\n    effect: loan_amount add loan_amount".to_string());
 
         let rendered = format_lint_warning(&warning);
         assert!(rendered.contains("[P2] [missing_effect]"));

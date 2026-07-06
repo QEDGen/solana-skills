@@ -4,6 +4,16 @@
 
 use super::*;
 
+/// Shorthand builder for lint warnings — see `CompletenessWarning::new`.
+pub(crate) fn warn(
+    rule: &str,
+    severity: Severity,
+    priority: u8,
+    message: impl Into<String>,
+) -> CompletenessWarning {
+    CompletenessWarning::new(rule, severity, priority, message)
+}
+
 /// Whole-word match: boundaries are start/end of string or any non-alphanumeric, non-underscore byte.
 pub(super) fn contains_word(haystack: &str, needle: &str) -> bool {
     for (i, _) in haystack.match_indices(needle) {
@@ -157,27 +167,25 @@ pub(super) fn make_old_in_single_state_warning(
     kind: &str,
     body_snippet: &str,
 ) -> CompletenessWarning {
-    CompletenessWarning {
-        rule: "old_in_single_state_context".to_string(),
-        severity: Severity::Warning,
-        priority: 1,
-        message: format!(
+    warn(
+        "old_in_single_state_context",
+        Severity::Warning,
+        1,
+        format!(
             "'{}' uses `old(...)` inside a `{}` body ({}) — only meaningful in \
              `ensures` or `property` bodies (a binary transition context). \
              `requires` and `invariant` describe a single state and have no \
              \"old\" value to reference.",
             holder, kind, body_snippet
         ),
-        subject: Some(holder.to_string()),
-        fix: "If you meant a precondition on the pre-state, drop `old(...)` \
+    )
+    .subject(holder.to_string())
+    .fix(
+        "If you meant a precondition on the pre-state, drop `old(...)` \
               and reference `state.x` directly. If you meant a property across \
               the transition, lift the clause into a `property X : ... \
-              preserved_by Y`."
-            .to_string(),
-        example: None,
-        counterexample: None,
-        fix_options: vec![],
-    }
+              preserved_by Y`.",
+    )
 }
 
 /// Predicate shared with `kani_impl::spec_triggers_impl_harness`: true iff

@@ -1163,16 +1163,7 @@ pub(super) fn infer_dispatch_tags(
             .entry(name.clone())
             .or_insert_with(|| PinocchioHandlerProfile {
                 name,
-                instruction_tag: None,
-                accounts: Vec::new(),
-                account_roles: BTreeMap::new(),
-                token_account_bindings: BTreeMap::new(),
-                mint_decimal_bindings: BTreeMap::new(),
-                account_key_derivations: BTreeMap::new(),
-                source_expr_aliases: BTreeMap::new(),
-                verified_stubs: Vec::new(),
-                params: Vec::new(),
-                repeats: Vec::new(),
+                ..Default::default()
             });
         entry.instruction_tag = Some(tag);
     }

@@ -79,7 +79,7 @@ pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> V
             continue;
         }
 
-        let finding_id = make_id(rel_file, line, "silent_success_arithmetic");
+        let finding_id = make_id(rel_file, line, Category::SilentSuccessArithmetic.tag());
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FILE".to_string(), rel_file.display().to_string());
         subs.insert("LINE".to_string(), line.to_string());
@@ -123,7 +123,7 @@ pub(crate) fn scan_silent_success_arithmetic(rel_file: &Path, source: &str) -> V
                 rel_file.display(),
                 line
             ),
-            category_tag: "silent_success_arithmetic".to_string(),
+            category_tag: Category::SilentSuccessArithmetic.tag().to_string(),
             reproducer: Some(Reproducer::MolluskPrompt {
                 template_path:
                     "references/probes/arithmetic_symbol/silent_success_arithmetic.md#reproducer"
@@ -178,7 +178,7 @@ pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<F
             continue;
         }
 
-        let finding_id = make_id(rel_file, line, "graceful_error_as_dos");
+        let finding_id = make_id(rel_file, line, Category::GracefulErrorAsDos.tag());
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FILE".to_string(), rel_file.display().to_string());
         subs.insert("LINE".to_string(), line.to_string());
@@ -218,7 +218,7 @@ pub(crate) fn scan_graceful_error_as_dos(rel_file: &Path, source: &str) -> Vec<F
                 rel_file.display(),
                 line
             ),
-            category_tag: "graceful_error_as_dos".to_string(),
+            category_tag: Category::GracefulErrorAsDos.tag().to_string(),
             reproducer: Some(Reproducer::MolluskPrompt {
                 template_path:
                     "references/probes/arithmetic_symbol/graceful_error_as_dos.md#reproducer"
@@ -318,7 +318,7 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
             continue;
         }
 
-        let finding_id = make_id(rel_file, line, "unchecked_arith_with_fund_flow");
+        let finding_id = make_id(rel_file, line, Category::UncheckedArithWithFundFlow.tag());
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FILE".to_string(), rel_file.display().to_string());
         subs.insert("LINE".to_string(), line.to_string());
@@ -367,7 +367,7 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
                  robust against the bound loosening. Otherwise, switch to the \
                  checked variant."
             ),
-            category_tag: "unchecked_arith_with_fund_flow".to_string(),
+            category_tag: Category::UncheckedArithWithFundFlow.tag().to_string(),
             reproducer: Some(Reproducer::MolluskPrompt {
                 template_path:
                     "references/probes/arithmetic_symbol/unchecked_arith_with_fund_flow.md#reproducer"

@@ -55,23 +55,7 @@ fn render_effect(
     // Both Lean and Rust consumers read this string; Rust-side `as usize`
     // index casting is applied at the codegen.rs::mechanize_effect site
     // so the Lean output stays untouched.
-    let field = {
-        let mut s = stmt.lhs.root.clone();
-        for seg in &stmt.lhs.segments {
-            match seg {
-                a::PathSeg::Field(f) => {
-                    s.push('.');
-                    s.push_str(f);
-                }
-                a::PathSeg::Index(i) => {
-                    s.push('[');
-                    s.push_str(i);
-                    s.push(']');
-                }
-            }
-        }
-        s
-    };
+    let field = stmt.lhs.to_source_string();
     // Per-effect semantic tag:
     //   - "add" / "sub"               = checked (default)
     //   - "add_sat" / "sub_sat"       = saturating (`+=!` / `-=!`)
@@ -137,40 +121,10 @@ fn render_effect_rhs_forms(
                 p.root.clone()
             } else if p.root == "state" {
                 // state.X → X (strip prefix, matches pest output)
-                let mut s = String::new();
-                for seg in &p.segments {
-                    match seg {
-                        a::PathSeg::Field(f) => {
-                            if !s.is_empty() {
-                                s.push('.');
-                            }
-                            s.push_str(f);
-                        }
-                        a::PathSeg::Index(i) => {
-                            s.push('[');
-                            s.push_str(i);
-                            s.push(']');
-                        }
-                    }
-                }
-                s
+                p.segments_source_string()
             } else {
                 // Bare path that isn't a param — emit as-is
-                let mut s = p.root.clone();
-                for seg in &p.segments {
-                    match seg {
-                        a::PathSeg::Field(f) => {
-                            s.push('.');
-                            s.push_str(f);
-                        }
-                        a::PathSeg::Index(i) => {
-                            s.push('[');
-                            s.push_str(i);
-                            s.push(']');
-                        }
-                    }
-                }
-                s
+                p.to_source_string()
             };
             (s.clone(), s, tree)
         }
@@ -272,21 +226,7 @@ pub(super) fn render_sbpf_check(e: &Expr, consts: ConstTable, resolve_consts: bo
                     }
                     return p.root.clone();
                 }
-                let mut s = p.root.clone();
-                for seg in &p.segments {
-                    match seg {
-                        a::PathSeg::Field(f) => {
-                            s.push('.');
-                            s.push_str(f);
-                        }
-                        a::PathSeg::Index(i) => {
-                            s.push('[');
-                            s.push_str(i);
-                            s.push(']');
-                        }
-                    }
-                }
-                s
+                p.to_source_string()
             }
             Expr::Paren(inner) => render(&inner.node, consts, resolve_consts),
             Expr::Cmp { op, lhs, rhs } => {

@@ -272,44 +272,22 @@ pub fn run(project_root: &Path) -> BackendReport {
     let start = Instant::now();
     let repros = discover_miri_repros(project_root);
     if repros.is_empty() {
-        return BackendReport {
-            name: "miri",
-            status: BackendStatus::Skipped,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(
-                "no Miri repros found under .qed/probes/pinocchio/*/repro_miri.rs".to_string(),
-            ),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        return BackendReport::skipped(
+            "miri",
+            start,
+            Some("no Miri repros found under .qed/probes/pinocchio/*/repro_miri.rs".to_string()),
+        );
     }
 
     // Dependency gate.
     if let Err(e) = crate::deps::require_miri() {
-        return BackendReport {
-            name: "miri",
-            status: BackendStatus::Skipped,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!("{}", e)),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        return BackendReport::skipped("miri", start, Some(format!("{}", e)));
     }
 
     let results = match run_all(project_root) {
         Ok(r) => r,
         Err(e) => {
-            return BackendReport {
-                name: "miri",
-                status: BackendStatus::Failed,
-                duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!("miri runner error: {}", e)),
-                log_path: None,
-                counterexamples: Vec::new(),
-                axioms: Vec::new(),
-            };
+            return BackendReport::failed("miri", start, Some(format!("miri runner error: {}", e)));
         }
     };
 
@@ -348,15 +326,7 @@ pub fn run(project_root: &Path) -> BackendReport {
         }
     }
 
-    BackendReport {
-        name: "miri",
-        status,
-        duration_ms: start.elapsed().as_millis(),
-        detail: Some(summary),
-        log_path: None,
-        counterexamples: Vec::new(),
-        axioms: Vec::new(),
-    }
+    BackendReport::new("miri", status, start, Some(summary))
 }
 
 #[cfg(test)]

@@ -145,6 +145,45 @@ pub enum Category {
     ExternalAuthorityNotRevokedOnClose,
 }
 
+impl Category {
+    /// The snake_case tag — must match the serde `rename_all` serialization
+    /// of the variant. Single source for `Finding.category_tag` and the
+    /// stable-id salt at probe constructor sites. (Pinocchio site findings
+    /// carry a finer-grained per-probe tag instead — see
+    /// `pinocchio_probe.rs` — so not every constructor routes through this.)
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Category::MissingSigner => "missing_signer",
+            Category::ArbitraryCpi => "arbitrary_cpi",
+            Category::ArithmeticOverflowWrapping => "arithmetic_overflow_wrapping",
+            Category::LifecycleOneShotViolation => "lifecycle_one_shot_violation",
+            Category::UnboundedAmountParam => "unbounded_amount_param",
+            Category::PermissionlessStateWriter => "permissionless_state_writer",
+            Category::InitWithoutPda => "init_without_pda",
+            Category::StoredFieldNeverWritten => "stored_field_never_written",
+            Category::CrucibleFuzzCrash => "crucible_fuzz_crash",
+            Category::PinocchioUncheckedAccountLoad => "pinocchio_unchecked_account_load",
+            Category::PinocchioUncheckedArith => "pinocchio_unchecked_arith",
+            Category::PinocchioAccountTypeConfusion => "pinocchio_account_type_confusion",
+            Category::PinocchioMutableBorrowAliasing => "pinocchio_mutable_borrow_aliasing",
+            Category::PinocchioPositionWithoutTypeTag => "pinocchio_position_without_type_tag",
+            Category::PinocchioOffsetOverrun => "pinocchio_offset_overrun",
+            Category::PinocchioMissingPdaVerification => "pinocchio_missing_pda_verification",
+            Category::PinocchioStaleSafetyComment => "pinocchio_stale_safety_comment",
+            Category::ExecutionDivergence => "execution_divergence",
+            Category::SilentSuccessArithmetic => "silent_success_arithmetic",
+            Category::GracefulErrorAsDos => "graceful_error_as_dos",
+            Category::UncheckedArithWithFundFlow => "unchecked_arith_with_fund_flow",
+            Category::PairedValidatorInputDomainMismatch => {
+                "paired_validator_input_domain_mismatch"
+            }
+            Category::ExternalAuthorityNotRevokedOnClose => {
+                "external_authority_not_revoked_on_close"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Low used by upcoming categories
@@ -884,31 +923,9 @@ mod tests {
     fn make_handler(name: &str, who: Option<&str>, permissionless: bool) -> ParsedHandler {
         ParsedHandler {
             name: name.to_string(),
-            doc: None,
             who: who.map(|s| s.to_string()),
-            on_account: None,
-            pre_status: None,
-            post_status: None,
-            takes_params: vec![],
-            guard_str: None,
-            aborts_if: vec![],
-            requires: vec![],
-            ensures: vec![],
-            modifies: None,
-            let_bindings: vec![],
-            aborts_total: false,
             permissionless,
-            effects: vec![],
-            accounts: vec![],
-            transfers: vec![],
-            emits: vec![],
-            invariants: vec![],
-            establishes: vec![],
-            properties: vec![],
-            schema_includes: vec![],
-            calls: vec![],
-            effect_branches: None,
-            abstract_binders: vec![],
+            ..Default::default()
         }
     }
 
