@@ -10,13 +10,15 @@
 
 use anyhow::Result;
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::adapt::arith_heuristics;
 use crate::cluster::{ClusterKind, ProtoClause};
+use crate::fs_walk;
 
 /// Entry point — walks the project root and emits Native proto-clauses.
 pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
-    let rs_files = collect_rust_files(project_root)?;
+    let rs_files = fs_walk::collect_rs_files(project_root, fs_walk::DEFAULT_SKIP_DIRS);
     let mut out = Vec::new();
     let pat = NativePatterns::new();
 
@@ -206,98 +208,7 @@ fn nearest_handler(
 /// Anchor extractor's arith heuristic minus the attribute filter (no
 /// `#[account(...)]` macros in Native source).
 fn scan_arith_sites(source: &str, pat: &NativePatterns) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (i, line) in source.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with("*") {
-            continue;
-        }
-        if pat.checked_call.is_match(line) {
-            continue;
-        }
-        if !contains_assignment(line) {
-            continue;
-        }
-        let after_eq = line.split_once('=').map(|(_, r)| r).unwrap_or("");
-        if has_arith_operator(after_eq) {
-            out.push(i + 1);
-        }
-    }
-    out
-}
-
-fn contains_assignment(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'=' {
-            let prev = if i > 0 { bytes[i - 1] } else { b' ' };
-            let next = if i + 1 < bytes.len() {
-                bytes[i + 1]
-            } else {
-                b' '
-            };
-            if next == b'=' || matches!(prev, b'!' | b'<' | b'>' | b'=') {
-                continue;
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn has_arith_operator(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if matches!(b, b'+' | b'-' | b'*' | b'/') {
-            let next = if i + 1 < bytes.len() {
-                bytes[i + 1]
-            } else {
-                b' '
-            };
-            if next == b'=' {
-                continue;
-            }
-            if b == b'/' && next == b'/' {
-                return false;
-            }
-            if b == b'-' && next == b'>' {
-                continue;
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            matches!(
-                n,
-                "target" | ".git" | "node_modules" | "tests" | "fuzz" | "migrations"
-            )
-        }) {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
+    arith_heuristics::scan_arith_sites(source, &pat.checked_call, |_, _| false)
 }
 
 #[cfg(test)]

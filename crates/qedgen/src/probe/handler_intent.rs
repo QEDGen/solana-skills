@@ -55,8 +55,7 @@ pub fn resolve_handler_body(entry_fn: &str, project_root: &Path) -> Option<(Path
     if !src.is_dir() {
         return None;
     }
-    let mut candidates = Vec::new();
-    collect_rs_files(&src, &mut candidates);
+    let candidates = crate::fs_walk::collect_rs_files(&src, crate::fs_walk::DEFAULT_SKIP_DIRS);
 
     for file in candidates {
         let Ok(source) = std::fs::read_to_string(&file) else {
@@ -71,24 +70,6 @@ pub fn resolve_handler_body(entry_fn: &str, project_root: &Path) -> Option<(Path
         }
     }
     None
-}
-
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(name, "target" | ".qed" | "formal_verification") {
-            continue;
-        }
-        if path.is_dir() {
-            collect_rs_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
 }
 
 /// Recursively scan items (descending into `impl` and `mod`) for

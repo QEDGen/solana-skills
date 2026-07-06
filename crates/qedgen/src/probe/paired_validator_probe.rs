@@ -17,6 +17,9 @@ use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::probe::scan_util::{
+    byte_offset_to_line, enclosing_fn_start_and_name, is_test_fn_name, line_is_commented, make_id,
+};
 use crate::probe::{Category, Finding, Reproducer, Severity};
 
 #[derive(Debug, Clone)]
@@ -35,7 +38,7 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     if !src_dir.exists() {
         return Ok(Vec::new());
     }
-    let rs_files = collect_rust_files(&src_dir)?;
+    let rs_files = crate::fs_walk::collect_rs_files(&src_dir, crate::fs_walk::DEFAULT_SKIP_DIRS);
     let mut by_field: BTreeMap<String, Vec<ValidatorSite>> = BTreeMap::new();
     for file in &rs_files {
         let Ok(source) = std::fs::read_to_string(file) else {
@@ -129,7 +132,13 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
         let summary = render_shape_summary(field, &shapes);
 
         let primary = sites.first().expect("non-empty per outer check");
-        let finding_id = make_id(&primary.rel_file, primary.line, field);
+        // Salt frozen at the pre-scan_util literal ("paired_validator:<field>")
+        // so existing suppression ids stay valid.
+        let finding_id = make_id(
+            &primary.rel_file,
+            primary.line,
+            &format!("paired_validator:{}", field),
+        );
 
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("FIELD".to_string(), field.clone());
@@ -320,22 +329,6 @@ fn normalize_condition(cond: &str) -> String {
     clauses.join(" && ")
 }
 
-// Shared helpers — deliberately duplicated across the source-scanner
-// probes so the modules can evolve independently.
-
-fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
-    let prefix = &source[..offset.min(source.len())];
-    1 + prefix.chars().filter(|c| *c == '\n').count() as u32
-}
-
-fn enclosing_fn_start_and_name(source: &str, offset: usize) -> Option<(usize, String)> {
-    let head = &source[..offset.min(source.len())];
-    let re = Regex::new(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<\(]").expect("static regex");
-    re.captures_iter(head)
-        .last()
-        .map(|c| (c.get(0).expect("full fn match").start(), c[1].to_string()))
-}
-
 fn is_cfg_kani_file(source: &str) -> bool {
     source
         .lines()
@@ -375,72 +368,6 @@ fn is_inner_cfg_kani_line(line: &str) -> bool {
 fn is_cfg_kani_attr_line(line: &str) -> bool {
     let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
     compact.starts_with("#[cfg(kani")
-}
-
-fn is_test_fn_name(fn_name: &str) -> bool {
-    let lower = fn_name.to_ascii_lowercase();
-    lower.starts_with("test_")
-        || lower.starts_with("it_")
-        || lower.ends_with("_test")
-        || lower.ends_with("_tests")
-}
-
-fn line_is_commented(source: &str, offset: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut i = offset.min(bytes.len());
-    while i > 0 && bytes[i - 1] != b'\n' {
-        i -= 1;
-    }
-    let line_prefix = &source[i..offset.min(source.len())];
-    if let Some(idx) = line_prefix.find("//") {
-        let before = &line_prefix[..idx];
-        let quote_count = before.chars().filter(|c| *c == '"').count();
-        quote_count % 2 == 0
-    } else {
-        false
-    }
-}
-
-fn make_id(rel_file: &Path, line: u32, key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(rel_file.display().to_string().as_bytes());
-    h.update(b":");
-    h.update(line.to_string().as_bytes());
-    h.update(b":paired_validator:");
-    h.update(key.as_bytes());
-    let id = format!("{:x}", h.finalize());
-    id[..16].to_string()
-}
-
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| matches!(n, "target" | ".git" | "node_modules" | "tests" | ".qed"))
-        {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

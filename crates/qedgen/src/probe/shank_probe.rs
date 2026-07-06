@@ -148,22 +148,10 @@ fn collect_lib_rs(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn collect_entrypoint_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(name, "target" | ".qed" | "formal_verification") {
-            continue;
-        }
-        if path.is_dir() {
-            collect_entrypoint_files(&path, out);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                if contents.contains("entrypoint!(") {
-                    out.push(path);
-                }
+    for path in crate::fs_walk::collect_rs_files(dir, crate::fs_walk::DEFAULT_SKIP_DIRS) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if contents.contains("entrypoint!(") {
+                out.push(path);
             }
         }
     }

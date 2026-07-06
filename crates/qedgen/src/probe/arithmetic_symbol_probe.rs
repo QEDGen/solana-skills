@@ -12,8 +12,11 @@
 
 use anyhow::Result;
 use regex::Regex;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::probe::scan_util::{
+    self, byte_offset_to_line, enclosing_fn_body, is_test_fn_name, line_is_commented, make_id,
+};
 use crate::probe::{Category, Finding, Reproducer, Severity};
 
 /// Entry point: walk `<root>/src/**/*.rs` and emit findings. No matches
@@ -24,7 +27,7 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
         // No `src/` — not a Rust crate root; nothing to scan.
         return Ok(Vec::new());
     }
-    let rs_files = collect_rust_files(&src_dir)?;
+    let rs_files = crate::fs_walk::collect_rs_files(&src_dir, crate::fs_walk::DEFAULT_SKIP_DIRS);
     let mut findings = Vec::new();
     for file in &rs_files {
         let Ok(source) = std::fs::read_to_string(file) else {
@@ -381,36 +384,6 @@ pub(crate) fn scan_unchecked_arith_with_fund_flow(rel_file: &Path, source: &str)
     out
 }
 
-/// Test-fn name predicate, for inline `#[cfg(test)]` fns that
-/// `collect_rust_files`'s directory filter can't catch.
-fn is_test_fn_name(fn_name: &str) -> bool {
-    let lower = fn_name.to_ascii_lowercase();
-    lower.starts_with("test_")
-        || lower.starts_with("it_")
-        || lower.ends_with("_test")
-        || lower.ends_with("_tests")
-}
-
-/// True when a `//` precedes `offset` on the same line. Block comments
-/// (`/* ... */`) are out of scope.
-fn line_is_commented(source: &str, offset: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut i = offset.min(bytes.len());
-    while i > 0 && bytes[i - 1] != b'\n' {
-        i -= 1;
-    }
-    let line_prefix = &source[i..offset.min(source.len())];
-    if let Some(idx) = line_prefix.find("//") {
-        // Rough string-literal guard: even quote count before the `//`
-        // means it isn't inside a string.
-        let before = &line_prefix[..idx];
-        let quote_count = before.chars().filter(|c| *c == '"').count();
-        quote_count % 2 == 0
-    } else {
-        false
-    }
-}
-
 /// True when the fn body invokes a token / system CPI — the discriminator
 /// for "arithmetic that crosses into fund flow". Also accepts helper calls
 /// named like transfer / mint dispatch (`transfer_with_delegate`, ...) —
@@ -435,39 +408,6 @@ fn body_signals_cpi(body: &str) -> bool {
         Regex::new(r"\b(?:transfer|mint|burn|withdraw|deposit|approve|revoke)_[a-z_]+\s*\(")
             .expect("static regex compiles");
     helper_re.is_match(body)
-}
-
-/// Body of the enclosing fn (brace-matched), so signals can be checked
-/// across the whole fn rather than just the call site.
-fn enclosing_fn_body(source: &str, offset: usize) -> String {
-    let head = &source[..offset.min(source.len())];
-    let fn_re = Regex::new(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*\s*[<\(]").expect("static regex");
-    let Some(fn_match) = fn_re.find_iter(head).last() else {
-        return String::new();
-    };
-    let bytes = source.as_bytes();
-    let mut i = fn_match.start();
-    while i < bytes.len() && bytes[i] != b'{' {
-        i += 1;
-    }
-    if i >= bytes.len() {
-        return String::new();
-    }
-    let body_start = i + 1;
-    let mut depth: i32 = 1;
-    let mut j = body_start;
-    while j < bytes.len() && depth > 0 {
-        match bytes[j] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 {
-            return source[body_start..j].to_string();
-        }
-        j += 1;
-    }
-    source[body_start..].to_string()
 }
 
 /// Fn name suggests a lifecycle-init handler (`init` / `create` /
@@ -565,67 +505,15 @@ fn window_has_gating_comparison(window: &str) -> bool {
     false
 }
 
-/// Resolve the byte offset to a 1-indexed line number.
-fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
-    let prefix = &source[..offset.min(source.len())];
-    1 + prefix.chars().filter(|c| *c == '\n').count() as u32
-}
-
-/// Nearest enclosing fn name (None when not inside a fn). The `[<\(]`
-/// terminator captures both bare and generic fns (`fn init<'a, T>`).
+/// Nearest enclosing fn name (None when not inside a fn).
 fn enclosing_fn_name(source: &str, offset: usize) -> Option<String> {
-    let head = &source[..offset.min(source.len())];
-    let re = Regex::new(r"fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<\(]").expect("static regex");
-    re.captures_iter(head).last().map(|c| c[1].to_string())
-}
-
-/// Stable id: hash of (file, line, rule). Matches the Pinocchio probe
-/// shape so suppression files are uniform across rule families.
-fn make_id(rel_file: &Path, line: u32, rule: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(rel_file.display().to_string().as_bytes());
-    h.update(b":");
-    h.update(line.to_string().as_bytes());
-    h.update(b":");
-    h.update(rule.as_bytes());
-    let id = format!("{:x}", h.finalize());
-    id[..16].to_string()
-}
-
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| matches!(n, "target" | ".git" | "node_modules" | "tests" | ".qed"))
-        {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
+    scan_util::enclosing_fn_start_and_name(source, offset).map(|(_, name)| name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)

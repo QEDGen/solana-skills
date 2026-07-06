@@ -28,6 +28,7 @@ pub(crate) mod pinocchio_probe;
 pub(crate) mod probe_repro;
 pub(crate) mod prompts;
 pub(crate) mod ratify;
+pub(crate) mod scan_util;
 pub(crate) mod shank_probe;
 pub(crate) mod spec_predicates;
 

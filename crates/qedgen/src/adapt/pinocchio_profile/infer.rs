@@ -3,29 +3,14 @@
 
 use super::*;
 
+/// Shared walker + the profile-specific exclusion of generated
+/// `kani_impl.rs` harnesses (they'd be inferred as handlers).
 pub(super) fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    if !dir.is_dir() {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(name, "target" | ".git" | "node_modules") {
-            continue;
-        }
-        if path.is_dir() {
-            collect_rust_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") && name != "kani_impl.rs"
-        {
-            out.push(path);
-        }
-    }
+    out.extend(
+        crate::fs_walk::collect_rs_files(dir, crate::fs_walk::DEFAULT_SKIP_DIRS)
+            .into_iter()
+            .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("kani_impl.rs")),
+    );
 }
 
 pub(super) fn collect_item_fns(items: &[Item]) -> Vec<&ItemFn> {

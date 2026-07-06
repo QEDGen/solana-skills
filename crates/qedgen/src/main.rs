@@ -4,6 +4,7 @@ mod cli;
 mod codegen;
 mod descriptor;
 mod dispatch;
+mod fs_walk;
 mod mir;
 mod probe;
 mod project;

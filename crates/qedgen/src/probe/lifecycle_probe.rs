@@ -15,6 +15,9 @@ use regex::Regex;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::probe::scan_util::{
+    body_after, byte_offset_to_line, is_test_fn_name, line_is_commented, make_id,
+};
 use crate::probe::{Category, Finding, Reproducer, Severity};
 
 #[derive(Debug, Clone)]
@@ -55,7 +58,7 @@ pub fn scan_program(project_root: &Path) -> Result<Vec<Finding>> {
     } else {
         return Ok(Vec::new());
     };
-    let rs_files = collect_rust_files(&scan_root)?;
+    let rs_files = crate::fs_walk::collect_rs_files(&scan_root, crate::fs_walk::DEFAULT_SKIP_DIRS);
     let mut grants: Vec<AuthorityGrant> = Vec::new();
     let mut closes: Vec<CloseSite> = Vec::new();
     for file in &rs_files {
@@ -269,7 +272,13 @@ fn emit_findings(grants: &[AuthorityGrant], closes: &[CloseSite]) -> Vec<Finding
             .map(|g| format!("{} at {}:{}", g.operator, g.rel_file.display(), g.line))
             .collect::<Vec<_>>()
             .join("; ");
-        let finding_id = make_id(&close.rel_file, close.line, &close.closed_account);
+        // Salt frozen at the pre-scan_util literal ("lifecycle_close:<acct>")
+        // so existing suppression ids stay valid.
+        let finding_id = make_id(
+            &close.rel_file,
+            close.line,
+            &format!("lifecycle_close:{}", close.closed_account),
+        );
 
         let mut subs = std::collections::BTreeMap::new();
         subs.insert("CLOSED_ACCOUNT".to_string(), close.closed_account.clone());
@@ -332,107 +341,6 @@ fn emit_findings(grants: &[AuthorityGrant], closes: &[CloseSite]) -> Vec<Finding
         });
     }
     out
-}
-
-// Shared helpers — deliberately duplicated across the source-scanner
-// probes so the modules can evolve independently.
-
-fn byte_offset_to_line(source: &str, offset: usize) -> u32 {
-    let prefix = &source[..offset.min(source.len())];
-    1 + prefix.chars().filter(|c| *c == '\n').count() as u32
-}
-
-fn is_test_fn_name(fn_name: &str) -> bool {
-    let lower = fn_name.to_ascii_lowercase();
-    lower.starts_with("test_")
-        || lower.starts_with("it_")
-        || lower.ends_with("_test")
-        || lower.ends_with("_tests")
-}
-
-fn line_is_commented(source: &str, offset: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut i = offset.min(bytes.len());
-    while i > 0 && bytes[i - 1] != b'\n' {
-        i -= 1;
-    }
-    let line_prefix = &source[i..offset.min(source.len())];
-    if let Some(idx) = line_prefix.find("//") {
-        let before = &line_prefix[..idx];
-        let quote_count = before.chars().filter(|c| *c == '"').count();
-        quote_count % 2 == 0
-    } else {
-        false
-    }
-}
-
-fn make_id(rel_file: &Path, line: u32, key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(rel_file.display().to_string().as_bytes());
-    h.update(b":");
-    h.update(line.to_string().as_bytes());
-    h.update(b":lifecycle_close:");
-    h.update(key.as_bytes());
-    let id = format!("{:x}", h.finalize());
-    id[..16].to_string()
-}
-
-/// Fn body after a decl: first `{` to its brace-matched `}`.
-fn body_after(source: &str, start: usize) -> Option<String> {
-    let bytes = source.as_bytes();
-    let mut i = start;
-    while i < bytes.len() && bytes[i] != b'{' {
-        i += 1;
-    }
-    if i >= bytes.len() {
-        return None;
-    }
-    let body_start = i + 1;
-    let mut depth: i32 = 1;
-    let mut j = body_start;
-    while j < bytes.len() && depth > 0 {
-        match bytes[j] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 {
-            return Some(source[body_start..j].to_string());
-        }
-        j += 1;
-    }
-    Some(source[body_start..].to_string())
-}
-
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| matches!(n, "target" | ".git" | "node_modules" | "tests" | ".qed"))
-        {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
