@@ -535,7 +535,10 @@ fn handler_is_pinned(
 ) -> bool {
     !handler.ensures.is_empty()
         && crate::lean_names::binary_hash_is_pinned(
-            iface.upstream.as_ref().and_then(|u| u.binary_hash.as_deref()),
+            iface
+                .upstream
+                .as_ref()
+                .and_then(|u| u.binary_hash.as_deref()),
         )
 }
 

@@ -777,4 +777,3 @@ pub(crate) fn emit_system_cpi_pinocchio(
         _ => None,
     }
 }
-

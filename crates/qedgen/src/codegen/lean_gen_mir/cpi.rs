@@ -350,7 +350,10 @@ pub(super) fn handler_is_pinned_mir(
 ) -> bool {
     !callee.ensures.is_empty()
         && crate::lean_names::binary_hash_is_pinned(
-            import.upstream.as_ref().and_then(|u| u.binary_hash.as_deref()),
+            import
+                .upstream
+                .as_ref()
+                .and_then(|u| u.binary_hash.as_deref()),
         )
 }
 

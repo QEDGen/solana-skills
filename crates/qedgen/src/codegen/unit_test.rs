@@ -488,9 +488,9 @@ fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Ve
         .into_iter()
         .map(|(field, kind, value)| {
             (
-                cast_subscripts(&crate::rust_codegen_util::strip_variant_prefix_for_flat_state(
-                    &field, spec,
-                )),
+                cast_subscripts(
+                    &crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
+                ),
                 kind,
                 value.rust.clone(),
             )
@@ -1024,10 +1024,8 @@ fn seed_state_values(
     // Raise-only fixpoint over the inequality atoms.
     for _ in 0..4 {
         for (lhs, cmp, rhs) in &atoms {
-            let (Some(a), Some(b)) = (
-                resolve_side(lhs, fields, op),
-                resolve_side(rhs, fields, op),
-            ) else {
+            let (Some(a), Some(b)) = (resolve_side(lhs, fields, op), resolve_side(rhs, fields, op))
+            else {
                 continue;
             };
             // Normalize to "left cmp right" with resolved values.
@@ -1145,11 +1143,7 @@ fn parse_atom(atom: &str) -> Option<(String, &'static str, String)> {
 /// Resolve one atom side: a `state.`-prefixed or bare state-field name, a
 /// numeric literal, or a handler param (folded to its `sensible_param`
 /// value). Compound expressions resolve to `None` and skip the atom.
-fn resolve_side(
-    side: &str,
-    fields: &[(String, String)],
-    op: &ParsedHandler,
-) -> Option<AtomSide> {
+fn resolve_side(side: &str, fields: &[(String, String)], op: &ParsedHandler) -> Option<AtomSide> {
     let t = side.trim();
     let (name, had_state_prefix) = if let Some(rest) = t.strip_prefix("state.") {
         (rest, true)

@@ -286,7 +286,8 @@ pub struct ParsedLayoutField {
     pub name: String,
     pub field_type: String,
     pub offset: i64,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
@@ -306,7 +307,8 @@ pub struct ParsedGuard {
 pub struct ParsedSbpfProperty {
     pub name: String,
     pub doc: Option<String>,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub kind: SbpfPropertyKind,
 }
 
@@ -342,9 +344,11 @@ pub enum FlowKind {
 #[derive(Debug, Clone)]
 pub struct ParsedInstruction {
     pub name: String,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub discriminant: Option<String>,
     pub entry: Option<u64>,
     pub constants: Vec<(String, String)>,
@@ -360,7 +364,8 @@ pub struct ParsedInstruction {
 pub struct ParsedErrorCode {
     pub name: String,
     pub value: Option<u64>,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
@@ -910,7 +915,8 @@ pub struct ImportedNamespace {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedInterface {
     pub name: String,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<ParsedUpstream>,
@@ -928,17 +934,22 @@ pub struct ParsedInterface {
 /// genuinely proven, not axiomatized.
 #[derive(Debug, Default, Clone)]
 pub struct ParsedUpstream {
-    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub package: Option<String>,
     pub version: Option<String>,
-    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub source: Option<String>,
     pub binary_hash: Option<String>,
-    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub idl_hash: Option<String>,
-    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_with: Vec<String>,
-    #[allow(dead_code)] // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_at: Option<String>,
 }
 
@@ -948,7 +959,8 @@ pub struct ParsedUpstream {
 #[derive(Debug, Default, Clone)]
 pub struct ParsedInterfaceHandler {
     pub name: String,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub params: Vec<(String, String)>,
     pub discriminant: Option<String>,
@@ -971,7 +983,8 @@ pub struct ParsedInterfaceHandler {
 #[derive(Debug, Clone)]
 pub struct ParsedSchema {
     pub name: String,
-    #[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     /// One entry per `requires expr else Err` clause; same shape as
     /// `ParsedHandler.requires` so the adapter can clone-and-append.

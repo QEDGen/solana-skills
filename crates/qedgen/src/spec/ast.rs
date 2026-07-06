@@ -962,9 +962,7 @@ pub fn for_each_child_with_binder<'a>(
         // Leaves.
         Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => {}
         Expr::Old(inner) | Expr::Not(inner) | Expr::Paren(inner) => f(inner, None),
-        Expr::Sum { binder, body, .. } | Expr::Quant { binder, body, .. } => {
-            f(body, Some(binder))
-        }
+        Expr::Sum { binder, body, .. } | Expr::Quant { binder, body, .. } => f(body, Some(binder)),
         Expr::BoolOp { lhs, rhs, .. }
         | Expr::Cmp { lhs, rhs, .. }
         | Expr::Arith { lhs, rhs, .. } => {
