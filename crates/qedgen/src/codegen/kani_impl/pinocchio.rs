@@ -833,9 +833,9 @@ fn emit_pinocchio_requires_assumptions(out: &mut String, handler: &ParsedHandler
             continue;
         }
         if has_fee_normalization_shape
-            && (expr.contains("fee_input_normalized")
-                || expr.contains("fee_output_normalized")
-                || expr.contains("retained_value_bps"))
+            && FEE_NORMALIZATION_GHOST_PARAMS
+                .iter()
+                .any(|ghost| expr.contains(ghost))
         {
             continue;
         }
@@ -844,11 +844,7 @@ fn emit_pinocchio_requires_assumptions(out: &mut String, handler: &ParsedHandler
         if lowered.contains("state.") || lowered.contains("s.") || lowered.contains(".pubkey") {
             if expr.contains("lane_count") {
                 for lane_param in &param_names {
-                    let lane_base = strip_numeric_suffix(lane_param)
-                        .map_or(lane_param.as_str(), |(base, _)| base);
-                    if matches!(lane_base, "lane_id" | "from_lane_id" | "to_lane_id") {
-                        out.push_str(&format!("    kani::assume({lane_param} < 2);\n"));
-                    }
+                    emit_lane_bound_assume(out, lane_param);
                 }
             }
             continue;
@@ -857,13 +853,23 @@ fn emit_pinocchio_requires_assumptions(out: &mut String, handler: &ParsedHandler
     }
 }
 
-fn pinocchio_has_fee_normalization_shape(handler: &ParsedHandler) -> bool {
-    let param_names: BTreeSet<String> = handler
-        .takes_params
-        .iter()
-        .map(|(name, _)| to_snake_case(name))
-        .collect();
-    [
+/// Single-protocol shape heuristics.
+///
+/// Everything in here is keyed to one specific brownfield protocol shape —
+/// a fee-normalized swap with two lanes — recognized by its parameter
+/// names. The heuristics bind otherwise-unconstrained ghost params
+/// (`fee_input_normalized` / `fee_output_normalized` /
+/// `retained_value_bps`) to real inputs, bound `lane_id`-family params,
+/// and lower the handful of state reads the shape's `requires` clauses
+/// touch to concrete witnesses. Generic specs never trip these (the full
+/// param-name set must match), but new protocol-specific shapes belong
+/// here, labeled, rather than inline in the generic emitters.
+mod single_protocol_shapes {
+    use super::*;
+
+    /// The parameter-name fingerprint of the fee-normalization shape. A
+    /// handler must take ALL of these for the heuristics to fire.
+    const FEE_NORMALIZATION_SHAPE_PARAMS: [&str; 7] = [
         "amount_in",
         "amount_out",
         "max_fee_bps",
@@ -871,25 +877,160 @@ fn pinocchio_has_fee_normalization_shape(handler: &ParsedHandler) -> bool {
         "output_decimals",
         "fee_input_normalized",
         "fee_output_normalized",
-    ]
-    .iter()
-    .all(|name| param_names.contains(*name))
-}
+    ];
 
-fn pinocchio_is_fee_normalization_ghost_param(handler: &ParsedHandler, name: &str) -> bool {
-    pinocchio_has_fee_normalization_shape(handler)
-        && matches!(
-            name,
-            "retained_value_bps" | "fee_input_normalized" | "fee_output_normalized"
-        )
-}
+    /// Ghost params the harness derives instead of declaring symbolic —
+    /// also the trigger list for skipping their `requires` clauses.
+    pub(crate) const FEE_NORMALIZATION_GHOST_PARAMS: [&str; 3] = [
+        "retained_value_bps",
+        "fee_input_normalized",
+        "fee_output_normalized",
+    ];
 
-fn pinocchio_lower_simple_state_requires_expr(expr: &str) -> String {
-    expr.replace("state.max_fee_bps", "10000")
-        .replace("state.lane_count", "2")
-        .replace("state.mint_count", "2")
-        .replace("state.paused", "0")
+    pub(crate) fn pinocchio_has_fee_normalization_shape(handler: &ParsedHandler) -> bool {
+        let param_names: BTreeSet<String> = handler
+            .takes_params
+            .iter()
+            .map(|(name, _)| to_snake_case(name))
+            .collect();
+        FEE_NORMALIZATION_SHAPE_PARAMS
+            .iter()
+            .all(|name| param_names.contains(*name))
+    }
+
+    pub(crate) fn pinocchio_is_fee_normalization_ghost_param(
+        handler: &ParsedHandler,
+        name: &str,
+    ) -> bool {
+        pinocchio_has_fee_normalization_shape(handler)
+            && FEE_NORMALIZATION_GHOST_PARAMS.contains(&name)
+    }
+
+    pub(crate) fn pinocchio_lower_simple_state_requires_expr(expr: &str) -> String {
+        expr.replace("state.max_fee_bps", "10000")
+            .replace("state.lane_count", "2")
+            .replace("state.mint_count", "2")
+            .replace("state.paused", "0")
+    }
+
+    /// Bound a `lane_id`-family param (`lane_id` / `from_lane_id` /
+    /// `to_lane_id`, with or without a numeric suffix) to the shape's two
+    /// lanes. No-op for any other param name.
+    pub(crate) fn emit_lane_bound_assume(out: &mut String, param_name: &str) {
+        let lane_base = strip_numeric_suffix(param_name).map_or(param_name, |(base, _)| base);
+        if matches!(lane_base, "lane_id" | "from_lane_id" | "to_lane_id") {
+            out.push_str(&format!("    kani::assume({param_name} < 2);\n"));
+        }
+    }
+
+    /// The symbolic decimal-scale prelude — shared by the literal-decimals
+    /// overflow branch and the fully-symbolic branch of
+    /// [`emit_pinocchio_fee_normalization_assumptions`].
+    fn emit_fee_symbolic_scale_block(out: &mut String) {
+        out.push_str(
+            "    let generated_fee_input_scale = normalized_fee_decimal_scale(input_decimals as u64);\n",
+        );
+        out.push_str(
+            "    let generated_fee_output_scale = normalized_fee_decimal_scale(output_decimals as u64);\n",
+        );
+        out.push_str("    kani::assume(generated_fee_input_scale != 0);\n");
+        out.push_str("    kani::assume(generated_fee_output_scale != 0);\n");
+        out.push_str(
+            "    kani::assume((amount_in as u128) <= u128::MAX / generated_fee_input_scale);\n",
+        );
+        out.push_str(
+            "    kani::assume((amount_out as u128) <= u128::MAX / generated_fee_output_scale);\n",
+        );
+        out.push_str("    let generated_fee_input_normalized = (amount_in as u128) * generated_fee_input_scale;\n");
+        out.push_str("    let generated_fee_output_normalized = (amount_out as u128) * generated_fee_output_scale;\n");
+    }
+
+    pub(crate) fn emit_pinocchio_fee_normalization_assumptions(
+        out: &mut String,
+        handler: &ParsedHandler,
+        handler_profile: Option<&PinocchioHandlerProfile>,
+    ) {
+        if !pinocchio_has_fee_normalization_shape(handler) {
+            return;
+        }
+        let has_input_mint = handler.accounts.iter().any(|account| {
+            pinocchio_mint_decimal_param(handler_profile, &to_snake_case(&account.name))
+                == Some("input_decimals".to_string())
+        });
+        let has_output_mint = handler.accounts.iter().any(|account| {
+            pinocchio_mint_decimal_param(handler_profile, &to_snake_case(&account.name))
+                == Some("output_decimals".to_string())
+        });
+        if !has_input_mint || !has_output_mint {
+            return;
+        }
+        out.push_str(
+            "    // Bind fee-normalization ghost params to real amount/mint-decimal inputs.\n",
+        );
+        out.push_str("    kani::assume(input_decimals <= 18);\n");
+        out.push_str("    kani::assume(output_decimals <= 18);\n");
+        if let (Some(input_decimals), Some(output_decimals)) = (
+            pinocchio_literal_requires_eq(handler, "input_decimals"),
+            pinocchio_literal_requires_eq(handler, "output_decimals"),
+        ) {
+            if input_decimals <= 18 && output_decimals <= 18 {
+                let input_scale = 10u128.pow((18 - input_decimals) as u32);
+                let output_scale = 10u128.pow((18 - output_decimals) as u32);
+                if input_scale == output_scale
+                    && pinocchio_has_requires_expr(handler, "amount_out >= amount_in")
+                {
+                    out.push_str("    kani::assume(amount_out >= amount_in);\n");
+                    return;
+                }
+                if input_scale == output_scale {
+                    out.push_str(
+                        "    let generated_fee_retained_bps = 10000u128 - max_fee_bps as u128;\n",
+                    );
+                    out.push_str("    let generated_fee_min_output = ((amount_in as u128) * generated_fee_retained_bps) / 10000u128;\n");
+                    out.push_str(
+                        "    kani::assume((amount_out as u128) >= generated_fee_min_output);\n",
+                    );
+                    return;
+                }
+                out.push_str(&format!(
+                    "    kani::assume((amount_in as u128) <= u128::MAX / {input_scale}u128);\n"
+                ));
+                out.push_str(&format!(
+                    "    kani::assume((amount_out as u128) <= u128::MAX / {output_scale}u128);\n"
+                ));
+                out.push_str(&format!(
+                    "    let generated_fee_input_normalized = (amount_in as u128) * {input_scale}u128;\n"
+                ));
+                out.push_str(&format!(
+                    "    let generated_fee_output_normalized = (amount_out as u128) * {output_scale}u128;\n"
+                ));
+            } else {
+                emit_fee_symbolic_scale_block(out);
+            }
+        } else {
+            emit_fee_symbolic_scale_block(out);
+        }
+        out.push_str("    let generated_fee_retained_bps = 10000u128 - max_fee_bps as u128;\n");
+        out.push_str(
+            "    kani::assume(generated_fee_input_normalized <= u128::MAX / 10000u128);\n",
+        );
+        out.push_str("    let Some(generated_fee_product) = generated_fee_input_normalized.checked_mul(generated_fee_retained_bps) else {\n");
+        out.push_str("        kani::assume(false);\n");
+        out.push_str("        return;\n");
+        out.push_str("    };\n");
+        out.push_str("    let generated_fee_threshold_holds = match generated_fee_output_normalized.checked_add(1u128) {\n");
+        out.push_str("        Some(generated_fee_next_output) => match generated_fee_next_output.checked_mul(10000u128) {\n");
+        out.push_str(
+            "            Some(generated_fee_threshold) => generated_fee_product < generated_fee_threshold,\n",
+        );
+        out.push_str("            None => true,\n");
+        out.push_str("        },\n");
+        out.push_str("        None => true,\n");
+        out.push_str("    };\n");
+        out.push_str("    kani::assume(generated_fee_threshold_holds);\n");
+    }
 }
+pub(crate) use single_protocol_shapes::*;
 
 fn emit_pinocchio_profile_width_assumptions(
     out: &mut String,
@@ -930,127 +1071,6 @@ fn emit_pinocchio_profile_width_assumptions(
             }
         }
     }
-}
-
-pub(crate) fn emit_pinocchio_fee_normalization_assumptions(
-    out: &mut String,
-    handler: &ParsedHandler,
-    handler_profile: Option<&PinocchioHandlerProfile>,
-) {
-    let param_names: BTreeSet<String> = handler
-        .takes_params
-        .iter()
-        .map(|(name, _)| to_snake_case(name))
-        .collect();
-    let required = [
-        "amount_in",
-        "amount_out",
-        "max_fee_bps",
-        "input_decimals",
-        "output_decimals",
-        "fee_input_normalized",
-        "fee_output_normalized",
-    ];
-    if required.iter().any(|name| !param_names.contains(*name)) {
-        return;
-    }
-    let has_input_mint = handler.accounts.iter().any(|account| {
-        pinocchio_mint_decimal_param(handler_profile, &to_snake_case(&account.name))
-            == Some("input_decimals".to_string())
-    });
-    let has_output_mint = handler.accounts.iter().any(|account| {
-        pinocchio_mint_decimal_param(handler_profile, &to_snake_case(&account.name))
-            == Some("output_decimals".to_string())
-    });
-    if !has_input_mint || !has_output_mint {
-        return;
-    }
-    out.push_str(
-        "    // Bind fee-normalization ghost params to real amount/mint-decimal inputs.\n",
-    );
-    out.push_str("    kani::assume(input_decimals <= 18);\n");
-    out.push_str("    kani::assume(output_decimals <= 18);\n");
-    if let (Some(input_decimals), Some(output_decimals)) = (
-        pinocchio_literal_requires_eq(handler, "input_decimals"),
-        pinocchio_literal_requires_eq(handler, "output_decimals"),
-    ) {
-        if input_decimals <= 18 && output_decimals <= 18 {
-            let input_scale = 10u128.pow((18 - input_decimals) as u32);
-            let output_scale = 10u128.pow((18 - output_decimals) as u32);
-            if input_scale == output_scale
-                && pinocchio_has_requires_expr(handler, "amount_out >= amount_in")
-            {
-                out.push_str("    kani::assume(amount_out >= amount_in);\n");
-                return;
-            }
-            if input_scale == output_scale {
-                out.push_str(
-                    "    let generated_fee_retained_bps = 10000u128 - max_fee_bps as u128;\n",
-                );
-                out.push_str("    let generated_fee_min_output = ((amount_in as u128) * generated_fee_retained_bps) / 10000u128;\n");
-                out.push_str(
-                    "    kani::assume((amount_out as u128) >= generated_fee_min_output);\n",
-                );
-                return;
-            }
-            out.push_str(&format!(
-                "    kani::assume((amount_in as u128) <= u128::MAX / {input_scale}u128);\n"
-            ));
-            out.push_str(&format!(
-                "    kani::assume((amount_out as u128) <= u128::MAX / {output_scale}u128);\n"
-            ));
-            out.push_str(&format!(
-                "    let generated_fee_input_normalized = (amount_in as u128) * {input_scale}u128;\n"
-            ));
-            out.push_str(&format!(
-                "    let generated_fee_output_normalized = (amount_out as u128) * {output_scale}u128;\n"
-            ));
-        } else {
-            out.push_str("    let generated_fee_input_scale = normalized_fee_decimal_scale(input_decimals as u64);\n");
-            out.push_str("    let generated_fee_output_scale = normalized_fee_decimal_scale(output_decimals as u64);\n");
-            out.push_str("    kani::assume(generated_fee_input_scale != 0);\n");
-            out.push_str("    kani::assume(generated_fee_output_scale != 0);\n");
-            out.push_str(
-                "    kani::assume((amount_in as u128) <= u128::MAX / generated_fee_input_scale);\n",
-            );
-            out.push_str("    kani::assume((amount_out as u128) <= u128::MAX / generated_fee_output_scale);\n");
-            out.push_str("    let generated_fee_input_normalized = (amount_in as u128) * generated_fee_input_scale;\n");
-            out.push_str("    let generated_fee_output_normalized = (amount_out as u128) * generated_fee_output_scale;\n");
-        }
-    } else {
-        out.push_str(
-            "    let generated_fee_input_scale = normalized_fee_decimal_scale(input_decimals as u64);\n",
-        );
-        out.push_str(
-            "    let generated_fee_output_scale = normalized_fee_decimal_scale(output_decimals as u64);\n",
-        );
-        out.push_str("    kani::assume(generated_fee_input_scale != 0);\n");
-        out.push_str("    kani::assume(generated_fee_output_scale != 0);\n");
-        out.push_str(
-            "    kani::assume((amount_in as u128) <= u128::MAX / generated_fee_input_scale);\n",
-        );
-        out.push_str(
-            "    kani::assume((amount_out as u128) <= u128::MAX / generated_fee_output_scale);\n",
-        );
-        out.push_str("    let generated_fee_input_normalized = (amount_in as u128) * generated_fee_input_scale;\n");
-        out.push_str("    let generated_fee_output_normalized = (amount_out as u128) * generated_fee_output_scale;\n");
-    }
-    out.push_str("    let generated_fee_retained_bps = 10000u128 - max_fee_bps as u128;\n");
-    out.push_str("    kani::assume(generated_fee_input_normalized <= u128::MAX / 10000u128);\n");
-    out.push_str("    let Some(generated_fee_product) = generated_fee_input_normalized.checked_mul(generated_fee_retained_bps) else {\n");
-    out.push_str("        kani::assume(false);\n");
-    out.push_str("        return;\n");
-    out.push_str("    };\n");
-    out.push_str("    let generated_fee_threshold_holds = match generated_fee_output_normalized.checked_add(1u128) {\n");
-    out.push_str("        Some(generated_fee_next_output) => match generated_fee_next_output.checked_mul(10000u128) {\n");
-    out.push_str(
-        "            Some(generated_fee_threshold) => generated_fee_product < generated_fee_threshold,\n",
-    );
-    out.push_str("            None => true,\n");
-    out.push_str("        },\n");
-    out.push_str("        None => true,\n");
-    out.push_str("    };\n");
-    out.push_str("    kani::assume(generated_fee_threshold_holds);\n");
 }
 
 fn pinocchio_has_requires_expr(handler: &ParsedHandler, expected: &str) -> bool {
@@ -1909,21 +1929,25 @@ fn normalize_pinocchio_profile_name(name: &str) -> String {
     to_snake_case(name)
 }
 
+/// Shared handler-profile map lookup: the snake-cased account ident first,
+/// the raw spec name second, then the numeric-suffix-stripped base
+/// (`vault_2` → `vault`). One core for the account-role / token-binding /
+/// key-derivation maps below.
+fn profile_lookup<'a, T>(
+    map: &'a BTreeMap<String, T>,
+    account: &ParsedHandlerAccount,
+) -> Option<&'a T> {
+    let ident = to_snake_case(&account.name);
+    map.get(&ident)
+        .or_else(|| map.get(&account.name))
+        .or_else(|| strip_numeric_suffix(&ident).and_then(|(base, _suffix)| map.get(base)))
+}
+
 fn pinocchio_account_role<'a>(
     profile: Option<&'a PinocchioHandlerProfile>,
     account: &ParsedHandlerAccount,
 ) -> Option<&'a PinocchioAccountRole> {
-    profile.and_then(|profile| {
-        let ident = to_snake_case(&account.name);
-        profile
-            .account_roles
-            .get(&ident)
-            .or_else(|| profile.account_roles.get(&account.name))
-            .or_else(|| {
-                strip_numeric_suffix(&ident)
-                    .and_then(|(base, _suffix)| profile.account_roles.get(base))
-            })
-    })
+    profile.and_then(|profile| profile_lookup(&profile.account_roles, account))
 }
 
 fn strip_numeric_suffix(ident: &str) -> Option<(&str, &str)> {
@@ -1938,34 +1962,14 @@ fn pinocchio_token_account_binding<'a>(
     profile: Option<&'a PinocchioHandlerProfile>,
     account: &ParsedHandlerAccount,
 ) -> Option<&'a PinocchioTokenAccountBinding> {
-    profile.and_then(|profile| {
-        let ident = to_snake_case(&account.name);
-        profile
-            .token_account_bindings
-            .get(&ident)
-            .or_else(|| profile.token_account_bindings.get(&account.name))
-            .or_else(|| {
-                strip_numeric_suffix(&ident)
-                    .and_then(|(base, _suffix)| profile.token_account_bindings.get(base))
-            })
-    })
+    profile.and_then(|profile| profile_lookup(&profile.token_account_bindings, account))
 }
 
 fn pinocchio_account_key_derivation<'a>(
     profile: Option<&'a PinocchioHandlerProfile>,
     account: &ParsedHandlerAccount,
 ) -> Option<&'a PinocchioLocalKeyDerivation> {
-    profile.and_then(|profile| {
-        let ident = to_snake_case(&account.name);
-        profile
-            .account_key_derivations
-            .get(&ident)
-            .or_else(|| profile.account_key_derivations.get(&account.name))
-            .or_else(|| {
-                strip_numeric_suffix(&ident)
-                    .and_then(|(base, _suffix)| profile.account_key_derivations.get(base))
-            })
-    })
+    profile.and_then(|profile| profile_lookup(&profile.account_key_derivations, account))
 }
 
 fn pinocchio_bound_key_expr(
@@ -2353,6 +2357,30 @@ fn pinocchio_local_arg_by_param<'a>(
         .collect()
 }
 
+/// Emit one PDA key binding: `let <name>_key = <helper_call>;` when a
+/// committed helper is callable, else the symbolic
+/// `try_find_program_address` + `kani::assume(is_some)` + unwrap triple.
+/// Shared by the nested / per-account / token-owner binding sites.
+fn emit_pinocchio_pda_key_binding(
+    out: &mut String,
+    name: &str,
+    helper_call: Option<String>,
+    seed_exprs: &[String],
+    program_expr: &str,
+) {
+    if let Some(helper_call) = helper_call {
+        out.push_str(&format!("    let {name}_key = {helper_call};\n"));
+    } else {
+        out.push_str(&format!(
+            "    let {name}_pda = pinocchio::pubkey::try_find_program_address(&[{}], {});\n",
+            seed_exprs.join(", "),
+            program_expr
+        ));
+        out.push_str(&format!("    kani::assume({name}_pda.is_some());\n"));
+        out.push_str(&format!("    let {name}_key = {name}_pda.unwrap().0;\n"));
+    }
+}
+
 struct PinocchioNestedKeyBindingCtx<'a> {
     proof_profile: Option<&'a PinocchioProofProfile>,
     handler_profile: Option<&'a PinocchioHandlerProfile>,
@@ -2413,7 +2441,7 @@ fn emit_pinocchio_nested_key_bindings(
             continue;
         };
         let ident = format!("{}_{}", ctx.current_ident, local_name);
-        if let Some(helper_call) = pinocchio_pda_helper_call(
+        let helper_call = pinocchio_pda_helper_call(
             nested_derivation,
             ctx.handler,
             ctx.handler_profile,
@@ -2422,17 +2450,8 @@ fn emit_pinocchio_nested_key_bindings(
                 nested_derivation,
                 &nested_local,
             )),
-        ) {
-            out.push_str(&format!("    let {ident}_key = {helper_call};\n"));
-        } else {
-            out.push_str(&format!(
-                "    let {ident}_pda = pinocchio::pubkey::try_find_program_address(&[{}], {});\n",
-                seed_exprs.join(", "),
-                program_expr
-            ));
-            out.push_str(&format!("    kani::assume({ident}_pda.is_some());\n"));
-            out.push_str(&format!("    let {ident}_key = {ident}_pda.unwrap().0;\n"));
-        }
+        );
+        emit_pinocchio_pda_key_binding(out, &ident, helper_call, &seed_exprs, &program_expr);
         nested_keys.insert(local_name.clone(), format!("{ident}_key"));
     }
     nested_keys
@@ -2648,17 +2667,7 @@ fn emit_pinocchio_pda_key_bindings(
                     )
                 })
         });
-        if let Some(helper_call) = helper_call {
-            out.push_str(&format!("    let {ident}_key = {helper_call};\n"));
-        } else {
-            out.push_str(&format!(
-                "    let {ident}_pda = pinocchio::pubkey::try_find_program_address(&[{}], {});\n",
-                seed_exprs.join(", "),
-                program_expr
-            ));
-            out.push_str(&format!("    kani::assume({ident}_pda.is_some());\n"));
-            out.push_str(&format!("    let {ident}_key = {ident}_pda.unwrap().0;\n"));
-        }
+        emit_pinocchio_pda_key_binding(out, &ident, helper_call, &seed_exprs, &program_expr);
         emitted.insert(ident.clone());
         let key_var = format!("{ident}_key");
         available_account_key_exprs.insert(key_var.clone(), key_var.clone());
@@ -3016,6 +3025,64 @@ pub(crate) fn emit_pinocchio_profile_notes(
 /// symbolic params into instruction data, and calls the committed
 /// `process_instruction` dispatcher. Kani's automatic overflow / UB checks do
 /// the verification; spec `ensures` clauses are emitted as reference comments.
+/// Threaded context for the per-handler harness emitters below — the
+/// split of the former single-function `emit_pinocchio_handler_harness`
+/// (symbolic params / account keys / per-account builds / array assembly
+/// / dispatcher call + assertions).
+struct PinocchioHarnessCtx<'a> {
+    handler: &'a ParsedHandler,
+    proof_profile: Option<&'a PinocchioProofProfile>,
+    handler_profile: Option<&'a PinocchioHandlerProfile>,
+    token_assertions: Vec<PinocchioTokenTransferAssertion>,
+    token_amount_witnesses: BTreeMap<String, String>,
+    transfer_token_accounts: BTreeSet<String>,
+    /// The first signer's index — its key threads through as the
+    /// token-account owner so the handler's owner check passes. Falls
+    /// back to a fixed key.
+    authority_idx: Option<usize>,
+}
+
+impl<'a> PinocchioHarnessCtx<'a> {
+    fn new(
+        handler: &'a ParsedHandler,
+        proof_profile: Option<&'a PinocchioProofProfile>,
+        handler_profile: Option<&'a PinocchioHandlerProfile>,
+    ) -> Self {
+        let token_assertions = pinocchio_token_transfer_assertions(handler);
+        let token_amount_witnesses = pinocchio_token_amount_witnesses(handler, &token_assertions);
+        let transfer_token_accounts = token_assertions
+            .iter()
+            .flat_map(|assertion| [assertion.from.clone(), assertion.to.clone()])
+            .collect();
+        let authority_idx = handler.accounts.iter().position(|a| a.is_signer);
+        Self {
+            handler,
+            proof_profile,
+            handler_profile,
+            token_assertions,
+            token_amount_witnesses,
+            transfer_token_accounts,
+            authority_idx,
+        }
+    }
+
+    /// Classify token accounts from the spec's explicit account type or from
+    /// Token.transfer resources. A `program, type token` account is the SPL
+    /// Token program, not an SPL Token account layout.
+    fn is_token(&self, a: &ParsedHandlerAccount) -> bool {
+        let role = pinocchio_account_role(self.handler_profile, a);
+        (!pinocchio_account_is_program(a, role) && pinocchio_account_type(a, role) == Some("token"))
+            || self
+                .transfer_token_accounts
+                .contains(&to_snake_case(&a.name))
+    }
+
+    fn is_mint(&self, a: &ParsedHandlerAccount) -> bool {
+        let role = pinocchio_account_role(self.handler_profile, a);
+        pinocchio_account_type(a, role) == Some("mint")
+    }
+}
+
 fn emit_pinocchio_handler_harness(
     out: &mut String,
     handler: &ParsedHandler,
@@ -3023,31 +3090,8 @@ fn emit_pinocchio_handler_harness(
     proof_profile: Option<&PinocchioProofProfile>,
     handler_profile: Option<&PinocchioHandlerProfile>,
 ) -> Result<()> {
+    let cx = PinocchioHarnessCtx::new(handler, proof_profile, handler_profile);
     let snake = to_snake_case(&handler.name);
-    let token_assertions = pinocchio_token_transfer_assertions(handler);
-    let token_amount_witnesses = pinocchio_token_amount_witnesses(handler, &token_assertions);
-
-    let transfer_token_accounts: BTreeSet<String> = token_assertions
-        .iter()
-        .flat_map(|assertion| [assertion.from.clone(), assertion.to.clone()])
-        .collect();
-    // Classify token accounts from the spec's explicit account type or from
-    // Token.transfer resources. A `program, type token` account is the SPL
-    // Token program, not an SPL Token account layout.
-    let is_token = |a: &ParsedHandlerAccount| {
-        let role = pinocchio_account_role(handler_profile, a);
-        (!pinocchio_account_is_program(a, role) && pinocchio_account_type(a, role) == Some("token"))
-            || transfer_token_accounts.contains(&to_snake_case(&a.name))
-    };
-    let is_mint = |a: &ParsedHandlerAccount| {
-        let role = pinocchio_account_role(handler_profile, a);
-        pinocchio_account_type(a, role) == Some("mint")
-    };
-
-    // The first signer's key threads through as the token-account owner
-    // so the handler's owner check passes. Falls back to a fixed key.
-    let authority_idx = handler.accounts.iter().position(|a| a.is_signer);
-
     let unwind_bound = pinocchio_kani_unwind_bound();
 
     out.push_str(&format!(
@@ -3069,6 +3113,28 @@ fn emit_pinocchio_handler_harness(
     out.push_str(&format!("#[kani::unwind({unwind_bound})]\n"));
     out.push_str(&format!("fn verify_{}_impl() {{\n", snake));
 
+    emit_pinocchio_harness_symbolic_params(out, &cx);
+
+    // Build accounts in source order when the profile inferred it; fall
+    // back to spec order for greenfield/generated specs without source.
+    let ordered_accounts = pinocchio_account_order(handler, handler_profile);
+    let state_assertions = pinocchio_state_assertions(handler, &ordered_accounts, proof_profile);
+    let account_key_exprs = emit_pinocchio_harness_account_keys(out, &cx, &ordered_accounts);
+    let acct_idents =
+        emit_pinocchio_harness_account_builds(out, &cx, &ordered_accounts, &account_key_exprs);
+    emit_pinocchio_harness_account_array(out, &acct_idents);
+    emit_pinocchio_harness_call_and_asserts(out, &cx, &state_assertions);
+
+    out.push_str("}\n\n");
+    Ok(())
+}
+
+/// Concrete program-id / authority-key witnesses, symbolic token amounts,
+/// symbolic instruction params, and the requires / ABI-width /
+/// fee-normalization assumptions over them.
+fn emit_pinocchio_harness_symbolic_params(out: &mut String, cx: &PinocchioHarnessCtx<'_>) {
+    let handler = cx.handler;
+
     // Use a concrete generic program id witness. Pinocchio PDA/key models
     // thread the id through account keys; keeping it symbolic makes otherwise
     // concrete valid-path proofs much larger without adding useful coverage
@@ -3081,7 +3147,7 @@ fn emit_pinocchio_handler_harness(
     // Symbolic amounts for token accounts.
     for (i, a) in handler.accounts.iter().enumerate() {
         let ident = to_snake_case(&a.name);
-        if is_token(a) && !token_amount_witnesses.contains_key(&ident) {
+        if cx.is_token(a) && !cx.token_amount_witnesses.contains_key(&ident) {
             out.push_str(&format!("    let {}_amount: u64 = kani::any();\n", ident));
         }
         let _ = i;
@@ -3101,7 +3167,7 @@ fn emit_pinocchio_handler_harness(
         if pinocchio_is_fee_normalization_ghost_param(handler, &param_name) {
             continue;
         }
-        match pinocchio_param_decl_rust_type(&param_name, ptype, handler, handler_profile) {
+        match pinocchio_param_decl_rust_type(&param_name, ptype, handler, cx.handler_profile) {
             Some(rust_ty) => {
                 let rust_ty = pinocchio_narrow_symbolic_param_type(handler, &param_name, rust_ty);
                 if let Some(value) = pinocchio_literal_requires_eq(handler, &param_name) {
@@ -3129,11 +3195,7 @@ fn emit_pinocchio_handler_harness(
                         param_name, rust_ty, ptype
                     ));
                 }
-                let lane_base =
-                    strip_numeric_suffix(&param_name).map_or(param_name.as_str(), |(base, _)| base);
-                if matches!(lane_base, "lane_id" | "from_lane_id" | "to_lane_id") {
-                    out.push_str(&format!("    kani::assume({param_name} < 2);\n"));
-                }
+                emit_lane_bound_assume(out, &param_name);
             }
             None => {
                 out.push_str(&format!(
@@ -3144,18 +3206,23 @@ fn emit_pinocchio_handler_harness(
         }
     }
     emit_pinocchio_requires_assumptions(out, handler);
-    emit_pinocchio_profile_width_assumptions(out, handler, handler_profile);
-    emit_pinocchio_fee_normalization_assumptions(out, handler, handler_profile);
+    emit_pinocchio_profile_width_assumptions(out, handler, cx.handler_profile);
+    emit_pinocchio_fee_normalization_assumptions(out, handler, cx.handler_profile);
     out.push('\n');
+}
 
-    // Build accounts in source order when the profile inferred it; fall
-    // back to spec order for greenfield/generated specs without source.
-    let ordered_accounts = pinocchio_account_order(handler, handler_profile);
-    let state_assertions = pinocchio_state_assertions(handler, &ordered_accounts, proof_profile);
+/// Account-key expressions: a preliminary index/signer-keyed pass feeds
+/// the PDA key bindings, whose emitted `<ident>_key` locals then refine
+/// the final per-account key-expression map.
+fn emit_pinocchio_harness_account_keys(
+    out: &mut String,
+    cx: &PinocchioHarnessCtx<'_>,
+    ordered_accounts: &[&ParsedHandlerAccount],
+) -> BTreeMap<String, String> {
     let mut preliminary_account_key_exprs = BTreeMap::new();
     for (i, a) in ordered_accounts.iter().enumerate() {
         let ident = to_snake_case(&a.name);
-        let role = pinocchio_account_role(handler_profile, a);
+        let role = pinocchio_account_role(cx.handler_profile, a);
         let key_expr = if pinocchio_account_is_program(a, role)
             && pinocchio_account_type(a, role) == Some("token")
         {
@@ -3170,10 +3237,10 @@ fn emit_pinocchio_handler_harness(
     let emitted_pda_keys = emit_pinocchio_pda_key_bindings(
         out,
         PinocchioPdaKeyBindingsCtx {
-            handler,
-            proof_profile,
-            handler_profile,
-            ordered_accounts: &ordered_accounts,
+            handler: cx.handler,
+            proof_profile: cx.proof_profile,
+            handler_profile: cx.handler_profile,
+            ordered_accounts,
             account_key_exprs: &preliminary_account_key_exprs,
         },
     );
@@ -3181,12 +3248,12 @@ fn emit_pinocchio_handler_harness(
     for (i, a) in ordered_accounts.iter().enumerate() {
         let ident = to_snake_case(&a.name);
         let key_byte = (i + 1) as u8;
-        let role = pinocchio_account_role(handler_profile, a);
+        let role = pinocchio_account_role(cx.handler_profile, a);
         let is_signer = pinocchio_account_is_signer(a, role);
         let mut key_expr = pinocchio_account_key_expr(
-            proof_profile,
-            handler_profile,
-            handler,
+            cx.proof_profile,
+            cx.handler_profile,
+            cx.handler,
             a,
             key_byte,
             is_signer,
@@ -3198,73 +3265,82 @@ fn emit_pinocchio_handler_harness(
         }
         account_key_exprs.insert(ident, key_expr);
     }
+    account_key_exprs
+}
 
+/// Per-account stack builds: token accounts (mint / owner bindings
+/// resolved through the profile), mints, ABI-layout data accounts with
+/// witness initializers, minimal accounts otherwise. Returns the account
+/// idents in emission order.
+fn emit_pinocchio_harness_account_builds(
+    out: &mut String,
+    cx: &PinocchioHarnessCtx<'_>,
+    ordered_accounts: &[&ParsedHandlerAccount],
+    account_key_exprs: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let handler = cx.handler;
     let mut acct_idents: Vec<String> = Vec::with_capacity(ordered_accounts.len());
     for (i, a) in ordered_accounts.iter().enumerate() {
         let ident = to_snake_case(&a.name);
         acct_idents.push(ident.clone());
         let key_byte = (i + 1) as u8;
-        let role = pinocchio_account_role(handler_profile, a);
+        let role = pinocchio_account_role(cx.handler_profile, a);
         let is_writable = pinocchio_account_is_writable(a, role);
         let is_signer = pinocchio_account_is_signer(a, role);
         let key_expr = account_key_exprs
             .get(&ident)
             .cloned()
             .unwrap_or_else(|| format!("[{}u8; 32]", key_byte));
-        if is_token(a) {
-            let binding = pinocchio_token_account_binding(handler_profile, a);
+        if cx.is_token(a) {
+            let binding = pinocchio_token_account_binding(cx.handler_profile, a);
             let mint_expr = binding
                 .and_then(|binding| binding.mint_account.as_ref())
-                .and_then(|account| pinocchio_bound_key_expr(&account_key_exprs, &ident, account))
+                .and_then(|account| pinocchio_bound_key_expr(account_key_exprs, &ident, account))
                 .unwrap_or_else(|| "[0u8; 32]".to_string());
             let owner_expr = binding
                 .and_then(|binding| binding.owner_account.as_ref())
-                .and_then(|account| pinocchio_bound_key_expr(&account_key_exprs, &ident, account))
+                .and_then(|account| pinocchio_bound_key_expr(account_key_exprs, &ident, account))
                 .or_else(|| {
-                    let local = binding.and_then(|binding| binding.owner_key_derivation.as_ref())?;
+                    let local =
+                        binding.and_then(|binding| binding.owner_key_derivation.as_ref())?;
                     let seed_exprs = pinocchio_local_derived_key_seed_exprs(
-                        proof_profile,
-                        handler_profile,
+                        cx.proof_profile,
+                        cx.handler_profile,
                         handler,
                         &ident,
                         local,
-                        &account_key_exprs,
+                        account_key_exprs,
                         &BTreeMap::new(),
                     )?;
-                    let derivation = proof_profile?.pda_derivations.get(&local.derivation)?;
+                    let derivation = cx.proof_profile?.pda_derivations.get(&local.derivation)?;
                     let program_expr = pinocchio_pda_program_expr(&derivation.program_id)?;
                     let arg_by_param = pinocchio_local_arg_by_param(derivation, local);
-                    if let Some(helper_call) =
-                        pinocchio_pda_helper_call(
-                            derivation,
-                            handler,
-                            handler_profile,
-                            &ident,
-                            Some(&arg_by_param),
-                        )
-                    {
-                        out.push_str(&format!("    let {ident}_owner_key = {helper_call};\n"));
-                    } else {
-                        out.push_str(&format!(
-                            "    let {ident}_owner_pda = pinocchio::pubkey::try_find_program_address(&[{}], {});\n",
-                            seed_exprs.join(", "),
-                            program_expr
-                        ));
-                        out.push_str(&format!("    kani::assume({ident}_owner_pda.is_some());\n"));
-                        out.push_str(&format!("    let {ident}_owner_key = {ident}_owner_pda.unwrap().0;\n"));
-                    }
+                    let helper_call = pinocchio_pda_helper_call(
+                        derivation,
+                        handler,
+                        cx.handler_profile,
+                        &ident,
+                        Some(&arg_by_param),
+                    );
+                    emit_pinocchio_pda_key_binding(
+                        out,
+                        &format!("{ident}_owner"),
+                        helper_call,
+                        &seed_exprs,
+                        &program_expr,
+                    );
                     Some(format!("{ident}_owner_key"))
                 })
                 .or_else(|| {
                     pinocchio_nested_owner_key_var_for_account(
-                        proof_profile,
-                        handler_profile,
+                        cx.proof_profile,
+                        cx.handler_profile,
                         a,
                         &ident,
                     )
                 })
                 .unwrap_or_else(|| {
-                    if authority_idx.is_some() && i == 0 {
+                    if cx.authority_idx.is_some() && i == 0 {
                         "authority_key".to_string()
                     } else {
                         "[9u8; 32]".to_string()
@@ -3278,13 +3354,14 @@ fn emit_pinocchio_handler_harness(
                 signer = is_signer,
                 mint_expr = mint_expr,
                 owner_expr = owner_expr,
-                amount_expr = token_amount_witnesses
+                amount_expr = cx
+                    .token_amount_witnesses
                     .get(&ident)
                     .map(|amount| pinocchio_token_amount_expr(amount))
                     .unwrap_or_else(|| pinocchio_token_amount_expr(&format!("{ident}_amount"))),
             ));
-        } else if is_mint(a) {
-            let decimals_expr = pinocchio_mint_decimal_param(handler_profile, &ident)
+        } else if cx.is_mint(a) {
+            let decimals_expr = pinocchio_mint_decimal_param(cx.handler_profile, &ident)
                 .filter(|param| {
                     handler
                         .takes_params
@@ -3301,7 +3378,7 @@ fn emit_pinocchio_handler_harness(
                 writable = is_writable,
                 decimals_expr = decimals_expr,
             ));
-        } else if let Some(layout) = pinocchio_account_layout(proof_profile, a) {
+        } else if let Some(layout) = pinocchio_account_layout(cx.proof_profile, a) {
             out.push_str(&format!(
                 "    // ABI account layout `{}`: {} byte data region.\n",
                 layout.name, layout.len
@@ -3333,7 +3410,7 @@ fn emit_pinocchio_handler_harness(
                 &ident,
                 layout,
                 handler,
-                &account_key_exprs,
+                account_key_exprs,
             );
         } else {
             out.push_str(&format!(
@@ -3346,13 +3423,17 @@ fn emit_pinocchio_handler_harness(
         }
     }
     out.push('\n');
+    acct_idents
+}
 
-    // Assemble the AccountInfo array.
+/// Assemble the `[ManuallyDrop<AccountInfo>; N]` array and the raw slice
+/// view the dispatcher receives.
+fn emit_pinocchio_harness_account_array(out: &mut String, acct_idents: &[String]) {
     let n = acct_idents.len();
     out.push_str(&format!(
         "    let accounts: [ManuallyDrop<AccountInfo>; {n}] = unsafe {{\n        [\n"
     ));
-    for ident in &acct_idents {
+    for ident in acct_idents {
         out.push_str(&format!(
             "            ManuallyDrop::new(account_info_from_stack(&mut {ident})),\n"
         ));
@@ -3361,13 +3442,23 @@ fn emit_pinocchio_handler_harness(
     out.push_str(&format!(
         "    let accounts_slice: &[AccountInfo] = unsafe {{\n        core::slice::from_raw_parts(&accounts as *const _ as *const AccountInfo, {n})\n    }};\n\n"
     ));
+}
 
+/// Pack instruction data, snapshot pre-state, call the committed
+/// dispatcher (Kani's automatic checks verify the path), and emit the
+/// state / token post-assertions plus the spec-ensures reference block.
+fn emit_pinocchio_harness_call_and_asserts(
+    out: &mut String,
+    cx: &PinocchioHarnessCtx<'_>,
+    state_assertions: &[PinocchioStateFieldAssertion],
+) {
+    let handler = cx.handler;
     // Pack instruction data from the committed instruction tag + ABI fields.
-    emit_pinocchio_instruction_data_pack_with_profile(out, handler, handler_profile);
+    emit_pinocchio_instruction_data_pack_with_profile(out, handler, cx.handler_profile);
     out.push('\n');
 
-    emit_pinocchio_state_pre_snapshots(out, &state_assertions);
-    emit_pinocchio_token_pre_snapshots(out, &token_assertions);
+    emit_pinocchio_state_pre_snapshots(out, state_assertions);
+    emit_pinocchio_token_pre_snapshots(out, &cx.token_assertions);
 
     // Call the committed dispatcher.
     out.push_str("    // Call the user's real dispatcher. Kani's automatic checks\n");
@@ -3380,8 +3471,8 @@ fn emit_pinocchio_handler_harness(
         "    assert!(_result.is_ok(), \"generated valid ABI/profile witness should reach success\");\n",
     );
 
-    emit_pinocchio_state_post_assertions(out, &state_assertions);
-    emit_pinocchio_token_post_assertions(out, &token_assertions);
+    emit_pinocchio_state_post_assertions(out, state_assertions);
+    emit_pinocchio_token_post_assertions(out, &cx.token_assertions);
 
     // Reference: spec ensures clauses. Kani's built-in checks already
     // cover arithmetic UB; explicit cross-field invariant assertions go
@@ -3395,7 +3486,4 @@ fn emit_pinocchio_handler_harness(
             out.push_str(&format!("    //   ensures {}\n", e.rust_expr_binary.trim()));
         }
     }
-
-    out.push_str("}\n\n");
-    Ok(())
 }
