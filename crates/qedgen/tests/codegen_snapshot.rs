@@ -2,7 +2,7 @@
 //! §"Phase 4i".
 //!
 //! For every pilot fixture (`examples/rust/{escrow, escrow-split,
-//! lending, multisig, bundled-stdlib-demo, percolator, cross-program-vault}`),
+//! lending, multisig, bundled-stdlib-demo, cross-program-vault}`),
 //! regenerates the MIR-rendered `programs/` tree, concatenates every
 //! file into a single text dump with file-path markers, and compares
 //! against a checked-in snapshot at
@@ -143,15 +143,6 @@ fn snapshot_bundled_stdlib_demo() {
 #[test]
 fn snapshot_escrow_split() {
     assert_or_update_snapshot("escrow-split", "examples/rust/escrow-split", ".");
-}
-
-#[test]
-fn snapshot_percolator() {
-    assert_or_update_snapshot(
-        "percolator",
-        "examples/rust/percolator",
-        "percolator.qedspec",
-    );
 }
 
 // `cross-program-vault` is intentionally omitted from this set. It

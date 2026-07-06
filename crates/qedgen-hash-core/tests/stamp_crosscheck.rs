@@ -29,10 +29,10 @@ struct Stamp {
     spec: Option<(&'static str, &'static str, &'static str)>,
 }
 
-/// Stamps across five example programs plus the compile-gated drift
+/// Stamps across four example programs plus the compile-gated drift
 /// fixture, covering: free fns (fixture `deposit`/`withdraw`), impl
-/// methods (fixture `process`; escrow exchange, percolator, multisig,
-/// lending), and the sole ADT-state example (cross-program-vault).
+/// methods (fixture `process`; escrow exchange, multisig, lending),
+/// and the sole ADT-state example (cross-program-vault).
 ///
 /// Deliberately NOT asserted (pre-existing staleness on main, verified
 /// against the v2.40.0 pre-extraction binary — NOT hash-core divergence;
@@ -41,9 +41,9 @@ struct Stamp {
 ///     `examples/rust/escrow/programs/escrow/src/lib.rs` (stamped at the
 ///     macro crate's introduction, pre-v2.15 canonicalization; `check
 ///     --drift` on main reports all three DRIFTED),
-///   - the `spec_hash` legs of escrow `programs/src` and percolator
-///     (`reconcile` on main reports them SPEC HASH DRIFT; their body
-///     legs verify clean and ARE asserted below).
+///   - the `spec_hash` leg of escrow `programs/src` (`reconcile` on
+///     main reports it SPEC HASH DRIFT; its body leg verifies clean
+///     and IS asserted below).
 const STAMPS: &[Stamp] = &[
     Stamp {
         // Free fn; compile-gated on every `cargo build` (workspace member).
@@ -68,11 +68,6 @@ const STAMPS: &[Stamp] = &[
     Stamp {
         rust_file: "examples/rust/escrow/programs/src/instructions/exchange.rs",
         body_hash: "7b560f1c9c9b8b97",
-        spec: None, // spec_hash leg stale on main — see module doc
-    },
-    Stamp {
-        rust_file: "examples/rust/percolator/programs/src/instructions/deposit.rs",
-        body_hash: "ec60291f63e98a6d",
         spec: None, // spec_hash leg stale on main — see module doc
     },
     Stamp {

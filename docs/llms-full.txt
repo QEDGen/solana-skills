@@ -322,10 +322,6 @@ A token escrow that lets two parties trade safely. Verified properties include a
 
 The same escrow decomposed across `escrow.qedspec`, `handlers/initialize.qedspec`, `handlers/exchange.qedspec`, `handlers/cancel.qedspec`, `interfaces/token.qedspec`, and `properties.qedspec`. Demonstrates spec composition across files and upstream interface dependencies.
 
-### Percolator (Pure Rust)
-
-A perpetual DEX risk engine with protected principal, junior profit claims, and lazy A/K side indices. Verified properties include conservation across deposit, top-up, and fee credits; PnL negation safety; bounded deposits; ADL lifecycle; and fee credits non-positive.
-
 ### Multisig (Anchor)
 
 M-of-N threshold signer gating with replay protection.

@@ -10,7 +10,7 @@
 //    Adequate for paused kill switch, epoch monotonicity, slot cursor,
 //    transcript monotonicity, graph-PDA fail-closed.
 //  - Boolean flags are modeled as `U8` with 0/1 discriminator following
-//    the canonical qedgen pattern (see percolator example's header
+//    the canonical qedgen pattern (see the bundled examples' header
 //    note on Account.active). `Bool` in state breaks Lean cover-witness
 //    codegen; U8 doesn't.
 //  - Pubkey state fields are used only for `admin` (assigned via
@@ -18,7 +18,7 @@
 //    (transparency log) running hash are NOT state fields — they're implicit in
 //    uninterpreted predicates at the guard/effect sites. Assigning
 //    integer literals to Pubkey fields (e.g. `:= 0`) has no DSL support
-//    and produces broken Lean — the multisig/percolator examples never
+//    and produces broken Lean — the bundled examples never
 //    do this.
 //  - 32-byte digests are opaque Pubkey values when they appear as
 //    handler parameters; no Pubkey literals in state/guards.
@@ -65,7 +65,7 @@ const RATE_PRECISION = 1_000_000
 // property, or auth clause — vault/mint/dWallet pubkeys and bump live in
 // the real on-chain PoolState but aren't load-bearing for this spec.
 //
-// Boolean flags use U8 (0/1) per the percolator-example convention —
+// Boolean flags use U8 (0/1) per the bundled-example convention —
 // Bool-in-state breaks Lean cover-witness codegen.
 //
 // Explicitly NOT modeled in state (deliberate scope reduction;
@@ -669,7 +669,7 @@ property epoch_field_tracked :
   state.epoch >= 0
   preserved_by all
 
-/// Flag bounds: 0/1 discriminator convention (percolator-style). All
+/// Flag bounds: 0/1 discriminator convention (U8 flags). All
 /// four Bool-ish fields are U8 with valid values in {0, 1}. Machine-
 /// checked here instead of via a type-level constraint.
 property flag_bounds_paused :

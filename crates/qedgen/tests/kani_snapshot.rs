@@ -2,7 +2,7 @@
 //! §"Phase 3f".
 //!
 //! For every pilot fixture (`examples/rust/{escrow, escrow-split,
-//! lending, multisig, bundled-stdlib-demo, percolator}`),
+//! lending, multisig, bundled-stdlib-demo}`),
 //! regenerates the MIR-rendered `tests/kani.rs` and compares against
 //! a checked-in snapshot at
 //! `crates/qedgen/tests/snapshots/<fixture>.kani.rs`.
@@ -107,15 +107,6 @@ fn snapshot_bundled_stdlib_demo() {
 #[test]
 fn snapshot_escrow_split() {
     assert_or_update_snapshot("escrow-split", "examples/rust/escrow-split", ".");
-}
-
-#[test]
-fn snapshot_percolator() {
-    assert_or_update_snapshot(
-        "percolator",
-        "examples/rust/percolator",
-        "percolator.qedspec",
-    );
 }
 
 #[test]

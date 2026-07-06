@@ -137,9 +137,3 @@ fn multisig_codegen_is_deterministic() {
     ensure_qedgen_built();
     assert_deterministic(&repo_root().join("examples/rust/multisig/multisig.qedspec"));
 }
-
-#[test]
-fn percolator_codegen_is_deterministic() {
-    ensure_qedgen_built();
-    assert_deterministic(&repo_root().join("examples/rust/percolator/percolator.qedspec"));
-}

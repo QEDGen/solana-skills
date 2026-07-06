@@ -206,7 +206,7 @@ How we'll know the new shape works:
    - `examples/rust/lending/lending.qedspec` (imports `Token` from `"spl"`)
    - `examples/rust/bundled-stdlib-demo/pool.qedspec` (imports both `Token` and `System`)
 
-2. **Inline `interface` fixtures regenerate identically.** Need to identify one in the corpus or add a minimal one. Candidates: percolator likely uses inline interface blocks for its multi-program shape; verify.
+2. **Inline `interface` fixtures regenerate identically.** Need to identify one in the corpus or add a minimal one. Candidates: the issue-8 pool fixture declares an inline `interface` block; verify.
 
 3. **v2.27 Track A `state_binders` fixture regenerates identically.** Need to identify the canonical Track A test case — likely lives under `examples/rust/bundled-stdlib-demo/` since that's where Track A landed.
 

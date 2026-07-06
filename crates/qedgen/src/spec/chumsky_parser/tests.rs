@@ -431,10 +431,10 @@ property conservation :
 }
 
 #[test]
-fn parses_full_percolator_spec() {
-    const SRC: &str = include_str!("../../../../../examples/rust/percolator/percolator.qedspec");
+fn parses_full_pool_spec() {
+    const SRC: &str = include_str!("../../../tests/fixtures/regressions/issue-8/pool.qedspec");
     let s = parse_ok(SRC);
-    assert_eq!(s.name, "Percolator");
+    assert_eq!(s.name, "Pool");
 
     // Quick structural sanity check.
     let counts = s
@@ -474,13 +474,30 @@ fn parses_full_percolator_spec() {
             },
         );
 
-    assert_eq!(counts.get("const"), Some(&4), "consts: {:?}", counts);
-    assert_eq!(counts.get("record"), Some(&1));
-    assert_eq!(counts.get("adt"), Some(&2)); // State + Error
-    assert_eq!(counts.get("handler"), Some(&15));
-    assert_eq!(counts.get("property"), Some(&3));
-    assert_eq!(counts.get("cover"), Some(&2));
-    assert_eq!(counts.get("liveness"), Some(&1));
+    assert_eq!(counts.get("const"), Some(&7), "consts: {:?}", counts);
+    assert_eq!(counts.get("adt"), Some(&2), "adts: {:?}", counts); // State + Error
+    assert_eq!(counts.get("handler"), Some(&13), "handlers: {:?}", counts);
+    assert_eq!(
+        counts.get("property"),
+        Some(&12),
+        "properties: {:?}",
+        counts
+    );
+    assert_eq!(counts.get("cover"), Some(&5), "covers: {:?}", counts);
+    assert_eq!(counts.get("event"), Some(&6), "events: {:?}", counts);
+    assert_eq!(
+        counts.get("invariant"),
+        Some(&6),
+        "invariants: {:?}",
+        counts
+    );
+    assert_eq!(counts.get("pda"), Some(&4), "pdas: {:?}", counts);
+    assert_eq!(
+        counts.get("interface"),
+        Some(&1),
+        "interfaces: {:?}",
+        counts
+    );
 }
 
 #[test]

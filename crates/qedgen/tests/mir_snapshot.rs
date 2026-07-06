@@ -97,16 +97,6 @@ fn snapshot_multisig() {
     assert_or_update_snapshot("multisig", "examples/rust/multisig/multisig.qedspec");
 }
 
-// Record-bearing fixture (v2.32 records→MIR migration). Verified
-// byte-identical to the legacy `lean_gen` output (the records carve-out
-// in main.rs is removed on this branch). Gates the gap-1/2/3 fixes:
-// record `structure`/`Inhabited` emission, indexed-record-field effect
-// rendering, and requires-conjunct ordering.
-#[test]
-fn snapshot_percolator() {
-    assert_or_update_snapshot("percolator", "examples/rust/percolator/percolator.qedspec");
-}
-
 #[test]
 fn snapshot_bundled_stdlib_demo() {
     assert_or_update_snapshot(

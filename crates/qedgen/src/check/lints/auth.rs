@@ -33,8 +33,9 @@ pub(super) fn r25_will_bind_auth(handler: &ParsedHandler, spec: &ParsedSpec) -> 
 /// `auth → has_one` lowering (R25) can't fire. The signer check verifies
 /// "someone signed," not "the right someone."
 ///
-/// Closed by R25 when `X` IS a state field. Catches the percolator-CRIT
-/// shape — auth name without a state-side anchor.
+/// Closed by R25 when `X` IS a state field. Catches the unbound-auth
+/// CRIT shape from an early perp-engine eval — auth name without a
+/// state-side anchor.
 pub(super) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
     for handler in &spec.handlers {
@@ -208,7 +209,7 @@ mod tests {
     // gaps go uncaught.
     // ========================================================================
 
-    /// Fixture mirroring the percolator-CRIT shape: `auth authority` but
+    /// Fixture mirroring the unbound-auth CRIT shape: `auth authority` but
     /// no `authority` field on the state. Every handler is reachable by
     /// any signer.
     const UNBOUND_AUTH_FIXTURE: &str = r#"

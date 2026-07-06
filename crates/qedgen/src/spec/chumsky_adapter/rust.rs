@@ -241,7 +241,7 @@ pub(super) fn expr_to_rust(
         // `a * b` can overflow u64 even when both operands are u64-bounded).
         // Inside arbitrary expression contexts (`requires` / `ensures` /
         // `effect` RHS) the u128 width is intentional — the spec author
-        // may compare against a u128 literal (e.g. percolator's `…
+        // may compare against a u128 literal (e.g. a perp risk engine's `…
         // mul_div_floor(...) <= 100000000000000000000`). The let-binding
         // emit site (see `HandlerClause::Let` handler below) narrows back
         // to U64 explicitly when the spec writes `let X = mul_div_*(…)`,

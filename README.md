@@ -623,7 +623,6 @@ via Lean + client-side tests.)
 - **[Escrow (split)](examples/rust/escrow-split/)** — Escrow with handlers split across instruction files (multi-file `qed.toml` layout)
 - **[Lending](examples/rust/lending/)** — Lending pool with multi-account state
 - **[Multisig](examples/rust/multisig/)** — Multi-signature vault with voting
-- **[Percolator](examples/rust/percolator/)** — Perpetual DEX risk engine
 
 ### sBPF Assembly
 

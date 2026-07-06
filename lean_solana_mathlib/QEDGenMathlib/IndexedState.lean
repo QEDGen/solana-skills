@@ -11,7 +11,7 @@ Backs `Map[N] T` fields in `.qedspec` with `Fin n → α`. This keeps sums
 (`Function.update`) all first-class with Mathlib's big-operator API.
 
 Used by QEDGen-generated Spec.lean files for per-account state like
-percolator's `accounts : Map[MAX_ACCOUNTS] Account`.
+`accounts : Map[MAX_ACCOUNTS] Account` in a perp-dex risk engine.
 -/
 
 namespace QEDGen.Solana.IndexedState

@@ -45,7 +45,7 @@ Slice 4 deleted the **parallel-array drift class**: `ParsedHandler` /
   (`accounts[i].capital`) — now `s.accounts[(i) as usize].capital`.
 - Kani conformance expected values only rebound *bare* field names to the
   `pre_<field>` snapshot locals; compound/indexed RHS leaked unbound or
-  post-state reads (percolator's `verify_close_account_effect_V` never
+  post-state reads (the perp-dex example's `verify_close_account_effect_V` never
   compiled). Expected values render under `Binder::PreLocal`.
 - Negated guard conjuncts get the same wrapping policy as positive ones
   (the legacy string pass never descended into `!(…)`).
@@ -98,9 +98,9 @@ lanes are documented out of scope pending a binder-aware render context.
 
 All bundled examples re-resolved to qedsvm v0.9.0 (they had lagged at
 v0.4.0) with full `lake build` validation. Green: all six Rust examples
-(escrow, escrow-split, lending, multisig, percolator,
+(escrow, escrow-split, lending, multisig, the perp-dex example,
 bundled-stdlib-demo — the two embedded `lean_solana` copies synced to the
-v0.9.0 sources) and `sbpf/counter`. Percolator's generated harnesses were
+v0.9.0 sources) and `sbpf/counter`. The perp-dex example's generated harnesses were
 regenerated to match the shipped codegen (PR #153).
 
 **Known debt (pre-existing, now surfaced):** `sbpf/{transfer, slippage,

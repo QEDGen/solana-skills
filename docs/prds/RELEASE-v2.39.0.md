@@ -77,7 +77,7 @@ signer gains) now fires `assert_no_wallet_inflation`.
 - Generated **Kani/proptest harnesses** change where specs use compound
   effect RHS or arithmetic inside predicates: previously-broken shapes now
   compile; arithmetic predicates render widened. Bundled multisig /
-  percolator harnesses + the 5 affected snapshots regenerated.
+  perp-dex harnesses + the 5 affected snapshots regenerated.
 - Generated **Lean** changes only for compound effect RHS (previously
   emitted unbound bare fields — did not elaborate).
 - Regression fixture: `crates/qedgen/tests/fixtures/regressions/issues-143-146-kani-arith/`

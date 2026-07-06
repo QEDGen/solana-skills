@@ -160,7 +160,7 @@ unverified before.
     scaffold smoke tests pass
   - `cargo fmt --check`, `cargo clippy --release -- -D warnings`,
     `bash scripts/check-readme-drift.sh` — clean
-  - `qedgen check --regen-drift` — clean (percolator's kani.rs picked
+  - `qedgen check --regen-drift` — clean (the perp-dex example's kani.rs picked
     up 7 new ensures-preservation harnesses; regenerated)
   - Hand-verified LP-deposit + ref_impl flow end-to-end: spec parses,
     ref_impl emits as Lean `def` and Rust fn, ensures harness binds

@@ -596,11 +596,11 @@ mod tests {
 
     #[test]
     fn resolve_program_root_anchors_on_spec_when_given() {
-        // `qedgen init --spec percolator.qedspec --output-dir /tmp/qedgen_eval`
+        // `qedgen init --spec pool.qedspec --output-dir /tmp/qedgen_eval`
         // from the project dir: .qed/ must land next to the spec (cwd), not
         // in /tmp.
-        let cwd = std::path::Path::new("/home/user/percolator-prog");
-        let spec = std::path::Path::new("percolator.qedspec");
+        let cwd = std::path::Path::new("/home/user/pool-prog");
+        let spec = std::path::Path::new("pool.qedspec");
         let output_dir = std::path::Path::new("/tmp/qedgen_eval");
 
         let root = resolve_program_root(Some(spec), output_dir, cwd);

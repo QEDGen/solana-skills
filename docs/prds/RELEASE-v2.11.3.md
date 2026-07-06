@@ -27,9 +27,9 @@ and multisig red on the Lean side.
 
 | Bug | Symptom | Fix |
 |---|---|---|
-| **A** — auth-var as State field | `auth approver` rendered as `signer = s.approver` even when `approver` isn't a State field. Worked only by name coincidence (escrow's `initializer` / `taker`, percolator's `authority`); broke multisig's `approver` / `rejecter`. | New `auth_who_is_state_field` helper. State-field case keeps the guard; alias-only case emits `let <who> := signer` so user-written predicates resolve. Both render paths (`render_transitions` + `render_indexed_state`) share the helper. |
+| **A** — auth-var as State field | `auth approver` rendered as `signer = s.approver` even when `approver` isn't a State field. Worked only by name coincidence (escrow's `initializer` / `taker`, the perp-dex example's `authority`); broke multisig's `approver` / `rejecter`. | New `auth_who_is_state_field` helper. State-field case keeps the guard; alias-only case emits `let <who> := signer` so user-written predicates resolve. Both render paths (`render_transitions` + `render_indexed_state`) share the helper. |
 | **B** — account-binding `.pubkey` in effect RHS | `field := initializer_ta.pubkey` in qedspec passed through to Lean unchanged. `initializer_ta` is an account binding with no Lean scope; `Unknown identifier` at the assignment site. | New `is_account_binding_pubkey_ref` helper drops these effects from Lean (Rust side keeps `ctx.accounts.<binding>.key()`). Skipped at three sites: `render_transitions`, `render_indexed_state`, and `WitnessState::apply` (cover-trace simulator). |
-| **C** — Map indices as raw `Nat` | `Map[N] T` is `Fin n → α` in Lean. `U8`/`Nat` index params used as `<map>[<param>]` produced `Application type mismatch: ℕ vs Fin N`. | New `infer_idx_promotions` scans handler effects + requires for `<map_root>[<param>]` patterns, promotes scalar params to `Fin <bound>` in transition signatures and `Operation` arms. Rust side unchanged. Percolator's `AccountIdx = Fin[MAX_ACCOUNTS]` alias arrives correctly typed; promotion is a no-op there. |
+| **C** — Map indices as raw `Nat` | `Map[N] T` is `Fin n → α` in Lean. `U8`/`Nat` index params used as `<map>[<param>]` produced `Application type mismatch: ℕ vs Fin N`. | New `infer_idx_promotions` scans handler effects + requires for `<map_root>[<param>]` patterns, promotes scalar params to `Fin <bound>` in transition signatures and `Operation` arms. Rust side unchanged. The perp-dex example's `AccountIdx = Fin[MAX_ACCOUNTS]` alias arrives correctly typed; promotion is a no-op there. |
 | **D** — cover witness `1` for `Pubkey` field | `WitnessState::resolve_value`'s fallback returned `"1"` for unresolved values, poisoning Pubkey-typed fields in cover-theorem struct literals (`failed to synthesize OfNat Pubkey 1`). | Same `is_account_binding_pubkey_ref` skip in `WitnessState::apply` keeps the field at its `pk` default. Same root cause as B; one helper fixes both. |
 
 ### Lakefile / Proofs roots
@@ -59,7 +59,7 @@ multisig's `Spec.lean` imports `Mathlib.Algebra.BigOperators.Fin` +
 `QEDGenMathlib.IndexedState` (Map-backed forall predicates) but its
 lakefile required the base `qedgenSupport` slice — `lake build`
 failed at `import Mathlib...` before any typechecking. Swapped to
-`qedgenSupportMathlib` (matches percolator's idiom).
+`qedgenSupportMathlib` (matches the perp-dex example's idiom).
 
 ### Drift hash alignment
 

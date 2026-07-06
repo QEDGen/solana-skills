@@ -17,7 +17,7 @@ surface changes beyond making previously-broken output correct.
 | Pinocchio: effect body binds account refs through `self` (the handler method), not the guard fn's `ctx`; `Pubkey` set assigns the deref'd value (no `.into()`) | issue #71 / PR #72 |
 | Kani impl-targeted harness: integer handler-param PDA seeds serialize via `to_le_bytes()` (not `u64::as_ref()`) | issue #71 / PR #72 |
 | `qedgen setup`: embed `CommandBuilders.lean` (the embedded `Spec.lean` imports it) so the validation workspace `lake build`s | issue #71 / PR #72 |
-| Anchor: a state type named like a prelude wrapper (e.g. percolator's `type Account = { … }`) no longer makes `Account<'info, _>` an ambiguous glob import — codegen re-imports the colliding wrapper explicitly. Fixes the `percolator_anchor_scaffold_compiles` CI failure (a pre-existing red on `main` from `ambiguous_glob_imports` going deny-by-default) | PR #72 |
+| Anchor: a state type named like a prelude wrapper (e.g. the perp-dex example's `type Account = { … }`) no longer makes `Account<'info, _>` an ambiguous glob import — codegen re-imports the colliding wrapper explicitly. Fixes the perp-dex scaffold-compile CI failure (a pre-existing red on `main` from `ambiguous_glob_imports` going deny-by-default) | PR #72 |
 
 ## Regression coverage added
 
