@@ -1760,10 +1760,10 @@ handler bump (delta : U64) : State.Active -> State.Active {
     #[test]
     fn spec_name_snake_cases() {
         let mut spec = ParsedSpec {
-            program_name: "PercolatorRiskEngine".into(),
+            program_name: "LiquidityRiskEngine".into(),
             ..Default::default()
         };
-        assert_eq!(spec_program_name(&spec), "percolator_risk_engine");
+        assert_eq!(spec_program_name(&spec), "liquidity_risk_engine");
         spec.program_name = "escrow-split".into();
         assert_eq!(spec_program_name(&spec), "escrow_split");
     }

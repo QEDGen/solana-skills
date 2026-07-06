@@ -6,8 +6,9 @@ open Lake DSL
 -- including all sBPF proofs) can use the base `lean_solana` package
 -- without paying the Mathlib download + build cost.
 --
--- Percolator (the one example that does per-account sum reasoning)
--- is the sole consumer today; add new per-account DeFi specs here too.
+-- Specs that do per-account sum reasoning (`Map[N] T` state with
+-- `sum i, ...` properties) are the consumers; add per-account DeFi
+-- specs here.
 package qedgenSupportMathlib
 
 require qedgenSupport from "../lean_solana"

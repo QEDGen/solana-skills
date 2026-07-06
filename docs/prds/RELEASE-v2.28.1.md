@@ -19,7 +19,7 @@ catches the gap before tagging.
   lowercase `claude.md` mirror stays byte-identical (same file on
   case-insensitive macOS filesystems).
 - **Bundled examples' `qedgen-macros` tag pin** sed-bumped across 7
-  Cargo.toml files (escrow, lending, multisig, percolator + their
+  Cargo.toml files (escrow, lending, multisig, the perp-dex example + their
   `programs/` sub-crates) from `tag = "v2.27.1"` → `tag = "v2.28.1"`.
   `codegen::render_qedgen_cargo_toml` embeds the value via
   `env!("CARGO_PKG_VERSION")`, so the `check --regen-drift` CI gate

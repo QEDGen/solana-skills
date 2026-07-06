@@ -359,15 +359,15 @@ fn render_skips_account_pubkey_aborts() {
 
 #[test]
 fn render_emits_constants() {
-    // Percolator declares MAX_ACCOUNTS, MAX_VAULT_TVL,
-    // POS_SCALE, MAX_ACCOUNT_NOTIONAL.
-    let mir = lower_fixture("examples/rust/percolator/percolator.qedspec");
+    // The issue-8 pool fixture declares SCHEDULE_LANES,
+    // RATE_PRECISION, VECTOR_COUNT, ….
+    let mir = lower_fixture("crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec");
     let out = render(&mir);
     assert!(
-        out.contains("abbrev MAX_ACCOUNTS : Nat := 1024"),
-        "expected MAX_ACCOUNTS abbrev"
+        out.contains("abbrev SCHEDULE_LANES : Nat := 32"),
+        "expected SCHEDULE_LANES abbrev"
     );
-    assert!(out.contains("abbrev POS_SCALE : Nat := 1000000"));
+    assert!(out.contains("abbrev RATE_PRECISION : Nat := 1000000"));
 }
 
 #[test]

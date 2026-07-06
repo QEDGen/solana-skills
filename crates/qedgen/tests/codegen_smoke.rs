@@ -700,12 +700,6 @@ fn multisig_anchor_scaffold_compiles() {
 }
 
 #[test]
-#[ignore = "runs qedgen codegen and cargo check on a generated Anchor crate"]
-fn percolator_anchor_scaffold_compiles() {
-    smoke_anchor_scaffold("percolator");
-}
-
-#[test]
 #[ignore = "runs qedgen codegen + cargo test --test proptest on a generated Anchor crate"]
 fn escrow_anchor_proptest_runs() {
     smoke_anchor_scaffold_with_proptest("escrow");

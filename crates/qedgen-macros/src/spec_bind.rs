@@ -450,7 +450,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_SPEC: &str = r#"
-spec Percolator
+spec Vault
 
 handler deposit (i : AccountIdx) (amount : U128) : State.Active -> State.Active {
   requires state.accounts[i].active == 1 else SlotInactive
@@ -539,13 +539,13 @@ handler withdraw (i : AccountIdx) (amount : U128) : State.Active -> State.Active
     fn parse_all_args() {
         let attr: TokenStream = quote::quote! {
             verified,
-            spec = "percolator.qedspec",
+            spec = "vault.qedspec",
             handler = "deposit",
             hash = "aaaaaaaaaaaaaaaa",
             spec_hash = "bbbbbbbbbbbbbbbb"
         };
         let args = parse_args(&attr).unwrap();
-        assert_eq!(args.spec.as_deref(), Some("percolator.qedspec"));
+        assert_eq!(args.spec.as_deref(), Some("vault.qedspec"));
         assert_eq!(args.handler.as_deref(), Some("deposit"));
         assert_eq!(args.hash.as_deref(), Some("aaaaaaaaaaaaaaaa"));
         assert_eq!(args.spec_hash.as_deref(), Some("bbbbbbbbbbbbbbbb"));

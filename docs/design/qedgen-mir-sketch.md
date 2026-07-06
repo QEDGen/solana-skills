@@ -344,7 +344,7 @@ Sub-slices shipped:
 | 15 | `emit_covers` + `emit_liveness` + `emit_environments` + `emit_overflow` | 1c-6 | ✅ (statements only — proof scripts deferred) |
 | 16 | namespace close | 1b | ✅ |
 
-**15 of 16 sections emit content.** End-to-end smoke-confirmed on `examples/rust/{escrow,lending,multisig,bundled-stdlib-demo,percolator}/*.qedspec` with `QEDGEN_USE_MIR=1`. 15 lean_gen_mir tests + 10 mir tests pass. Full bin suite at 970 passing.
+**15 of 16 sections emit content.** End-to-end smoke-confirmed on `examples/rust/{escrow,lending,multisig,bundled-stdlib-demo}/*.qedspec` plus the since-removed perp-dex risk-engine example with `QEDGEN_USE_MIR=1`. 15 lean_gen_mir tests + 10 mir tests pass. Full bin suite at 970 passing.
 
 Commit trail on `mir` branch:
 - `ab4bdbe` Phase 0 — typed IR + lowering
@@ -404,7 +404,7 @@ account). MIR is the default Lean codegen path post v2.30 Phase 2.
 path** post Phase 3f flip (`QEDGEN_LEGACY_KANI=1` escape hatch).
 All 6 pilot fixtures full-file byte-identical to legacy (escrow
 268 / escrow-split 179 / bundled-stdlib-demo 155 / multisig 1324
-/ percolator 2365 / lending 511 lines). Snapshot tests gate every
+/ the since-removed perp-dex risk engine 2365 / lending 511 lines). Snapshot tests gate every
 pilot via `tests/kani_snapshot.rs` (mirrors `tests/mir_snapshot.rs`
 for Lean). Pilot-scope guard sends sBPF (`pragma sbpf`) to legacy
 unconditionally — MIR's `is_sbpf` is still a Phase-0 stub; records
@@ -474,8 +474,8 @@ For the next session picking up this work:
 2. **Close the MIR pilot-scope carve-outs.** The dispatch guard
    currently sends two shape classes to legacy: (a) sBPF — needs
    `pragmas` lifted into MIR and `is_sbpf` un-stubbed (then a
-   `render_sbpf` MIR port); (b) record-bearing specs (percolator
-   class) — needs `Mir.records` lift + per-field `structure T` +
+   `render_sbpf` MIR port); (b) record-bearing specs (the
+   perp-dex-risk-engine class) — needs `Mir.records` lift + per-field `structure T` +
    `instance : Inhabited T` emission + bare-field assign wrapping
    (`{ acct with active := 1 }` instead of MIR's current bare
    `(1)`). The legacy fallback covers correctness; closing the

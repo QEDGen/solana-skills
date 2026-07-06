@@ -108,21 +108,23 @@ fn render_emits_state_model_header_banner() {
 
 #[test]
 fn render_emits_constants_when_spec_declares_them() {
-    // percolator declares MAX_ACCOUNTS, POS_SCALE — Mir.constants
-    // carries them as (name, value) and `emit_constants` lowers
-    // them to `pub const NAME: u64 = VALUE;`.
-    let (mir, parsed) = lower_fixture("examples/rust/percolator/percolator.qedspec");
+    // The issue-8 pool fixture declares SCHEDULE_LANES,
+    // RATE_PRECISION, … — Mir.constants carries them as
+    // (name, value) and `emit_constants` lowers them to
+    // `pub const NAME: u64 = VALUE;`.
+    let (mir, parsed) =
+        lower_fixture("crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec");
     let out = render(&mir, &parsed);
     // `rust_codegen_util::emit_constants` writes `const NAME:
     // <ty> = VALUE;` (file-scoped, no `pub` — the per-ADT modules
     // pull them in via `use super::*`).
     assert!(
-        out.contains("const MAX_ACCOUNTS"),
-        "expected MAX_ACCOUNTS constant emit"
+        out.contains("const SCHEDULE_LANES"),
+        "expected SCHEDULE_LANES constant emit"
     );
     assert!(
-        out.contains("const POS_SCALE"),
-        "expected POS_SCALE constant emit"
+        out.contains("const RATE_PRECISION"),
+        "expected RATE_PRECISION constant emit"
     );
 }
 
@@ -229,9 +231,10 @@ fn render_emits_overflow_detection_harnesses_for_add_effects() {
 
 #[test]
 fn render_emits_ensures_preservation_harnesses() {
-    // Percolator has handlers with ensures clauses (e.g. deposit
-    // with old(...) bindings).
-    let (mir, parsed) = lower_fixture("examples/rust/percolator/percolator.qedspec");
+    // The issue-8 pool fixture has handlers with ensures clauses
+    // (with old(...) bindings).
+    let (mir, parsed) =
+        lower_fixture("crates/qedgen/tests/fixtures/regressions/issue-8/pool.qedspec");
     let out = render(&mir, &parsed);
     assert!(
         out.contains("// Ensures preservation —"),

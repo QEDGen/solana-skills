@@ -1597,7 +1597,7 @@ mismatch.
 
 ```rust
 #[qed(verified,
-      spec      = "../../percolator.qedspec",
+      spec      = "../../escrow.qedspec",
       handler   = "deposit",
       hash      = "3f2c9a81b0d5e4f7",   // body content hash
       spec_hash = "7e1a48d93b2c0f65")]  // spec-handler content hash

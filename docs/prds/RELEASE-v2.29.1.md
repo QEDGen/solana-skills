@@ -106,7 +106,7 @@ and limitations.md (the lookup spot when triaging a specific lint).
 ### Codegen drift
 
 `qedgen check --regen-drift --write` refreshed `examples/rust/{escrow,
-lending, multisig, percolator}/Cargo.toml` to match v2.29's codegen
+lending, multisig}/Cargo.toml` (and the since-removed perp-dex example's) to match v2.29's codegen
 output (`InitSpace` derive on multi-account wrappers, `space = 8 +
 <Wrapper>::INIT_SPACE` on init handlers, the `mut`+`init` exclusion
 fix). v2.29.0's first CI run failed on this gate; v2.29.1 ships clean.

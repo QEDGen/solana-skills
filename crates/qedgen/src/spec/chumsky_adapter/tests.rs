@@ -3,8 +3,85 @@
 
 use super::*;
 
-const PERCOLATOR_SPEC: &str =
-    include_str!("../../../../../examples/rust/percolator/percolator.qedspec");
+/// Inline stand-in for the retired perp-risk-engine example: consts,
+/// a `Fin[...]` alias, a record, a multi-variant ADT `State`, per-requires
+/// error names, const substitution in guards, a top-level `match` handler
+/// (arm expansion), and property/cover/liveness items — the full-spec
+/// shape the adapter must keep round-tripping.
+const RISK_ENGINE_SPEC: &str = r#"spec RiskEngine
+
+const MAX_SLOTS = 64
+const MAX_VAULT_TVL = 10_000_000_000_000_000
+
+type SlotIdx = Fin[MAX_SLOTS]
+
+type Slot = {
+  active  : U8,
+  capital : U128,
+}
+
+type State
+  | Active of {
+      authority : Pubkey,
+      V         : U128,
+      slots     : Map[MAX_SLOTS] Slot,
+    }
+  | Halted
+
+type Error
+  | SlotInactive
+  | SlotHealthy
+  | BankruptPosition
+  | VaultOverflow
+
+handler deposit (i : SlotIdx) (amount : U128) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer, writable
+             vault     : writable }
+
+  requires state.slots[i].active == 1 else SlotInactive
+  requires state.V + amount <= MAX_VAULT_TVL else VaultOverflow
+
+  effect {
+    slots[i].capital += amount
+    V += amount
+  }
+}
+
+handler liquidate (i : SlotIdx) : State.Active -> State.Active {
+  auth authority
+  accounts { authority : signer
+             vault     : writable }
+
+  requires state.slots[i].active == 1 else SlotInactive
+
+  match
+    | state.slots[i].capital >= 1 =>
+        abort SlotHealthy
+    | state.slots[i].capital == 0 =>
+        effect { slots[i].active := 0 }
+    | _ =>
+        abort BankruptPosition
+}
+
+handler halt : State.Active -> State.Halted {
+  auth authority
+  accounts { authority : signer }
+}
+
+handler resume : State.Halted -> State.Active {
+  auth authority
+  accounts { authority : signer }
+}
+
+property conservation :
+  state.V >= (sum i : SlotIdx, state.slots[i].capital)
+  preserved_by all
+
+cover happy_path [deposit, liquidate]
+
+liveness engine_recovers : State.Halted ~> State.Active via [resume] within 1
+"#;
 
 /// `Map[<EnumType>] T` is recognized when the bound names a unit-only
 /// enum (all variants payload-free).
@@ -614,23 +691,22 @@ fn pubkey_typecheck_does_not_break_bundled_examples() {
         include_str!("../../../../../examples/rust/escrow/escrow.qedspec"),
         include_str!("../../../../../examples/rust/lending/lending.qedspec"),
         include_str!("../../../../../examples/rust/multisig/multisig.qedspec"),
-        include_str!("../../../../../examples/rust/percolator/percolator.qedspec"),
         include_str!("../../../tests/fixtures/regressions/issue-8/pool.qedspec"),
     ] {
         parse_str(src).unwrap();
     }
 }
 
-// Structural smoke test — percolator produces the shape we expect.
-// When pest existed this compared parser-for-parser; now it's a
-// regression fence against future adapter changes.
+// Structural smoke test — the risk-engine spec produces the shape we
+// expect. When pest existed this compared parser-for-parser; now it's
+// a regression fence against future adapter changes.
 #[test]
-fn percolator_shape() {
-    let spec = parse_str(PERCOLATOR_SPEC).expect("chumsky parse");
-    // 14 plain handlers + `liquidate` expanded into 3 branch arms = 17.
-    assert_eq!(spec.handlers.len(), 17);
-    assert_eq!(spec.properties.len(), 3);
-    assert_eq!(spec.covers.len(), 2);
+fn risk_engine_shape() {
+    let spec = parse_str(RISK_ENGINE_SPEC).expect("chumsky parse");
+    // 3 plain handlers + `liquidate` expanded into 3 branch arms = 6.
+    assert_eq!(spec.handlers.len(), 6);
+    assert_eq!(spec.properties.len(), 1);
+    assert_eq!(spec.covers.len(), 1);
     assert_eq!(spec.liveness_props.len(), 1);
 
     let deposit = spec.handlers.iter().find(|h| h.name == "deposit").unwrap();

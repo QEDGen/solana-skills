@@ -116,7 +116,7 @@ fn map_type_renders_map_with_literal_bound() {
 
 #[test]
 fn map_type_resolves_map_bound_via_constants() {
-    // Mirrors the percolator eval case: `Map[MAX_ACCOUNTS] U64` where
+    // Mirrors a real eval case: `Map[MAX_ACCOUNTS] U64` where
     // MAX_ACCOUNTS is declared as a spec constant.
     let spec = spec_with_constants(&[("MAX_ACCOUNTS", "256"), ("UNRELATED", "99")]);
     assert_eq!(
@@ -151,7 +151,7 @@ fn map_type_resolves_fin_to_usize() {
 
 #[test]
 fn map_type_resolves_type_aliases_transitively() {
-    // The percolator pattern: `type AccountIdx = Fin[MAX_ACCOUNTS]`.
+    // The indexed-slot pattern: `type AccountIdx = Fin[MAX_ACCOUNTS]`.
     // `map_type("AccountIdx")` must resolve through the alias to `usize`.
     use crate::check::ParsedRecordType;
     let mut spec = ParsedSpec {

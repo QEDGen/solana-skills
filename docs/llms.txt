@@ -18,8 +18,6 @@ A `.qedspec` is the single source of truth. It can live in one file or span mult
 - [Escrow spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/escrow.qedspec): Two-party token escrow (access control, state machine, arithmetic safety, CPI correctness)
 - [Escrow Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow/formal_verification/Spec.lean): Generated Lean proofs for the escrow spec
 - [Escrow-split spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/escrow-split/escrow.qedspec): Multi-file version of the escrow showing spec composition across handlers and interfaces
-- [Percolator spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/percolator.qedspec): Pure Rust perpetual DEX risk engine (conservation, arithmetic safety, lifecycle, fee isolation)
-- [Percolator Lean](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/percolator/formal_verification/Proofs.lean): Generated Lean proofs for the percolator engine
 - [Multisig spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/multisig/multisig.qedspec): M-of-N threshold signer gating with replay protection
 - [Lending spec](https://raw.githubusercontent.com/qedgen/solana-skills/main/examples/rust/lending/lending.qedspec): Collateralized lending market
 
