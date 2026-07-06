@@ -66,7 +66,7 @@ const SCHEMA_VERSION: u32 = 1;
 
 /// Walk `src/`, `program/src/`, and `programs/*/src/`; emit the site catalogue.
 pub fn scan_program(project_root: &Path) -> Result<PinocchioCatalogue> {
-    let rs_files = collect_rust_files(project_root)?;
+    let rs_files = collect_rust_files(project_root);
     let mut sites = Vec::new();
     let mut files_scanned = 0;
     let mut safety_total = 0;
@@ -106,46 +106,22 @@ pub fn scan_program(project_root: &Path) -> Result<PinocchioCatalogue> {
     })
 }
 
-/// Recursively collect `.rs` under conventional program source roots,
-/// skipping build-artifact dirs.
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
+/// Recursively collect `.rs` under conventional program source roots
+/// (shared walker + skip list; see `fs_walk::DEFAULT_SKIP_DIRS`).
+fn collect_rust_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let candidates = ["src", "program/src", "programs"];
     for c in candidates {
-        let dir = root.join(c);
-        if !dir.exists() {
-            continue;
-        }
-        walk_dir(&dir, &mut out)?;
+        out.extend(crate::fs_walk::collect_rs_files(
+            &root.join(c),
+            crate::fs_walk::DEFAULT_SKIP_DIRS,
+        ));
     }
     // Fallback: some Pinocchio fixtures put source straight under root.
     if out.is_empty() {
-        walk_dir(root, &mut out)?;
+        out = crate::fs_walk::collect_rs_files(root, crate::fs_walk::DEFAULT_SKIP_DIRS);
     }
-    Ok(out)
-}
-
-fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(
-            name,
-            "target" | ".qed" | "node_modules" | ".git" | "formal_verification"
-        ) {
-            continue;
-        }
-        if path.is_dir() {
-            walk_dir(&path, out)?;
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
+    out
 }
 
 struct SitePatterns {

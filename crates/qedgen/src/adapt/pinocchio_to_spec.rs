@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::program_model::{
     HandlerModel, HandlerShape, ProgramAdapter, ProgramFramework, ProgramModel,
@@ -160,7 +160,8 @@ pub fn enumerate_handlers(project_root: &Path) -> Result<Vec<String>> {
 /// Arbitrary-prefix variant: Pinocchio convention is `process_*`; Native
 /// naming varies. Pass `""` to accept every `pub fn`.
 pub fn enumerate_handlers_with_prefix(project_root: &Path, prefix: &str) -> Result<Vec<String>> {
-    let rs_files = collect_rust_files(project_root)?;
+    let rs_files =
+        crate::fs_walk::collect_rs_files(project_root, crate::fs_walk::DEFAULT_SKIP_DIRS);
     let mut handlers: BTreeSet<String> = BTreeSet::new();
     let pattern = if prefix.is_empty() {
         r"^\s*pub(?:\([^)]+\))?\s+fn\s+([A-Za-z][A-Za-z0-9_]*)\s*\(".to_string()
@@ -184,39 +185,6 @@ pub fn enumerate_handlers_with_prefix(project_root: &Path, prefix: &str) -> Resu
     }
 
     Ok(handlers.into_iter().collect())
-}
-
-/// Mirrors `pinocchio_probe::collect_rust_files`; kept local so the two
-/// scanners can diverge.
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        // Skip vendor/build dirs that shouldn't contribute handlers.
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| matches!(n, "target" | ".git" | "node_modules" | "tests" | "fuzz"))
-        {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 /// snake/kebab-case → PascalCase for the `spec Name` declaration.

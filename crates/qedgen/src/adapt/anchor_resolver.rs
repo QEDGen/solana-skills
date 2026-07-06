@@ -406,25 +406,7 @@ fn resolve_method(
 
 /// Recursive `.rs` walk, sorted for determinism.
 fn walk_rust_files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    walk_rust_files_inner(dir, &mut out);
-    out.sort();
-    out
-}
-
-fn walk_rust_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_rust_files_inner(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
+    crate::fs_walk::collect_rs_files(dir, crate::fs_walk::DEFAULT_SKIP_DIRS)
 }
 
 /// Find `pub fn <fn_name>` whose enclosing module path matches
