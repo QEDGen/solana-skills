@@ -925,8 +925,8 @@ pub(crate) enum Commands {
         #[arg(long)]
         integration: bool,
 
-        /// Output path for integration tests (default: ./src/integration_tests.rs)
-        #[arg(long, default_value = "./src/integration_tests.rs")]
+        /// Output path for integration tests (default: ./programs/tests/integration_tests.rs)
+        #[arg(long, default_value = "./programs/tests/integration_tests.rs")]
         integration_output: PathBuf,
 
         /// Generate Lean 4 proofs from qedspec

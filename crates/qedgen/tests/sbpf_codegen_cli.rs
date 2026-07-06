@@ -108,7 +108,7 @@ fn sbpf_codegen_all_emits_only_lean_and_ci() {
         tmp.path().join(".github/workflows/verify.yml").exists(),
         "--all should emit CI for sBPF specs"
     );
-    for suppressed in ["programs", "fuzz", "src/integration_tests.rs"] {
+    for suppressed in ["programs", "fuzz", "tests/integration_tests.rs"] {
         assert!(
             !tmp.path().join(suppressed).exists(),
             "`{suppressed}` must not be emitted for sBPF specs"

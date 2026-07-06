@@ -54,11 +54,15 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 fn run_codegen(spec: &Path, out_dir: &Path) {
+    common::git_init(out_dir);
     let output = Command::new(qedgen_bin())
         .args(["codegen", "--all", "--spec"])
         .arg(spec)
         .arg("--output-dir")
         .arg(out_dir)
+        // cwd-relative artifact defaults (tests/, programs/, fuzz/) must
+        // land in the tempdir, not wherever the test harness runs.
+        .current_dir(out_dir)
         .output()
         .expect("spawn qedgen codegen");
     assert!(

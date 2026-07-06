@@ -505,7 +505,7 @@ $QEDGEN codegen --ci
 | `--crucible` | bool | false | Generate a coverage-guided fuzz harness (v2.18). Anchor target only; sBPF specs are skipped with a note (assembly is Lean-verified); Pinocchio specs error early. Output is a self-contained `fuzz/<prog>/` directory with `Cargo.toml`, `src/main.rs` (the harness), and `idls/`. Action-body `accounts::X { ... }` literals emit as `todo!()` for agent-fill (same as handler bodies). |
 | `--crucible-output` | Path | `./fuzz` | Parent directory for the generated harness. Final tree lives at `<dir>/<prog>/`. |
 | `--integration` | bool | false | Generate in-process SVM integration tests |
-| `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
+| `--integration-output` | Path | `./programs/tests/integration_tests.rs` | Integration test output path |
 | `--ci` | bool | false | Generate GitHub Actions CI workflow |
 | `--ci-output` | Path | `.github/workflows/verify.yml` | CI workflow output path |
 | `--ci-asm` | String | - | sBPF assembly source (for CI verify step) |
