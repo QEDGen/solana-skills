@@ -6,7 +6,7 @@ after tagging:
 1. **Anchor scaffold smoke tests broken on the bundled examples.**
    v2.24.0 wired multi-variant ADT codegen on any spec with 2+ State
    variants, but the bundled examples (escrow, multisig, lending,
-   percolator) hadn't migrated their effect LHS to `Variant.field`
+   the perp-dex example) hadn't migrated their effect LHS to `Variant.field`
    syntax. The wrapper-struct + inner-enum emission referenced
    variant-payload fields the legacy lib.rs / guards.rs paths still
    addressed flatly, so `cargo check` failed on every regen.
@@ -63,7 +63,7 @@ their own pace.
 
 Bundled-example status:
 
-  - escrow, multisig, lending, percolator: **legacy flat path**
+  - escrow, multisig, lending, the perp-dex example: **legacy flat path**
     (no `WrongState` declared) — scaffolds compile and proptest
     runs as before.
   - Any new spec written against v2.24 SKILL/DSL guidance opts
@@ -138,8 +138,8 @@ shape for zero-copy `#[account]`.
   - `cargo test --release --bin qedgen` — 804/804 pass
   - `cargo test --release --test codegen_smoke -- --ignored` —
     4/4 pass (escrow scaffold + escrow proptest + multisig
-    scaffold + percolator scaffold)
+    scaffold + perp-dex scaffold)
   - `cargo fmt --check`, `cargo clippy --release -- -D warnings`,
     `bash scripts/check-readme-drift.sh` — all clean
-  - `qedgen check --frozen --spec examples/rust/{escrow,multisig,lending,percolator}/`
+  - `qedgen check --frozen --spec examples/rust/{escrow,multisig,lending}/` (plus the perp-dex example, since removed)
     — exit 0 across the bundled set

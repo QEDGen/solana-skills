@@ -577,13 +577,7 @@ pub(super) fn environment_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a
 
 // pubkey NAME [c0, c1, c2, c3]
 pub(super) fn pubkey_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    just("pubkey")
-        .then(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+    bare_kw("pubkey")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
@@ -627,13 +621,7 @@ pub(super) fn error_entry<'a>() -> impl Parser<'a, &'a str, ErrorEntry, Err<'a>>
 
 // errors [ Name = N "desc", Name = M, ... ]
 pub(super) fn errors_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
-    just("errors")
-        .then(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+    bare_kw("errors")
         .then_ignore(wsc())
         .ignore_then(just('['))
         .then_ignore(wsc())

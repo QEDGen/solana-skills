@@ -12,7 +12,7 @@ The `qedguards` block generates:
 3. Proof bodies for simple guards marked `proof auto`
 4. Phase decomposition scaffolding for complex guards marked `proof phased`
 
-This is designed for programs like Dropset where each validation check
+This is designed for single-instruction sBPF programs where each validation check
 exits with a specific error code on failure.
 -/
 

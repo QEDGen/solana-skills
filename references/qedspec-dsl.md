@@ -1597,7 +1597,7 @@ mismatch.
 
 ```rust
 #[qed(verified,
-      spec      = "../../percolator.qedspec",
+      spec      = "../../escrow.qedspec",
       handler   = "deposit",
       hash      = "3f2c9a81b0d5e4f7",   // body content hash
       spec_hash = "7e1a48d93b2c0f65")]  // spec-handler content hash
@@ -1673,7 +1673,7 @@ generates guard-chain infrastructure. This is the Lean-side companion to
 ```lean
 import QEDGen.Solana.Guards
 
-qedguards Dropset where
+qedguards VaultLock where
   prog: progAt
   chunks progAt_0 progAt_1 progAt_2
 
@@ -1687,7 +1687,7 @@ qedguards Dropset where
 
   guard P1 "wrong discriminant"
     offset: DISCRIMINANT_OFFSET
-    expected: DISCRIMINANT_REGISTER_MARKET
+    expected: DISCRIMINANT_LOCK_VAULT
     fuel 8
     error E_DISCRIMINANT
     proof auto

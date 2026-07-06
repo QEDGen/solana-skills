@@ -82,5 +82,5 @@ P0 with the fix-it. Switch to the pipe form to clear it.
   - `cargo test --release --test codegen_smoke -- --ignored` — 4/4 pass
   - `cargo fmt --check`, `cargo clippy --release -- -D warnings`,
     `bash scripts/check-readme-drift.sh` — all clean
-  - `qedgen check --frozen --spec examples/rust/{escrow,multisig,lending,percolator}/`
+  - `qedgen check --frozen --spec examples/rust/{escrow,multisig,lending}/` (plus the perp-dex example, since removed)
     — exit 0 across the bundled set

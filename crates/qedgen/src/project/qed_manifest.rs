@@ -31,14 +31,12 @@ pub const MANIFEST_FILENAME: &str = "qed.toml";
 /// Validated manifest. Keys are dep names (the `from "..."` strings in
 /// import statements); values are validated source descriptors.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct Manifest {
     pub dependencies: BTreeMap<String, Dependency>,
 }
 
 /// One validated dependency entry.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum Dependency {
     /// `github = "org/repo"` plus a ref + optional sub-path.
     Github {
@@ -56,14 +54,12 @@ pub enum Dependency {
 
 /// Which kind of git reference the dependency pins.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum GitRef {
     Tag(String),
     Branch(String),
     Rev(String),
 }
 
-#[allow(dead_code)]
 impl GitRef {
     /// Human-readable form of the ref (the value the user wrote). Used for
     /// `git clone --branch <ref>` (which accepts tags and branches but not
@@ -113,7 +109,6 @@ struct RawDependency {
 /// Load and validate `qed.toml` from `spec_dir`. `Ok(None)` when absent
 /// (caller decides if that's an error); `Err` on read / parse / validation
 /// failure.
-#[allow(dead_code)]
 pub fn load_from_dir(spec_dir: &Path) -> Result<Option<Manifest>> {
     let manifest_path = spec_dir.join(MANIFEST_FILENAME);
     if !manifest_path.exists() {

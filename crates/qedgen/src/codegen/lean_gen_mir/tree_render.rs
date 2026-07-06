@@ -621,7 +621,6 @@ mod tests {
             "examples/rust/lending/lending.qedspec",
             "examples/rust/multisig/multisig.qedspec",
             "examples/rust/bundled-stdlib-demo/pool.qedspec",
-            "examples/rust/percolator/percolator.qedspec",
             "examples/rust/cross-program-vault",
         ] {
             let spec = parse_fixture(fixture);

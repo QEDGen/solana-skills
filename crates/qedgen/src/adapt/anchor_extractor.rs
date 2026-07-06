@@ -12,11 +12,13 @@ use anyhow::Result;
 use regex::Regex;
 use std::path::{Path, PathBuf};
 
+use crate::adapt::arith_heuristics;
 use crate::cluster::{ClusterKind, ProtoClause};
+use crate::fs_walk;
 
 /// Entry point — walks the project root and emits proto-clauses.
 pub fn extract_proto_clauses(project_root: &Path) -> Result<Vec<ProtoClause>> {
-    let rs_files = collect_rust_files(project_root)?;
+    let rs_files = fs_walk::collect_rs_files(project_root, fs_walk::DEFAULT_SKIP_DIRS);
     let mut out = Vec::new();
     let pat = AnchorPatterns::new();
 
@@ -324,30 +326,9 @@ fn scan_handler_context_map(rs_files: &[PathBuf], pat: &AnchorPatterns) -> Vec<(
 /// computes layout at macro-expansion time, not runtime.
 fn scan_arith_sites(source: &str, pat: &AnchorPatterns) -> Vec<usize> {
     let inside_attr = compute_inside_attr_lines(source);
-    let mut out = Vec::new();
-    for (i, line) in source.lines().enumerate() {
-        if inside_attr[i] {
-            continue;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with("*") {
-            continue;
-        }
-        if pat.checked_call.is_match(line) {
-            continue;
-        }
-        if is_anchor_attr_field(line) {
-            continue;
-        }
-        if !contains_assignment(line) {
-            continue;
-        }
-        let after_eq = line.split_once('=').map(|(_, r)| r).unwrap_or("");
-        if has_arith_operator(after_eq) {
-            out.push(i + 1);
-        }
-    }
-    out
+    arith_heuristics::scan_arith_sites(source, &pat.checked_call, |i, line| {
+        inside_attr[i] || is_anchor_attr_field(line)
+    })
 }
 
 /// Per-line flag: starts inside an open `#[ ... ]` span, or opens one on the
@@ -425,55 +406,6 @@ fn is_anchor_attr_field(line: &str) -> bool {
     false
 }
 
-fn contains_assignment(line: &str) -> bool {
-    // `=` not preceded by `<>!=` and not part of `==` — accepts `x = y`,
-    // `x += y`; rejects `x == y`, `a <= b`.
-    let bytes = line.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'=' {
-            let prev = if i > 0 { bytes[i - 1] } else { b' ' };
-            let next = if i + 1 < bytes.len() {
-                bytes[i + 1]
-            } else {
-                b' '
-            };
-            // Skip `==`, `!=`, `<=`, `>=`. Accept `=`, `+=`, `-=`, `*=`, `/=`.
-            if next == b'=' || matches!(prev, b'!' | b'<' | b'>' | b'=') {
-                continue;
-            }
-            return true;
-        }
-    }
-    false
-}
-
-fn has_arith_operator(s: &str) -> bool {
-    // `+ - * /` outside compound assignments, `//` comments, and `->`.
-    let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if matches!(b, b'+' | b'-' | b'*' | b'/') {
-            let next = if i + 1 < bytes.len() {
-                bytes[i + 1]
-            } else {
-                b' '
-            };
-            if next == b'=' {
-                continue;
-            }
-            if b == b'/' && next == b'/' {
-                // Comment marker.
-                return false;
-            }
-            // Skip `->` (return arrow).
-            if b == b'-' && next == b'>' {
-                continue;
-            }
-            return true;
-        }
-    }
-    false
-}
-
 /// Attribute arith-site lines to the most recently-declared fn — imprecise
 /// but adequate when handlers are physically separated.
 fn attribute_arith_to_handlers(
@@ -516,39 +448,6 @@ fn attribute_arith_to_handlers(
         }
     }
     out
-}
-
-// ── File walker ───────────────────────────────────────────────────────
-
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    walk(root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
-
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            matches!(
-                n,
-                "target" | ".git" | "node_modules" | "tests" | "fuzz" | "migrations"
-            )
-        }) {
-            continue;
-        }
-        if path.is_dir() {
-            walk(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

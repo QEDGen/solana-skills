@@ -82,13 +82,7 @@ pub(super) fn guard_decl<'a>() -> impl Parser<'a, &'a str, GuardDecl, Err<'a>> +
     let item = choice((checks, error, fuel)).boxed();
 
     doc_comments()
-        .then_ignore(just("guard"))
-        .then_ignore(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+        .then_ignore(bare_kw("guard"))
         .then_ignore(wsc())
         .then(non_keyword_ident())
         .then_ignore(wsc())
@@ -265,13 +259,7 @@ pub(super) fn sbpf_prop_clause<'a>() -> impl Parser<'a, &'a str, SbpfPropClause,
 pub(super) fn sbpf_property_decl<'a>() -> impl Parser<'a, &'a str, SbpfPropertyDecl, Err<'a>> + Clone
 {
     doc_comments()
-        .then_ignore(just("property"))
-        .then_ignore(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+        .then_ignore(bare_kw("property"))
         .then_ignore(wsc())
         .then(non_keyword_ident())
         .then_ignore(wsc())
@@ -323,13 +311,7 @@ pub(super) fn instruction_item<'a>() -> impl Parser<'a, &'a str, InstructionItem
                 }),
         )
         .map(|(name, value)| InstructionItem::Const { name, value });
-    let errors_c = just("errors")
-        .then(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+    let errors_c = bare_kw("errors")
         .then_ignore(wsc())
         .ignore_then(just('['))
         .then_ignore(wsc())
@@ -357,13 +339,7 @@ pub(super) fn instruction_item<'a>() -> impl Parser<'a, &'a str, InstructionItem
 // instruction NAME { instruction_items }
 pub(super) fn instruction_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
     doc_comments()
-        .then_ignore(just("instruction"))
-        .then_ignore(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
+        .then_ignore(bare_kw("instruction"))
         .then_ignore(wsc())
         .then(non_keyword_ident())
         .then_ignore(wsc())

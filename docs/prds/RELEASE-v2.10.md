@@ -23,8 +23,8 @@ emits the defense layers automatically.
 
 ### Codegen quality pass (R1–R24)
 
-Three Quasar-target codegen examples (`multisig`, `lending`,
-`percolator`) went from 88–90 cargo errors each on a fresh regen to
+Three Quasar-target codegen examples (`multisig`, `lending`, and
+the perp-dex risk engine) went from 88–90 cargo errors each on a fresh regen to
 **0 errors each**. 24 root-cause fixes shipped in 7 commits — every
 one resolves a class of codegen-output problem, not just the one
 example that surfaced it.
@@ -61,7 +61,7 @@ regenerated examples and found 2 CRITs + 6 HIGHs. Five closed by
 codegen, two by spec edits.
 
 - **R25** — `auth X` lowers to `has_one = X` when `X` matches a state
-  field. Closes percolator's CRIT (every handler reachable by any
+  field. Closes the perp-dex example's CRIT (every handler reachable by any
   signer) and multisig::remove_member HIGH in one emit.
 - **R26** — runtime lifecycle Status enforcement. State structs carry
   a `pub status: u8` field; guards.rs emits `if status != Pre as u8 {
@@ -95,7 +95,7 @@ spec-authoring time**, sub-second, on save. Each maps 1:1 to an audit
 finding so routine gaps don't have to wait for a post-codegen audit.
 
 - `[unbound_auth]` — `auth X` without a state-field anchor (would
-  have caught the percolator CRIT).
+  have caught the perp-dex CRIT).
 - `[unguarded_indexed_mutation]` — handler takes index parameter and
   mutates `state.<map>[i]` without binding `i` to the signer
   (multisig approve/reject).
@@ -166,7 +166,7 @@ auditor then investigates.
 - 28 root causes resolved (R1–R28) — 24 codegen, 4 security.
 - 439 qedgen unit tests pass; 4 new fixture-based regression tests
   for the spec-authoring lints.
-- Multisig: 88 errors → 0. Lending: 88 → 0. Percolator: 90 → 0.
+- Multisig: 88 errors → 0. Lending: 88 → 0. Perp-dex: 90 → 0.
 - 2 CRITs, 6 HIGHs, 3 MEDs, 2 INFOs from the audit — all closed
   (5 by codegen, 2 by spec edits, 1 by `permissionless` markers).
 
@@ -212,7 +212,7 @@ pub vault: &'info mut Account<MultisigAccount>,
 - [x] `cargo test` — 439 pass, 0 fail
 - [x] `bash scripts/check-readme-drift.sh`
 - [x] All 3 codegen-output examples compile cleanly from fresh regen
-- [x] Audit clean on all 4 specs (multisig, lending, percolator,
+- [x] Audit clean on all 4 specs (multisig, lending, perp-dex,
       escrow): zero CRIT/HIGH from the spec-authoring lints
 - [x] `.qedspec` files frozen and audit-fixed for the showcase
       examples

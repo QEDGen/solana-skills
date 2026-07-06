@@ -26,25 +26,8 @@ pub(crate) fn emit_property_preservation_harnesses(
         return Ok(());
     }
 
-    // Resolve view — same logic as `emit_account_section_structural`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
-    let mutable = util::mutable_fields(state_fields);
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -258,7 +241,6 @@ pub(crate) fn emit_ensures_preservation_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
 ) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
@@ -273,25 +255,8 @@ pub(crate) fn emit_ensures_preservation_harnesses(
         return Ok(());
     }
 
-    // Resolve view.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
-    let mutable = util::mutable_fields(state_fields);
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -307,22 +272,21 @@ pub(crate) fn emit_ensures_preservation_harnesses(
 
     for op in handlers_with_ensures {
         for (idx, ensures) in op.ensures.iter().enumerate() {
-            out.push_str("#[kani::proof]\n");
-            out.push_str("#[kani::unwind(2)]\n");
-            out.push_str("#[kani::solver(cadical)]\n");
-            out.push_str(&format!("fn verify_{}_ensures_{}() {{\n", op.name, idx));
-
-            util::emit_state_init_symbolic(out, &mutable, lifecycle);
-            util::emit_pre_status_assume(out, op, lifecycle);
-
-            for (pname, ptype) in &op.takes_params {
-                out.push_str(&format!(
-                    "    let {}: {} = kani::any();\n",
-                    pname,
-                    map_type(ptype, parsed)?
-                ));
-            }
-            util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+            emit_proof_preamble(
+                out,
+                parsed,
+                Some(op),
+                &mutable,
+                lifecycle,
+                PreambleOpts {
+                    harness_name: &format!("verify_{}_ensures_{}", op.name, idx),
+                    unwind: 2,
+                    solver: "cadical",
+                    zeroed_init: false,
+                    pre_status_assume: true,
+                },
+            );
+            emit_symbolic_params(out, parsed, op, 1)?;
 
             // Assume requires hold pre-state (avoid vacuous pass).
             emit_kani_account_env_binding(out, op, "accounts", "    ");
@@ -414,20 +378,10 @@ pub(crate) fn emit_ensures_preservation_harnesses(
             ));
             out.push_str("    }\n");
             out.push_str("}\n\n");
-
-            // Intentional no-op — see `pre_unused_workaround_needed`.
-            let _ = pre_unused_workaround_needed(ensures);
         }
     }
 
     Ok(())
-}
-
-/// No-op stub for the `pre`-binding lint workaround: deliberately emits
-/// nothing extra (underscoring `pre` conditionally proved too brittle);
-/// the call marks intent to keep the snapshot-pinned byte-exact shape.
-pub(crate) fn pre_unused_workaround_needed(_ensures: &crate::check::ParsedEnsures) -> bool {
-    false
 }
 
 /// Emit `#[kani::proof] fn verify_<handler>_(preserves|establishes)_<invariant>()`
@@ -441,7 +395,6 @@ pub(crate) fn emit_invariant_preservation_harnesses(
     out: &mut String,
     parsed: &ParsedSpec,
 ) -> Result<()> {
-    use crate::codegen_shared::map_type;
     use crate::rust_codegen_util as util;
 
     let handlers: Vec<&crate::check::ParsedHandler> = parsed.handlers.iter().collect();
@@ -461,25 +414,8 @@ pub(crate) fn emit_invariant_preservation_harnesses(
         return Ok(());
     }
 
-    // Resolve view — same logic as `emit_account_section_structural`.
-    let (state_fields, lifecycle): (&[(String, String)], &[String]) =
-        if parsed.account_types.len() == 1 {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        } else if parsed.account_types.is_empty() {
-            (
-                util::resolve_state_fields(parsed),
-                parsed.lifecycle_states.as_slice(),
-            )
-        } else {
-            (
-                &parsed.account_types[0].fields,
-                parsed.account_types[0].lifecycle.as_slice(),
-            )
-        };
-    let mutable = util::mutable_fields(state_fields);
+    let (state_fields, lifecycle) = resolve_account_view(parsed);
+    let mutable = util::field_refs(state_fields);
 
     out.push_str(
         "// ============================================================================\n",
@@ -515,37 +451,30 @@ pub(crate) fn emit_invariant_preservation_harnesses(
 
             let is_init = op.pre_status.as_deref() == Some("Uninitialized");
 
-            out.push_str("#[kani::proof]\n");
-            out.push_str("#[kani::unwind(2)]\n");
-            out.push_str("#[kani::solver(cadical)]\n");
             let verb = if is_establish {
                 "establishes"
             } else {
                 "preserves"
             };
-            out.push_str(&format!(
-                "fn verify_{}_{}_{}() {{\n",
-                op.name, verb, inv.name
-            ));
-
-            if is_init {
-                util::emit_state_init_zeroed(out, &mutable, lifecycle, parsed);
-            } else {
-                util::emit_state_init_symbolic(out, &mutable, lifecycle);
-                util::emit_pre_status_assume(out, op, lifecycle);
-                if !is_establish {
-                    out.push_str(&format!("    kani::assume({}(&s));\n", inv.name));
-                }
+            emit_proof_preamble(
+                out,
+                parsed,
+                Some(op),
+                &mutable,
+                lifecycle,
+                PreambleOpts {
+                    harness_name: &format!("verify_{}_{}_{}", op.name, verb, inv.name),
+                    unwind: 2,
+                    solver: "cadical",
+                    zeroed_init: is_init,
+                    pre_status_assume: true,
+                },
+            );
+            if !is_init && !is_establish {
+                out.push_str(&format!("    kani::assume({}(&s));\n", inv.name));
             }
 
-            for (pname, ptype) in &op.takes_params {
-                out.push_str(&format!(
-                    "    let {}: {} = kani::any();\n",
-                    pname,
-                    map_type(ptype, parsed)?
-                ));
-            }
-            util::emit_abstract_binders(out, op, "    ", "kani::any()", |t| map_type(t, parsed))?;
+            emit_symbolic_params(out, parsed, op, 1)?;
 
             let args: String = op
                 .takes_params

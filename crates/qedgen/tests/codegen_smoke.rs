@@ -1,13 +1,8 @@
+mod common;
+
+use common::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("qedgen crate should live under <repo>/crates/qedgen")
-        .to_path_buf()
-}
 
 fn run(command: &mut Command) {
     let output = command.output().expect("failed to spawn command");
@@ -450,74 +445,8 @@ fn assert_pinocchio_kani_profile_diversity_contract(body: &str) {
     );
 }
 
-fn codegen_smoke_snapshots_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("snapshots")
-}
-
 fn assert_or_update_codegen_smoke_snapshot(snapshot_name: &str, rendered: &str) {
-    let snapshot_path = codegen_smoke_snapshots_dir().join(snapshot_name);
-    let update = std::env::var("UPDATE_SNAPSHOTS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if update {
-        std::fs::create_dir_all(codegen_smoke_snapshots_dir()).expect("create snapshots dir");
-        std::fs::write(&snapshot_path, rendered)
-            .unwrap_or_else(|e| panic!("write {}: {e}", snapshot_path.display()));
-        eprintln!("UPDATE_SNAPSHOTS=1: wrote {}", snapshot_path.display());
-        return;
-    }
-
-    let expected = std::fs::read_to_string(&snapshot_path).unwrap_or_else(|e| {
-        panic!(
-            "missing snapshot {}: {e}\n\
-             Run with UPDATE_SNAPSHOTS=1 to seed it.",
-            snapshot_path.display()
-        )
-    });
-
-    if expected != rendered {
-        let diff = diff_unified(&expected, rendered);
-        panic!(
-            "{snapshot_name}: Pinocchio Kani impl snapshot drift detected.\n\
-             Snapshot: {}\n\
-             Re-run with UPDATE_SNAPSHOTS=1 to refresh (then inspect the diff before \
-             committing).\n\
-             {diff}",
-            snapshot_path.display()
-        );
-    }
-}
-
-fn diff_unified(expected: &str, actual: &str) -> String {
-    let exp_lines: Vec<&str> = expected.lines().collect();
-    let act_lines: Vec<&str> = actual.lines().collect();
-    let mut out = String::new();
-    out.push_str("--- snapshot\n+++ rendered\n");
-    let max = exp_lines.len().max(act_lines.len());
-    let mut printed = 0usize;
-    let max_lines = 80usize;
-    for i in 0..max {
-        let e = exp_lines.get(i).copied().unwrap_or("");
-        let a = act_lines.get(i).copied().unwrap_or("");
-        if e != a {
-            if printed >= max_lines {
-                out.push_str("... (diff truncated)\n");
-                break;
-            }
-            out.push_str(&format!("@@ line {} @@\n", i + 1));
-            if !e.is_empty() || i < exp_lines.len() {
-                out.push_str(&format!("-{}\n", e));
-            }
-            if !a.is_empty() || i < act_lines.len() {
-                out.push_str(&format!("+{}\n", a));
-            }
-            printed += 1;
-        }
-    }
-    out
+    common::assert_or_update_snapshot_content(snapshot_name, "Pinocchio Kani impl", rendered);
 }
 
 fn proof_completion_pinocchio_kani_profile_diversity_with_cargo_kani() {
@@ -768,12 +697,6 @@ fn escrow_anchor_scaffold_compiles() {
 #[ignore = "runs qedgen codegen and cargo check on a generated Anchor crate"]
 fn multisig_anchor_scaffold_compiles() {
     smoke_anchor_scaffold("multisig");
-}
-
-#[test]
-#[ignore = "runs qedgen codegen and cargo check on a generated Anchor crate"]
-fn percolator_anchor_scaffold_compiles() {
-    smoke_anchor_scaffold("percolator");
 }
 
 #[test]

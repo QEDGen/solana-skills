@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/qedgen",
+    "crates/qedgen-hash-core",
     "crates/qedgen-macros",
     "crates/qedgen-sandbox",
     "crates/qed-drift-fixture",
@@ -9,7 +10,6 @@ exclude = [
     "examples/rust/escrow",
     "examples/rust/lending",
     "examples/rust/multisig",
-    "examples/rust/percolator",
     "examples/rust/brownfield-onboarding/program",
 ]
 resolver = "2"
@@ -23,7 +23,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 syn = { version = "2", features = ["full", "parsing", "visit", "fold", "extra-traits"] }
 quote = "1"
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
 toml = "0.8"

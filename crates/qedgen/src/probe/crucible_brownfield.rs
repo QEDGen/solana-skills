@@ -74,32 +74,8 @@ pub fn synthesize_spec(project_root: &Path, runtime: Runtime) -> Result<Brownfie
 fn empty_handler(name: String) -> ParsedHandler {
     ParsedHandler {
         name,
-        doc: None,
-        who: None,
-        on_account: None,
-        pre_status: None,
-        post_status: None,
-        takes_params: vec![],
-        guard_str: None,
-        guard_str_rust: None,
-        aborts_if: vec![],
-        requires: vec![],
-        ensures: vec![],
-        modifies: None,
-        let_bindings: vec![],
-        aborts_total: false,
         permissionless: true,
-        effects: vec![],
-        accounts: vec![],
-        transfers: vec![],
-        emits: vec![],
-        invariants: vec![],
-        establishes: vec![],
-        schema_includes: vec![],
-        properties: vec![],
-        calls: vec![],
-        effect_branches: None,
-        abstract_binders: vec![],
+        ..Default::default()
     }
 }
 
@@ -563,7 +539,7 @@ fn scan_anchor_handlers(root: &Path) -> Result<Vec<String>> {
             .expect("static regex");
     let mut handlers: Vec<String> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    for file in collect_rust_files(&src_dir)? {
+    for file in crate::fs_walk::collect_rs_files(&src_dir, crate::fs_walk::DEFAULT_SKIP_DIRS) {
         let Ok(src) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -575,28 +551,6 @@ fn scan_anchor_handlers(root: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(handlers)
-}
-
-fn collect_rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().and_then(|s| s.to_str()) == Some("target") {
-                    continue;
-                }
-                walk(&path, out)?;
-            } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-                out.push(path);
-            }
-        }
-        Ok(())
-    }
-    walk(dir, &mut out)?;
-    out.sort();
-    Ok(out)
 }
 
 /// Default brownfield harness location: `<root>/.qed/fuzz/`. Returns the

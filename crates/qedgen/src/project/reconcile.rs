@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::check;
+use crate::drift;
 use crate::proofs_bootstrap::{self, OrphanFinding};
 use crate::spec_hash;
 
@@ -58,43 +59,6 @@ impl Report {
     }
 }
 
-/// A parsed `#[qed(verified, ...)]` attribute with source position.
-#[derive(Debug, Clone)]
-struct QedAttr {
-    line: usize,
-    spec: Option<String>,
-    handler: Option<String>,
-    spec_hash: Option<String>,
-}
-
-/// Recursively collect `.rs` files under a directory. Mirrors the approach
-/// used by `drift::walkdir` — no new dependency.
-fn collect_rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    if dir.is_file() {
-        if dir.extension().is_some_and(|e| e == "rs") {
-            out.push(dir.to_path_buf());
-        }
-        return Ok(out);
-    }
-    if !dir.is_dir() {
-        return Ok(out);
-    }
-    for entry in
-        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(collect_rs_files(&path)?);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
 /// Walk up from a file's parent directory until a `Cargo.toml` is found.
 /// Returns the directory that contains that manifest.
 fn nearest_manifest_dir(file: &Path) -> Option<PathBuf> {
@@ -110,193 +74,6 @@ fn nearest_manifest_dir(file: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Extract all `#[qed(verified, ...)]` attributes from Rust source text,
-/// keyed by the 1-based line number the attribute starts on. Deliberately
-/// regex-free: we scan for the `#[qed(` prefix, match the enclosing
-/// `(...)` with depth tracking, and parse `key = "value"` pairs from the
-/// interior. Handles multi-line attributes.
-fn scan_qed_attrs(source: &str) -> Vec<QedAttr> {
-    let bytes = source.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Look for `#[qed(` (allow whitespace: `# [ qed (` — rare, but cheap to handle).
-        if bytes[i] == b'#' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'[' {
-                j += 1;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if j + 3 <= bytes.len() && &bytes[j..j + 3] == b"qed" {
-                    let after_qed = j + 3;
-                    let mut k = after_qed;
-                    while k < bytes.len() && bytes[k].is_ascii_whitespace() {
-                        k += 1;
-                    }
-                    if k < bytes.len() && bytes[k] == b'(' {
-                        // Find matching `)` respecting strings.
-                        let inner_start = k + 1;
-                        let mut cursor = inner_start;
-                        let mut depth = 1i32;
-                        let mut in_str = false;
-                        let mut in_line_comment = false;
-                        let mut in_block_comment = false;
-                        while cursor < bytes.len() {
-                            let b = bytes[cursor];
-                            if in_line_comment {
-                                if b == b'\n' {
-                                    in_line_comment = false;
-                                }
-                                cursor += 1;
-                                continue;
-                            }
-                            if in_block_comment {
-                                if b == b'*'
-                                    && cursor + 1 < bytes.len()
-                                    && bytes[cursor + 1] == b'/'
-                                {
-                                    in_block_comment = false;
-                                    cursor += 2;
-                                    continue;
-                                }
-                                cursor += 1;
-                                continue;
-                            }
-                            if in_str {
-                                if b == b'\\' && cursor + 1 < bytes.len() {
-                                    cursor += 2;
-                                    continue;
-                                }
-                                if b == b'"' {
-                                    in_str = false;
-                                }
-                                cursor += 1;
-                                continue;
-                            }
-                            if b == b'/' && cursor + 1 < bytes.len() {
-                                if bytes[cursor + 1] == b'/' {
-                                    in_line_comment = true;
-                                    cursor += 2;
-                                    continue;
-                                }
-                                if bytes[cursor + 1] == b'*' {
-                                    in_block_comment = true;
-                                    cursor += 2;
-                                    continue;
-                                }
-                            }
-                            if b == b'"' {
-                                in_str = true;
-                                cursor += 1;
-                                continue;
-                            }
-                            if b == b'(' {
-                                depth += 1;
-                            } else if b == b')' {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            cursor += 1;
-                        }
-                        if depth == 0 && cursor < bytes.len() {
-                            let inner = &source[inner_start..cursor];
-                            // The `verified` keyword is required before key=value pairs.
-                            let first_word = inner
-                                .trim_start()
-                                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                                .next()
-                                .unwrap_or("");
-                            if first_word == "verified" {
-                                let line = 1 + source[..i].bytes().filter(|&b| b == b'\n').count();
-                                let (spec, handler, spec_hash) = parse_kv_pairs(inner);
-                                out.push(QedAttr {
-                                    line,
-                                    spec,
-                                    handler,
-                                    spec_hash,
-                                });
-                            }
-                            i = cursor + 1;
-                            continue;
-                        }
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Parse `key = "value"` pairs from the attribute interior.
-/// Returns `(spec, handler, spec_hash)` — other keys (`hash`, etc.) are ignored.
-fn parse_kv_pairs(interior: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let bytes = interior.as_bytes();
-    let mut spec = None;
-    let mut handler = None;
-    let mut spec_hash = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        // Skip whitespace + commas.
-        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
-            i += 1;
-        }
-        // Read an identifier.
-        let ident_start = i;
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-            i += 1;
-        }
-        if i == ident_start {
-            i += 1;
-            continue;
-        }
-        let ident = &interior[ident_start..i];
-        // Look for `=` (with optional whitespace).
-        let save = i;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] != b'=' {
-            i = save;
-            continue;
-        }
-        i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= bytes.len() || bytes[i] != b'"' {
-            continue;
-        }
-        i += 1;
-        let val_start = i;
-        while i < bytes.len() && bytes[i] != b'"' {
-            if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                i += 2;
-                continue;
-            }
-            i += 1;
-        }
-        if i >= bytes.len() {
-            break;
-        }
-        let value = interior[val_start..i].to_string();
-        i += 1;
-        match ident {
-            "spec" => spec = Some(value),
-            "handler" => handler = Some(value),
-            "spec_hash" => spec_hash = Some(value),
-            _ => {}
-        }
-    }
-    (spec, handler, spec_hash)
-}
-
 /// Run the full reconcile check. Report-only — never modifies files.
 pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result<Report> {
     let spec_display = spec_path.display().to_string();
@@ -310,15 +87,22 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
     let mut warnings = Vec::new();
 
     // Rust side: scan .rs files for #[qed(verified, ...)] attributes.
+    // Attribute parsing is shared with `qedgen verify --drift`
+    // (`drift::scan_verified_fns`) so the two commands agree on the
+    // attribute grammar by construction.
     if code_dir.exists() {
-        let files = collect_rs_files(code_dir)?;
+        let files = crate::fs_walk::collect_rs_files(code_dir, crate::fs_walk::DEFAULT_SKIP_DIRS);
         for file in &files {
             let source = match std::fs::read_to_string(file) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let attrs = scan_qed_attrs(&source);
-            for attr in attrs {
+            let entries = match drift::scan_verified_fns(&source) {
+                Ok(e) => e,
+                Err(_) => continue, // not parseable Rust — skip
+            };
+            for entry in entries {
+                let attr = &entry.attr;
                 let (attr_spec, handler, declared_hash) =
                     match (&attr.spec, &attr.handler, &attr.spec_hash) {
                         (Some(s), Some(h), Some(sh)) if !sh.is_empty() => {
@@ -339,7 +123,7 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
                     warnings.push(format!(
                         "{}:{}: attribute references spec `{}` (resolved to `{}`) but --spec is `{}` — skipping",
                         file.display(),
-                        attr.line,
+                        entry.attr_line,
                         attr_spec,
                         attr_spec_canonical.display(),
                         spec_path_canonical.display(),
@@ -353,7 +137,7 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
                         warnings.push(format!(
                             "{}:{}: handler `{}` not found in spec — skipping",
                             file.display(),
-                            attr.line,
+                            entry.attr_line,
                             handler,
                         ));
                         continue;
@@ -363,7 +147,7 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
                 if actual_hash != declared_hash {
                     rust_drift.push(RustDriftEntry {
                         file: file.display().to_string(),
-                        line: attr.line,
+                        line: entry.attr_line,
                         handler,
                         expected_spec_hash: declared_hash,
                         actual_spec_hash: actual_hash,
@@ -665,8 +449,11 @@ pub fn {}(amount: u64) -> u64 {{
         assert_eq!(parsed["rust_drift"][0]["handler"], "deposit");
     }
 
+    // Attribute-grammar coverage for the shared scanner reconcile now
+    // rides on (`drift::scan_verified_fns`), exercised through reconcile's
+    // needs: multi-line attrs, line numbers, non-qed attrs, legacy shapes.
     #[test]
-    fn scan_qed_attrs_multiline() {
+    fn shared_scanner_multiline_attr_with_line_number() {
         let src = r#"
 #[qed(verified,
       spec = "foo.qedspec",
@@ -675,33 +462,35 @@ pub fn {}(amount: u64) -> u64 {{
       spec_hash = "bbbb")]
 pub fn deposit() {}
 "#;
-        let attrs = scan_qed_attrs(src);
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].spec.as_deref(), Some("foo.qedspec"));
-        assert_eq!(attrs[0].handler.as_deref(), Some("deposit"));
-        assert_eq!(attrs[0].spec_hash.as_deref(), Some("bbbb"));
+        let entries = drift::scan_verified_fns(src).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attr.spec.as_deref(), Some("foo.qedspec"));
+        assert_eq!(entries[0].attr.handler.as_deref(), Some("deposit"));
+        assert_eq!(entries[0].attr.spec_hash.as_deref(), Some("bbbb"));
+        // The attribute starts on line 2 (1-based; leading newline).
+        assert_eq!(entries[0].attr_line, 2);
     }
 
     #[test]
-    fn scan_ignores_non_qed_attrs() {
+    fn shared_scanner_ignores_non_qed_attrs() {
         let src = r#"
 #[derive(Debug)]
-#[allow(dead_code)]
 #[qed(verified, spec = "a.qedspec", handler = "h", spec_hash = "cc")]
 pub fn h() {}
 "#;
-        let attrs = scan_qed_attrs(src);
-        assert_eq!(attrs.len(), 1);
+        let entries = drift::scan_verified_fns(src).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].attr_line, 3);
     }
 
     #[test]
-    fn scan_ignores_legacy_qed_without_verified() {
+    fn shared_scanner_ignores_legacy_qed_without_verified() {
         let src = r#"
 #[qed(experimental)]
 pub fn h() {}
 "#;
-        let attrs = scan_qed_attrs(src);
-        assert_eq!(attrs.len(), 0);
+        let entries = drift::scan_verified_fns(src).unwrap();
+        assert_eq!(entries.len(), 0);
     }
 
     #[test]

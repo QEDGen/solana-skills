@@ -387,7 +387,7 @@ empirical confirmation that the design holds.
 - `cargo test --release`: 677 tests pass (vs 624 on `main`; +53 new)
 - `bash scripts/check-readme-drift.sh`: clean
 - `bash scripts/check-lake-build.sh`: 8/10 OK, 2 skipped
-  (`multisig` + `percolator` need `lake update` for cold-checkout
+  (`multisig` + the perp-dex example need `lake update` for cold-checkout
   state — pre-existing, not v2.20-introduced)
 - Zero unintended `sorry` (verified: all hits are legitimate v2.8 G3
   ensures-as-axiom CPI theorems, comments, or string templates)

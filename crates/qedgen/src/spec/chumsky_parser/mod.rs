@@ -10,8 +10,6 @@
 //! unchanged. The top-level driver (`spec_parser` / `parse` /
 //! `format_parse_error`) stays in this facade.
 
-#![allow(dead_code)] // parsed-but-unconsumed scaffolding; see ast.rs note
-
 use chumsky::prelude::*;
 
 use crate::ast::*;

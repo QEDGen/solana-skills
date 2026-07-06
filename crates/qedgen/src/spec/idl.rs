@@ -67,6 +67,7 @@ pub(crate) struct IdlPda {
 pub(crate) struct IdlSeed {
     #[serde(default)]
     #[allow(dead_code)]
+    // IDL wire-shape field; deserialized but unread (seeds resolve via value/path)
     pub kind: String,
     #[serde(default)]
     pub value: Option<serde_json::Value>,
@@ -106,7 +107,7 @@ pub(crate) struct IdlField {
 #[derive(Debug, Deserialize)]
 pub(crate) struct IdlError {
     pub name: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // IDL wire-shape field; deserialized but unread (errors surface by name)
     pub msg: String,
 }
 

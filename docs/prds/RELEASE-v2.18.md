@@ -240,7 +240,7 @@ All three fixed before tagging.
   proof tactic positions)
 - `qedgen check --frozen` lock-currency check passes for all 5
   bundled spec dirs (escrow, escrow-split, lending, multisig,
-  percolator). Multisig has 1 pre-existing
+  and the perp-dex example). Multisig has 1 pre-existing
   `excluded_op_modifies_property` warning (predates v2.17, tracked
   separately).
 

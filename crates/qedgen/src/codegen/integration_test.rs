@@ -25,11 +25,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
-    let hash = fp
-        .file_hashes
-        .get("src/tests.rs")
-        .cloned()
-        .unwrap_or_default();
+    let hash = crate::codegen_shared::fingerprint_hash(&fp, "src/tests.rs");
 
     let out = render(&spec, &hash)?;
     write_generated_file(output_path, &out)?;

@@ -92,18 +92,12 @@ fn walk_apps(
     out: &mut Vec<(String, Vec<String>, String)>,
     seen: &mut std::collections::HashSet<(String, usize)>,
 ) {
-    match expr {
-        Expr::App { func, args } => {
-            // Skip the `now()` builtin — it resolves via the support-library
-            // axiom `QEDGen.Solana.Valid.now : Nat`; emitting `axiom now :
-            // Bool` here would collide at elaboration.
-            if func == "now" && args.is_empty() {
-                return;
-            }
-            // `current_epoch()` — same support-library shape as `now`.
-            if func == "current_epoch" && args.is_empty() {
-                return;
-            }
+    if let Expr::App { func, args } = expr {
+        // Skip the `now()` / `current_epoch()` builtins — they resolve via
+        // support-library axioms (`QEDGen.Solana.Valid.now : Nat`); emitting
+        // `axiom now : Bool` here would collide at elaboration.
+        let is_builtin = (func == "now" || func == "current_epoch") && args.is_empty();
+        if !is_builtin {
             let key = (func.clone(), args.len());
             if seen.insert(key) {
                 let arg_types: Vec<String> = args
@@ -117,29 +111,14 @@ fn walk_apps(
                 // coercion the call-site renderer already produces.
                 out.push((func.clone(), arg_types, "Bool".to_string()));
             }
-            for n in args {
-                walk_apps(&n.node, field_types, param_types, out, seen);
-            }
         }
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => {
-            walk_apps(&lhs.node, field_types, param_types, out, seen);
-            walk_apps(&rhs.node, field_types, param_types, out, seen);
-        }
-        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
-            walk_apps(&inner.node, field_types, param_types, out, seen);
-        }
-        Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
-            walk_apps(&body.node, field_types, param_types, out, seen);
-        }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
-            walk_apps(&a.node, field_types, param_types, out, seen);
-            walk_apps(&b.node, field_types, param_types, out, seen);
-            walk_apps(&d.node, field_types, param_types, out, seen);
-        }
-        _ => {}
     }
+    // Shared spine (F2): this previously skipped `Match` / `Let` /
+    // `IfThenElse` / `RecordLit` / `RecordUpdate` / `Ctor` / `Field` /
+    // `IsVariant`, silently missing helper calls in those positions.
+    crate::ast::for_each_child(expr, |child| {
+        walk_apps(&child.node, field_types, param_types, out, seen);
+    });
 }
 
 /// Best-effort Lean type for an argument expression. Used only for
@@ -204,73 +183,10 @@ pub fn typecheck_spec(spec: &a::Spec, parsed: &ParsedSpec) -> anyhow::Result<()>
 /// and mutual recursion both manifest as a ref_impl body calling
 /// another (or itself).
 fn collect_app_funcs(expr: &Expr, out: &mut std::collections::HashSet<String>) {
-    match expr {
-        Expr::App { func, args } => {
-            out.insert(func.clone());
-            for n in args {
-                collect_app_funcs(&n.node, out);
-            }
-        }
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => {
-            collect_app_funcs(&lhs.node, out);
-            collect_app_funcs(&rhs.node, out);
-        }
-        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => {
-            collect_app_funcs(&inner.node, out);
-        }
-        Expr::Quant { body, .. } | Expr::Sum { body, .. } => {
-            collect_app_funcs(&body.node, out);
-        }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
-            collect_app_funcs(&a.node, out);
-            collect_app_funcs(&b.node, out);
-            collect_app_funcs(&d.node, out);
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_app_funcs(&cond.node, out);
-            collect_app_funcs(&then_branch.node, out);
-            collect_app_funcs(&else_branch.node, out);
-        }
-        Expr::Match { scrutinee, arms } => {
-            collect_app_funcs(&scrutinee.node, out);
-            for arm in arms {
-                collect_app_funcs(&arm.body.node, out);
-            }
-        }
-        Expr::Let { value, body, .. } => {
-            collect_app_funcs(&value.node, out);
-            collect_app_funcs(&body.node, out);
-        }
-        Expr::Ctor {
-            payload: Some(p), ..
-        } => {
-            collect_app_funcs(&p.node, out);
-        }
-        Expr::RecordLit(fields) => {
-            for (_, v) in fields {
-                collect_app_funcs(&v.node, out);
-            }
-        }
-        Expr::RecordUpdate { base, updates } => {
-            collect_app_funcs(&base.node, out);
-            for (_, v) in updates {
-                collect_app_funcs(&v.node, out);
-            }
-        }
-        Expr::IsVariant { scrutinee, .. } => {
-            collect_app_funcs(&scrutinee.node, out);
-        }
-        Expr::Field { base, .. } => {
-            collect_app_funcs(&base.node, out);
-        }
-        _ => {}
+    if let Expr::App { func, .. } = expr {
+        out.insert(func.clone());
     }
+    crate::ast::for_each_child(expr, |child| collect_app_funcs(&child.node, out));
 }
 
 /// Reject recursive `ref_impl`s: build the call graph restricted to
@@ -630,19 +546,43 @@ fn numeric_literal_value(
 }
 
 fn render_path_human(p: &a::Path) -> String {
-    let mut out = p.root.clone();
-    for seg in &p.segments {
-        match seg {
-            a::PathSeg::Field(f) => {
-                out.push('.');
-                out.push_str(f);
-            }
-            a::PathSeg::Index(i) => {
-                out.push('[');
-                out.push_str(i);
-                out.push(']');
-            }
-        }
+    p.to_source_string()
+}
+
+#[cfg(test)]
+mod tests {
+    /// F2 regression: `walk_apps` previously skipped `IfThenElse` / `Let`
+    /// positions, so helper calls there never entered the
+    /// uninterpreted-helper bag (and Lean failed on the unresolved name).
+    /// The shared `for_each_child` spine descends everywhere.
+    #[test]
+    fn walk_apps_descends_into_if_and_let() {
+        let spec = r#"
+spec WalkerDemo
+
+type State | Active of { count : U64, }
+
+handler bump : State.Active -> State.Active {
+  requires (if state.count > 0 then fee(state.count) else 0) <= 100
+  requires (let y = rebate(state.count) in y) <= 5
+  effect {
+    count += 1
+  }
+}
+"#;
+        let parsed = crate::chumsky_adapter::parse_str(spec).unwrap();
+        let names: Vec<&str> = parsed
+            .uninterpreted_helpers
+            .iter()
+            .map(|(n, _, _)| n.as_str())
+            .collect();
+        assert!(
+            names.contains(&"fee"),
+            "helper call under IfThenElse must be collected, got {names:?}"
+        );
+        assert!(
+            names.contains(&"rebate"),
+            "helper call under Let must be collected, got {names:?}"
+        );
     }
-    out
 }

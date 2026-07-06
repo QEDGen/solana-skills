@@ -294,20 +294,7 @@ fn path_to_lean(p: &a::Path, ctx: Ctx, inside_old: bool, consts: ConstTable) -> 
             out.push_str(&p.root);
         }
     } else {
-        out.push_str(&p.root);
-        for seg in &p.segments {
-            match seg {
-                a::PathSeg::Field(f) => {
-                    out.push('.');
-                    out.push_str(f);
-                }
-                a::PathSeg::Index(i) => {
-                    out.push('[');
-                    out.push_str(i);
-                    out.push(']');
-                }
-            }
-        }
+        out.push_str(&p.to_source_string());
     }
     out
 }
@@ -327,30 +314,9 @@ fn path_or_expr_to_lean_old(inner: &Expr, ctx: Ctx, consts: ConstTable, env: &Ty
 
 /// Check if an arm body string mentions an identifier as a whole word.
 /// Used to decide whether to preserve `binder` or emit `_` in match arms.
+/// Alias of the shared scanner in `codegen_shared`.
 fn body_mentions_binder(body: &str, binder: &str) -> bool {
-    if binder.is_empty() {
-        return false;
-    }
-    let bytes = body.as_bytes();
-    let target = binder.as_bytes();
-    let n = bytes.len();
-    let m = target.len();
-    if m > n {
-        return false;
-    }
-    let is_ident_char = |c: u8| (c as char).is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0;
-    while i + m <= n {
-        if &bytes[i..i + m] == target {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + m == n || !is_ident_char(bytes[i + m]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
+    crate::codegen_shared::contains_word_boundary(body, binder)
 }
 
 fn strip_state_prefix(s: &str) -> String {

@@ -26,24 +26,24 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
                 .join("\n")
         })
         .unwrap_or_else(|| "  | InvalidAmount\n  | Unauthorized".to_string());
-    warnings.push(CompletenessWarning {
-        rule: "error_declared_as_record".to_string(),
-        severity: Severity::Error,
-        priority: 0,
-        message: "`type Error = { ... }` (record brace form) does not declare error \
+    warnings.push(
+        warn(
+            "error_declared_as_record",
+            Severity::Error,
+            0,
+            "`type Error = { ... }` (record brace form) does not declare error \
                   variants — the parser treats it as a struct named `Error` and \
                   `spec.error_codes` ends up empty. Downstream lowering then \
                   misbehaves silently (CPI error refs unresolved, `WrongState` / \
-                  `MathOverflow` gates don't fire)."
-            .to_string(),
-        subject: Some("Error".to_string()),
-        fix: "Use the pipe form instead of `= { ... }`. Each variant goes on its \
-              own line with a leading `|`."
-            .to_string(),
-        example: Some(format!("  type Error\n{}", fields_hint)),
-        counterexample: None,
-        fix_options: vec![],
-    });
+                  `MathOverflow` gates don't fire).",
+        )
+        .subject("Error".to_string())
+        .fix(
+            "Use the pipe form instead of `= { ... }`. Each variant goes on its \
+              own line with a leading `|`.",
+        )
+        .example(format!("  type Error\n{}", fields_hint)),
+    );
     warnings
 }
 
@@ -58,26 +58,16 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for (key, value) in &spec.pragma_assignments {
         if (key == "checked_overflow_error" || key == "checked_underflow_error") && !has_decl(value)
         {
-            warnings.push(CompletenessWarning {
-                rule: "unknown_error_variant".to_string(),
-                severity: Severity::Warning,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
                     "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
                     key,
                     value,
                     crate::codegen_shared::to_pascal_case(&spec.program_name),
                     value,
-                ),
-                subject: Some(value.clone()),
-                fix: format!(
+                )).subject(value.clone()).fix(format!(
                     "Add `{}` to your `type Error | …` block, drop the pragma, or replace it with a declared variant name.",
                     value,
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
 
@@ -85,26 +75,16 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for h in &spec.handlers {
         for on_error in h.effects.iter().filter_map(|e| e.on_error.as_ref()) {
             if !has_decl(on_error) {
-                warnings.push(CompletenessWarning {
-                    rule: "unknown_error_variant".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
                         "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
                         h.name,
                         on_error,
                         crate::codegen_shared::to_pascal_case(&spec.program_name),
                         on_error,
-                    ),
-                    subject: Some(h.name.clone()),
-                    fix: format!(
+                    )).subject(h.name.clone()).fix(format!(
                         "Add `{}` to your `type Error | …` block, drop the `else {}` suffix to fall back to the default, or use a declared variant.",
                         on_error, on_error,
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -131,20 +111,13 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
 
             if a.seeds == b.seeds {
                 // Exact collision — same seed tuple → same address always.
-                warnings.push(CompletenessWarning {
-                    rule: "pda_seed_collision".to_string(),
-                    severity: Severity::Warning,
-                    priority: 1,
-                    message: format!(
+                warnings.push(warn("pda_seed_collision", Severity::Warning, 1, format!(
                         "PDA '{}' and PDA '{}' have identical seed tuples [{}] — they will always resolve to the same on-chain address",
                         a.name, b.name, a.seeds.join(", ")
-                    ),
-                    subject: Some(a.name.clone()),
-                    fix: format!(
+                    )).subject(a.name.clone()).fix(format!(
                         "Add a distinguishing seed to '{}' or '{}' (e.g., a discriminator byte or unique program-specific tag)",
                         a.name, b.name
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  pda {} [\"{}_tag\", {}]\n  pda {} [\"{}_tag\", {}]",
                         a.name,
                         a.name.to_lowercase(),
@@ -152,10 +125,7 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
                         b.name,
                         b.name.to_lowercase(),
                         b.seeds.join(", ")
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
                 continue;
             }
 
@@ -176,29 +146,19 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
             if !a_literals.is_empty() && a_literals == b_literals && a.seeds.len() == b.seeds.len()
             {
                 // Same structure, same literals — variable seeds could collide at runtime.
-                warnings.push(CompletenessWarning {
-                    rule: "pda_seed_possible_collision".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("pda_seed_possible_collision", Severity::Warning, 2, format!(
                         "PDA '{}' and PDA '{}' share all literal seeds [{}] and differ only in variable positions — they can collide at runtime when variables hold the same values",
                         a.name, b.name, a_literals.join(", ")
-                    ),
-                    subject: Some(a.name.clone()),
-                    fix: format!(
+                    )).subject(a.name.clone()).fix(format!(
                         "Add a unique literal discriminator seed to '{}' or '{}' so their namespaces cannot overlap",
                         a.name, b.name
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  pda {} [\"{}\", ...]\n  pda {} [\"{}\", ...]",
                         a.name,
                         a.name.to_lowercase(),
                         b.name,
                         b.name.to_lowercase()
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -233,48 +193,48 @@ pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
 
         // Rule 2 — unconditional: marker present, body is a stub.
         if rs.contains(QEDGEN_UNSUPPORTED_MARKER) {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' lowered Rust contains \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' lowered Rust contains \
                      QEDGEN_UNSUPPORTED_QUANTIFIER — the harness emits a `true` \
                      body and skips the real check",
-                    prop.name
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "Rewrite the quantifier in a shape qedgen can lower \
+                        prop.name
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "Rewrite the quantifier in a shape qedgen can lower \
                       (see docs/limitations.md#unsupported-quantifier-shapes) \
-                      or split the property into per-element guards."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      or split the property into per-element guards.",
+                ),
+            );
             continue;
         }
 
         // Rule 3 — unconditional: bare `true` body.
         if trimmed == "true" {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' lowered to the literal `true` — the harness \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' lowered to the literal `true` — the harness \
                      can never fail. Check the spec body and re-run check.",
-                    prop.name
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "Inspect the property body for a spec construct that \
+                        prop.name
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "Inspect the property body for a spec construct that \
                       lowered to a constant. If the property is genuinely \
-                      trivial, remove it; otherwise file a codegen bug."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      trivial, remove it; otherwise file a codegen bug.",
+                ),
+            );
             continue;
         }
 
@@ -291,25 +251,25 @@ pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
             continue;
         };
         if lhs == rhs {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' uses `old(...)` but lowered Rust collapses to a \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' uses `old(...)` but lowered Rust collapses to a \
                      structural tautology (`{} {} {}`). The temporal marker was \
                      dropped during lowering — this indicates a codegen regression.",
-                    prop.name, lhs, _op, rhs
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "File a qedgen issue with the spec snippet. Pre-v2.23 this \
+                        prop.name, lhs, _op, rhs
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "File a qedgen issue with the spec snippet. Pre-v2.23 this \
                       was the default behavior for `old(...)` in proptest/Kani; \
-                      post-Slices 2-4 it should be unreachable."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      post-Slices 2-4 it should be unreachable.",
+                ),
+            );
         }
     }
     warnings
@@ -388,27 +348,683 @@ pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<Completen
                 } else {
                     name.clone()
                 };
-                warnings.push(CompletenessWarning {
-                    rule: "unknown_guard_identifier".to_string(),
-                    severity: Severity::Error,
-                    priority: 0,
-                    message: format!(
-                        "handler '{}' references `{}` in a `requires` clause, but it \
+                warnings.push(
+                    warn(
+                        "unknown_guard_identifier",
+                        Severity::Error,
+                        0,
+                        format!(
+                            "handler '{}' references `{}` in a `requires` clause, but it \
                          resolves to nothing — not a state field, parameter, account, \
                          const, or binding. Generated code carries the name verbatim \
                          and won't compile in any backend.",
-                        h.name, display
-                    ),
-                    subject: Some(h.name.clone()),
-                    fix: format!(
+                            h.name, display
+                        ),
+                    )
+                    .subject(h.name.clone())
+                    .fix(format!(
                         "Declare `{name}` (state field, param, or const) or fix the \
                          reference to an existing name."
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
+                    )),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Ghost-variable validation: non-scalar types, `on <handler>` clauses
+/// naming unknown handlers, and state shapes ghosts aren't wired into yet.
+pub(super) fn check_ghost_declarations(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    if !spec.ghosts.is_empty() {
+        let scalar = |t: &str| {
+            matches!(
+                t.trim(),
+                "U8" | "U16"
+                    | "U32"
+                    | "U64"
+                    | "U128"
+                    | "I8"
+                    | "I16"
+                    | "I32"
+                    | "I64"
+                    | "I128"
+                    | "Bool"
+            )
+        };
+        // Ghosts are only wired into the flat single-account verification
+        // State today. Indexed (`Map[N]`), multi-account, and explicit
+        // ADT-state shapes don't yet thread ghost fields through their
+        // renderers, so flag rather than silently drop them.
+        let is_indexed = spec
+            .state_fields
+            .iter()
+            .any(|(_, t)| t.trim_start().starts_with("Map"));
+        let is_multi_account = spec.account_types.len() > 1;
+        let is_adt = spec.state_repr_is_adt();
+        let unsupported_shape = is_indexed || is_multi_account || is_adt;
+        let handler_names: std::collections::BTreeSet<&str> =
+            spec.handlers.iter().map(|h| h.name.as_str()).collect();
+        for g in &spec.ghosts {
+            if !scalar(&g.ty) {
+                warnings.push(warn("ghost_non_scalar_type", Severity::Warning, 2, format!(
+                        "ghost '{}' has non-scalar type '{}' — ghosts must be a scalar (U8…U128 / I8…I128 / Bool)",
+                        g.name, g.ty
+                    )).subject(g.name.clone()).fix("Use a scalar ghost type. Aggregate quantities over collections belong in a `property` via `sum i : Idx, …`, not a ghost."));
+            }
+            for u in &g.updates {
+                if !handler_names.contains(u.handler.as_str()) {
+                    warnings.push(
+                        warn(
+                            "ghost_update_unknown_handler",
+                            Severity::Warning,
+                            2,
+                            format!(
+                            "ghost '{}' has an `on {}` clause, but no handler named '{}' exists",
+                            g.name, u.handler, u.handler
+                        ),
+                        )
+                        .subject(g.name.clone())
+                        .fix("Name an existing handler in the `on` clause, or remove the clause."),
+                    );
+                }
+            }
+            if unsupported_shape {
+                warnings.push(warn("ghost_unsupported_state_shape", Severity::Warning, 2, format!(
+                        "ghost '{}' is declared with an indexed / multi-account / ADT state — ghost fields are only wired into the flat single-account verification State today",
+                        g.name
+                    )).subject(g.name.clone()).fix("Move the ghost to a flat single-account spec, or track the quantity in a `property` (e.g. `sum i : Idx, accounts[i].x`) until ghost support lands for this shape."));
+            }
+        }
+    }
+    warnings
+}
+
+/// Hook validation: deferred-Lean note, unknown `after_store` fields,
+/// unsupported state shapes, deferred `before_cpi`, and assert-less hooks.
+pub(super) fn check_hook_declarations(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    if !spec.hooks.is_empty() {
+        // Lean enforcement is deferred (lands with qedsvm); hooks are
+        // currently checked only in the Kani / proptest harnesses.
+        warnings.push(warn("hook_lean_unsupported", Severity::Info, 3, "hooks are enforced in the Kani / proptest harnesses; Lean enforcement is deferred (lands with qedsvm)").fix("No action needed — `qedgen verify --kani` / `--proptest` exercise the hook assertions."));
+        let state_field_names: std::collections::BTreeSet<&str> =
+            spec.state_fields.iter().map(|(n, _)| n.as_str()).collect();
+        let is_indexed = spec
+            .state_fields
+            .iter()
+            .any(|(_, t)| t.trim_start().starts_with("Map"));
+        let unsupported_shape = is_indexed || spec.account_types.len() > 1;
+        for hook in &spec.hooks {
+            match &hook.kind {
+                ParsedHookKind::AfterStore(field) => {
+                    if !state_field_names.contains(field.as_str()) {
+                        warnings.push(
+                            warn(
+                                "hook_unknown_field",
+                                Severity::Warning,
+                                2,
+                                format!(
+                                    "hook `after_store({})` names '{}', which is not a state field",
+                                    field, field
+                                ),
+                            )
+                            .fix("Name a declared state field in `after_store(<field>)`."),
+                        );
+                    }
+                    if unsupported_shape {
+                        warnings.push(warn("hook_unsupported_state_shape", Severity::Warning, 2, format!(
+                                "hook `after_store({})` is declared with an indexed / multi-account state — `after_store` is wired into the flat single-account transition only",
+                                field
+                            )).fix("Use a flat single-account spec, or assert the post-store condition in a `property`."));
+                    }
+                }
+                ParsedHookKind::BeforeCpi(_) => {
+                    warnings.push(warn("hook_before_cpi_unsupported", Severity::Warning, 2, "`hook before_cpi` enforcement is deferred — the runtime state model has no CPI to anchor to, and the Lean CPI-theorem precondition path lands with qedsvm").fix("Encode the precondition as a `requires` on the calling handler for now, or assert it via `after_store` on the field the CPI consumes."));
+                }
+            }
+            if hook.asserts.is_empty() {
+                warnings.push(
+                    warn(
+                        "hook_no_assert",
+                        Severity::Info,
+                        3,
+                        "hook has no `assert` clause — it checks nothing",
+                    )
+                    .fix("Add at least one `assert <expr>` to the hook body."),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Rule 2: handler not covered by any property.
+pub(super) fn check_uncovered_operation(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for op in &spec.handlers {
+        let covered = spec
+            .properties
+            .iter()
+            .any(|p| p.preserved_by.contains(&op.name));
+        if !covered && !spec.properties.is_empty() {
+            let prop_names: Vec<&str> = spec.properties.iter().map(|p| p.name.as_str()).collect();
+            warnings.push(warn("uncovered_operation", Severity::Info, 3, format!(
+                    "handler '{}' is not in any property's `preserved_by`",
+                    op.name
+                )).subject(op.name.clone()).fix(format!(
+                    "Add '{}' to an existing property's `preserved_by` list, or confirm it doesn't need property coverage",
+                    op.name
+                )).example(format!(
+                    "  property {} \"...\"\n    preserved_by: ..., {}",
+                    prop_names.first().unwrap_or(&"my_property"),
+                    op.name
+                )));
+        }
+    }
+    warnings
+}
+
+/// Rule 5: property references nonexistent handler.
+pub(super) fn check_dangling_preserved_by(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let op_names: Vec<&str> = spec.handlers.iter().map(|o| o.name.as_str()).collect();
+    for prop in &spec.properties {
+        for op_name in &prop.preserved_by {
+            if !op_names.contains(&op_name.as_str()) {
+                warnings.push(
+                    warn(
+                        "dangling_preserved_by",
+                        Severity::Warning,
+                        1,
+                        format!(
+                            "property '{}' references nonexistent handler '{}'",
+                            prop.name, op_name
+                        ),
+                    )
+                    .subject(format!("{}.preserved_by.{}", prop.name, op_name))
+                    .fix(format!(
+                        "Check the spelling of '{}' — available handlers: {}",
+                        op_name,
+                        op_names.join(", ")
+                    )),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Quantifier over a type that can't be exhausted at test time.
+/// Two distinct shapes:
+///   - `forall s : <StateType>` — universal over states (e.g. `Pool.Active`).
+///     Always Lean territory; the whole quantifier is redundant since
+///     `state.x` already refers to the current state. Advice: drop it.
+///   - `forall i : <BinderType>` — bounded value quantifier over a primitive
+///     (U16+, AccountIdx, etc.). U8/I8 fit in proptest; wider types emit a
+///     stub `true`. Advice: narrow the binder.
+pub(super) fn check_unchecked_quantifier(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let state_type_names: std::collections::HashSet<String> = spec
+        .account_types
+        .iter()
+        .flat_map(|at| {
+            // Both the bare type name (e.g. `Pool`) and `Pool.<Variant>` for
+            // each lifecycle variant — qedspec quantifiers use the qualified
+            // form `Pool.Active` to range over a specific lifecycle state.
+            let qualified = at
+                .lifecycle
+                .iter()
+                .map(move |v| format!("{}.{}", at.name, v));
+            std::iter::once(at.name.clone()).chain(qualified)
+        })
+        .collect();
+    for prop in &spec.properties {
+        // Per-slot lowering already provides a proptest-checkable form for
+        // wide-binder forall properties (see ParsedProperty::per_slot).
+        // The lint's "harness emits true" warning isn't accurate for these:
+        // the per-slot `{prop}_at` predicate is generated and called at the
+        // modified slot in each handler's preservation test.
+        if prop.per_slot.is_some() {
+            continue;
+        }
+        // When P5 `unsupported_quantifier_shape` fires, skip the legacy
+        // `unchecked_quantifier` — P5 carries strictly more precise
+        // information (kind + span); double-reporting clutters.
+        if prop.quantifier_lint.is_some() {
+            continue;
+        }
+        if let Some(ref rust_expr) = prop.rust_expression {
+            if rust_expr_is_unsupported(rust_expr) {
+                // Extract the quantifier kind and binder type from the sentinel
+                // comment so the message is specific.
+                let detail = rust_expr
+                    .trim_start_matches("/*")
+                    .trim_end_matches("*/")
+                    .trim()
+                    .trim_start_matches(QEDGEN_UNSUPPORTED_MARKER)
+                    .trim_start_matches(':')
+                    .trim()
+                    .to_string();
+                // Pull the binder type out of `forall <var> : <Type>` so we
+                // can pick the right advice. Detail looks like
+                // `forall s : Pool.Active — lower at harness level`.
+                let binder_type: Option<String> = detail
+                    .split_once(':')
+                    .and_then(|(_, rest)| rest.split('—').next())
+                    .map(|s| s.trim().to_string());
+                let is_state_quantifier = binder_type
+                    .as_ref()
+                    .map(|t| state_type_names.contains(t))
+                    .unwrap_or(false);
+                let (fix, example) = if is_state_quantifier {
+                    (
+                        "Drop the `forall s : <State>` wrapper — properties are \
+                         implicitly evaluated against the current state. Use \
+                         `state.<field>` directly."
+                            .to_string(),
+                        Some(format!(
+                            "  // instead of: forall s : <State>, s.x >= s.y\n  \
+                             property {} :\n    state.x >= state.y",
+                            prop.name
+                        )),
+                    )
+                } else {
+                    (
+                        "Use U8 or I8 as the quantifier binder type (≤256 values, \
+                         exhausted automatically), or split the property into a \
+                         per-element guard."
+                            .to_string(),
+                        Some(format!(
+                            "  // instead of: forall v : U64, …\n  \
+                             property {} :\n    forall v : U8, …",
+                            prop.name
+                        )),
+                    )
+                };
+                warnings.push(CompletenessWarning {
+                    subject: Some(prop.name.clone()),
+                    fix,
+                    example,
+                    ..warn(
+                        "unchecked_quantifier",
+                        Severity::Warning,
+                        1,
+                        format!(
+                            "property '{}' uses a quantifier over a type that proptest/Kani \
+                         cannot exhaust — the harness emits `true` and skips the check ({})",
+                            prop.name, detail
+                        ),
+                    )
                 });
             }
+        }
+    }
+    warnings
+}
+
+/// P5: quantifier shape unsupported by codegen. The chumsky_adapter
+/// records a precise reason (nested forall, exists, unbounded binder);
+/// surfacing it here shows the exact breaking construct instead of a
+/// silent `true` stub later. Supersedes `unchecked_quantifier` for the
+/// shapes it covers (that lint skips when quantifier_lint is Some).
+pub(super) fn check_unsupported_quantifier_shape(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for prop in &spec.properties {
+        let Some(qlint) = &prop.quantifier_lint else {
+            continue;
+        };
+        let workaround = match qlint.kind.as_str() {
+            "nested_quantifier" => {
+                "Split into two single-binder properties — one per quantifier — \
+                 so each lowers to a bool-valued harness independently."
+            }
+            "unbounded_binder" => {
+                "Use a primitive (U8…U128) or a declared record type as the binder. \
+                 `Vec<T>` / `List<T>` aren't enumerable by Kani / proptest in v2.20."
+            }
+            "exists_quantifier" => {
+                "A bounded `exists` (binder typed `Fin[N]`, e.g. via an index \
+                 alias like `MemberIdx = Fin[MAX_MEMBERS]`) lowers to \
+                 `(0..N).any(…)`. This `exists` ranges over an unbounded domain \
+                 (e.g. `U64`); bound the binder with a `Fin[N]` index type so it \
+                 can be enumerated."
+            }
+            _ => "See docs/limitations.md#unsupported-quantifier-shapes for the workaround.",
+        };
+        warnings.push(
+            warn(
+                "unsupported_quantifier_shape",
+                Severity::Warning,
+                1,
+                format!(
+                    "property '{}' has a quantifier shape qedgen v2.20 can't lower to a \
+                 non-vacuous harness — {} (bytes {}..{})",
+                    prop.name, qlint.message, qlint.span_start, qlint.span_end,
+                ),
+            )
+            .subject(prop.name.clone())
+            .fix(workaround.to_string()),
+        );
+    }
+    warnings
+}
+
+/// P6: informational note that `Pubkey` state fields lower structurally
+/// to `[u8; 32]` in the verification State (proptest generates them via
+/// the 32-byte-array strategy).
+///
+/// Scope — every place a Pubkey field can land as state:
+/// `account_types[*].fields`, `sum_types[*].variants[*].fields`, and
+/// `records[*].fields`. `state_fields` is a flat mirror of the first
+/// account type's fields and is intentionally not scanned (double-firing).
+pub(super) fn check_pubkey_state_field_unsupported(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let push_p6 = |warnings: &mut Vec<CompletenessWarning>, holder: &str, field: &str| {
+        warnings.push(
+            warn(
+                "pubkey_state_field_unsupported",
+                Severity::Info,
+                3,
+                format!(
+                    "P6: Pubkey field '{}' in {} is lowered to `[u8; 32]` in \
+                     the generated proptest / Kani harness. The user-facing \
+                     Anchor program target keeps the `Pubkey` type.",
+                    field, holder,
+                ),
+            )
+            .subject(format!("{}.{}", holder, field))
+            .fix(format!(
+                "No action required. To compare against an Anchor `Pubkey` \
+                     param, convert at the call site: `s.{} == pk.to_bytes()`.",
+                field,
+            )),
+        );
+    };
+
+    for acct in &spec.account_types {
+        for (fname, ftype) in &acct.fields {
+            if ftype == "Pubkey" {
+                push_p6(&mut warnings, &acct.name, fname);
+            }
+        }
+    }
+    for sum in &spec.sum_types {
+        for variant in &sum.variants {
+            for (fname, ftype) in &variant.fields {
+                if ftype == "Pubkey" {
+                    let holder = format!("{}.{}", sum.name, variant.name);
+                    push_p6(&mut warnings, &holder, fname);
+                }
+            }
+        }
+    }
+    for rec in &spec.records {
+        for (fname, ftype) in &rec.fields {
+            if ftype == "Pubkey" {
+                push_p6(&mut warnings, &rec.name, fname);
+            }
+        }
+    }
+    warnings
+}
+
+/// Rule 9: handlers with effects but zero properties.
+pub(super) fn check_no_properties(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let has_effects = spec.handlers.iter().any(|op| op.has_effect());
+    if has_effects && spec.properties.is_empty() && spec.invariants.is_empty() {
+        // Suggest conservation if paired add/sub exist on same field
+        let mut modified_fields: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for op in &spec.handlers {
+            for eff in &op.effects {
+                modified_fields
+                    .entry(eff.field.as_str())
+                    .or_default()
+                    .push(eff.op.as_str());
+            }
+        }
+        let conservation_candidates: Vec<&str> = modified_fields
+            .iter()
+            .filter(|(_, kinds)| kinds.contains(&"add") && kinds.contains(&"sub"))
+            .map(|(f, _)| *f)
+            .collect();
+
+        let op_list: Vec<&str> = spec
+            .handlers
+            .iter()
+            .filter(|op| op.has_effect())
+            .map(|op| op.name.as_str())
+            .collect();
+        let preserved_by = if op_list.len() <= 4 {
+            format!("[{}]", op_list.join(", "))
+        } else {
+            "all".to_string()
+        };
+
+        let example = if !conservation_candidates.is_empty() {
+            let field = conservation_candidates[0];
+            format!(
+                "  property conservation {{\n    expr state.{} >= 0\n    preserved_by {}\n  }}",
+                field, preserved_by
+            )
+        } else {
+            format!(
+                "  property my_invariant {{\n    expr <your invariant expression>\n    preserved_by {}\n  }}",
+                preserved_by
+            )
+        };
+
+        warnings.push(
+            warn(
+                "no_properties",
+                Severity::Warning,
+                3,
+                "spec has effects but no properties — verification has nothing to prove",
+            )
+            .fix("Add at least one property to define what the verification should prove")
+            .example(example),
+        );
+    }
+    warnings
+}
+
+/// Rule 11: no errors block but handlers have guards.
+pub(super) fn check_no_errors_block(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let any_guards = spec.handlers.iter().any(|op| op.has_guard());
+    if any_guards && spec.error_codes.is_empty() {
+        warnings.push(
+            warn(
+                "no_errors_block",
+                Severity::Info,
+                4,
+                "spec has guards but no `errors` block — codegen can't generate error types",
+            )
+            .fix("Add an errors block listing all failure modes")
+            .example("  errors [InvalidAmount, Unauthorized, AlreadyClosed]".to_string()),
+        );
+    }
+    warnings
+}
+
+/// Rule 16: excluded_op_modifies_property — handler NOT in preserved_by
+/// modifies fields referenced by the property. The inductive theorem will
+/// need a manual proof (not sorry).
+pub(super) fn check_excluded_op_modifies_property(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for prop in &spec.properties {
+        if let Some(ref expr) = prop.expression {
+            // Extract field names from the property expression.
+            // The expression is in Lean form (s.field_name) from the parser.
+            let prop_fields: Vec<&str> = {
+                let mut fields = Vec::new();
+                // Check both "s." (Lean form) and "state." (DSL form) patterns
+                for prefix in &["s.", "state."] {
+                    for (i, _) in expr.match_indices(prefix) {
+                        let rest = &expr[i + prefix.len()..];
+                        let end = rest
+                            .find(|c: char| !c.is_alphanumeric() && c != '_')
+                            .unwrap_or(rest.len());
+                        if end > 0 {
+                            let field = &rest[..end];
+                            if !fields.contains(&field) {
+                                fields.push(field);
+                            }
+                        }
+                    }
+                }
+                fields
+            };
+
+            let uses_all = prop.preserved_by.iter().any(|p| p == "all");
+            if uses_all {
+                continue; // all ops are in preserved_by, no exclusion
+            }
+
+            for op in &spec.handlers {
+                if prop.preserved_by.contains(&op.name) {
+                    // Handler is claimed to preserve the property — verify via
+                    // effect analysis. Warn when the effect demonstrably violates
+                    // the bound (covers preserved_by all expansion and explicit lists).
+                    let covered_modified: Vec<&str> = op
+                        .effects
+                        .iter()
+                        .filter(|e| prop_fields.contains(&e.field.as_str()))
+                        .map(|e| e.field.as_str())
+                        .collect();
+                    if !covered_modified.is_empty() {
+                        // Skip when any `requires` references a property
+                        // field: the boundary `build_counterexample` picks is
+                        // often unreachable because of guards the local
+                        // analyzer doesn't model (dedup bitmaps, lifecycle
+                        // gates). Trust the author's bound; preserved_by
+                        // claims with NO constraining guard still fire.
+                        if requires_constrains_prop_fields(op, &prop_fields) {
+                            continue;
+                        }
+                        if let Some(ce) = build_counterexample(
+                            expr,
+                            &prop.name,
+                            &prop_fields,
+                            op,
+                            &covered_modified,
+                            &spec.constants,
+                        ) {
+                            if !ce.invariant_holds {
+                                warnings.push(warn("preserved_by_all_potential_violation", Severity::Warning, 1, format!(
+                                        "handler '{}' is in `preserved_by` for property '{}' but effect analysis suggests a violation",
+                                        op.name, prop.name
+                                    )).subject(op.name.clone()).fix(format!(
+                                        "Add a guard to '{}' ensuring the invariant holds after the effect, or remove it from `preserved_by`",
+                                        op.name
+                                    )).counterexample(ce));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // Check if this excluded op modifies any field in the property expression
+                let modified_prop_fields: Vec<&str> = op
+                    .effects
+                    .iter()
+                    .filter(|e| prop_fields.contains(&e.field.as_str()))
+                    .map(|e| e.field.as_str())
+                    .collect();
+
+                if !modified_prop_fields.is_empty() {
+                    // Skip if ALL effects on property fields are monotonically safe.
+                    // e.g., sub on LHS of ≤ can only decrease the LHS → invariant still holds.
+                    if let Some((lhs, op_sym, _rhs)) = parse_property_relation(expr, &prop_fields) {
+                        let all_safe = op
+                            .effects
+                            .iter()
+                            .filter(|e| modified_prop_fields.contains(&e.field.as_str()))
+                            .all(|e| {
+                                let on_lhs = e.field.as_str() == lhs;
+                                match (e.op.as_str(), op_sym, on_lhs) {
+                                    ("sub", "≤", true) | ("sub", "<=", true) => true, // decreasing LHS of ≤
+                                    ("add", "≥", true) | ("add", ">=", true) => true, // increasing LHS of ≥
+                                    ("sub", "≥", false) | ("sub", ">=", false) => true, // decreasing RHS of ≥
+                                    ("add", "≤", false) | ("add", "<=", false) => true, // increasing RHS of ≤
+                                    _ => false,
+                                }
+                            });
+                        if all_safe {
+                            continue; // monotonically preserves the invariant
+                        }
+                    }
+
+                    let counterexample = build_counterexample(
+                        expr,
+                        &prop.name,
+                        &prop_fields,
+                        op,
+                        &modified_prop_fields,
+                        &spec.constants,
+                    );
+
+                    let fix_options = build_fix_suggestions(
+                        expr,
+                        &prop.name,
+                        op,
+                        &prop_fields,
+                        &modified_prop_fields,
+                    );
+
+                    let fix = fix_options.first().map_or_else(
+                        || format!(
+                            "Add '{}' to property '{}' `preserved_by` with a guard, or restructure the property",
+                            op.name, prop.name
+                        ),
+                        |f| f.snippet.clone(),
+                    );
+
+                    warnings.push(CompletenessWarning {
+                        subject: Some(op.name.clone()),
+                        fix,
+                        counterexample,
+                        fix_options,
+                        ..warn(
+                            "excluded_op_modifies_property",
+                            Severity::Warning,
+                            2,
+                            format!(
+                                "handler '{}' modifies field(s) [{}] used in property '{}' but is excluded from `preserved_by` — no inductive arm is generated for this handler, so the per-arm proof obligation is silently dropped. Either add the handler to `preserved_by` (and discharge the proof) or refactor the property so this handler doesn't need to preserve it.",
+                                op.name,
+                                modified_prop_fields.join(", "),
+                                prop.name
+                            ),
+                        )
+                    });
+                }
+            }
+        }
+    }
+    warnings
+}
+
+/// Rule 17: invariant_no_body — doc-string-only invariant. Lean codegen
+/// would lower it to `theorem <name> : True := trivial` (vacuous, banned
+/// by the no-tautological-proofs policy); surface at check time.
+pub(super) fn check_invariant_no_body(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for inv in &spec.invariants {
+        if inv.lean_expr.is_none() {
+            warnings.push(warn("invariant_no_body", Severity::Error, 1, format!(
+                    "invariant '{}' has only a description string, no `expr` body — \
+                     codegen would emit `theorem {} : True := trivial` (vacuous proof)",
+                    inv.name, inv.name
+                )).subject(inv.name.clone()).fix(format!(
+                    "Add an `expr` body to invariant '{}': \
+                     `invariant {} {{ expr <predicate-over-state> preserved_by all }}`",
+                    inv.name, inv.name
+                )).example(format!(
+                    "  invariant {} {{\n    expr state.total_in == state.total_out\n    preserved_by all\n  }}",
+                    inv.name
+                )));
         }
     }
     warnings
@@ -417,6 +1033,7 @@ pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<Completen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::test_support::*;
 
     #[test]
     fn error_declared_as_record_lint_fires_and_suggests_pipe_form() {
@@ -854,6 +1471,393 @@ handler initialize : State.Uninitialized -> State.Active {
         assert!(
             check_unknown_guard_identifier(&spec).is_empty(),
             "sBPF requires vocabulary resolves against the input layout, not state"
+        );
+    }
+
+    #[test]
+    fn test_no_properties_fires() {
+        let mut h = make_handler("deposit");
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_properties"),
+            "expected no_properties, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_properties_skips_with_property() {
+        let mut h = make_handler("deposit");
+        h.effects = vec![ParsedEffect::from_triple("balance", "add", "amount")];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            state_fields: vec![("balance".to_string(), "U64".to_string())],
+            properties: vec![ParsedProperty {
+                name: "conservation".to_string(),
+                expression: Some("state.balance >= 0".to_string()),
+                rust_expression: Some("s.balance >= 0".to_string()),
+                rust_expression_pod: Some("s.balance >= 0".to_string()),
+                rust_expression_math: None,
+                preserved_by: vec!["deposit".to_string()],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+                tree: None,
+            }],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_properties"),
+            "should not fire when properties exist"
+        );
+    }
+
+    #[test]
+    fn test_no_errors_block_fires() {
+        let mut h = make_handler("deposit");
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_errors_block"),
+            "expected no_errors_block, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_fires_for_large_type() {
+        // U64 quantifier can't be exhausted — check.rs must warn so the user
+        // knows the property is being silently skipped in proptest/Kani.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "all_balances_positive".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some(
+                    "/* QEDGEN_UNSUPPORTED_QUANTIFIER: forall v : U64 \
+                         — lower at harness level */"
+                        .to_string(),
+                ),
+                rust_expression_pod: None,
+                rust_expression_math: None,
+                preserved_by: vec![],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+                tree: None,
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "expected unchecked_quantifier lint for U64 forall, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "unchecked_quantifier")
+            .unwrap();
+        assert_eq!(w.priority, 1, "unchecked_quantifier must be P1");
+        assert!(
+            w.message.contains("all_balances_positive"),
+            "message must name the property"
+        );
+    }
+
+    #[test]
+    fn unchecked_quantifier_lint_does_not_fire_for_u8() {
+        // U8 forall lowers to a real iterator — no lint should fire.
+        let spec = ParsedSpec {
+            properties: vec![ParsedProperty {
+                name: "bytes_nonneg".to_string(),
+                expression: Some("∀ v : Nat, v ≥ 0".to_string()),
+                rust_expression: Some("(u8::MIN..=u8::MAX).all(|v| v >= 0)".to_string()),
+                rust_expression_pod: None,
+                rust_expression_math: None,
+                preserved_by: vec![],
+                per_slot: None,
+                quantifier_lint: None,
+                class: PropertyClass::Unary,
+                ast_body: None,
+                tree: None,
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unchecked_quantifier"),
+            "U8 forall must not fire unchecked_quantifier"
+        );
+    }
+
+    #[test]
+    fn build_counterexample_resolves_named_const_in_effect() {
+        let handler = ParsedHandler {
+            name: "reset".to_string(),
+            effects: vec![ParsedEffect::from_triple("counter", "set", "ZERO")],
+            ..make_handler("reset")
+        };
+        let constants = vec![("ZERO".to_string(), "0".to_string())];
+        let ce = build_counterexample(
+            "s.counter \u{2264} 5",
+            "bounded",
+            &["counter"],
+            &handler,
+            &["counter"],
+            &constants,
+        )
+        .expect("should produce a counterexample");
+        let post = ce
+            .post_state
+            .iter()
+            .find(|(f, _)| f == "counter")
+            .unwrap()
+            .1;
+        assert_eq!(post, 0, "ZERO should resolve to 0, not fall back to 1");
+    }
+
+    #[test]
+    fn preserved_by_all_potential_violation_fires_for_named_const_effect() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    const STEP = 5
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_small :
+      state.counter <= 3
+      preserved_by all
+    handler tick : State.Active -> State.Active {
+      permissionless
+      effect { counter := STEP }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "must warn when preserved_by all handler demonstrably violates the property"
+        );
+    }
+
+    /// Transition property `counter >= old(counter)` preserved by an `add`
+    /// handler must NOT fire — guards against the counterexample builder
+    /// misreading `s'.counter` as a constant and applying the effect to the
+    /// `old(...)` side (inverting the relation into a bogus violation).
+    #[test]
+    fn preserved_by_transition_property_silent_when_add_preserves_monotonicity() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_monotonic :
+      state.counter >= old(state.counter)
+      preserved_by all
+    handler grow (delta : U64) : State.Active -> State.Active {
+      permissionless
+      effect { counter += delta }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "add preserves `counter >= old(counter)` — must not flag a violation"
+        );
+    }
+
+    /// The same transition property `counter >= old(counter)` claimed-
+    /// preserved by a `sub` handler MUST still fire — decreasing the post
+    /// side genuinely breaks monotonicity.
+    #[test]
+    fn preserved_by_transition_property_fires_when_sub_breaks_monotonicity() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Test
+    program_id "11111111111111111111111111111111"
+    type State | Active of { counter : U64 }
+    type Error | E
+    property counter_monotonic :
+      state.counter >= old(state.counter)
+      preserved_by all
+    handler shrink : State.Active -> State.Active {
+      permissionless
+      effect { counter -= 1 }
+    }"#,
+        )
+        .unwrap();
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "preserved_by_all_potential_violation"),
+            "sub breaks `counter >= old(counter)` — must flag the violation"
+        );
+    }
+
+    /// `build_fix_suggestions` must not emit a nonsensical
+    /// `requires state.counter > state.counter` guard for a transition
+    /// property (same field on both sides). Fix A is suppressed; Fix B
+    /// (add to preserved_by) still applies.
+    #[test]
+    fn build_fix_suggestions_skips_self_guard_for_transition_property() {
+        let handler = ParsedHandler {
+            name: "shrink".to_string(),
+            effects: vec![ParsedEffect::from_triple("counter", "sub", "1")],
+            ..make_handler("shrink")
+        };
+        let fixes = build_fix_suggestions(
+            "s'.counter \u{2265} s.counter",
+            "counter_monotonic",
+            &handler,
+            &["counter"],
+            &["counter"],
+        );
+        assert!(
+            !fixes
+                .iter()
+                .any(|f| f.snippet.contains("state.counter > state.counter")
+                    || f.snippet.contains("state.counter < state.counter")),
+            "must not suggest a self-comparison guard; got: {:?}",
+            fixes.iter().map(|f| &f.snippet).collect::<Vec<_>>()
+        );
+        assert!(
+            fixes.iter().any(|f| f.label == "Add to preserved_by"),
+            "the preserved_by fix should still be offered"
+        );
+    }
+
+    // ── P6: pubkey_state_field_unsupported ────────────────────────────────
+    //
+    // Guards the structural lowering note: a State carrying
+    // `authority : Pubkey` lowers to `[u8; 32]` in the verification State;
+    // P6 surfaces the lowering at check time.
+
+    #[test]
+    fn pubkey_state_field_lint_fires_on_account_type() {
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec PubkeyState
+    type State
+      | Active of {
+          authority : Pubkey,
+          balance : U64,
+        }
+    handler h : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "pubkey_state_field_unsupported")
+            .collect();
+        assert_eq!(hits.len(), 1, "expected exactly one P6 hit: {hits:#?}");
+        let w = hits[0];
+        assert!(
+            w.message.contains("P6:") && w.message.contains("'authority'"),
+            "message must cite P6 and name the field: {}",
+            w.message
+        );
+        // P6 is Info-only: Pubkey state fields lower to `[u8; 32]`
+        // automatically; the lint just documents the lowering.
+        assert!(
+            w.message.contains("lowered to `[u8; 32]`"),
+            "message must describe the lowering: {}",
+            w.message
+        );
+        assert_eq!(w.priority, 3, "P6 is now a P3 informational");
+        assert_eq!(w.severity, Severity::Info);
+    }
+
+    #[test]
+    fn pubkey_state_field_lint_silent_without_pubkey_field() {
+        // Control: no Pubkey field in state → no P6.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec NoPubkey
+    type State | Active of { balance : U64 }
+    handler bump : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "pubkey_state_field_unsupported"),
+            "no Pubkey field → no P6, got: {warnings:#?}"
+        );
+    }
+
+    #[test]
+    fn pubkey_state_field_lint_fires_per_field() {
+        // Two Pubkey fields → two P6 lints, each naming its specific
+        // field. The non-Pubkey `balance` must not appear in any hit's
+        // subject. This pins field-scoped reporting (mirrors how
+        // `wrapping_arithmetic` fires per-op).
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec PubkeyMulti
+    type State
+      | Active of {
+          authority : Pubkey,
+          mint : Pubkey,
+          balance : U64,
+        }
+    handler h : State.Active -> State.Active {
+      permissionless
+      effect { balance += 1 }
+    }
+    "#,
+        )
+        .expect("fixture should parse");
+        let warnings = check_completeness(&spec);
+        let hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "pubkey_state_field_unsupported")
+            .collect();
+        assert_eq!(hits.len(), 2, "expected two P6 hits: {hits:#?}");
+        let subjects: Vec<&str> = hits
+            .iter()
+            .map(|w| w.subject.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            subjects.iter().any(|s| s.ends_with(".authority")),
+            "must name authority: {subjects:?}"
+        );
+        assert!(
+            subjects.iter().any(|s| s.ends_with(".mint")),
+            "must name mint: {subjects:?}"
+        );
+        assert!(
+            !subjects.iter().any(|s| s.ends_with(".balance")),
+            "must NOT name balance: {subjects:?}"
         );
     }
 }

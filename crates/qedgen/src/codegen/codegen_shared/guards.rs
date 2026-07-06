@@ -121,6 +121,11 @@ pub(crate) fn generate_guards(
     // `instructions/<name>.rs` and re-exports via `instructions::*`.
     out.push_str(surface.guard_accounts_import());
 
+    // Hoisted once: the guard error-enum name (`<Program>Error`) is
+    // spec-constant; R28 / R27 / requires / aborts all format against it
+    // (previously recomputed 4x per handler).
+    let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
+
     // Walk MIR handlers in lockstep with their ParsedSpec source (1:1, same
     // order — `mir.handlers = parsed.handlers.map(lower_handler)`). `hm` is the
     // migration target; reads move from `handler`/`spec` to `hm`/`mir` slice by
@@ -181,7 +186,7 @@ pub(crate) fn generate_guards(
         // Anchor `has_one` attribute under multi-variant ADT
         // because the macro can't reach `wrapper.inner.<variant>.X`
         // (see `is_multi_variant_adt_with_field_in_variant` in
-        // check.rs). Replace it with an explicit destructure-then-
+        // account_attr.rs). Replace it with an explicit destructure-then-
         // compare guard so the auth check still fires at runtime.
         // Requires:
         //   - multi-variant ADT spec
@@ -197,173 +202,9 @@ pub(crate) fn generate_guards(
             out.push_str(&auth_guard);
         }
 
-        let err_enum_name_r28 = format!("{}Error", to_pascal_case(&spec.program_name));
-        let _ = &err_enum_name_r28;
-        // R28: per-handler PDA verification. R13 suppresses
-        // `seeds = [...]` on Quasar non-init handlers when seeds
-        // reference state fields (the macro's `Bumps::seeds()` method
-        // can't auto-capture `self.<state-field>`). Owner+discriminator
-        // protects against type confusion but not wrong-PDA passing —
-        // the audit's MED-tier finding. Emit a runtime
-        // `verify_program_address` check using the stored bump for
-        // every account whose `seeds = [...]` would have been
-        // suppressed. The cost is one syscall (~544 CU on first-try
-        // bump 255) per affected handler load.
-        for acct in &handler.accounts {
-            let Some(ref seeds) = acct.pda_seeds else {
-                continue;
-            };
-            let is_init_target = matches!(
-                handler.pre_status.as_deref(),
-                Some("Uninitialized") | Some("Empty")
-            ) && match handler.on_account.as_deref() {
-                Some(adt) => {
-                    let lower = adt.to_lowercase();
-                    acct.name == lower || acct.name.starts_with(&lower)
-                }
-                None => true,
-            } && !acct.is_signer;
-            if is_init_target {
-                continue; // init flow already verifies via #[account(seeds=…, bump)]
-            }
-            // Was R13 going to suppress on this handler? Mirror the
-            // detection logic from `quasar_account_attr`.
-            let bound_account_names: std::collections::HashSet<&str> =
-                handler.accounts.iter().map(|a| a.name.as_str()).collect();
-            let needs_state_field_seed = seeds.iter().any(|seed| {
-                let is_literal = seed.starts_with('"') && seed.ends_with('"');
-                !is_literal && !bound_account_names.contains(seed.as_str())
-            });
-            // v2.29 — Anchor extension: when the seed references a
-            // variant-payload field on a multi-variant ADT, the
-            // `seeds = [...]` macro can't route through the
-            // accessor and we suppressed it in
-            // `quasar_account_attr`. Emit the runtime check here
-            // instead. Quasar still fires on any state-field seed
-            // (its R13 suppression is broader).
-            let anchor_variant_field_seed = matches!(target, Target::Anchor)
-                && needs_state_field_seed
-                && is_multi_variant_adt_state(spec)
-                && seeds.iter().any(|seed| {
-                    let is_literal = seed.starts_with('"') && seed.ends_with('"');
-                    if is_literal || bound_account_names.contains(seed.as_str()) {
-                        return false;
-                    }
-                    spec.account_types.iter().any(|a| {
-                        a.variants
-                            .iter()
-                            .any(|v| v.fields.iter().any(|(n, _)| n == seed))
-                    })
-                });
-            let fire_r28 = (matches!(target, Target::Quasar) && needs_state_field_seed)
-                || anchor_variant_field_seed;
-            if !fire_r28 {
-                continue;
-            }
+        emit_r28_pda_checks(&mut out, handler, spec, target, &err_enum);
 
-            let mut seed_exprs: Vec<String> = Vec::with_capacity(seeds.len() + 1);
-            for seed in seeds {
-                if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                    seed_exprs.push(format!("b\"{}\"", inner));
-                } else if bound_account_names.contains(seed.as_str()) {
-                    // Handler-bound account: read its address.
-                    match target {
-                        Target::Anchor => seed_exprs.push(format!("ctx.{}.key().as_ref()", seed)),
-                        _ => seed_exprs
-                            .push(format!("ctx.{}.to_account_view().address().as_ref()", seed)),
-                    }
-                } else {
-                    // State-field seed: read off the same PDA's stored
-                    // value. For multi-variant ADTs on Anchor, route
-                    // through the v2.29 Slice B accessor; for Quasar
-                    // / flat-state, read the field directly.
-                    let is_variant_field = matches!(target, Target::Anchor)
-                        && spec.account_types.iter().any(|a| {
-                            a.variants
-                                .iter()
-                                .any(|v| v.fields.iter().any(|(n, _)| n == seed))
-                        });
-                    if is_variant_field {
-                        seed_exprs.push(format!("ctx.{}.inner.{}().as_ref()", acct.name, seed));
-                    } else {
-                        seed_exprs.push(format!("ctx.{}.{}.as_ref()", acct.name, seed));
-                    }
-                }
-            }
-
-            match target {
-                Target::Anchor => {
-                    // Anchor PDA verification uses
-                    // `anchor_lang::solana_program::pubkey::Pubkey::
-                    // create_program_address` with the stored bump
-                    // to avoid the find_program_address syscall cost.
-                    seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
-                    out.push_str(&format!(
-                        "    // R28 PDA check: ctx.{acct} matches its declared seeds (Anchor)\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        let __expected = anchor_lang::solana_program::pubkey::Pubkey::create_program_address(__seeds, &crate::ID).map_err(|_| {err_enum}::InvalidPda)?;\n        if ctx.{acct}.key() != __expected {{\n            return Err({err_enum}::InvalidPda.into());\n        }}\n    }}\n",
-                        acct = acct.name,
-                        seeds = seed_exprs.join(", "),
-                        err_enum = err_enum_name_r28,
-                    ));
-                }
-                _ => {
-                    seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
-                    out.push_str(&format!(
-                        "    // R28 PDA check: ctx.{acct} matches its declared seeds\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.{acct}.to_account_view().address()).is_err() {{\n            return Err(ProgramError::from({err_enum}::InvalidPda));\n        }}\n    }}\n",
-                        acct = acct.name,
-                        seeds = seed_exprs.join(", "),
-                        err_enum = err_enum_name_r28,
-                    ));
-                }
-            }
-        }
-
-        // R27: token-vault authority binding. The spec declares
-        // `pool_vault : token, authority pool` — meaning the SPL token
-        // account's `owner` field (i.e. the entity that can sign
-        // transfers from it) must equal the `pool` PDA's address. R6
-        // dropped Quasar's `token::authority = X` constraint on
-        // non-init accounts (the macro rejects it without `init`), so
-        // the static check is gone for every load after init. Without
-        // a runtime equivalent the pool_vault parameter could be any
-        // SPL-Token-program-owned account, breaking the deposit/repay/
-        // liquidate transfer routing intent (audit HIGH 5).
-        //
-        // Emit a runtime owner check on every non-init token account
-        // that declares `authority X` — the token account's `owner()`
-        // accessor returns the authority address, compared against the
-        // bound account's address.
-        let err_enum_name = format!("{}Error", to_pascal_case(&spec.program_name));
-        for acct in &handler.accounts {
-            let is_init_target = matches!(
-                handler.pre_status.as_deref(),
-                Some("Uninitialized") | Some("Empty")
-            ) && match handler.on_account.as_deref() {
-                Some(adt) => {
-                    let lower = adt.to_lowercase();
-                    acct.name == lower || acct.name.starts_with(&lower)
-                }
-                None => true,
-            } && acct.pda_seeds.is_some()
-                && !acct.is_signer;
-            let is_token = acct.account_type.as_deref() == Some("token");
-            if !is_token || is_init_target {
-                continue;
-            }
-            let Some(ref auth_name) = acct.authority else {
-                continue;
-            };
-            let unauthorized = if spec.error_codes.iter().any(|c| c == "Unauthorized") {
-                "Unauthorized"
-            } else {
-                "InvalidLifecycle"
-            };
-            let err_expr = surface.error_expr(&err_enum_name, unauthorized);
-            let check_expr = surface.authority_check_expr(&acct.name, auth_name);
-            out.push_str(&format!(
-                "    // authority: {}\n    if {} {{ return Err({}); }}\n",
-                check_expr, check_expr, err_expr,
-            ));
-        }
+        emit_r27_authority_checks(&mut out, handler, spec, &surface, &err_enum);
 
         if handler.requires.is_empty()
             && handler.aborts_if.is_empty()
@@ -386,222 +227,12 @@ pub(crate) fn generate_guards(
         // get `s.<field>` rewritten to `ctx.<canonical>.<field>`
         // instead of left unbound.
         let state_acct = resolve_handler_state_account(handler, spec);
-        // Bare handler-account idents in spec expressions (e.g. the
-        // `approver` in `state.members[i] == approver`) need to be
-        // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
-        // Without this, the spec's signer-binding compiles to `... ==
-        // approver` where `approver` resolves to nothing in scope.
-        let handler_account_names: Vec<String> =
-            handler.accounts.iter().map(|a| a.name.clone()).collect();
-        // v2.29 Slice G.4 — index handler accounts by name so the
-        // `<acct>.<field>` rewriting can dispatch on
-        // `imported_namespace` and route through the local mirror.
-        let handler_accounts_by_name: std::collections::HashMap<
-            &str,
-            &crate::check::ParsedHandlerAccount,
-        > = handler
-            .accounts
-            .iter()
-            .map(|a| (a.name.as_str(), a))
-            .collect();
-        let bind_state = |expr: &str| -> String {
-            // Step 1: rewrite handler-account idents to address loads.
-            let mut after_accounts = String::with_capacity(expr.len() + 32);
-            let bytes = expr.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-                let mut matched = false;
-                if prev_ok {
-                    for name in &handler_account_names {
-                        let nbytes = name.as_bytes();
-                        if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes
-                        {
-                            // Boundary check on the trailing edge: don't
-                            // match `approver_x` when looking for `approver`.
-                            let after = i + nbytes.len();
-                            if after >= bytes.len() || !is_ident_char(bytes[after]) {
-                                // `<acct>.pubkey` is the spec-author's
-                                // way of saying "this account's address"
-                                // — lower to the same address-load form
-                                // we use for bare `<acct>` so a
-                                // `requires acct.pubkey == state.field`
-                                // clause compiles.
-                                let pubkey_marker = b".pubkey";
-                                let after_dot_end = after + pubkey_marker.len();
-                                if after_dot_end <= bytes.len()
-                                    && &bytes[after..after_dot_end] == pubkey_marker
-                                    && (after_dot_end == bytes.len()
-                                        || !is_ident_char(bytes[after_dot_end]))
-                                {
-                                    after_accounts.push_str(&surface.account_key_expr(name));
-                                    i = after_dot_end;
-                                    matched = true;
-                                    break;
-                                }
-                                // v2.29 Slice G.4 — `<imported_acct>.<field>`
-                                // routes through the local mirror at
-                                // `crate::imported::<ns>::<Type>`. Multi-
-                                // variant ADT goes through the accessor
-                                // (`(*ctx.<name>.inner.<field>())`); flat
-                                // structs read directly off the wrapper's
-                                // auto-deref (`ctx.<name>.<field>`).
-                                if after < bytes.len() && bytes[after] == b'.' {
-                                    if let Some(acct_meta) =
-                                        handler_accounts_by_name.get(name.as_str())
-                                    {
-                                        if let (Some(ns), Some(ty)) =
-                                            (&acct_meta.imported_namespace, &acct_meta.account_type)
-                                        {
-                                            // Extract the field ident.
-                                            let mut j = after + 1;
-                                            while j < bytes.len() && is_ident_char(bytes[j]) {
-                                                j += 1;
-                                            }
-                                            let field = &expr[after + 1..j];
-                                            if !field.is_empty() {
-                                                let imported_ns =
-                                                    spec.imported_namespaces.get(ns.as_str());
-                                                let imported_ty = imported_ns.and_then(|ins| {
-                                                    ins.account_types.iter().find(|a| &a.name == ty)
-                                                });
-                                                let is_multi_variant = imported_ty
-                                                    .map(|a| a.variants.len() > 1)
-                                                    .unwrap_or(false);
-                                                if is_multi_variant {
-                                                    after_accounts.push_str(&format!(
-                                                        "(*ctx.{}.inner.{}())",
-                                                        name, field
-                                                    ));
-                                                } else {
-                                                    after_accounts.push_str(&format!(
-                                                        "ctx.{}.{}",
-                                                        name, field
-                                                    ));
-                                                }
-                                                i = j;
-                                                matched = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                // Don't rewrite `name.` (field access on
-                                // the handler-account is a different
-                                // expression — keep the `.` access path).
-                                if after >= bytes.len() || bytes[after] != b'.' {
-                                    after_accounts.push_str(&surface.account_key_expr(name));
-                                    i = after;
-                                    matched = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !matched {
-                    after_accounts.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-
-            // Step 2: rewrite `s.` to `ctx.<state>.` if we have a state
-            // account. Word-bounded so `accounts[i].fee_credits.get()`
-            // doesn't get corrupted to `fee_creditctx.vault.get()`.
-            let Some(sa) = state_acct else {
-                return after_accounts;
-            };
-            // v2.29 Slice B (#12 deep) — when the state is a multi-
-            // variant ADT, fields that live on variant payloads can't
-            // be reached through `ctx.<state>.<field>` directly
-            // (the wrapper only carries `inner`). Route through the
-            // accessor method emitted in generate_state. We look
-            // ahead after each `s.` match to grab the identifier and
-            // dispatch: known variant-payload field → accessor call,
-            // otherwise → the bare `ctx.<state>.<field>` rewrite for
-            // flat-state compatibility.
-            let multi_variant = is_multi_variant_adt_state(spec);
-            let accessor_fields: std::collections::HashSet<String> = if multi_variant {
-                let mut set = std::collections::HashSet::new();
-                if let Some(acct) = spec.account_types.first() {
-                    let total = acct.variants.len();
-                    let mut idx: std::collections::BTreeMap<String, usize> =
-                        std::collections::BTreeMap::new();
-                    let mut tys: std::collections::BTreeMap<String, String> =
-                        std::collections::BTreeMap::new();
-                    let mut consistent: std::collections::BTreeMap<String, bool> =
-                        std::collections::BTreeMap::new();
-                    for variant in &acct.variants {
-                        for (fname, ftype) in &variant.fields {
-                            *idx.entry(fname.clone()).or_insert(0) += 1;
-                            if let Some(existing) = tys.get(fname) {
-                                if existing != ftype {
-                                    consistent.insert(fname.clone(), false);
-                                }
-                            } else {
-                                tys.insert(fname.clone(), ftype.clone());
-                                consistent.insert(fname.clone(), true);
-                            }
-                        }
-                    }
-                    let _ = total;
-                    for fname in idx.keys() {
-                        if *consistent.get(fname).unwrap_or(&true) {
-                            set.insert(fname.clone());
-                        }
-                    }
-                }
-                set
-            } else {
-                std::collections::HashSet::new()
-            };
-            let bare_target = format!("ctx.{}.", sa.name);
-            let bytes = after_accounts.as_bytes();
-            let mut out = String::with_capacity(after_accounts.len());
-            let mut i = 0;
-            while i < bytes.len() {
-                let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-                if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
-                    // Look ahead to extract the field identifier.
-                    let mut j = i + 2;
-                    while j < bytes.len() && is_ident_char(bytes[j]) {
-                        j += 1;
-                    }
-                    let field = &after_accounts[i + 2..j];
-                    if !field.is_empty() && accessor_fields.contains(field) {
-                        // v2.29 Slice B accessor call. Wrap in
-                        // parens + deref so subsequent ops (e.g.
-                        // `!*paused`, `state.lp_supply.bits`) parse
-                        // against the accessor return value.
-                        out.push_str(&format!("(*ctx.{}.inner.{}())", sa.name, field));
-                        i = j;
-                    } else {
-                        out.push_str(&bare_target);
-                        i += 2;
-                    }
-                } else {
-                    out.push(bytes[i] as char);
-                    i += 1;
-                }
-            }
-            out
-        };
 
         // Pick the Pod-aware rust expression on Quasar so Pod field
         // accesses carry `.get()` and mixed-kind binops add `as i128`
         // casts — without it `state.foo.x + state.foo.y` fails when
         // `x: PodU128` and `y: PodI128`.
         let pod_target = matches!(target, Target::Quasar);
-
-        // v2.29 Slice B — collect abstract-binder names. Requires that
-        // reference an abstract binder can't run in the guard fn (the
-        // binder is computed AFTER the guard fires in the handler
-        // scaffold). Defer to the handler body and document the skip.
-        let abstract_binder_names: Vec<&str> = hm
-            .abstract_binders
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect();
 
         // v2.29.2 — emit spec-level `let X = ref_impl(...)` bindings
         // here so `requires X > 0` clauses can reference them. Without
@@ -612,7 +243,7 @@ pub(crate) fn generate_guards(
         // RHS goes through `bind_state` so `s.<field>` reads route
         // through `ctx.<state>.<field>` (the guards binder).
         for (binding_name, _lean_expr, rust_expr) in &handler.let_bindings {
-            let rewritten = bind_state(rust_expr);
+            let rewritten = bind_state_expr(rust_expr, handler, state_acct, spec, &surface);
             out.push_str(&format!(
                 "    // let-binding from spec: {} = {}\n",
                 binding_name, rust_expr
@@ -620,129 +251,13 @@ pub(crate) fn generate_guards(
             out.push_str(&format!("    let {} = {};\n", binding_name, rewritten));
         }
 
-        // #151 Slice 3 — tree-native requires rendering. One render under
-        // `Binder::SelfAcct("ctx.<state>")` (state receiver) +
-        // `AcctKeyStyle` (account key loads) replaces `bind_state`'s
-        // two-pass string rewrite. The tree path fires only where it
-        // reproduces the legacy receivers exactly:
-        //   - flat state (multi-variant ADT fields route through the
-        //     `.inner.<field>()` accessor — a spec-indexed rewrite the
-        //     Copy render context can't carry), and
-        //   - key-style account reads only (imported-account field reads
-        //     need the `crate::imported` mirror dispatch).
-        // Everything else — and tree-less clauses (IDL ingest, probes) —
-        // keeps the legacy string path.
-        let acct_key_style = match target {
-            Target::Anchor => crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx,
-            Target::Quasar | Target::Pinocchio => {
-                // Pinocchio never reaches here (dedicated emitter above).
-                crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx
-            }
-        };
-        let guard_receiver = state_acct.map(|sa| format!("ctx.{}", sa.name));
-        let spec_is_adt = is_multi_variant_adt_state(spec);
+        emit_requires_guards(
+            &mut out, handler, hm, spec, &surface, target, state_acct, pod_target, &err_enum,
+        );
 
-        for req in &handler.requires {
-            use crate::rust_codegen_util::tree_render::{
-                account_reads_are_key_style, render_rust, tree_references_abstract_binder, Binder,
-                RustCx,
-            };
-            // Emit as a comment for human readers + an executable check.
-            out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
-            let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
-            let raw = if pod_target {
-                req.rust_expr_pod.trim()
-            } else {
-                req.rust_expr.trim()
-            };
-
-            // v2.29 Slice B — abstract-binder defer. The guard runs
-            // before the user's handler body computes the binder; the
-            // verifier still enforces this clause via the binder's
-            // symbolic value. The user should re-assert it in their
-            // handler body after the binder is computed. Structural on
-            // the tree; word-boundary substring scan for legacy strings.
-            let references_abstract = match &req.tree {
-                Some(tree) => tree_references_abstract_binder(tree),
-                None => {
-                    !abstract_binder_names.is_empty()
-                        && abstract_binder_names
-                            .iter()
-                            .any(|name| contains_word_boundary(raw, name))
-                }
-            };
-            if references_abstract {
-                out.push_str(
-                    "    //   DEFERRED — references an `abstract` binder; verifier still\n",
-                );
-                out.push_str(
-                    "    //   enforces the clause symbolically. Re-assert in the handler body\n",
-                );
-                out.push_str(
-                    "    //   after the `let <binder> = …;` line if you want a runtime check.\n",
-                );
-                continue;
-            }
-
-            let rust = match &req.tree {
-                Some(tree) if !spec_is_adt && account_reads_are_key_style(tree) => {
-                    let binder = match &guard_receiver {
-                        Some(receiver) => Binder::SelfAcct(receiver),
-                        // No resolvable state account: the legacy path
-                        // leaves `s.` unbound for the caller to hand-edit
-                        // (R12); `Binder::S` renders the same form.
-                        None => Binder::S,
-                    };
-                    let cx = RustCx::native()
-                        .with_binder(binder)
-                        .with_acct_key(Some(acct_key_style));
-                    let cx = if pod_target {
-                        RustCx { pod: true, ..cx }
-                    } else {
-                        cx
-                    };
-                    render_rust(tree, cx)
-                }
-                Some(_) | None => bind_state(raw),
-            };
-            if let Some(err) = &req.error_name {
-                out.push_str(&format!(
-                    "    if !({}) {{ return Err({}); }}\n",
-                    rust,
-                    surface.error_expr(&err_enum, err),
-                ));
-            } else {
-                // Bare `requires` (no `else <ErrorCode>`). Pre-v2.14 emitted
-                // `debug_assert!`, which silently no-ops in release builds —
-                // every bare requires would skip its check in production.
-                // Emit a real runtime check with `ProgramError::Custom(0xFF)`
-                // (sentinel "predicate violated, no specific error code").
-                // The auditor's `bounty_intent_drift` predicate flags
-                // bare requires as P3 — users should still add an explicit
-                // `else <Error>` for diagnostic clarity, but the check now
-                // runs either way.
-                out.push_str(&format!(
-                    "    if !({}) {{ return Err({}); }}\n",
-                    rust,
-                    surface.generic_error_expr()
-                ));
-            }
-        }
-
-        let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
-        for ab in &handler.aborts_if {
-            let raw = if pod_target {
-                ab.rust_expr_pod.trim()
-            } else {
-                ab.rust_expr.trim()
-            };
-            let rust = bind_state(raw);
-            out.push_str(&format!(
-                "    if ({}) {{ return Err({}); }}\n",
-                rust,
-                surface.error_expr(&err_enum, &ab.error_name),
-            ));
-        }
+        emit_aborts_guards(
+            &mut out, handler, spec, &surface, state_acct, pod_target, &err_enum,
+        );
 
         // R26: lifecycle post-status write — runs after all guards have
         // passed so a failed guard doesn't half-transition. Only emitted
@@ -758,6 +273,478 @@ pub(crate) fn generate_guards(
     out.push_str("// ---- END GENERATED ----\n");
     std::fs::write(src_dir.join("guards.rs"), &out)?;
     Ok(())
+}
+
+/// R28: per-handler PDA verification. R13 suppresses
+/// `seeds = [...]` on Quasar non-init handlers when seeds
+/// reference state fields (the macro's `Bumps::seeds()` method
+/// can't auto-capture `self.<state-field>`). Owner+discriminator
+/// protects against type confusion but not wrong-PDA passing —
+/// the audit's MED-tier finding. Emit a runtime
+/// `verify_program_address` check using the stored bump for
+/// every account whose `seeds = [...]` would have been
+/// suppressed. The cost is one syscall (~544 CU on first-try
+/// bump 255) per affected handler load.
+fn emit_r28_pda_checks(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    target: Target,
+    err_enum: &str,
+) {
+    for acct in &handler.accounts {
+        let Some(ref seeds) = acct.pda_seeds else {
+            continue;
+        };
+        let is_init_target = handler_is_init_for(handler, &acct.name) && !acct.is_signer;
+        if is_init_target {
+            continue; // init flow already verifies via #[account(seeds=…, bump)]
+        }
+        // Was R13 going to suppress on this handler? Mirror the
+        // detection logic from `quasar_account_attr`. Quasar fires on
+        // any state-field seed (its R13 suppression is broader);
+        // Anchor (v2.29 extension) only when the seed references a
+        // variant-payload field on a multi-variant ADT — the
+        // `seeds = [...]` macro can't route through the accessor, so
+        // `quasar_account_attr` suppressed it and the runtime check
+        // emits here instead.
+        let bound_account_names: std::collections::HashSet<&str> =
+            handler.accounts.iter().map(|a| a.name.as_str()).collect();
+        if !r28_pda_check_fires(target, spec, seeds, &bound_account_names) {
+            continue;
+        }
+
+        let mut seed_exprs: Vec<String> = Vec::with_capacity(seeds.len() + 1);
+        for seed in seeds {
+            if let Some(inner) = seed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                seed_exprs.push(format!("b\"{}\"", inner));
+            } else if bound_account_names.contains(seed.as_str()) {
+                // Handler-bound account: read its address.
+                match target {
+                    Target::Anchor => seed_exprs.push(format!("ctx.{}.key().as_ref()", seed)),
+                    _ => seed_exprs
+                        .push(format!("ctx.{}.to_account_view().address().as_ref()", seed)),
+                }
+            } else {
+                // State-field seed: read off the same PDA's stored
+                // value. For multi-variant ADTs on Anchor, route
+                // through the v2.29 Slice B accessor; for Quasar
+                // / flat-state, read the field directly.
+                let is_variant_field = matches!(target, Target::Anchor)
+                    && spec.account_types.iter().any(|a| {
+                        a.variants
+                            .iter()
+                            .any(|v| v.fields.iter().any(|(n, _)| n == seed))
+                    });
+                if is_variant_field {
+                    seed_exprs.push(format!("ctx.{}.inner.{}().as_ref()", acct.name, seed));
+                } else {
+                    seed_exprs.push(format!("ctx.{}.{}.as_ref()", acct.name, seed));
+                }
+            }
+        }
+
+        match target {
+            Target::Anchor => {
+                // Anchor PDA verification uses
+                // `anchor_lang::solana_program::pubkey::Pubkey::
+                // create_program_address` with the stored bump
+                // to avoid the find_program_address syscall cost.
+                seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
+                out.push_str(&format!(
+                    "    // R28 PDA check: ctx.{acct} matches its declared seeds (Anchor)\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        let __expected = anchor_lang::solana_program::pubkey::Pubkey::create_program_address(__seeds, &crate::ID).map_err(|_| {err_enum}::InvalidPda)?;\n        if ctx.{acct}.key() != __expected {{\n            return Err({err_enum}::InvalidPda.into());\n        }}\n    }}\n",
+                    acct = acct.name,
+                    seeds = seed_exprs.join(", "),
+                ));
+            }
+            _ => {
+                seed_exprs.push(format!("&[ctx.{}.bump]", acct.name));
+                out.push_str(&format!(
+                    "    // R28 PDA check: ctx.{acct} matches its declared seeds\n    {{\n        let __seeds: &[&[u8]] = &[{seeds}];\n        if quasar_lang::pda::verify_program_address(__seeds, &crate::ID, ctx.{acct}.to_account_view().address()).is_err() {{\n            return Err(ProgramError::from({err_enum}::InvalidPda));\n        }}\n    }}\n",
+                    acct = acct.name,
+                    seeds = seed_exprs.join(", "),
+                ));
+            }
+        }
+    }
+}
+
+/// R27: token-vault authority binding. The spec declares
+/// `pool_vault : token, authority pool` — meaning the SPL token
+/// account's `owner` field (i.e. the entity that can sign
+/// transfers from it) must equal the `pool` PDA's address. R6
+/// dropped Quasar's `token::authority = X` constraint on
+/// non-init accounts (the macro rejects it without `init`), so
+/// the static check is gone for every load after init. Without
+/// a runtime equivalent the pool_vault parameter could be any
+/// SPL-Token-program-owned account, breaking the deposit/repay/
+/// liquidate transfer routing intent (audit HIGH 5).
+///
+/// Emit a runtime owner check on every non-init token account
+/// that declares `authority X` — the token account's `owner()`
+/// accessor returns the authority address, compared against the
+/// bound account's address.
+fn emit_r27_authority_checks(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    surface: &FrameworkSurface,
+    err_enum: &str,
+) {
+    for acct in &handler.accounts {
+        let is_init_target =
+            handler_is_init_for(handler, &acct.name) && acct.pda_seeds.is_some() && !acct.is_signer;
+        let is_token = acct.account_type.as_deref() == Some("token");
+        if !is_token || is_init_target {
+            continue;
+        }
+        let Some(ref auth_name) = acct.authority else {
+            continue;
+        };
+        let unauthorized = if spec.error_codes.iter().any(|c| c == "Unauthorized") {
+            "Unauthorized"
+        } else {
+            "InvalidLifecycle"
+        };
+        let err_expr = surface.error_expr(err_enum, unauthorized);
+        let check_expr = surface.authority_check_expr(&acct.name, auth_name);
+        out.push_str(&format!(
+            "    // authority: {}\n    if {} {{ return Err({}); }}\n",
+            check_expr, check_expr, err_expr,
+        ));
+    }
+}
+
+/// Rewrite a spec-rendered guard expression for the guards.rs body: bare
+/// handler-account idents (and `<acct>.pubkey`) become runtime address
+/// loads, then the state binder `s.` is rebound to `ctx.<state_acct>.`
+/// (flat state) or the ADT accessor (`(*ctx.<state>.inner.<field>())`).
+/// Free-function sibling of [`bind_pinocchio_expr`]; formerly a 180-line
+/// closure inside `generate_guards`.
+fn bind_state_expr(
+    expr: &str,
+    handler: &ParsedHandler,
+    state_acct: Option<&crate::check::ParsedHandlerAccount>,
+    spec: &ParsedSpec,
+    surface: &FrameworkSurface,
+) -> String {
+    // Bare handler-account idents in spec expressions (e.g. the
+    // `approver` in `state.members[i] == approver`) need to be
+    // lowered to the runtime pubkey load `*ctx.<name>.to_account_view().address()`.
+    // Without this, the spec's signer-binding compiles to `... ==
+    // approver` where `approver` resolves to nothing in scope.
+    let handler_account_names: Vec<String> =
+        handler.accounts.iter().map(|a| a.name.clone()).collect();
+    // v2.29 Slice G.4 — index handler accounts by name so the
+    // `<acct>.<field>` rewriting can dispatch on
+    // `imported_namespace` and route through the local mirror.
+    let handler_accounts_by_name: std::collections::HashMap<
+        &str,
+        &crate::check::ParsedHandlerAccount,
+    > = handler
+        .accounts
+        .iter()
+        .map(|a| (a.name.as_str(), a))
+        .collect();
+    // Step 1: rewrite handler-account idents to address loads.
+    let mut after_accounts = String::with_capacity(expr.len() + 32);
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+        let mut matched = false;
+        if prev_ok {
+            for name in &handler_account_names {
+                let nbytes = name.as_bytes();
+                if i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes {
+                    // Boundary check on the trailing edge: don't
+                    // match `approver_x` when looking for `approver`.
+                    let after = i + nbytes.len();
+                    if after >= bytes.len() || !is_ident_char(bytes[after]) {
+                        // `<acct>.pubkey` is the spec-author's
+                        // way of saying "this account's address"
+                        // — lower to the same address-load form
+                        // we use for bare `<acct>` so a
+                        // `requires acct.pubkey == state.field`
+                        // clause compiles.
+                        let pubkey_marker = b".pubkey";
+                        let after_dot_end = after + pubkey_marker.len();
+                        if after_dot_end <= bytes.len()
+                            && &bytes[after..after_dot_end] == pubkey_marker
+                            && (after_dot_end == bytes.len()
+                                || !is_ident_char(bytes[after_dot_end]))
+                        {
+                            after_accounts.push_str(&surface.account_key_expr(name));
+                            i = after_dot_end;
+                            matched = true;
+                            break;
+                        }
+                        // v2.29 Slice G.4 — `<imported_acct>.<field>`
+                        // routes through the local mirror at
+                        // `crate::imported::<ns>::<Type>`. Multi-
+                        // variant ADT goes through the accessor
+                        // (`(*ctx.<name>.inner.<field>())`); flat
+                        // structs read directly off the wrapper's
+                        // auto-deref (`ctx.<name>.<field>`).
+                        if after < bytes.len() && bytes[after] == b'.' {
+                            if let Some(acct_meta) = handler_accounts_by_name.get(name.as_str()) {
+                                if let (Some(ns), Some(ty)) =
+                                    (&acct_meta.imported_namespace, &acct_meta.account_type)
+                                {
+                                    // Extract the field ident.
+                                    let mut j = after + 1;
+                                    while j < bytes.len() && is_ident_char(bytes[j]) {
+                                        j += 1;
+                                    }
+                                    let field = &expr[after + 1..j];
+                                    if !field.is_empty() {
+                                        let imported_ns = spec.imported_namespaces.get(ns.as_str());
+                                        let imported_ty = imported_ns.and_then(|ins| {
+                                            ins.account_types.iter().find(|a| &a.name == ty)
+                                        });
+                                        let is_multi_variant = imported_ty
+                                            .map(|a| a.variants.len() > 1)
+                                            .unwrap_or(false);
+                                        if is_multi_variant {
+                                            after_accounts.push_str(&format!(
+                                                "(*ctx.{}.inner.{}())",
+                                                name, field
+                                            ));
+                                        } else {
+                                            after_accounts
+                                                .push_str(&format!("ctx.{}.{}", name, field));
+                                        }
+                                        i = j;
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        // Don't rewrite `name.` (field access on
+                        // the handler-account is a different
+                        // expression — keep the `.` access path).
+                        if after >= bytes.len() || bytes[after] != b'.' {
+                            after_accounts.push_str(&surface.account_key_expr(name));
+                            i = after;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !matched {
+            after_accounts.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    // Step 2: rewrite `s.` to `ctx.<state>.` if we have a state
+    // account. Word-bounded so `accounts[i].fee_credits.get()`
+    // doesn't get corrupted to `fee_creditctx.vault.get()`.
+    let Some(sa) = state_acct else {
+        return after_accounts;
+    };
+    // v2.29 Slice B (#12 deep) — when the state is a multi-
+    // variant ADT, fields that live on variant payloads can't
+    // be reached through `ctx.<state>.<field>` directly
+    // (the wrapper only carries `inner`). Route through the
+    // accessor method emitted in generate_state. We look
+    // ahead after each `s.` match to grab the identifier and
+    // dispatch: known variant-payload field → accessor call,
+    // otherwise → the bare `ctx.<state>.<field>` rewrite for
+    // flat-state compatibility.
+    let accessor_fields = adt_accessor_field_names(spec);
+    let bare_target = format!("ctx.{}.", sa.name);
+    let bytes = after_accounts.as_bytes();
+    let mut out = String::with_capacity(after_accounts.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let prev_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+        if prev_ok && i + 1 < bytes.len() && bytes[i] == b's' && bytes[i + 1] == b'.' {
+            // Look ahead to extract the field identifier.
+            let mut j = i + 2;
+            while j < bytes.len() && is_ident_char(bytes[j]) {
+                j += 1;
+            }
+            let field = &after_accounts[i + 2..j];
+            if !field.is_empty() && accessor_fields.contains(field) {
+                // v2.29 Slice B accessor call. Wrap in
+                // parens + deref so subsequent ops (e.g.
+                // `!*paused`, `state.lp_supply.bits`) parse
+                // against the accessor return value.
+                out.push_str(&format!("(*ctx.{}.inner.{}())", sa.name, field));
+                i = j;
+            } else {
+                out.push_str(&bare_target);
+                i += 2;
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Emit the `requires` clause checks for one handler.
+///
+/// #151 Slice 3 — tree-native requires rendering. One render under
+/// `Binder::SelfAcct("ctx.<state>")` (state receiver) +
+/// `AcctKeyStyle` (account key loads) replaces `bind_state`'s
+/// two-pass string rewrite. The tree path fires only where it
+/// reproduces the legacy receivers exactly:
+///   - flat state (multi-variant ADT fields route through the
+///     `.inner.<field>()` accessor — a spec-indexed rewrite the
+///     Copy render context can't carry), and
+///   - key-style account reads only (imported-account field reads
+///     need the `crate::imported` mirror dispatch).
+///
+/// Everything else — and tree-less clauses (IDL ingest, probes) —
+/// keeps the legacy string path.
+// Internal seam of the generate_guards split; the params are the loop-local
+// context, not an API — a carrier struct would just rename them.
+#[allow(clippy::too_many_arguments)]
+fn emit_requires_guards(
+    out: &mut String,
+    handler: &ParsedHandler,
+    hm: &crate::mir::HandlerMir,
+    spec: &ParsedSpec,
+    surface: &FrameworkSurface,
+    target: Target,
+    state_acct: Option<&crate::check::ParsedHandlerAccount>,
+    pod_target: bool,
+    err_enum: &str,
+) {
+    // v2.29 Slice B — collect abstract-binder names. Requires that
+    // reference an abstract binder can't run in the guard fn (the
+    // binder is computed AFTER the guard fires in the handler
+    // scaffold). Defer to the handler body and document the skip.
+    let abstract_binder_names: Vec<&str> = hm
+        .abstract_binders
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+
+    let acct_key_style = match target {
+        Target::Anchor => crate::rust_codegen_util::tree_render::AcctKeyStyle::AnchorCtx,
+        Target::Quasar | Target::Pinocchio => {
+            // Pinocchio never reaches here (dedicated emitter above).
+            crate::rust_codegen_util::tree_render::AcctKeyStyle::QuasarCtx
+        }
+    };
+    let guard_receiver = state_acct.map(|sa| format!("ctx.{}", sa.name));
+    let spec_is_adt = is_multi_variant_adt_state(spec);
+
+    for req in &handler.requires {
+        use crate::rust_codegen_util::tree_render::{
+            account_reads_are_key_style, render_rust, tree_references_abstract_binder, Binder,
+            RustCx,
+        };
+        // Emit as a comment for human readers + an executable check.
+        out.push_str(&format!("    // requires: {}\n", req.lean_expr.trim()));
+        let raw = if pod_target {
+            req.rust_expr_pod.trim()
+        } else {
+            req.rust_expr.trim()
+        };
+
+        // v2.29 Slice B — abstract-binder defer. The guard runs
+        // before the user's handler body computes the binder; the
+        // verifier still enforces this clause via the binder's
+        // symbolic value. The user should re-assert it in their
+        // handler body after the binder is computed. Structural on
+        // the tree; word-boundary substring scan for legacy strings.
+        let references_abstract = match &req.tree {
+            Some(tree) => tree_references_abstract_binder(tree),
+            None => {
+                !abstract_binder_names.is_empty()
+                    && abstract_binder_names
+                        .iter()
+                        .any(|name| contains_word_boundary(raw, name))
+            }
+        };
+        if references_abstract {
+            out.push_str("    //   DEFERRED — references an `abstract` binder; verifier still\n");
+            out.push_str(
+                "    //   enforces the clause symbolically. Re-assert in the handler body\n",
+            );
+            out.push_str(
+                "    //   after the `let <binder> = …;` line if you want a runtime check.\n",
+            );
+            continue;
+        }
+
+        let rust = match &req.tree {
+            Some(tree) if !spec_is_adt && account_reads_are_key_style(tree) => {
+                let binder = match &guard_receiver {
+                    Some(receiver) => Binder::SelfAcct(receiver),
+                    // No resolvable state account: the legacy path
+                    // leaves `s.` unbound for the caller to hand-edit
+                    // (R12); `Binder::S` renders the same form.
+                    None => Binder::S,
+                };
+                let cx = RustCx::native()
+                    .with_binder(binder)
+                    .with_acct_key(Some(acct_key_style));
+                let cx = if pod_target {
+                    RustCx { pod: true, ..cx }
+                } else {
+                    cx
+                };
+                render_rust(tree, cx)
+            }
+            Some(_) | None => bind_state_expr(raw, handler, state_acct, spec, surface),
+        };
+        if let Some(err) = &req.error_name {
+            out.push_str(&format!(
+                "    if !({}) {{ return Err({}); }}\n",
+                rust,
+                surface.error_expr(err_enum, err),
+            ));
+        } else {
+            // Bare `requires` (no `else <ErrorCode>`). Pre-v2.14 emitted
+            // `debug_assert!`, which silently no-ops in release builds —
+            // every bare requires would skip its check in production.
+            // Emit a real runtime check with `ProgramError::Custom(0xFF)`
+            // (sentinel "predicate violated, no specific error code").
+            // The auditor's `bounty_intent_drift` predicate flags
+            // bare requires as P3 — users should still add an explicit
+            // `else <Error>` for diagnostic clarity, but the check now
+            // runs either way.
+            out.push_str(&format!(
+                "    if !({}) {{ return Err({}); }}\n",
+                rust,
+                surface.generic_error_expr()
+            ));
+        }
+    }
+}
+
+/// Emit the `aborts_if` clause checks for one handler.
+fn emit_aborts_guards(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    surface: &FrameworkSurface,
+    state_acct: Option<&crate::check::ParsedHandlerAccount>,
+    pod_target: bool,
+    err_enum: &str,
+) {
+    for ab in &handler.aborts_if {
+        let raw = if pod_target {
+            ab.rust_expr_pod.trim()
+        } else {
+            ab.rust_expr.trim()
+        };
+        let rust = bind_state_expr(raw, handler, state_acct, spec, surface);
+        out.push_str(&format!(
+            "    if ({}) {{ return Err({}); }}\n",
+            rust,
+            surface.error_expr(err_enum, &ab.error_name),
+        ));
+    }
 }
 
 /// True when `expr` references the spec's state binder `s` (a word-bounded
@@ -1013,6 +1000,62 @@ pub(crate) fn emit_pinocchio_guards(
     out.push_str("// ---- END GENERATED ----\n");
     std::fs::write(src_dir.join("guards.rs"), &out)?;
     Ok(())
+}
+
+/// The `on_account` ADT ↔ handler-account naming convention: the account
+/// is named exactly the lowercased ADT, or prefixed by it.
+pub(crate) fn account_name_matches_adt(adt: &str, acct_name: &str) -> bool {
+    let lower = adt.to_lowercase();
+    acct_name == lower || acct_name.starts_with(&lower)
+}
+
+/// True when `handler` is an init transition (`pre_status` Uninitialized /
+/// Empty) targeting the account named `acct_name` — its `on_account` ADT
+/// matches by naming convention, or no `on_account` is declared. Callers
+/// compose their own extra conjuncts (signer / pda_seeds).
+pub(crate) fn handler_is_init_for(handler: &ParsedHandler, acct_name: &str) -> bool {
+    matches!(
+        handler.pre_status.as_deref(),
+        Some("Uninitialized") | Some("Empty")
+    ) && match handler.on_account.as_deref() {
+        Some(adt) => account_name_matches_adt(adt, acct_name),
+        None => true,
+    }
+}
+
+/// R28 firing predicate for one account's `pda_seeds`: does the runtime
+/// PDA verification emit for this (target, seeds) pair? Quasar fires on
+/// any state-field seed (non-literal, not a bound handler account);
+/// Anchor only under a multi-variant ADT state when the seed is a
+/// variant-payload field; Pinocchio never (dedicated emitter). Shared
+/// between `generate_guards` (the check emission) and
+/// `codegen_mir::emit_errors` (the `InvalidPda` variant) so the guard
+/// can't reference a variant the error enum didn't declare.
+pub(crate) fn r28_pda_check_fires(
+    target: Target,
+    spec: &ParsedSpec,
+    seeds: &[String],
+    bound_account_names: &std::collections::HashSet<&str>,
+) -> bool {
+    let is_state_seed = |seed: &String| {
+        let is_literal = seed.starts_with('"') && seed.ends_with('"');
+        !is_literal && !bound_account_names.contains(seed.as_str())
+    };
+    match target {
+        Target::Quasar => seeds.iter().any(is_state_seed),
+        Target::Anchor => {
+            is_multi_variant_adt_state(spec)
+                && seeds.iter().any(|seed| {
+                    is_state_seed(seed)
+                        && spec.account_types.iter().any(|a| {
+                            a.variants
+                                .iter()
+                                .any(|v| v.fields.iter().any(|(n, _)| n == seed))
+                        })
+                })
+        }
+        Target::Pinocchio => false,
+    }
 }
 
 /// Infer the state struct name for a handler account in multi-account specs.

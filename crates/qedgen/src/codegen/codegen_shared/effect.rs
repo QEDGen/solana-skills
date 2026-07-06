@@ -72,36 +72,7 @@ pub(crate) fn rewrite_state_refs_for_self(
     let Some(sa) = resolve_handler_state_account(handler, spec) else {
         return expr.to_string();
     };
-    let multi_variant = is_multi_variant_adt_state(spec);
-    let accessor_fields: std::collections::HashSet<String> = if multi_variant {
-        let mut set = std::collections::HashSet::new();
-        if let Some(acct) = spec.account_types.first() {
-            let mut tys: std::collections::BTreeMap<String, String> =
-                std::collections::BTreeMap::new();
-            let mut consistent: std::collections::BTreeMap<String, bool> =
-                std::collections::BTreeMap::new();
-            for variant in &acct.variants {
-                for (fname, ftype) in &variant.fields {
-                    if let Some(existing) = tys.get(fname) {
-                        if existing != ftype {
-                            consistent.insert(fname.clone(), false);
-                        }
-                    } else {
-                        tys.insert(fname.clone(), ftype.clone());
-                        consistent.insert(fname.clone(), true);
-                    }
-                }
-            }
-            for fname in tys.keys() {
-                if *consistent.get(fname).unwrap_or(&true) {
-                    set.insert(fname.clone());
-                }
-            }
-        }
-        set
-    } else {
-        std::collections::HashSet::new()
-    };
+    let accessor_fields = adt_accessor_field_names(spec);
     let bare_target = format!("self.{}.", sa.name);
     let bytes = expr.as_bytes();
     let mut out = String::with_capacity(expr.len() + 16);
@@ -240,6 +211,30 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
     }
 }
 
+/// Resolve the `(overflow, underflow)` error variants for a checked-arith
+/// lowering site. Three-tiered:
+///   1. per-site `or <Variant>` override (`on_error`),
+///   2. `pragma checked_{over,under}flow_error =` default,
+///   3. built-in `MathOverflow` / `MathUnderflow` — with the back-compat
+///      fallback: `MathOverflow` declared without `MathUnderflow` keeps
+///      `-=` raising `MathOverflow` so existing specs build.
+pub(crate) fn checked_arith_error_variants<'a>(
+    spec: &'a ParsedSpec,
+    on_error: Option<&'a str>,
+) -> (&'a str, &'a str) {
+    let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
+    let pragma_overflow = spec.pragma_value("checked_overflow_error");
+    let pragma_underflow = spec.pragma_value("checked_underflow_error");
+    let builtin_underflow = if has_decl("MathUnderflow") || !has_decl("MathOverflow") {
+        "MathUnderflow"
+    } else {
+        "MathOverflow"
+    };
+    let overflow_variant = on_error.or(pragma_overflow).unwrap_or("MathOverflow");
+    let underflow_variant = on_error.or(pragma_underflow).unwrap_or(builtin_underflow);
+    (overflow_variant, underflow_variant)
+}
+
 /// Try to translate a single effect tuple to a real Rust statement. Returns
 /// None when the RHS is too complex for mechanical expansion (match/arith/
 /// pre-rendered Lean form); the caller falls through to a `todo!()` so an
@@ -322,18 +317,7 @@ pub(crate) fn mechanize_effect(
     //   2. `pragma checked_{over,under}flow_error =` default,
     //   3. built-in `MathOverflow` / `MathUnderflow`.
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
-    let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
-    let pragma_overflow = spec.pragma_value("checked_overflow_error");
-    let pragma_underflow = spec.pragma_value("checked_underflow_error");
-    // Back-compat: MathOverflow declared without MathUnderflow keeps `-=`
-    // raising MathOverflow so existing specs build.
-    let builtin_underflow = if has_decl("MathUnderflow") || !has_decl("MathOverflow") {
-        "MathUnderflow"
-    } else {
-        "MathOverflow"
-    };
-    let overflow_variant = on_error.or(pragma_overflow).unwrap_or("MathOverflow");
-    let underflow_variant = on_error.or(pragma_underflow).unwrap_or(builtin_underflow);
+    let (overflow_variant, underflow_variant) = checked_arith_error_variants(spec, on_error);
     // Quasar's `#[account]` auto-wraps integer fields in Pod companions
     // (u64 → PodU64). Plain `=` / `wrapping_*` between u64 and PodU64
     // don't type-check, so on Quasar: `set` rhs gets `.into()`;
@@ -442,16 +426,7 @@ pub(crate) fn mechanize_effect_destructured(
     };
 
     let err_enum = format!("{}Error", to_pascal_case(&spec.program_name));
-    let has_decl = |name: &str| spec.error_codes.iter().any(|c| c == name);
-    let pragma_overflow = spec.pragma_value("checked_overflow_error");
-    let pragma_underflow = spec.pragma_value("checked_underflow_error");
-    let builtin_underflow = if has_decl("MathUnderflow") || !has_decl("MathOverflow") {
-        "MathUnderflow"
-    } else {
-        "MathOverflow"
-    };
-    let overflow_variant = on_error.or(pragma_overflow).unwrap_or("MathOverflow");
-    let underflow_variant = on_error.or(pragma_underflow).unwrap_or(builtin_underflow);
+    let (overflow_variant, underflow_variant) = checked_arith_error_variants(spec, on_error);
 
     // Scalars need an explicit deref to write through `&mut T`;
     // indexed access through `&mut [T; N]` works as-is.
@@ -913,7 +888,7 @@ pub(crate) fn emit_variant_auth_guard(
     let Some(ref who) = handler.who else {
         return String::new();
     };
-    if !crate::check::is_multi_variant_adt_with_field_in_variant(spec, who) {
+    if !is_multi_variant_adt_with_field_in_variant(spec, who) {
         return String::new();
     }
     let Some(ref pre) = handler.pre_status else {

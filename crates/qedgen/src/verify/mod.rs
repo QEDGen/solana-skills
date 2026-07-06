@@ -42,6 +42,51 @@ pub struct BackendReport {
     pub axioms: Vec<AxiomDependency>,
 }
 
+impl BackendReport {
+    /// Base constructor: `duration_ms` measured from `start`, no log path,
+    /// empty counterexample/axiom lists. Status-specific wrappers below.
+    pub fn new(
+        name: &'static str,
+        status: BackendStatus,
+        start: Instant,
+        detail: Option<String>,
+    ) -> Self {
+        BackendReport {
+            name,
+            status,
+            duration_ms: start.elapsed().as_millis(),
+            detail,
+            log_path: None,
+            counterexamples: Vec::new(),
+            axioms: Vec::new(),
+        }
+    }
+
+    pub fn passed(name: &'static str, start: Instant, detail: Option<String>) -> Self {
+        Self::new(name, BackendStatus::Passed, start, detail)
+    }
+
+    pub fn failed(name: &'static str, start: Instant, detail: Option<String>) -> Self {
+        Self::new(name, BackendStatus::Failed, start, detail)
+    }
+
+    pub fn skipped(name: &'static str, start: Instant, detail: Option<String>) -> Self {
+        Self::new(name, BackendStatus::Skipped, start, detail)
+    }
+
+    /// Attach structured counterexamples (Failed reports).
+    pub fn with_counterexamples(mut self, cxs: Vec<Counterexample>) -> Self {
+        self.counterexamples = cxs;
+        self
+    }
+
+    /// Attach the axiom trust-surface report (`lean` backend).
+    pub fn with_axioms(mut self, axioms: Vec<AxiomDependency>) -> Self {
+        self.axioms = axioms;
+        self
+    }
+}
+
 /// One theorem's dependence on unverified axioms. Lean built-ins
 /// (`LEAN_BUILTIN_AXIOMS`) are filtered before construction — what remains is
 /// the user-meaningful trust surface: bundled-callee `*.ensures_axiom_*`
@@ -81,6 +126,90 @@ pub struct VerifyOpts {
     pub miri: bool,
     /// Project root for Miri repro discovery (typically the spec's parent dir).
     pub project_root: PathBuf,
+}
+
+/// `qedgen verify --require-verified` pre-check: every imported interface
+/// with `ensures` clauses must ship a Lake-buildable proof package —
+/// results against a not-fully-proven dep graph still rest on Stance-1
+/// axiom discharge. Prints the CRIT findings and exits(1) on failure
+/// (fail fast, before any backend dispatches).
+pub fn require_verified_gate(parsed: &crate::check::ParsedSpec) {
+    let findings = crate::check::collect_require_verified_findings(parsed);
+    if !findings.is_empty() {
+        eprintln!(
+            "--require-verified: {} unverified import(s) — every imported interface \
+             with `ensures` clauses must ship a Lake-buildable proof package.",
+            findings.len(),
+        );
+        for f in &findings {
+            eprintln!("  [CRIT] {}: unverified callee", f.interface_name);
+            eprintln!("         {}", f.fix_hint);
+        }
+        std::process::exit(1);
+    }
+}
+
+/// `qedgen verify --recursive`: `lake build` every imported proof package
+/// (resolver returns DFS-pre-order = bottom-up, cycle-detected). Keeps
+/// walking on failure so every breakage shows; aggregate exit(1) at the
+/// end. Empty list = no-op success.
+pub fn recursive_lake_walk(parsed: &crate::check::ParsedSpec) {
+    if parsed.verified_proof_pkgs.is_empty() {
+        eprintln!(
+            "--recursive: no imported proof packages in this spec's dep graph; \
+             nothing to walk."
+        );
+    } else {
+        eprintln!(
+            "--recursive: walking {} verified provider proof package(s) bottom-up.",
+            parsed.verified_proof_pkgs.len(),
+        );
+        let mut any_failed = false;
+        for (idx, pkg_root) in parsed.verified_proof_pkgs.iter().enumerate() {
+            eprintln!(
+                "  [{}/{}] lake build — {}",
+                idx + 1,
+                parsed.verified_proof_pkgs.len(),
+                pkg_root.display(),
+            );
+            match Command::new("lake")
+                .arg("build")
+                .current_dir(pkg_root)
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    eprintln!("       PASS");
+                }
+                Ok(out) => {
+                    any_failed = true;
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    eprintln!("       FAIL");
+                    // First ~10 lines of each stream — the head
+                    // usually identifies the failure.
+                    for line in stderr.lines().take(10) {
+                        eprintln!("         | {}", line);
+                    }
+                    for line in stdout.lines().take(10) {
+                        eprintln!("         | {}", line);
+                    }
+                }
+                Err(e) => {
+                    any_failed = true;
+                    eprintln!("       ERROR: failed to spawn `lake build`: {}", e);
+                }
+            }
+        }
+        if any_failed {
+            eprintln!(
+                "--recursive: at least one provider's Lake build failed; the dep \
+                 graph is NOT fully proven. Fix the provider(s) above before \
+                 trusting this consumer's Stance-2 axioms."
+            );
+            std::process::exit(1);
+        }
+        eprintln!("--recursive: every imported proof package built clean.");
+    }
 }
 
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
@@ -164,33 +293,25 @@ fn run_proptest(harness: &Path) -> BackendReport {
     let start = Instant::now();
 
     if !harness.exists() {
-        return BackendReport {
-            name: "proptest",
-            status: BackendStatus::Skipped,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!(
+        return BackendReport::skipped(
+            "proptest",
+            start,
+            Some(format!(
                 "harness not found at {} (run `qedgen codegen --proptest`)",
                 harness.display()
             )),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        );
     }
 
     // Run from the harness's nearest Cargo.toml ancestor.
     let crate_dir = match nearest_cargo_dir(harness) {
         Some(dir) => dir,
         None => {
-            return BackendReport {
-                name: "proptest",
-                status: BackendStatus::Failed,
-                duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!("no Cargo.toml found above {}", harness.display())),
-                log_path: None,
-                counterexamples: Vec::new(),
-                axioms: Vec::new(),
-            };
+            return BackendReport::failed(
+                "proptest",
+                start,
+                Some(format!("no Cargo.toml found above {}", harness.display())),
+            );
         }
     };
 
@@ -205,18 +326,8 @@ fn run_proptest(harness: &Path) -> BackendReport {
         .current_dir(&crate_dir)
         .output();
 
-    let duration_ms = start.elapsed().as_millis();
-
     match output {
-        Ok(out) if out.status.success() => BackendReport {
-            name: "proptest",
-            status: BackendStatus::Passed,
-            duration_ms,
-            detail: None,
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        },
+        Ok(out) if out.status.success() => BackendReport::passed("proptest", start, None),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -228,25 +339,18 @@ fn run_proptest(harness: &Path) -> BackendReport {
                 cx.seed =
                     crate::verify_proptest_parse::read_seed_for_harness(&crate_dir, test_name);
             }
-            BackendReport {
-                name: "proptest",
-                status: BackendStatus::Failed,
-                duration_ms,
-                detail: Some(summarize_cargo_failure(&stdout, &stderr)),
-                log_path: None,
-                counterexamples: cxs,
-                axioms: Vec::new(),
-            }
+            BackendReport::failed(
+                "proptest",
+                start,
+                Some(summarize_cargo_failure(&stdout, &stderr)),
+            )
+            .with_counterexamples(cxs)
         }
-        Err(e) => BackendReport {
-            name: "proptest",
-            status: BackendStatus::Failed,
-            duration_ms,
-            detail: Some(format!("failed to spawn cargo: {}", e)),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        },
+        Err(e) => BackendReport::failed(
+            "proptest",
+            start,
+            Some(format!("failed to spawn cargo: {}", e)),
+        ),
     }
 }
 
@@ -254,60 +358,36 @@ fn run_kani(harness: &Path) -> BackendReport {
     let start = Instant::now();
 
     if !harness.exists() {
-        return BackendReport {
-            name: "kani",
-            status: BackendStatus::Skipped,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!(
+        return BackendReport::skipped(
+            "kani",
+            start,
+            Some(format!(
                 "harness not found at {} (run `qedgen codegen --kani`)",
                 harness.display()
             )),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        );
     }
 
     // Surface a missing cargo-kani as a Failed backend with the install hint,
     // not an opaque spawn error.
     if let Err(e) = crate::deps::require_kani() {
-        return BackendReport {
-            name: "kani",
-            status: BackendStatus::Failed,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!("{}", e)),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        return BackendReport::failed("kani", start, Some(format!("{}", e)));
     }
 
     // Harnesses routing effects to `bin = "z3"` (wide-type mul/div) need z3
     // preflighted — otherwise Kani dies with an opaque cbmc spawn error.
     if let Err(e) = crate::deps::require_z3_if_kani_harness_needs_it(harness) {
-        return BackendReport {
-            name: "kani",
-            status: BackendStatus::Failed,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!("{}", e)),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        return BackendReport::failed("kani", start, Some(format!("{}", e)));
     }
 
     let kani_crate = match prepare_standalone_kani_crate(harness) {
         Ok(dir) => dir,
         Err(e) => {
-            return BackendReport {
-                name: "kani",
-                status: BackendStatus::Failed,
-                duration_ms: start.elapsed().as_millis(),
-                detail: Some(format!("failed to prepare standalone Kani crate: {}", e)),
-                log_path: None,
-                counterexamples: Vec::new(),
-                axioms: Vec::new(),
-            };
+            return BackendReport::failed(
+                "kani",
+                start,
+                Some(format!("failed to prepare standalone Kani crate: {}", e)),
+            );
         }
     };
 
@@ -318,43 +398,30 @@ fn run_kani(harness: &Path) -> BackendReport {
         .current_dir(kani_crate.path())
         .output();
 
-    let duration_ms = start.elapsed().as_millis();
-
     match output {
-        Ok(out) if out.status.success() => BackendReport {
-            name: "kani",
-            status: BackendStatus::Passed,
-            duration_ms,
-            detail: Some(summarize_kani_pass(&String::from_utf8_lossy(&out.stdout))),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        },
+        Ok(out) if out.status.success() => BackendReport::passed(
+            "kani",
+            start,
+            Some(summarize_kani_pass(&String::from_utf8_lossy(&out.stdout))),
+        ),
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             // Counterexamples come exclusively from stdout (cargo-kani routes
             // verdicts there); stderr is build noise folded into `detail` only.
             let cxs = crate::verify_kani_parse::parse_failures(&stdout);
-            BackendReport {
-                name: "kani",
-                status: BackendStatus::Failed,
-                duration_ms,
-                detail: Some(summarize_kani_failure(&stdout, &stderr)),
-                log_path: None,
-                counterexamples: cxs,
-                axioms: Vec::new(),
-            }
+            BackendReport::failed(
+                "kani",
+                start,
+                Some(summarize_kani_failure(&stdout, &stderr)),
+            )
+            .with_counterexamples(cxs)
         }
-        Err(e) => BackendReport {
-            name: "kani",
-            status: BackendStatus::Failed,
-            duration_ms,
-            detail: Some(format!("failed to spawn cargo kani: {}", e)),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        },
+        Err(e) => BackendReport::failed(
+            "kani",
+            start,
+            Some(format!("failed to spawn cargo kani: {}", e)),
+        ),
     }
 }
 
@@ -362,18 +429,14 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
     let start = Instant::now();
 
     if !lean_dir.join("lakefile.lean").exists() && !lean_dir.join("lakefile.toml").exists() {
-        return BackendReport {
-            name: "lean",
-            status: BackendStatus::Skipped,
-            duration_ms: start.elapsed().as_millis(),
-            detail: Some(format!(
+        return BackendReport::skipped(
+            "lean",
+            start,
+            Some(format!(
                 "no lakefile in {} (run `qedgen codegen --lean`)",
                 lean_dir.display()
             )),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        };
+        );
     }
 
     let output = Command::new("lake")
@@ -381,48 +444,30 @@ fn run_lean(lean_dir: &Path) -> BackendReport {
         .current_dir(lean_dir)
         .output();
 
-    let duration_ms = start.elapsed().as_millis();
-
     match output {
         Ok(out) if out.status.success() => {
             // Soft-failing: if the axiom query can't run, report an empty
             // list rather than failing the verify.
             let axioms = collect_axiom_report(lean_dir).unwrap_or_default();
-            BackendReport {
-                name: "lean",
-                status: BackendStatus::Passed,
-                duration_ms,
-                detail: None,
-                log_path: None,
-                counterexamples: Vec::new(),
-                axioms,
-            }
+            BackendReport::passed("lean", start, None).with_axioms(axioms)
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stdout = String::from_utf8_lossy(&out.stdout);
-            BackendReport {
-                name: "lean",
-                status: BackendStatus::Failed,
-                duration_ms,
-                detail: Some(summarize_lake_failure(&stdout, &stderr)),
-                log_path: None,
-                counterexamples: Vec::new(),
-                axioms: Vec::new(),
-            }
+            BackendReport::failed(
+                "lean",
+                start,
+                Some(summarize_lake_failure(&stdout, &stderr)),
+            )
         }
-        Err(e) => BackendReport {
-            name: "lean",
-            status: BackendStatus::Failed,
-            duration_ms,
-            detail: Some(format!(
+        Err(e) => BackendReport::failed(
+            "lean",
+            start,
+            Some(format!(
                 "failed to spawn lake: {} (is lean/lake on PATH?)",
                 e
             )),
-            log_path: None,
-            counterexamples: Vec::new(),
-            axioms: Vec::new(),
-        },
+        ),
     }
 }
 

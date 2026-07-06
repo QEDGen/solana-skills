@@ -38,7 +38,7 @@ pub struct RegenDriftReport {
 }
 
 impl RegenDriftReport {
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // production reads the fields directly; kept as the test-side summary
     pub fn has_issues(&self) -> bool {
         !self.missing_manifests.is_empty() || !self.drift.is_empty()
     }
@@ -52,7 +52,7 @@ struct Example {
 }
 
 /// Default Check-mode entrypoint kept for test consumers.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))] // production passes an explicit WriteMode via check_examples_with; kept as the test entry
 pub fn check_examples(examples_root: &Path) -> Result<RegenDriftReport> {
     check_examples_with(examples_root, WriteMode::Check)
 }
@@ -403,14 +403,18 @@ fn generate_existing_artifacts(root: &Path, temp_root: &Path, spec_path: &Path) 
     if root.join("programs/src/tests.rs").is_file() {
         crate::unit_test::generate(spec_path, &temp_root.join("programs/src/tests.rs"))?;
     }
-    if root.join("src/integration_tests.rs").is_file() {
-        crate::integration_test::generate(spec_path, &temp_root.join("src/integration_tests.rs"))?;
-    }
-    if root.join("programs/src/integration_tests.rs").is_file() {
-        crate::integration_test::generate(
-            spec_path,
-            &temp_root.join("programs/src/integration_tests.rs"),
-        )?;
+    // `src/` variants are the pre-v2.41 default; kept for existing projects.
+    for rel in [
+        "tests/integration_tests.rs",
+        "programs/tests/integration_tests.rs",
+        "tests/integration_tests.rs",
+        "programs/tests/integration_tests.rs",
+        "src/integration_tests.rs",
+        "programs/src/integration_tests.rs",
+    ] {
+        if root.join(rel).is_file() {
+            crate::integration_test::generate(spec_path, &temp_root.join(rel))?;
+        }
     }
     if let Some((parsed, mir)) = &mir_ctx {
         if root.join("formal_verification/Spec.lean").is_file() {
@@ -451,6 +455,8 @@ fn comparable_paths(root: &Path, generated_root: &Path) -> Result<Vec<PathBuf>> 
         "programs/tests/proptest.rs",
         "src/tests.rs",
         "programs/src/tests.rs",
+        "tests/integration_tests.rs",
+        "programs/tests/integration_tests.rs",
         "src/integration_tests.rs",
         "programs/src/integration_tests.rs",
         // Spec.lean is intentionally NOT compared: codegen emits `sorry`

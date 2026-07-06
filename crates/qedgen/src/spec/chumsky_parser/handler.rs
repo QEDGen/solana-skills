@@ -17,6 +17,26 @@ pub(super) fn handler_param<'a>() -> impl Parser<'a, &'a str, TypedField, Err<'a
         .map(|(name, ty)| TypedField { name, ty })
 }
 
+/// `name = expr` — one keyword argument inside a `call(...)` arg list.
+fn call_kw_arg<'a>() -> impl Parser<'a, &'a str, CallArg, Err<'a>> + Clone {
+    non_keyword_ident()
+        .then_ignore(wsc())
+        .then_ignore(just('='))
+        .then_ignore(wsc())
+        .then(expr())
+        .map(|(name, value)| CallArg { name, value })
+}
+
+/// Comma-separated `name = expr` list (trailing comma allowed) — the
+/// `call Target.handler(...)` argument grammar.
+fn call_kw_args<'a>() -> impl Parser<'a, &'a str, Vec<CallArg>, Err<'a>> + Clone {
+    call_kw_arg()
+        .then_ignore(wsc())
+        .separated_by(just(',').then_ignore(wsc()))
+        .allow_trailing()
+        .collect::<Vec<CallArg>>()
+}
+
 pub(super) fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a>> + Clone {
     let pda_attr = just("pda")
         .then_ignore(wsc())
@@ -28,7 +48,7 @@ pub(super) fn account_attr<'a>() -> impl Parser<'a, &'a str, AccountAttr, Err<'a
             // `b"vault"` byte-string literals and the latter as
             // `<name>.key().as_ref()` Pubkey accessors. We mark literals by
             // re-attaching the quote chars; the consumer in
-            // `check.rs::quasar_account_attr` splits on leading `"`.
+            // `codegen_shared::quasar_account_attr` splits on leading `"`.
             choice((
                 string_lit().map(|s| format!("\"{}\"", s)),
                 non_keyword_ident(),
@@ -129,14 +149,7 @@ pub(super) fn effect_stmt<'a>() -> impl Parser<'a, &'a str, EffectStmt, Err<'a>>
 /// a `match`-shape branch.
 pub(super) fn effect_block<'a>() -> impl Parser<'a, &'a str, EffectBlock, Err<'a>> + Clone {
     recursive(|effect_block| {
-        let wildcard_pat = just('_')
-            .then(
-                any::<&'a str, Err<'a>>()
-                    .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                    .rewind()
-                    .not(),
-            )
-            .to(EffectPattern::Wildcard);
+        let wildcard_pat = bare_kw("_").to(EffectPattern::Wildcard);
         let literal_pat = integer().map(EffectPattern::Literal);
         let pattern = choice((wildcard_pat, literal_pat));
 
@@ -261,18 +274,7 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
                 .then_ignore(wsc())
                 .then_ignore(just('('))
                 .then_ignore(wsc())
-                .then(
-                    non_keyword_ident()
-                        .then_ignore(wsc())
-                        .then_ignore(just('='))
-                        .then_ignore(wsc())
-                        .then(expr())
-                        .map(|(name, value)| CallArg { name, value })
-                        .then_ignore(wsc())
-                        .separated_by(just(',').then_ignore(wsc()))
-                        .allow_trailing()
-                        .collect::<Vec<CallArg>>(),
-                )
+                .then(call_kw_args())
                 .then_ignore(wsc())
                 .then_ignore(just(')'))
                 .map(|(target, args)| LetRhs::Call(target, args)),
@@ -317,23 +319,13 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
     // captured as `MatchBody::Call`, expanded into a synthetic handler
     // issuing the CPI just like `MatchBody::Effect` expands to a per-arm
     // effect handler (outcome-conditional CPI).
-    let match_call_args = non_keyword_ident()
-        .then_ignore(wsc())
-        .then_ignore(just('='))
-        .then_ignore(wsc())
-        .then(expr())
-        .map(|(name, value)| CallArg { name, value })
-        .then_ignore(wsc())
-        .separated_by(just(',').then_ignore(wsc()))
-        .allow_trailing()
-        .collect::<Vec<CallArg>>();
     let match_call = just("call")
         .then_ignore(wsc())
         .ignore_then(qualified_path())
         .then_ignore(wsc())
         .then_ignore(just('('))
         .then_ignore(wsc())
-        .then(match_call_args)
+        .then(call_kw_args())
         .then_ignore(wsc())
         .then_ignore(just(')'))
         .map(|(target, args)| {
@@ -375,14 +367,7 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
     // ML-style arms:
     //   | <expr> => <body>
     //   | _      => <body>     (wildcard / fallthrough)
-    let wildcard_guard = just('_')
-        .then(
-            any::<&'a str, Err<'a>>()
-                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                .rewind()
-                .not(),
-        )
-        .to(None::<Node<Expr>>);
+    let wildcard_guard = bare_kw("_").to(None::<Node<Expr>>);
     let arm_guard = choice((wildcard_guard, expr().map(Some)));
     let match_arm = just('|')
         .then_ignore(wsc())
@@ -501,14 +486,6 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
         .ignore_then(non_keyword_ident())
         .map(HandlerClause::Include);
 
-    // call Target.handler(name = expr, name = expr, ...)
-    let call_kw_arg = non_keyword_ident()
-        .then_ignore(wsc())
-        .then_ignore(just('='))
-        .then_ignore(wsc())
-        .then(expr())
-        .map(|(name, value)| CallArg { name, value });
-
     // `state_binders { callee_field = state.X, ... }` sub-block: maps each
     // callee-side abstract field (LHS) to a caller-side state path (RHS).
     // Contextual — the token is only recognized inside a `call(...)` arg
@@ -551,7 +528,7 @@ pub(super) fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Er
     }
     let call_arg_item = choice((
         state_binders_block.map(CallArgItem::Binders),
-        call_kw_arg.map(CallArgItem::Kw),
+        call_kw_arg().map(CallArgItem::Kw),
     ));
 
     // Optional `let <ident> = ` prefix binds the call's return value;

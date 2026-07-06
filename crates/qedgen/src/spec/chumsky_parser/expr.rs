@@ -8,6 +8,27 @@ use super::*;
 // Expressions (the main win of the typed AST)
 // ----------------------------------------------------------------------------
 
+/// `name()` — a zero-arg builtin atom parsing to
+/// `Expr::App { func: name, args: [] }` (e.g. `now()`, `current_epoch()`).
+fn zero_arg_builtin<'a>(
+    name: &'static str,
+) -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
+    bare_kw(name)
+        .then_ignore(wsc())
+        .ignore_then(just('('))
+        .then_ignore(wsc())
+        .then_ignore(just(')'))
+        .map_with(move |_, e| {
+            Node::new(
+                Expr::App {
+                    func: name.to_string(),
+                    args: vec![],
+                },
+                e.span().into_range(),
+            )
+        })
+}
+
 pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clone {
     recursive(|expr| {
         let int = integer().map_with(|v, e| Node::new(Expr::Int(v), e.span().into_range()));
@@ -123,13 +144,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             let e1 = expr.clone();
             let e2 = expr.clone();
             let e3 = expr.clone();
-            just(kw_name)
-                .then(
-                    any::<&'a str, Err<'a>>()
-                        .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                        .rewind()
-                        .not(),
-                )
+            bare_kw(kw_name)
                 .then_ignore(wsc())
                 .ignore_then(just('('))
                 .then_ignore(wsc())
@@ -169,50 +184,12 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
         // Lean axiomatized `QEDGen.Solana.Valid.now`, Kani/proptest
         // `any::<u64>()`. Parses to `Expr::App { func: "now", args: [] }`,
         // special-cased in `chumsky_adapter::expr_to_rust` / `expr_to_lean`.
-        let now_atom = just("now")
-            .then(
-                any::<&'a str, Err<'a>>()
-                    .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                    .rewind()
-                    .not(),
-            )
-            .then_ignore(wsc())
-            .ignore_then(just('('))
-            .then_ignore(wsc())
-            .then_ignore(just(')'))
-            .map_with(|_, e| {
-                Node::new(
-                    Expr::App {
-                        func: "now".to_string(),
-                        args: vec![],
-                    },
-                    e.span().into_range(),
-                )
-            });
+        let now_atom = zero_arg_builtin("now");
 
         // `current_epoch()` — like `now()` but Rust reads
         // `Clock::get().unwrap().epoch`; Lean axiomatizes
         // `QEDGen.Solana.Valid.current_epoch : Nat`.
-        let current_epoch_atom = just("current_epoch")
-            .then(
-                any::<&'a str, Err<'a>>()
-                    .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
-                    .rewind()
-                    .not(),
-            )
-            .then_ignore(wsc())
-            .ignore_then(just('('))
-            .then_ignore(wsc())
-            .then_ignore(just(')'))
-            .map_with(|_, e| {
-                Node::new(
-                    Expr::App {
-                        func: "current_epoch".to_string(),
-                        args: vec![],
-                    },
-                    e.span().into_range(),
-                )
-            });
+        let current_epoch_atom = zero_arg_builtin("current_epoch");
 
         // Generic function application: `f(arg1, arg2, ...)`.
         // Must precede path_expr in the atom choice (both start with ident);

@@ -149,10 +149,10 @@ pub fn resolve_state_fields(spec: &ParsedSpec) -> &[(String, String)] {
     }
 }
 
-/// Every declared state field flows through here (the "mutable" naming is
-/// historical; Pubkey fields are first-class since they lower to
-/// `[u8; 32]`).
-pub fn mutable_fields(fields: &[(String, String)]) -> Vec<&(String, String)> {
+/// Borrow every declared state field (was `mutable_fields` — the "mutable"
+/// naming was historical; Pubkey fields are first-class since they lower to
+/// `[u8; 32]`, so nothing is filtered).
+pub fn field_refs(fields: &[(String, String)]) -> Vec<&(String, String)> {
     fields.iter().collect()
 }
 

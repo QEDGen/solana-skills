@@ -277,17 +277,15 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
     rust_codegen_util::check_effect_targets(spec)?;
 
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("tests/proptest.rs")
-        .cloned()
-        .unwrap_or_default();
 
     let is_multi = spec.account_types.len() > 1;
 
     let mut out = String::new();
 
-    out.push_str(&crate::banner::banner(None, &hash));
+    out.push_str(&crate::codegen_shared::marker_unlabeled(
+        &fp,
+        "tests/proptest.rs",
+    ));
     out.push_str("//\n");
     out.push_str("// Proptest harnesses — property-based testing for the spec's state machine.\n");
     out.push_str(
@@ -310,11 +308,11 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
     // against a 99-field flat State) only above 32 fields so small specs
     // keep the rustc default; bigger specs fail with the same clear
     // diagnostic and can override locally.
-    let total_field_count: usize = rust_codegen_util::mutable_fields(&spec.state_fields).len()
+    let total_field_count: usize = rust_codegen_util::field_refs(&spec.state_fields).len()
         + spec
             .account_types
             .iter()
-            .map(|a| rust_codegen_util::mutable_fields(&a.fields).len())
+            .map(|a| rust_codegen_util::field_refs(&a.fields).len())
             .sum::<usize>();
     if total_field_count > 32 {
         out.push_str("#![recursion_limit = \"512\"]\n\n");
@@ -351,7 +349,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
     if is_multi {
         // Multi-account: generate per-account sections in separate modules
         for acct in &spec.account_types {
-            let acct_fields = rust_codegen_util::mutable_fields(&acct.fields);
+            let acct_fields = rust_codegen_util::field_refs(&acct.fields);
             if acct_fields.is_empty() {
                 continue;
             }
@@ -406,7 +404,7 @@ fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
             .chain(spec.ghosts.iter().map(|g| (g.name.clone(), g.ty.clone())))
             .collect();
         let state_fields: &[(String, String)] = &state_fields_owned;
-        let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+        let mutable_fields = rust_codegen_util::field_refs(state_fields);
         let all_handlers: Vec<&ParsedHandler> = spec.handlers.iter().collect();
         let all_props: Vec<&ParsedProperty> = spec.properties.iter().collect();
         emit_account_section(
@@ -499,74 +497,18 @@ fn emit_account_section(
         spec,
     )?;
 
-    // Property predicates
+    // Property predicates — shared emitter with the Kani backend
+    // (`rust_codegen_util::emit_property_predicates_with`), wrapping
+    // arithmetic (proptest evaluates predicates on arbitrary states).
     let props_with_expr: Vec<&&ParsedProperty> = properties
         .iter()
         .filter(|p| p.expression.is_some())
         .collect();
-    if !props_with_expr.is_empty() {
-        for prop in &props_with_expr {
-            // Tree-native math-exact rendering (issue #146); string
-            // fallbacks for tree-less properties (see
-            // `property_predicate_rust`).
-            let Some(rust_expr) = rust_codegen_util::property_predicate_rust(prop, true) else {
-                continue;
-            };
-            let doc = prop.expression.as_deref().unwrap_or("");
-            out.push_str(&format!("/// {}: {}\n", prop.name, doc));
-            // Binary properties (body contains `old(...)`) emit
-            // `fn p(pre: &State, post: &State)` over the binary-rendered body
-            // (`state.x` → `post.x`, `old(state.x)` → `pre.x`, set by the
-            // adapter at parse time). Unary properties keep `fn p(s: &State)`;
-            // the preservation harness dispatches arity on `prop.class`.
-            let is_binary = prop.class == crate::check::PropertyClass::Binary;
-            let signature = if is_binary {
-                format!("fn {}(pre: &State, post: &State) -> bool", prop.name)
-            } else {
-                format!("fn {}(s: &State) -> bool", prop.name)
-            };
-            // Underscore params on stub bodies (`true` /
-            // unsupported_quantifier) to avoid unused_variables warnings.
-            let unused_signature = if is_binary {
-                format!("fn {}(_pre: &State, _post: &State) -> bool", prop.name)
-            } else {
-                format!("fn {}(_s: &State) -> bool", prop.name)
-            };
-            if crate::check::rust_expr_is_unsupported(&rust_expr) {
-                out.push_str(&format!("{} {{\n", unused_signature));
-                out.push_str(&format!(
-                    "    // {} — property uses a quantifier; not lowerable to a predicate.\n",
-                    rust_expr.trim()
-                ));
-                out.push_str("    true\n");
-                out.push_str("}\n\n");
-            } else {
-                out.push_str(&format!("{} {{\n", signature));
-                out.push_str(&format!("    {}\n", rust_expr));
-                out.push_str("}\n\n");
-            }
-            // Per-slot form: `forall <binder>` properties too wide for
-            // proptest exhaustion get an `_at` variant checking one slot.
-            // Checking at the modified slot suffices for inductive
-            // preservation — handlers only mutate state.<arr>[binder]; the
-            // rest is held fixed by frame condition.
-            if let Some(slot) = &prop.per_slot {
-                let rust_ty = map_type(&slot.binder_type, spec)
-                    .ok()
-                    .unwrap_or_else(|| slot.binder_type.clone());
-                out.push_str(&format!(
-                    "/// {}: per-slot check at `{}: {}`\n",
-                    prop.name, slot.binder_name, slot.binder_type
-                ));
-                out.push_str(&format!(
-                    "fn {}_at(s: &State, {}: {}) -> bool {{\n",
-                    prop.name, slot.binder_name, rust_ty
-                ));
-                out.push_str(&format!("    {}\n", slot.rust_body));
-                out.push_str("}\n\n");
-            }
-        }
-    }
+    let owned_props_for_predicates: Vec<ParsedProperty> =
+        properties.iter().map(|p| (*p).clone()).collect();
+    rust_codegen_util::emit_property_predicates_with(out, &owned_props_for_predicates, true, |t| {
+        map_type(t, spec)
+    });
 
     // Invariant predicates — only those referenced by at least one handler
     // AND carrying a rust_expr body (not description-only).

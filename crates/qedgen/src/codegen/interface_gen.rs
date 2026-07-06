@@ -169,20 +169,11 @@ fn render_account(out: &mut String, acc: &IdlAccount) {
     }
 }
 
+/// snake/kebab-case → PascalCase. Routes through the shared
+/// `codegen_shared::to_pascal_case` (which splits on `_` only) by
+/// normalizing `-` to `_` first.
 fn snake_to_pascal(s: &str) -> String {
-    let mut out = String::new();
-    let mut upper_next = true;
-    for ch in s.chars() {
-        if ch == '_' || ch == '-' {
-            upper_next = true;
-        } else if upper_next {
-            out.push(ch.to_ascii_uppercase());
-            upper_next = false;
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    crate::codegen_shared::to_pascal_case(&s.replace('-', "_"))
 }
 
 #[cfg(test)]

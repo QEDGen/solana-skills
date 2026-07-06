@@ -123,30 +123,30 @@ pub(super) fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessW
     for handler in &spec.handlers {
         let findings = multi_cpi_shared_fields(spec, handler);
         for (call_i_label, call_j_label, field) in findings {
-            warnings.push(CompletenessWarning {
-                rule: "multi_cpi_same_field".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
-                    "handler '{}' makes multiple CPI calls ({} and {}) whose \
+            warnings.push(
+                warn(
+                    "multi_cpi_same_field",
+                    Severity::Info,
+                    2,
+                    format!(
+                        "handler '{}' makes multiple CPI calls ({} and {}) whose \
                      substituted ensures both reference '{}'. Kani's impl-targeted \
                      harness has only one (pre_{}, post_{}) snapshot pair captured \
                      at handler boundary; both assumes will fire at the same splice \
                      point, which can over-constrain.",
-                    handler.name, call_i_label, call_j_label, field, field, field
-                ),
-                subject: Some(handler.name.clone()),
-                fix: "Until per-call snapshot frames land (v3.0), either: (1) \
+                        handler.name, call_i_label, call_j_label, field, field, field
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix(
+                    "Until per-call snapshot frames land (v3.0), either: (1) \
                       merge the CPI calls into a single helper handler whose \
                       ensures captures the combined effect; (2) tighten each \
                       callee's ensures so they reference disjoint fields; or \
                       (3) split the multi-CPI handler into separate handlers \
-                      (one per CPI) so each gets its own (pre, post) snapshot."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      (one per CPI) so each gets its own (pre, post) snapshot.",
+                ),
+            );
         }
     }
     warnings
@@ -178,29 +178,19 @@ pub(super) fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<Completeness
             if !ih.ensures.is_empty() {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "cpi_no_callee_ensures".to_string(),
-                severity: Severity::Info,
-                priority: 1,
-                message: format!(
+            warnings.push(warn("cpi_no_callee_ensures", Severity::Info, 1, format!(
                     "handler '{}' calls `{}.{}` — callee has no `ensures` clauses; \
                      caller's Lean theorem carries `by sorry` (Tier-0 axiomatization)",
                     handler.name, call.target_interface, call.target_handler,
-                ),
-                subject: Some(handler.name.clone()),
-                fix: format!(
+                )).subject(handler.name.clone()).fix(format!(
                     "Add at least one `ensures <expr>` inside `interface {} {{ handler {} {{ ... }} }}`, \
                      or commit to an `upstream {{ binary_hash = ... }}` pin on the interface so the \
                      caller can discharge via the bundled axiom module.",
                     call.target_interface, call.target_handler,
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  interface {} {{\n    handler {} (...) {{\n      ensures /* observable post-condition */\n    }}\n  }}",
                     call.target_interface, call.target_handler,
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
     warnings
@@ -259,27 +249,17 @@ pub(super) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<Completeness
             if !seen.insert(key) {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "cpi_unverified_callee".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("cpi_unverified_callee", Severity::Info, 2, format!(
                     "import `{}` is unverified — `{}.{}` discharges via Stance-1 axiom (binary_hash pin) instead of an imported proof",
                     iface.name, iface.name, ih.name,
-                ),
-                subject: Some(iface.name.clone()),
-                fix: format!(
+                )).subject(iface.name.clone()).fix(format!(
                     "Ship a Lake-buildable proof package alongside the provider's qedspec at \
                      `<source>/.qed/proofs/{}.lean` (with a sibling `lakefile.lean` declaring \
                      `package {}`). The consumer's codegen will auto-detect the package and \
                      swap the caller's theorem from Stance 1 (axiom) to Stance 2 (imported proof).",
                     iface.name,
                     crate::lean_sidecars::proof_pkg_name(&iface.name),
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
     warnings
@@ -289,7 +269,6 @@ pub(super) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<Completeness
 /// --require-verified` would reject; carries enough context for main.rs to
 /// render a CRIT line and exit non-zero.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct UnverifiedCallee {
     pub interface_name: String,
     pub fix_hint: String,
@@ -305,7 +284,6 @@ pub(crate) struct UnverifiedCallee {
 /// discharged by the validator itself, so counting them "unverified" would
 /// fail every spec that imports them. Empty vec = dep graph fully proven
 /// from a Stance-2 standpoint; mirrors `check_cpi_unverified_callee`.
-#[allow(dead_code)]
 pub(crate) fn collect_require_verified_findings(spec: &ParsedSpec) -> Vec<UnverifiedCallee> {
     let import_iface_names: std::collections::HashSet<&str> = spec
         .imports
@@ -393,32 +371,117 @@ pub(super) fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning
                 _ => continue,
             };
 
-            warnings.push(CompletenessWarning {
-                rule: "shape_only_cpi".to_string(),
-                severity: Severity::Info,
-                priority: 3,
-                message: format!(
-                    "handler '{}' calls `{}.{}` — {}",
-                    handler.name, call.target_interface, call.target_handler, reason
-                ),
-                subject: Some(handler.name.clone()),
-                fix,
-                example: Some(format!(
+            warnings.push(
+                warn(
+                    "shape_only_cpi",
+                    Severity::Info,
+                    3,
+                    format!(
+                        "handler '{}' calls `{}.{}` — {}",
+                        handler.name, call.target_interface, call.target_handler, reason
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix(fix)
+                .example(format!(
                     "  interface {} {{\n    handler {} (...) {{\n      ensures /* what the callee guarantees */\n    }}\n  }}",
                     call.target_interface, call.target_handler
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
 
     warnings
 }
 
+/// Rule 10: handler has token program in accounts but no transfers.
+///
+/// Suppressed on lifecycle-init handlers that create a token account:
+/// Anchor's `#[account(init, token::… / associated_token::…)]` handles
+/// the SPL Token CPI implicitly — no explicit `transfers` / `call
+/// Token.*` needed. Init detection is a shape predicate (pre-state
+/// variant carries no payload fields = freshly-created account), not a
+/// hardcoded name list, which over-fired on specs naming the pre-state
+/// `Uninit` / `Created` / etc. Unit variants come from both
+/// `account_types[*].variants` and `sum_types`.
+pub(super) fn check_missing_cpi_for_token_context(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let unit_variant_names: std::collections::HashSet<&str> = spec
+        .account_types
+        .iter()
+        .flat_map(|a| a.variants.iter())
+        .chain(spec.sum_types.iter().flat_map(|s| s.variants.iter()))
+        .filter(|v| v.fields.is_empty())
+        .map(|v| v.name.as_str())
+        .collect();
+    for handler in &spec.handlers {
+        if !handler.has_token_program() {
+            continue;
+        }
+        if !handler.has_calls() {
+            let is_lifecycle_init = handler
+                .pre_status
+                .as_deref()
+                .map(|s| unit_variant_names.contains(s))
+                .unwrap_or(false);
+            // No writable-token-account sub-condition: real specs often
+            // leave token accounts bare-typed and let Anchor resolve via
+            // init constraints; `is_lifecycle_init && !has_calls()` already
+            // captures the shape Anchor's init macro covers implicitly.
+            if is_lifecycle_init {
+                continue;
+            }
+            let writable_tokens: Vec<&str> = handler
+                .accounts
+                .iter()
+                .filter(|a| {
+                    a.is_writable && a.account_type.as_deref() == Some("token") && !a.is_program
+                })
+                .map(|a| a.name.as_str())
+                .collect();
+            let signer_name = handler
+                .signer_account()
+                .map(|a| a.name.as_str())
+                .unwrap_or("authority");
+            let accounts_str = if writable_tokens.len() >= 2 {
+                format!(
+                    "from {} to {} authority {}",
+                    writable_tokens[0], writable_tokens[1], signer_name
+                )
+            } else if writable_tokens.len() == 1 {
+                format!(
+                    "from {} to dest authority {}",
+                    writable_tokens[0], signer_name
+                )
+            } else {
+                format!("from source to dest authority {}", signer_name)
+            };
+            warnings.push(
+                warn(
+                    "missing_cpi_for_token_context",
+                    Severity::Warning,
+                    2,
+                    format!(
+                        "handler '{}' has token_program in accounts but no `transfers` block",
+                        handler.name
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix("Add a `transfers` block to specify token movements")
+                .example(format!(
+                    "  handler {}\n    transfers {{\n      {} amount <expr>\n    }}",
+                    handler.name, accounts_str
+                )),
+            );
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::test_support::*;
 
     // ========================================================================
     // multi_cpi_same_field lint
@@ -1056,6 +1119,365 @@ mod tests {
         assert!(
             findings.is_empty(),
             "inline interfaces must not fire; got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context() {
+        let mut h = make_handler("transfer");
+        // Has token program in accounts but no transfers block
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "source".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "dest".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "expected missing_cpi_for_token_context, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_on_lifecycle_init() {
+        // An `initialize` handler creating a writable token account via
+        // Anchor's `#[account(init, ...)]` needs no explicit `transfers` /
+        // `call Token.*` — the init macro handles the SPL CPI implicitly.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninitialized".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "vault".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: Some(vec!["vault".to_string(), "authority".to_string()]),
+                account_type: Some("token".to_string()),
+                authority: Some("vault_pda".to_string()),
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninitialized".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninitialized".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "lifecycle-init handler creating a token account should NOT fire \
+                 missing_cpi_for_token_context; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_on_non_canonical_init_name() {
+        // The suppression keys on "pre-state variant has no payload", not
+        // a hardcoded name list — specs naming the pre-init variant
+        // `Uninit` / `Created` / etc. must stay silent too. Mirror of the
+        // canonical-name test above with `Uninit` substituted.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninit".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "vault".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: Some(vec!["vault".to_string(), "authority".to_string()]),
+                account_type: Some("token".to_string()),
+                authority: Some("vault_pda".to_string()),
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninit".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninit".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "init handler with non-canonical pre-state variant `Uninit` \
+                 must NOT fire missing_cpi_for_token_context (v2.29.2 shape \
+                 predicate); got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_suppressed_when_no_typed_token_account() {
+        // The suppression must not require a writable account typed
+        // `token`: real specs leave token accounts bare-typed and rely on
+        // Anchor's `init, associated_token::*` constraints to resolve the
+        // type. `is_lifecycle_init && !has_calls()` is sufficient.
+        let mut h = make_handler("initialize");
+        h.pre_status = Some("Uninit".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                // Bare writable, no `type token` — Anchor would type it
+                // via an `init, associated_token::*` constraint set the
+                // spec doesn't repeat.
+                name: "pool_balance_account".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Uninit".to_string(), "Active".to_string()],
+            account_types: vec![ParsedAccountType {
+                name: "State".to_string(),
+                fields: vec![],
+                lifecycle: vec![],
+                pda_ref: None,
+                variants: vec![
+                    ParsedVariant {
+                        name: "Uninit".to_string(),
+                        fields: vec![],
+                    },
+                    ParsedVariant {
+                        name: "Active".to_string(),
+                        fields: vec![("balance".to_string(), "U64".to_string())],
+                    },
+                ],
+            }],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "lifecycle-init handler with token_program but no `type token` \
+                 writable account must NOT fire missing_cpi_for_token_context \
+                 (v2.29.2 — Anchor init handles SPL implicitly via constraint \
+                 set); got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_cpi_for_token_context_still_fires_on_non_init() {
+        // Complement to the suppression: a handler in a non-init
+        // lifecycle (e.g. Active → Active) with token_program and a
+        // writable token account but no transfers SHOULD still fire —
+        // Anchor's init macro doesn't apply, so the missing CPI is a
+        // real spec gap.
+        let mut h = make_handler("transfer");
+        h.pre_status = Some("Active".to_string());
+        h.post_status = Some("Active".to_string());
+        h.accounts = vec![
+            ParsedHandlerAccount {
+                name: "authority".to_string(),
+                is_signer: true,
+                is_writable: false,
+                is_program: false,
+                pda_seeds: None,
+                account_type: None,
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "source".to_string(),
+                is_signer: false,
+                is_writable: true,
+                is_program: false,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+            ParsedHandlerAccount {
+                name: "token_program".to_string(),
+                is_signer: false,
+                is_writable: false,
+                is_program: true,
+                pda_seeds: None,
+                account_type: Some("token".to_string()),
+                authority: None,
+                default_pubkey: None,
+                imported_namespace: None,
+            },
+        ];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_cpi_for_token_context"),
+            "non-init handler with token_program and no transfers SHOULD \
+                 still fire; got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
         );
     }
 }

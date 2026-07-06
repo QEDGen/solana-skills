@@ -13,20 +13,17 @@ impl WitnessState {
     fn new(state: &crate::mir::StateAdt) -> Self {
         // Union of all variant fields forms the witness's flat-field view;
         // the first variant defines order, later variants append.
-        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut fields: Vec<(String, String)> = Vec::new();
-        for v in &state.variants {
-            for f in &v.fields {
-                if seen.insert(f.name.clone()) {
-                    let val = match &f.ty {
-                        crate::mir::Ty::Pubkey => "pk".to_string(),
-                        crate::mir::Ty::Bool => "false".to_string(),
-                        _ => "0".to_string(),
-                    };
-                    fields.push((f.name.clone(), val));
-                }
-            }
-        }
+        let fields: Vec<(String, String)> = state_field_union(state)
+            .into_iter()
+            .map(|(name, ty)| {
+                let val = match ty {
+                    crate::mir::Ty::Pubkey => "pk".to_string(),
+                    crate::mir::Ty::Bool => "false".to_string(),
+                    _ => "0".to_string(),
+                };
+                (name, val)
+            })
+            .collect();
         WitnessState {
             fields,
             status: state.lifecycle_states.first().cloned(),
@@ -306,6 +303,15 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         "-- ============================================================================\n\n",
     );
 
+    emit_covers_body(out, mir, adt_form);
+}
+
+/// Per-cover theorem rendering — shared body of `emit_covers_inner`
+/// (which writes the section header) and the multi-account
+/// `emit_covers_multi` (which writes its own header before filtering
+/// cross-account traces, then calls this directly — no more
+/// render-then-strip).
+pub(super) fn emit_covers_body(out: &mut String, mir: &Mir, adt_form: bool) {
     for cover in &mir.covers {
         for (trace_idx, trace) in cover.traces.iter().enumerate() {
             let suffix = if cover.traces.len() > 1 {
@@ -330,9 +336,6 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
             for (j, op_name) in trace.iter().enumerate() {
                 let handler = mir.handlers.iter().find(|h| h.name == *op_name);
                 let trans = safe_name(&format!("{}Transition", op_name));
-                let param_args = handler
-                    .map(|h| param_args_str(&h.params))
-                    .unwrap_or_default();
                 let extra_exists = handler
                     .map(|h| {
                         h.params
@@ -344,9 +347,7 @@ pub(super) fn emit_covers_inner(out: &mut String, mir: &Mir, adt_form: bool) {
                     })
                     .unwrap_or_default();
 
-                // Call sites use the existentially-bound `v{j}_{k}` names;
-                // the declared-name `param_args` is unused here.
-                let _ = param_args;
+                // Call sites use the existentially-bound `v{j}_{k}` names.
                 let positional_args = handler
                     .map(|h| {
                         h.params
@@ -495,6 +496,14 @@ pub(super) fn emit_liveness_inner(out: &mut String, mir: &Mir, adt_form: bool) {
         out.push_str("    | none => none\n\n");
     }
 
+    emit_liveness_body(out, mir, adt_form);
+}
+
+/// Per-liveness theorem rendering — shared body of `emit_liveness_inner`
+/// (single-account: header + `applyOps` helper above) and the
+/// multi-account `emit_liveness_inner_body` (per-account helper + token
+/// renames handled by the caller).
+pub(super) fn emit_liveness_body(out: &mut String, mir: &Mir, adt_form: bool) {
     for liveness in &mir.liveness_props {
         let bound = liveness.within_steps.unwrap_or(10);
         out.push_str(&format!(
@@ -778,6 +787,16 @@ pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
         "-- ============================================================================\n\n",
     );
 
+    emit_environments_body(out, mir);
+}
+
+/// Per-(environment × property) theorem rendering — shared body of
+/// `emit_environments` (single-account) and the multi-account
+/// `emit_environments_multi` (which scopes and renames per account).
+/// Includes the bare-field-name constraint rewrite the spec's
+/// `constraint <field> > 0` form needs — historically only the
+/// multi-account clone had it (drift healed in T4).
+pub(super) fn emit_environments_body(out: &mut String, mir: &Mir) {
     for env in &mir.environments {
         for prop in &mir.properties {
             let prop_expr = match &prop.expression {
@@ -791,8 +810,8 @@ pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
                 .map(|(name, ty)| format!(" (new_{} : {})", name, render_ty(ty)))
                 .collect();
 
-            // Rewrite `s.<field>` / `state.<field>` in each constraint
-            // to refer to the new value.
+            // Rewrite `s.<field>` / `state.<field>` / bare `<field>` in
+            // each constraint to refer to the new value.
             let constraint_hyps: String = env
                 .constraints
                 .iter()
@@ -803,6 +822,15 @@ pub(super) fn emit_environments(out: &mut String, mir: &Mir) {
                         expr = expr
                             .replace(&format!("s.{}", field), &format!("new_{}", field))
                             .replace(&format!("state.{}", field), &format!("new_{}", field));
+                        // Bare field-name reference (e.g.
+                        // `constraint interest_rate > 0`). Use word
+                        // boundary so `interest_rate_pct` isn't
+                        // captured by `interest_rate`.
+                        let pat = format!(r"\b{}\b", regex::escape(field));
+                        let re = regex::Regex::new(&pat).expect("static regex");
+                        expr = re
+                            .replace_all(&expr, regex::NoExpand(&format!("new_{}", field)))
+                            .into_owned();
                     }
                     format!("\n    (h_c{} : {})", i, expr)
                 })

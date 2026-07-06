@@ -4,6 +4,7 @@ mod cli;
 mod codegen;
 mod descriptor;
 mod dispatch;
+mod fs_walk;
 mod mir;
 mod probe;
 mod project;
@@ -23,10 +24,10 @@ pub(crate) use adapt::{
     anchor_adapt, anchor_check, anchor_extractor, anchor_project, anchor_resolver,
     native_extractor, pinocchio_extractor, pinocchio_profile, program_model,
 };
-pub(crate) use cli::{AristotleCommands, Cli, Commands, RuntimeOverride, Target};
+pub(crate) use cli::{AristotleCommands, Cli, Commands, Target};
 pub(crate) use codegen::{
     asm2lean, banner, codegen_mir, codegen_shared, crucible_gen, fingerprint, integration_test,
-    interface_gen, kani_impl, kani_mir, lean_gen_mir, lean_sidecars, proptest_gen_mir,
+    interface_gen, kani_impl, kani_mir, lean_gen_mir, lean_names, lean_sidecars, proptest_gen_mir,
     rust_codegen_util, unit_test,
 };
 pub(crate) use dispatch::{api, aristotle};
@@ -38,10 +39,10 @@ pub(crate) use probe::{
 };
 pub(crate) use project::{
     consolidate, deps, feedback, fill, init, proofs_bootstrap, qed_lock, qed_manifest, reconcile,
+    validate,
 };
 pub(crate) use spec::{
     ast, chumsky_adapter, chumsky_parser, idl, idl2spec, import_resolver, quantifier, spec_hash,
-    validate,
 };
 pub(crate) use verify::{
     drift, miri_verify, ratchet, regen_drift, sbpf_verify, upstream_check, verify_counterexample,

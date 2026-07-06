@@ -322,50 +322,12 @@ fn build_path(p: &a::Path, cx: &TreeCx, shadow: &[String]) -> TreePath {
 
 /// Leaf `TypeRef` of a path. Like `TypeEnv::path_type_ref` but also
 /// resolves record-form state (`type State = { … }` / `state { … }` sugar
-/// keeps its fields in `records["State"]`, not `state_fields`). Kept local
-/// to the tree builder: widening `path_type_ref` itself would change
-/// `path_is_pod_field`'s answers and with them the rendered Quasar output —
-/// Slice 0 is carry-only.
+/// keeps its fields in `records["State"]`, not `state_fields`) — the
+/// fallback stays tree-builder-only: widening `path_type_ref` itself would
+/// change `path_is_pod_field`'s answers and with them the rendered Quasar
+/// output.
 fn path_leaf_type<'e>(p: &a::Path, env: &TypeEnv<'e>) -> Option<&'e a::TypeRef> {
-    if p.root == "state" {
-        let mut current: Option<&a::TypeRef> = None;
-        for seg in &p.segments {
-            match seg {
-                a::PathSeg::Field(f) => {
-                    current =
-                        match current {
-                            None => env.state_fields.get(f).copied().or_else(|| {
-                                env.records.get("State").and_then(|m| m.get(f).copied())
-                            }),
-                            Some(a::TypeRef::Named(rec)) => {
-                                env.records.get(rec).and_then(|m| m.get(f).copied())
-                            }
-                            Some(a::TypeRef::Map { inner, .. }) => match inner.as_ref() {
-                                a::TypeRef::Named(rec) => {
-                                    env.records.get(rec).and_then(|m| m.get(f).copied())
-                                }
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                }
-                a::PathSeg::Index(_) => {
-                    if let Some(a::TypeRef::Map { inner, .. }) = current {
-                        current = Some(inner.as_ref());
-                    }
-                }
-            }
-        }
-        return current;
-    }
-    if p.segments.is_empty() {
-        return env
-            .params
-            .iter()
-            .find(|(n, _)| n == &p.root)
-            .map(|(_, t)| *t);
-    }
-    None
+    env.resolve_path_leaf(p, true)
 }
 
 /// Source `TypeRef` → MIR `Ty`. Named forms route through the same

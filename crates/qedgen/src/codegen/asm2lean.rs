@@ -628,41 +628,11 @@ fn format_num(n: i64) -> String {
     }
 }
 
-/// Format a value for Src.imm / lddw / st (all take Int; Nat constants
-/// auto-coerce in Lean).
-fn lean_imm_value(
-    v: &Value,
-    equates: &HashMap<String, i64>,
-    rodata: &HashMap<String, String>,
-    _offset_symbols: &HashSet<String>,
-) -> String {
-    match v {
-        Value::Num(n) => format_num(*n),
-        Value::Sym(s) => {
-            if equates.contains_key(s) {
-                s.clone()
-            } else if let Some(name) = rodata.get(s) {
-                name.clone()
-            } else {
-                format!("0 /- undefined: {} -/", s)
-            }
-        }
-        Value::NegSym(s) => {
-            if equates.contains_key(s) {
-                format!("(-{})", s)
-            } else {
-                format!("0 /- undefined: -{} -/", s)
-            }
-        }
-    }
-}
-
 fn lean_src(
     op: &Operand,
     equates: &HashMap<String, i64>,
     labels: &HashMap<String, usize>,
     rodata: &HashMap<String, String>,
-    offset_symbols: &HashSet<String>,
 ) -> String {
     match op {
         Operand::Reg(r) => format!("(.reg {})", lean_reg(r)),
@@ -673,10 +643,7 @@ fn lean_src(
                     return format!("{}", idx);
                 }
             }
-            format!(
-                "(.imm {})",
-                lean_imm_value(v, equates, rodata, offset_symbols)
-            )
+            format!("(.imm {})", lean_value(v, equates, rodata))
         }
         _ => "(.imm 0)".to_string(),
     }
@@ -707,7 +674,6 @@ fn emit_insn(
     equates: &HashMap<String, i64>,
     labels: &HashMap<String, usize>,
     rodata: &HashMap<String, String>,
-    offset_symbols: &HashSet<String>,
 ) -> Result<String> {
     let mn = insn.mnemonic.as_str();
     let ops = &insn.operands;
@@ -734,7 +700,7 @@ fn emit_insn(
         };
         let val = match &ops[1] {
             // lddw loads a Nat, so use imm_value for proper unsigned handling
-            Operand::Imm(v) => lean_imm_value(v, equates, rodata, offset_symbols),
+            Operand::Imm(v) => lean_value(v, equates, rodata),
             _ => bail!("line {}: lddw src must be immediate", insn.line_no),
         };
         return Ok(format!(".lddw {} {}", dst, val));
@@ -765,7 +731,7 @@ fn emit_insn(
         };
         let imm = match &ops[1] {
             // st takes imm : Nat, so use imm_value for proper type handling
-            Operand::Imm(v) => lean_imm_value(v, equates, rodata, offset_symbols),
+            Operand::Imm(v) => lean_value(v, equates, rodata),
             _ => bail!("line {}: st src must be immediate", insn.line_no),
         };
         return Ok(format!(".st {} {} {} {}", width, dst, off, imm));
@@ -782,7 +748,7 @@ fn emit_insn(
             Operand::Reg(r) => lean_reg(r),
             _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
-        let src = lean_src(&ops[1], equates, labels, rodata, offset_symbols);
+        let src = lean_src(&ops[1], equates, labels, rodata);
         return Ok(format!(".{} {} {}", mn, dst, src));
     }
 
@@ -804,7 +770,7 @@ fn emit_insn(
             Operand::Reg(r) => lean_reg(r),
             _ => bail!("line {}: {} dst must be register", insn.line_no, mn),
         };
-        let src = lean_src(&ops[1], equates, labels, rodata, offset_symbols);
+        let src = lean_src(&ops[1], equates, labels, rodata);
         let target = lean_jump_target(&ops[2], equates, labels);
         return Ok(format!(".{} {} {} {}", mn, dst, src, target));
     }
@@ -1032,6 +998,14 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         }
     }
 
+    // Render every instruction once; the chunked/flat progAt emitters, the
+    // prog array, and the fetch cache all reuse the same rendered forms.
+    let rendered_insns: Vec<String> = prog
+        .instructions
+        .iter()
+        .map(|insn| emit_insn(insn, &equates_map, &prog.labels, &rodata_names))
+        .collect::<Result<_>>()?;
+
     // For large programs (>64 instructions), emit a function-based lookup
     // for O(1) simp performance. Small programs use @[simp] on the array directly.
     let use_fn_lookup = prog.instructions.len() > 64;
@@ -1051,15 +1025,14 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
 
             writeln!(out, "def progAt_{} : Nat → Option SVM.SBPF.Insn", chunk_idx)?;
 
-            for idx in start..end {
-                let insn = &prog.instructions[idx];
-                let lean = emit_insn(
-                    insn,
-                    &equates_map,
-                    &prog.labels,
-                    &rodata_names,
-                    &prog.offset_symbols,
-                )?;
+            for (idx, (insn, lean)) in prog
+                .instructions
+                .iter()
+                .zip(rendered_insns.iter())
+                .enumerate()
+                .take(end)
+                .skip(start)
+            {
                 let comment = if let Some(ref lbl) = insn.label {
                     format!("-- {}: {}", idx, lbl)
                 } else {
@@ -1083,14 +1056,7 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         writeln!(out)?;
 
         writeln!(out, "def prog : Program := #[")?;
-        for (idx, insn) in prog.instructions.iter().enumerate() {
-            let lean = emit_insn(
-                insn,
-                &equates_map,
-                &prog.labels,
-                &rodata_names,
-                &prog.offset_symbols,
-            )?;
+        for (idx, lean) in rendered_insns.iter().enumerate() {
             let comma = if idx + 1 < n_insns { "," } else { "" };
             writeln!(out, "  {}{}", lean, comma)?;
         }
@@ -1100,13 +1066,7 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         writeln!(out, "@[simp] def prog : Program := #[")?;
 
         for (idx, insn) in prog.instructions.iter().enumerate() {
-            let lean = emit_insn(
-                insn,
-                &equates_map,
-                &prog.labels,
-                &rodata_names,
-                &prog.offset_symbols,
-            )?;
+            let lean = &rendered_insns[idx];
             let comma = if idx + 1 < prog.instructions.len() {
                 ","
             } else {
@@ -1132,14 +1092,8 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
         // Flat match-based fetch — the fetch-cache theorems below and the
         // wp_exec dsimp lists in proof files both reference `progAt`.
         writeln!(out, "@[simp] def progAt : Nat → Option SVM.SBPF.Insn")?;
-        for (idx, insn) in prog.instructions.iter().enumerate() {
-            let lean = emit_insn(
-                insn,
-                &equates_map,
-                &prog.labels,
-                &rodata_names,
-                &prog.offset_symbols,
-            )?;
+        for (idx, _insn) in prog.instructions.iter().enumerate() {
+            let lean = &rendered_insns[idx];
             writeln!(out, "  | {} => some ({})", idx, lean)?;
         }
         writeln!(out, "  | _ => none\n")?;
@@ -1149,17 +1103,8 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     // Eliminates the need for `have hfN : progAt N = some (...) := by native_decide`
     // boilerplate in proof files.
     {
-        let n_insns = prog.instructions.len();
         writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
-        for idx in 0..n_insns {
-            let insn = &prog.instructions[idx];
-            let lean = emit_insn(
-                insn,
-                &equates_map,
-                &prog.labels,
-                &rodata_names,
-                &prog.offset_symbols,
-            )?;
+        for (idx, lean) in rendered_insns.iter().enumerate() {
             writeln!(
                 out,
                 "@[simp] theorem insn_{} : progAt {} = some ({}) := by native_decide",

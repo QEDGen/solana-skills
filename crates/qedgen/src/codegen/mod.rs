@@ -9,6 +9,7 @@ pub(crate) mod interface_gen;
 pub(crate) mod kani_impl;
 pub(crate) mod kani_mir;
 pub(crate) mod lean_gen_mir;
+pub(crate) mod lean_names;
 pub(crate) mod lean_sidecars;
 pub(crate) mod proptest_gen_mir;
 pub(crate) mod rust_codegen_util;

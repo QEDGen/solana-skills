@@ -96,7 +96,7 @@ SKILL.md grew from 819 to 1170 lines. exploits.md from 1032 to 1212.
   byte-mirror fix). Run `qedgen check --spec <path> --drift <code>
   --update-hashes` to refresh; the new flow handles all three legs.
 - Examples bundled in this repo (escrow, escrow-split, lending,
-  multisig, percolator) regenerated against v2.15 with refreshed
+  multisig, and the perp-dex example) regenerated against v2.15 with refreshed
   spec_hashes and the v2.15 codegen output.
 
 ## Gates
@@ -115,7 +115,7 @@ SKILL.md grew from 819 to 1170 lines. exploits.md from 1032 to 1212.
 ## Eval artifacts
 
 The v2.15 audit eval against internal (`escrow`, `escrow-split`,
-`lending`, `percolator`) and external (blueshift-gg/quasar `escrow`,
+`lending`, and the perp-dex example) and external (blueshift-gg/quasar `escrow`,
 `multisig`, `vault`, `upstream-vault`) examples is preserved under
 `.qed/findings/` for internal traceability:
 - `phase1-rollup.md` — internal eval: 8 prioritized gap categories

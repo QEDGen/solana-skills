@@ -31,7 +31,7 @@ The release narrative shifts from "scaffolds compile on bundled fixtures" to **"
 - **Target dispatch centralized.** `FrameworkSurface` now owns the per-target rendering decisions: `signer_type`, `program_type`, `token_account_type`, `mint_account_type`, `state_account_type`, `unchecked_account_type`, `error_expr`, `account_key_expr`, `token_owner_expr`, `authority_check_expr`, `token_imports(has_token, has_mint)`, `needs_bumps_import(handler)`. Anchor-vs-Quasar string branches are no longer scattered across `generate_lib`, `generate_guards`, and the handler scaffold renderer.
 - **Target-aware type mappers.** `map_type_anchor` / `map_type_quasar` / `map_type_standalone` (plus `map_type_pod` and `map_type_for_target`) replace the single mapper that forced compatibility aliases like `pub type Address = Pubkey;`. Anchor scaffolds emit `Pubkey` directly.
 - **Records used inside `#[account]` Anchor structs** now emit `#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy)]` so the recursive Borsh bound on the outer struct is satisfied. Quasar's `#[repr(C)]` zero-copy path stays as-is.
-- **Rust `Nat → Int` coercion** in spec expressions now fires on every target. Pre-v2.11 the cast was gated on `pod_aware` (Quasar only), silently producing `u128 + i128` for Anchor — fails to type-check. Surfaced by percolator's `state.accounts[i].capital + state.accounts[i].pnl`.
+- **Rust `Nat → Int` coercion** in spec expressions now fires on every target. Pre-v2.11 the cast was gated on `pod_aware` (Quasar only), silently producing `u128 + i128` for Anchor — fails to type-check. Surfaced by the perp-dex example's `state.accounts[i].capital + state.accounts[i].pnl`.
 - **`mul_div_floor_u128` / `mul_div_ceil_u128` argument casts** unconditional too — same root cause, different call site.
 - **`use crate::errors::*;` in handler scaffolds** is conditional: emitted only when the rendered body references `<Pascal>Error::*` (i.e., when an effect lowers to `checked_add(...).ok_or(MathOverflow)?`). Surfaced by multisig.
 - **Handler-file SPL imports gated** by per-handler `has_token` / `has_mint` flags, dropping unused-import warnings on programs that don't use mints (escrow).
@@ -47,12 +47,12 @@ The release narrative shifts from "scaffolds compile on bundled fixtures" to **"
 
 - New `scripts/check-version-consistency.sh` enforces `package.json.version == crates/qedgen/Cargo.toml [package].version`. Both at `2.11.0`.
 - CI gate added: `cargo run -p qedgen-solana-skills -- check --regen-drift` on every PR.
-- CI gate added: `cargo test -p qedgen-solana-skills --test codegen_smoke -- --ignored` runs full `cargo check` against generated Anchor scaffolds for escrow + multisig + percolator + a `cargo test --test proptest` smoke for escrow on every PR. Cargo registry cached between runs (~30s warm vs ~2min cold).
+- CI gate added: `cargo test -p qedgen-solana-skills --test codegen_smoke -- --ignored` runs full `cargo check` against generated Anchor scaffolds for escrow + multisig + the perp-dex example + a `cargo test --test proptest` smoke for escrow on every PR. Cargo registry cached between runs (~30s warm vs ~2min cold).
 - `QEDGEN_CACHE_TTL` is now isolated in tests via `EnvVarGuard`, so `cargo test --workspace` is stable regardless of the env var's state.
 
 ## Verification surface
 
-- **3 bundled Anchor scaffolds compile clean:** escrow (~10s), multisig (~13s), percolator (~16s). Zero qedgen-emitted warnings on each (only sanctioned `#![allow(unexpected_cfgs)]` is the framework-cfg shim).
+- **3 bundled Anchor scaffolds compile clean:** escrow (~10s), multisig (~13s), perp-dex (~16s). Zero qedgen-emitted warnings on each (only sanctioned `#![allow(unexpected_cfgs)]` is the framework-cfg shim).
 - **Bundled escrow Quasar scaffold compiles clean** at 0 warnings (after fetching `blueshift-gg/quasar` for the `quasar-lang` patch).
 - **Bundled escrow Anchor scaffold's generated proptest harness runs and passes** (`cargo test --test proptest` smoke).
 - **2 external Anchor programs validated:**
@@ -67,7 +67,7 @@ The release narrative shifts from "scaffolds compile on bundled fixtures" to **"
 4. ✅ `cargo test` — 449 unit tests, all integration tests, 4-fixture compile + proptest smoke.
 5. ✅ `bash scripts/check-readme-drift.sh` — 17/17 commands documented.
 6. ✅ `lake build` for `examples/rust/lending/formal_verification/` (the only example regen'd inside this branch's proof-fill work). Other Lean-bearing examples were untouched.
-7. ✅ Zero unfilled `sorry` in user proofs. The 4 remaining `:= by sorry` in `examples/rust/escrow-split/formal_verification/Spec.lean` are sanctioned v2.8 G3 CPI ensures-as-axiom theorems (each carries the `Token.transfer.ensures @ <handler>` marker). Other matches in `lean_solana/QEDGen/Solana/{Spec,CommandBuilders}.lean` and `dropset/Spec.lean` are inside code comments / macro docstrings.
+7. ✅ Zero unfilled `sorry` in user proofs. The 4 remaining `:= by sorry` in `examples/rust/escrow-split/formal_verification/Spec.lean` are sanctioned v2.8 G3 CPI ensures-as-axiom theorems (each carries the `Token.transfer.ensures @ <handler>` marker). Other matches in `lean_solana/QEDGen/Solana/{Spec,CommandBuilders}.lean` and `the-vendored-sbpf-example/Spec.lean` are inside code comments / macro docstrings.
 8. ✅ `qedgen check --frozen` clean against all 5 bundled `qed.toml` fixtures.
 9. ✅ Doc/code drift sweep complete:
    - `references/cli.md` covers `--regen-drift` + `--examples-root`.
@@ -84,12 +84,12 @@ The release narrative shifts from "scaffolds compile on bundled fixtures" to **"
 
 - **Pinocchio target.** Reserved CLI surface, errors cleanly when selected. v2.11+ scope.
 - **Auditor as harness-native subagent.** v2.10's deferred bear-hug, still v2.12+. The `qedgen probe --json` data layer ships and was validated against external code in `EVAL-v2.11-external.md`.
-- **Quasar compile-clean pass on every bundled fixture.** Escrow Quasar verified clean; lending / multisig / percolator Quasar paths weren't compiled in this release (would need a non-trivial setup with the cloned `blueshift-gg/quasar` repo). Track for v2.12.
+- **Quasar compile-clean pass on every bundled fixture.** Escrow Quasar verified clean; lending / multisig / perp-dex Quasar paths weren't compiled in this release (would need a non-trivial setup with the cloned `blueshift-gg/quasar` repo). Track for v2.12.
 - **Bare-field-resolution lint.** Day 1 brownfield walk surfaced `requires current_amount >= amount_to_raise` (without `state.` prefix) failing codegen. Convention is documented; lint to flag this and suggest the prefix is a v2.12+ task.
 - **Spec language gaps surfaced by external evals:**
   - Mint decimals access (token-fundraiser's `MIN_AMOUNT_TO_RAISE.pow(decimals)`).
   - Time / Clock primitives (token-fundraiser's duration check, refund handler).
-  - Mixed `i128`/`u128` arithmetic on shared state in non-trivial DeFi math (percolator's `xy=k` shape).
+  - Mixed `i128`/`u128` arithmetic on shared state in non-trivial DeFi math (the perp-dex `xy=k` shape).
   Each of these would need a DSL extension or a target-specific lowering. Track separately for v2.12+ scoping.
 
 ## Migration notes

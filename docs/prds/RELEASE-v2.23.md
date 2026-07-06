@@ -142,7 +142,7 @@ syn — fast and dependency-free.
 
 Two of 45 bundled specs use `old(...)`:
 
-- `examples/rust/percolator/percolator.qedspec` — `old(...)` lives
+- the perp-dex risk-engine spec (since removed) — `old(...)` lives
   in `ensures` only, which lowers via the transition-fn assume
   path (not the property-preservation path). v2.23 changes nothing
   in its generated harness; the regen is a no-op confirmation.
@@ -154,7 +154,7 @@ Two of 45 bundled specs use `old(...)`:
   binary `(pre, post)` predicate and a per-handler preservation
   harness that captures pre-state before the handler call.
 
-The shipped acceptance run confirmed both: percolator regen produces
+The shipped acceptance run confirmed both: the perp-dex regen produces
 byte-identical output; pool regen produces the binary harness shape
 verbatim per the PRD's worked example.
 

@@ -34,12 +34,10 @@ use crate::qed_lock::{self, LockEntry, LockFile};
 
 /// Env var overriding `solana program dump` in `SolanaCliFetcher`;
 /// test-only (see module docs).
-#[allow(dead_code)]
 pub const FAKE_BYTES_ENV: &str = "QEDGEN_UPSTREAM_FAKE_BYTES";
 
 /// Result of checking one dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum DepCheckOutcome {
     Match {
         program_id: String,
@@ -68,7 +66,6 @@ pub enum DepCheckOutcome {
 
 /// One row in the report. `name` is the manifest dep key.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DepCheckResult {
     pub name: String,
     pub outcome: DepCheckOutcome,
@@ -81,12 +78,14 @@ pub struct DepCheckResult {
 /// Verification gate the upstream check runs under; maps `Mismatch` outcomes
 /// onto [`FindingSeverity`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Gate {
     /// `qedgen verify --check-upstream` — mismatch = Crit, fails.
     Verify,
     /// `qedgen verify --check-upstream --upstream-stale-ok` — mismatch
-    /// demoted to Info; exits zero. Offline-dev only.
+    /// demoted to Info; exits zero. Offline-dev only. Today `run.rs` skips
+    /// the check entirely under the flag; the demotion routing stays tested
+    /// for when the report is rendered anyway.
+    #[cfg_attr(not(test), allow(dead_code))]
     VerifyStaleOk,
     /// `qedgen check --frozen` — mismatch = P2 (warning), exits zero.
     CheckFrozen,
@@ -96,7 +95,6 @@ pub enum Gate {
 
 /// Severity assigned to a single [`Finding`] after [`Gate`]-aware routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum FindingSeverity {
     /// Verification-gating. Caller exits non-zero.
     Crit,
@@ -109,7 +107,6 @@ pub enum FindingSeverity {
 /// One finding per `Mismatch` / `Error` dep; matches and skips are
 /// summarized separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct Finding {
     pub name: String,
     pub severity: FindingSeverity,
@@ -118,7 +115,6 @@ pub struct Finding {
 
 /// Result of routing a slate of [`DepCheckResult`]s through a [`Gate`].
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RoutedReport {
     /// One [`Finding`] per Mismatch / Error outcome, with severity routed.
     pub findings: Vec<Finding>,
@@ -129,7 +125,6 @@ pub struct RoutedReport {
 
 impl RoutedReport {
     /// True if any finding is severity-CRIT — the caller exits non-zero.
-    #[allow(dead_code)]
     pub fn any_blocking(&self) -> bool {
         self.findings
             .iter()
@@ -138,7 +133,7 @@ impl RoutedReport {
 
     /// True if any finding is P2 — caller renders the warnings tail line
     /// but exits zero.
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))] // production renders findings individually; kept as the test-side summary
     pub fn any_warning(&self) -> bool {
         self.findings
             .iter()
@@ -148,7 +143,6 @@ impl RoutedReport {
 
 /// Pure routing step (no I/O — fetching already happened in
 /// `check_lock_with_fetcher`).
-#[allow(dead_code)]
 pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport {
     let mut findings = Vec::new();
     for r in &results {
@@ -214,7 +208,6 @@ pub fn route_findings(results: Vec<DepCheckResult>, gate: Gate) -> RoutedReport 
 
 /// True if `lock` has any populated `upstream_binary_hash`; `qedgen verify`
 /// uses this to auto-enable `--check-upstream`.
-#[allow(dead_code)]
 pub fn lock_has_pinned_hash(lock: &LockFile) -> bool {
     lock.dependencies.iter().any(|e| {
         e.upstream_binary_hash
@@ -230,7 +223,6 @@ pub fn lock_has_pinned_hash(lock: &LockFile) -> bool {
 /// `rpc_url` flows to `solana program dump --url`; `None` uses the CLI's
 /// configured cluster. `offline`: deps needing an RPC fetch return
 /// `Error { offline-blocked }` instead of shelling out (for network-free CI).
-#[allow(dead_code)]
 pub fn check_lock(
     spec_dir: &Path,
     rpc_url: Option<&str>,
@@ -284,7 +276,6 @@ impl BinaryFetcher for OfflineFetcher {
 
 /// Test seam separating the side-effecting fetch from the pure hash-compare
 /// logic. Production uses `SolanaCliFetcher`; tests inject an in-memory fake.
-#[allow(dead_code)]
 pub trait BinaryFetcher {
     /// Raw bytes of the deployed program (`.so` payload); error cleanly on
     /// network/CLI failure.
@@ -337,7 +328,6 @@ impl<'a> BinaryFetcher for SolanaCliFetcher<'a> {
     }
 }
 
-#[allow(dead_code)]
 pub fn check_lock_with_fetcher(
     lock: &LockFile,
     fetcher: &mut dyn BinaryFetcher,
@@ -448,7 +438,6 @@ fn format_hash(bytes: &[u8]) -> String {
 /// sentinel-pinned native programs from `--require-verified` (their `ensures`
 /// are validated by the runtime, not a proof package); `pub(crate)` so the
 /// lint reuses the same definition.
-#[allow(dead_code)]
 pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
     let body = pinned
         .strip_prefix("sha256:")
@@ -473,7 +462,6 @@ pub(crate) fn is_sentinel_hash(pinned: &str) -> bool {
 /// Root of the content-addressed ELF cache: an `elf-cache/` sibling of the
 /// validation workspace under the qedgen home (`~/.qedgen/elf-cache`, override
 /// via `QEDGEN_HOME`).
-#[allow(dead_code)]
 pub(crate) fn elf_cache_root() -> Result<PathBuf> {
     Ok(crate::validate::qedgen_home()?.join("elf-cache"))
 }
@@ -481,7 +469,6 @@ pub(crate) fn elf_cache_root() -> Result<PathBuf> {
 /// Map a `sha256:<hex>` pin to its file path under `root`. The body must be
 /// pure hex (what [`format_hash`] emits); anything else is rejected so a
 /// malformed pin can never escape the cache directory via `..`/separators.
-#[allow(dead_code)]
 pub(crate) fn cached_elf_path_in(root: &Path, hash: &str) -> Result<PathBuf> {
     let body = hash
         .strip_prefix("sha256:")
@@ -497,7 +484,6 @@ pub(crate) fn cached_elf_path_in(root: &Path, hash: &str) -> Result<PathBuf> {
 /// (temp file + rename) so a concurrent reader never sees a torn file.
 /// Idempotent: the path is content-addressed, so an existing entry is the same
 /// bytes by construction and the write is skipped. Returns the cached path.
-#[allow(dead_code)]
 pub(crate) fn stash_elf_in(root: &Path, hash: &str, bytes: &[u8]) -> Result<PathBuf> {
     use std::io::Write;
     let path = cached_elf_path_in(root, hash)?;
@@ -524,13 +510,12 @@ pub(crate) fn stash_elf_in(root: &Path, hash: &str, bytes: &[u8]) -> Result<Path
 /// cache read means discharging against the *pinned upstream* binary by
 /// `binary_hash` — do it when the aggregate trust report folds in per-handler
 /// discharge verdicts (the same consumer).
-#[allow(dead_code)]
 pub(crate) fn read_cached_elf_in(root: &Path, hash: &str) -> Option<Vec<u8>> {
     std::fs::read(cached_elf_path_in(root, hash).ok()?).ok()
 }
 
 /// [`read_cached_elf_in`] against the default [`elf_cache_root`].
-#[allow(dead_code)]
+#[allow(dead_code)] // staged: re-deferred in v2.40 (#124) — see doc comment on read_cached_elf_in
 pub(crate) fn read_cached_elf(hash: &str) -> Option<Vec<u8>> {
     read_cached_elf_in(&elf_cache_root().ok()?, hash)
 }
@@ -542,7 +527,6 @@ pub(crate) fn read_cached_elf(hash: &str) -> Option<Vec<u8>> {
 /// Render a [`RoutedReport`]: per-dep outcomes first (skip / match context),
 /// then the severity-tagged findings tail. Returns true if the caller should
 /// exit non-zero (any CRIT).
-#[allow(dead_code)]
 pub fn print_routed_report(report: &RoutedReport) -> bool {
     for r in &report.raw {
         match &r.outcome {

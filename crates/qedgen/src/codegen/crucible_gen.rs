@@ -748,12 +748,7 @@ fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<S
 
 fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("fuzz/src/main.rs")
-        .cloned()
-        .unwrap_or_default();
-    let mut s = crate::banner::banner(None, &hash);
+    let mut s = crate::codegen_shared::marker_unlabeled(&fp, "fuzz/src/main.rs");
     s.push_str("//\n");
     s.push_str("// Crucible coverage-guided fuzz harness for the spec.\n");
     s.push_str("//\n");
@@ -832,7 +827,7 @@ fn emit_fixture_struct(out: &mut String, spec: &ParsedSpec, fixture: &str, mode:
 
     // Shadow fields for mutable state — read after each action.
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
-    let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+    let mutable_fields = rust_codegen_util::field_refs(state_fields);
     for (fname, ftype) in &mutable_fields {
         let rust_ty = map_simple_type(ftype);
         out.push_str(&format!("    {fname}: {rust_ty},\n"));
@@ -1015,7 +1010,7 @@ fn emit_fixture_impl(
     }
 
     let state_fields = rust_codegen_util::resolve_state_fields(spec);
-    let mutable_fields = rust_codegen_util::mutable_fields(state_fields);
+    let mutable_fields = rust_codegen_util::field_refs(state_fields);
 
     out.push_str("        Self {\n");
     out.push_str("            ctx,\n");
@@ -1244,20 +1239,9 @@ fn infer_range_attr(_spec: &ParsedSpec, _ptype: &str) -> String {
 }
 
 /// snake_case → PascalCase (used for Anchor `instruction::Foo` / `accounts::Foo`).
+/// Alias of the shared `codegen_shared::to_pascal_case`.
 fn pascal_case(s: &str) -> String {
-    let mut out = String::new();
-    let mut upper_next = true;
-    for c in s.chars() {
-        if c == '_' {
-            upper_next = true;
-        } else if upper_next {
-            out.push(c.to_ascii_uppercase());
-            upper_next = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    crate::codegen_shared::to_pascal_case(s)
 }
 
 fn emit_invariant_fn(out: &mut String, spec: &ParsedSpec, fixture: &str, mode: InvariantMode) {
@@ -1762,32 +1746,7 @@ handler bump (delta : U64) : State.Active -> State.Active {
     fn synthetic_handler() -> crate::check::ParsedHandler {
         crate::check::ParsedHandler {
             name: "noop".into(),
-            doc: None,
-            who: None,
-            on_account: None,
-            pre_status: None,
-            post_status: None,
-            takes_params: vec![],
-            guard_str: None,
-            guard_str_rust: None,
-            aborts_if: vec![],
-            requires: vec![],
-            ensures: vec![],
-            modifies: None,
-            let_bindings: vec![],
-            aborts_total: false,
-            permissionless: false,
-            effects: vec![],
-            accounts: vec![],
-            transfers: vec![],
-            emits: vec![],
-            invariants: vec![],
-            establishes: vec![],
-            properties: vec![],
-            schema_includes: vec![],
-            calls: vec![],
-            effect_branches: None,
-            abstract_binders: vec![],
+            ..Default::default()
         }
     }
 
@@ -1801,10 +1760,10 @@ handler bump (delta : U64) : State.Active -> State.Active {
     #[test]
     fn spec_name_snake_cases() {
         let mut spec = ParsedSpec {
-            program_name: "PercolatorRiskEngine".into(),
+            program_name: "LiquidityRiskEngine".into(),
             ..Default::default()
         };
-        assert_eq!(spec_program_name(&spec), "percolator_risk_engine");
+        assert_eq!(spec_program_name(&spec), "liquidity_risk_engine");
         spec.program_name = "escrow-split".into();
         assert_eq!(spec_program_name(&spec), "escrow_split");
     }

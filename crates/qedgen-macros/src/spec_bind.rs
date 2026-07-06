@@ -9,7 +9,17 @@
 //! to what the user wrote.
 
 use proc_macro2::TokenStream;
-use sha2::{Digest, Sha256};
+
+// Canonical hashing shared with the qedgen CLI (`qedgen::spec_hash`
+// re-exports the same functions) — agreement by construction, not by
+// hand-kept mirroring. `extract_handler_block` / `normalize_spec_block` /
+// `spec_context_digest` are pulled in so the test module (and future
+// callers) can reach them via `super::*`.
+#[allow(unused_imports)]
+use qedgen_hash_core::{
+    extract_handler_block, normalize_spec_block, spec_context_digest, spec_hash_for_handler,
+    token_stream_hash,
+};
 
 use crate::verified::FnLike;
 
@@ -31,15 +41,6 @@ pub(crate) struct Args {
     /// Sealed hash of the canonicalized accounts struct (sha256-hex16
     /// of the syn ItemStruct's tokens after attribute stripping).
     pub accounts_hash: Option<String>,
-}
-
-/// SHA-256 hash of a string, truncated to 16 hex characters.
-/// Shared algorithm with `verified::sha256_hex16` (kept private there).
-fn sha256_hex16(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    let full = format!("{:x}", hasher.finalize());
-    full[..16].to_string()
 }
 
 /// v2.29 — recursively read every `*.qedspec` file under `dir`, sort
@@ -185,12 +186,11 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
             syn::Item::Struct(s) if s.ident == struct_name => {
                 let mut stripped = s.clone();
                 stripped.attrs.clear();
-                // v2.15: canonical_token_string normalizes Spacing on
+                // v2.15: token_stream_hash canonicalizes Spacing on
                 // every Punct so this computation agrees byte-for-byte
                 // with `qedgen::spec_hash::accounts_struct_hash_in_items`
-                // — see verified::canonical_token_string for rationale.
-                let canonical = crate::verified::canonical_token_string(stripped.to_token_stream());
-                return Some(sha256_hex16(&canonical));
+                // — see qedgen_hash_core::canonical_token_string.
+                return Some(token_stream_hash(&stripped.to_token_stream()));
             }
             syn::Item::Mod(item_mod) => {
                 if let Some((_, sub_items)) = &item_mod.content {
@@ -203,327 +203,6 @@ fn accounts_struct_hash_in_items(items: &[syn::Item], struct_name: &str) -> Opti
         }
     }
     None
-}
-
-/// Extract the raw text of a `handler <name> { ... }` block from the spec source
-/// by scanning for the keyword + balanced-brace matching.
-///
-/// Returns the body (including the enclosing braces). Whitespace and comments
-/// inside are preserved — the hash is of the raw bytes of that slice.
-pub(crate) fn extract_handler_block(source: &str, handler_name: &str) -> Option<String> {
-    // Match `handler <name>` where <name> is followed by a word boundary.
-    // Hand-rolled to avoid pulling regex into the proc-macro crate.
-    let needle = "handler";
-    let mut search_from = 0;
-    while let Some(pos) = source[search_from..].find(needle) {
-        let abs = search_from + pos;
-        // Require that the previous char is whitespace or SOF
-        let prev_ok = abs == 0
-            || source.as_bytes()[abs - 1].is_ascii_whitespace()
-            || source.as_bytes()[abs - 1] == b'\n';
-        // Require that the char after 'handler' is whitespace
-        let after = abs + needle.len();
-        if !prev_ok || after >= source.len() || !source.as_bytes()[after].is_ascii_whitespace() {
-            search_from = abs + 1;
-            continue;
-        }
-        // Skip whitespace, then capture the identifier
-        let rest = &source[after..];
-        let rest_trimmed = rest.trim_start();
-        let ws_consumed = rest.len() - rest_trimmed.len();
-        // Capture identifier bytes: ASCII alnum + underscore.
-        let mut id_end = 0;
-        for (i, c) in rest_trimmed.char_indices() {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                id_end = i + c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        if id_end == 0 {
-            search_from = abs + 1;
-            continue;
-        }
-        let ident = &rest_trimmed[..id_end];
-        if ident != handler_name {
-            search_from = abs + 1;
-            continue;
-        }
-        // Found the handler. Now scan forward to the first `{` and do balanced
-        // matching (respecting single-line `//` comments and string literals —
-        // since the DSL allows `//` comments inside handler bodies, we must
-        // not count `{`/`}` that appear in comments).
-        let body_search_start = after + ws_consumed + id_end;
-        let body_bytes = source.as_bytes();
-        let mut cursor = body_search_start;
-        // Find the opening brace.
-        while cursor < body_bytes.len() && body_bytes[cursor] != b'{' {
-            cursor += 1;
-        }
-        if cursor >= body_bytes.len() {
-            return None;
-        }
-        let block_start = cursor;
-        let mut depth = 0i32;
-        let mut in_line_comment = false;
-        let mut in_block_comment = false;
-        let mut in_str = false;
-        while cursor < body_bytes.len() {
-            let b = body_bytes[cursor];
-            if in_line_comment {
-                if b == b'\n' {
-                    in_line_comment = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_block_comment {
-                if b == b'*' && cursor + 1 < body_bytes.len() && body_bytes[cursor + 1] == b'/' {
-                    in_block_comment = false;
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_str {
-                if b == b'\\' && cursor + 1 < body_bytes.len() {
-                    cursor += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_str = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            // Check for comment/string starts
-            if b == b'/' && cursor + 1 < body_bytes.len() {
-                let nxt = body_bytes[cursor + 1];
-                if nxt == b'/' {
-                    in_line_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-                if nxt == b'*' {
-                    in_block_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-            }
-            if b == b'"' {
-                in_str = true;
-                cursor += 1;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    // Found the matching close brace.
-                    let block_end = cursor + 1;
-                    return Some(source[block_start..block_end].to_string());
-                }
-            }
-            cursor += 1;
-        }
-        return None;
-    }
-    None
-}
-
-/// Normalize a spec handler block before hashing so cosmetic edits
-/// (reformatting, comment changes, blank-line shuffling) don't fire
-/// drift while semantic edits still do. MUST match
-/// `qedgen::spec_hash::normalize_spec_block` byte-for-byte; any
-/// divergence yields a spurious spec-hash drift.
-pub(crate) fn normalize_spec_block(block: &str) -> String {
-    let bytes = block.as_bytes();
-    let mut out = String::with_capacity(block.len());
-    let mut i = 0;
-    let mut in_str = false;
-    let mut last_emit_was_ws = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_str {
-            out.push(b as char);
-            if b == b'\\' && i + 1 < bytes.len() {
-                out.push(bytes[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            if b == b'"' {
-                in_str = false;
-            }
-            i += 1;
-            last_emit_was_ws = false;
-            continue;
-        }
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            i = i.saturating_add(2);
-            if !out.is_empty() && !last_emit_was_ws {
-                out.push(' ');
-                last_emit_was_ws = true;
-            }
-            continue;
-        }
-        if b == b'"' {
-            in_str = true;
-            out.push('"');
-            i += 1;
-            last_emit_was_ws = false;
-            continue;
-        }
-        if b.is_ascii_whitespace() {
-            if !out.is_empty() && !last_emit_was_ws {
-                out.push(' ');
-                last_emit_was_ws = true;
-            }
-            i += 1;
-            continue;
-        }
-        out.push(b as char);
-        last_emit_was_ws = false;
-        i += 1;
-    }
-    out.trim().to_string()
-}
-
-/// Build a digest of every top-level item in `source` *except* handler
-/// blocks. (GH issue #31.) Folded into `spec_hash_for_handler` so
-/// changes to shared top-level declarations (`const`, `type`, `pda`,
-/// `event`, `errors`, `interface`, `import`, `invariant`, `property`,
-/// `environment`) invalidate every handler's spec_hash. MUST mirror
-/// `qedgen::spec_hash::spec_context_digest` byte-for-byte.
-pub(crate) fn spec_context_digest(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut search_from = 0;
-    let mut last_emit = 0usize;
-    let needle = "handler";
-
-    while let Some(pos) = source[search_from..].find(needle) {
-        let abs = search_from + pos;
-        let prev_ok = abs == 0 || bytes[abs - 1].is_ascii_whitespace();
-        let after = abs + needle.len();
-        if !prev_ok || after >= bytes.len() || !bytes[after].is_ascii_whitespace() {
-            search_from = abs + 1;
-            continue;
-        }
-        let mut cursor = after;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'_')
-        {
-            cursor += 1;
-        }
-        while cursor < bytes.len() && bytes[cursor] != b'{' {
-            cursor += 1;
-        }
-        if cursor >= bytes.len() {
-            search_from = abs + 1;
-            continue;
-        }
-        let block_start = abs;
-        let body_start = cursor;
-        let mut depth = 0i32;
-        let mut in_line_comment = false;
-        let mut in_block_comment = false;
-        let mut in_str = false;
-        cursor = body_start;
-        while cursor < bytes.len() {
-            let b = bytes[cursor];
-            if in_line_comment {
-                if b == b'\n' {
-                    in_line_comment = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_block_comment {
-                if b == b'*' && cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' {
-                    in_block_comment = false;
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                continue;
-            }
-            if in_str {
-                if b == b'\\' && cursor + 1 < bytes.len() {
-                    cursor += 2;
-                    continue;
-                }
-                if b == b'"' {
-                    in_str = false;
-                }
-                cursor += 1;
-                continue;
-            }
-            if b == b'/' && cursor + 1 < bytes.len() {
-                let nxt = bytes[cursor + 1];
-                if nxt == b'/' {
-                    in_line_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-                if nxt == b'*' {
-                    in_block_comment = true;
-                    cursor += 2;
-                    continue;
-                }
-            }
-            if b == b'"' {
-                in_str = true;
-                cursor += 1;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    let block_end = cursor + 1;
-                    out.push_str(&source[last_emit..block_start]);
-                    out.push(' ');
-                    last_emit = block_end;
-                    search_from = block_end;
-                    break;
-                }
-            }
-            cursor += 1;
-        }
-        if depth != 0 {
-            break;
-        }
-    }
-    out.push_str(&source[last_emit..]);
-    sha256_hex16(&normalize_spec_block(&out))
-}
-
-/// Compute the spec hash for a handler: extract the block text,
-/// normalize whitespace + comments, then sha256-hex16. v2.15 (GH issue
-/// #31): the hash also folds in `spec_context_digest(source)` so
-/// changes to top-level shared declarations propagate into every
-/// handler's hash.
-pub(crate) fn spec_hash_for_handler(source: &str, handler_name: &str) -> Option<String> {
-    let block = extract_handler_block(source, handler_name)?;
-    let normalized = normalize_spec_block(&block);
-    let context = spec_context_digest(source);
-    Some(sha256_hex16(&format!("{}:{}", normalized, context)))
 }
 
 /// Main expansion for `#[qed(verified, spec=..., handler=..., hash=..., spec_hash=...)]`.
@@ -771,7 +450,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_SPEC: &str = r#"
-spec Percolator
+spec Vault
 
 handler deposit (i : AccountIdx) (amount : U128) : State.Active -> State.Active {
   requires state.accounts[i].active == 1 else SlotInactive
@@ -860,13 +539,13 @@ handler withdraw (i : AccountIdx) (amount : U128) : State.Active -> State.Active
     fn parse_all_args() {
         let attr: TokenStream = quote::quote! {
             verified,
-            spec = "percolator.qedspec",
+            spec = "vault.qedspec",
             handler = "deposit",
             hash = "aaaaaaaaaaaaaaaa",
             spec_hash = "bbbbbbbbbbbbbbbb"
         };
         let args = parse_args(&attr).unwrap();
-        assert_eq!(args.spec.as_deref(), Some("percolator.qedspec"));
+        assert_eq!(args.spec.as_deref(), Some("vault.qedspec"));
         assert_eq!(args.handler.as_deref(), Some("deposit"));
         assert_eq!(args.hash.as_deref(), Some("aaaaaaaaaaaaaaaa"));
         assert_eq!(args.spec_hash.as_deref(), Some("bbbbbbbbbbbbbbbb"));

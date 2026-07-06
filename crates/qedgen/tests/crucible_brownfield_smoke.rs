@@ -13,42 +13,11 @@
 //!   `invariant_test()` body.
 //! - The emitted JSON envelope has `mode: spec_less` and 0 findings.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use common::{ensure_qedgen_built, qedgen_bin, repo_root};
+use std::path::Path;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("qedgen crate should live under <repo>/crates/qedgen")
-        .to_path_buf()
-}
-
-fn qedgen_bin() -> PathBuf {
-    repo_root()
-        .join("target")
-        .join(profile_dir())
-        .join("qedgen")
-}
-
-fn profile_dir() -> &'static str {
-    if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    }
-}
-
-fn ensure_qedgen_built() {
-    if !qedgen_bin().exists() {
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "qedgen"])
-            .current_dir(repo_root())
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "cargo build qedgen failed");
-    }
-}
 
 fn write_brownfield_anchor(dir: &Path, name: &str) {
     std::fs::create_dir_all(dir.join("src")).unwrap();

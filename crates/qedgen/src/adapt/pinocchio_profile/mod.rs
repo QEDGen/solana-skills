@@ -12,7 +12,6 @@
 
 use anyhow::Result;
 use quote::ToTokens;
-use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use syn::{Expr, Item, ItemFn, Pat, Stmt};
@@ -39,6 +38,8 @@ mod tests;
 /// Infer a proof profile from a Pinocchio crate's `src/` directory. Missing
 /// or unrecognized patterns produce an empty/partial profile instead of an
 /// error; the Kani emitter can then fall back to spec-order generation.
+/// Unparseable Rust, by contrast, is a hard error — silent under-inference
+/// is worse than a loud failure.
 #[cfg(test)]
 pub(crate) fn infer_from_src_dir(src_dir: &Path) -> Result<PinocchioProofProfile> {
     infer_from_src_dirs([(src_dir.to_path_buf(), false)])
@@ -110,143 +111,102 @@ fn infer_single_src_dir(src_dir: &Path, include_siblings: bool) -> Result<Pinocc
     let mut handlers: BTreeMap<String, PinocchioHandlerProfile> = BTreeMap::new();
     let mut pda_derivations: BTreeMap<String, PinocchioPdaDerivation> = BTreeMap::new();
     let mut parsed_files = Vec::new();
+    let mut parse_errors = Vec::new();
     let mut contracted_fns = BTreeMap::new();
     let mut call_graph = BTreeMap::new();
     for path in files {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if let Ok(syntax) = syn::parse_file(&source) {
-            let fns = collect_item_fns(&syntax.items);
-            for item_fn in &fns {
-                call_graph.insert(
+        let syntax = match syn::parse_file(&source) {
+            Ok(syntax) => syntax,
+            Err(err) => {
+                let start = err.span().start();
+                parse_errors.push(format!(
+                    "{}:{}:{}: {err}",
+                    path.display(),
+                    start.line,
+                    start.column + 1
+                ));
+                continue;
+            }
+        };
+        let fns = collect_item_fns(&syntax.items);
+        for item_fn in &fns {
+            call_graph.insert(
+                item_fn.sig.ident.to_string(),
+                infer_called_fn_names_from_block(&item_fn.block),
+            );
+            if item_fn_has_kani_contract(item_fn) {
+                contracted_fns.insert(
                     item_fn.sig.ident.to_string(),
-                    infer_called_fn_names_from_block(&item_fn.block),
+                    crate_fn_path(src_dir, &path, &item_fn.sig.ident.to_string()),
                 );
-                if item_fn_has_kani_contract(item_fn) {
-                    contracted_fns.insert(
-                        item_fn.sig.ident.to_string(),
-                        crate_fn_path(src_dir, &path, &item_fn.sig.ident.to_string()),
-                    );
-                }
             }
-            parsed_files.push((path, source, syntax));
-        } else {
-            parsed_files.push((
-                path,
-                source,
-                syn::File {
-                    shebang: None,
-                    attrs: Vec::new(),
-                    items: Vec::new(),
-                },
-            ));
         }
+        parsed_files.push(syntax);
     }
-    for (_path, source, syntax) in parsed_files {
-        if !syntax.items.is_empty() {
-            let fns = collect_item_fns(&syntax.items);
-            for item_fn in &fns {
-                let Some(name) = process_handler_name(item_fn) else {
-                    continue;
-                };
-                let entry = handlers
-                    .entry(name.clone())
-                    .or_insert_with(|| empty_handler_profile(name));
-                if entry.accounts.is_empty() {
-                    entry.accounts = infer_accounts_from_block(&item_fn.block);
-                }
-                let role_accounts = if entry.accounts.is_empty() {
-                    infer_accounts_from_block(&item_fn.block)
-                } else {
-                    entry.accounts.clone()
-                };
-                for (account, role) in
-                    infer_account_roles_from_block(&item_fn.block, &role_accounts)
-                {
-                    entry.account_roles.entry(account).or_default().merge(role);
-                }
-                for (account, param) in infer_mint_decimal_bindings_from_block(&item_fn.block) {
-                    entry.mint_decimal_bindings.insert(account, param);
-                }
-                let key_account_aliases = infer_key_account_aliases_from_block(&item_fn.block);
-                let local_key_derivations = infer_local_key_derivations_from_block(&item_fn.block);
-                for (account, binding) in infer_token_account_bindings_from_block(
-                    &item_fn.block,
-                    &key_account_aliases,
-                    &local_key_derivations,
-                ) {
-                    entry.token_account_bindings.insert(account, binding);
-                }
-                for (account, derivation) in
-                    infer_account_key_derivations_from_block(&item_fn.block, &local_key_derivations)
-                {
-                    entry.account_key_derivations.insert(account, derivation);
-                }
-                for (expr, alias) in infer_source_expr_aliases_from_block(&item_fn.block) {
-                    entry.source_expr_aliases.insert(expr, alias);
-                }
-                for stub in
-                    infer_verified_stubs_from_block(&item_fn.block, &contracted_fns, &call_graph)
-                {
-                    if !entry.verified_stubs.contains(&stub) {
-                        entry.verified_stubs.push(stub);
-                    }
-                }
-                if entry.params.is_empty() {
-                    entry.params = infer_params_from_block(&item_fn.block);
+    if !parse_errors.is_empty() {
+        anyhow::bail!(
+            "unparseable Rust under {}: {} file(s) failed to parse:\n  {}",
+            src_dir.display(),
+            parse_errors.len(),
+            parse_errors.join("\n  ")
+        );
+    }
+    for syntax in parsed_files {
+        let fns = collect_item_fns(&syntax.items);
+        for item_fn in &fns {
+            let Some(name) = process_handler_name(item_fn) else {
+                continue;
+            };
+            let entry = handlers
+                .entry(name.clone())
+                .or_insert_with(|| empty_handler_profile(name));
+            if entry.accounts.is_empty() {
+                entry.accounts = infer_accounts_from_block(&item_fn.block);
+            }
+            let role_accounts = if entry.accounts.is_empty() {
+                infer_accounts_from_block(&item_fn.block)
+            } else {
+                entry.accounts.clone()
+            };
+            for (account, role) in infer_account_roles_from_block(&item_fn.block, &role_accounts) {
+                entry.account_roles.entry(account).or_default().merge(role);
+            }
+            for (account, param) in infer_mint_decimal_bindings_from_block(&item_fn.block) {
+                entry.mint_decimal_bindings.insert(account, param);
+            }
+            let key_account_aliases = infer_key_account_aliases_from_block(&item_fn.block);
+            let local_key_derivations = infer_local_key_derivations_from_block(&item_fn.block);
+            for (account, binding) in infer_token_account_bindings_from_block(
+                &item_fn.block,
+                &key_account_aliases,
+                &local_key_derivations,
+            ) {
+                entry.token_account_bindings.insert(account, binding);
+            }
+            for (account, derivation) in
+                infer_account_key_derivations_from_block(&item_fn.block, &local_key_derivations)
+            {
+                entry.account_key_derivations.insert(account, derivation);
+            }
+            for (expr, alias) in infer_source_expr_aliases_from_block(&item_fn.block) {
+                entry.source_expr_aliases.insert(expr, alias);
+            }
+            for stub in
+                infer_verified_stubs_from_block(&item_fn.block, &contracted_fns, &call_graph)
+            {
+                if !entry.verified_stubs.contains(&stub) {
+                    entry.verified_stubs.push(stub);
                 }
             }
-            infer_dispatch_tags_from_items(&syntax.items, &mut handlers);
-            infer_pda_derivations_from_fns(&fns, &mut pda_derivations);
-        } else {
-            for (name, body) in process_fn_bodies(&source) {
-                let entry = handlers
-                    .entry(name.clone())
-                    .or_insert_with(|| empty_handler_profile(name));
-                if entry.accounts.is_empty() {
-                    entry.accounts = infer_accounts(&body);
-                }
-                let role_accounts = if entry.accounts.is_empty() {
-                    infer_accounts(&body)
-                } else {
-                    entry.accounts.clone()
-                };
-                for (account, role) in infer_account_roles(&body, &role_accounts) {
-                    entry.account_roles.entry(account).or_default().merge(role);
-                }
-                for (account, param) in infer_mint_decimal_bindings(&body) {
-                    entry.mint_decimal_bindings.insert(account, param);
-                }
-                let key_account_aliases = infer_key_account_aliases(&body);
-                let local_key_derivations = infer_local_key_derivations(&body);
-                for (account, binding) in infer_token_account_bindings(
-                    &body,
-                    &key_account_aliases,
-                    &local_key_derivations,
-                ) {
-                    entry.token_account_bindings.insert(account, binding);
-                }
-                for (account, derivation) in
-                    infer_account_key_derivations(&body, &local_key_derivations)
-                {
-                    entry.account_key_derivations.insert(account, derivation);
-                }
-                for (expr, alias) in infer_source_expr_aliases(&body) {
-                    entry.source_expr_aliases.insert(expr, alias);
-                }
-                for stub in infer_verified_stubs_from_body(&body, &contracted_fns, &call_graph) {
-                    if !entry.verified_stubs.contains(&stub) {
-                        entry.verified_stubs.push(stub);
-                    }
-                }
-                if entry.params.is_empty() {
-                    entry.params = infer_params(&body);
-                }
+            if entry.params.is_empty() {
+                entry.params = infer_params_from_block(&item_fn.block);
             }
-            infer_dispatch_tags(&source, &mut handlers);
-            infer_pda_derivations(&source, &mut pda_derivations);
         }
+        infer_dispatch_tags_from_items(&syntax.items, &mut handlers);
+        infer_pda_derivations_from_fns(&fns, &mut pda_derivations);
     }
 
     let mut profile = PinocchioProofProfile {
@@ -264,15 +224,6 @@ fn infer_single_src_dir(src_dir: &Path, include_siblings: bool) -> Result<Pinocc
 fn empty_handler_profile(name: String) -> PinocchioHandlerProfile {
     PinocchioHandlerProfile {
         name,
-        instruction_tag: None,
-        accounts: Vec::new(),
-        account_roles: BTreeMap::new(),
-        token_account_bindings: BTreeMap::new(),
-        mint_decimal_bindings: BTreeMap::new(),
-        account_key_derivations: BTreeMap::new(),
-        source_expr_aliases: BTreeMap::new(),
-        verified_stubs: Vec::new(),
-        params: Vec::new(),
-        repeats: Vec::new(),
+        ..Default::default()
     }
 }

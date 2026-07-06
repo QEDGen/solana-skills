@@ -107,14 +107,11 @@ pub struct ParsedRequires {
 #[derive(Debug, Clone)]
 pub struct ParsedEnsures {
     pub lean_expr: String,
-    #[allow(dead_code)]
     pub rust_expr: String,
-    #[allow(dead_code)]
     pub rust_expr_pod: String,
     /// Binary-mode rendering (`state.x` → `post.x`, `old(state.x)` → `pre.x`)
     /// for the ensures-preservation Kani harness; `rust_expr` flattens both to
     /// `s.x`, losing the pre/post distinction.
-    #[allow(dead_code)]
     pub rust_expr_binary: String,
     /// Binary-mode + math-exact rendering (see
     /// `ParsedRequires::rust_expr_math`) for harness asserts (issue #146).
@@ -158,7 +155,6 @@ pub struct ParsedInvariant {
     /// Lean form of the predicate. `None` for description-only.
     pub lean_expr: Option<String>,
     /// Rust form of the predicate. `None` for description-only.
-    #[allow(dead_code)]
     pub rust_expr: Option<String>,
     /// Source AST body for the `old_in_single_state_context` lint.
     /// `None` for the description-only form.
@@ -174,44 +170,6 @@ pub struct ParsedEnvironment {
     pub mutates: Vec<(String, String)>, // (field, type)
     pub constraints: Vec<String>,       // lean form
     pub constraints_rust: Vec<String>,  // rust form
-}
-
-/// Parsed operation from a qedspec block.
-///
-/// Fields are shared across backends (kani/proptest/lean/codegen) to avoid
-/// re-parsing; struct-level `allow(dead_code)` covers fields not all
-/// feature sets touch.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedOperation {
-    pub name: String,
-    pub doc: Option<String>,
-    pub who: Option<String>,
-    /// Which account type this operation targets (from `on` clause).
-    /// None means the default (first/only) account.
-    pub on_account: Option<String>,
-    pub has_when: bool,
-    pub pre_status: Option<String>,
-    pub post_status: Option<String>,
-    pub has_calls: bool,
-    pub program_id: Option<String>,
-    pub has_u64_fields: bool,
-    pub has_takes: bool,
-    pub has_guard: bool,
-    pub guard_str: Option<String>,
-    pub has_effect: bool,
-    pub takes_params: Vec<(String, String)>,
-    pub effects: Vec<(String, String, String)>,
-    /// Per-site `or <ErrorVariant>` overrides, parallel to `effects`
-    /// (`effect_on_error[i]` overrides `effects[i]`). `None` without an
-    /// explicit `or`, and for saturating / wrapping / `Set` effects where
-    /// overrides are meaningless.
-    pub effect_on_error: Vec<Option<String>>,
-    pub calls_accounts: Vec<(String, String)>,
-    pub calls_discriminator: Option<String>,
-    pub emits: Vec<String>,
-    /// Abort conditions: (lean_expr, rust_expr, error_name)
-    pub aborts_if: Vec<ParsedAbort>,
 }
 
 /// Temporal shape of a property body, computed at parse time: any
@@ -299,7 +257,6 @@ pub fn rust_expr_is_unsupported(rust_expr: &str) -> bool {
 
 /// PDA seed declaration from a qedspec block.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedPda {
     pub name: String,
     pub seeds: Vec<String>,
@@ -307,37 +264,9 @@ pub struct ParsedPda {
 
 /// Event declaration from a qedspec block.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedEvent {
     pub name: String,
     pub fields: Vec<(String, String)>,
-}
-
-/// Account entry within an operation's context: block.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedAccountEntry {
-    pub name: String,
-    pub account_type: String,
-    pub inner_type: Option<String>,
-    pub is_mut: bool,
-    pub is_init: bool,
-    pub is_init_if_needed: bool,
-    pub payer: Option<String>,
-    pub seeds_ref: Option<String>,
-    pub has_bump: bool,
-    pub close_target: Option<String>,
-    pub has_one: Option<String>,
-    pub token_mint: Option<String>,
-    pub token_authority: Option<String>,
-}
-
-/// Per-operation account context.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct ParsedContext {
-    pub operation: String,
-    pub accounts: Vec<ParsedAccountEntry>,
 }
 
 // ============================================================================
@@ -346,7 +275,6 @@ pub struct ParsedContext {
 
 /// Known pubkey as 4-chunk U64 representation.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedPubkey {
     pub name: String,
     pub chunks: Vec<String>, // 4 U64 values as strings
@@ -354,17 +282,17 @@ pub struct ParsedPubkey {
 
 /// A field in an input/instruction layout with byte offset.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedLayoutField {
     pub name: String,
     pub field_type: String,
     pub offset: i64,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
 /// An sBPF validation guard.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedGuard {
     pub name: String,
     pub doc: Option<String>,
@@ -376,16 +304,17 @@ pub struct ParsedGuard {
 
 /// An sBPF property (memory safety, data flow, CPI correctness, etc).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedSbpfProperty {
     pub name: String,
     pub doc: Option<String>,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub kind: SbpfPropertyKind,
 }
 
 /// The different kinds of sBPF properties.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
 pub enum SbpfPropertyKind {
     /// Memory safety — scope over guards or named list
     Scope { targets: Vec<String> },
@@ -405,7 +334,7 @@ pub enum SbpfPropertyKind {
 
 /// Sub-kinds of data flow properties.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
 pub enum FlowKind {
     FromSeeds(Vec<String>),
     Through(Vec<String>),
@@ -413,10 +342,13 @@ pub enum FlowKind {
 
 /// A single instruction handler in an sBPF program.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInstruction {
     pub name: String,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub discriminant: Option<String>,
     pub entry: Option<u64>,
     pub constants: Vec<(String, String)>,
@@ -429,10 +361,11 @@ pub struct ParsedInstruction {
 
 /// Error code with optional numeric value and description.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedErrorCode {
     pub name: String,
     pub value: Option<u64>,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub description: Option<String>,
 }
 
@@ -462,8 +395,9 @@ pub struct ParsedEffect {
     /// outside the chumsky adapter (IDL ingest, probes) — MIR lowering
     /// falls back to `value`.
     pub value_rust: String,
-    /// Per-site `else <ErrorVariant>` override (checked add/sub only).
-    /// See `ParsedOperation::effect_on_error`.
+    /// Per-site `or <ErrorVariant>` override (checked add/sub only).
+    /// `None` without an explicit `or`, and for saturating / wrapping /
+    /// `Set` effects where overrides are meaningless.
     pub on_error: Option<String>,
     /// Typed RHS tree (#151); `None` for legacy ingest and hand-built
     /// fixtures.
@@ -493,10 +427,11 @@ impl ParsedEffect {
     }
 }
 
-/// A unified handler — replaces both ParsedOperation (Quasar) and
-/// ParsedInstruction (sBPF). Represents any callable entry point with
-/// guards, effects, accounts, and properties.
-#[derive(Debug, Clone)]
+/// A unified handler — replaced the pre-unification per-frontend shapes
+/// (`ParsedOperation` for Quasar, `ParsedInstruction` for sBPF, both since
+/// deleted). Represents any callable entry point with guards, effects,
+/// accounts, and properties.
+#[derive(Debug, Clone, Default)]
 pub struct ParsedHandler {
     pub name: String,
     pub doc: Option<String>,
@@ -511,9 +446,6 @@ pub struct ParsedHandler {
     pub takes_params: Vec<(String, String)>,
     /// Legacy guard expression (Lean form). Deprecated: use `requires` instead.
     pub guard_str: Option<String>,
-    /// Legacy guard expression (Rust form). Deprecated: use `requires` instead.
-    #[allow(dead_code)]
-    pub guard_str_rust: Option<String>,
     /// Legacy abort conditions. Deprecated: use `requires ... else` instead.
     pub aborts_if: Vec<ParsedAbort>,
     /// Requires clauses: guard + optional abort. When error_name is Some,
@@ -552,7 +484,6 @@ pub struct ParsedHandler {
     pub properties: Vec<String>,
     /// `call Interface.handler(name = expr, ...)` sites resolved against a
     /// top-level `interface` block. Empty for handlers that don't CPI.
-    #[allow(dead_code)]
     pub calls: Vec<ParsedCall>,
     /// Conditional-effect tree: `Some` when the spec uses `match` inside
     /// `effect { … }`. The flat `effects` field still holds the union of
@@ -600,7 +531,6 @@ pub struct ParsedEffectArm {
 /// target is split into interface + handler name for easier lookup; args
 /// carry both Lean and Rust renderings so backends can pick their form.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedCall {
     pub target_interface: String,
     pub target_handler: String,
@@ -619,7 +549,6 @@ pub struct ParsedCall {
 }
 
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedCallArg {
     pub name: String,
     pub lean_expr: String,
@@ -637,7 +566,6 @@ pub struct ParsedCallArg {
 /// for v3.0. Substitution helpers synthesize `pre.` / `post.` prefixes and
 /// Lean `(·.<caller_field>)` at use sites.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedStateBinder {
     /// Callee abstract field name, matched verbatim (word-boundary) in the
     /// callee's `ensures` text.
@@ -682,250 +610,6 @@ impl ParsedHandler {
     /// Check if any account has bumps (PDA seeds).
     pub fn has_bumps(&self) -> bool {
         self.accounts.iter().any(|a| a.pda_seeds.is_some())
-    }
-}
-
-/// True iff the spec is a multi-variant ADT, the field lives inside a variant
-/// payload (not on the wrapper), and the spec opted into wrapper-struct +
-/// inner-enum codegen (ADT state repr).
-///
-/// Used by R25's `auth X → has_one = X` lowering and `emit_variant_auth_guard`
-/// to decide whether the auth field is reachable from the Anchor wrapper. On
-/// the flat-struct path every field sits directly on the wrapper, so `has_one`
-/// works and a variant-destructure guard would reference a non-existent `inner` enum.
-pub fn is_multi_variant_adt_with_field_in_variant(spec: &ParsedSpec, field: &str) -> bool {
-    let Some(acct) = spec.account_types.first() else {
-        return false;
-    };
-    if acct.variants.len() <= 1 {
-        return false;
-    }
-    if !spec.state_repr_is_adt() {
-        return false;
-    }
-    acct.variants
-        .iter()
-        .any(|v| v.fields.iter().any(|(n, _)| n == field))
-}
-
-/// True if the state struct backing this handler-account has `field`.
-/// Multi-state specs walk `spec.account_types`; single-state specs use the
-/// union in `spec.state_fields`. Used by R25's `auth X` → `has_one = X` lowering.
-fn state_account_has_field(acct: &ParsedHandlerAccount, spec: &ParsedSpec, field: &str) -> bool {
-    // Multi-state: match account name → ADT name (lowercase).
-    for at in &spec.account_types {
-        let lower = at.name.to_lowercase();
-        if acct.name == lower || acct.name.starts_with(&lower) {
-            return at.fields.iter().any(|(n, _)| n == field);
-        }
-    }
-    // Single-state spec — fields union lives on the spec.
-    spec.state_fields.iter().any(|(n, _)| n == field)
-}
-
-impl ParsedHandlerAccount {
-    /// Generate the #[account(...)] attribute for codegen, target-aware.
-    ///
-    /// Anchor and Quasar both spell the attribute `#[account(...)]` but
-    /// disagree on:
-    ///
-    /// - **Pubkey accessor**: Anchor uses `<acct>.key()`; Quasar uses
-    ///   `<acct>.address()`. Quasar's `#[account]` macro also auto-handles
-    ///   bare-ident seeds matching field names (expanding to
-    ///   `<ident>.to_account_view().address().as_ref()`), so Quasar bare
-    ///   idents are preferred over `.key().as_ref()`.
-    /// - **State-field seeds in non-init handlers**: Anchor's macro evaluates
-    ///   `<pda>.<field>.as_ref()` in a scope where `<pda>` is bound to the
-    ///   parsed account. Quasar re-uses the same expression in a `Bumps::seeds()`
-    ///   method where only `self` is in scope, so `vault.creator.as_ref()`
-    ///   fails with E0425. For Quasar we omit the `seeds = [...]` directive
-    ///   entirely on non-init handlers when seeds reference state fields —
-    ///   `Account<T>`'s owner+discriminator check still protects type
-    ///   confusion. Anchor keeps the original behavior.
-    pub fn quasar_account_attr(
-        &self,
-        handler: &ParsedHandler,
-        state_name: &str,
-        target: crate::Target,
-        spec: &ParsedSpec,
-        is_state_account: bool,
-    ) -> String {
-        let _ = state_name;
-        let mut parts = Vec::new();
-
-        // Infer init from lifecycle. In multi-state specs only the account
-        // matching the handler's `on_account` is init'd — sibling writable
-        // PDAs in the same handler are pre-existing.
-        let lifecycle_is_init = handler.pre_status.as_deref() == Some("Uninitialized")
-            || handler.pre_status.as_deref() == Some("Empty");
-        let on_account_matches = match handler.on_account.as_deref() {
-            // Multi-state: only the named state account init's.
-            Some(adt_name) => {
-                let lower = adt_name.to_lowercase();
-                self.name == lower || self.name.starts_with(&lower)
-            }
-            // Single-state spec: any writable PDA can be the init target.
-            None => true,
-        };
-        let is_init =
-            lifecycle_is_init && on_account_matches && !self.is_signer && self.pda_seeds.is_some();
-
-        // `mut` is mutually exclusive with `init` in Anchor (init implies
-        // mut) — emitting both trips `mut cannot be provided with init`.
-        if self.is_writable && !is_init {
-            parts.push("mut".to_string());
-        }
-
-        if is_init {
-            parts.push("init".to_string());
-            if let Some(signer) = handler.signer_account() {
-                parts.push(format!("payer = {}", signer.name));
-            }
-            // Anchor requires `space = <bytes>` with `init`. We derive
-            // `InitSpace` on every account type / inner enum / record, so
-            // the canonical form is `space = 8 + <AccountStruct>::INIT_SPACE`
-            // (8 = Anchor discriminator). The struct name must match what
-            // `generate_state` emits.
-            let space_target = match (target, handler.on_account.as_deref()) {
-                // Multi-state spec: per-handler `on_account` names
-                // the ADT being driven. The wrapper struct is
-                // `<Name>Account`.
-                (_, Some(adt_name)) => format!("{}Account", adt_name),
-                // Single-state spec on Anchor: the wrapper is
-                // `<Program>Account` (matches `generate_state`'s
-                // non-multi branch).
-                (crate::Target::Anchor, None) => format!(
-                    "{}Account",
-                    crate::codegen_shared::to_pascal_case(&spec.program_name)
-                ),
-                // Quasar handles space differently — its `init`
-                // analogue takes size from the typed `Account<T>`
-                // wrapper. Skip the `space` attribute on Quasar.
-                _ => String::new(),
-            };
-            if !space_target.is_empty() {
-                parts.push(format!("space = 8 + {}::INIT_SPACE", space_target));
-            }
-        }
-
-        if let Some(ref seeds) = self.pda_seeds {
-            let bound_account_names: std::collections::HashSet<&str> =
-                handler.accounts.iter().map(|a| a.name.as_str()).collect();
-
-            // Detect the case-3 (state-field) seeds. For Quasar non-init
-            // handlers these don't survive the `Bumps::<acct>_seeds(self)`
-            // method generation because `self.<seed>` isn't auto-captured —
-            // omit `seeds`/`bump` on the per-handler attribute and rely on
-            // owner+discriminator from `Account<T>`.
-            let needs_state_field_seed = seeds.iter().any(|seed| {
-                let is_literal = seed.starts_with('"') && seed.ends_with('"');
-                !is_literal && !bound_account_names.contains(seed.as_str())
-            });
-
-            // v2.29 — extend the suppress to Anchor too when the
-            // seed references a field that lives in a variant payload
-            // of a multi-variant ADT. Anchor's `#[account(seeds =
-            // […])]` macro requires syntactic field access; the
-            // accessor `inner.<field>()` we emit for multi-variant
-            // ADTs returns a `&Pubkey` via a method call which the
-            // macro can't parse. Drop the macro-side `seeds = [...]`
-            // for those accounts; the generic-guards.rs R28 pass
-            // (below) emits a runtime PDA check that uses the
-            // accessor directly.
-            let anchor_variant_field_seed = matches!(target, crate::Target::Anchor)
-                && !is_init
-                && needs_state_field_seed
-                && crate::codegen_shared::is_multi_variant_adt_state_pub(spec)
-                && seeds.iter().any(|seed| {
-                    let is_literal = seed.starts_with('"') && seed.ends_with('"');
-                    if is_literal || bound_account_names.contains(seed.as_str()) {
-                        return false;
-                    }
-                    // Is this a variant-payload field?
-                    spec.account_types.iter().any(|a| {
-                        a.variants
-                            .iter()
-                            .any(|v| v.fields.iter().any(|(n, _)| n == seed))
-                    })
-                });
-            let suppress_seeds =
-                (matches!(target, crate::Target::Quasar) && !is_init && needs_state_field_seed)
-                    || anchor_variant_field_seed;
-
-            if !suppress_seeds {
-                let seed_parts: Vec<String> = seeds
-                    .iter()
-                    .map(|seed| {
-                        if let Some(inner) =
-                            seed.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
-                        {
-                            format!("b\"{}\"", inner)
-                        } else if bound_account_names.contains(seed.as_str()) {
-                            // Quasar auto-handles bare idents matching field
-                            // names; Anchor needs the explicit `.key().as_ref()`
-                            // call.
-                            match target {
-                                crate::Target::Quasar => seed.clone(),
-                                _ => format!("{}.key().as_ref()", seed),
-                            }
-                        } else {
-                            // State-field seed (only reached on Anchor or on
-                            // init handlers — non-init Quasar suppresses the
-                            // whole seeds directive above).
-                            format!("{}.{}.as_ref()", self.name, seed)
-                        }
-                    })
-                    .collect();
-                parts.push(format!("seeds = [{}]", seed_parts.join(", ")));
-                parts.push("bump".to_string());
-            }
-        }
-
-        // `token::authority = X` is only valid on accounts that are also
-        // `init` / `init_if_needed` — quasar (and anchor) reject it on
-        // already-existing accounts. The spec authority annotation
-        // captures "this token account should belong to this authority";
-        // for non-init accounts that's already enforced at init time and
-        // doesn't need re-emission. For init accounts we emit it so the
-        // macro can wire up the SPL InitToken CPI correctly.
-        if is_init {
-            if let Some(ref auth) = self.authority {
-                parts.push(format!("token::authority = {}", auth));
-            }
-        }
-
-        // R25: lower `auth X` to `has_one = X` when the state-bearing
-        // account has a field named X. Without this binding, every handler
-        // taking an authority signer is reachable by ANY signer — the
-        // signer check verifies "someone signed", not "the right someone".
-        // Anchor and Quasar both accept `has_one = field`.
-        //
-        // With multi-variant ADT state the auth field often lives in a
-        // variant payload (`Active.owner`); Anchor's `has_one` macro can't
-        // reach into the inner enum ("no field `owner` on `Account<…>`").
-        // Skip emission there — the auth gap surfaces via a TODO line next
-        // to the handler body rather than being dropped silently.
-        if is_state_account {
-            if let Some(ref who) = handler.who {
-                if state_account_has_field(self, spec, who) {
-                    // Suppress only on Anchor: its wrapper-struct +
-                    // inner-enum emission hides variant-payload fields from
-                    // `has_one`; Quasar's flat-struct emission keeps every
-                    // field at top level so `has_one = field` works.
-                    let suppress_for_anchor_variant = matches!(target, crate::Target::Anchor)
-                        && is_multi_variant_adt_with_field_in_variant(spec, who);
-                    if !suppress_for_anchor_variant {
-                        parts.push(format!("has_one = {}", who));
-                    }
-                }
-            }
-        }
-
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("    #[account({})]\n", parts.join(", "))
-        }
     }
 }
 
@@ -976,33 +660,18 @@ pub struct ParsedSpec {
     pub handlers: Vec<ParsedHandler>,
 
     // Legacy fields — populated by forward bridge for backward compat.
-    #[allow(dead_code)]
-    pub operations: Vec<ParsedOperation>,
     pub invariants: Vec<ParsedInvariant>,
     pub properties: Vec<ParsedProperty>,
-    #[allow(dead_code)]
-    pub has_u64_fields: bool,
-    #[allow(dead_code)]
-    pub u64_field_names: Vec<String>,
-    #[allow(dead_code)]
     pub program_id: Option<String>,
-    #[allow(dead_code)]
     pub program_name: String,
     /// Flat union of state fields across account types (single-account: the
     /// account's fields; multi-account: the primary account's).
-    #[allow(dead_code)]
     pub state_fields: Vec<(String, String)>,
     /// Flat lifecycle states (union across all account types for backward compat).
-    #[allow(dead_code)]
     pub lifecycle_states: Vec<String>,
-    #[allow(dead_code)]
     pub pdas: Vec<ParsedPda>,
-    #[allow(dead_code)]
     pub events: Vec<ParsedEvent>,
-    #[allow(dead_code)]
     pub error_codes: Vec<String>,
-    #[allow(dead_code)]
-    pub contexts: Vec<ParsedContext>,
     /// Named account types with per-account fields and lifecycle.
     /// Empty for single-account specs that use bare `state {}`.
     pub account_types: Vec<ParsedAccountType>,
@@ -1019,29 +688,22 @@ pub struct ParsedSpec {
     pub sum_types: Vec<ParsedSumType>,
 
     /// Known pubkeys as 4-chunk U64 representations.
-    #[allow(dead_code)]
     pub pubkeys: Vec<ParsedPubkey>,
     /// Instruction handlers (sBPF mode).
-    #[allow(dead_code)]
     pub instructions: Vec<ParsedInstruction>,
     /// Global error codes with values (sBPF `Name = value "desc"` syntax).
-    #[allow(dead_code)]
     pub valued_errors: Vec<ParsedErrorCode>,
     /// Global named constants (`const NAME = VALUE`).
-    #[allow(dead_code)]
     pub constants: Vec<(String, String)>,
     /// Type aliases: `type AccountIdx = Fin[MAX_ACCOUNTS]` etc.
     /// Stored as (alias_name, rendered_target). Target is `Fin[N]`, `Nat`,
     /// a record name, etc. — whatever `TypeRef` the source points at.
     pub type_aliases: Vec<(String, String)>,
     /// Cover blocks (reachability properties).
-    #[allow(dead_code)]
     pub covers: Vec<ParsedCover>,
     /// Liveness properties (leads-to).
-    #[allow(dead_code)]
     pub liveness_props: Vec<ParsedLiveness>,
     /// Environment blocks (external state).
-    #[allow(dead_code)]
     pub environments: Vec<ParsedEnvironment>,
 
     /// Callee contracts for CPI (docs/design/spec-composition.md §2).
@@ -1070,7 +732,6 @@ pub struct ParsedSpec {
     /// bundles. Handlers reference them via `include <name>`, expanded into
     /// the handler's `requires` at parse time so downstream lints/codegen
     /// see the union as if inlined.
-    #[allow(dead_code)]
     pub schemas: Vec<ParsedSchema>,
 
     /// Helper functions referenced by name but not declared in the spec, as
@@ -1083,7 +744,6 @@ pub struct ParsedSpec {
     /// from `ensures`. Lower to Lean `def`s and inline at Kani assertion
     /// sites. Unlike `uninterpreted_helpers` (axiomatic), these carry an
     /// executable body.
-    #[allow(dead_code)]
     pub ref_impls: Vec<ParsedRefImpl>,
 
     /// `ghost <name> : <Ty> { init {…} on H {…} }` spec-only auxiliary
@@ -1103,30 +763,26 @@ pub struct ParsedSpec {
     /// sibling axiom module and emits a `require` directive;
     /// `lint_pinned_imports` emits `cpi_unverified_callee` P2 for pinned
     /// imports NOT in this set (the Stance-1 trust gap).
-    #[allow(dead_code)]
     pub verified_callees: std::collections::BTreeMap<String, std::path::PathBuf>,
 
     /// proof_hash drift detected during qed.lock reconciliation in Frozen
     /// mode; empty in Auto/Skip (lock auto-writes) and in Frozen without
     /// drift. main.rs routes these via `upstream_check::route_findings` —
     /// P2 by default, CRIT under `--strict`.
-    #[allow(dead_code)]
     pub proof_hash_findings: Vec<crate::upstream_check::DepCheckResult>,
 
     /// Proof-package dirs of every imported interface in the transitive
     /// closure that ships a Lake-buildable proof package (DFS-pre-order,
     /// deduped). `qedgen verify --recursive` builds each bottom-up so "dep
     /// graph fully proven" reduces to "every layer's Lake build succeeds."
-    #[allow(dead_code)]
     pub verified_proof_pkgs: Vec<std::path::PathBuf>,
 
     /// Per-import account-type bookkeeping: local name (alias or source
     /// `bound_name`) → `ImportedNamespace`. Populated when an imported
     /// source carries `type` declarations beyond the interface-stub shape;
     /// empty for interface-only imports (bundled stdlib stubs). Drives
-    /// `generate_imported_mirror` (`src/imported/<ns>.rs`) and `<ns>.<Type>`
-    /// resolution in account-binding positions.
-    #[allow(dead_code)]
+    /// `codegen_mir::emit_imported_mirror` (`src/imported/<ns>.rs`) and
+    /// `<ns>.<Type>` resolution in account-binding positions.
     pub imported_namespaces: std::collections::BTreeMap<String, ImportedNamespace>,
 }
 
@@ -1134,7 +790,6 @@ pub struct ParsedSpec {
 /// so the body lowers into Spec.lean (`def`) and the impl-targeted Kani
 /// harness (inlined at the assertion site).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedRefImpl {
     pub name: String,
     pub doc: Option<String>,
@@ -1191,7 +846,6 @@ pub enum ParsedHookKind {
 pub struct ParsedHookAssert {
     /// Lean rendering, retained for the deferred Lean enforcement path
     /// (qedsvm). Not consumed today — Lean ignores hooks.
-    #[allow(dead_code)]
     pub lean: String,
     pub rust: String,
 }
@@ -1232,7 +886,6 @@ impl ParsedSpec {
 /// `from` keys into `qed.toml`'s `[dependencies]`. The local name at
 /// `call ...` sites is `as_name.unwrap_or(name)`.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedImport {
     pub name: String,
     pub from: String,
@@ -1246,7 +899,6 @@ pub struct ParsedImport {
 /// `<ns>::<Type>` without depending on the foreign crate. Interface-only
 /// imports (bundled stdlib stubs) leave the map empty.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ImportedNamespace {
     /// Manifest dep key (`from "..."` value); cited in the generated
     /// mirror's banner comment for traceability.
@@ -1259,20 +911,12 @@ pub struct ImportedNamespace {
     pub records: Vec<ParsedRecordType>,
 }
 
-impl ParsedImport {
-    /// Name used at `call <X>.handler(...)` sites; falls back to `name`
-    /// when no alias is declared.
-    #[allow(dead_code)]
-    pub fn local_name(&self) -> &str {
-        self.as_name.as_deref().unwrap_or(&self.name)
-    }
-}
-
 /// Callee contract: program ID + per-handler shape (and optional effects).
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInterface {
     pub name: String,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub program_id: Option<String>,
     pub upstream: Option<ParsedUpstream>,
@@ -1289,14 +933,23 @@ pub struct ParsedInterface {
 /// backends that were actually run; `"lean"` appears only when the callee is
 /// genuinely proven, not axiomatized.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedUpstream {
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub package: Option<String>,
     pub version: Option<String>,
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub source: Option<String>,
     pub binary_hash: Option<String>,
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub idl_hash: Option<String>,
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_with: Vec<String>,
+    #[allow(dead_code)]
+    // upstream {} pin metadata: parsed for the declared block shape; only version + binary_hash are consumed today
     pub verified_at: Option<String>,
 }
 
@@ -1304,9 +957,10 @@ pub struct ParsedUpstream {
 /// are empty for Tier-0 (shape-only) interfaces. Populated for Tier-1
 /// (hand-authored) and Tier-2 (imported) interfaces.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)]
 pub struct ParsedInterfaceHandler {
     pub name: String,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     pub params: Vec<(String, String)>,
     pub discriminant: Option<String>,
@@ -1327,9 +981,10 @@ pub struct ParsedInterfaceHandler {
 /// Parsed `schema` block: a named bundle of `requires` clauses handlers
 /// reference via `include <name>` (pause gating, time-window checks, …).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ParsedSchema {
     pub name: String,
+    #[allow(dead_code)]
+    // parsed-but-unconsumed spec info, kept for future consumers; see spec/ast.rs note
     pub doc: Option<String>,
     /// One entry per `requires expr else Err` clause; same shape as
     /// `ParsedHandler.requires` so the adapter can clone-and-append.
@@ -1399,6 +1054,48 @@ pub struct CompletenessWarning {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub fix_options: Vec<FixOption>,
+}
+
+impl CompletenessWarning {
+    /// Builder seed — rule / severity / priority / message; the remaining
+    /// fields default (no subject/example/counterexample, empty fix, no fix
+    /// options). Chain `.subject()` / `.fix()` / `.example()` /
+    /// `.counterexample()` as needed (or struct-update over the base for
+    /// `Option`-typed locals). Lint rules use the `warn(...)` shorthand in
+    /// `lints::shared`.
+    pub fn new(rule: &str, severity: Severity, priority: u8, message: impl Into<String>) -> Self {
+        CompletenessWarning {
+            rule: rule.to_string(),
+            severity,
+            priority,
+            message: message.into(),
+            subject: None,
+            fix: String::new(),
+            example: None,
+            counterexample: None,
+            fix_options: vec![],
+        }
+    }
+
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    pub fn fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = fix.into();
+        self
+    }
+
+    pub fn example(mut self, example: impl Into<String>) -> Self {
+        self.example = Some(example.into());
+        self
+    }
+
+    pub fn counterexample(mut self, ce: Counterexample) -> Self {
+        self.counterexample = Some(ce);
+        self
+    }
 }
 
 /// Drift status for a generated code file.

@@ -54,20 +54,22 @@ pub(crate) fn emit_spl_token_cpi_anchor(
     let prog_name = &token_program_acct.name;
 
     match call.target_handler.as_str() {
-        "transfer" => emit_spl_anchor(
+        "transfer" => emit_anchor_builder_cpi(
             call,
             handler,
             spec,
+            "anchor_spl::token",
             prog_name,
             "Transfer",
             &[("from", "from"), ("to", "to"), ("authority", "authority")],
             Some("amount"),
             "transfer",
         ),
-        "mint_to" => emit_spl_anchor(
+        "mint_to" => emit_anchor_builder_cpi(
             call,
             handler,
             spec,
+            "anchor_spl::token",
             prog_name,
             "MintTo",
             &[
@@ -80,10 +82,11 @@ pub(crate) fn emit_spl_token_cpi_anchor(
             Some("amount"),
             "mint_to",
         ),
-        "burn" => emit_spl_anchor(
+        "burn" => emit_anchor_builder_cpi(
             call,
             handler,
             spec,
+            "anchor_spl::token",
             prog_name,
             "Burn",
             &[
@@ -94,10 +97,11 @@ pub(crate) fn emit_spl_token_cpi_anchor(
             Some("amount"),
             "burn",
         ),
-        "initialize_account" => emit_spl_anchor(
+        "initialize_account" => emit_anchor_builder_cpi(
             call,
             handler,
             spec,
+            "anchor_spl::token",
             prog_name,
             "InitializeAccount",
             &[
@@ -111,10 +115,11 @@ pub(crate) fn emit_spl_token_cpi_anchor(
             None,
             "initialize_account",
         ),
-        "close_account" => emit_spl_anchor(
+        "close_account" => emit_anchor_builder_cpi(
             call,
             handler,
             spec,
+            "anchor_spl::token",
             prog_name,
             "CloseAccount",
             &[
@@ -355,29 +360,37 @@ pub(crate) fn emit_generic_cpi_anchor(
     Some(out)
 }
 
-/// Emit one `anchor_spl::token::<fn>` CPI body. Generic over which SPL
-/// Token handler is being called — the differences are the Anchor accounts
-/// struct name, the call-arg → struct-field name map, the optional
-/// scalar argument (e.g. `amount` for transfer / mint_to / burn; absent
-/// for initialize_account / close_account), and the function name.
+/// Emit one Anchor context-builder CPI body — `use <module>::{self,
+/// <Struct>}; let cpi_accounts = <Struct> { … }; <alias>::<fn>(
+/// CpiContext::new(cpi_program, cpi_accounts)[, <scalar>])?;`. Serves
+/// both the SPL Token (`anchor_spl::token`) and System
+/// (`anchor_lang::system_program`) shapes: the builder is identical,
+/// only the module path and the program account differ.
 ///
 /// `field_to_arg` is `(anchor_field_name, call_arg_name)` pairs. The arg
 /// name is the call-site identifier (matches the qedspec interface's
-/// account block); the anchor field name is what `anchor_spl::token`'s
+/// account block); the anchor field name is what the target module's
 /// accounts struct expects. Most are identity (`("from", "from")`) but
-/// some interfaces expose a more semantic name than anchor_spl uses
-/// (e.g. `mint_authority` vs `authority`).
+/// some interfaces expose a more semantic name than anchor uses
+/// (e.g. `mint_authority` vs `authority`). `scalar_arg` is the optional
+/// trailing scalar (e.g. `amount` for transfer / mint_to / burn; absent
+/// for initialize_account / close_account).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_spl_anchor(
+pub(crate) fn emit_anchor_builder_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
-    token_program: &str,
+    module_path: &str,
+    program_account: &str,
     accounts_struct: &str,
     field_to_arg: &[(&str, &str)],
     scalar_arg: Option<&str>,
     fn_name: &str,
 ) -> Option<String> {
+    // The invocation prefix is the module's trailing segment (`token`,
+    // `system_program`) — brought into scope by the `use …::{self, …}`.
+    let module_alias = module_path.rsplit("::").next().unwrap_or(module_path);
+
     // Resolve every account argument via the call site.
     let mut acct_lines: Vec<String> = Vec::with_capacity(field_to_arg.len());
     let max_field = field_to_arg.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
@@ -402,8 +415,8 @@ pub(crate) fn emit_spl_anchor(
     let mut out = String::new();
     out.push_str("        {\n");
     out.push_str(&format!(
-        "            use anchor_spl::token::{{self, {}}};\n",
-        accounts_struct
+        "            use {}::{{self, {}}};\n",
+        module_path, accounts_struct
     ));
     out.push_str(&format!(
         "            let cpi_accounts = {} {{\n",
@@ -415,16 +428,16 @@ pub(crate) fn emit_spl_anchor(
     out.push_str("            };\n");
     out.push_str(&format!(
         "            let cpi_program = self.{}.to_account_info();\n",
-        token_program
+        program_account
     ));
     let invocation = match scalar_rhs {
         Some(rhs) => format!(
-            "            token::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
-            fn_name, rhs
+            "            {}::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
+            module_alias, fn_name, rhs
         ),
         None => format!(
-            "            token::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
-            fn_name
+            "            {}::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
+            module_alias, fn_name
         ),
     };
     out.push_str(&invocation);
@@ -452,10 +465,11 @@ pub(crate) fn emit_system_cpi_anchor(
         // inline) rather than fail.
         if let Some(sp) = find_program_account_for_interface(handler, &call.target_interface) {
             let name = sp.name.clone();
-            return emit_system_anchor(
+            return emit_anchor_builder_cpi(
                 call,
                 handler,
                 spec,
+                "anchor_lang::system_program",
                 &name,
                 "Transfer",
                 &[("from", "from"), ("to", "to")],
@@ -465,75 +479,6 @@ pub(crate) fn emit_system_cpi_anchor(
         }
     }
     emit_generic_cpi_anchor(call, handler, iface, spec)
-}
-
-/// Emit an idiomatic `anchor_lang::system_program::<fn>(CpiContext::new(
-/// cpi_program, <Struct> { … }), <scalar>)?` CPI. Sibling to
-/// `emit_spl_anchor` — identical context-builder shape, but the `use`
-/// path is `anchor_lang::system_program` and the program account is the
-/// System program (`system_program`), not `anchor_spl::token` /
-/// `token_program`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_system_anchor(
-    call: &crate::check::ParsedCall,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-    system_program: &str,
-    accounts_struct: &str,
-    field_to_arg: &[(&str, &str)],
-    scalar_arg: Option<&str>,
-    fn_name: &str,
-) -> Option<String> {
-    let mut acct_lines: Vec<String> = Vec::with_capacity(field_to_arg.len());
-    let max_field = field_to_arg.iter().map(|(f, _)| f.len()).max().unwrap_or(0);
-    for (anchor_field, call_arg) in field_to_arg {
-        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
-        let pad = " ".repeat(max_field - anchor_field.len());
-        acct_lines.push(format!(
-            "                {}:{} self.{}.to_account_info(),\n",
-            anchor_field, pad, arg.rust_expr
-        ));
-    }
-
-    let scalar_rhs = match scalar_arg {
-        Some(name) => {
-            let arg = call.args.iter().find(|a| a.name == name)?;
-            Some(resolve_call_arg_for_amount(&arg.rust_expr, handler, spec))
-        }
-        None => None,
-    };
-
-    let mut out = String::new();
-    out.push_str("        {\n");
-    out.push_str(&format!(
-        "            use anchor_lang::system_program::{{self, {}}};\n",
-        accounts_struct
-    ));
-    out.push_str(&format!(
-        "            let cpi_accounts = {} {{\n",
-        accounts_struct
-    ));
-    for line in &acct_lines {
-        out.push_str(line);
-    }
-    out.push_str("            };\n");
-    out.push_str(&format!(
-        "            let cpi_program = self.{}.to_account_info();\n",
-        system_program
-    ));
-    let invocation = match scalar_rhs {
-        Some(rhs) => format!(
-            "            system_program::{}(CpiContext::new(cpi_program, cpi_accounts), {})?;\n",
-            fn_name, rhs
-        ),
-        None => format!(
-            "            system_program::{}(CpiContext::new(cpi_program, cpi_accounts))?;\n",
-            fn_name
-        ),
-    };
-    out.push_str(&invocation);
-    out.push_str("        }\n");
-    Some(out)
 }
 
 /// Quasar SPL Token dispatcher: `transfer`, `mint_to`, `burn`,
@@ -681,19 +626,21 @@ pub(crate) fn emit_spl_token_cpi_pinocchio(
     spec: &ParsedSpec,
 ) -> Option<String> {
     match call.target_handler.as_str() {
-        "transfer" => emit_spl_pinocchio(
+        "transfer" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_token",
             "Transfer",
             // (pinocchio_struct_field, spec_arg_name)
             &[("from", "from"), ("to", "to"), ("authority", "authority")],
-            Some("amount"),
+            &[("amount", "amount")],
         ),
-        "mint_to" => emit_spl_pinocchio(
+        "mint_to" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_token",
             "MintTo",
             // pinocchio-token's MintTo names the recipient `account`
             // (canonical SPL `to`) and the signer `mint_authority`.
@@ -702,12 +649,13 @@ pub(crate) fn emit_spl_token_cpi_pinocchio(
                 ("account", "to"),
                 ("mint_authority", "mint_authority"),
             ],
-            Some("amount"),
+            &[("amount", "amount")],
         ),
-        "burn" => emit_spl_pinocchio(
+        "burn" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_token",
             "Burn",
             // Burn names the source slot `account` (canonical SPL `from`).
             &[
@@ -715,12 +663,13 @@ pub(crate) fn emit_spl_token_cpi_pinocchio(
                 ("mint", "mint"),
                 ("authority", "authority"),
             ],
-            Some("amount"),
+            &[("amount", "amount")],
         ),
-        "initialize_account" => emit_spl_pinocchio(
+        "initialize_account" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_token",
             "InitializeAccount",
             // InitializeAccount names the rent sysvar `rent_sysvar`
             // (canonical SPL `rent`). No scalar.
@@ -730,64 +679,75 @@ pub(crate) fn emit_spl_token_cpi_pinocchio(
                 ("owner", "owner"),
                 ("rent_sysvar", "rent"),
             ],
-            None,
+            &[],
         ),
-        "close_account" => emit_spl_pinocchio(
+        "close_account" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_token",
             "CloseAccount",
             &[
                 ("account", "account"),
                 ("destination", "destination"),
                 ("authority", "authority"),
             ],
-            None,
+            &[],
         ),
         _ => None,
     }
 }
 
-/// Emit one `pinocchio_token::instructions::<Struct> { … }.invoke()?;`
-/// CPI. `field_to_arg` maps pinocchio-token struct field names to
-/// call-site arg names, absorbing the naming divergences from canonical
-/// SPL at the codegen boundary (mirroring `emit_spl_anchor`).
-pub(crate) fn emit_spl_pinocchio(
+/// Emit one `<crate>::instructions::<Struct> { … }.invoke()?;` Pinocchio
+/// CPI — serves both `pinocchio_token` and `pinocchio_system` (the
+/// struct-literal + `.invoke()` shape is identical; only the crate path
+/// differs).
+///
+/// `account_fields` map struct fields holding `&AccountInfo` to call-site
+/// arg names (emitted as `self.<arg>`), absorbing naming divergences from
+/// canonical SPL at the codegen boundary (mirroring
+/// `emit_anchor_builder_cpi`); `scalar_fields` map scalar struct fields
+/// to call args, resolved through `resolve_call_arg_for_amount` (System's
+/// `Transfer.lamports` binds the spec's `amount` arg).
+pub(crate) fn emit_pinocchio_struct_cpi(
     call: &crate::check::ParsedCall,
     handler: &ParsedHandler,
     spec: &ParsedSpec,
+    crate_path: &str,
     struct_name: &str,
-    field_to_arg: &[(&str, &str)],
-    scalar_arg: Option<&str>,
+    account_fields: &[(&str, &str)],
+    scalar_fields: &[(&str, &str)],
 ) -> Option<String> {
-    let max_field = field_to_arg
+    let max_field = account_fields
         .iter()
+        .chain(scalar_fields.iter())
         .map(|(f, _)| f.len())
-        .chain(scalar_arg.map(|s| s.len()))
         .max()
         .unwrap_or(0);
 
     let mut out = String::new();
-    out.push_str("        pinocchio_token::instructions::");
+    out.push_str("        ");
+    out.push_str(crate_path);
+    out.push_str("::instructions::");
     out.push_str(struct_name);
     out.push_str(" {\n");
-    for (struct_field, call_arg) in field_to_arg {
+    for (struct_field, call_arg) in account_fields {
         let arg = call.args.iter().find(|a| a.name == *call_arg)?;
         let pad = " ".repeat(max_field - struct_field.len());
         // The Pinocchio handler struct stores each account as
-        // `&'a AccountInfo`, and `pinocchio_token`'s CPI structs take
-        // `&'a AccountInfo` fields — so `self.<acct>` is already the
-        // right type. (A leading `&` would yield `&&AccountInfo`.)
+        // `&'a AccountInfo`, and the CPI structs take `&'a AccountInfo`
+        // fields — so `self.<acct>` is already the right type. (A
+        // leading `&` would yield `&&AccountInfo`.)
         out.push_str(&format!(
             "            {}:{} self.{},\n",
             struct_field, pad, arg.rust_expr
         ));
     }
-    if let Some(name) = scalar_arg {
-        let arg = call.args.iter().find(|a| a.name == name)?;
+    for (struct_field, call_arg) in scalar_fields {
+        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
         let rhs = resolve_call_arg_for_amount(&arg.rust_expr, handler, spec);
-        let pad = " ".repeat(max_field - name.len());
-        out.push_str(&format!("            {}:{} {},\n", name, pad, rhs));
+        let pad = " ".repeat(max_field - struct_field.len());
+        out.push_str(&format!("            {}:{} {},\n", struct_field, pad, rhs));
     }
     out.push_str("        }.invoke()?;\n");
     Some(out)
@@ -804,10 +764,11 @@ pub(crate) fn emit_system_cpi_pinocchio(
     spec: &ParsedSpec,
 ) -> Option<String> {
     match call.target_handler.as_str() {
-        "transfer" => emit_system_pinocchio(
+        "transfer" => emit_pinocchio_struct_cpi(
             call,
             handler,
             spec,
+            "pinocchio_system",
             "Transfer",
             // (pinocchio_system struct field, spec call-site arg)
             &[("from", "from"), ("to", "to")],
@@ -815,55 +776,4 @@ pub(crate) fn emit_system_cpi_pinocchio(
         ),
         _ => None,
     }
-}
-
-/// Emit one `pinocchio_system::instructions::<Struct> { … }.invoke()?;`
-/// CPI for a `call System.<handler>(...)` site. Mirrors
-/// `emit_spl_pinocchio` but targets the System Program crate and lets the
-/// struct field name differ from the call-site arg name (System's
-/// `Transfer.lamports` binds the spec's `amount` arg).
-///
-/// `account_fields` map `pinocchio_system` struct fields holding
-/// `&AccountInfo` to call args (emitted as `self.<arg>`); `scalar_fields`
-/// map `u64` struct fields to call args (resolved through
-/// `resolve_call_arg_for_amount`, the same path the SPL scalar uses).
-pub(crate) fn emit_system_pinocchio(
-    call: &crate::check::ParsedCall,
-    handler: &ParsedHandler,
-    spec: &ParsedSpec,
-    struct_name: &str,
-    account_fields: &[(&str, &str)],
-    scalar_fields: &[(&str, &str)],
-) -> Option<String> {
-    let max_field = account_fields
-        .iter()
-        .chain(scalar_fields.iter())
-        .map(|(f, _)| f.len())
-        .max()
-        .unwrap_or(0);
-
-    let mut out = String::new();
-    out.push_str("        pinocchio_system::instructions::");
-    out.push_str(struct_name);
-    out.push_str(" {\n");
-    for (struct_field, call_arg) in account_fields {
-        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
-        let pad = " ".repeat(max_field - struct_field.len());
-        // `pinocchio_system` CPI structs take `&AccountInfo` fields and the
-        // generated Pinocchio handler stores each account as
-        // `&'a AccountInfo`, so `self.<acct>` is already the right type
-        // (a leading `&` would yield `&&AccountInfo`).
-        out.push_str(&format!(
-            "            {}:{} self.{},\n",
-            struct_field, pad, arg.rust_expr
-        ));
-    }
-    for (struct_field, call_arg) in scalar_fields {
-        let arg = call.args.iter().find(|a| a.name == *call_arg)?;
-        let rhs = resolve_call_arg_for_amount(&arg.rust_expr, handler, spec);
-        let pad = " ".repeat(max_field - struct_field.len());
-        out.push_str(&format!("            {}:{} {},\n", struct_field, pad, rhs));
-    }
-    out.push_str("        }.invoke()?;\n");
-    Some(out)
 }

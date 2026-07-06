@@ -315,7 +315,7 @@ real pins before any production use of `qedgen verify --check-upstream`.
   documented
 - `bash scripts/check-lake-build.sh` — 10/10 bundled examples
   lake-build clean (escrow, escrow-split, lending, multisig,
-  percolator on Anchor; counter, dropset, slippage, transfer, tree
+  the perp-dex example on Anchor; counter, the-vendored-sbpf-example, slippage, transfer, tree
   on sBPF)
 - `qedgen check --regen-drift` — clean on all 6 bundled rust
   examples

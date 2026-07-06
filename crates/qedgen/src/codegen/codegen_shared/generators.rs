@@ -538,13 +538,7 @@ pub(crate) fn emit_pinocchio_effect_body(
 /// emission (`pragma state_repr = adt` via `state_repr_is_adt`).
 /// Single-record account types, single-variant ADTs, multi-account specs,
 /// and non-opted specs all stay on the flat-fields + `Status`-enum path.
-/// Public re-export of `is_multi_variant_adt_state` for check.rs's
-/// seeds-suppression logic.
-pub fn is_multi_variant_adt_state_pub(spec: &ParsedSpec) -> bool {
-    is_multi_variant_adt_state(spec)
-}
-
-pub(crate) fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
+pub fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
     spec.state_repr_is_adt()
         && spec.account_types.len() == 1
         && spec
@@ -554,221 +548,125 @@ pub(crate) fn is_multi_variant_adt_state(spec: &ParsedSpec) -> bool {
             .unwrap_or(false)
 }
 
-/// Generate `src/imported/<ns>.rs` per imported namespace plus a
-/// `src/imported/mod.rs` re-exporter, so the accounts block can name
-/// `<ns>::<Type>` without a compile-time dep on the foreign crate — the
-/// mirror carries the same field layout, so `Account<'info, <ns>::<Type>>`
-/// deserializes foreign bytes exactly as the foreign program would.
-/// Fully regenerated on every `qedgen codegen` (never hand-edit).
-/// Single-variant account types lower to plain structs; multi-variant
-/// ADTs reuse the wrapper + inner-enum shape (with accessors) so the
-/// discriminator and consumer reads match local multi-variant state.
-/// Referenced record types are emitted in the same file (self-contained).
-#[allow(dead_code)]
-pub(crate) fn generate_imported_mirror(
-    spec: &ParsedSpec,
-    fp: &SpecFingerprint,
-    output_dir: &Path,
+/// Index an ADT account's variant fields: field name → every
+/// `(variant_name, declared_type)` occurrence, in name-sorted (BTreeMap)
+/// order. Raw view — includes fields whose type differs across variants;
+/// see [`consistent_variant_fields`] for the accessor-eligible subset.
+pub(crate) fn variant_field_index(
+    acct: &crate::check::ParsedAccountType,
+) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
+    let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for variant in &acct.variants {
+        for (fname, ftype) in &variant.fields {
+            field_index
+                .entry(fname.clone())
+                .or_default()
+                .push((variant.name.clone(), ftype.clone()));
+        }
+    }
+    field_index
+}
+
+/// Fields shared across an ADT account's variants with a *consistent*
+/// declared type: field name → (type, carrying variants), name-sorted.
+/// This is the single source of truth for which fields get a wrapper
+/// accessor — emission (`render_adt_inner_enum`) and consumption
+/// (`generate_guards` / `rewrite_state_refs_for_self`) must agree, or a
+/// guard would call an accessor that was never emitted.
+pub(crate) fn consistent_variant_fields(
+    acct: &crate::check::ParsedAccountType,
+) -> std::collections::BTreeMap<String, (String, Vec<String>)> {
+    variant_field_index(acct)
+        .into_iter()
+        .filter_map(|(fname, occurrences)| {
+            let first_ty = occurrences[0].1.clone();
+            if occurrences.iter().any(|(_, t)| t != &first_ty) {
+                return None;
+            }
+            let variants = occurrences.into_iter().map(|(v, _)| v).collect();
+            Some((fname, (first_ty, variants)))
+        })
+        .collect()
+}
+
+/// Accessor-eligible field names for the spec's (single) multi-variant
+/// ADT account; empty for flat-state specs.
+pub(crate) fn adt_accessor_field_names(spec: &ParsedSpec) -> std::collections::HashSet<String> {
+    if !is_multi_variant_adt_state(spec) {
+        return std::collections::HashSet::new();
+    }
+    let Some(acct) = spec.account_types.first() else {
+        return std::collections::HashSet::new();
+    };
+    consistent_variant_fields(acct).into_keys().collect()
+}
+
+/// Render the multi-variant ADT inner enum + its consistent-field
+/// accessors (the shared tail of the wrapper-struct emission — the
+/// wrapper struct itself differs per site and stays with the caller).
+/// `inner_doc` is the full doc-comment block above the enum;
+/// `accessor_doc` renders the per-field doc block; `blank_after_impl`
+/// matches each site's historical trailing-newline shape.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_adt_inner_enum(
+    out: &mut String,
+    acct: &crate::check::ParsedAccountType,
+    inner_name: &str,
+    inner_doc: &str,
+    accessor_doc: &dyn Fn(&str) -> String,
+    parsed: &ParsedSpec,
     target: Target,
+    blank_after_impl: bool,
 ) -> Result<()> {
-    // Only namespaces with non-empty `account_types` produce a mirror;
-    // Tier-0 interface stubs (SPL Token / System / Metaplex) carry no
-    // `type` declarations.
-    if !spec
-        .imported_namespaces
-        .values()
-        .any(|ns| !ns.account_types.is_empty())
-    {
-        return Ok(());
+    out.push_str(inner_doc);
+    out.push_str(
+        "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]\n",
+    );
+    out.push_str(&format!("pub enum {} {{\n", inner_name));
+    for variant in &acct.variants {
+        if variant.fields.is_empty() {
+            out.push_str(&format!("    {},\n", variant.name));
+        } else {
+            out.push_str(&format!("    {} {{\n", variant.name));
+            for (fname, ftype) in &variant.fields {
+                out.push_str(&format!(
+                    "        {}: {},\n",
+                    fname,
+                    map_type_for_target(ftype, parsed, target)?
+                ));
+            }
+            out.push_str("    },\n");
+        }
     }
-    let surface = FrameworkSurface::for_target(target);
-    let src_dir = output_dir.join("src");
-    let imported_dir = src_dir.join("imported");
-    std::fs::create_dir_all(&imported_dir)?;
+    out.push_str("}\n\n");
 
-    // BTreeMap iteration order keeps output deterministic.
-    for (local_name, ns) in &spec.imported_namespaces {
-        if ns.account_types.is_empty() {
-            continue;
-        }
-        let mut out = String::new();
-        let file_rel = format!("src/imported/{}.rs", local_name);
-        out.push_str(&marker("DO NOT EDIT", fp, &file_rel));
-        out.push_str(&format!(
-            "//! v2.29 Slice H mirror of `{0}`'s account types\n\
-             //! (sourced from dep `{1}`).\n\
-             //!\n\
-             //! Hand-editing is unsafe: every `qedgen codegen` regenerates\n\
-             //! this file from the imported `.qedspec`'s `type` declarations.\n\
-             //! To change a field, change the imported spec and re-resolve.\n\n",
-            local_name, ns.dep_key,
-        ));
-        out.push_str(surface.prelude_import);
-        out.push('\n');
-
-        // Record types first (account types may reference them).
-        // Anchor-only: Quasar's zero-copy/Pod path isn't wired for
-        // imports.
-        for record in &ns.records {
-            out.push_str("#[repr(C)]\n");
-            let derives = match target {
-                Target::Anchor => "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Copy, Debug, PartialEq)]\n",
-                _ => "#[derive(Clone, Copy)]\n",
-            };
-            out.push_str(derives);
-            out.push_str(&format!("pub struct {} {{\n", record.name));
-            for (fname, ftype) in &record.fields {
-                let rust_ty = map_type_for_target(ftype, spec, target)?;
-                out.push_str(&format!("    pub {}: {},\n", fname, rust_ty));
-            }
-            out.push_str("}\n\n");
-        }
-
-        // Account types: single-variant → plain `#[account]` struct;
-        // multi-variant ADT → wrapper + inner enum with accessors so
-        // `imported_acct.inner.<field>()` reads resolve.
-        for (idx, acct) in ns.account_types.iter().enumerate() {
-            let is_multi_variant = acct.variants.len() > 1;
-            let account_attr = if surface.explicit_account_discriminator {
-                format!("#[account(discriminator = {})]\n", idx + 1)
-            } else {
-                "#[account]\n".to_string()
-            };
-            if !is_multi_variant {
-                // Flat struct path. The lifecycle status field is needed
-                // so consumer `requires` referencing `<acct>.status`
-                // compile against the mirror.
-                out.push_str(&format!("{}pub struct {} {{\n", account_attr, acct.name));
-                for (fname, ftype) in &acct.fields {
-                    let rust_ty = map_type_for_target(ftype, spec, target)?;
-                    out.push_str(&format!("    pub {}: {},\n", fname, rust_ty));
-                }
-                if !acct.lifecycle.is_empty() && !acct.fields.iter().any(|(n, _)| n == "status") {
-                    out.push_str("    pub status: u8,\n");
-                }
-                out.push_str("}\n\n");
-
-                if !acct.lifecycle.is_empty() {
-                    out.push_str(&format!(
-                        "/// {} lifecycle states (mirrored from `{}`).\n",
-                        acct.name, ns.dep_key
-                    ));
-                    out.push_str("#[derive(Clone, Copy, PartialEq, Eq)]\n");
-                    out.push_str("#[repr(u8)]\n");
-                    out.push_str(&format!("pub enum {}Status {{\n", acct.name));
-                    for (i, state) in acct.lifecycle.iter().enumerate() {
-                        out.push_str(&format!("    {} = {},\n", state, i));
-                    }
-                    out.push_str("}\n\n");
-                }
-                continue;
-            }
-
-            // Multi-variant ADT — same wrapper + inner enum shape as the
-            // local-state path so the mirror deserializes the foreign
-            // account exactly as the foreign program does.
-            let inner_name = format!("{}Inner", acct.name);
-            out.push_str(&format!("{}pub struct {} {{\n", account_attr, acct.name));
-            out.push_str(&format!("    pub inner: {},\n", inner_name));
-            out.push_str("}\n\n");
-
+    // Accessors for fields shared (with consistent type) across variants.
+    if !variant_field_index(acct).is_empty() {
+        out.push_str(&format!("impl {} {{\n", inner_name));
+        for (fname, (first_ty, variants)) in &consistent_variant_fields(acct) {
+            let rust_ty = map_type_for_target(first_ty, parsed, target)?;
+            out.push_str(&accessor_doc(fname));
             out.push_str(&format!(
-                "/// Variant-payload state for `{0}` (mirrored from `{1}`).\n",
-                acct.name, ns.dep_key
+                "    pub fn {}(&self) -> &{} {{\n        match self {{\n",
+                fname, rust_ty
             ));
-            out.push_str(
-                "#[derive(AnchorSerialize, AnchorDeserialize, InitSpace, Clone, Debug, PartialEq)]\n",
-            );
-            out.push_str(&format!("pub enum {} {{\n", inner_name));
-            for variant in &acct.variants {
-                if variant.fields.is_empty() {
-                    out.push_str(&format!("    {},\n", variant.name));
-                } else {
-                    out.push_str(&format!("    {} {{\n", variant.name));
-                    for (fname, ftype) in &variant.fields {
-                        out.push_str(&format!(
-                            "        {}: {},\n",
-                            fname,
-                            map_type_for_target(ftype, spec, target)?
-                        ));
-                    }
-                    out.push_str("    },\n");
-                }
+            for variant_name in variants {
+                out.push_str(&format!(
+                    "            Self::{} {{ {}, .. }} => {},\n",
+                    variant_name, fname, fname
+                ));
             }
-            out.push_str("}\n\n");
-
-            // Fields appearing across variants with a consistent type get
-            // an accessor on the inner enum, same shape as local
-            // multi-variant ADT state.
-            let mut field_index: std::collections::BTreeMap<String, Vec<(String, String)>> =
-                std::collections::BTreeMap::new();
-            for variant in &acct.variants {
-                for (fname, ftype) in &variant.fields {
-                    field_index
-                        .entry(fname.clone())
-                        .or_default()
-                        .push((variant.name.clone(), ftype.clone()));
-                }
+            if variants.len() < acct.variants.len() {
+                out.push_str(&format!(
+                    "            _ => panic!(\"{}::{}() called on a variant without `{}`\"),\n",
+                    inner_name, fname, fname
+                ));
             }
-            if !field_index.is_empty() {
-                out.push_str(&format!("impl {} {{\n", inner_name));
-                for (fname, occurrences) in &field_index {
-                    let first_ty = &occurrences[0].1;
-                    if occurrences.iter().any(|(_, t)| t != first_ty) {
-                        continue;
-                    }
-                    let rust_ty = map_type_for_target(first_ty, spec, target)?;
-                    out.push_str(&format!(
-                        "    /// v2.29 Slice H accessor for `{0}`. Panics on variants\n\
-                         /// that don't carry the field — the per-handler lifecycle\n\
-                         /// check at the top of each `crate::guards::*` fn prevents\n\
-                         /// the panic arm from being reached at runtime.\n",
-                        fname
-                    ));
-                    out.push_str(&format!(
-                        "    pub fn {}(&self) -> &{} {{\n        match self {{\n",
-                        fname, rust_ty
-                    ));
-                    for (variant_name, _) in occurrences {
-                        out.push_str(&format!(
-                            "            Self::{} {{ {}, .. }} => {},\n",
-                            variant_name, fname, fname
-                        ));
-                    }
-                    if occurrences.len() < acct.variants.len() {
-                        out.push_str(&format!(
-                            "            _ => panic!(\"{}::{}() called on a variant without `{}`\"),\n",
-                            inner_name, fname, fname
-                        ));
-                    }
-                    out.push_str("        }\n    }\n");
-                }
-                out.push_str("}\n\n");
-            }
+            out.push_str("        }\n    }\n");
         }
-
-        out.push_str("// ---- END GENERATED ----\n");
-        std::fs::write(imported_dir.join(format!("{}.rs", local_name)), &out)?;
+        out.push_str(if blank_after_impl { "}\n\n" } else { "}\n" });
     }
-
-    // `mod.rs` re-exports each namespace as `pub mod <ns>;` so
-    // `<ns>::<Type>` refs resolve against the local mirror.
-    // `#![allow(non_snake_case)]` covers PascalCase bound names
-    // (`import Config from …` keeps module name `Config`).
-    let mut mod_out = String::new();
-    mod_out.push_str(&marker("DO NOT EDIT", fp, "src/imported/mod.rs"));
-    mod_out.push_str("//! v2.29 Slice H — re-exports for imported namespace mirrors.\n\n");
-    mod_out.push_str("#![allow(non_snake_case)]\n\n");
-    // Only re-export namespaces that produced a mirror file.
-    for (local_name, ns) in &spec.imported_namespaces {
-        if ns.account_types.is_empty() {
-            continue;
-        }
-        mod_out.push_str(&format!("pub mod {};\n", local_name));
-    }
-    mod_out.push_str("\n// ---- END GENERATED ----\n");
-    std::fs::write(imported_dir.join("mod.rs"), mod_out)?;
-
     Ok(())
 }
 
@@ -1020,11 +918,10 @@ pub(crate) fn find_state_account_filtered(
     // matches the ADT (lowercase) — otherwise two writable PDA candidates
     // would return None and leave guard refs un-rewritten.
     if let Some(adt) = handler.on_account.as_deref() {
-        let lower = adt.to_lowercase();
         if let Some(matched) = candidates
             .iter()
             .copied()
-            .find(|a| a.name == lower || a.name.starts_with(&lower))
+            .find(|a| account_name_matches_adt(adt, &a.name))
         {
             return Some(matched);
         }

@@ -226,7 +226,7 @@ Generated and always safe to regenerate:
 | `tests/kani.rs` | QEDGen | Kani harnesses |
 | `tests/proptest.rs` | QEDGen | Property-test harnesses |
 | `src/tests.rs` | QEDGen | Unit tests when requested |
-| `src/integration_tests.rs` | QEDGen | Integration-test scaffold when requested |
+| `programs/tests/integration_tests.rs` | QEDGen | Integration-test scaffold when requested |
 | `formal_verification/Spec.lean` | QEDGen | Lean model generated from `.qedspec` |
 
 User-owned after first scaffold:

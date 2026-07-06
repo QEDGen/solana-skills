@@ -5,8 +5,97 @@
 //! re-export hub (the `crate::<module>` aliases these helpers reach).
 
 use crate::*;
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use std::path::{Path, PathBuf};
+
+/// Shared argument validation for the two Leanstral dispatch verbs
+/// (`generate`, `fill-sorry`).
+pub(crate) fn validate_dispatch_args(
+    passes: usize,
+    temperature: f64,
+    max_tokens: usize,
+) -> Result<()> {
+    ensure!(passes > 0, "passes must be greater than 0");
+    ensure!(
+        (0.0..=2.0).contains(&temperature),
+        "temperature must be between 0.0 and 2.0"
+    );
+    ensure!(max_tokens > 0, "max_tokens must be greater than 0");
+    Ok(())
+}
+
+/// Shared poll-interval bounds for the two waiting Aristotle verbs
+/// (`submit`, `status`).
+pub(crate) fn validate_poll_interval(poll_interval: Option<u64>) -> Result<()> {
+    if let Some(interval) = poll_interval {
+        ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
+        ensure!(
+            interval <= 3600,
+            "poll_interval must be at most 3600 seconds"
+        );
+    }
+    Ok(())
+}
+
+/// The five Rust-shaped codegen artifacts share one skip rationale for
+/// sBPF specs (assembly is verified via Lean proofs only).
+pub(crate) fn note_sbpf_skip(artifact: &str) {
+    eprintln!(
+        "note: skipping {artifact} codegen for sBPF spec — assembly \
+         programs are verified via Lean proofs; runtime checks \
+         belong in client-side tests."
+    );
+}
+
+/// Materialize the audit working set (`interview.md`, `clusters.json`,
+/// `skeleton.qedspec`) under `dir` — shared by the Pinocchio (run.rs),
+/// Anchor, and Native probe paths, which previously each carried this
+/// block inline. `lenient_skeleton`: the Anchor path falls back to a
+/// minimal stub when the structural adapter fails (non-standard
+/// layouts); the other paths propagate the error.
+pub(crate) fn write_audit_working_set(
+    dir: &Path,
+    prog_root: &Path,
+    clusters: &[cluster::Cluster],
+    framework: program_model::ProgramFramework,
+    lenient_skeleton: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let program_name = prog_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("program")
+        .to_string();
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+        .unwrap_or_else(|_| "unknown".to_string());
+    let md = prompts::render_interview(clusters, &program_name, &now_iso);
+    std::fs::write(dir.join("interview.md"), md)?;
+    // clusters.json — ratify looks up cluster_id → suggested_syntax here.
+    let clusters_json = serde_json::to_string_pretty(clusters)?;
+    std::fs::write(dir.join("clusters.json"), clusters_json)?;
+    // skeleton.qedspec — handler stubs only.
+    let anchor_overrides = std::collections::HashMap::new();
+    let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
+    let skeleton = match adapt::render_skeleton_for_framework(framework, prog_root, adapter_config)
+    {
+        Ok(s) => s,
+        Err(e) if lenient_skeleton => {
+            eprintln!(
+                "warning: program adapter failed ({}); writing minimal skeleton",
+                e
+            );
+            format!(
+                "spec {}\n\ntype State | Init | Active\ntype Error | InvalidArgument\n",
+                program_name
+            )
+        }
+        Err(e) => return Err(e),
+    };
+    std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
+    eprintln!("Wrote audit working set to {}", dir.display());
+    Ok(())
+}
 /// Redirect a `…/tests/kani_impl.rs` path to a sibling `…/src/kani_impl.rs`.
 /// Pinocchio Kani harnesses must live in the lib (`src/`) because
 /// `cargo kani` only discovers `#[kani::proof]` there, not in `tests/`
@@ -89,31 +178,7 @@ pub(crate) fn crucible_backend_report(
             }
         }
     };
-    let prog = if parsed.program_name.is_empty() {
-        "program".to_string()
-    } else {
-        // Inlined snake-case normalization (mirrors crucible_gen).
-        let mut out = String::new();
-        let mut prev_lower = false;
-        for c in parsed.program_name.chars() {
-            if c.is_uppercase() {
-                if prev_lower {
-                    out.push('_');
-                }
-                for lc in c.to_lowercase() {
-                    out.push(lc);
-                }
-                prev_lower = false;
-            } else if c == '-' || c == ' ' {
-                out.push('_');
-                prev_lower = false;
-            } else {
-                out.push(c);
-                prev_lower = c.is_lowercase() || c.is_ascii_digit();
-            }
-        }
-        out
-    };
+    let prog = crucible_gen::spec_program_name(&parsed);
     let harness = harness_dir.unwrap_or_else(|| project_root.join("fuzz").join(&prog));
 
     let mut ctx = crucible_probe::FuzzProbeContext::new(spec, project_root, harness.clone());
@@ -363,43 +428,16 @@ pub(crate) fn run_anchor_probe(
     };
 
     if let (Some(dir), Some(clusters_ref)) = (audit_dir, clusters.as_ref()) {
-        std::fs::create_dir_all(dir)?;
-        let program_name = prog_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("program")
-            .to_string();
-        let now_iso = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-            .unwrap_or_else(|_| "unknown".to_string());
-        let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
-        std::fs::write(dir.join("interview.md"), md)?;
-        let cj = serde_json::to_string_pretty(clusters_ref)?;
-        std::fs::write(dir.join("clusters.json"), cj)?;
-        // skeleton.qedspec — the Anchor-compatible structural adapter feeds
-        // the pre-interview skeleton; on failure fall back to a minimal stub
-        // ratify still accepts.
-        let anchor_overrides = std::collections::HashMap::new();
-        let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
-        let skeleton = match adapt::render_skeleton_for_framework(
-            program_model::ProgramFramework::Anchor,
+        // The Anchor-compatible structural adapter feeds the pre-interview
+        // skeleton; on failure fall back to a minimal stub ratify still
+        // accepts (lenient_skeleton).
+        write_audit_working_set(
+            dir,
             prog_root,
-            adapter_config,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "warning: program adapter failed ({}); writing minimal skeleton",
-                    e
-                );
-                format!(
-                    "spec {}\n\ntype State | Init | Active\ntype Error | InvalidArgument\n",
-                    program_name
-                )
-            }
-        };
-        std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
-        eprintln!("Wrote audit working set to {}", dir.display());
+            clusters_ref,
+            program_model::ProgramFramework::Anchor,
+            /*lenient_skeleton=*/ true,
+        )?;
     }
 
     let output = probe::ProbeOutput {
@@ -436,30 +474,15 @@ pub(crate) fn run_native_probe(
     };
 
     if let (Some(dir), Some(clusters_ref)) = (audit_dir, clusters.as_ref()) {
-        std::fs::create_dir_all(dir)?;
-        let program_name = prog_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("program")
-            .to_string();
-        let now_iso = time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Iso8601::DEFAULT)
-            .unwrap_or_else(|_| "unknown".to_string());
-        let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
-        std::fs::write(dir.join("interview.md"), md)?;
-        let cj = serde_json::to_string_pretty(clusters_ref)?;
-        std::fs::write(dir.join("clusters.json"), cj)?;
         // Native skeleton accepts any `pub fn` (no `process_*`-style naming
         // convention to key on).
-        let anchor_overrides = std::collections::HashMap::new();
-        let adapter_config = adapt::AdapterConfig::new(&program_name, &anchor_overrides);
-        let skeleton = adapt::render_skeleton_for_framework(
-            program_model::ProgramFramework::Native,
+        write_audit_working_set(
+            dir,
             prog_root,
-            adapter_config,
+            clusters_ref,
+            program_model::ProgramFramework::Native,
+            /*lenient_skeleton=*/ false,
         )?;
-        std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
-        eprintln!("Wrote audit working set to {}", dir.display());
     }
 
     // Shank central-match dispatcher detection — the richer envelope
@@ -563,20 +586,15 @@ mod tests {
 
     #[test]
     fn plain_text_lint_output_includes_priority() {
-        let warning = CompletenessWarning {
-            rule: "missing_effect".to_string(),
-            severity: Severity::Warning,
-            priority: 2,
-            message: "operation 'borrow' takes params and transitions state but has no effect"
-                .to_string(),
-            subject: Some("borrow".to_string()),
-            fix: "Add an effect block to describe state changes".to_string(),
-            example: Some(
-                "  operation borrow\n    effect: loan_amount add loan_amount".to_string(),
-            ),
-            counterexample: None,
-            fix_options: vec![],
-        };
+        let warning = CompletenessWarning::new(
+            "missing_effect",
+            Severity::Warning,
+            2,
+            "operation 'borrow' takes params and transitions state but has no effect",
+        )
+        .subject("borrow".to_string())
+        .fix("Add an effect block to describe state changes")
+        .example("  operation borrow\n    effect: loan_amount add loan_amount".to_string());
 
         let rendered = format_lint_warning(&warning);
         assert!(rendered.contains("[P2] [missing_effect]"));

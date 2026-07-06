@@ -52,15 +52,15 @@ fn apply_propose(state: &mut MultisigState) {
 }
 
 /// Apply `approve` effects to state.
-fn apply_approve(state: &mut MultisigState, _member_index: u8) {
+fn apply_approve(state: &mut MultisigState, member_index: u8) {
     state.approval_count += 1;
-    state.voted[member_index] = 1;
+    state.voted[member_index as usize] = 1;
 }
 
 /// Apply `reject` effects to state.
-fn apply_reject(state: &mut MultisigState, _member_index: u8) {
+fn apply_reject(state: &mut MultisigState, member_index: u8) {
     state.rejection_count += 1;
-    state.voted[member_index] = 1;
+    state.voted[member_index as usize] = 1;
 }
 
 /// Apply `execute` effects to state.
@@ -76,8 +76,8 @@ fn apply_cancel_proposal(state: &mut MultisigState) {
 }
 
 /// Apply `add_member` effects to state.
-fn apply_add_member(state: &mut MultisigState, _member_index: u8, member_pubkey: [u8; 32]) {
-    state.members[member_index] = member_pubkey;
+fn apply_add_member(state: &mut MultisigState, member_index: u8, member_pubkey: [u8; 32]) {
+    state.members[member_index as usize] = member_pubkey;
 }
 
 /// Apply `remove_member` effects to state.
@@ -132,15 +132,15 @@ mod tests {
     fn test_create_vault_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 3;
-        let member_count: u8 = 5;
+        let threshold: u8 = 1;
+        let member_count: u8 = 1;
         apply_create_vault(&mut state, threshold, member_count);
         assert_eq!(state.threshold, threshold);
         assert_eq!(state.member_count, member_count);
@@ -152,8 +152,8 @@ mod tests {
     fn test_propose_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -168,8 +168,8 @@ mod tests {
     fn test_approve_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -179,15 +179,15 @@ mod tests {
         let pre_approval_count = state.approval_count;
         apply_approve(&mut state, member_index);
         assert_eq!(state.approval_count, pre_approval_count + 1);
-        assert_eq!(state.voted[member_index], 1);
+        assert_eq!(state.voted[member_index as usize], 1);
     }
 
     #[test]
     fn test_reject_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -197,15 +197,15 @@ mod tests {
         let pre_rejection_count = state.rejection_count;
         apply_reject(&mut state, member_index);
         assert_eq!(state.rejection_count, pre_rejection_count + 1);
-        assert_eq!(state.voted[member_index], 1);
+        assert_eq!(state.voted[member_index as usize], 1);
     }
 
     #[test]
     fn test_execute_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -221,8 +221,8 @@ mod tests {
     fn test_cancel_proposal_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -237,25 +237,25 @@ mod tests {
     fn test_add_member_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
-        let member_pubkey: [u8; 32] = 1;
+        let member_pubkey: [u8; 32] = [1u8; 32];
         apply_add_member(&mut state, member_index, member_pubkey);
-        assert_eq!(state.members[member_index], member_pubkey);
+        assert_eq!(state.members[member_index as usize], member_pubkey);
     }
 
     #[test]
     fn test_remove_member_effects() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -274,15 +274,15 @@ mod tests {
     fn test_create_vault_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 3;
-        let member_count: u8 = 5;
+        let threshold: u8 = 1;
+        let member_count: u8 = 1;
         assert!(guard_create_vault(&state, threshold, member_count));
     }
 
@@ -290,8 +290,8 @@ mod tests {
     fn test_create_vault_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -306,8 +306,8 @@ mod tests {
     fn test_approve_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -321,8 +321,8 @@ mod tests {
     fn test_approve_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -336,8 +336,8 @@ mod tests {
     fn test_reject_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -351,8 +351,8 @@ mod tests {
     fn test_reject_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -366,8 +366,8 @@ mod tests {
     fn test_execute_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -381,8 +381,8 @@ mod tests {
     fn test_execute_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -396,8 +396,8 @@ mod tests {
     fn test_cancel_proposal_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -410,8 +410,8 @@ mod tests {
     fn test_cancel_proposal_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -424,15 +424,15 @@ mod tests {
     fn test_add_member_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
-        let member_pubkey: [u8; 32] = 1;
+        let member_pubkey: [u8; 32] = [1u8; 32];
         assert!(guard_add_member(&state, member_index, member_pubkey));
     }
 
@@ -440,15 +440,15 @@ mod tests {
     fn test_add_member_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
-        let member_pubkey: [u8; 32] = 1;
+        let member_pubkey: [u8; 32] = [1u8; 32];
         assert!(!guard_add_member(&state, member_index, member_pubkey));
     }
 
@@ -456,8 +456,8 @@ mod tests {
     fn test_remove_member_guard_accepts_valid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -470,8 +470,8 @@ mod tests {
     fn test_remove_member_guard_rejects_invalid() {
         let state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -488,15 +488,15 @@ mod tests {
     fn test_create_vault_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 3;
-        let member_count: u8 = 5;
+        let threshold: u8 = 1;
+        let member_count: u8 = 1;
         apply_create_vault(&mut state, threshold, member_count);
         // Property: threshold bounded must hold after create_vault
         assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after create_vault");
@@ -506,8 +506,8 @@ mod tests {
     fn test_propose_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -522,8 +522,8 @@ mod tests {
     fn test_approve_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -539,8 +539,8 @@ mod tests {
     fn test_reject_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -556,11 +556,11 @@ mod tests {
     fn test_execute_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
-            approval_count: 0,
+            approval_count: 2,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
@@ -573,8 +573,8 @@ mod tests {
     fn test_cancel_proposal_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -589,15 +589,15 @@ mod tests {
     fn test_add_member_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
-        let member_pubkey: [u8; 32] = 1;
+        let member_pubkey: [u8; 32] = [1u8; 32];
         apply_add_member(&mut state, member_index, member_pubkey);
         // Property: threshold bounded must hold after add_member
         assert!(state.threshold <= state.member_count && state.threshold > 0, "threshold_bounded must hold after add_member");
@@ -607,8 +607,8 @@ mod tests {
     fn test_remove_member_preserves_threshold_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 2,
+            member_count: 4,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -623,15 +623,15 @@ mod tests {
     fn test_create_vault_preserves_votes_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 3;
-        let member_count: u8 = 5;
+        let threshold: u8 = 1;
+        let member_count: u8 = 1;
         apply_create_vault(&mut state, threshold, member_count);
         // Property: votes bounded must hold after create_vault
         assert!(state.approval_count + state.rejection_count <= state.member_count, "votes_bounded must hold after create_vault");
@@ -641,8 +641,8 @@ mod tests {
     fn test_propose_preserves_votes_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -657,8 +657,8 @@ mod tests {
     fn test_execute_preserves_votes_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -674,8 +674,8 @@ mod tests {
     fn test_cancel_proposal_preserves_votes_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -690,8 +690,8 @@ mod tests {
     fn test_remove_member_preserves_votes_bounded() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -710,15 +710,15 @@ mod tests {
     fn test_create_vault_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
-        let threshold: u8 = 3;
-        let member_count: u8 = 5;
+        let threshold: u8 = 1;
+        let member_count: u8 = 1;
         let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         apply_create_vault(&mut state, threshold, member_count);
@@ -730,8 +730,8 @@ mod tests {
     fn test_propose_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -752,8 +752,8 @@ mod tests {
     fn test_approve_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -763,13 +763,11 @@ mod tests {
         let pre_threshold = state.threshold.clone();
         let pre_member_count = state.member_count.clone();
         let pre_members = state.members.clone();
-        let pre_voted = state.voted.clone();
         let pre_rejection_count = state.rejection_count.clone();
         apply_approve(&mut state, member_index);
         assert_eq!(state.threshold, pre_threshold, "threshold must not change after approve");
         assert_eq!(state.member_count, pre_member_count, "member_count must not change after approve");
         assert_eq!(state.members, pre_members, "members must not change after approve");
-        assert_eq!(state.voted, pre_voted, "voted must not change after approve");
         assert_eq!(state.rejection_count, pre_rejection_count, "rejection_count must not change after approve");
     }
 
@@ -777,8 +775,8 @@ mod tests {
     fn test_reject_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -788,13 +786,11 @@ mod tests {
         let pre_threshold = state.threshold.clone();
         let pre_member_count = state.member_count.clone();
         let pre_members = state.members.clone();
-        let pre_voted = state.voted.clone();
         let pre_approval_count = state.approval_count.clone();
         apply_reject(&mut state, member_index);
         assert_eq!(state.threshold, pre_threshold, "threshold must not change after reject");
         assert_eq!(state.member_count, pre_member_count, "member_count must not change after reject");
         assert_eq!(state.members, pre_members, "members must not change after reject");
-        assert_eq!(state.voted, pre_voted, "voted must not change after reject");
         assert_eq!(state.approval_count, pre_approval_count, "approval_count must not change after reject");
     }
 
@@ -802,8 +798,8 @@ mod tests {
     fn test_execute_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -825,8 +821,8 @@ mod tests {
     fn test_cancel_proposal_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 0,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
@@ -847,25 +843,23 @@ mod tests {
     fn test_add_member_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,
             rejection_count: 0,
         };
         let member_index: u8 = 0;
-        let member_pubkey: [u8; 32] = 1;
+        let member_pubkey: [u8; 32] = [1u8; 32];
         let pre_threshold = state.threshold.clone();
         let pre_member_count = state.member_count.clone();
-        let pre_members = state.members.clone();
         let pre_voted = state.voted.clone();
         let pre_approval_count = state.approval_count.clone();
         let pre_rejection_count = state.rejection_count.clone();
         apply_add_member(&mut state, member_index, member_pubkey);
         assert_eq!(state.threshold, pre_threshold, "threshold must not change after add_member");
         assert_eq!(state.member_count, pre_member_count, "member_count must not change after add_member");
-        assert_eq!(state.members, pre_members, "members must not change after add_member");
         assert_eq!(state.voted, pre_voted, "voted must not change after add_member");
         assert_eq!(state.approval_count, pre_approval_count, "approval_count must not change after add_member");
         assert_eq!(state.rejection_count, pre_rejection_count, "rejection_count must not change after add_member");
@@ -875,8 +869,8 @@ mod tests {
     fn test_remove_member_unchanged_fields() {
         let mut state = MultisigState {
             creator: [1u8; 32],
-            threshold: 3,
-            member_count: 5,
+            threshold: 0,
+            member_count: 2,
             members: Default::default(),
             voted: Default::default(),
             approval_count: 0,

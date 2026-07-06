@@ -4,7 +4,7 @@
 
 **Purpose.** Walk every handler in `examples/` and tag which feature it uses, mapping to a candidate MIR node from issue #66's intrinsic list. The bug-reduction framing per [[feedback-mir-is-bug-reduction]] says: a node belongs in MIR if it eliminates a class of cross-codegen divergence bug (see `codegen-divergence.md`), grounded in real handlers — not if it's a theoretically pretty fit. This inventory is the reality check.
 
-**Corpus.** 20 non-regression fixtures across `crates/qedgen/tests/fixtures/anchor-brownfield-demo/`, `examples/rust/{percolator,cross-program-vault,multisig,lending,brownfield-onboarding,escrow,escrow-split,bundled-stdlib-demo}/`, `examples/sbpf/{tree,slippage,transfer,counter}/`, `examples/rust/cross-program-vault/imports/cross-program-vault-admin/`. Plus the 28 regression fixtures consulted as supplementary evidence. (The sBPF order-book example is temporarily out pending a proof re-port to the qedsvm region-table semantics; its codegen fixture remains under `crates/qedgen/tests/fixtures/`.)
+**Corpus.** 19 non-regression fixtures across `crates/qedgen/tests/fixtures/anchor-brownfield-demo/`, `examples/rust/{cross-program-vault,multisig,lending,brownfield-onboarding,escrow,escrow-split,bundled-stdlib-demo}/` (the perp-dex risk-engine example was in the original 20-fixture sweep; it has since been removed), `examples/sbpf/{tree,slippage,transfer,counter}/`, `examples/rust/cross-program-vault/imports/cross-program-vault-admin/`. Plus the 28 regression fixtures consulted as supplementary evidence. (The sBPF order-book example is temporarily out pending a proof re-port to the qedsvm region-table semantics; its codegen fixture remains under `crates/qedgen/tests/fixtures/`.)
 
 ## Feature frequency table
 

@@ -42,7 +42,7 @@ pub(crate) fn render_handler_accounts_struct(
             let inferred_match = is_multi && inferred_name != default_state_name;
             let is_state =
                 state_acct.map(|sa| sa.name == acct.name).unwrap_or(false) || inferred_match;
-            let attr = acct.quasar_account_attr(handler, &inferred_name, target, spec, is_state);
+            let attr = quasar_account_attr(acct, handler, &inferred_name, target, spec, is_state);
             let field_type = render_account_field_type(acct, surface, is_state, &inferred_name);
             out.push_str(&format!("{}    pub {}: {},\n", attr, acct.name, field_type));
         }

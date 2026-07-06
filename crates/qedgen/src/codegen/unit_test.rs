@@ -4,6 +4,9 @@ use std::path::Path;
 use crate::check::{self, ParsedHandler, ParsedSpec};
 use crate::codegen_shared::{map_type, write_generated_file};
 
+/// `(field, op_kind, rust_value)` — the unit-test view of one effect site.
+type EffectTriple = (String, &'static str, String);
+
 /// Generate unit tests from a spec file (.lean or .qedspec).
 /// Tests exercise effects, guards, and properties directly on a plain state
 /// struct — no SVM, no Quasar runtime, just `cargo test`.
@@ -19,17 +22,21 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
 
     crate::rust_codegen_util::check_effect_targets(&spec)?;
 
+    // Effect iteration runs over the lowered MIR body via the shared
+    // `stmt_effect_triple` projection (#66) instead of string-matching
+    // raw `op.effects` (F7).
+    let mir = crate::mir::lower(&spec);
+
     let fp = crate::fingerprint::compute_fingerprint(&spec);
-    let hash = fp
-        .file_hashes
-        .get("src/tests.rs")
-        .cloned()
-        .unwrap_or_default();
 
     let is_multi = spec.account_types.len() > 1;
     let mut out = String::new();
 
-    out.push_str(&crate::banner::banner(Some("DO NOT EDIT"), &hash));
+    out.push_str(&crate::codegen_shared::marker(
+        "DO NOT EDIT",
+        &fp,
+        "src/tests.rs",
+    ));
     out.push_str("// Unit tests generated from qedspec.\n");
     out.push_str("// These test effects, guards, and properties on a plain state struct.\n");
     out.push_str("// No SVM or Quasar runtime required — just `cargo test`.\n\n");
@@ -104,13 +111,17 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (op_state_name, _) = resolve_state_for_op(op, &spec, is_multi);
-        // Prefix unused params with _ to suppress warnings
-        let effect_values: Vec<&str> = op.effects.iter().map(|e| e.value.as_str()).collect();
+        let triples = effect_triples(&op.name, &mir, &spec);
+        // Prefix unused params with _ to suppress warnings. A param is used
+        // when any effect references it — in the target path (subscripts
+        // like `voted[member_index]`) or the RHS.
         let params: Vec<String> = op
             .takes_params
             .iter()
             .map(|(n, t)| {
-                let used = effect_values.iter().any(|v| v.contains(n.as_str()));
+                let used = triples
+                    .iter()
+                    .any(|(f, _, v)| f.contains(n.as_str()) || v.contains(n.as_str()));
                 let rt = map_type(t, &spec)?;
                 Ok(if used {
                     format!("{}: {}", n, rt)
@@ -129,9 +140,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             "fn apply_{}(state: &mut {}{}) {{\n",
             op.name, op_state_name, param_sig
         ));
-        for eff in &op.effects {
-            let (field, value) = (&eff.field, &eff.value);
-            match eff.op.as_str() {
+        for (field, kind, value) in &triples {
+            match *kind {
                 "set" => {
                     out.push_str(&format!("    state.{} = {};\n", field, value));
                 }
@@ -141,10 +151,34 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 "sub" => {
                     out.push_str(&format!("    state.{} -= {};\n", field, value));
                 }
-                _ => {
+                "add_sat" => {
+                    out.push_str(&format!(
+                        "    state.{} = state.{}.saturating_add({});\n",
+                        field, field, value
+                    ));
+                }
+                "sub_sat" => {
+                    out.push_str(&format!(
+                        "    state.{} = state.{}.saturating_sub({});\n",
+                        field, field, value
+                    ));
+                }
+                "add_wrap" => {
+                    out.push_str(&format!(
+                        "    state.{} = state.{}.wrapping_add({});\n",
+                        field, field, value
+                    ));
+                }
+                "sub_wrap" => {
+                    out.push_str(&format!(
+                        "    state.{} = state.{}.wrapping_sub({});\n",
+                        field, field, value
+                    ));
+                }
+                other => {
                     out.push_str(&format!(
                         "    // unknown effect: {} {} {}\n",
-                        field, eff.op, value
+                        field, other, value
                     ));
                 }
             }
@@ -171,7 +205,7 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             format!(", {}", params.join(", "))
         };
         // If the guard doesn't reference state fields, prefix with _
-        let state_param = if guard.contains("s.") {
+        let state_param = if guard_rust.contains("state.") {
             "state"
         } else {
             "_state"
@@ -196,7 +230,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_effect_test(&mut out, op, fields, &sn, &spec)?;
+        let triples = effect_triples(&op.name, &mir, &spec);
+        generate_effect_test(&mut out, op, &triples, fields, &sn, &spec)?;
     }
 
     out.push_str("    // ====================================================================\n");
@@ -256,7 +291,8 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
             continue;
         }
         let (sn, fields) = resolve_state_for_op(op, &spec, is_multi);
-        generate_unchanged_test(&mut out, op, fields, &sn, &spec)?;
+        let triples = effect_triples(&op.name, &mir, &spec);
+        generate_unchanged_test(&mut out, op, &triples, fields, &sn, &spec)?;
     }
 
     let transition_ops: Vec<&ParsedHandler> = spec
@@ -426,15 +462,79 @@ fn resolve_state_for_property<'a>(
     )
 }
 
-/// Translate a Lean guard expression to Rust.
+/// Translate a Lean guard/property expression to Rust, binding state
+/// references to `state_var`. Routed through the shared
+/// `translate_guard_to_rust` (F7) so unit tests get the same Lean `=` →
+/// Rust `==` fix and `and`/`or` word-connective handling as every other
+/// backend; the private copy this replaces let those leak through.
 fn translate_guard(guard: &str, state_var: &str) -> String {
-    guard
+    crate::rust_codegen_util::translate_guard_to_rust(guard, /*wrapping=*/ false)
         .replace("s.", &format!("{}.", state_var))
-        .replace('≤', "<=")
-        .replace('≥', ">=")
-        .replace('∧', "&&")
-        .replace('∨', "||")
-        .replace('≠', "!=")
+}
+
+/// Effect triples for a handler, projected from the lowered MIR body via
+/// the shared `stmt_effect_triple` (#66) — the same iteration source the
+/// Kani/proptest backends use — instead of string-matching raw
+/// `op.effects`. Deep: `effect { match … }` arms flatten to their union,
+/// matching the parser's back-compat `op.effects` view this file
+/// previously consumed. Fields are flattened to the union-state view
+/// (variant prefixes stripped); values carry the adapter-rendered Rust
+/// RHS (falls back to the raw spec string for tree-less ingest paths).
+fn effect_triples(op_name: &str, mir: &crate::mir::Mir, spec: &ParsedSpec) -> Vec<EffectTriple> {
+    let Some(h) = mir.handlers.iter().find(|h| h.name == op_name) else {
+        return Vec::new();
+    };
+    crate::rust_codegen_util::block_effect_triples_deep(&h.body)
+        .into_iter()
+        .map(|(field, kind, value)| {
+            (
+                cast_subscripts(
+                    &crate::rust_codegen_util::strip_variant_prefix_for_flat_state(&field, spec),
+                ),
+                kind,
+                value.rust.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Rewrite `[ident]` subscripts to `[ident as usize]` — unit tests bind
+/// params at their spec types (`u8` etc.) while Rust arrays index by
+/// `usize`. Numeric and compound subscripts pass through unchanged.
+fn cast_subscripts(field: &str) -> String {
+    let mut out = String::new();
+    let mut rest = field;
+    while let Some(i) = rest.find('[') {
+        out.push_str(&rest[..=i]);
+        rest = &rest[i + 1..];
+        let Some(j) = rest.find(']') else {
+            out.push_str(rest);
+            return out;
+        };
+        let idx = &rest[..j];
+        let is_numeric = !idx.is_empty() && idx.chars().all(|c| c.is_ascii_digit());
+        let is_ident = !idx.is_empty()
+            && idx.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !idx.starts_with(|c: char| c.is_ascii_digit());
+        if is_ident && !is_numeric {
+            out.push_str(&format!("{} as usize", idx));
+        } else {
+            out.push_str(idx);
+        }
+        out.push(']');
+        rest = &rest[j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Identifier-safe form of an effect-target path for `pre_*` snapshot
+/// bindings: `voted[member_index]` → `voted_member_index_`.
+fn pre_ident(field: &str) -> String {
+    field
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 /// Build the argument list for calling apply_op / guard_op.
@@ -450,6 +550,7 @@ fn call_args(op: &ParsedHandler) -> String {
 fn generate_effect_test(
     out: &mut String,
     op: &ParsedHandler,
+    triples: &[EffectTriple],
     fields: &[(String, String)],
     state_name: &str,
     spec: &ParsedSpec,
@@ -458,15 +559,10 @@ fn generate_effect_test(
     out.push_str(&format!("    fn test_{}_effects() {{\n", op.name));
 
     // Set up state with concrete values that satisfy the guard
-    out.push_str(&format!("        let mut state = {} {{\n", state_name));
-    for (fname, ftype) in fields {
-        let val = sensible_default(fname, ftype, op);
-        out.push_str(&format!("            {}: {},\n", fname, val));
-    }
-    out.push_str("        };\n");
+    emit_state_literal(out, state_name, fields, op, &[], true);
 
     for (pname, ptype) in &op.takes_params {
-        let val = sensible_param(pname, ptype, op);
+        let val = sensible_param(pname, ptype);
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
@@ -475,11 +571,14 @@ fn generate_effect_test(
         ));
     }
 
-    // Snapshot pre-state
-    for eff in &op.effects {
-        let field = &eff.field;
-        if eff.op == "add" || eff.op == "sub" {
-            out.push_str(&format!("        let pre_{} = state.{};\n", field, field));
+    // Snapshot pre-state for arithmetic effects
+    for (field, kind, _) in triples {
+        if *kind != "set" {
+            out.push_str(&format!(
+                "        let pre_{} = state.{};\n",
+                pre_ident(field),
+                field
+            ));
         }
     }
 
@@ -489,9 +588,9 @@ fn generate_effect_test(
         call_args(op)
     ));
 
-    for eff in &op.effects {
-        let (field, value) = (&eff.field, &eff.value);
-        match eff.op.as_str() {
+    for (field, kind, value) in triples {
+        let pre = format!("pre_{}", pre_ident(field));
+        match *kind {
             "set" => {
                 out.push_str(&format!(
                     "        assert_eq!(state.{}, {});\n",
@@ -500,14 +599,38 @@ fn generate_effect_test(
             }
             "add" => {
                 out.push_str(&format!(
-                    "        assert_eq!(state.{}, pre_{} + {});\n",
-                    field, field, value
+                    "        assert_eq!(state.{}, {} + {});\n",
+                    field, pre, value
                 ));
             }
             "sub" => {
                 out.push_str(&format!(
-                    "        assert_eq!(state.{}, pre_{} - {});\n",
-                    field, field, value
+                    "        assert_eq!(state.{}, {} - {});\n",
+                    field, pre, value
+                ));
+            }
+            "add_sat" => {
+                out.push_str(&format!(
+                    "        assert_eq!(state.{}, {}.saturating_add({}));\n",
+                    field, pre, value
+                ));
+            }
+            "sub_sat" => {
+                out.push_str(&format!(
+                    "        assert_eq!(state.{}, {}.saturating_sub({}));\n",
+                    field, pre, value
+                ));
+            }
+            "add_wrap" => {
+                out.push_str(&format!(
+                    "        assert_eq!(state.{}, {}.wrapping_add({}));\n",
+                    field, pre, value
+                ));
+            }
+            "sub_wrap" => {
+                out.push_str(&format!(
+                    "        assert_eq!(state.{}, {}.wrapping_sub({}));\n",
+                    field, pre, value
                 ));
             }
             _ => {}
@@ -527,6 +650,7 @@ fn generate_guard_tests(
     spec: &ParsedSpec,
 ) -> Result<()> {
     let guard_str = op.guard_str.as_deref().unwrap_or("true");
+    let guard_rust = translate_guard(guard_str, "state");
 
     // --- Test: guard PASSES with valid inputs ---
     out.push_str("    #[test]\n");
@@ -534,14 +658,9 @@ fn generate_guard_tests(
         "    fn test_{}_guard_accepts_valid() {{\n",
         op.name
     ));
-    out.push_str(&format!("        let state = {} {{\n", state_name));
-    for (fname, ftype) in fields {
-        let val = sensible_default(fname, ftype, op);
-        out.push_str(&format!("            {}: {},\n", fname, val));
-    }
-    out.push_str("        };\n");
+    emit_state_literal(out, state_name, fields, op, &[], false);
     for (pname, ptype) in &op.takes_params {
-        let val = sensible_param(pname, ptype, op);
+        let val = sensible_param(pname, ptype);
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
@@ -564,18 +683,9 @@ fn generate_guard_tests(
     ));
 
     // Try to derive a violating input from the guard
-    let (state_overrides, param_overrides) = derive_guard_violation(guard_str, op);
+    let (state_overrides, param_overrides) = derive_guard_violation(&guard_rust, op, fields);
 
-    out.push_str(&format!("        let state = {} {{\n", state_name));
-    for (fname, ftype) in fields {
-        if let Some(val) = state_overrides.iter().find(|(n, _)| n == fname) {
-            out.push_str(&format!("            {}: {},\n", fname, val.1));
-        } else {
-            let val = sensible_default(fname, ftype, op);
-            out.push_str(&format!("            {}: {},\n", fname, val));
-        }
-    }
-    out.push_str("        };\n");
+    emit_state_literal_with(out, state_name, fields, op, &[], &state_overrides, false);
     for (pname, ptype) in &op.takes_params {
         if let Some(val) = param_overrides.iter().find(|(n, _)| n == pname) {
             out.push_str(&format!(
@@ -585,7 +695,7 @@ fn generate_guard_tests(
                 val.1
             ));
         } else {
-            let val = sensible_param(pname, ptype, op);
+            let val = sensible_param(pname, ptype);
             out.push_str(&format!(
                 "        let {}: {} = {};\n",
                 pname,
@@ -618,16 +728,17 @@ fn generate_property_test(
         op.name, prop.name
     ));
 
-    // Set up state that satisfies the property
-    out.push_str(&format!("        let mut state = {} {{\n", state_name));
-    for (fname, ftype) in fields {
-        let val = sensible_default(fname, ftype, op);
-        out.push_str(&format!("            {}: {},\n", fname, val));
-    }
-    out.push_str("        };\n");
+    // Set up state that satisfies the property: seed values consider the
+    // property body alongside the operation's own guards.
+    let prop_rust = prop
+        .expression
+        .as_deref()
+        .map(|e| translate_guard(e, "state"));
+    let extra: Vec<&str> = prop_rust.as_deref().into_iter().collect();
+    emit_state_literal(out, state_name, fields, op, &extra, true);
 
     for (pname, ptype) in &op.takes_params {
-        let val = sensible_param(pname, ptype, op);
+        let val = sensible_param(pname, ptype);
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
@@ -669,11 +780,18 @@ fn generate_property_test(
 fn generate_unchanged_test(
     out: &mut String,
     op: &ParsedHandler,
+    triples: &[EffectTriple],
     fields: &[(String, String)],
     state_name: &str,
     spec: &ParsedSpec,
 ) -> Result<()> {
-    let affected: Vec<&str> = op.effects.iter().map(|e| e.field.as_str()).collect();
+    // Base name of each effect target: `voted[member_index]` affects
+    // `voted` (the old raw-string comparison missed subscripted targets
+    // and asserted them unchanged).
+    let affected: Vec<&str> = triples
+        .iter()
+        .map(|(f, _, _)| crate::rust_codegen_util::effect_target_base(f))
+        .collect();
     let unchanged: Vec<&(String, String)> = fields
         .iter()
         .filter(|(f, t)| !affected.contains(&f.as_str()) && t != "Pubkey")
@@ -686,15 +804,10 @@ fn generate_unchanged_test(
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn test_{}_unchanged_fields() {{\n", op.name));
 
-    out.push_str(&format!("        let mut state = {} {{\n", state_name));
-    for (fname, ftype) in fields {
-        let val = sensible_default(fname, ftype, op);
-        out.push_str(&format!("            {}: {},\n", fname, val));
-    }
-    out.push_str("        };\n");
+    emit_state_literal(out, state_name, fields, op, &[], true);
 
     for (pname, ptype) in &op.takes_params {
-        let val = sensible_param(pname, ptype, op);
+        let val = sensible_param(pname, ptype);
         out.push_str(&format!(
             "        let {}: {} = {};\n",
             pname,
@@ -760,67 +873,315 @@ fn generate_state_machine_test(out: &mut String, op: &ParsedHandler, status_enum
     out.push_str("    }\n\n");
 }
 
-/// Pick a sensible default value for a state field given the operation context.
-fn sensible_default(fname: &str, ftype: &str, op: &ParsedHandler) -> String {
-    // Try to pick values that satisfy common guards
+// ----------------------------------------------------------------------
+// Spec-derived seed values (F7). Test-state literals were previously
+// seeded by pattern-matching multisig-example field names ("threshold",
+// "member_count", …) — hardcoded semantics that leaked into every other
+// spec. Values now derive from the spec itself: type-based bases raised
+// by the simple comparison atoms of the handler's guard/requires
+// conjunction (plus the property body for property tests).
+// ----------------------------------------------------------------------
+
+/// One side of a comparison atom, resolved against the spec.
+enum AtomSide {
+    /// A bare state-field reference.
+    Field(String),
+    /// A handler param, carrying its `sensible_param` seed value.
+    Param(String, u128),
+    /// A numeric literal.
+    Lit(u128),
+}
+
+/// Emit a `let [mut] state = <State> { … }` literal with spec-derived
+/// seed values.
+fn emit_state_literal(
+    out: &mut String,
+    state_name: &str,
+    fields: &[(String, String)],
+    op: &ParsedHandler,
+    extra_guard_texts: &[&str],
+    mutable: bool,
+) {
+    emit_state_literal_with(out, state_name, fields, op, extra_guard_texts, &[], mutable);
+}
+
+/// Like [`emit_state_literal`], with explicit per-field overrides (used
+/// by the guard-rejection test to inject a violating value).
+fn emit_state_literal_with(
+    out: &mut String,
+    state_name: &str,
+    fields: &[(String, String)],
+    op: &ParsedHandler,
+    extra_guard_texts: &[&str],
+    overrides: &[(String, String)],
+    mutable: bool,
+) {
+    let seeds = seed_state_values(fields, op, extra_guard_texts);
+    let mut_kw = if mutable { "mut " } else { "" };
+    out.push_str(&format!(
+        "        let {}state = {} {{\n",
+        mut_kw, state_name
+    ));
+    for (fname, ftype) in fields {
+        let val = overrides
+            .iter()
+            .find(|(n, _)| n == fname)
+            .map(|(_, v)| v.clone())
+            .or_else(|| seeds.get(fname).cloned())
+            .unwrap_or_else(|| non_numeric_default(ftype));
+        out.push_str(&format!("            {}: {},\n", fname, val));
+    }
+    out.push_str("        };\n");
+}
+
+/// Default literal for field types outside the seedable numeric set.
+fn non_numeric_default(ftype: &str) -> String {
     match ftype {
         "Pubkey" => "[1u8; 32]".to_string(),
-        "U8" | "u8" => {
-            // If this field appears in a guard like "threshold > 0", use a non-zero value
-            if fname == "threshold" {
-                "3".to_string()
-            } else if fname == "member_count" {
-                "5".to_string()
-            } else if fname == "approval_count" {
-                // For execute guard (approval_count >= threshold), set appropriately
-                if op
-                    .guard_str
-                    .as_deref()
-                    .unwrap_or("")
-                    .contains("approval_count")
-                {
-                    "3".to_string()
-                } else {
-                    "0".to_string()
-                }
-            } else {
-                "0".to_string()
-            }
-        }
-        "U64" | "u64" => {
-            if fname.contains("count") || fname.contains("amount") || fname.contains("value") {
-                "100".to_string()
-            } else {
-                "0".to_string()
-            }
-        }
-        "U128" | "u128" => "0u128".to_string(),
-        "I128" | "i128" => "0i128".to_string(),
         "Bool" | "bool" => "false".to_string(),
+        "I128" | "i128" => "0i128".to_string(),
         _ => "Default::default()".to_string(),
     }
 }
 
-/// Pick a sensible param value that satisfies the guard.
-fn sensible_param(pname: &str, ptype: &str, _op: &ParsedHandler) -> String {
-    match ptype {
-        "U8" | "u8" => {
-            if pname == "threshold" {
-                "3".to_string()
-            } else if pname == "member_count" {
-                "5".to_string()
-            } else if pname.contains("index") {
-                "0".to_string()
-            } else {
-                "1".to_string()
+/// Types the constraint seeding understands (unsigned only — the raise
+/// rules reason in `u128`).
+fn is_seedable_numeric(ftype: &str) -> bool {
+    matches!(ftype, "U8" | "u8" | "U64" | "u64" | "U128" | "u128")
+}
+
+/// Render a numeric seed with the type's literal suffix convention.
+fn render_seed(v: u128, ftype: &str) -> String {
+    match ftype {
+        "U128" | "u128" => format!("{}u128", v),
+        _ => v.to_string(),
+    }
+}
+
+/// Compute seed values for the numeric state fields: start at the
+/// type-based base (`count`/`amount`/`value`-named U64 fields at 100 —
+/// the legacy generic heuristic), then walk the comparison atoms of the
+/// handler's guards (plus `extra_texts`) and raise values until simple
+/// `a > b` / `a >= lit` shapes hold; `f == <lit>` pins exactly. Compound
+/// sides are skipped — this is a seeding heuristic, not a solver.
+fn seed_state_values(
+    fields: &[(String, String)],
+    op: &ParsedHandler,
+    extra_texts: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut vals: BTreeMap<String, u128> = BTreeMap::new();
+    for (fname, ftype) in fields {
+        if !is_seedable_numeric(ftype) {
+            continue;
+        }
+        let base = if matches!(ftype.as_str(), "U64" | "u64")
+            && (fname.contains("count") || fname.contains("amount") || fname.contains("value"))
+        {
+            100
+        } else {
+            0
+        };
+        vals.insert(fname.clone(), base);
+    }
+
+    // Guard conjunction: legacy guard + requires clauses + extras
+    // (property bodies), all normalized through the shared translator.
+    let mut texts: Vec<String> = Vec::new();
+    if let Some(g) = &op.guard_str {
+        texts.push(translate_guard(g, "state"));
+    }
+    for req in &op.requires {
+        texts.push(translate_guard(&req.lean_expr, "state"));
+    }
+    for t in extra_texts {
+        texts.push((*t).to_string());
+    }
+
+    let atoms: Vec<(String, &'static str, String)> = texts
+        .iter()
+        .flat_map(|t| split_atoms(t))
+        .filter_map(|a| parse_atom(&a))
+        .collect();
+
+    // `f == <lit>` pins the value exactly; inequality passes won't move it.
+    let mut pinned: BTreeSet<String> = BTreeSet::new();
+    for (lhs, cmp, rhs) in &atoms {
+        if *cmp != "==" {
+            continue;
+        }
+        match (resolve_side(lhs, fields, op), resolve_side(rhs, fields, op)) {
+            (Some(AtomSide::Field(f)), Some(AtomSide::Lit(l)))
+            | (Some(AtomSide::Lit(l)), Some(AtomSide::Field(f))) => {
+                vals.insert(f.clone(), l);
+                pinned.insert(f);
+            }
+            _ => {}
+        }
+    }
+
+    // Raise-only fixpoint over the inequality atoms.
+    for _ in 0..4 {
+        for (lhs, cmp, rhs) in &atoms {
+            let (Some(a), Some(b)) = (resolve_side(lhs, fields, op), resolve_side(rhs, fields, op))
+            else {
+                continue;
+            };
+            // Normalize to "left cmp right" with resolved values.
+            let get = |s: &AtomSide, vals: &BTreeMap<String, u128>| match s {
+                AtomSide::Field(f) => vals.get(f).copied(),
+                AtomSide::Param(_, v) => Some(*v),
+                AtomSide::Lit(l) => Some(*l),
+            };
+            let (Some(va), Some(vb)) = (get(&a, &vals), get(&b, &vals)) else {
+                continue;
+            };
+            let mut adjust = |f: &str, v: u128, pinned: &BTreeSet<String>| {
+                if !pinned.contains(f) {
+                    vals.insert(f.to_string(), v);
+                }
+            };
+            match (*cmp, &a, &b) {
+                // field-vs-field: push the greater side up.
+                ("<", _, AtomSide::Field(f)) if va >= vb => adjust(f, va + 2, &pinned),
+                ("<=", _, AtomSide::Field(f)) if va > vb => adjust(f, va, &pinned),
+                (">", AtomSide::Field(f), _) if va <= vb => adjust(f, vb + 2, &pinned),
+                (">=", AtomSide::Field(f), _) if va < vb => adjust(f, vb, &pinned),
+                // field-vs-literal upper bounds: clamp down.
+                ("<", AtomSide::Field(f), AtomSide::Lit(l)) if va >= *l => {
+                    adjust(f, l.saturating_sub(1), &pinned)
+                }
+                ("<=", AtomSide::Field(f), AtomSide::Lit(l)) if va > *l => adjust(f, *l, &pinned),
+                (">", AtomSide::Lit(l), AtomSide::Field(f)) if *l <= vb => {
+                    adjust(f, l.saturating_sub(1), &pinned)
+                }
+                (">=", AtomSide::Lit(l), AtomSide::Field(f)) if *l < vb => adjust(f, *l, &pinned),
+                ("!=", AtomSide::Field(f), AtomSide::Lit(l)) if va == *l => {
+                    adjust(f, l + 1, &pinned)
+                }
+                ("!=", AtomSide::Lit(l), AtomSide::Field(f)) if vb == *l => {
+                    adjust(f, l + 1, &pinned)
+                }
+                _ => {}
             }
         }
-        "U64" | "u64" => {
-            if pname.contains("amount") || pname.contains("value") || pname.contains("delta") {
-                "100".to_string()
-            } else {
-                "1".to_string()
+    }
+
+    let mut out = BTreeMap::new();
+    for (fname, ftype) in fields {
+        if let Some(v) = vals.get(fname) {
+            out.insert(fname.clone(), render_seed(*v, ftype));
+        }
+    }
+    out
+}
+
+/// Split a translated guard conjunction into candidate atoms on the
+/// boolean connectives, stripping balanced outer parens.
+fn split_atoms(text: &str) -> Vec<String> {
+    text.split("&&")
+        .flat_map(|p| p.split("||"))
+        .map(strip_outer_parens)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn strip_outer_parens(s: &str) -> String {
+    let mut t = s.trim();
+    while t.starts_with('(') && t.ends_with(')') {
+        // Only strip when the leading '(' matches the trailing ')'.
+        let inner = &t[1..t.len() - 1];
+        let mut depth = 0i32;
+        let mut balanced = true;
+        for c in inner.chars() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        balanced = false;
+                        break;
+                    }
+                }
+                _ => {}
             }
+        }
+        if balanced && depth == 0 {
+            t = inner.trim();
+        } else {
+            break;
+        }
+    }
+    t.to_string()
+}
+
+/// Parse `lhs <cmp> rhs` out of an atom; two-char comparators first so
+/// `<=`/`>=` don't mis-split.
+fn parse_atom(atom: &str) -> Option<(String, &'static str, String)> {
+    for cmp in ["<=", ">=", "==", "!="] {
+        if let Some(i) = atom.find(cmp) {
+            return Some((
+                atom[..i].trim().to_string(),
+                cmp,
+                atom[i + 2..].trim().to_string(),
+            ));
+        }
+    }
+    for cmp in ["<", ">"] {
+        if let Some(i) = atom.find(cmp) {
+            return Some((
+                atom[..i].trim().to_string(),
+                if cmp == "<" { "<" } else { ">" },
+                atom[i + 1..].trim().to_string(),
+            ));
+        }
+    }
+    None
+}
+
+/// Resolve one atom side: a `state.`-prefixed or bare state-field name, a
+/// numeric literal, or a handler param (folded to its `sensible_param`
+/// value). Compound expressions resolve to `None` and skip the atom.
+fn resolve_side(side: &str, fields: &[(String, String)], op: &ParsedHandler) -> Option<AtomSide> {
+    let t = side.trim();
+    let (name, had_state_prefix) = if let Some(rest) = t.strip_prefix("state.") {
+        (rest, true)
+    } else if let Some(rest) = t.strip_prefix("s.") {
+        (rest, true)
+    } else {
+        (t, false)
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    if !had_state_prefix {
+        if let Ok(n) = name.parse::<u128>() {
+            return Some(AtomSide::Lit(n));
+        }
+        // A handler param shadows a same-named state field in guard position.
+        if let Some((pn, pt)) = op.takes_params.iter().find(|(p, _)| p == name) {
+            return sensible_param(pn, pt)
+                .parse::<u128>()
+                .ok()
+                .map(|v| AtomSide::Param(pn.clone(), v));
+        }
+    }
+    if fields.iter().any(|(f, _)| f == name) {
+        return Some(AtomSide::Field(name.to_string()));
+    }
+    None
+}
+
+/// Pick a sensible param value — generic name/type heuristics only (the
+/// multisig-specific names were removed in F7).
+fn sensible_param(pname: &str, ptype: &str) -> String {
+    match ptype {
+        "Pubkey" => "[1u8; 32]".to_string(),
+        "Bool" | "bool" => "true".to_string(),
+        _ if pname.contains("index") => "0".to_string(),
+        _ if pname.contains("amount") || pname.contains("value") || pname.contains("delta") => {
+            "100".to_string()
         }
         _ => "1".to_string(),
     }
@@ -830,35 +1191,62 @@ fn sensible_param(pname: &str, ptype: &str, _op: &ParsedHandler) -> String {
 /// Returns (state_overrides, param_overrides) — field name → value pairs.
 type Overrides = Vec<(String, String)>;
 
-fn derive_guard_violation(guard: &str, op: &ParsedHandler) -> (Overrides, Overrides) {
+/// Negate the first comparison atom with a resolvable target (generic —
+/// F7 removed the multisig-specific pattern list). Falls back to zeroing
+/// every numeric param.
+fn derive_guard_violation(
+    guard_rust: &str,
+    op: &ParsedHandler,
+    fields: &[(String, String)],
+) -> (Overrides, Overrides) {
     let mut state_overrides = Vec::new();
     let mut param_overrides = Vec::new();
 
-    // Simple heuristic: look for common patterns and negate one clause
-    // "threshold > 0" → set threshold = 0
-    // "member_index < s.member_count" → set member_index = member_count
-    // "s.approval_count ≥ s.threshold" → set approval_count = 0, threshold = 3
-
-    if guard.contains("threshold > 0") || guard.contains("threshold>0") {
-        if op.takes_params.iter().any(|(n, _)| n == "threshold") {
-            param_overrides.push(("threshold".to_string(), "0".to_string()));
-        } else {
-            state_overrides.push(("threshold".to_string(), "0".to_string()));
+    for atom in split_atoms(guard_rust) {
+        let Some((lhs, cmp, rhs)) = parse_atom(&atom) else {
+            continue;
+        };
+        // Normalize to `<name> cmp <literal>` (mirror literal-first atoms).
+        let normalized = match (
+            resolve_side(&lhs, fields, op),
+            resolve_side(&rhs, fields, op),
+        ) {
+            (Some(AtomSide::Field(f)), Some(AtomSide::Lit(l))) => Some((f, false, cmp, l)),
+            (Some(AtomSide::Param(p, _)), Some(AtomSide::Lit(l))) => Some((p, true, cmp, l)),
+            (Some(AtomSide::Lit(l)), Some(AtomSide::Field(f))) => {
+                Some((f, false, flip_cmp(cmp), l))
+            }
+            (Some(AtomSide::Lit(l)), Some(AtomSide::Param(p, _))) => {
+                Some((p, true, flip_cmp(cmp), l))
+            }
+            _ => None,
+        };
+        let Some((name, is_param, cmp, l)) = normalized else {
+            continue;
+        };
+        // Boundary value that breaks the atom (skip `>= 0`: unsigned).
+        let value = match cmp {
+            ">" => Some(l),
+            ">=" if l > 0 => Some(l - 1),
+            "<" => Some(l),
+            "<=" => Some(l + 1),
+            "==" => Some(l + 1),
+            "!=" => Some(l),
+            _ => None,
+        };
+        if let Some(v) = value {
+            let entry = (name, v.to_string());
+            if is_param {
+                param_overrides.push(entry);
+            } else {
+                state_overrides.push(entry);
+            }
+            break;
         }
-    } else if guard.contains("member_index") && guard.contains("member_count") {
-        // member_index < s.member_count → set member_index >= member_count
-        param_overrides.push(("member_index".to_string(), "5".to_string()));
-        state_overrides.push(("member_count".to_string(), "5".to_string()));
-    } else if guard.contains("approval_count") && guard.contains("threshold") {
-        // s.approval_count >= s.threshold → set approval_count < threshold
-        state_overrides.push(("approval_count".to_string(), "0".to_string()));
-        state_overrides.push(("threshold".to_string(), "3".to_string()));
-    } else if guard.contains("member_count") && guard.contains("threshold") {
-        // s.member_count > s.threshold → set member_count == threshold
-        state_overrides.push(("member_count".to_string(), "3".to_string()));
-        state_overrides.push(("threshold".to_string(), "3".to_string()));
-    } else {
-        // Generic: just try setting all numeric params to 0
+    }
+
+    if state_overrides.is_empty() && param_overrides.is_empty() {
+        // Generic fallback: just try setting all numeric params to 0
         for (pname, ptype) in &op.takes_params {
             if matches!(ptype.as_str(), "U8" | "U64" | "U128") {
                 param_overrides.push((pname.clone(), "0".to_string()));
@@ -867,4 +1255,15 @@ fn derive_guard_violation(guard: &str, op: &ParsedHandler) -> (Overrides, Overri
     }
 
     (state_overrides, param_overrides)
+}
+
+/// Mirror a comparator across its operands (`0 < x` ⇔ `x > 0`).
+fn flip_cmp(cmp: &'static str) -> &'static str {
+    match cmp {
+        "<" => ">",
+        "<=" => ">=",
+        ">" => "<",
+        ">=" => "<=",
+        other => other,
+    }
 }

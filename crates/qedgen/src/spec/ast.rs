@@ -733,6 +733,45 @@ pub struct Path {
     pub segments: Vec<PathSeg>,
 }
 
+impl Path {
+    /// Render as source syntax: `root.field[idx].field`. The single source
+    /// of truth for Path→string spelling — renderers that need a prefix
+    /// swap (Lean `s.`/`s'.`) keep their own root handling.
+    pub fn to_source_string(&self) -> String {
+        let mut s = self.root.clone();
+        push_segments_source(&mut s, &self.segments);
+        s
+    }
+
+    /// Segments-only render (no root) — the `state.`-stripped form:
+    /// `state.a[i].b` → `a[i].b`.
+    pub fn segments_source_string(&self) -> String {
+        let mut s = String::new();
+        push_segments_source(&mut s, &self.segments);
+        s
+    }
+}
+
+/// Append `.field` / `[idx]` segments to `s`; the leading `.` is elided
+/// when `s` is empty (segments-only render).
+fn push_segments_source(s: &mut String, segments: &[PathSeg]) {
+    for seg in segments {
+        match seg {
+            PathSeg::Field(f) => {
+                if !s.is_empty() {
+                    s.push('.');
+                }
+                s.push_str(f);
+            }
+            PathSeg::Index(i) => {
+                s.push('[');
+                s.push_str(i);
+                s.push(']');
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PathSeg {
     /// `.field`
@@ -898,6 +937,86 @@ pub struct MatchExprArm {
     /// variants or arms that don't need the data.
     pub binder: Option<String>,
     pub body: Box<Node<Expr>>,
+}
+
+/// Visit every direct child expression of `expr` in source order (F2).
+///
+/// The single walker spine: recursive `Expr` traversals build on this and
+/// keep only their interesting arms, so a new `Expr` variant is a compile
+/// error *here* (the match is exhaustive by discipline — no `_` arm, same
+/// contract as the MIR `Stmt` enum) instead of a silent miss in five
+/// hand-rolled walkers.
+pub fn for_each_child<'a>(expr: &'a Expr, mut f: impl FnMut(&'a Node<Expr>)) {
+    for_each_child_with_binder(expr, |child, _| f(child));
+}
+
+/// Binder-aware variant of [`for_each_child`]: `f(child, binder)` where
+/// `binder` is the name newly bound in scope for that child — quantifier /
+/// sum binders, `let` names, match-arm payload binders — and `None` for
+/// non-binding positions.
+pub fn for_each_child_with_binder<'a>(
+    expr: &'a Expr,
+    mut f: impl FnMut(&'a Node<Expr>, Option<&'a str>),
+) {
+    match expr {
+        // Leaves.
+        Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => {}
+        Expr::Old(inner) | Expr::Not(inner) | Expr::Paren(inner) => f(inner, None),
+        Expr::Sum { binder, body, .. } | Expr::Quant { binder, body, .. } => f(body, Some(binder)),
+        Expr::BoolOp { lhs, rhs, .. }
+        | Expr::Cmp { lhs, rhs, .. }
+        | Expr::Arith { lhs, rhs, .. } => {
+            f(lhs, None);
+            f(rhs, None);
+        }
+        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
+            f(a, None);
+            f(b, None);
+            f(d, None);
+        }
+        Expr::Match { scrutinee, arms } => {
+            f(scrutinee, None);
+            for arm in arms {
+                f(&arm.body, arm.binder.as_deref());
+            }
+        }
+        Expr::Ctor { payload, .. } => {
+            if let Some(p) = payload {
+                f(p, None);
+            }
+        }
+        Expr::RecordLit(fields) => {
+            for (_, v) in fields {
+                f(v, None);
+            }
+        }
+        Expr::RecordUpdate { base, updates } => {
+            f(base, None);
+            for (_, v) in updates {
+                f(v, None);
+            }
+        }
+        Expr::IsVariant { scrutinee, .. } => f(scrutinee, None),
+        Expr::App { args, .. } => {
+            for arg in args {
+                f(arg, None);
+            }
+        }
+        Expr::Field { base, .. } => f(base, None),
+        Expr::Let { name, value, body } => {
+            f(value, None);
+            f(body, Some(name));
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            f(cond, None);
+            f(then_branch, None);
+            f(else_branch, None);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

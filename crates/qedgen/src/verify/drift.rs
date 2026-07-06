@@ -35,9 +35,11 @@ fn content_hash(func: &ItemFn) -> String {
 }
 
 /// All key=value fields that may appear inside `#[qed(verified, ...)]`.
-/// Used by `--update-hashes` to know which hash legs to refresh.
+/// Used by `--update-hashes` to know which hash legs to refresh, and by
+/// `reconcile` (which shares this parser so the two commands agree on the
+/// attribute grammar).
 #[derive(Debug, Default, Clone)]
-struct VerifiedAttr {
+pub(crate) struct VerifiedAttr {
     pub spec: Option<String>,
     pub handler: Option<String>,
     pub hash: Option<String>,
@@ -50,7 +52,7 @@ struct VerifiedAttr {
 /// Every `key = "value"` pair inside a `#[qed(verified, ...)]` attribute.
 /// `None` = not `qed(verified, ...)`-shaped; `Some(default())` = bare
 /// `#[qed(verified)]`.
-fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
+pub(crate) fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
     let path = attr.path();
     if !path.is_ident("qed") {
         return None;
@@ -107,12 +109,6 @@ fn parse_verified_attr(attr: &syn::Attribute) -> Option<VerifiedAttr> {
     Some(out)
 }
 
-/// `scan_file` wrapper: outer Some = "is a `#[qed(verified)]` attribute",
-/// inner Option = the body `hash` value.
-fn extract_hash_from_attr(attr: &syn::Attribute) -> Option<Option<String>> {
-    parse_verified_attr(attr).map(|a| a.hash)
-}
-
 /// Walk parents of `start` for the named file (first hit wins). Matches the
 /// proc-macro's `CARGO_MANIFEST_DIR`-relative resolution of `spec = "..."`.
 fn find_relative_file(start: &Path, rel: &str) -> Option<PathBuf> {
@@ -127,60 +123,80 @@ fn find_relative_file(start: &Path, rel: &str) -> Option<PathBuf> {
     None
 }
 
-/// Collected entry from scanning: function name, expected hash, parsed function.
-type ScannedEntry = (String, Option<String>, ItemFn);
-
-/// Collect verified functions from a top-level function item.
-fn collect_from_fn(func: &ItemFn, out: &mut Vec<ScannedEntry>) {
-    for attr in &func.attrs {
-        if let Some(hash) = extract_hash_from_attr(attr) {
-            out.push((func.sig.ident.to_string(), hash, func.clone()));
-            break;
-        }
-    }
+/// One `#[qed(verified, ...)]`-stamped function: name, full parsed
+/// attribute, 1-based line the attribute starts on, and the function body.
+/// Single walker — replaces the former twin traversals
+/// (`collect_from_items` for hashes, `walk_verified_attrs` for full
+/// attributes) that callers zipped by index.
+pub(crate) struct VerifiedFn {
+    pub(crate) name: String,
+    pub(crate) attr: VerifiedAttr,
+    pub(crate) attr_line: usize,
+    pub(crate) func: ItemFn,
 }
 
-/// Collect verified functions from an impl block.
-fn collect_from_impl(item: &syn::ItemImpl, out: &mut Vec<ScannedEntry>) {
-    for impl_item in &item.items {
-        if let syn::ImplItem::Fn(method) = impl_item {
-            for attr in &method.attrs {
-                if let Some(hash) = extract_hash_from_attr(attr) {
-                    let item_fn = ItemFn {
-                        attrs: method.attrs.clone(),
-                        vis: method.vis.clone(),
-                        sig: method.sig.clone(),
-                        block: Box::new(method.block.clone()),
-                    };
-                    out.push((method.sig.ident.to_string(), hash, item_fn));
-                    break;
-                }
-            }
-        }
-    }
+/// First `#[qed(verified, ...)]` attribute on a fn-shaped item, with its
+/// 1-based start line (needs proc-macro2 `span-locations`).
+fn first_verified_attr(attrs: &[syn::Attribute]) -> Option<(VerifiedAttr, usize)> {
+    use syn::spanned::Spanned;
+    attrs
+        .iter()
+        .find_map(|attr| parse_verified_attr(attr).map(|a| (a, attr.span().start().line)))
 }
 
 /// Recursively collect verified functions from a list of items.
-fn collect_from_items(items: &[syn::Item], out: &mut Vec<ScannedEntry>) {
+fn collect_verified_fns(items: &[syn::Item], out: &mut Vec<VerifiedFn>) {
     for item in items {
         match item {
-            syn::Item::Fn(f) => collect_from_fn(f, out),
-            syn::Item::Impl(i) => collect_from_impl(i, out),
+            syn::Item::Fn(f) => {
+                if let Some((attr, attr_line)) = first_verified_attr(&f.attrs) {
+                    out.push(VerifiedFn {
+                        name: f.sig.ident.to_string(),
+                        attr,
+                        attr_line,
+                        func: f.clone(),
+                    });
+                }
+            }
+            syn::Item::Impl(i) => {
+                for impl_item in &i.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        if let Some((attr, attr_line)) = first_verified_attr(&method.attrs) {
+                            let func = ItemFn {
+                                attrs: method.attrs.clone(),
+                                vis: method.vis.clone(),
+                                sig: method.sig.clone(),
+                                block: Box::new(method.block.clone()),
+                            };
+                            out.push(VerifiedFn {
+                                name: method.sig.ident.to_string(),
+                                attr,
+                                attr_line,
+                                func,
+                            });
+                        }
+                    }
+                }
+            }
             syn::Item::Trait(t) => {
                 for trait_item in &t.items {
                     if let syn::TraitItem::Fn(method) = trait_item {
-                        for attr in &method.attrs {
-                            if let Some(hash) = extract_hash_from_attr(attr) {
-                                if let Some(ref block) = method.default {
-                                    let item_fn = ItemFn {
-                                        attrs: method.attrs.clone(),
-                                        vis: syn::Visibility::Inherited,
-                                        sig: method.sig.clone(),
-                                        block: Box::new(block.clone()),
-                                    };
-                                    out.push((method.sig.ident.to_string(), hash, item_fn));
-                                }
-                                break;
+                        if let Some((attr, attr_line)) = first_verified_attr(&method.attrs) {
+                            // Default-body-less trait fns can't be hashed —
+                            // skipped.
+                            if let Some(ref block) = method.default {
+                                let func = ItemFn {
+                                    attrs: method.attrs.clone(),
+                                    vis: syn::Visibility::Inherited,
+                                    sig: method.sig.clone(),
+                                    block: Box::new(block.clone()),
+                                };
+                                out.push(VerifiedFn {
+                                    name: method.sig.ident.to_string(),
+                                    attr,
+                                    attr_line,
+                                    func,
+                                });
                             }
                         }
                     }
@@ -188,7 +204,7 @@ fn collect_from_items(items: &[syn::Item], out: &mut Vec<ScannedEntry>) {
             }
             syn::Item::Mod(m) => {
                 if let Some((_, inner_items)) = &m.content {
-                    collect_from_items(inner_items, out);
+                    collect_verified_fns(inner_items, out);
                 }
             }
             _ => {}
@@ -196,28 +212,34 @@ fn collect_from_items(items: &[syn::Item], out: &mut Vec<ScannedEntry>) {
     }
 }
 
+/// Parse `source` and return every stamped fn. Shared entry for `drift`
+/// and `reconcile` — one attribute grammar, one traversal.
+pub(crate) fn scan_verified_fns(source: &str) -> syn::Result<Vec<VerifiedFn>> {
+    let syntax = syn::parse_file(source)?;
+    let mut out = Vec::new();
+    collect_verified_fns(&syntax.items, &mut out);
+    Ok(out)
+}
+
 /// Scan a single Rust source file for `#[qed(verified)]` functions.
 fn scan_file(path: &Path) -> Result<Vec<VerifiedEntry>> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-
-    let syntax = syn::parse_file(&source).with_context(|| format!("parsing {}", path.display()))?;
-
-    let mut scanned = Vec::new();
-    collect_from_items(&syntax.items, &mut scanned);
+    let scanned =
+        scan_verified_fns(&source).with_context(|| format!("parsing {}", path.display()))?;
 
     let results = scanned
         .into_iter()
-        .map(|(fn_name, expected_hash, func)| {
-            let actual = content_hash(&func);
-            let status = match expected_hash {
+        .map(|entry| {
+            let actual = content_hash(&entry.func);
+            let status = match entry.attr.hash {
                 Some(expected) if expected == actual => DriftStatus::Ok,
                 Some(expected) => DriftStatus::Drifted { expected, actual },
                 None => DriftStatus::NoHash { computed: actual },
             };
             VerifiedEntry {
                 file: path.to_path_buf(),
-                fn_name,
+                fn_name: entry.name,
                 status,
             }
         })
@@ -226,37 +248,11 @@ fn scan_file(path: &Path) -> Result<Vec<VerifiedEntry>> {
     Ok(results)
 }
 
-/// Collect all `.rs` files under a path (file or directory).
-fn collect_rs_files(path: &Path) -> Result<Vec<PathBuf>> {
-    if path.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    let mut files = Vec::new();
-    for entry in walkdir(path)? {
-        if entry.extension().is_some_and(|e| e == "rs") {
-            files.push(entry);
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-/// Simple recursive directory walk (avoids adding walkdir dependency).
-fn walkdir(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut results = Vec::new();
-    if !dir.is_dir() {
-        return Ok(results);
-    }
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            results.extend(walkdir(&path)?);
-        } else {
-            results.push(path);
-        }
-    }
-    Ok(results)
+/// Collect all `.rs` files under a path (file or directory) via the
+/// shared walker (skips `target`, `tests`, `.git`, … — see
+/// `fs_walk::DEFAULT_SKIP_DIRS`).
+fn collect_rs_files(path: &Path) -> Vec<PathBuf> {
+    crate::fs_walk::collect_rs_files(path, crate::fs_walk::DEFAULT_SKIP_DIRS)
 }
 
 // ============================================================================
@@ -359,33 +355,33 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
     let all_fns = collect_all_fns(&syntax);
 
     let mut scanned = Vec::new();
-    collect_from_items(&syntax.items, &mut scanned);
+    collect_verified_fns(&syntax.items, &mut scanned);
 
     // Which `#[qed(verified)]` functions have drifted directly?
     let mut directly_drifted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (fn_name, expected_hash, func) in &scanned {
-        let Some(expected) = expected_hash else {
+    for entry in &scanned {
+        let Some(expected) = &entry.attr.hash else {
             continue;
         };
-        let actual = content_hash(func);
+        let actual = content_hash(&entry.func);
         if expected != &actual {
-            directly_drifted.insert(fn_name.clone());
+            directly_drifted.insert(entry.name.clone());
         }
     }
 
     // For each function whose direct hash IS OK, surface verified callees
     // that drifted directly.
     let mut results = Vec::new();
-    for (fn_name, expected_hash, func) in &scanned {
-        let Some(expected) = expected_hash else {
+    for entry in &scanned {
+        let Some(expected) = &entry.attr.hash else {
             continue;
         };
-        let actual = content_hash(func);
+        let actual = content_hash(&entry.func);
         if expected != &actual {
             continue; // direct drift handled by check(); don't double-report
         }
 
-        let callees = extract_callees(func);
+        let callees = extract_callees(&entry.func);
         let mut changed: Vec<String> = callees
             .into_iter()
             .filter(|name| all_fns.contains_key(name) && directly_drifted.contains(name))
@@ -396,7 +392,7 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
         if !changed.is_empty() {
             results.push(TransitiveDriftEntry {
                 file: path.to_path_buf(),
-                fn_name: fn_name.clone(),
+                fn_name: entry.name.clone(),
                 changed_callees: changed,
             });
         }
@@ -407,7 +403,7 @@ fn scan_file_deep(path: &Path) -> Result<Vec<TransitiveDriftEntry>> {
 
 /// Run deep (transitive) drift analysis across all files.
 pub fn check_deep(input: &Path) -> Result<Vec<TransitiveDriftEntry>> {
-    let files = collect_rs_files(input)?;
+    let files = collect_rs_files(input);
     let mut all_entries = Vec::new();
     for file in &files {
         match scan_file_deep(file) {
@@ -444,7 +440,7 @@ pub fn print_deep_report(entries: &[TransitiveDriftEntry]) {
 
 /// Scan all Rust files under `input` for verified functions and report their status.
 pub fn check(input: &Path) -> Result<Vec<VerifiedEntry>> {
-    let files = collect_rs_files(input)?;
+    let files = collect_rs_files(input);
     let mut all_entries = Vec::new();
     for file in &files {
         match scan_file(file) {
@@ -468,10 +464,43 @@ pub struct StampedDriftEntry {
     pub fn_name: String,
 }
 
+/// Outcome of recomputing one stamp leg (`spec_hash` / `accounts_hash`).
+enum LegHash {
+    /// Recomputed on-disk hash.
+    Hash(String),
+    /// The `spec` / `accounts_file` path did not resolve from the stamped
+    /// file's parents — `update` warns on this; `check_stamped_drift`
+    /// stays silent.
+    Unresolved,
+    /// Resolved but unreadable / handler-or-struct not found.
+    Unavailable,
+}
+
+/// Shared recompute leg for `check_stamped_drift` and `update`: resolve
+/// `rel` against the stamped file's parent dirs, read it, hash via
+/// `hash_fn(source, name)`.
+fn actual_leg_hash(
+    stamped_file: &Path,
+    rel: &str,
+    name: &str,
+    hash_fn: impl Fn(&str, &str) -> Option<String>,
+) -> LegHash {
+    let Some(resolved) = find_relative_file(stamped_file, rel) else {
+        return LegHash::Unresolved;
+    };
+    let Ok(src) = std::fs::read_to_string(&resolved) else {
+        return LegHash::Unavailable;
+    };
+    match hash_fn(&src, name) {
+        Some(h) => LegHash::Hash(h),
+        None => LegHash::Unavailable,
+    }
+}
+
 /// Read-only complement to `update`: same staleness logic across all three
 /// hash legs, no rewrites. One entry per stale stamp; empty = all current.
 pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
-    let files = collect_rs_files(input)?;
+    let files = collect_rs_files(input);
     let mut entries = Vec::new();
 
     for file in &files {
@@ -479,23 +508,17 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let syntax = match syn::parse_file(&source) {
+        let scanned = match scan_verified_fns(&source) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        let mut scanned = Vec::new();
-        collect_from_items(&syntax.items, &mut scanned);
-        let attrs = collect_verified_attrs(&syntax.items);
-        if scanned.is_empty() {
-            continue;
-        }
-
-        for ((fn_name, _expected_body, func), attr) in scanned.iter().zip(attrs.iter()) {
+        for entry in &scanned {
+            let attr = &entry.attr;
             let mut stale = false;
 
             // Body hash leg
-            let actual_body = content_hash(func);
+            let actual_body = content_hash(&entry.func);
             if let Some(expected) = &attr.hash {
                 if expected != &actual_body {
                     stale = true;
@@ -506,15 +529,13 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
             if let (Some(spec_path), Some(handler_name), Some(expected_spec)) =
                 (&attr.spec, &attr.handler, &attr.spec_hash)
             {
-                if let Some(resolved) = find_relative_file(file, spec_path) {
-                    if let Ok(spec_src) = std::fs::read_to_string(&resolved) {
-                        if let Some(actual_spec) =
-                            spec_hash::spec_hash_for_handler(&spec_src, handler_name)
-                        {
-                            if &actual_spec != expected_spec {
-                                stale = true;
-                            }
-                        }
+                if let LegHash::Hash(actual_spec) =
+                    actual_leg_hash(file, spec_path, handler_name, |src, h| {
+                        spec_hash::spec_hash_for_handler(src, h)
+                    })
+                {
+                    if &actual_spec != expected_spec {
+                        stale = true;
                     }
                 }
             }
@@ -523,15 +544,13 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
             if let (Some(struct_name), Some(accounts_file), Some(expected_acct)) =
                 (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
             {
-                if let Some(resolved) = find_relative_file(file, accounts_file) {
-                    if let Ok(acct_src) = std::fs::read_to_string(&resolved) {
-                        if let Some(actual_acct) =
-                            spec_hash::accounts_struct_hash(&acct_src, struct_name)
-                        {
-                            if &actual_acct != expected_acct {
-                                stale = true;
-                            }
-                        }
+                if let LegHash::Hash(actual_acct) =
+                    actual_leg_hash(file, accounts_file, struct_name, |src, s| {
+                        spec_hash::accounts_struct_hash(src, s)
+                    })
+                {
+                    if &actual_acct != expected_acct {
+                        stale = true;
                     }
                 }
             }
@@ -539,7 +558,7 @@ pub fn check_stamped_drift(input: &Path) -> Result<Vec<StampedDriftEntry>> {
             if stale {
                 entries.push(StampedDriftEntry {
                     file: file.clone(),
-                    fn_name: fn_name.clone(),
+                    fn_name: entry.name.clone(),
                 });
             }
         }
@@ -602,7 +621,7 @@ pub fn print_report(entries: &[VerifiedEntry]) {
 /// the proc-macro's `CARGO_MANIFEST_DIR`-relative behavior); an unresolvable
 /// file skips that leg with a warning so partial trees still work.
 pub fn update(input: &Path) -> Result<usize> {
-    let files = collect_rs_files(input)?;
+    let files = collect_rs_files(input);
     let mut updated = 0;
 
     for file in &files {
@@ -610,28 +629,18 @@ pub fn update(input: &Path) -> Result<usize> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let syntax = match syn::parse_file(&source) {
+        let scanned = match scan_verified_fns(&source) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        let mut scanned = Vec::new();
-        collect_from_items(&syntax.items, &mut scanned);
-
-        // Full attribute (not just body hash) per scanned function, to know
-        // which legs to refresh.
-        let attrs = collect_verified_attrs(&syntax.items);
-
-        if scanned.is_empty() {
-            continue;
-        }
-
         let mut new_source = source.clone();
         let mut changed = false;
 
-        for ((_fn_name, _expected_body, func), attr) in scanned.iter().zip(attrs.iter()) {
+        for entry in &scanned {
+            let attr = &entry.attr;
             // Body hash leg; bare `#[qed(verified)]` gets stamped.
-            let actual_body = content_hash(func);
+            let actual_body = content_hash(&entry.func);
             match &attr.hash {
                 Some(expected) if expected != &actual_body => {
                     let old = format!("hash = \"{}\"", expected);
@@ -667,29 +676,29 @@ pub fn update(input: &Path) -> Result<usize> {
             if let (Some(spec_path), Some(handler_name), Some(expected_spec)) =
                 (&attr.spec, &attr.handler, &attr.spec_hash)
             {
-                if let Some(resolved) = find_relative_file(file, spec_path) {
-                    if let Ok(spec_src) = std::fs::read_to_string(&resolved) {
-                        if let Some(actual_spec) =
-                            spec_hash::spec_hash_for_handler(&spec_src, handler_name)
-                        {
-                            if &actual_spec != expected_spec {
-                                let old = format!("spec_hash = \"{}\"", expected_spec);
-                                let new = format!("spec_hash = \"{}\"", actual_spec);
-                                if new_source.contains(&old) {
-                                    new_source = new_source.replacen(&old, &new, 1);
-                                    changed = true;
-                                    updated += 1;
-                                }
+                match actual_leg_hash(file, spec_path, handler_name, |src, h| {
+                    spec_hash::spec_hash_for_handler(src, h)
+                }) {
+                    LegHash::Hash(actual_spec) => {
+                        if &actual_spec != expected_spec {
+                            let old = format!("spec_hash = \"{}\"", expected_spec);
+                            let new = format!("spec_hash = \"{}\"", actual_spec);
+                            if new_source.contains(&old) {
+                                new_source = new_source.replacen(&old, &new, 1);
+                                changed = true;
+                                updated += 1;
                             }
                         }
                     }
-                } else {
-                    eprintln!(
-                        "warning: --update-hashes: could not resolve `spec = \"{}\"` from {} \
-                         (skipping spec_hash refresh for this entry)",
-                        spec_path,
-                        file.display()
-                    );
+                    LegHash::Unresolved => {
+                        eprintln!(
+                            "warning: --update-hashes: could not resolve `spec = \"{}\"` from {} \
+                             (skipping spec_hash refresh for this entry)",
+                            spec_path,
+                            file.display()
+                        );
+                    }
+                    LegHash::Unavailable => {}
                 }
             }
 
@@ -699,29 +708,29 @@ pub fn update(input: &Path) -> Result<usize> {
             if let (Some(struct_name), Some(accounts_file), Some(expected_acct)) =
                 (&attr.accounts, &attr.accounts_file, &attr.accounts_hash)
             {
-                if let Some(resolved) = find_relative_file(file, accounts_file) {
-                    if let Ok(acct_src) = std::fs::read_to_string(&resolved) {
-                        if let Some(actual_acct) =
-                            spec_hash::accounts_struct_hash(&acct_src, struct_name)
-                        {
-                            if &actual_acct != expected_acct {
-                                let old = format!("accounts_hash = \"{}\"", expected_acct);
-                                let new = format!("accounts_hash = \"{}\"", actual_acct);
-                                if new_source.contains(&old) {
-                                    new_source = new_source.replacen(&old, &new, 1);
-                                    changed = true;
-                                    updated += 1;
-                                }
+                match actual_leg_hash(file, accounts_file, struct_name, |src, s| {
+                    spec_hash::accounts_struct_hash(src, s)
+                }) {
+                    LegHash::Hash(actual_acct) => {
+                        if &actual_acct != expected_acct {
+                            let old = format!("accounts_hash = \"{}\"", expected_acct);
+                            let new = format!("accounts_hash = \"{}\"", actual_acct);
+                            if new_source.contains(&old) {
+                                new_source = new_source.replacen(&old, &new, 1);
+                                changed = true;
+                                updated += 1;
                             }
                         }
                     }
-                } else {
-                    eprintln!(
-                        "warning: --update-hashes: could not resolve `accounts_file = \"{}\"` \
-                         from {} (skipping accounts_hash refresh for this entry)",
-                        accounts_file,
-                        file.display()
-                    );
+                    LegHash::Unresolved => {
+                        eprintln!(
+                            "warning: --update-hashes: could not resolve `accounts_file = \"{}\"` \
+                             from {} (skipping accounts_hash refresh for this entry)",
+                            accounts_file,
+                            file.display()
+                        );
+                    }
+                    LegHash::Unavailable => {}
                 }
             }
         }
@@ -732,61 +741,6 @@ pub fn update(input: &Path) -> Result<usize> {
     }
 
     Ok(updated)
-}
-
-/// Parallel collector to `collect_from_items` capturing the full attribute.
-/// Indices match `collect_from_items` so callers can zip the two.
-fn collect_verified_attrs(items: &[syn::Item]) -> Vec<VerifiedAttr> {
-    let mut out = Vec::new();
-    walk_verified_attrs(items, &mut out);
-    out
-}
-
-fn walk_verified_attrs(items: &[syn::Item], out: &mut Vec<VerifiedAttr>) {
-    for item in items {
-        match item {
-            syn::Item::Fn(f) => {
-                for attr in &f.attrs {
-                    if let Some(parsed) = parse_verified_attr(attr) {
-                        out.push(parsed);
-                        break;
-                    }
-                }
-            }
-            syn::Item::Impl(i) => {
-                for impl_item in &i.items {
-                    if let syn::ImplItem::Fn(method) = impl_item {
-                        for attr in &method.attrs {
-                            if let Some(parsed) = parse_verified_attr(attr) {
-                                out.push(parsed);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            syn::Item::Trait(t) => {
-                for trait_item in &t.items {
-                    if let syn::TraitItem::Fn(method) = trait_item {
-                        for attr in &method.attrs {
-                            if let Some(parsed) = parse_verified_attr(attr) {
-                                if method.default.is_some() {
-                                    out.push(parsed);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            syn::Item::Mod(m) => {
-                if let Some((_, inner)) = &m.content {
-                    walk_verified_attrs(inner, out);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]

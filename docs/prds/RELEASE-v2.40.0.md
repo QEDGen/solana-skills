@@ -45,7 +45,7 @@ Slice 4 deleted the **parallel-array drift class**: `ParsedHandler` /
   (`accounts[i].capital`) — now `s.accounts[(i) as usize].capital`.
 - Kani conformance expected values only rebound *bare* field names to the
   `pre_<field>` snapshot locals; compound/indexed RHS leaked unbound or
-  post-state reads (percolator's `verify_close_account_effect_V` never
+  post-state reads (the perp-dex example's `verify_close_account_effect_V` never
   compiled). Expected values render under `Binder::PreLocal`.
 - Negated guard conjuncts get the same wrapping policy as positive ones
   (the legacy string pass never descended into `!(…)`).
@@ -98,9 +98,9 @@ lanes are documented out of scope pending a binder-aware render context.
 
 All bundled examples re-resolved to qedsvm v0.9.0 (they had lagged at
 v0.4.0) with full `lake build` validation. Green: all six Rust examples
-(escrow, escrow-split, lending, multisig, percolator,
+(escrow, escrow-split, lending, multisig, the perp-dex example,
 bundled-stdlib-demo — the two embedded `lean_solana` copies synced to the
-v0.9.0 sources) and `sbpf/counter`. Percolator's generated harnesses were
+v0.9.0 sources) and `sbpf/counter`. The perp-dex example's generated harnesses were
 regenerated to match the shipped codegen (PR #153).
 
 **Known debt (pre-existing, now surfaced):** `sbpf/{transfer, slippage,
@@ -109,7 +109,7 @@ their lifted programs hit the v0.9 fail-closed ISA model
 (`ERR_UNSUPPORTED_INSTRUCTION` where v0.4.0 executed; `tree` needs a full
 re-proof). These three had not built full-fat since the un-vendoring
 (cold caches masked it — the v2.39.0 lesson cut both ways). Same posture
-as the dropset precedent: proof migration is tracked in #154, not a ship gate.
+as the the-vendored-sbpf-example precedent: proof migration is tracked in #154, not a ship gate.
 The support library itself compiles green in all three projects; only the
 example proof bodies lag.
 

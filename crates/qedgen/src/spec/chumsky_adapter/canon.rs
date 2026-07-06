@@ -240,85 +240,26 @@ pub(crate) fn collect_guard_path_refs(node: &Node<Expr>) -> Vec<GuardPathRef> {
     out
 }
 
+/// Walks the shared binder-aware `ast::for_each_child_with_binder` spine
+/// (F2), keeping only the `Path` leaf arm; binder pushes/pops come from
+/// the spine's binder slots.
 fn collect_refs(n: &Node<Expr>, shadow: &mut Vec<String>, out: &mut Vec<GuardPathRef>) {
-    let under =
-        |name: &str, body: &Node<Expr>, shadow: &mut Vec<String>, out: &mut Vec<GuardPathRef>| {
-            shadow.push(name.to_string());
-            collect_refs(body, shadow, out);
-            shadow.pop();
-        };
-    match &n.node {
-        Expr::Int(_) | Expr::Bool(_) => {}
-        Expr::Path(p) => {
-            if p.root == "state" {
-                if let Some(a::PathSeg::Field(f)) = p.segments.first() {
-                    out.push(GuardPathRef::StateField(f.clone()));
-                }
-            } else if p.segments.is_empty() && !shadow.iter().any(|s| s == &p.root) {
-                out.push(GuardPathRef::Bare(p.root.clone()));
+    if let Expr::Path(p) = &n.node {
+        if p.root == "state" {
+            if let Some(a::PathSeg::Field(f)) = p.segments.first() {
+                out.push(GuardPathRef::StateField(f.clone()));
             }
+        } else if p.segments.is_empty() && !shadow.iter().any(|s| s == &p.root) {
+            out.push(GuardPathRef::Bare(p.root.clone()));
         }
-        Expr::Old(inner) | Expr::Not(inner) | Expr::Paren(inner) => {
-            collect_refs(inner, shadow, out)
-        }
-        Expr::Sum { binder, body, .. } | Expr::Quant { binder, body, .. } => {
-            under(binder, body, shadow, out)
-        }
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => {
-            collect_refs(lhs, shadow, out);
-            collect_refs(rhs, shadow, out);
-        }
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
-            collect_refs(a, shadow, out);
-            collect_refs(b, shadow, out);
-            collect_refs(d, shadow, out);
-        }
-        Expr::Match { scrutinee, arms } => {
-            collect_refs(scrutinee, shadow, out);
-            for arm in arms {
-                match &arm.binder {
-                    Some(b) => under(b, &arm.body, shadow, out),
-                    None => collect_refs(&arm.body, shadow, out),
-                }
-            }
-        }
-        Expr::Ctor { payload, .. } => {
-            if let Some(p) = payload {
-                collect_refs(p, shadow, out);
-            }
-        }
-        Expr::RecordLit(fields) => {
-            for (_, v) in fields {
-                collect_refs(v, shadow, out);
-            }
-        }
-        Expr::RecordUpdate { base, updates } => {
-            collect_refs(base, shadow, out);
-            for (_, v) in updates {
-                collect_refs(v, shadow, out);
-            }
-        }
-        Expr::IsVariant { scrutinee, .. } => collect_refs(scrutinee, shadow, out),
-        Expr::App { args, .. } => {
-            for arg in args {
-                collect_refs(arg, shadow, out);
-            }
-        }
-        Expr::Field { base, .. } => collect_refs(base, shadow, out),
-        Expr::Let { name, value, body } => {
-            collect_refs(value, shadow, out);
-            under(name, body, shadow, out);
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_refs(cond, shadow, out);
-            collect_refs(then_branch, shadow, out);
-            collect_refs(else_branch, shadow, out);
-        }
+        return;
     }
+    a::for_each_child_with_binder(&n.node, |child, binder| match binder {
+        Some(b) => {
+            shadow.push(b.to_string());
+            collect_refs(child, shadow, out);
+            shadow.pop();
+        }
+        None => collect_refs(child, shadow, out),
+    });
 }

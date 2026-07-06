@@ -129,7 +129,7 @@ across Anchor versions.
 beginning — `op.guard_str` was the only read-side source, but
 modern specs leave it `None` (they use the typed `requires` clauses
 in `op.requires`). That alone removed ~30 false positives on
-percolator-scale specs.
+perp-dex-scale specs.
 
 ## What's deferred
 
@@ -152,7 +152,7 @@ percolator-scale specs.
   free variables for now. v2.25 candidate.
 - **Bundled-example migration**: only `escrow-split` migrated to
   the new syntax this release. The other bundled multi-variant
-  ADT examples (multisig, lending, percolator) are
+  ADT examples (multisig, lending, the perp-dex example) are
   all Quasar target — they take the legacy flat-struct fallback
   path and aren't affected by v2.24's Anchor-side changes.
 

@@ -189,3 +189,6 @@ pub(crate) mod proofs_bootstrap;
 pub(crate) mod qed_lock;
 pub(crate) mod qed_manifest;
 pub(crate) mod reconcile;
+// Lean workspace build harness (`validate_completion`, `setup_workspace`,
+// `qedgen_home`) — project-level infrastructure, not spec front-end.
+pub(crate) mod validate;

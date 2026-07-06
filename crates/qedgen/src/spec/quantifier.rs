@@ -149,42 +149,19 @@ fn binder_type_supported(ty: &str) -> bool {
 /// Span of the first quantifier in the tree, if any. Returns the same span
 /// twice — callers pick whichever slot they need (outer-already-known vs
 /// no-top-quantifier paths).
+/// Walks the shared `ast::for_each_child` spine (F2), keeping only the
+/// `Quant` arm.
 fn find_nested_quantifier(node: &Node<Expr>) -> Option<(Span, Span)> {
-    match &node.node {
-        Expr::Quant { .. } => Some((node.span.clone(), node.span.clone())),
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => {
-            find_nested_quantifier(lhs).or_else(|| find_nested_quantifier(rhs))
-        }
-        Expr::Not(inner) | Expr::Paren(inner) | Expr::Old(inner) => find_nested_quantifier(inner),
-        Expr::Sum { body, .. } => find_nested_quantifier(body),
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => find_nested_quantifier(a)
-            .or_else(|| find_nested_quantifier(b))
-            .or_else(|| find_nested_quantifier(d)),
-        Expr::Match { scrutinee, arms } => find_nested_quantifier(scrutinee).or_else(|| {
-            arms.iter()
-                .find_map(|arm| find_nested_quantifier(&arm.body))
-        }),
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => find_nested_quantifier(cond)
-            .or_else(|| find_nested_quantifier(then_branch))
-            .or_else(|| find_nested_quantifier(else_branch)),
-        Expr::Let { value, body, .. } => {
-            find_nested_quantifier(value).or_else(|| find_nested_quantifier(body))
-        }
-        Expr::App { args, .. } => args.iter().find_map(find_nested_quantifier),
-        Expr::Field { base, .. } => find_nested_quantifier(base),
-        Expr::RecordLit(fs) => fs.iter().find_map(|(_, v)| find_nested_quantifier(v)),
-        Expr::RecordUpdate { base, updates } => find_nested_quantifier(base)
-            .or_else(|| updates.iter().find_map(|(_, v)| find_nested_quantifier(v))),
-        Expr::Ctor { payload, .. } => payload.as_ref().and_then(|p| find_nested_quantifier(p)),
-        Expr::IsVariant { scrutinee, .. } => find_nested_quantifier(scrutinee),
-        Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => None,
+    if matches!(node.node, Expr::Quant { .. }) {
+        return Some((node.span.clone(), node.span.clone()));
     }
+    let mut found = None;
+    crate::ast::for_each_child(&node.node, |child| {
+        if found.is_none() {
+            found = find_nested_quantifier(child);
+        }
+    });
+    found
 }
 
 #[cfg(test)]

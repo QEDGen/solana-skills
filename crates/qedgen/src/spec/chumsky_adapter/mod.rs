@@ -172,52 +172,82 @@ impl<'a> TypeEnv<'a> {
         }
     }
 
-    /// Resolve the kind of a Path. Handles subscripts into Map fields by
-    /// reading through the map's value-record to find the trailing field.
-    fn path_kind(&self, p: &a::Path) -> Kind {
-        // `state.x.y` or `state.accounts[i].capital` or bare `amount`
+    /// Shared walking core for [`Self::path_kind`] / [`Self::path_type_name`]
+    /// / [`Self::path_type_ref`] and the tree builder's `path_leaf_type`:
+    /// resolve the leaf `TypeRef` of a path. State-rooted paths walk the
+    /// segments — the first Field must be a state field; subsequent Fields
+    /// index into a record or Map-of-record; a subscript advances to the
+    /// Map's inner type. Bare idents resolve through the handler params;
+    /// everything else is untyped.
+    ///
+    /// `record_state_fallback` additionally resolves first-segment fields
+    /// through `records["State"]` (record-form state: `type State = { … }` /
+    /// `state { … }` sugar keeps its fields there, not in `state_fields`).
+    /// Only `path_leaf_type` passes `true` — widening the others would
+    /// change `path_is_pod_field`'s answers and with them the rendered
+    /// Quasar output.
+    fn resolve_path_leaf(
+        &self,
+        p: &a::Path,
+        record_state_fallback: bool,
+    ) -> Option<&'a a::TypeRef> {
         if p.root == "state" {
-            // Walk the segments: first Field must be a state field; subsequent
-            // Fields index into a record or Map-of-record.
             let mut current: Option<&a::TypeRef> = None;
             for seg in &p.segments {
                 match seg {
                     a::PathSeg::Field(f) => {
-                        let field_ty = match current {
-                            None => self.state_fields.get(f).copied(),
-                            Some(a::TypeRef::Named(rec_name)) => {
-                                self.records.get(rec_name).and_then(|m| m.get(f).copied())
-                            }
-                            Some(a::TypeRef::Map { inner, .. }) => {
-                                // direct .field after a Map without [idx] shouldn't happen
-                                // in valid specs, but bottom out safely
-                                if let a::TypeRef::Named(rec_name) = inner.as_ref() {
-                                    self.records.get(rec_name).and_then(|m| m.get(f).copied())
+                        current = match current {
+                            None => {
+                                let direct = self.state_fields.get(f).copied();
+                                if record_state_fallback {
+                                    direct.or_else(|| {
+                                        self.records.get("State").and_then(|m| m.get(f).copied())
+                                    })
                                 } else {
-                                    None
+                                    direct
                                 }
                             }
+                            Some(a::TypeRef::Named(rec)) => {
+                                self.records.get(rec).and_then(|m| m.get(f).copied())
+                            }
+                            // direct .field after a Map without [idx] shouldn't happen
+                            // in valid specs, but bottom out safely
+                            Some(a::TypeRef::Map { inner, .. }) => match inner.as_ref() {
+                                a::TypeRef::Named(rec) => {
+                                    self.records.get(rec).and_then(|m| m.get(f).copied())
+                                }
+                                _ => None,
+                            },
                             _ => None,
                         };
-                        current = field_ty;
                     }
                     a::PathSeg::Index(_) => {
-                        // Subscript into a Map: advance `current` to the inner record type.
+                        // Subscript into a Map: advance `current` to the inner type.
                         if let Some(a::TypeRef::Map { inner, .. }) = current {
                             current = Some(inner.as_ref());
                         }
                     }
                 }
             }
-            return current.map(|t| self.type_ref_kind(t)).unwrap_or(Kind::Nat);
+            return current;
         }
-        // Bare ident — try handler params first.
+        // Bare ident — try handler params.
         if p.segments.is_empty() {
-            if let Some((_, ty)) = self.params.iter().find(|(n, _)| n == &p.root) {
-                return self.type_ref_kind(ty);
-            }
+            return self
+                .params
+                .iter()
+                .find(|(n, _)| n == &p.root)
+                .map(|(_, t)| *t);
         }
-        Kind::Nat
+        None
+    }
+
+    /// Resolve the kind of a Path. Handles subscripts into Map fields by
+    /// reading through the map's value-record to find the trailing field.
+    fn path_kind(&self, p: &a::Path) -> Kind {
+        self.resolve_path_leaf(p, false)
+            .map(|t| self.type_ref_kind(t))
+            .unwrap_or(Kind::Nat)
     }
 
     /// Resolve the SOURCE type name of a path expression — e.g.,
@@ -225,43 +255,7 @@ impl<'a> TypeEnv<'a> {
     /// Returns None when the path terminates on a primitive/Bool/unknown type
     /// or doesn't refer into the state.
     fn path_type_name(&self, p: &a::Path) -> Option<String> {
-        if p.root != "state" {
-            if p.segments.is_empty() {
-                if let Some((_, a::TypeRef::Named(n))) =
-                    self.params.iter().find(|(n, _)| n == &p.root)
-                {
-                    return Some(n.clone());
-                }
-            }
-            return None;
-        }
-        let mut current: Option<&a::TypeRef> = None;
-        for seg in &p.segments {
-            match seg {
-                a::PathSeg::Field(f) => {
-                    current = match current {
-                        None => self.state_fields.get(f).copied(),
-                        Some(a::TypeRef::Named(rec)) => {
-                            self.records.get(rec).and_then(|m| m.get(f).copied())
-                        }
-                        Some(a::TypeRef::Map { inner, .. }) => {
-                            if let a::TypeRef::Named(rec) = inner.as_ref() {
-                                self.records.get(rec).and_then(|m| m.get(f).copied())
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    };
-                }
-                a::PathSeg::Index(_) => {
-                    if let Some(a::TypeRef::Map { inner, .. }) = current {
-                        current = Some(inner.as_ref());
-                    }
-                }
-            }
-        }
-        match current? {
+        match self.resolve_path_leaf(p, false)? {
             a::TypeRef::Named(n) => Some(n.clone()),
             _ => None,
         }
@@ -358,84 +352,22 @@ impl<'a> TypeEnv<'a> {
     /// raw `TypeRef` instead of collapsing to `Kind`. Bare-ident params
     /// resolve through `params`.
     fn path_type_ref(&self, p: &a::Path) -> Option<&'a a::TypeRef> {
-        if p.root == "state" {
-            let mut current: Option<&a::TypeRef> = None;
-            for seg in &p.segments {
-                match seg {
-                    a::PathSeg::Field(f) => {
-                        let next = match current {
-                            None => self.state_fields.get(f).copied(),
-                            Some(a::TypeRef::Named(rec)) => {
-                                self.records.get(rec).and_then(|m| m.get(f).copied())
-                            }
-                            Some(a::TypeRef::Map { inner, .. }) => match inner.as_ref() {
-                                a::TypeRef::Named(rec) => {
-                                    self.records.get(rec).and_then(|m| m.get(f).copied())
-                                }
-                                _ => None,
-                            },
-                            _ => None,
-                        };
-                        current = next;
-                    }
-                    a::PathSeg::Index(_) => {
-                        if let Some(a::TypeRef::Map { inner, .. }) = current {
-                            current = Some(inner.as_ref());
-                        }
-                    }
-                }
-            }
-            return current;
-        }
-        if p.segments.is_empty() {
-            return self
-                .params
-                .iter()
-                .find(|(n, _)| n == &p.root)
-                .map(|(_, t)| *t);
-        }
-        None
+        self.resolve_path_leaf(p, false)
     }
 }
 
 /// Any `Expr::Old(_)` in the tree? Used by `classify_property_body` and the
-/// `vacuous_property_lowering` lint. Mirrors the shape of
-/// `quantifier::find_nested_quantifier` — same node set, different predicate.
+/// `vacuous_property_lowering` lint. Walks the shared `ast::for_each_child`
+/// spine (F2), keeping only the `Old` arm.
 pub(crate) fn expr_contains_old(node: &Node<Expr>) -> bool {
-    match &node.node {
-        Expr::Old(_) => true,
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => expr_contains_old(lhs) || expr_contains_old(rhs),
-        Expr::Not(inner) | Expr::Paren(inner) => expr_contains_old(inner),
-        Expr::Sum { body, .. } | Expr::Quant { body, .. } => expr_contains_old(body),
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
-            expr_contains_old(a) || expr_contains_old(b) || expr_contains_old(d)
-        }
-        Expr::Match { scrutinee, arms } => {
-            expr_contains_old(scrutinee) || arms.iter().any(|arm| expr_contains_old(&arm.body))
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            expr_contains_old(cond)
-                || expr_contains_old(then_branch)
-                || expr_contains_old(else_branch)
-        }
-        Expr::Let { value, body, .. } => expr_contains_old(value) || expr_contains_old(body),
-        Expr::App { args, .. } => args.iter().any(expr_contains_old),
-        Expr::Field { base, .. } => expr_contains_old(base),
-        Expr::RecordLit(fs) => fs.iter().any(|(_, v)| expr_contains_old(v)),
-        Expr::RecordUpdate { base, updates } => {
-            expr_contains_old(base) || updates.iter().any(|(_, v)| expr_contains_old(v))
-        }
-        Expr::Ctor { payload, .. } => payload.as_ref().is_some_and(|p| expr_contains_old(p)),
-        Expr::IsVariant { scrutinee, .. } => expr_contains_old(scrutinee),
-        // Leaves
-        Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => false,
+    if matches!(node.node, Expr::Old(_)) {
+        return true;
     }
+    let mut found = false;
+    crate::ast::for_each_child(&node.node, |child| {
+        found = found || expr_contains_old(child);
+    });
+    found
 }
 
 /// Temporal shape of a property body: contains `Expr::Old(_)` ⇒ `Binary`,

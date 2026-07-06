@@ -83,7 +83,7 @@ at the modified slot, which is sufficient for inductive preservation
 since handlers only mutate `state.<arr>[i]` (frame condition handles
 the rest).
 
-Closes the percolator `account_solvent` warning that previously had
+Closes the perp-dex example's `account_solvent` warning that previously had
 no clean fix; the property is now genuinely verified by proptest at
 every handler step.
 
@@ -107,7 +107,7 @@ passes `qedgen check` with zero warnings:
   `[b"pool", authority, &[bump]]` seeds.
 - escrow (3 handlers): event emits + token transfers, including
   escrow-PDA-signed releases on exchange and cancel.
-- percolator (1 handler): `close_account`'s `V -= accounts[i].capital`
+- the perp-dex example (1 handler): `close_account`'s `V -= accounts[i].capital`
   via `PodU128.into() → u128.checked_sub`.
 
 Multisig handler files also picked up `let _ = bumps;` to match
@@ -136,7 +136,7 @@ state implicitly.
 | escrow | 0 | 0 | 0 |
 | lending | 0 | 0 | 0 |
 | multisig | 0 | 0 | 0 |
-| percolator | 0 | 0 | 0 |
+| perp-dex | 0 | 0 | 0 |
 
 ## Pre-release gates
 

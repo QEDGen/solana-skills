@@ -237,27 +237,7 @@ pub(crate) fn find_cmp_rhs_end(expr: &str, op_end: usize) -> usize {
 
 /// True if `hay` contains `needle` as a whole word (not a substring of a
 /// longer identifier). `net` in `amount - net` matches; `net` in `network`
-/// does not.
+/// does not. Alias of the shared scanner in `codegen_shared`.
 pub(crate) fn contains_whole_word(hay: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = hay.as_bytes();
-    let n = needle.as_bytes();
-    let mut i = 0;
-    while i + n.len() <= bytes.len() {
-        if &bytes[i..i + n.len()] == n {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + n.len() == bytes.len() || !is_ident_byte(bytes[i + n.len()]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+    crate::codegen_shared::contains_word_boundary(hay, needle)
 }

@@ -14,49 +14,18 @@
 //! emit, the Rust scaffold is suppressed, and the generated header
 //! names a command that actually exists.
 
+mod common;
+
+use common::{ensure_qedgen_built, qedgen_bin, repo_root};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("qedgen crate at <repo>/crates/qedgen")
-        .to_path_buf()
-}
-
-fn qedgen_bin() -> PathBuf {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    repo_root().join("target").join(profile).join("qedgen")
-}
-
-fn ensure_qedgen_built() {
-    if !qedgen_bin().exists() {
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "qedgen"])
-            .current_dir(repo_root())
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "cargo build qedgen failed");
-    }
-}
 
 /// Fresh git-initialized tempdir containing the given spec file.
 fn sbpf_project(spec_src: &Path, spec_name: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("create tempdir");
     fs::copy(spec_src, tmp.path().join(spec_name)).expect("copy spec fixture");
-    let git_init = Command::new("git")
-        .arg("init")
-        .arg("--quiet")
-        .current_dir(tmp.path())
-        .status()
-        .expect("spawn git init");
-    assert!(git_init.success(), "git init failed");
+    common::git_init(tmp.path());
     tmp
 }
 
@@ -75,15 +44,15 @@ fn run_codegen(dir: &Path, args: &[&str]) -> std::process::Output {
 /// branch was reached.
 #[test]
 fn sbpf_old_syntax_lean_regen_path_works() {
-    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/dropset_sbpf.qedspec");
-    let tmp = sbpf_project(&spec_src, "dropset.qedspec");
+    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/vault_lock_sbpf.qedspec");
+    let tmp = sbpf_project(&spec_src, "vault_lock.qedspec");
 
     let out = run_codegen(
         tmp.path(),
         &[
             "--lean",
             "--spec",
-            "dropset.qedspec",
+            "vault_lock.qedspec",
             "--lean-output",
             "formal_verification/Spec.lean",
         ],
@@ -120,10 +89,10 @@ fn sbpf_old_syntax_lean_regen_path_works() {
 /// artifact is suppressed rather than erroring.
 #[test]
 fn sbpf_codegen_all_emits_only_lean_and_ci() {
-    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/dropset_sbpf.qedspec");
-    let tmp = sbpf_project(&spec_src, "dropset.qedspec");
+    let spec_src = repo_root().join("crates/qedgen/tests/fixtures/vault_lock_sbpf.qedspec");
+    let tmp = sbpf_project(&spec_src, "vault_lock.qedspec");
 
-    let out = run_codegen(tmp.path(), &["--all", "--spec", "dropset.qedspec"]);
+    let out = run_codegen(tmp.path(), &["--all", "--spec", "vault_lock.qedspec"]);
     assert!(
         out.status.success(),
         "codegen --all failed on sBPF spec:\nstdout: {}\nstderr: {}",
@@ -139,7 +108,7 @@ fn sbpf_codegen_all_emits_only_lean_and_ci() {
         tmp.path().join(".github/workflows/verify.yml").exists(),
         "--all should emit CI for sBPF specs"
     );
-    for suppressed in ["programs", "fuzz", "src/integration_tests.rs"] {
+    for suppressed in ["programs", "fuzz", "tests/integration_tests.rs"] {
         assert!(
             !tmp.path().join(suppressed).exists(),
             "`{suppressed}` must not be emitted for sBPF specs"

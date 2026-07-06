@@ -9,37 +9,12 @@
 //! the unified diff so the offending file is obvious. Single-spec and
 //! multi-spec (directory-of-fragments) shapes both exercised.
 
+mod common;
+
+use common::{ensure_qedgen_built, qedgen_bin, repo_root};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("qedgen crate at <repo>/crates/qedgen")
-        .to_path_buf()
-}
-
-fn qedgen_bin() -> PathBuf {
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    repo_root().join("target").join(profile).join("qedgen")
-}
-
-fn ensure_qedgen_built() {
-    if !qedgen_bin().exists() {
-        let status = Command::new("cargo")
-            .args(["build", "--bin", "qedgen"])
-            .current_dir(repo_root())
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "cargo build qedgen failed");
-    }
-}
 
 /// Collect file contents under `dir` keyed by their relative path, so two
 /// directory trees can be compared as ordered maps.
@@ -79,11 +54,15 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 fn run_codegen(spec: &Path, out_dir: &Path) {
+    common::git_init(out_dir);
     let output = Command::new(qedgen_bin())
         .args(["codegen", "--all", "--spec"])
         .arg(spec)
         .arg("--output-dir")
         .arg(out_dir)
+        // cwd-relative artifact defaults (tests/, programs/, fuzz/) must
+        // land in the tempdir, not wherever the test harness runs.
+        .current_dir(out_dir)
         .output()
         .expect("spawn qedgen codegen");
     assert!(
@@ -161,10 +140,4 @@ fn lending_codegen_is_deterministic() {
 fn multisig_codegen_is_deterministic() {
     ensure_qedgen_built();
     assert_deterministic(&repo_root().join("examples/rust/multisig/multisig.qedspec"));
-}
-
-#[test]
-fn percolator_codegen_is_deterministic() {
-    ensure_qedgen_built();
-    assert_deterministic(&repo_root().join("examples/rust/percolator/percolator.qedspec"));
 }
