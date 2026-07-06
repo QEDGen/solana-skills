@@ -128,6 +128,90 @@ pub struct VerifyOpts {
     pub project_root: PathBuf,
 }
 
+/// `qedgen verify --require-verified` pre-check: every imported interface
+/// with `ensures` clauses must ship a Lake-buildable proof package —
+/// results against a not-fully-proven dep graph still rest on Stance-1
+/// axiom discharge. Prints the CRIT findings and exits(1) on failure
+/// (fail fast, before any backend dispatches).
+pub fn require_verified_gate(parsed: &crate::check::ParsedSpec) {
+    let findings = crate::check::collect_require_verified_findings(parsed);
+    if !findings.is_empty() {
+        eprintln!(
+            "--require-verified: {} unverified import(s) — every imported interface \
+             with `ensures` clauses must ship a Lake-buildable proof package.",
+            findings.len(),
+        );
+        for f in &findings {
+            eprintln!("  [CRIT] {}: unverified callee", f.interface_name);
+            eprintln!("         {}", f.fix_hint);
+        }
+        std::process::exit(1);
+    }
+}
+
+/// `qedgen verify --recursive`: `lake build` every imported proof package
+/// (resolver returns DFS-pre-order = bottom-up, cycle-detected). Keeps
+/// walking on failure so every breakage shows; aggregate exit(1) at the
+/// end. Empty list = no-op success.
+pub fn recursive_lake_walk(parsed: &crate::check::ParsedSpec) {
+    if parsed.verified_proof_pkgs.is_empty() {
+        eprintln!(
+            "--recursive: no imported proof packages in this spec's dep graph; \
+             nothing to walk."
+        );
+    } else {
+        eprintln!(
+            "--recursive: walking {} verified provider proof package(s) bottom-up.",
+            parsed.verified_proof_pkgs.len(),
+        );
+        let mut any_failed = false;
+        for (idx, pkg_root) in parsed.verified_proof_pkgs.iter().enumerate() {
+            eprintln!(
+                "  [{}/{}] lake build — {}",
+                idx + 1,
+                parsed.verified_proof_pkgs.len(),
+                pkg_root.display(),
+            );
+            match Command::new("lake")
+                .arg("build")
+                .current_dir(pkg_root)
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    eprintln!("       PASS");
+                }
+                Ok(out) => {
+                    any_failed = true;
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    eprintln!("       FAIL");
+                    // First ~10 lines of each stream — the head
+                    // usually identifies the failure.
+                    for line in stderr.lines().take(10) {
+                        eprintln!("         | {}", line);
+                    }
+                    for line in stdout.lines().take(10) {
+                        eprintln!("         | {}", line);
+                    }
+                }
+                Err(e) => {
+                    any_failed = true;
+                    eprintln!("       ERROR: failed to spawn `lake build`: {}", e);
+                }
+            }
+        }
+        if any_failed {
+            eprintln!(
+                "--recursive: at least one provider's Lake build failed; the dep \
+                 graph is NOT fully proven. Fix the provider(s) above before \
+                 trusting this consumer's Stance-2 axioms."
+            );
+            std::process::exit(1);
+        }
+        eprintln!("--recursive: every imported proof package built clean.");
+    }
+}
+
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
     let mut backends = Vec::new();
     let runners: [&dyn VerifyBackend; 4] =
