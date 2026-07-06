@@ -26,16 +26,14 @@ pub(crate) fn emit_kani_impl_pinocchio(
     spec_path: Option<&Path>,
 ) -> Result<()> {
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("src/kani_impl.rs")
-        .cloned()
-        .unwrap_or_default();
 
     let mut out = String::new();
 
     // ── File header ──────────────────────────────────────────────────────
-    out.push_str(&crate::banner::banner(None, &hash));
+    out.push_str(&crate::codegen_shared::marker_unlabeled(
+        &fp,
+        "src/kani_impl.rs",
+    ));
     out.push_str("//\n");
     out.push_str("// Impl-targeted Kani harnesses for a Pinocchio (#![no_std]) program.\n");
     out.push_str("// Builds symbolic `AccountInfo` values on the stack and calls the\n");

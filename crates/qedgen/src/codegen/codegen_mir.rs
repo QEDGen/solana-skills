@@ -210,11 +210,7 @@ fn render_cargo_toml(
 ) -> String {
     let program_name = mir.name.to_lowercase().replace('_', "-");
     let needs_spl = mir_needs_spl(mir);
-    let hash = fp
-        .file_hashes
-        .get("Cargo.toml")
-        .cloned()
-        .unwrap_or_default();
+    let hash = crate::codegen_shared::fingerprint_hash(fp, "Cargo.toml");
     let qedgen_version = env!("CARGO_PKG_VERSION");
 
     let mut out = String::new();

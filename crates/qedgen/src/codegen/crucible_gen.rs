@@ -748,12 +748,7 @@ fn account_tracked_pubkey_exprs(spec: &ParsedSpec, mode: InvariantMode) -> Vec<S
 
 fn header(spec: &ParsedSpec, mode: InvariantMode) -> String {
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("fuzz/src/main.rs")
-        .cloned()
-        .unwrap_or_default();
-    let mut s = crate::banner::banner(None, &hash);
+    let mut s = crate::codegen_shared::marker_unlabeled(&fp, "fuzz/src/main.rs");
     s.push_str("//\n");
     s.push_str("// Crucible coverage-guided fuzz harness for the spec.\n");
     s.push_str("//\n");

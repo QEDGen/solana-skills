@@ -277,17 +277,15 @@ fn generate_impl(mir: &Mir, spec: &ParsedSpec, output_path: &Path) -> Result<()>
     rust_codegen_util::check_effect_targets(spec)?;
 
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get("tests/proptest.rs")
-        .cloned()
-        .unwrap_or_default();
 
     let is_multi = spec.account_types.len() > 1;
 
     let mut out = String::new();
 
-    out.push_str(&crate::banner::banner(None, &hash));
+    out.push_str(&crate::codegen_shared::marker_unlabeled(
+        &fp,
+        "tests/proptest.rs",
+    ));
     out.push_str("//\n");
     out.push_str("// Proptest harnesses — property-based testing for the spec's state machine.\n");
     out.push_str(

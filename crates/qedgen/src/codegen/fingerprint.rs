@@ -166,9 +166,76 @@ pub fn compute_fingerprint(spec: &ParsedSpec) -> SpecFingerprint {
         hashes.insert("tests/kani.rs".to_string(), section_hash(&c));
     }
 
+    // tests/proptest.rs — proptest harnesses: state model, transition fns,
+    // property/invariant predicates. F8: this key (and fuzz/src/main.rs
+    // below) was looked up by the emitters but never inserted, so those
+    // banners shipped hash-less and drift detection couldn't see spec
+    // changes in them.
+    {
+        let mut c = String::from("file=tests/proptest.rs\n");
+        c.push_str(&canonical_spec_core(spec));
+        hashes.insert("tests/proptest.rs".to_string(), section_hash(&c));
+    }
+
+    // fuzz/src/main.rs — Crucible fuzz harness: the spec core plus the
+    // per-handler accounts surface (action account metas derive from it).
+    {
+        let mut c = String::from("file=fuzz/src/main.rs\n");
+        c.push_str(&format!("name={}\n", spec.program_name));
+        c.push_str(&canonical_spec_core(spec));
+        for handler in &spec.handlers {
+            c.push_str(&canonical_accounts(handler));
+        }
+        hashes.insert("fuzz/src/main.rs".to_string(), section_hash(&c));
+    }
+
     SpecFingerprint {
         file_hashes: hashes,
     }
+}
+
+/// Canonical string for the spec surface the harness generators consume:
+/// state fields (incl. multi-variant payload structure), handlers,
+/// properties (with bodies), invariants, and lifecycle states.
+fn canonical_spec_core(spec: &ParsedSpec) -> String {
+    let mut c = String::new();
+    for (fname, ftype) in &spec.state_fields {
+        c.push_str(&format!("state={}:{}\n", fname, ftype));
+    }
+    for acct in &spec.account_types {
+        if acct.variants.len() <= 1 {
+            continue;
+        }
+        c.push_str(&format!("variant_state_acct={}\n", acct.name));
+        for variant in &acct.variants {
+            c.push_str(&format!("  variant={}\n", variant.name));
+            for (fname, ftype) in &variant.fields {
+                c.push_str(&format!("    {}:{}\n", fname, ftype));
+            }
+        }
+    }
+    for handler in &spec.handlers {
+        c.push_str(&canonical_handler(handler));
+    }
+    for prop in &spec.properties {
+        c.push_str(&format!(
+            "prop={}|expr={}|{}\n",
+            prop.name,
+            prop.expression.as_deref().unwrap_or(""),
+            prop.preserved_by.join(",")
+        ));
+    }
+    for inv in &spec.invariants {
+        c.push_str(&format!(
+            "invariant={}|{}\n",
+            inv.name,
+            inv.lean_expr.as_deref().unwrap_or("")
+        ));
+    }
+    for state in &spec.lifecycle_states {
+        c.push_str(&format!("status={}\n", state));
+    }
+    c
 }
 
 /// Canonical string for a handler (deterministic, sorted).
