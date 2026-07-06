@@ -3,6 +3,199 @@
 //! `Map[N] T` / subscript validation.
 
 use super::*;
+use regex::Regex;
+use std::sync::LazyLock;
+
+/// Rule 3: add effect without explicit overflow bound (type-aware),
+/// per-field. Sub effects get auto-guarded for underflow by codegen,
+/// so only add overflow warns here.
+pub(super) fn check_unguarded_arithmetic(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for op in &spec.handlers {
+        // Collect all guard text for substring matching
+        let all_guards: String = {
+            let mut g = op.guard_str.clone().unwrap_or_default();
+            for req in &op.requires {
+                g.push(' ');
+                g.push_str(&req.lean_expr);
+            }
+            g
+        };
+
+        for eff in &op.effects {
+            let (field, kind, val) = (&eff.field, &eff.op, &eff.value);
+            if kind != "add" {
+                continue;
+            }
+            // Check if any guard already bounds this field's addition.
+            // Use contains_word on the val side to avoid "1" matching "10".
+            let patterns = [
+                format!("state.{} + {}", field, val),
+                format!("{} + state.{}", val, field),
+                format!("s.{} + {}", field, val),
+                format!("{} + s.{}", val, field),
+            ];
+            let field_bounded = patterns.iter().any(|pat| contains_word(&all_guards, pat));
+            if field_bounded {
+                continue;
+            }
+
+            // Cumulative bound: `requires state.x + a + b <= U64_MAX`
+            // bounds both `+= a` and `+= b`, but the per-pair patterns
+            // above only match the first additive term. Accept when the
+            // field appears in an additive expression AND the effect's
+            // RHS appears as a bare word in the same guard string.
+            let field_in_add = [
+                format!("state.{} +", field),
+                format!("s.{} +", field),
+                format!("+ state.{}", field),
+                format!("+ s.{}", field),
+            ]
+            .iter()
+            .any(|pat| all_guards.contains(pat.as_str()));
+            if field_in_add && contains_word(&all_guards, val) {
+                continue;
+            }
+
+            let field_type = find_field_type(spec, op, field);
+            let type_max = match field_type.as_deref() {
+                Some("U8") => "U8_MAX (255)",
+                Some("U16") => "U16_MAX (65535)",
+                Some("U32") => "U32_MAX",
+                Some("U128") => "U128_MAX",
+                _ => "U64_MAX",
+            };
+            let type_label = field_type.as_deref().unwrap_or("U64");
+            warnings.push(warn("unguarded_arithmetic", Severity::Info, 2, format!(
+                    "handler '{}' adds to {} field '{}' without an explicit bound — codegen auto-inserts a {} guard, but an explicit `requires` with a tighter domain bound produces stronger proofs",
+                    op.name, type_label, field, type_label
+                )).subject(op.name.clone()).fix(format!(
+                    "Add `requires state.{} + {} <= MY_BOUND` for a tighter bound than {} max",
+                    field, val, type_label
+                )).example(format!(
+                    "  handler {}\n    requires state.{} + {} <= {}",
+                    op.name, field, val, type_max
+                )));
+        }
+    }
+    warnings
+}
+
+/// Rule 7: takes params (U64) with no guard — suggest input validation.
+/// Reads the already-accumulated warnings so it can skip handlers Rule 3
+/// (`unguarded_arithmetic`) already flagged.
+pub(super) fn check_missing_guard_from_takes(
+    spec: &ParsedSpec,
+    prior: &[CompletenessWarning],
+) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for op in &spec.handlers {
+        if op.has_guard() {
+            continue;
+        }
+        // Skip if rule 3 (unguarded_arithmetic) already fired for this op
+        let already_flagged = prior
+            .iter()
+            .any(|w| w.rule == "unguarded_arithmetic" && w.subject.as_deref() == Some(&op.name));
+        if already_flagged {
+            continue;
+        }
+        let u64_params: Vec<&str> = op
+            .takes_params
+            .iter()
+            .filter(|(_, t)| t == "U64")
+            .map(|(n, _)| n.as_str())
+            .collect();
+        if !u64_params.is_empty() {
+            let guard_parts: Vec<String> =
+                u64_params.iter().map(|p| format!("{} > 0", p)).collect();
+            let guard_expr = guard_parts.join(" and ");
+            warnings.push(
+                warn(
+                    "missing_guard_from_takes",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "handler '{}' takes U64 params but has no guard — no input validation",
+                        op.name
+                    ),
+                )
+                .subject(op.name.clone())
+                .fix("Add input validation for takes parameters")
+                .example(format!("  handler {}\n    guard {}", op.name, guard_expr)),
+            );
+        }
+    }
+    warnings
+}
+
+/// Rule 14: dead_guard — a guard conjunct subsumed by another on the same
+/// operation.
+pub(super) fn check_dead_guard(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    static CMP_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(?:s\.|state\.)?(\w+)\s*(>=|<=|>|<|=)\s*(\d+)$").unwrap());
+    let cmp_re = &*CMP_RE;
+    for op in &spec.handlers {
+        if let Some(ref guard) = op.guard_str {
+            // Split on ∧ and "and" to get individual conjuncts
+            let conjuncts: Vec<&str> = guard
+                .split('\u{2227}')
+                .flat_map(|s| s.split(" and "))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let parsed: Vec<(usize, &str, &str, i64)> = conjuncts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    cmp_re.captures(c).and_then(|caps| {
+                        let field = caps.get(1)?.as_str();
+                        let cmp = caps.get(2)?.as_str();
+                        let val: i64 = caps.get(3)?.as_str().parse().ok()?;
+                        Some((i, field, cmp, val))
+                    })
+                })
+                .collect();
+
+            for &(i, field_a, cmp_a, val_a) in &parsed {
+                for &(j, field_b, cmp_b, val_b) in &parsed {
+                    if i == j || field_a != field_b {
+                        continue;
+                    }
+                    // Check if conjunct j implies conjunct i (making i redundant)
+                    let subsumed = match (cmp_a, cmp_b) {
+                        (">=", ">=") => val_b >= val_a, // x >= 5 implies x >= 3
+                        (">", ">") => val_b >= val_a,   // x > 5 implies x > 3
+                        (">=", ">") => val_b >= val_a,  // x > 5 implies x >= 5
+                        ("<=", "<=") => val_b <= val_a, // x <= 3 implies x <= 5
+                        ("<", "<") => val_b <= val_a,
+                        ("<=", "<") => val_b <= val_a,
+                        _ => false,
+                    };
+                    if subsumed && i != j {
+                        warnings.push(
+                            warn(
+                                "dead_guard",
+                                Severity::Info,
+                                4,
+                                format!(
+                                    "guard conjunct '{}' on operation '{}' is subsumed by '{}'",
+                                    conjuncts[i], op.name, conjuncts[j]
+                                ),
+                            )
+                            .subject(op.name.clone())
+                            .fix(format!("Remove the redundant conjunct '{}'", conjuncts[i])),
+                        );
+                        break; // Only report once per subsumed conjunct
+                    }
+                }
+            }
+        }
+    }
+    warnings
+}
 
 pub(super) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     let mut warnings = Vec::new();
@@ -572,6 +765,103 @@ mod tests {
                 .iter()
                 .map(|w| (&w.rule, &w.subject))
                 .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_fires() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
+            "expected missing_guard_from_takes, got: {:?}",
+            warnings.iter().map(|w| &w.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_missing_guard_from_takes_skips_when_guard_exists() {
+        let mut h = make_handler("deposit");
+        h.takes_params = vec![("amount".to_string(), "U64".to_string())];
+        h.guard_str = Some("amount > 0".to_string());
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings
+                .iter()
+                .any(|w| w.rule == "missing_guard_from_takes"),
+            "should not fire when guard exists"
+        );
+    }
+
+    #[test]
+    fn unguarded_arithmetic_accepts_cumulative_bound_across_multiple_adds() {
+        // A single `requires state.x + a + b <= U64_MAX` logically bounds
+        // both `state.x += a` and `state.x += b`; the lint must accept the
+        // cumulative form, not just per-pair patterns.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow
+
+    handler deposit (a : U64) (b : U64) : State.Active -> State.Active {
+      permissionless
+      requires state.balance + a + b <= U64_MAX
+      effect {
+        balance += a
+        balance += b
+      }
+    }
+    "#,
+        )
+        .expect("cumulative-bound spec must parse");
+        let warnings = check_completeness(&spec);
+        let arith_hits: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.rule == "unguarded_arithmetic")
+            .collect();
+        assert!(
+            arith_hits.is_empty(),
+            "cumulative bound should satisfy unguarded_arithmetic for all adds; got: {arith_hits:#?}"
+        );
+    }
+
+    #[test]
+    fn u64_max_builtin_resolves_in_requires_clause() {
+        // `U64_MAX` (and friends) are seeded as builtin consts so users
+        // don't have to declare `const U64_MAX = …` per spec.
+        let spec = crate::chumsky_adapter::parse_str(
+            r#"spec Pool
+    program_id "11111111111111111111111111111111"
+    type State | Active of { balance : U64 }
+    type Error | MathOverflow
+
+    handler deposit (n : U64) : State.Active -> State.Active {
+      permissionless
+      requires state.balance + n <= U64_MAX
+      effect { balance += n }
+    }
+    "#,
+        )
+        .expect("U64_MAX should resolve as a builtin");
+        let warnings = check_completeness(&spec);
+        // With the U64_MAX guard, unguarded_arithmetic should be silent.
+        assert!(
+            !warnings.iter().any(|w| w.rule == "unguarded_arithmetic"),
+            "U64_MAX builtin should satisfy unguarded_arithmetic; got: {warnings:#?}"
         );
     }
 }

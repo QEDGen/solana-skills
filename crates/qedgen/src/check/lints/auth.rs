@@ -165,9 +165,42 @@ pub(super) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<Compl
     warnings
 }
 
+/// `auth X` and `permissionless` are contradictory; surface as P1
+/// rather than silently letting one take precedence.
+pub(super) fn check_contradictory_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    for op in &spec.handlers {
+        if op.permissionless && op.who.is_some() {
+            warnings.push(warn("contradictory_auth", Severity::Warning, 1, format!(
+                    "handler '{}' declares both `auth {}` and `permissionless` — pick one",
+                    op.name,
+                    op.who.as_deref().unwrap_or("?"),
+                )).subject(op.name.clone()).fix("Remove one: `permissionless` for deliberately-open handlers, `auth X` for access-controlled ones."));
+        }
+    }
+    warnings
+}
+
+/// Rule 1: handler without `auth`. Skipped for `permissionless` —
+/// an explicit opt-in, not a missing declaration.
+pub(super) fn check_no_access_control(ctx: &LintCtx) -> Vec<CompletenessWarning> {
+    let mut warnings = Vec::new();
+    let signer_hint = ctx.signer_hint;
+    for op in &ctx.spec.handlers {
+        if op.who.is_none() && !op.permissionless {
+            warnings.push(warn("no_access_control", Severity::Warning, 1, format!("handler '{}' has no `auth` — anyone can call it", op.name)).subject(op.name.clone()).fix(format!(
+                    "Add `auth {}` to restrict who can execute this handler, or `permissionless` if this handler is deliberately open",
+                    signer_hint
+                )).example(format!("  handler {}\n    auth {}", op.name, signer_hint)));
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::test_support::*;
 
     // ========================================================================
     // Spec-authoring lint regression tests. Each fixture mirrors an audit
@@ -272,6 +305,68 @@ mod tests {
                  <acct>.<field> == <signer>.pubkey` clause binds the signer \
                  via an imported account (v2.29.2 escape); got: {:?}",
             unbound.iter().map(|w| &w.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn permissionless_skips_no_access_control() {
+        // `permissionless` opts out of the P1 `no_access_control` lint;
+        // without the marker, who-less handlers still fire.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            !warnings.iter().any(|w| w.rule == "no_access_control"),
+            "permissionless handler must not fire no_access_control: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn no_access_control_still_fires_without_marker() {
+        // Control: handler with no auth and no permissionless marker still
+        // triggers the lint.
+        let mut h = make_handler("init_user");
+        h.who = None;
+        // h.permissionless stays false
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        assert!(
+            warnings.iter().any(|w| w.rule == "no_access_control"),
+            "who-less handler without permissionless should fire: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn permissionless_with_auth_surfaces_contradictory_auth() {
+        // Both `auth X` and `permissionless` is contradictory — not a silent
+        // precedence situation. Lint surfaces a clear P1.
+        let mut h = make_handler("weird");
+        h.who = Some("authority".to_string());
+        h.permissionless = true;
+        let spec = ParsedSpec {
+            handlers: vec![h],
+            lifecycle_states: vec!["Active".to_string()],
+            ..empty_spec()
+        };
+        let warnings = check_completeness(&spec);
+        let w = warnings
+            .iter()
+            .find(|w| w.rule == "contradictory_auth")
+            .expect("contradictory_auth should fire");
+        assert!(
+            w.message.contains("authority") && w.message.contains("permissionless"),
+            "message should name both: {}",
+            w.message
         );
     }
 }
