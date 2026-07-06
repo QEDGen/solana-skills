@@ -600,8 +600,12 @@ fn bind_state_expr(
 ///     Copy render context can't carry), and
 ///   - key-style account reads only (imported-account field reads
 ///     need the `crate::imported` mirror dispatch).
+///
 /// Everything else — and tree-less clauses (IDL ingest, probes) —
 /// keeps the legacy string path.
+// Internal seam of the generate_guards split; the params are the loop-local
+// context, not an API — a carrier struct would just rename them.
+#[allow(clippy::too_many_arguments)]
 fn emit_requires_guards(
     out: &mut String,
     handler: &ParsedHandler,

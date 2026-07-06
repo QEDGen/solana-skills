@@ -1025,9 +1025,14 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
 
             writeln!(out, "def progAt_{} : Nat → Option SVM.SBPF.Insn", chunk_idx)?;
 
-            for idx in start..end {
-                let insn = &prog.instructions[idx];
-                let lean = &rendered_insns[idx];
+            for (idx, (insn, lean)) in prog
+                .instructions
+                .iter()
+                .zip(rendered_insns.iter())
+                .enumerate()
+                .take(end)
+                .skip(start)
+            {
                 let comment = if let Some(ref lbl) = insn.label {
                     format!("-- {}: {}", idx, lbl)
                 } else {
@@ -1098,10 +1103,8 @@ pub fn generate(source: &str, namespace: &str, input_filename: &str) -> Result<S
     // Eliminates the need for `have hfN : progAt N = some (...) := by native_decide`
     // boilerplate in proof files.
     {
-        let n_insns = prog.instructions.len();
         writeln!(out, "/-! ## Instruction fetch cache -/\n")?;
-        for idx in 0..n_insns {
-            let lean = &rendered_insns[idx];
+        for (idx, lean) in rendered_insns.iter().enumerate() {
             writeln!(
                 out,
                 "@[simp] theorem insn_{} : progAt {} = some ({}) := by native_decide",
