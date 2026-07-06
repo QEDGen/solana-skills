@@ -712,15 +712,7 @@ fn handler_lookup_falls_back_to_numeric_arity_base() {
         PinocchioHandlerProfile {
             name: "batch".to_string(),
             instruction_tag: Some(4),
-            accounts: Vec::new(),
-            account_roles: BTreeMap::new(),
-            token_account_bindings: BTreeMap::new(),
-            mint_decimal_bindings: BTreeMap::new(),
-            account_key_derivations: BTreeMap::new(),
-            source_expr_aliases: BTreeMap::new(),
-            verified_stubs: Vec::new(),
-            params: Vec::new(),
-            repeats: Vec::new(),
+            ..Default::default()
         },
     );
     let profile = PinocchioProofProfile {

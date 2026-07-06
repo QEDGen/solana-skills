@@ -127,6 +127,45 @@ pub enum Category {
     ExternalAuthorityNotRevokedOnClose,
 }
 
+impl Category {
+    /// The snake_case tag — must match the serde `rename_all` serialization
+    /// of the variant. Single source for `Finding.category_tag` and the
+    /// stable-id salt at probe constructor sites. (Pinocchio site findings
+    /// carry a finer-grained per-probe tag instead — see
+    /// `pinocchio_probe.rs` — so not every constructor routes through this.)
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Category::MissingSigner => "missing_signer",
+            Category::ArbitraryCpi => "arbitrary_cpi",
+            Category::ArithmeticOverflowWrapping => "arithmetic_overflow_wrapping",
+            Category::LifecycleOneShotViolation => "lifecycle_one_shot_violation",
+            Category::UnboundedAmountParam => "unbounded_amount_param",
+            Category::PermissionlessStateWriter => "permissionless_state_writer",
+            Category::InitWithoutPda => "init_without_pda",
+            Category::StoredFieldNeverWritten => "stored_field_never_written",
+            Category::CrucibleFuzzCrash => "crucible_fuzz_crash",
+            Category::PinocchioUncheckedAccountLoad => "pinocchio_unchecked_account_load",
+            Category::PinocchioUncheckedArith => "pinocchio_unchecked_arith",
+            Category::PinocchioAccountTypeConfusion => "pinocchio_account_type_confusion",
+            Category::PinocchioMutableBorrowAliasing => "pinocchio_mutable_borrow_aliasing",
+            Category::PinocchioPositionWithoutTypeTag => "pinocchio_position_without_type_tag",
+            Category::PinocchioOffsetOverrun => "pinocchio_offset_overrun",
+            Category::PinocchioMissingPdaVerification => "pinocchio_missing_pda_verification",
+            Category::PinocchioStaleSafetyComment => "pinocchio_stale_safety_comment",
+            Category::ExecutionDivergence => "execution_divergence",
+            Category::SilentSuccessArithmetic => "silent_success_arithmetic",
+            Category::GracefulErrorAsDos => "graceful_error_as_dos",
+            Category::UncheckedArithWithFundFlow => "unchecked_arith_with_fund_flow",
+            Category::PairedValidatorInputDomainMismatch => {
+                "paired_validator_input_domain_mismatch"
+            }
+            Category::ExternalAuthorityNotRevokedOnClose => {
+                "external_authority_not_revoked_on_close"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Low used by upcoming categories
@@ -866,7 +905,7 @@ fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
     }
 
     Some(Finding {
-        id: stable_id(&handler.name, "missing_signer"),
+        id: stable_id(&handler.name, Category::MissingSigner.tag()),
         category: Category::MissingSigner,
         severity: Severity::Critical,
         handler: handler.name.clone(),
@@ -883,7 +922,7 @@ fn predicate_missing_signer(handler: &ParsedHandler) -> Option<Finding> {
              or has explicit `is_signer` check (native Rust). Absence is a real vulnerability.",
             handler.name
         ),
-        category_tag: "missing_signer".to_string(),
+        category_tag: Category::MissingSigner.tag().to_string(),
         reproducer: None,
         gated_by: None,
     })
@@ -917,7 +956,7 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
         .find(|a| a.is_writable && a.account_type.as_deref() == Some("token") && !a.is_program)?;
 
     Some(Finding {
-        id: stable_id(&handler.name, "arbitrary_cpi"),
+        id: stable_id(&handler.name, Category::ArbitraryCpi.tag()),
         category: Category::ArbitraryCpi,
         severity: Severity::High,
         handler: handler.name.clone(),
@@ -938,7 +977,7 @@ fn predicate_arbitrary_cpi(handler: &ParsedHandler) -> Option<Finding> {
              If the body is `todo!()` or empty, this is a spec-gap (impl incomplete).",
             handler.name
         ),
-        category_tag: "arbitrary_cpi".to_string(),
+        category_tag: Category::ArbitraryCpi.tag().to_string(),
         reproducer: None,
         gated_by: None,
     })
@@ -972,7 +1011,7 @@ fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Findin
         out.push(Finding {
             id: stable_id(
                 &format!("{}::{}::{}", handler.name, field, op),
-                "arithmetic_overflow_wrapping",
+                Category::ArithmeticOverflowWrapping.tag(),
             ),
             category: Category::ArithmeticOverflowWrapping,
             severity,
@@ -994,7 +1033,7 @@ fn predicate_arithmetic_overflow_wrapping(handler: &ParsedHandler) -> Vec<Findin
                  saturating-by-design suppression rules in SKILL.md.",
                 handler.name, kind
             ),
-            category_tag: "arithmetic_overflow_wrapping".to_string(),
+            category_tag: Category::ArithmeticOverflowWrapping.tag().to_string(),
             reproducer: None,
             gated_by: None,
         });
@@ -1028,7 +1067,7 @@ fn predicate_lifecycle_one_shot_violation(
     }
 
     Some(Finding {
-        id: stable_id(&handler.name, "lifecycle_one_shot_violation"),
+        id: stable_id(&handler.name, Category::LifecycleOneShotViolation.tag()),
         category: Category::LifecycleOneShotViolation,
         severity: Severity::Medium,
         handler: handler.name.clone(),
@@ -1048,7 +1087,7 @@ fn predicate_lifecycle_one_shot_violation(
              states without explicit handling, this is a real replay/ordering vulnerability.",
             handler.name
         ),
-        category_tag: "lifecycle_one_shot_violation".to_string(),
+        category_tag: Category::LifecycleOneShotViolation.tag().to_string(),
         reproducer: None,
         gated_by: None,
     })
@@ -1096,7 +1135,7 @@ fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
         out.push(Finding {
             id: stable_id(
                 &format!("{}::{}", handler.name, pname),
-                "unbounded_amount_param",
+                Category::UnboundedAmountParam.tag(),
             ),
             category: Category::UnboundedAmountParam,
             severity: Severity::High,
@@ -1118,7 +1157,7 @@ fn predicate_unbounded_amount_param(handler: &ParsedHandler) -> Vec<Finding> {
                  handler — the combined chain is usually the real vulnerability.",
                 handler.name, pname
             ),
-            category_tag: "unbounded_amount_param".to_string(),
+            category_tag: Category::UnboundedAmountParam.tag().to_string(),
             reproducer: None,
             gated_by: None,
         });
@@ -1143,7 +1182,7 @@ fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Find
     let mutated_fields: Vec<&str> = handler.effects.iter().map(|e| e.field.as_str()).collect();
 
     Some(Finding {
-        id: stable_id(&handler.name, "permissionless_state_writer"),
+        id: stable_id(&handler.name, Category::PermissionlessStateWriter.tag()),
         category: Category::PermissionlessStateWriter,
         severity: Severity::High,
         handler: handler.name.clone(),
@@ -1168,7 +1207,7 @@ fn predicate_permissionless_state_writer(handler: &ParsedHandler) -> Option<Find
             handler.name,
             mutated_fields.join(", ")
         ),
-        category_tag: "permissionless_state_writer".to_string(),
+        category_tag: Category::PermissionlessStateWriter.tag().to_string(),
         reproducer: None,
         gated_by: None,
     })
@@ -1203,7 +1242,7 @@ fn predicate_init_without_pda(
     }
 
     Some(Finding {
-        id: stable_id(&handler.name, "init_without_pda"),
+        id: stable_id(&handler.name, Category::InitWithoutPda.tag()),
         category: Category::InitWithoutPda,
         severity: Severity::High,
         handler: handler.name.clone(),
@@ -1227,7 +1266,7 @@ fn predicate_init_without_pda(
              the full takeover chain.",
             handler.name
         ),
-        category_tag: "init_without_pda".to_string(),
+        category_tag: Category::InitWithoutPda.tag().to_string(),
         reproducer: None,
         gated_by: None,
     })
@@ -1365,7 +1404,7 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
             findings.push(Finding {
                 id: stable_id(
                     &format!("{}::{}", acct.name, field),
-                    "stored_field_never_written",
+                    Category::StoredFieldNeverWritten.tag(),
                 ),
                 category: Category::StoredFieldNeverWritten,
                 severity: Severity::Critical,
@@ -1380,7 +1419,7 @@ fn predicate_stored_field_never_written(spec: &ParsedSpec) -> Vec<Finding> {
                 investigation_hint: format!(
                     "Open the impl. On Quasar/Anchor, `auth {field}` lowers to `has_one = {field}` — if `state.{field}` is the zero pubkey (default), no signer can satisfy the constraint and the handler is unreachable (escrow `taker` / multisig `creator` shape). On counter-shaped fields read by a `preserved_by all` invariant, the invariant proves vacuously because the field is constant (lending `total_borrows` shape). Look for: pre-deploy state population from migrations, handlers that should write the field but don't, or hand-edits to codegen that diverge from the spec."
                 ),
-                category_tag: "stored_field_never_written".to_string(),
+                category_tag: Category::StoredFieldNeverWritten.tag().to_string(),
                 reproducer: None,
                 gated_by: None,
             });
@@ -1483,32 +1522,9 @@ mod tests {
     fn make_handler(name: &str, who: Option<&str>, permissionless: bool) -> ParsedHandler {
         ParsedHandler {
             name: name.to_string(),
-            doc: None,
             who: who.map(|s| s.to_string()),
-            on_account: None,
-            pre_status: None,
-            post_status: None,
-            takes_params: vec![],
-            guard_str: None,
-            guard_str_rust: None,
-            aborts_if: vec![],
-            requires: vec![],
-            ensures: vec![],
-            modifies: None,
-            let_bindings: vec![],
-            aborts_total: false,
             permissionless,
-            effects: vec![],
-            accounts: vec![],
-            transfers: vec![],
-            emits: vec![],
-            invariants: vec![],
-            establishes: vec![],
-            properties: vec![],
-            schema_includes: vec![],
-            calls: vec![],
-            effect_branches: None,
-            abstract_binders: vec![],
+            ..Default::default()
         }
     }
 

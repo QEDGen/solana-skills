@@ -896,6 +896,47 @@ impl Expr {
         }
     }
 
+    /// Lean-only rendering — every Rust form stays empty (cover `when`
+    /// predicates and other Lean-exclusive positions).
+    pub fn from_lean(lean: impl Into<String>) -> Self {
+        Expr {
+            lean: lean.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Lean + native-Rust renderings; `rust_pod` stays empty (invariants,
+    /// ghost init/updates, environment constraints).
+    pub fn from_lean_rust(lean: impl Into<String>, rust: impl Into<String>) -> Self {
+        Expr {
+            lean: lean.into(),
+            rust: rust.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Lean + native-Rust + pod-Rust renderings (hooks, aborts_if, CPI
+    /// args, branch patterns/scrutinees).
+    pub fn from_lean_rust_pod(
+        lean: impl Into<String>,
+        rust: impl Into<String>,
+        rust_pod: impl Into<String>,
+    ) -> Self {
+        Expr {
+            lean: lean.into(),
+            rust: rust.into(),
+            rust_pod: rust_pod.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Attach a typed expression tree (builder-style tail for the
+    /// `from_*` constructors).
+    pub fn with_tree(mut self, tree: Option<ExprTree>) -> Self {
+        self.tree = tree;
+        self
+    }
+
     /// The math-exact predicate form when rendered, else the plain Rust
     /// form. Harness predicate positions (guards, property bodies,
     /// aborts assumes) read through this.
@@ -954,12 +995,7 @@ pub fn lower(parsed: &ParsedSpec) -> Mir {
                 asserts: h
                     .asserts
                     .iter()
-                    .map(|a| Expr {
-                        lean: a.lean.clone(),
-                        rust: a.rust.clone(),
-                        rust_pod: a.rust.clone(),
-                        ..Default::default()
-                    })
+                    .map(|a| Expr::from_lean_rust_pod(&a.lean, &a.rust, &a.rust))
                     .collect(),
             })
             .collect(),
@@ -1234,12 +1270,10 @@ fn lower_invariants(parsed: &ParsedSpec) -> Vec<InvariantMir> {
             name: inv.name.clone(),
             doc: inv.doc.clone(),
             body: inv.lean_expr.as_ref().map(|lean| {
-                Predicate(Expr {
-                    lean: lean.clone(),
-                    rust: inv.rust_expr.clone().unwrap_or_default(),
-                    tree: inv.tree.clone(),
-                    ..Default::default()
-                })
+                Predicate(
+                    Expr::from_lean_rust(lean, inv.rust_expr.clone().unwrap_or_default())
+                        .with_tree(inv.tree.clone()),
+                )
             }),
         })
         .collect()
@@ -1256,12 +1290,7 @@ fn lower_covers(parsed: &ParsedSpec) -> Vec<CoverMir> {
                 .reachable
                 .iter()
                 .map(|(op, when)| {
-                    let pred = when.as_ref().map(|expr| {
-                        Predicate(Expr {
-                            lean: expr.clone(),
-                            ..Default::default()
-                        })
-                    });
+                    let pred = when.as_ref().map(|expr| Predicate(Expr::from_lean(expr)));
                     (op.clone(), pred)
                 })
                 .collect(),
@@ -1291,22 +1320,14 @@ fn lower_ghosts(parsed: &ParsedSpec) -> Vec<GhostMir> {
             name: g.name.clone(),
             doc: g.doc.clone(),
             ty: parse_ty(&g.ty),
-            init: Expr {
-                lean: g.init_lean.clone(),
-                rust: g.init_rust.clone(),
-                ..Default::default()
-            },
+            init: Expr::from_lean_rust(&g.init_lean, &g.init_rust),
             updates: g
                 .updates
                 .iter()
                 .map(|u| {
                     (
                         u.handler.clone(),
-                        Expr {
-                            lean: u.value_lean.clone(),
-                            rust: u.value_rust.clone(),
-                            ..Default::default()
-                        },
+                        Expr::from_lean_rust(&u.value_lean, &u.value_rust),
                     )
                 })
                 .collect(),
@@ -1330,11 +1351,10 @@ fn lower_environments(parsed: &ParsedSpec) -> Vec<EnvironmentMir> {
                 .iter()
                 .enumerate()
                 .map(|(i, lean)| {
-                    Predicate(Expr {
-                        lean: lean.clone(),
-                        rust: env.constraints_rust.get(i).cloned().unwrap_or_default(),
-                        ..Default::default()
-                    })
+                    Predicate(Expr::from_lean_rust(
+                        lean,
+                        env.constraints_rust.get(i).cloned().unwrap_or_default(),
+                    ))
                 })
                 .collect(),
         })
@@ -1377,12 +1397,11 @@ fn lower_handler(h: &crate::check::ParsedHandler) -> HandlerMir {
         .aborts_if
         .iter()
         .map(|a| AbortClause {
-            pred: Predicate(Expr {
-                lean: a.lean_expr.clone(),
-                rust: a.rust_expr.clone(),
-                rust_pod: a.rust_expr_pod.clone(),
-                ..Default::default()
-            }),
+            pred: Predicate(Expr::from_lean_rust_pod(
+                &a.lean_expr,
+                &a.rust_expr,
+                &a.rust_expr_pod,
+            )),
             err: a.error_name.clone(),
         })
         .collect();
@@ -1540,13 +1559,12 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                     .iter()
                     .map(|a| CallArg {
                         name: a.name.clone(),
-                        value: Expr {
-                            lean: a.lean_expr.clone(),
-                            rust: a.rust_expr.clone(),
-                            rust_pod: a.rust_expr_pod.clone(),
-                            tree: a.tree.clone(),
-                            ..Default::default()
-                        },
+                        value: Expr::from_lean_rust_pod(
+                            &a.lean_expr,
+                            &a.rust_expr,
+                            &a.rust_expr_pod,
+                        )
+                        .with_tree(a.tree.clone()),
                     })
                     .collect(),
                 state_binders: call
@@ -1582,24 +1600,24 @@ fn lower_body(h: &crate::check::ParsedHandler) -> Block {
                 default = Some(block);
             } else {
                 arms.push(BranchArm {
-                    pattern: Some(Expr {
-                        lean: arm.pattern_lean.clone(),
-                        rust: arm.pattern_rust.clone(),
-                        rust_pod: arm.pattern_rust.clone(),
-                        ..Default::default()
-                    }),
+                    pattern: Some(Expr::from_lean_rust_pod(
+                        &arm.pattern_lean,
+                        &arm.pattern_rust,
+                        &arm.pattern_rust,
+                    )),
                     block,
                 });
             }
         }
         stmts.push(Stmt::Branch {
-            scrutinee: BranchScrutinee::Match(Expr {
-                lean: br.scrutinee_lean.clone(),
-                rust: br.scrutinee_rust.clone(),
-                rust_pod: br.scrutinee_rust_pod.clone(),
-                tree: br.scrutinee_tree.clone(),
-                ..Default::default()
-            }),
+            scrutinee: BranchScrutinee::Match(
+                Expr::from_lean_rust_pod(
+                    &br.scrutinee_lean,
+                    &br.scrutinee_rust,
+                    &br.scrutinee_rust_pod,
+                )
+                .with_tree(br.scrutinee_tree.clone()),
+            ),
             arms,
             default,
         });
@@ -1630,16 +1648,7 @@ fn lower_effects(effects: &[crate::check::ParsedEffect]) -> Vec<Stmt> {
                 ..Expr::from_raw(value.clone())
             }
         } else {
-            Expr {
-                lean: value.clone(),
-                rust: eff.value_rust.clone(),
-                rust_pod: eff.value_rust.clone(),
-                rust_binary: String::new(),
-                rust_math: String::new(),
-                rust_binary_math: String::new(),
-                tree,
-                source_span: None,
-            }
+            Expr::from_lean_rust_pod(value, &eff.value_rust, &eff.value_rust).with_tree(tree)
         };
         let stmt = match eff.op.as_str() {
             "set" => Stmt::Assign { path, rhs },

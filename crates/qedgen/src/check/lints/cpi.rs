@@ -123,30 +123,30 @@ pub(super) fn check_multi_cpi_same_field(spec: &ParsedSpec) -> Vec<CompletenessW
     for handler in &spec.handlers {
         let findings = multi_cpi_shared_fields(spec, handler);
         for (call_i_label, call_j_label, field) in findings {
-            warnings.push(CompletenessWarning {
-                rule: "multi_cpi_same_field".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
-                    "handler '{}' makes multiple CPI calls ({} and {}) whose \
+            warnings.push(
+                warn(
+                    "multi_cpi_same_field",
+                    Severity::Info,
+                    2,
+                    format!(
+                        "handler '{}' makes multiple CPI calls ({} and {}) whose \
                      substituted ensures both reference '{}'. Kani's impl-targeted \
                      harness has only one (pre_{}, post_{}) snapshot pair captured \
                      at handler boundary; both assumes will fire at the same splice \
                      point, which can over-constrain.",
-                    handler.name, call_i_label, call_j_label, field, field, field
-                ),
-                subject: Some(handler.name.clone()),
-                fix: "Until per-call snapshot frames land (v3.0), either: (1) \
+                        handler.name, call_i_label, call_j_label, field, field, field
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix(
+                    "Until per-call snapshot frames land (v3.0), either: (1) \
                       merge the CPI calls into a single helper handler whose \
                       ensures captures the combined effect; (2) tighten each \
                       callee's ensures so they reference disjoint fields; or \
                       (3) split the multi-CPI handler into separate handlers \
-                      (one per CPI) so each gets its own (pre, post) snapshot."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      (one per CPI) so each gets its own (pre, post) snapshot.",
+                ),
+            );
         }
     }
     warnings
@@ -178,29 +178,19 @@ pub(super) fn check_cpi_no_callee_ensures(spec: &ParsedSpec) -> Vec<Completeness
             if !ih.ensures.is_empty() {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "cpi_no_callee_ensures".to_string(),
-                severity: Severity::Info,
-                priority: 1,
-                message: format!(
+            warnings.push(warn("cpi_no_callee_ensures", Severity::Info, 1, format!(
                     "handler '{}' calls `{}.{}` — callee has no `ensures` clauses; \
                      caller's Lean theorem carries `by sorry` (Tier-0 axiomatization)",
                     handler.name, call.target_interface, call.target_handler,
-                ),
-                subject: Some(handler.name.clone()),
-                fix: format!(
+                )).subject(handler.name.clone()).fix(format!(
                     "Add at least one `ensures <expr>` inside `interface {} {{ handler {} {{ ... }} }}`, \
                      or commit to an `upstream {{ binary_hash = ... }}` pin on the interface so the \
                      caller can discharge via the bundled axiom module.",
                     call.target_interface, call.target_handler,
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  interface {} {{\n    handler {} (...) {{\n      ensures /* observable post-condition */\n    }}\n  }}",
                     call.target_interface, call.target_handler,
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
     warnings
@@ -259,27 +249,17 @@ pub(super) fn check_cpi_unverified_callee(spec: &ParsedSpec) -> Vec<Completeness
             if !seen.insert(key) {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "cpi_unverified_callee".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("cpi_unverified_callee", Severity::Info, 2, format!(
                     "import `{}` is unverified — `{}.{}` discharges via Stance-1 axiom (binary_hash pin) instead of an imported proof",
                     iface.name, iface.name, ih.name,
-                ),
-                subject: Some(iface.name.clone()),
-                fix: format!(
+                )).subject(iface.name.clone()).fix(format!(
                     "Ship a Lake-buildable proof package alongside the provider's qedspec at \
                      `<source>/.qed/proofs/{}.lean` (with a sibling `lakefile.lean` declaring \
                      `package {}`). The consumer's codegen will auto-detect the package and \
                      swap the caller's theorem from Stance 1 (axiom) to Stance 2 (imported proof).",
                     iface.name,
                     crate::lean_sidecars::proof_pkg_name(&iface.name),
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
     warnings
@@ -393,23 +373,23 @@ pub(super) fn check_shape_only_cpi(spec: &ParsedSpec) -> Vec<CompletenessWarning
                 _ => continue,
             };
 
-            warnings.push(CompletenessWarning {
-                rule: "shape_only_cpi".to_string(),
-                severity: Severity::Info,
-                priority: 3,
-                message: format!(
-                    "handler '{}' calls `{}.{}` — {}",
-                    handler.name, call.target_interface, call.target_handler, reason
-                ),
-                subject: Some(handler.name.clone()),
-                fix,
-                example: Some(format!(
+            warnings.push(
+                warn(
+                    "shape_only_cpi",
+                    Severity::Info,
+                    3,
+                    format!(
+                        "handler '{}' calls `{}.{}` — {}",
+                        handler.name, call.target_interface, call.target_handler, reason
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix(fix)
+                .example(format!(
                     "  interface {} {{\n    handler {} (...) {{\n      ensures /* what the callee guarantees */\n    }}\n  }}",
                     call.target_interface, call.target_handler
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
 

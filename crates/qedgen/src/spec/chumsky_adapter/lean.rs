@@ -294,20 +294,7 @@ fn path_to_lean(p: &a::Path, ctx: Ctx, inside_old: bool, consts: ConstTable) -> 
             out.push_str(&p.root);
         }
     } else {
-        out.push_str(&p.root);
-        for seg in &p.segments {
-            match seg {
-                a::PathSeg::Field(f) => {
-                    out.push('.');
-                    out.push_str(f);
-                }
-                a::PathSeg::Index(i) => {
-                    out.push('[');
-                    out.push_str(i);
-                    out.push(']');
-                }
-            }
-        }
+        out.push_str(&p.to_source_string());
     }
     out
 }

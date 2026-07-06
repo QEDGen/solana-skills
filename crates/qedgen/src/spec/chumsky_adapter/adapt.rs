@@ -231,44 +231,21 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Record(r) => {
                 out.records.push(ParsedRecordType {
                     name: r.name.clone(),
-                    fields: r
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-                        .collect(),
+                    fields: typed_pairs(&r.fields),
                 });
             }
             TopItem::Adt(adt) => {
                 // Error ADT: populate error_codes / valued_errors.
                 if adt.name == "Error" {
                     for v in &adt.variants {
-                        out.error_codes.push(v.name.clone());
-                        if v.code.is_some() || v.description.is_some() {
-                            out.valued_errors.push(ParsedErrorCode {
-                                name: v.name.clone(),
-                                value: v.code,
-                                description: v.description.clone(),
-                            });
-                        }
+                        push_error(&mut out, &v.name, v.code, &v.description);
                     }
                 } else if is_map_value_sum_type(&adt.name, spec) {
                     // Real sum type used as a Map value → emit as proper Lean
                     // `inductive` later; preserve variant structure here.
-                    let variants = adt
-                        .variants
-                        .iter()
-                        .map(|v| ParsedVariant {
-                            name: v.name.clone(),
-                            fields: v
-                                .fields
-                                .iter()
-                                .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-                                .collect(),
-                        })
-                        .collect();
                     out.sum_types.push(ParsedSumType {
                         name: adt.name.clone(),
-                        variants,
+                        variants: parsed_variants(&adt.variants),
                     });
                 } else {
                     // State-ish ADT: collect lifecycle from variant names,
@@ -296,24 +273,12 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                     // the flat view stays for back-compat. Zero-payload
                     // variants (`| Inactive`) are kept for unit-style enum
                     // emission.
-                    let parsed_variants: Vec<ParsedVariant> = adt
-                        .variants
-                        .iter()
-                        .map(|v| ParsedVariant {
-                            name: v.name.clone(),
-                            fields: v
-                                .fields
-                                .iter()
-                                .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-                                .collect(),
-                        })
-                        .collect();
                     out.account_types.push(ParsedAccountType {
                         name: adt.name.clone(),
                         fields,
                         lifecycle,
                         pda_ref: None,
-                        variants: parsed_variants,
+                        variants: parsed_variants(&adt.variants),
                     });
                 }
             }
@@ -528,11 +493,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             TopItem::Event(ev) => {
                 out.events.push(ParsedEvent {
                     name: ev.name.clone(),
-                    fields: ev
-                        .fields
-                        .iter()
-                        .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-                        .collect(),
+                    fields: typed_pairs(&ev.fields),
                 });
             }
             TopItem::TypeAlias(ta) => {
@@ -550,16 +511,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
             }
             TopItem::Errors(entries) => {
                 // Mirror ADT-Error behavior: populate error_codes and valued_errors.
-                for e in entries {
-                    out.error_codes.push(e.name.clone());
-                    if e.code.is_some() || e.description.is_some() {
-                        out.valued_errors.push(ParsedErrorCode {
-                            name: e.name.clone(),
-                            value: e.code,
-                            description: e.description.clone(),
-                        });
-                    }
-                }
+                push_errors(&mut out, entries);
             }
             TopItem::Instruction(instr) => {
                 out.instructions.push(adapt_instruction(instr, consts));
@@ -622,24 +574,8 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 let requires = s
                     .requires
                     .iter()
-                    .map(|(guard, on_fail)| ParsedRequires {
-                        lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, &env),
-                        rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(&env)),
-                        rust_expr_pod: expr_to_rust(
-                            &guard.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_pod(&env),
-                        ),
-                        rust_expr_math: expr_to_rust(
-                            &guard.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_native(&env).with_widen_arith(),
-                        ),
-                        error_name: on_fail.clone(),
-                        ast_body: Some(guard.clone()),
-                        tree: Some(build_expr_tree(guard, &spec_tcx)),
+                    .map(|(guard, on_fail)| {
+                        lower_requires(guard, on_fail.clone(), consts, &env, &spec_tcx)
                     })
                     .collect();
                 out.schemas.push(crate::check::ParsedSchema {
@@ -652,11 +588,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                 // Lean lowering uses `lean_body`; Kani inlining uses
                 // `rust_body`. The body is pure — use Guard ctx so bare
                 // state refs render as `s.x` (single-state context).
-                let params: Vec<(String, String)> = r
-                    .params
-                    .iter()
-                    .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
-                    .collect();
+                let params: Vec<(String, String)> = typed_pairs(&r.params);
                 let lean_body = expr_to_lean(&r.body.node, Ctx::Guard, consts, &env);
                 let rust_body = expr_to_rust(&r.body.node, Ctx::Guard, consts, opts_native(&env));
                 // Narrow a `mul_div_*`-rooted body back to the declared
@@ -778,16 +710,7 @@ pub fn adapt(spec: &a::Spec) -> ParsedSpec {
                             out.instructions.push(adapt_instruction(instr, consts));
                         }
                         TopItem::Errors(entries) => {
-                            for e in entries {
-                                out.error_codes.push(e.name.clone());
-                                if e.code.is_some() || e.description.is_some() {
-                                    out.valued_errors.push(ParsedErrorCode {
-                                        name: e.name.clone(),
-                                        value: e.code,
-                                        description: e.description.clone(),
-                                    });
-                                }
-                            }
+                            push_errors(&mut out, entries);
                         }
                         // Grammar already rejects non-whitelisted items; this
                         // arm is defensive and silently ignores anything that
@@ -1026,6 +949,184 @@ fn desugar_dotted_auth(spec: &mut ParsedSpec) {
     }
 }
 
+/// `(name, type-string)` pairs from a typed field list — the shared shape
+/// for record / event / variant fields and interface state fields.
+fn typed_pairs(fields: &[a::TypedField]) -> Vec<(String, String)> {
+    fields
+        .iter()
+        .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
+        .collect()
+}
+
+/// ADT variants → `ParsedVariant`s (structure-preserving view).
+fn parsed_variants(variants: &[a::Variant]) -> Vec<ParsedVariant> {
+    variants
+        .iter()
+        .map(|v| ParsedVariant {
+            name: v.name.clone(),
+            fields: typed_pairs(&v.fields),
+        })
+        .collect()
+}
+
+/// Register one error entry: the name always lands in `error_codes`; a
+/// `ParsedErrorCode` is added when a code or description is present.
+/// Shared by the `type Error` ADT, top-level `errors [...]`, and
+/// pragma-nested `errors [...]` lowerings.
+fn push_error(out: &mut ParsedSpec, name: &str, code: Option<u64>, description: &Option<String>) {
+    out.error_codes.push(name.to_string());
+    if code.is_some() || description.is_some() {
+        out.valued_errors.push(ParsedErrorCode {
+            name: name.to_string(),
+            value: code,
+            description: description.clone(),
+        });
+    }
+}
+
+/// `errors [...]` entry list — top-level and pragma-nested forms.
+fn push_errors(out: &mut ParsedSpec, entries: &[a::ErrorEntry]) {
+    for e in entries {
+        push_error(out, &e.name, e.code, &e.description);
+    }
+}
+
+/// Four-way requires render (Lean / native Rust / pod Rust / math Rust)
+/// from an already-canonicalized guard. Shared by handler `requires`,
+/// schema requires, match-arm guards, and interface requires.
+fn lower_requires(
+    guard: &Node<a::Expr>,
+    error_name: Option<String>,
+    consts: ConstTable,
+    env: &TypeEnv,
+    tcx: &TreeCx,
+) -> ParsedRequires {
+    ParsedRequires {
+        lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
+        rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
+        rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
+        rust_expr_math: expr_to_rust(
+            &guard.node,
+            Ctx::Guard,
+            consts,
+            opts_native(env).with_widen_arith(),
+        ),
+        error_name,
+        tree: Some(build_expr_tree(guard, tcx)),
+        ast_body: Some(guard.clone()),
+    }
+}
+
+/// Five-way ensures render (Lean / native / pod / binary / binary-math)
+/// from an already-canonicalized post-condition. Shared by handler and
+/// interface `ensures` lowering.
+fn lower_ensures(
+    e: &Node<a::Expr>,
+    consts: ConstTable,
+    env: &TypeEnv,
+    tcx: &TreeCx,
+) -> ParsedEnsures {
+    ParsedEnsures {
+        lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
+        rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
+        rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
+        // Binary rendering for the Kani ensures-preservation harness:
+        // `state.x` → `post.x`; `old(state.x)` → `pre.x`.
+        rust_expr_binary: expr_to_rust(
+            &e.node,
+            Ctx::Ensures,
+            consts,
+            opts_native(env).with_state_mode(StateMode::Binary),
+        ),
+        rust_expr_binary_math: expr_to_rust(
+            &e.node,
+            Ctx::Ensures,
+            consts,
+            opts_native(env)
+                .with_state_mode(StateMode::Binary)
+                .with_widen_arith(),
+        ),
+        tree: Some(build_expr_tree(e, tcx)),
+    }
+}
+
+/// One `accounts { ... }` descriptor → `ParsedHandlerAccount`. Shared
+/// verbatim by handler and interface-handler account lowering.
+fn lower_account_descriptor(d: &a::AccountDescriptor) -> ParsedHandlerAccount {
+    let mut acc = ParsedHandlerAccount {
+        name: d.name.clone(),
+        is_signer: false,
+        is_writable: false,
+        is_program: false,
+        pda_seeds: None,
+        account_type: None,
+        authority: None,
+        default_pubkey: None,
+        imported_namespace: None,
+    };
+    for attr in &d.attrs {
+        match attr {
+            a::AccountAttr::Simple(s) => match s.as_str() {
+                "signer" => acc.is_signer = true,
+                "writable" => acc.is_writable = true,
+                "readonly" => acc.is_writable = false,
+                "program" => acc.is_program = true,
+                _ => acc.account_type = Some(s.clone()),
+            },
+            a::AccountAttr::Type(t) => {
+                // Dotted type ref (`Foreign.State`) splits into namespace
+                // alias + source type; bare types keep
+                // `imported_namespace = None`. `imported_namespaces` is
+                // populated BEFORE handler adapt, so check.rs validates
+                // the namespace is known.
+                if let Some((ns, ty)) = t.split_once('.') {
+                    acc.imported_namespace = Some(ns.to_string());
+                    acc.account_type = Some(ty.to_string());
+                } else {
+                    acc.account_type = Some(t.clone());
+                }
+            }
+            a::AccountAttr::Authority(x) => acc.authority = Some(x.clone()),
+            a::AccountAttr::Pda(seeds) => acc.pda_seeds = Some(seeds.clone()),
+        }
+    }
+    acc
+}
+
+/// Lower a `call Interface.handler(...)` expression to a `ParsedCall`.
+/// Splits `Interface.handler` from the qualified path — longer paths
+/// (unusual — e.g. nested namespacing) flatten with '.' into the handler
+/// name so the call still records, and the resolver decides what to do.
+/// Shared by the top-level `Call` clause and match-arm `Call` bodies.
+fn lower_call(c: &a::CallExpr, consts: ConstTable, env: &TypeEnv, tcx: &TreeCx) -> ParsedCall {
+    let segs = &c.target.0;
+    let (iface, handler_name) = match segs.as_slice() {
+        [] => (String::new(), String::new()),
+        [only] => (String::new(), only.clone()),
+        [head, tail @ ..] => (head.clone(), tail.join(".")),
+    };
+    let args = c
+        .args
+        .iter()
+        .map(|arg| ParsedCallArg {
+            name: arg.name.clone(),
+            lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
+            rust_expr: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_native(env)),
+            rust_expr_pod: expr_to_rust(&arg.value.node, Ctx::Guard, consts, opts_pod(env)),
+            tree: Some(build_expr_tree(&arg.value, tcx)),
+        })
+        .collect();
+    ParsedCall {
+        target_interface: iface,
+        target_handler: handler_name,
+        args,
+        result_binding: c.result_binding.clone(),
+        // Empty when no binders declared; backends keep the callee-frame,
+        // param-only axiom shape in that case.
+        state_binders: lower_state_binders(&c.state_binders),
+    }
+}
+
 /// Expand a handler declaration into one or more `ParsedHandler`s.
 /// Handlers without a `branch` clause produce exactly one. Handlers with
 /// branches produce one synthetic handler per arm, each carrying the
@@ -1091,32 +1192,17 @@ fn expand_handler(
         // recorded for subsequent arms.
         if let Some(guard) = &arm.guard {
             let guard = canonicalize_state_refs(guard, &canon);
-            let lean = expr_to_lean(&guard.node, Ctx::Guard, consts, env);
-            let rust = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env));
-            let rust_pod = expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env));
-            let rust_math = expr_to_rust(
-                &guard.node,
-                Ctx::Guard,
-                consts,
-                opts_native(env).with_widen_arith(),
-            );
-            let guard_tree = build_expr_tree(&guard, tcx);
-            synth.requires.push(ParsedRequires {
-                lean_expr: lean.clone(),
-                rust_expr: rust.clone(),
-                rust_expr_pod: rust_pod.clone(),
-                rust_expr_math: rust_math.clone(),
-                error_name: None,
-                ast_body: Some(guard),
-                tree: Some(guard_tree.clone()),
-            });
+            let req = lower_requires(&guard, None, consts, env, tcx);
             prior_conds.push((
-                format!("\u{00AC}({})", lean),
-                format!("!({})", rust),
-                format!("!({})", rust_pod),
-                format!("!({})", rust_math),
-                Some(crate::mir::ExprTree::Not(Box::new(guard_tree))),
+                format!("\u{00AC}({})", req.lean_expr),
+                format!("!({})", req.rust_expr),
+                format!("!({})", req.rust_expr_pod),
+                format!("!({})", req.rust_expr_math),
+                req.tree
+                    .clone()
+                    .map(|t| crate::mir::ExprTree::Not(Box::new(t))),
             ));
+            synth.requires.push(req);
         }
 
         // Arm body: abort → additional aborting requires; effect → effects
@@ -1154,45 +1240,11 @@ fn expand_handler(
             }
             // Synth handler issues the CPI plus any alongside effects —
             // mirrors the top-level `Call` clause lowering so backends see
-            // the same ParsedCall shape either way.
+            // the same ParsedCall shape either way. (Match-arm CPIs always
+            // carry an empty binder list at the parser; lower_state_binders
+            // still runs so the codepath stays uniform.)
             a::MatchBody::Call(call, effects) => {
-                let segs = &call.target.0;
-                let (iface, handler_name) = match segs.as_slice() {
-                    [] => (String::new(), String::new()),
-                    [only] => (String::new(), only.clone()),
-                    [head, tail @ ..] => (head.clone(), tail.join(".")),
-                };
-                let args = call
-                    .args
-                    .iter()
-                    .map(|arg| ParsedCallArg {
-                        name: arg.name.clone(),
-                        lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
-                        rust_expr: expr_to_rust(
-                            &arg.value.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_native(env),
-                        ),
-                        rust_expr_pod: expr_to_rust(
-                            &arg.value.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_pod(env),
-                        ),
-                        tree: Some(build_expr_tree(&arg.value, tcx)),
-                    })
-                    .collect();
-                synth.calls.push(ParsedCall {
-                    target_interface: iface,
-                    target_handler: handler_name,
-                    args,
-                    result_binding: call.result_binding.clone(),
-                    // Match-arm CPIs always carry an empty binder list at
-                    // the parser; lower_state_binders still runs so the
-                    // codepath stays uniform.
-                    state_binders: lower_state_binders(&call.state_binders),
-                });
+                synth.calls.push(lower_call(call, consts, env, tcx));
                 for Node { node: stmt, .. } in effects {
                     for eff in render_effect_or_expand_variant_promotion(
                         stmt,
@@ -1272,11 +1324,7 @@ fn adapt_handler(
     env: &TypeEnv,
     tcx: &TreeCx,
 ) -> ParsedHandler {
-    let params: Vec<(String, String)> = h
-        .params
-        .iter()
-        .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
-        .collect();
+    let params: Vec<(String, String)> = typed_pairs(&h.params);
     let canon = canon_scope_for_handler(h, consts, env);
 
     // `on_account` is the type prefix of the pre-state ref, if qualified.
@@ -1293,31 +1341,11 @@ fn adapt_handler(
     let mut handler = ParsedHandler {
         name: h.name.clone(),
         doc: h.doc.clone(),
-        who: None,
         on_account,
         pre_status: h.pre.as_ref().and_then(|p| p.0.last().cloned()),
         post_status: h.post.as_ref().and_then(|p| p.0.last().cloned()),
         takes_params: params.clone(),
-        guard_str: None,
-        guard_str_rust: None,
-        aborts_if: Vec::new(),
-        requires: Vec::new(),
-        ensures: Vec::new(),
-        modifies: None,
-        let_bindings: Vec::new(),
-        aborts_total: false,
-        permissionless: false,
-        effects: Vec::new(),
-        accounts: Vec::new(),
-        transfers: Vec::new(),
-        emits: Vec::new(),
-        invariants: Vec::new(),
-        establishes: Vec::new(),
-        schema_includes: Vec::new(),
-        properties: Vec::new(),
-        calls: Vec::new(),
-        effect_branches: None,
-        abstract_binders: Vec::new(),
+        ..Default::default()
     };
 
     for Node { node: clause, .. } in &h.clauses {
@@ -1325,88 +1353,18 @@ fn adapt_handler(
             a::HandlerClause::Auth(actor) => handler.who = Some(actor.clone()),
             a::HandlerClause::Accounts(descs) => {
                 for d in descs {
-                    let mut acc = ParsedHandlerAccount {
-                        name: d.name.clone(),
-                        is_signer: false,
-                        is_writable: false,
-                        is_program: false,
-                        pda_seeds: None,
-                        account_type: None,
-                        authority: None,
-                        default_pubkey: None,
-                        imported_namespace: None,
-                    };
-                    for attr in &d.attrs {
-                        match attr {
-                            a::AccountAttr::Simple(s) => match s.as_str() {
-                                "signer" => acc.is_signer = true,
-                                "writable" => acc.is_writable = true,
-                                "readonly" => acc.is_writable = false,
-                                "program" => acc.is_program = true,
-                                _ => acc.account_type = Some(s.clone()),
-                            },
-                            a::AccountAttr::Type(t) => {
-                                // Dotted type ref (`Foreign.State`) splits
-                                // into namespace alias + source type; bare
-                                // types keep `imported_namespace = None`.
-                                // `imported_namespaces` is populated BEFORE
-                                // handler adapt, so check.rs validates the
-                                // namespace is known.
-                                if let Some((ns, ty)) = t.split_once('.') {
-                                    acc.imported_namespace = Some(ns.to_string());
-                                    acc.account_type = Some(ty.to_string());
-                                } else {
-                                    acc.account_type = Some(t.clone());
-                                }
-                            }
-                            a::AccountAttr::Authority(x) => acc.authority = Some(x.clone()),
-                            a::AccountAttr::Pda(seeds) => acc.pda_seeds = Some(seeds.clone()),
-                        }
-                    }
-                    handler.accounts.push(acc);
+                    handler.accounts.push(lower_account_descriptor(d));
                 }
             }
             a::HandlerClause::Requires { guard, on_fail } => {
                 let guard = canonicalize_state_refs(guard, &canon);
-                handler.requires.push(ParsedRequires {
-                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
-                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
-                    rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
-                    rust_expr_math: expr_to_rust(
-                        &guard.node,
-                        Ctx::Guard,
-                        consts,
-                        opts_native(env).with_widen_arith(),
-                    ),
-                    error_name: on_fail.clone(),
-                    tree: Some(build_expr_tree(&guard, tcx)),
-                    ast_body: Some(guard),
-                });
+                handler
+                    .requires
+                    .push(lower_requires(&guard, on_fail.clone(), consts, env, tcx));
             }
             a::HandlerClause::Ensures(e) => {
                 let e = canonicalize_state_refs(e, &canon);
-                handler.ensures.push(ParsedEnsures {
-                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
-                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
-                    rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
-                    // Binary rendering for the Kani ensures-preservation
-                    // harness: `state.x` → `post.x`; `old(state.x)` → `pre.x`.
-                    rust_expr_binary: expr_to_rust(
-                        &e.node,
-                        Ctx::Ensures,
-                        consts,
-                        opts_native(env).with_state_mode(StateMode::Binary),
-                    ),
-                    rust_expr_binary_math: expr_to_rust(
-                        &e.node,
-                        Ctx::Ensures,
-                        consts,
-                        opts_native(env)
-                            .with_state_mode(StateMode::Binary)
-                            .with_widen_arith(),
-                    ),
-                    tree: Some(build_expr_tree(&e, tcx)),
-                });
+                handler.ensures.push(lower_ensures(&e, consts, env, tcx));
             }
             a::HandlerClause::Modifies(fs) => {
                 handler.modifies = Some(fs.clone());
@@ -1537,21 +1495,7 @@ fn adapt_handler(
                         crate::ast::TransferAmount::Literal(v) => v.to_string(),
                         crate::ast::TransferAmount::Path(p) => {
                             // Pest captures amount as raw ident source — emit plain path.
-                            let mut s = p.root.clone();
-                            for seg in &p.segments {
-                                match seg {
-                                    crate::ast::PathSeg::Field(f) => {
-                                        s.push('.');
-                                        s.push_str(f);
-                                    }
-                                    crate::ast::PathSeg::Index(i) => {
-                                        s.push('[');
-                                        s.push_str(i);
-                                        s.push(']');
-                                    }
-                                }
-                            }
-                            s
+                            p.to_source_string()
                         }
                     });
                     handler.transfers.push(crate::check::ParsedTransfer {
@@ -1587,46 +1531,7 @@ fn adapt_handler(
                 // base and must ignore the branch clause itself.
             }
             a::HandlerClause::Call(c) => {
-                // Split `Interface.handler` from the qualified path. Longer
-                // paths (unusual — e.g. nested namespacing) flatten with '.'
-                // into the handler name so the call still records, and the
-                // resolver (slice 4+) can decide what to do.
-                let segs = &c.target.0;
-                let (iface, handler_name) = match segs.as_slice() {
-                    [] => (String::new(), String::new()),
-                    [only] => (String::new(), only.clone()),
-                    [head, tail @ ..] => (head.clone(), tail.join(".")),
-                };
-                let args = c
-                    .args
-                    .iter()
-                    .map(|arg| ParsedCallArg {
-                        name: arg.name.clone(),
-                        lean_expr: expr_to_lean(&arg.value.node, Ctx::Guard, consts, env),
-                        rust_expr: expr_to_rust(
-                            &arg.value.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_native(env),
-                        ),
-                        rust_expr_pod: expr_to_rust(
-                            &arg.value.node,
-                            Ctx::Guard,
-                            consts,
-                            opts_pod(env),
-                        ),
-                        tree: Some(build_expr_tree(&arg.value, tcx)),
-                    })
-                    .collect();
-                handler.calls.push(ParsedCall {
-                    target_interface: iface,
-                    target_handler: handler_name,
-                    args,
-                    result_binding: c.result_binding.clone(),
-                    // Empty when no binders declared; backends keep the
-                    // callee-frame, param-only axiom in that case.
-                    state_binders: lower_state_binders(&c.state_binders),
-                });
+                handler.calls.push(lower_call(c, consts, env, tcx));
             }
         }
     }
@@ -1663,11 +1568,7 @@ fn adapt_interface<'a>(
         }),
         // Interface-level `state { ... }` block as (name, type-string)
         // pairs; empty when not declared.
-        state_fields: iface
-            .state_fields
-            .iter()
-            .map(|f| (f.name.clone(), type_ref_to_string(&f.ty)))
-            .collect(),
+        state_fields: typed_pairs(&iface.state_fields),
         handlers,
     }
 }
@@ -1681,11 +1582,7 @@ fn adapt_interface_handler<'a>(
     let mut out = ParsedInterfaceHandler {
         name: h.name.clone(),
         doc: h.doc.clone(),
-        params: h
-            .params
-            .iter()
-            .map(|p| (p.name.clone(), type_ref_to_string(&p.ty)))
-            .collect(),
+        params: typed_pairs(&h.params),
         discriminant: None,
         accounts: Vec::new(),
         requires: Vec::new(),
@@ -1703,78 +1600,15 @@ fn adapt_interface_handler<'a>(
             }
             a::InterfaceHandlerClause::Accounts(descs) => {
                 for d in descs {
-                    let mut acc = ParsedHandlerAccount {
-                        name: d.name.clone(),
-                        is_signer: false,
-                        is_writable: false,
-                        is_program: false,
-                        pda_seeds: None,
-                        account_type: None,
-                        authority: None,
-                        default_pubkey: None,
-                        imported_namespace: None,
-                    };
-                    for attr in &d.attrs {
-                        match attr {
-                            a::AccountAttr::Simple(s) => match s.as_str() {
-                                "signer" => acc.is_signer = true,
-                                "writable" => acc.is_writable = true,
-                                "readonly" => acc.is_writable = false,
-                                "program" => acc.is_program = true,
-                                _ => acc.account_type = Some(s.clone()),
-                            },
-                            a::AccountAttr::Type(t) => {
-                                if let Some((ns, ty)) = t.split_once('.') {
-                                    acc.imported_namespace = Some(ns.to_string());
-                                    acc.account_type = Some(ty.to_string());
-                                } else {
-                                    acc.account_type = Some(t.clone());
-                                }
-                            }
-                            a::AccountAttr::Authority(x) => acc.authority = Some(x.clone()),
-                            a::AccountAttr::Pda(seeds) => acc.pda_seeds = Some(seeds.clone()),
-                        }
-                    }
-                    out.accounts.push(acc);
+                    out.accounts.push(lower_account_descriptor(d));
                 }
             }
             a::InterfaceHandlerClause::Requires { guard, on_fail } => {
-                out.requires.push(ParsedRequires {
-                    lean_expr: expr_to_lean(&guard.node, Ctx::Guard, consts, env),
-                    rust_expr: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_native(env)),
-                    rust_expr_pod: expr_to_rust(&guard.node, Ctx::Guard, consts, opts_pod(env)),
-                    rust_expr_math: expr_to_rust(
-                        &guard.node,
-                        Ctx::Guard,
-                        consts,
-                        opts_native(env).with_widen_arith(),
-                    ),
-                    error_name: on_fail.clone(),
-                    ast_body: Some(guard.clone()),
-                    tree: Some(build_expr_tree(guard, &tcx)),
-                });
+                out.requires
+                    .push(lower_requires(guard, on_fail.clone(), consts, env, &tcx));
             }
             a::InterfaceHandlerClause::Ensures(e) => {
-                out.ensures.push(ParsedEnsures {
-                    lean_expr: expr_to_lean(&e.node, Ctx::Ensures, consts, env),
-                    rust_expr: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_native(env)),
-                    rust_expr_pod: expr_to_rust(&e.node, Ctx::Ensures, consts, opts_pod(env)),
-                    rust_expr_binary: expr_to_rust(
-                        &e.node,
-                        Ctx::Ensures,
-                        consts,
-                        opts_native(env).with_state_mode(StateMode::Binary),
-                    ),
-                    rust_expr_binary_math: expr_to_rust(
-                        &e.node,
-                        Ctx::Ensures,
-                        consts,
-                        opts_native(env)
-                            .with_state_mode(StateMode::Binary)
-                            .with_widen_arith(),
-                    ),
-                    tree: Some(build_expr_tree(e, &tcx)),
-                });
+                out.ensures.push(lower_ensures(e, consts, env, &tcx));
             }
         }
     }

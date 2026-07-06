@@ -630,19 +630,5 @@ fn numeric_literal_value(
 }
 
 fn render_path_human(p: &a::Path) -> String {
-    let mut out = p.root.clone();
-    for seg in &p.segments {
-        match seg {
-            a::PathSeg::Field(f) => {
-                out.push('.');
-                out.push_str(f);
-            }
-            a::PathSeg::Index(i) => {
-                out.push('[');
-                out.push_str(i);
-                out.push(']');
-            }
-        }
-    }
-    out
+    p.to_source_string()
 }

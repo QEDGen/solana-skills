@@ -26,24 +26,24 @@ pub(super) fn check_error_declared_as_record(spec: &ParsedSpec) -> Vec<Completen
                 .join("\n")
         })
         .unwrap_or_else(|| "  | InvalidAmount\n  | Unauthorized".to_string());
-    warnings.push(CompletenessWarning {
-        rule: "error_declared_as_record".to_string(),
-        severity: Severity::Error,
-        priority: 0,
-        message: "`type Error = { ... }` (record brace form) does not declare error \
+    warnings.push(
+        warn(
+            "error_declared_as_record",
+            Severity::Error,
+            0,
+            "`type Error = { ... }` (record brace form) does not declare error \
                   variants — the parser treats it as a struct named `Error` and \
                   `spec.error_codes` ends up empty. Downstream lowering then \
                   misbehaves silently (CPI error refs unresolved, `WrongState` / \
-                  `MathOverflow` gates don't fire)."
-            .to_string(),
-        subject: Some("Error".to_string()),
-        fix: "Use the pipe form instead of `= { ... }`. Each variant goes on its \
-              own line with a leading `|`."
-            .to_string(),
-        example: Some(format!("  type Error\n{}", fields_hint)),
-        counterexample: None,
-        fix_options: vec![],
-    });
+                  `MathOverflow` gates don't fire).",
+        )
+        .subject("Error".to_string())
+        .fix(
+            "Use the pipe form instead of `= { ... }`. Each variant goes on its \
+              own line with a leading `|`.",
+        )
+        .example(format!("  type Error\n{}", fields_hint)),
+    );
     warnings
 }
 
@@ -58,26 +58,16 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for (key, value) in &spec.pragma_assignments {
         if (key == "checked_overflow_error" || key == "checked_underflow_error") && !has_decl(value)
         {
-            warnings.push(CompletenessWarning {
-                rule: "unknown_error_variant".to_string(),
-                severity: Severity::Warning,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
                     "`pragma {} = {}` references a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
                     key,
                     value,
                     crate::codegen_shared::to_pascal_case(&spec.program_name),
                     value,
-                ),
-                subject: Some(value.clone()),
-                fix: format!(
+                )).subject(value.clone()).fix(format!(
                     "Add `{}` to your `type Error | …` block, drop the pragma, or replace it with a declared variant name.",
                     value,
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
 
@@ -85,26 +75,16 @@ pub(super) fn check_unknown_error_variant(spec: &ParsedSpec) -> Vec<Completeness
     for h in &spec.handlers {
         for on_error in h.effects.iter().filter_map(|e| e.on_error.as_ref()) {
             if !has_decl(on_error) {
-                warnings.push(CompletenessWarning {
-                    rule: "unknown_error_variant".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("unknown_error_variant", Severity::Warning, 2, format!(
                         "handler '{}' has an effect with `else {}` referencing a variant absent from `type Error | …`. Generated Rust references `{}Error::{}` and won't compile.",
                         h.name,
                         on_error,
                         crate::codegen_shared::to_pascal_case(&spec.program_name),
                         on_error,
-                    ),
-                    subject: Some(h.name.clone()),
-                    fix: format!(
+                    )).subject(h.name.clone()).fix(format!(
                         "Add `{}` to your `type Error | …` block, drop the `else {}` suffix to fall back to the default, or use a declared variant.",
                         on_error, on_error,
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -131,20 +111,13 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
 
             if a.seeds == b.seeds {
                 // Exact collision — same seed tuple → same address always.
-                warnings.push(CompletenessWarning {
-                    rule: "pda_seed_collision".to_string(),
-                    severity: Severity::Warning,
-                    priority: 1,
-                    message: format!(
+                warnings.push(warn("pda_seed_collision", Severity::Warning, 1, format!(
                         "PDA '{}' and PDA '{}' have identical seed tuples [{}] — they will always resolve to the same on-chain address",
                         a.name, b.name, a.seeds.join(", ")
-                    ),
-                    subject: Some(a.name.clone()),
-                    fix: format!(
+                    )).subject(a.name.clone()).fix(format!(
                         "Add a distinguishing seed to '{}' or '{}' (e.g., a discriminator byte or unique program-specific tag)",
                         a.name, b.name
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  pda {} [\"{}_tag\", {}]\n  pda {} [\"{}_tag\", {}]",
                         a.name,
                         a.name.to_lowercase(),
@@ -152,10 +125,7 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
                         b.name,
                         b.name.to_lowercase(),
                         b.seeds.join(", ")
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
                 continue;
             }
 
@@ -176,29 +146,19 @@ pub(super) fn check_pda_collisions(spec: &ParsedSpec) -> Vec<CompletenessWarning
             if !a_literals.is_empty() && a_literals == b_literals && a.seeds.len() == b.seeds.len()
             {
                 // Same structure, same literals — variable seeds could collide at runtime.
-                warnings.push(CompletenessWarning {
-                    rule: "pda_seed_possible_collision".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("pda_seed_possible_collision", Severity::Warning, 2, format!(
                         "PDA '{}' and PDA '{}' share all literal seeds [{}] and differ only in variable positions — they can collide at runtime when variables hold the same values",
                         a.name, b.name, a_literals.join(", ")
-                    ),
-                    subject: Some(a.name.clone()),
-                    fix: format!(
+                    )).subject(a.name.clone()).fix(format!(
                         "Add a unique literal discriminator seed to '{}' or '{}' so their namespaces cannot overlap",
                         a.name, b.name
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  pda {} [\"{}\", ...]\n  pda {} [\"{}\", ...]",
                         a.name,
                         a.name.to_lowercase(),
                         b.name,
                         b.name.to_lowercase()
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -233,48 +193,48 @@ pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
 
         // Rule 2 — unconditional: marker present, body is a stub.
         if rs.contains(QEDGEN_UNSUPPORTED_MARKER) {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' lowered Rust contains \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' lowered Rust contains \
                      QEDGEN_UNSUPPORTED_QUANTIFIER — the harness emits a `true` \
                      body and skips the real check",
-                    prop.name
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "Rewrite the quantifier in a shape qedgen can lower \
+                        prop.name
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "Rewrite the quantifier in a shape qedgen can lower \
                       (see docs/limitations.md#unsupported-quantifier-shapes) \
-                      or split the property into per-element guards."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      or split the property into per-element guards.",
+                ),
+            );
             continue;
         }
 
         // Rule 3 — unconditional: bare `true` body.
         if trimmed == "true" {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' lowered to the literal `true` — the harness \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' lowered to the literal `true` — the harness \
                      can never fail. Check the spec body and re-run check.",
-                    prop.name
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "Inspect the property body for a spec construct that \
+                        prop.name
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "Inspect the property body for a spec construct that \
                       lowered to a constant. If the property is genuinely \
-                      trivial, remove it; otherwise file a codegen bug."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      trivial, remove it; otherwise file a codegen bug.",
+                ),
+            );
             continue;
         }
 
@@ -291,25 +251,25 @@ pub(super) fn check_vacuous_property_lowering(spec: &ParsedSpec) -> Vec<Complete
             continue;
         };
         if lhs == rhs {
-            warnings.push(CompletenessWarning {
-                rule: "vacuous_property_lowering".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "property '{}' uses `old(...)` but lowered Rust collapses to a \
+            warnings.push(
+                warn(
+                    "vacuous_property_lowering",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "property '{}' uses `old(...)` but lowered Rust collapses to a \
                      structural tautology (`{} {} {}`). The temporal marker was \
                      dropped during lowering — this indicates a codegen regression.",
-                    prop.name, lhs, _op, rhs
-                ),
-                subject: Some(prop.name.clone()),
-                fix: "File a qedgen issue with the spec snippet. Pre-v2.23 this \
+                        prop.name, lhs, _op, rhs
+                    ),
+                )
+                .subject(prop.name.clone())
+                .fix(
+                    "File a qedgen issue with the spec snippet. Pre-v2.23 this \
                       was the default behavior for `old(...)` in proptest/Kani; \
-                      post-Slices 2-4 it should be unreachable."
-                    .to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                      post-Slices 2-4 it should be unreachable.",
+                ),
+            );
         }
     }
     warnings
@@ -388,26 +348,25 @@ pub(super) fn check_unknown_guard_identifier(spec: &ParsedSpec) -> Vec<Completen
                 } else {
                     name.clone()
                 };
-                warnings.push(CompletenessWarning {
-                    rule: "unknown_guard_identifier".to_string(),
-                    severity: Severity::Error,
-                    priority: 0,
-                    message: format!(
-                        "handler '{}' references `{}` in a `requires` clause, but it \
+                warnings.push(
+                    warn(
+                        "unknown_guard_identifier",
+                        Severity::Error,
+                        0,
+                        format!(
+                            "handler '{}' references `{}` in a `requires` clause, but it \
                          resolves to nothing — not a state field, parameter, account, \
                          const, or binding. Generated code carries the name verbatim \
                          and won't compile in any backend.",
-                        h.name, display
-                    ),
-                    subject: Some(h.name.clone()),
-                    fix: format!(
+                            h.name, display
+                        ),
+                    )
+                    .subject(h.name.clone())
+                    .fix(format!(
                         "Declare `{name}` (state field, param, or const) or fix the \
                          reference to an existing name."
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )),
+                );
             }
         }
     }

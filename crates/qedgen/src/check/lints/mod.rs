@@ -72,17 +72,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             .unwrap_or(false)
         && !spec.error_codes.iter().any(|c| c == "WrongState")
     {
-        warnings.push(CompletenessWarning {
-            rule: "adt_state_missing_wrong_state".to_string(),
-            severity: Severity::Warning,
-            priority: 2,
-            message: "`pragma state_repr = adt` is set but no `WrongState` error is declared — the inductive transitions return `Err(WrongState)` on a variant-mismatch fallthrough, which won't compile".to_string(),
-            subject: None,
-            fix: "Add `WrongState` to `type Error`, or drop `pragma state_repr = adt` to use the flat State representation.".to_string(),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+        warnings.push(warn("adt_state_missing_wrong_state", Severity::Warning, 2, "`pragma state_repr = adt` is set but no `WrongState` error is declared — the inductive transitions return `Err(WrongState)` on a variant-mismatch fallthrough, which won't compile").fix("Add `WrongState` to `type Error`, or drop `pragma state_repr = adt` to use the flat State representation."));
     }
 
     // Ghost-variable validation.
@@ -117,55 +107,33 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             spec.handlers.iter().map(|h| h.name.as_str()).collect();
         for g in &spec.ghosts {
             if !scalar(&g.ty) {
-                warnings.push(CompletenessWarning {
-                    rule: "ghost_non_scalar_type".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("ghost_non_scalar_type", Severity::Warning, 2, format!(
                         "ghost '{}' has non-scalar type '{}' — ghosts must be a scalar (U8…U128 / I8…I128 / Bool)",
                         g.name, g.ty
-                    ),
-                    subject: Some(g.name.clone()),
-                    fix: "Use a scalar ghost type. Aggregate quantities over collections belong in a `property` via `sum i : Idx, …`, not a ghost.".to_string(),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )).subject(g.name.clone()).fix("Use a scalar ghost type. Aggregate quantities over collections belong in a `property` via `sum i : Idx, …`, not a ghost."));
             }
             for u in &g.updates {
                 if !handler_names.contains(u.handler.as_str()) {
-                    warnings.push(CompletenessWarning {
-                        rule: "ghost_update_unknown_handler".to_string(),
-                        severity: Severity::Warning,
-                        priority: 2,
-                        message: format!(
+                    warnings.push(
+                        warn(
+                            "ghost_update_unknown_handler",
+                            Severity::Warning,
+                            2,
+                            format!(
                             "ghost '{}' has an `on {}` clause, but no handler named '{}' exists",
                             g.name, u.handler, u.handler
                         ),
-                        subject: Some(g.name.clone()),
-                        fix: "Name an existing handler in the `on` clause, or remove the clause."
-                            .to_string(),
-                        example: None,
-                        counterexample: None,
-                        fix_options: vec![],
-                    });
+                        )
+                        .subject(g.name.clone())
+                        .fix("Name an existing handler in the `on` clause, or remove the clause."),
+                    );
                 }
             }
             if unsupported_shape {
-                warnings.push(CompletenessWarning {
-                    rule: "ghost_unsupported_state_shape".to_string(),
-                    severity: Severity::Warning,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("ghost_unsupported_state_shape", Severity::Warning, 2, format!(
                         "ghost '{}' is declared with an indexed / multi-account / ADT state — ghost fields are only wired into the flat single-account verification State today",
                         g.name
-                    ),
-                    subject: Some(g.name.clone()),
-                    fix: "Move the ghost to a flat single-account spec, or track the quantity in a `property` (e.g. `sum i : Idx, accounts[i].x`) until ghost support lands for this shape.".to_string(),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )).subject(g.name.clone()).fix("Move the ghost to a flat single-account spec, or track the quantity in a `property` (e.g. `sum i : Idx, accounts[i].x`) until ghost support lands for this shape."));
             }
         }
     }
@@ -174,17 +142,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     if !spec.hooks.is_empty() {
         // Lean enforcement is deferred (lands with qedsvm); hooks are
         // currently checked only in the Kani / proptest harnesses.
-        warnings.push(CompletenessWarning {
-            rule: "hook_lean_unsupported".to_string(),
-            severity: Severity::Info,
-            priority: 3,
-            message: "hooks are enforced in the Kani / proptest harnesses; Lean enforcement is deferred (lands with qedsvm)".to_string(),
-            subject: None,
-            fix: "No action needed — `qedgen verify --kani` / `--proptest` exercise the hook assertions.".to_string(),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+        warnings.push(warn("hook_lean_unsupported", Severity::Info, 3, "hooks are enforced in the Kani / proptest harnesses; Lean enforcement is deferred (lands with qedsvm)").fix("No action needed — `qedgen verify --kani` / `--proptest` exercise the hook assertions."));
         let state_field_names: std::collections::BTreeSet<&str> =
             spec.state_fields.iter().map(|(n, _)| n.as_str()).collect();
         let is_indexed = spec
@@ -196,65 +154,40 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             match &hook.kind {
                 ParsedHookKind::AfterStore(field) => {
                     if !state_field_names.contains(field.as_str()) {
-                        warnings.push(CompletenessWarning {
-                            rule: "hook_unknown_field".to_string(),
-                            severity: Severity::Warning,
-                            priority: 2,
-                            message: format!(
-                                "hook `after_store({})` names '{}', which is not a state field",
-                                field, field
-                            ),
-                            subject: None,
-                            fix: "Name a declared state field in `after_store(<field>)`."
-                                .to_string(),
-                            example: None,
-                            counterexample: None,
-                            fix_options: vec![],
-                        });
+                        warnings.push(
+                            warn(
+                                "hook_unknown_field",
+                                Severity::Warning,
+                                2,
+                                format!(
+                                    "hook `after_store({})` names '{}', which is not a state field",
+                                    field, field
+                                ),
+                            )
+                            .fix("Name a declared state field in `after_store(<field>)`."),
+                        );
                     }
                     if unsupported_shape {
-                        warnings.push(CompletenessWarning {
-                            rule: "hook_unsupported_state_shape".to_string(),
-                            severity: Severity::Warning,
-                            priority: 2,
-                            message: format!(
+                        warnings.push(warn("hook_unsupported_state_shape", Severity::Warning, 2, format!(
                                 "hook `after_store({})` is declared with an indexed / multi-account state — `after_store` is wired into the flat single-account transition only",
                                 field
-                            ),
-                            subject: None,
-                            fix: "Use a flat single-account spec, or assert the post-store condition in a `property`.".to_string(),
-                            example: None,
-                            counterexample: None,
-                            fix_options: vec![],
-                        });
+                            )).fix("Use a flat single-account spec, or assert the post-store condition in a `property`."));
                     }
                 }
                 ParsedHookKind::BeforeCpi(_) => {
-                    warnings.push(CompletenessWarning {
-                        rule: "hook_before_cpi_unsupported".to_string(),
-                        severity: Severity::Warning,
-                        priority: 2,
-                        message: "`hook before_cpi` enforcement is deferred — the runtime state model has no CPI to anchor to, and the Lean CPI-theorem precondition path lands with qedsvm".to_string(),
-                        subject: None,
-                        fix: "Encode the precondition as a `requires` on the calling handler for now, or assert it via `after_store` on the field the CPI consumes.".to_string(),
-                        example: None,
-                        counterexample: None,
-                        fix_options: vec![],
-                    });
+                    warnings.push(warn("hook_before_cpi_unsupported", Severity::Warning, 2, "`hook before_cpi` enforcement is deferred — the runtime state model has no CPI to anchor to, and the Lean CPI-theorem precondition path lands with qedsvm").fix("Encode the precondition as a `requires` on the calling handler for now, or assert it via `after_store` on the field the CPI consumes."));
                 }
             }
             if hook.asserts.is_empty() {
-                warnings.push(CompletenessWarning {
-                    rule: "hook_no_assert".to_string(),
-                    severity: Severity::Info,
-                    priority: 3,
-                    message: "hook has no `assert` clause — it checks nothing".to_string(),
-                    subject: None,
-                    fix: "Add at least one `assert <expr>` to the hook body.".to_string(),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                warnings.push(
+                    warn(
+                        "hook_no_assert",
+                        Severity::Info,
+                        3,
+                        "hook has no `assert` clause — it checks nothing",
+                    )
+                    .fix("Add at least one `assert <expr>` to the hook body."),
+                );
             }
         }
     }
@@ -263,40 +196,20 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         // `auth X` and `permissionless` are contradictory; surface as P1
         // rather than silently letting one take precedence.
         if op.permissionless && op.who.is_some() {
-            warnings.push(CompletenessWarning {
-                rule: "contradictory_auth".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
+            warnings.push(warn("contradictory_auth", Severity::Warning, 1, format!(
                     "handler '{}' declares both `auth {}` and `permissionless` — pick one",
                     op.name,
                     op.who.as_deref().unwrap_or("?"),
-                ),
-                subject: Some(op.name.clone()),
-                fix: "Remove one: `permissionless` for deliberately-open handlers, `auth X` for access-controlled ones.".to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )).subject(op.name.clone()).fix("Remove one: `permissionless` for deliberately-open handlers, `auth X` for access-controlled ones."));
         }
 
         // Rule 1: handler without `auth`. Skipped for `permissionless` —
         // an explicit opt-in, not a missing declaration.
         if op.who.is_none() && !op.permissionless {
-            warnings.push(CompletenessWarning {
-                rule: "no_access_control".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!("handler '{}' has no `auth` — anyone can call it", op.name),
-                subject: Some(op.name.clone()),
-                fix: format!(
+            warnings.push(warn("no_access_control", Severity::Warning, 1, format!("handler '{}' has no `auth` — anyone can call it", op.name)).subject(op.name.clone()).fix(format!(
                     "Add `auth {}` to restrict who can execute this handler, or `permissionless` if this handler is deliberately open",
                     signer_hint
-                ),
-                example: Some(format!("  handler {}\n    auth {}", op.name, signer_hint)),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )).example(format!("  handler {}\n    auth {}", op.name, signer_hint)));
         }
 
         // Rule 2: handler not covered by any property
@@ -306,27 +219,17 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             .any(|p| p.preserved_by.contains(&op.name));
         if !covered && !spec.properties.is_empty() {
             let prop_names: Vec<&str> = spec.properties.iter().map(|p| p.name.as_str()).collect();
-            warnings.push(CompletenessWarning {
-                rule: "uncovered_operation".to_string(),
-                severity: Severity::Info,
-                priority: 3,
-                message: format!(
+            warnings.push(warn("uncovered_operation", Severity::Info, 3, format!(
                     "handler '{}' is not in any property's `preserved_by`",
                     op.name
-                ),
-                subject: Some(op.name.clone()),
-                fix: format!(
+                )).subject(op.name.clone()).fix(format!(
                     "Add '{}' to an existing property's `preserved_by` list, or confirm it doesn't need property coverage",
                     op.name
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  property {} \"...\"\n    preserved_by: ..., {}",
                     prop_names.first().unwrap_or(&"my_property"),
                     op.name
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
 
         // Rule 3: add effect without explicit overflow bound (type-aware),
@@ -387,48 +290,38 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     _ => "U64_MAX",
                 };
                 let type_label = field_type.as_deref().unwrap_or("U64");
-                warnings.push(CompletenessWarning {
-                    rule: "unguarded_arithmetic".to_string(),
-                    severity: Severity::Info,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("unguarded_arithmetic", Severity::Info, 2, format!(
                         "handler '{}' adds to {} field '{}' without an explicit bound — codegen auto-inserts a {} guard, but an explicit `requires` with a tighter domain bound produces stronger proofs",
                         op.name, type_label, field, type_label
-                    ),
-                    subject: Some(op.name.clone()),
-                    fix: format!(
+                    )).subject(op.name.clone()).fix(format!(
                         "Add `requires state.{} + {} <= MY_BOUND` for a tighter bound than {} max",
                         field, val, type_label
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  handler {}\n    requires state.{} + {} <= {}",
                         op.name, field, val, type_max
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
 
         // Rule 6: handler has no when/then lifecycle
         if op.pre_status.is_none() && op.post_status.is_none() {
-            warnings.push(CompletenessWarning {
-                rule: "no_lifecycle".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
-                    "handler '{}' has no `when`/`then` — no state machine enforcement",
-                    op.name
-                ),
-                subject: Some(op.name.clone()),
-                fix: "Add `when` and `then` clauses to enforce handler ordering".to_string(),
-                example: Some(format!(
+            warnings.push(
+                warn(
+                    "no_lifecycle",
+                    Severity::Info,
+                    2,
+                    format!(
+                        "handler '{}' has no `when`/`then` — no state machine enforcement",
+                        op.name
+                    ),
+                )
+                .subject(op.name.clone())
+                .fix("Add `when` and `then` clauses to enforce handler ordering")
+                .example(format!(
                     "  handler {}\n    when Active\n    then Active",
                     op.name
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
 
@@ -460,23 +353,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                 .map(|op| op.name.as_str())
                 .collect();
             let op_hint = mutating_ops.first().copied().unwrap_or("some_handler");
-            warnings.push(CompletenessWarning {
-                rule: "unused_field".to_string(),
-                severity: Severity::Info,
-                priority: 4,
-                message: format!("state field '{}' is never modified by any effect", fname),
-                subject: Some(fname.clone()),
-                fix: format!(
+            warnings.push(warn("unused_field", Severity::Info, 4, format!("state field '{}' is never modified by any effect", fname)).subject(fname.clone()).fix(format!(
                     "Add an `effect: {} set <value>` or `effect: {} add <value>` to an operation, or remove the field if it's not needed",
                     fname, fname
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  operation {}\n    effect: {} set new_value",
                     op_hint, fname
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
 
@@ -485,24 +368,23 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     for prop in &spec.properties {
         for op_name in &prop.preserved_by {
             if !op_names.contains(&op_name.as_str()) {
-                warnings.push(CompletenessWarning {
-                    rule: "dangling_preserved_by".to_string(),
-                    severity: Severity::Warning,
-                    priority: 1,
-                    message: format!(
-                        "property '{}' references nonexistent handler '{}'",
-                        prop.name, op_name
-                    ),
-                    subject: Some(format!("{}.preserved_by.{}", prop.name, op_name)),
-                    fix: format!(
+                warnings.push(
+                    warn(
+                        "dangling_preserved_by",
+                        Severity::Warning,
+                        1,
+                        format!(
+                            "property '{}' references nonexistent handler '{}'",
+                            prop.name, op_name
+                        ),
+                    )
+                    .subject(format!("{}.preserved_by.{}", prop.name, op_name))
+                    .fix(format!(
                         "Check the spelling of '{}' — available handlers: {}",
                         op_name,
                         op_names.join(", ")
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )),
+                );
             }
         }
     }
@@ -593,19 +475,19 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     )
                 };
                 warnings.push(CompletenessWarning {
-                    rule: "unchecked_quantifier".to_string(),
-                    severity: Severity::Warning,
-                    priority: 1,
-                    message: format!(
-                        "property '{}' uses a quantifier over a type that proptest/Kani \
-                         cannot exhaust — the harness emits `true` and skips the check ({})",
-                        prop.name, detail
-                    ),
                     subject: Some(prop.name.clone()),
                     fix,
                     example,
-                    counterexample: None,
-                    fix_options: vec![],
+                    ..warn(
+                        "unchecked_quantifier",
+                        Severity::Warning,
+                        1,
+                        format!(
+                            "property '{}' uses a quantifier over a type that proptest/Kani \
+                         cannot exhaust — the harness emits `true` and skips the check ({})",
+                            prop.name, detail
+                        ),
+                    )
                 });
             }
         }
@@ -638,21 +520,20 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             }
             _ => "See docs/limitations.md#unsupported-quantifier-shapes for the workaround.",
         };
-        warnings.push(CompletenessWarning {
-            rule: "unsupported_quantifier_shape".to_string(),
-            severity: Severity::Warning,
-            priority: 1,
-            message: format!(
-                "property '{}' has a quantifier shape qedgen v2.20 can't lower to a \
+        warnings.push(
+            warn(
+                "unsupported_quantifier_shape",
+                Severity::Warning,
+                1,
+                format!(
+                    "property '{}' has a quantifier shape qedgen v2.20 can't lower to a \
                  non-vacuous harness — {} (bytes {}..{})",
-                prop.name, qlint.message, qlint.span_start, qlint.span_end,
-            ),
-            subject: Some(prop.name.clone()),
-            fix: workaround.to_string(),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+                    prop.name, qlint.message, qlint.span_start, qlint.span_end,
+                ),
+            )
+            .subject(prop.name.clone())
+            .fix(workaround.to_string()),
+        );
     }
 
     // P6: informational note that `Pubkey` state fields lower structurally
@@ -665,26 +546,25 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // account type's fields and is intentionally not scanned (double-firing).
     {
         let push_p6 = |warnings: &mut Vec<CompletenessWarning>, holder: &str, field: &str| {
-            warnings.push(CompletenessWarning {
-                rule: "pubkey_state_field_unsupported".to_string(),
-                severity: Severity::Info,
-                priority: 3,
-                message: format!(
-                    "P6: Pubkey field '{}' in {} is lowered to `[u8; 32]` in \
+            warnings.push(
+                warn(
+                    "pubkey_state_field_unsupported",
+                    Severity::Info,
+                    3,
+                    format!(
+                        "P6: Pubkey field '{}' in {} is lowered to `[u8; 32]` in \
                      the generated proptest / Kani harness. The user-facing \
                      Anchor program target keeps the `Pubkey` type.",
-                    field, holder,
-                ),
-                subject: Some(format!("{}.{}", holder, field)),
-                fix: format!(
+                        field, holder,
+                    ),
+                )
+                .subject(format!("{}.{}", holder, field))
+                .fix(format!(
                     "No action required. To compare against an Anchor `Pubkey` \
                      param, convert at the call site: `s.{} == pk.to_bytes()`.",
                     field,
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )),
+            );
         };
 
         for acct in &spec.account_types {
@@ -752,32 +632,32 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
 
         let push_p7 =
             |warnings: &mut Vec<CompletenessWarning>, handler: &str, side: &str, name: &str| {
-                warnings.push(CompletenessWarning {
-                    rule: "undeclared_state_field_in_effect".to_string(),
-                    severity: Severity::Warning,
-                    priority: 1,
-                    message: format!(
-                        "P7: handler '{}' references undeclared state field \
+                warnings.push(
+                    warn(
+                        "undeclared_state_field_in_effect",
+                        Severity::Warning,
+                        1,
+                        format!(
+                            "P7: handler '{}' references undeclared state field \
                          '{}' on the {} of an effect — codegen will emit the \
                          reference verbatim and `cargo test` will fail with \
                          'no field' downstream",
-                        handler, name, side,
-                    ),
-                    subject: Some(format!("{}.{}", handler, name)),
-                    fix: format!(
+                            handler, name, side,
+                        ),
+                    )
+                    .subject(format!("{}.{}", handler, name))
+                    .fix(format!(
                         "Declare `{}` in your state schema (an account_type \
                          field, a sum-variant payload field, or a record \
                          field), or rename the effect reference to match an \
                          existing field.",
                         name
-                    ),
-                    example: Some(format!(
+                    ))
+                    .example(format!(
                         "  type State\n    | Active of {{ {} : U64, ... }}\n",
                         name
                     )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                );
             };
 
         let strip_root = |path: &str| -> String {
@@ -907,20 +787,20 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             let guard_parts: Vec<String> =
                 u64_params.iter().map(|p| format!("{} > 0", p)).collect();
             let guard_expr = guard_parts.join(" and ");
-            warnings.push(CompletenessWarning {
-                rule: "missing_guard_from_takes".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
-                    "handler '{}' takes U64 params but has no guard — no input validation",
-                    op.name
-                ),
-                subject: Some(op.name.clone()),
-                fix: "Add input validation for takes parameters".to_string(),
-                example: Some(format!("  handler {}\n    guard {}", op.name, guard_expr)),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            warnings.push(
+                warn(
+                    "missing_guard_from_takes",
+                    Severity::Warning,
+                    1,
+                    format!(
+                        "handler '{}' takes U64 params but has no guard — no input validation",
+                        op.name
+                    ),
+                )
+                .subject(op.name.clone())
+                .fix("Add input validation for takes parameters")
+                .example(format!("  handler {}\n    guard {}", op.name, guard_expr)),
+            );
         }
     }
 
@@ -956,24 +836,24 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         let is_init_like = op.name.contains("init") || op.name.contains("create");
         if !op.takes_params.is_empty() && (has_lifecycle || is_init_like) {
             let effect_lines = suggested_effect_lines(spec, op, is_init_like);
-            warnings.push(CompletenessWarning {
-                rule: "missing_effect".to_string(),
-                severity: Severity::Warning,
-                priority: 2,
-                message: format!(
-                    "handler '{}' takes params and transitions state but has no effect",
-                    op.name
-                ),
-                subject: Some(op.name.clone()),
-                fix: "Add an effect block to describe state changes".to_string(),
-                example: Some(format!(
+            warnings.push(
+                warn(
+                    "missing_effect",
+                    Severity::Warning,
+                    2,
+                    format!(
+                        "handler '{}' takes params and transitions state but has no effect",
+                        op.name
+                    ),
+                )
+                .subject(op.name.clone())
+                .fix("Add an effect block to describe state changes")
+                .example(format!(
                     "  handler {}\n  effect {{\n{}\n  }}",
                     op.name,
                     effect_lines.join("\n")
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
 
@@ -1022,19 +902,16 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             )
         };
 
-        warnings.push(CompletenessWarning {
-            rule: "no_properties".to_string(),
-            severity: Severity::Warning,
-            priority: 3,
-            message: "spec has effects but no properties — verification has nothing to prove"
-                .to_string(),
-            subject: None,
-            fix: "Add at least one property to define what the verification should prove"
-                .to_string(),
-            example: Some(example),
-            counterexample: None,
-            fix_options: vec![],
-        });
+        warnings.push(
+            warn(
+                "no_properties",
+                Severity::Warning,
+                3,
+                "spec has effects but no properties — verification has nothing to prove",
+            )
+            .fix("Add at least one property to define what the verification should prove")
+            .example(example),
+        );
     }
 
     // Rule 10: handler has token program in accounts but no transfers.
@@ -1097,41 +974,39 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             } else {
                 format!("from source to dest authority {}", signer_name)
             };
-            warnings.push(CompletenessWarning {
-                rule: "missing_cpi_for_token_context".to_string(),
-                severity: Severity::Warning,
-                priority: 2,
-                message: format!(
-                    "handler '{}' has token_program in accounts but no `transfers` block",
-                    handler.name
-                ),
-                subject: Some(handler.name.clone()),
-                fix: "Add a `transfers` block to specify token movements".to_string(),
-                example: Some(format!(
+            warnings.push(
+                warn(
+                    "missing_cpi_for_token_context",
+                    Severity::Warning,
+                    2,
+                    format!(
+                        "handler '{}' has token_program in accounts but no `transfers` block",
+                        handler.name
+                    ),
+                )
+                .subject(handler.name.clone())
+                .fix("Add a `transfers` block to specify token movements")
+                .example(format!(
                     "  handler {}\n    transfers {{\n      {} amount <expr>\n    }}",
                     handler.name, accounts_str
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
 
     // Rule 11: no errors block but handlers have guards
     let any_guards = spec.handlers.iter().any(|op| op.has_guard());
     if any_guards && spec.error_codes.is_empty() {
-        warnings.push(CompletenessWarning {
-            rule: "no_errors_block".to_string(),
-            severity: Severity::Info,
-            priority: 4,
-            message: "spec has guards but no `errors` block — codegen can't generate error types"
-                .to_string(),
-            subject: None,
-            fix: "Add an errors block listing all failure modes".to_string(),
-            example: Some("  errors [InvalidAmount, Unauthorized, AlreadyClosed]".to_string()),
-            counterexample: None,
-            fix_options: vec![],
-        });
+        warnings.push(
+            warn(
+                "no_errors_block",
+                Severity::Info,
+                4,
+                "spec has guards but no `errors` block — codegen can't generate error types",
+            )
+            .fix("Add an errors block listing all failure modes")
+            .example("  errors [InvalidAmount, Unauthorized, AlreadyClosed]".to_string()),
+        );
     }
 
     // Rule 12: lifecycle states unreachable by any operation transition
@@ -1139,23 +1014,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         let reachable = reachable_lifecycle_states(spec);
         for state in &spec.lifecycle_states {
             if !reachable.contains(state) {
-                warnings.push(CompletenessWarning {
-                    rule: "lifecycle_unreachable_state".to_string(),
-                    severity: Severity::Info,
-                    priority: 2,
-                    message: format!(
+                warnings.push(warn("lifecycle_unreachable_state", Severity::Info, 2, format!(
                         "lifecycle state '{}' cannot be reached from any initial state via operation transitions",
                         state
-                    ),
-                    subject: Some(state.clone()),
-                    fix: format!(
+                    )).subject(state.clone()).fix(format!(
                         "Add a `when: {}` or `then: {}` clause to an operation, or remove '{}' from the lifecycle",
                         state, state, state
-                    ),
-                    example: None,
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -1225,26 +1090,16 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
         }
         for field in &written_fields {
             if !read_fields.contains(field) {
-                warnings.push(CompletenessWarning {
-                    rule: "write_without_read".to_string(),
-                    severity: Severity::Info,
-                    priority: 3,
-                    message: format!(
+                warnings.push(warn("write_without_read", Severity::Info, 3, format!(
                         "state field '{}' is written in effects but never referenced in any guard or property",
                         field
-                    ),
-                    subject: Some(field.clone()),
-                    fix: format!(
+                    )).subject(field.clone()).fix(format!(
                         "Add '{}' to a property expression or guard, or verify that writing it without reading is intentional",
                         field
-                    ),
-                    example: Some(format!(
+                    )).example(format!(
                         "  property my_invariant {{\n    expr state.{} >= 0\n    preserved_by all\n  }}",
                         field
-                    )),
-                    counterexample: None,
-                    fix_options: vec![],
-                });
+                    )));
             }
         }
     }
@@ -1294,20 +1149,19 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                             _ => false,
                         };
                         if subsumed && i != j {
-                            warnings.push(CompletenessWarning {
-                                rule: "dead_guard".to_string(),
-                                severity: Severity::Info,
-                                priority: 4,
-                                message: format!(
-                                    "guard conjunct '{}' on operation '{}' is subsumed by '{}'",
-                                    conjuncts[i], op.name, conjuncts[j]
-                                ),
-                                subject: Some(op.name.clone()),
-                                fix: format!("Remove the redundant conjunct '{}'", conjuncts[i]),
-                                example: None,
-                                counterexample: None,
-                                fix_options: vec![],
-                            });
+                            warnings.push(
+                                warn(
+                                    "dead_guard",
+                                    Severity::Info,
+                                    4,
+                                    format!(
+                                        "guard conjunct '{}' on operation '{}' is subsumed by '{}'",
+                                        conjuncts[i], op.name, conjuncts[j]
+                                    ),
+                                )
+                                .subject(op.name.clone())
+                                .fix(format!("Remove the redundant conjunct '{}'", conjuncts[i])),
+                            );
                             break; // Only report once per subsumed conjunct
                         }
                     }
@@ -1336,18 +1190,7 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
             .iter()
             .any(|s| !outgoing.contains_key(s.as_str()) || outgoing[s.as_str()].is_empty());
         if !terminal_exists {
-            warnings.push(CompletenessWarning {
-                rule: "circular_lifecycle_no_terminal".to_string(),
-                severity: Severity::Info,
-                priority: 3,
-                message: "lifecycle has no terminal state — every state has outgoing transitions"
-                    .to_string(),
-                subject: None,
-                fix: "Consider whether the cycle is intentional. If not, designate a terminal state by removing its outgoing transitions.".to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+            warnings.push(warn("circular_lifecycle_no_terminal", Severity::Info, 3, "lifecycle has no terminal state — every state has outgoing transitions").fix("Consider whether the cycle is intentional. If not, designate a terminal state by removing its outgoing transitions."));
         }
     }
 
@@ -1412,23 +1255,13 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                             &spec.constants,
                         ) {
                             if !ce.invariant_holds {
-                                warnings.push(CompletenessWarning {
-                                    rule: "preserved_by_all_potential_violation".to_string(),
-                                    severity: Severity::Warning,
-                                    priority: 1,
-                                    message: format!(
+                                warnings.push(warn("preserved_by_all_potential_violation", Severity::Warning, 1, format!(
                                         "handler '{}' is in `preserved_by` for property '{}' but effect analysis suggests a violation",
                                         op.name, prop.name
-                                    ),
-                                    subject: Some(op.name.clone()),
-                                    fix: format!(
+                                    )).subject(op.name.clone()).fix(format!(
                                         "Add a guard to '{}' ensuring the invariant holds after the effect, or remove it from `preserved_by`",
                                         op.name
-                                    ),
-                                    example: None,
-                                    counterexample: Some(ce),
-                                    fix_options: vec![],
-                                });
+                                    )).counterexample(ce));
                             }
                         }
                     }
@@ -1491,20 +1324,21 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
                     );
 
                     warnings.push(CompletenessWarning {
-                        rule: "excluded_op_modifies_property".to_string(),
-                        severity: Severity::Warning,
-                        priority: 2,
-                        message: format!(
-                            "handler '{}' modifies field(s) [{}] used in property '{}' but is excluded from `preserved_by` — no inductive arm is generated for this handler, so the per-arm proof obligation is silently dropped. Either add the handler to `preserved_by` (and discharge the proof) or refactor the property so this handler doesn't need to preserve it.",
-                            op.name,
-                            modified_prop_fields.join(", "),
-                            prop.name
-                        ),
                         subject: Some(op.name.clone()),
                         fix,
-                        example: None,
                         counterexample,
                         fix_options,
+                        ..warn(
+                            "excluded_op_modifies_property",
+                            Severity::Warning,
+                            2,
+                            format!(
+                                "handler '{}' modifies field(s) [{}] used in property '{}' but is excluded from `preserved_by` — no inductive arm is generated for this handler, so the per-arm proof obligation is silently dropped. Either add the handler to `preserved_by` (and discharge the proof) or refactor the property so this handler doesn't need to preserve it.",
+                                op.name,
+                                modified_prop_fields.join(", "),
+                                prop.name
+                            ),
+                        )
                     });
                 }
             }
@@ -1516,28 +1350,18 @@ pub fn check_completeness(spec: &ParsedSpec) -> Vec<CompletenessWarning> {
     // by the no-tautological-proofs policy); surface at check time.
     for inv in &spec.invariants {
         if inv.lean_expr.is_none() {
-            warnings.push(CompletenessWarning {
-                rule: "invariant_no_body".to_string(),
-                severity: Severity::Error,
-                priority: 1,
-                message: format!(
+            warnings.push(warn("invariant_no_body", Severity::Error, 1, format!(
                     "invariant '{}' has only a description string, no `expr` body — \
                      codegen would emit `theorem {} : True := trivial` (vacuous proof)",
                     inv.name, inv.name
-                ),
-                subject: Some(inv.name.clone()),
-                fix: format!(
+                )).subject(inv.name.clone()).fix(format!(
                     "Add an `expr` body to invariant '{}': \
                      `invariant {} {{ expr <predicate-over-state> preserved_by all }}`",
                     inv.name, inv.name
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  invariant {} {{\n    expr state.total_in == state.total_out\n    preserved_by all\n  }}",
                     inv.name
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
 
@@ -3185,32 +3009,7 @@ mod tests {
     fn synthetic_handler_default(name: &str) -> ParsedHandler {
         ParsedHandler {
             name: name.into(),
-            doc: None,
-            who: None,
-            on_account: None,
-            pre_status: None,
-            post_status: None,
-            takes_params: vec![],
-            guard_str: None,
-            guard_str_rust: None,
-            aborts_if: vec![],
-            requires: vec![],
-            ensures: vec![],
-            modifies: None,
-            let_bindings: vec![],
-            aborts_total: false,
-            permissionless: false,
-            effects: vec![],
-            accounts: vec![],
-            transfers: vec![],
-            emits: vec![],
-            invariants: vec![],
-            establishes: vec![],
-            properties: vec![],
-            schema_includes: vec![],
-            calls: vec![],
-            effect_branches: None,
-            abstract_binders: vec![],
+            ..Default::default()
         }
     }
 

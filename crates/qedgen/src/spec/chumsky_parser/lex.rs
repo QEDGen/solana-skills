@@ -21,8 +21,9 @@ pub(super) fn wsc<'a>() -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
 }
 
 /// Match a keyword with a word boundary on the trailing side — rejects
-/// `justify` matching `just`. Consumes trailing ws/comments.
-pub(super) fn kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
+/// `justify` matching `just`. Does NOT consume trailing ws/comments;
+/// use `kw()` when the trailing `wsc()` should be eaten too.
+pub(super) fn bare_kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
     just(keyword)
         .then(
             any::<&'a str, Err<'a>>()
@@ -31,7 +32,11 @@ pub(super) fn kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<
                 .not(),
         )
         .ignored()
-        .then_ignore(wsc())
+}
+
+/// `bare_kw` + trailing ws/comment consumption.
+pub(super) fn kw<'a>(keyword: &'static str) -> impl Parser<'a, &'a str, (), Err<'a>> + Clone {
+    bare_kw(keyword).then_ignore(wsc())
 }
 
 /// Identifier: `[A-Za-z_][A-Za-z0-9_]*` — returned as an owned `String`.

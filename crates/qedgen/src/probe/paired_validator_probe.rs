@@ -185,7 +185,7 @@ fn emit_findings(by_field: &BTreeMap<String, Vec<ValidatorSite>>) -> Vec<Finding
                  operator strictness with no sentinel semantics in play.",
                 shapes.len()
             ),
-            category_tag: "paired_validator_input_domain_mismatch".to_string(),
+            category_tag: Category::PairedValidatorInputDomainMismatch.tag().to_string(),
             reproducer: Some(Reproducer::MolluskPrompt {
                 template_path:
                     "references/probes/arithmetic_symbol/paired_validator_input_domain_mismatch.md#reproducer"

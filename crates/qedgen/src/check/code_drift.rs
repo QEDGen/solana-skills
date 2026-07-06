@@ -200,23 +200,13 @@ pub fn check_handler_todos(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| path.display().to_string());
 
-        warnings.push(CompletenessWarning {
-            rule: "handler_unfilled_todo".to_string(),
-            severity: Severity::Warning,
-            priority: 2,
-            message: format!(
+        warnings.push(CompletenessWarning::new("handler_unfilled_todo", Severity::Warning, 2, format!(
                 "handler `{}` has an unfilled `todo!()` in {} — spec expects: {}",
                 handler.name, rel, hint_text
-            ),
-            subject: Some(handler.name.clone()),
-            fix: format!(
+            )).subject(handler.name.clone()).fix(format!(
                 "Open `{}` and fill the body using guard calls, state structs, and the spec's declared {} as the contract. Codegen leaves `todo!()` so the agent closes the loop on business logic; the placeholder type-checks but panics at runtime.",
                 rel, hint_text
-            ),
-            example: None,
-            counterexample: None,
-            fix_options: Vec::new(),
-        });
+            )));
     }
 
     Ok(warnings)

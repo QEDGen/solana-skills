@@ -77,33 +77,33 @@ pub(super) fn check_unconstrained_modifies(spec: &ParsedSpec) -> Vec<Completenes
             if referenced {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "unconstrained_modifies".to_string(),
-                severity: Severity::Error,
-                priority: 0,
-                message: format!(
-                    "handler '{}' lists '{}' in `modifies` but no `effect` writes \
+            warnings.push(
+                warn(
+                    "unconstrained_modifies",
+                    Severity::Error,
+                    0,
+                    format!(
+                        "handler '{}' lists '{}' in `modifies` but no `effect` writes \
                      it and no `ensures` clause references it — the field is \
                      completely unconstrained. Verification harnesses have no \
                      contract to check against and the Lean frame conditions \
                      allow any post-value.",
-                    h.name, field
-                ),
-                subject: Some(h.name.clone()),
-                fix: format!(
+                        h.name, field
+                    ),
+                )
+                .subject(h.name.clone())
+                .fix(format!(
                     "Either add an `ensures` clause that constrains `{}` against \
                      its pre-state value (so Kani / proptest can verify the impl \
                      satisfies the contract), or remove `{}` from `modifies` if \
                      it isn't really being modified.",
                     field, field
-                ),
-                example: Some(format!(
+                ))
+                .example(format!(
                     "  ensures {}_grew : state.{} >= old(state.{})",
                     field, field, field
                 )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+            );
         }
     }
     warnings
@@ -155,21 +155,11 @@ pub(super) fn check_unguarded_terminal_transition(spec: &ParsedSpec) -> Vec<Comp
         if r25_will_bind_auth(handler, spec) {
             continue;
         }
-        warnings.push(CompletenessWarning {
-            rule: "unguarded_terminal_transition".to_string(),
-            severity: Severity::Warning,
-            priority: 1,
-            message: format!(
+        warnings.push(warn("unguarded_terminal_transition", Severity::Warning, 1, format!(
                 "handler '{handler}' transitions to terminal state `{post}` with no `requires` clauses. Terminal transitions usually need a guard — anyone with the right account shape can otherwise trigger the transition.",
                 handler = handler.name,
                 post = post,
-            ),
-            subject: Some(handler.name.clone()),
-            fix: "Add a `requires` clause that gates the transition. For liquidation: a health threshold (`requires state.amount > state.collateral else AccountHealthy`). For closing: an empty-balance check (`requires state.balance == 0`). For settlement: a finality predicate.".to_string(),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+            )).subject(handler.name.clone()).fix("Add a `requires` clause that gates the transition. For liquidation: a health threshold (`requires state.amount > state.collateral else AccountHealthy`). For closing: an empty-balance check (`requires state.balance == 0`). For settlement: a finality predicate."));
     }
     warnings
 }
@@ -231,25 +221,15 @@ pub(super) fn check_scalar_counter_no_dedup(spec: &ParsedSpec) -> Vec<Completene
             if !bounded_by_state {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "scalar_counter_no_dedup".to_string(),
-                severity: Severity::Info,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("scalar_counter_no_dedup", Severity::Info, 2, format!(
                     "handler '{handler}' increments scalar counter `{lhs}` toward an existing bound, but the spec has no per-actor record (e.g. `voted : Map[N] U8`) preventing the same actor from incrementing across different signer pubkeys.",
                     handler = handler.name,
                     lhs = lhs,
-                ),
-                subject: Some(handler.name.clone()),
-                fix: format!(
+                )).subject(handler.name.clone()).fix(format!(
                     "Add a per-actor tracking field and a corresponding requires clause:\n\n    state.Active of {{ ... voted : Map[N] U8 ... }}\n\n    handler {handler} (i : U8) ... {{\n      requires state.voted[i] == 0 else AlreadyVoted\n      effect {{\n        {lhs} += 1\n        voted[i] := 1\n      }}\n    }}",
                     handler = handler.name,
                     lhs = lhs,
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
             // Only one warning per handler.
             break;
         }
@@ -322,26 +302,16 @@ pub(super) fn check_unguarded_indexed_mutation(spec: &ParsedSpec) -> Vec<Complet
         if r25_will_bind_auth(handler, spec) {
             continue;
         }
-        warnings.push(CompletenessWarning {
-            rule: "unguarded_indexed_mutation".to_string(),
-            severity: Severity::Warning,
-            priority: 1,
-            message: format!(
+        warnings.push(warn("unguarded_indexed_mutation", Severity::Warning, 1, format!(
                 "handler '{handler}' takes index `{idx} : <int>` and mutates `state.<map>[{idx}]`, but no `requires` clause binds `{idx}` to the signer `{who}`. As written, any signer can drive the indexed mutation against any slot — the only existing check is the bounds (`{idx} < bound`), which rules out out-of-range but not unauthorized writes.",
                 handler = handler.name,
                 idx = idx_param,
                 who = who,
-            ),
-            subject: Some(handler.name.clone()),
-            fix: format!(
+            )).subject(handler.name.clone()).fix(format!(
                 "Add a `requires` clause that ties `{idx}` to `{who}`, e.g.:\n\n    requires state.members[{idx}] == {who} else NotAMember\n\nWithout it, `{idx}` is just a number the caller picks.",
                 idx = idx_param,
                 who = who,
-            ),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+            )));
     }
     warnings
 }
@@ -432,26 +402,16 @@ pub(super) fn check_cross_adt_field_ambiguity(spec: &ParsedSpec) -> Vec<Complete
             }
             let adt_list = adts.join(", ");
             let first_adt_lower = adts[0].to_lowercase();
-            warnings.push(CompletenessWarning {
-                rule: "cross_adt_field_ambiguity".to_string(),
-                severity: Severity::Warning,
-                priority: 2,
-                message: format!(
+            warnings.push(warn("cross_adt_field_ambiguity", Severity::Warning, 2, format!(
                     "property '{}' references field `{}` which is declared in multiple account types ({}); codegen will emit the predicate inside every matching module",
                     prop.name, field, adt_list,
-                ),
-                subject: Some(prop.name.clone()),
-                fix: format!(
+                )).subject(prop.name.clone()).fix(format!(
                     "Qualify the reference with the owning account type (e.g. `{}.{}`), or split the property into one per account type.",
                     first_adt_lower, field,
-                ),
-                example: Some(format!(
+                )).example(format!(
                     "  property {} \"...\"\n    {}.{} >= 0",
                     prop.name, first_adt_lower, field,
-                )),
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )));
         }
     }
     warnings

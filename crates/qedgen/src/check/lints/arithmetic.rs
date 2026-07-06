@@ -23,30 +23,30 @@ pub(super) fn check_ref_impl_unbounded_arith(spec: &ParsedSpec) -> Vec<Completen
         if r.rust_body.contains('-') {
             ops.push("-");
         }
-        warnings.push(CompletenessWarning {
-            rule: "ref_impl_unbounded_arith".to_string(),
-            severity: Severity::Info,
-            priority: 2,
-            message: format!(
-                "ref_impl '{}' uses {} over bounded-numeric params/return. \
+        warnings.push(
+            warn(
+                "ref_impl_unbounded_arith",
+                Severity::Info,
+                2,
+                format!(
+                    "ref_impl '{}' uses {} over bounded-numeric params/return. \
                  Lean lowers this to `Nat`/`Int` (unbounded — no overflow), \
                  but the generated Rust runs on `u64`/`i64`/etc. where the \
                  same expression can wrap (release) or panic (debug). \
                  Bounded-arithmetic verification lives in Kani.",
-                r.name,
-                ops.join("/"),
-            ),
-            subject: Some(r.name.clone()),
-            fix: "Run `qedgen verify --kani` against the generated impl-targeted \
+                    r.name,
+                    ops.join("/"),
+                ),
+            )
+            .subject(r.name.clone())
+            .fix(
+                "Run `qedgen verify --kani` against the generated impl-targeted \
                 Kani harness — auto-emitted starting v2.26 whenever a ref_impl \
                 trips this lint. The harness drives every numeric param with \
                 `kani::any()` and produces a concrete counterexample at the \
-                bit-width boundary."
-                .to_string(),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+                bit-width boundary.",
+            ),
+        );
     }
     warnings
 }
@@ -123,26 +123,16 @@ pub(super) fn check_checked_arith_needs_math_overflow(
         .map(|v| format!("      | {}", v))
         .collect::<Vec<_>>()
         .join("\n");
-    vec![CompletenessWarning {
-        rule: "missing_math_overflow".to_string(),
-        severity: Severity::Warning,
-        priority: 2,
-        message: format!(
+    vec![warn("missing_math_overflow", Severity::Warning, 2, format!(
             "handler(s) [{}] use checked-arithmetic effects (`+=` / `-=`), but `type Error` doesn't declare a `{}` variant. The generated Rust references `{}Error::{}` and won't compile without it.",
             names,
             variants,
             crate::codegen_shared::to_pascal_case(&spec.program_name),
             variants,
-        ),
-        subject: None,
-        fix: format!(
+        )).fix(format!(
             "Add `{}` to your `type Error | …` block. Example:\n\n    type Error\n{}\n      | …\n\nOr opt out of checked semantics per-effect with `+=!` (saturating) or `+=?` (wrapping), or override the variant inline with `pool += amount else MyVariant`.",
             variants, fix_block,
-        ),
-        example: None,
-        counterexample: None,
-        fix_options: vec![],
-    }]
+        ))]
 }
 
 /// `[wrapping_arithmetic]` / `[saturating_arithmetic]` — explicit
@@ -168,30 +158,29 @@ pub(super) fn check_wrapping_arithmetic_opt_in(spec: &ParsedSpec) -> Vec<Complet
                 "sub_sat" => (Severity::Info, 2, "saturating", "-="),
                 _ => continue,
             };
-            warnings.push(CompletenessWarning {
-                rule: format!("{}_arithmetic", label),
-                severity,
-                priority,
-                message: format!(
-                    "handler `{}` uses {} arithmetic on `{}` (op `{}`) — silent overflow {}. Default `{}` (checked) aborts on overflow.",
-                    op.name,
-                    label,
-                    field,
-                    kind,
-                    if label == "wrapping" { "modulo 2^N" } else { "saturating to MAX/MIN" },
-                    default_op,
-                ),
-                subject: Some(format!("{}::{}::{}", op.name, field, kind)),
-                fix: format!(
+            warnings.push(
+                warn(
+                    &format!("{}_arithmetic", label),
+                    severity,
+                    priority,
+                    format!(
+                        "handler `{}` uses {} arithmetic on `{}` (op `{}`) — silent overflow {}. Default `{}` (checked) aborts on overflow.",
+                        op.name,
+                        label,
+                        field,
+                        kind,
+                        if label == "wrapping" { "modulo 2^N" } else { "saturating to MAX/MIN" },
+                        default_op,
+                    ),
+                )
+                .subject(format!("{}::{}::{}", op.name, field, kind))
+                .fix(format!(
                     "If the {label} semantic is intentional (epoch wrap, rate limiter), document the invariant inline. Otherwise change `{kind}` to `{default_op}` (checked) — the spec's `type Error` block must declare `MathOverflow`.",
                     label = label,
                     kind = kind,
                     default_op = default_op,
-                ),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )),
+            );
         }
     }
     warnings
@@ -226,20 +215,10 @@ pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
             if let FieldTypeShape::Map { bound, inner } = classify_field_type(ftype) {
                 // Rule: bound must be a declared const OR a unit-only sum type.
                 if !const_names.contains(bound) && !unit_only_sum_names.contains(bound) {
-                    warnings.push(CompletenessWarning {
-                        rule: "map_bound_not_const".to_string(),
-                        severity: Severity::Error,
-                        priority: 0,
-                        message: format!(
+                    warnings.push(warn("map_bound_not_const", Severity::Error, 0, format!(
                             "field '{}.{}' uses Map[{}] but '{}' is neither a declared `const` nor a unit-only enum type",
                             acct.name, fname, bound, bound
-                        ),
-                        subject: Some(fname.clone()),
-                        fix: format!("Add `const {} = <size>` or declare `type {} | Variant1 | Variant2 | …` at the top of the spec", bound, bound),
-                        example: Some(format!("  const {} = 1024", bound)),
-                        counterexample: None,
-                        fix_options: vec![],
-                    });
+                        )).subject(fname.clone()).fix(format!("Add `const {} = <size>` or declare `type {} | Variant1 | Variant2 | …` at the top of the spec", bound, bound)).example(format!("  const {} = 1024", bound)));
                 }
 
                 // Rule: inner must be a record or a known primitive
@@ -260,23 +239,13 @@ pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
                             | "Pubkey"
                     );
                 if !is_known {
-                    warnings.push(CompletenessWarning {
-                        rule: "map_value_unknown".to_string(),
-                        severity: Severity::Error,
-                        priority: 0,
-                        message: format!(
+                    warnings.push(warn("map_value_unknown", Severity::Error, 0, format!(
                             "field '{}.{}' uses Map[{}] {} but '{}' is neither a declared record nor a primitive",
                             acct.name, fname, bound, inner, inner
-                        ),
-                        subject: Some(fname.clone()),
-                        fix: format!("Declare `type {} = {{ ... }}`", inner),
-                        example: Some(format!(
+                        )).subject(fname.clone()).fix(format!("Declare `type {} = {{ ... }}`", inner)).example(format!(
                             "  type {} = {{\n    active : Bool,\n    capital : U128,\n  }}",
                             inner
-                        )),
-                        counterexample: None,
-                        fix_options: vec![],
-                    });
+                        )));
                 }
 
                 map_fields.insert(fname.as_str(), (acct.name.as_str(), bound, inner));
@@ -291,23 +260,13 @@ pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
             if let Some(bracket) = field.find('[') {
                 let root = &field[..bracket];
                 if !map_fields.contains_key(root) {
-                    warnings.push(CompletenessWarning {
-                        rule: "subscript_not_map".to_string(),
-                        severity: Severity::Error,
-                        priority: 0,
-                        message: format!(
+                    warnings.push(warn("subscript_not_map", Severity::Error, 0, format!(
                             "handler '{}' has effect `{}` but '{}' is not a Map-typed state field",
                             op.name, field, root
-                        ),
-                        subject: Some(op.name.clone()),
-                        fix: format!(
+                        )).subject(op.name.clone()).fix(format!(
                             "Declare `{} : Map[MAX_...] SomeRecord` in the state type, or remove the subscript",
                             root
-                        ),
-                        example: None,
-                        counterexample: None,
-                        fix_options: vec![],
-                    });
+                        )));
                 }
             }
         }

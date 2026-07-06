@@ -915,7 +915,7 @@ pub fn findings_from_catalogue(cat: &PinocchioCatalogue) -> Vec<crate::probe::Fi
                     site.file.display(),
                     site.line
                 ),
-                category_tag: "pinocchio_stale_safety_comment".to_string(),
+                category_tag: Category::PinocchioStaleSafetyComment.tag().to_string(),
                 reproducer: Some(Reproducer::MiriPrompt {
                     template_path:
                         "references/probes/pinocchio/stale_safety_comment.md#miri-reproducer"

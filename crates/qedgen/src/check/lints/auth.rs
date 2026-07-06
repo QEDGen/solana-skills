@@ -95,24 +95,14 @@ pub(super) fn check_unbound_auth(spec: &ParsedSpec) -> Vec<CompletenessWarning> 
         if auth_bound_via_account {
             continue;
         }
-        warnings.push(CompletenessWarning {
-            rule: "unbound_auth".to_string(),
-            severity: Severity::Warning,
-            priority: 1,
-            message: format!(
+        warnings.push(warn("unbound_auth", Severity::Warning, 1, format!(
                 "handler '{handler}' declares `auth {who}` but no state field is named `{who}`. R25's `auth → has_one` lowering only fires when the auth name matches a state field — as written, any signer can call this handler against any program-owned account.",
                 handler = handler.name,
                 who = who,
-            ),
-            subject: Some(handler.name.clone()),
-            fix: format!(
+            )).subject(handler.name.clone()).fix(format!(
                 "Either (a) add `{who} : Pubkey` to the state account so codegen emits `has_one = {who}`, (b) add an explicit `requires state.<field> == {who} else Unauthorized` clause that binds the signer to a stored value, or (c) mark the handler `permissionless` if it's deliberately open.",
                 who = who,
-            ),
-            example: None,
-            counterexample: None,
-            fix_options: vec![],
-        });
+            )));
     }
     warnings
 }
@@ -163,22 +153,12 @@ pub(super) fn check_unconditional_value_transfer(spec: &ParsedSpec) -> Vec<Compl
             if r25_will_bind_auth(handler, spec) {
                 continue;
             }
-            warnings.push(CompletenessWarning {
-                rule: "unconditional_value_transfer".to_string(),
-                severity: Severity::Warning,
-                priority: 1,
-                message: format!(
+            warnings.push(warn("unconditional_value_transfer", Severity::Warning, 1, format!(
                     "handler '{handler}' transfers from program-owned `{from}` (authority `{auth}`) with no `requires` clauses constraining who can call it. Value-extracting handlers usually need an authority binding or a precondition that gates the transfer.",
                     handler = handler.name,
                     from = transfer.from,
                     auth = auth_name,
-                ),
-                subject: Some(handler.name.clone()),
-                fix: "Either bind the auth to a state field (so R25 emits `has_one = X`) or add a precondition that gates the transfer (e.g. health check, redemption ratio, allowance). Without one, any signer can extract value from the program-owned account.".to_string(),
-                example: None,
-                counterexample: None,
-                fix_options: vec![],
-            });
+                )).subject(handler.name.clone()).fix("Either bind the auth to a state field (so R25 emits `has_one = X`) or add a precondition that gates the transfer (e.g. health check, redemption ratio, allowance). Without one, any signer can extract value from the program-owned account."));
             break; // one warning per handler
         }
     }

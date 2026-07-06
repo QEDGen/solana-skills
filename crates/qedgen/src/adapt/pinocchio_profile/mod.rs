@@ -264,15 +264,6 @@ fn infer_single_src_dir(src_dir: &Path, include_siblings: bool) -> Result<Pinocc
 fn empty_handler_profile(name: String) -> PinocchioHandlerProfile {
     PinocchioHandlerProfile {
         name,
-        instruction_tag: None,
-        accounts: Vec::new(),
-        account_roles: BTreeMap::new(),
-        token_account_bindings: BTreeMap::new(),
-        mint_decimal_bindings: BTreeMap::new(),
-        account_key_derivations: BTreeMap::new(),
-        source_expr_aliases: BTreeMap::new(),
-        verified_stubs: Vec::new(),
-        params: Vec::new(),
-        repeats: Vec::new(),
+        ..Default::default()
     }
 }

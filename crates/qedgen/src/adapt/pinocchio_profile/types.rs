@@ -11,7 +11,7 @@ pub(crate) struct PinocchioProofProfile {
     pub account_layouts: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PinocchioHandlerProfile {
     pub name: String,
     pub instruction_tag: Option<u8>,
@@ -150,16 +150,7 @@ impl PinocchioProofProfile {
                     .entry(name.clone())
                     .or_insert_with(|| PinocchioHandlerProfile {
                         name,
-                        instruction_tag: None,
-                        accounts: Vec::new(),
-                        account_roles: BTreeMap::new(),
-                        token_account_bindings: BTreeMap::new(),
-                        mint_decimal_bindings: BTreeMap::new(),
-                        account_key_derivations: BTreeMap::new(),
-                        source_expr_aliases: BTreeMap::new(),
-                        verified_stubs: Vec::new(),
-                        params: Vec::new(),
-                        repeats: Vec::new(),
+                        ..Default::default()
                     });
             if handler.instruction_tag.is_some() {
                 entry.instruction_tag = handler.instruction_tag;
@@ -233,16 +224,7 @@ impl PinocchioProofProfile {
                 .entry(handler_name.clone())
                 .or_insert_with(|| PinocchioHandlerProfile {
                     name: handler_name.clone(),
-                    instruction_tag: None,
-                    accounts: Vec::new(),
-                    account_roles: BTreeMap::new(),
-                    token_account_bindings: BTreeMap::new(),
-                    mint_decimal_bindings: BTreeMap::new(),
-                    account_key_derivations: BTreeMap::new(),
-                    source_expr_aliases: BTreeMap::new(),
-                    verified_stubs: Vec::new(),
-                    params: Vec::new(),
-                    repeats: Vec::new(),
+                    ..Default::default()
                 });
             entry.instruction_tag = Some(*tag);
 
