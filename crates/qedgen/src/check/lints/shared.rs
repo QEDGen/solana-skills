@@ -14,6 +14,64 @@ pub(crate) fn warn(
     CompletenessWarning::new(rule, severity, priority, message)
 }
 
+/// Shared per-spec context threaded through the completeness rules that
+/// need more than the bare `ParsedSpec`: the signer hint for auth
+/// suggestions and the variant index every effect-LHS lint uses to
+/// normalize `Variant.field` paths.
+pub(crate) struct LintCtx<'a> {
+    pub(crate) spec: &'a ParsedSpec,
+    /// A likely signer field name from state (first Pubkey field).
+    pub(crate) signer_hint: &'a str,
+    /// Variant index for `Variant.field` LHS normalization, shared by every
+    /// effect-LHS lint so the variant prefix is stripped before comparing
+    /// against bare field names. Maps variant name → its payload fields;
+    /// empty when no account type has variants.
+    pub(crate) variant_fields:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl<'a> LintCtx<'a> {
+    pub(crate) fn new(spec: &'a ParsedSpec) -> Self {
+        let signer_hint = spec
+            .state_fields
+            .iter()
+            .find(|(_, t)| t == "Pubkey")
+            .map(|(n, _)| n.as_str())
+            .unwrap_or("authority");
+
+        let mut variant_fields: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeSet<String>,
+        > = std::collections::BTreeMap::new();
+        for acct in &spec.account_types {
+            for variant in &acct.variants {
+                let entry = variant_fields.entry(variant.name.clone()).or_default();
+                for (fname, _) in &variant.fields {
+                    entry.insert(fname.clone());
+                }
+            }
+        }
+
+        LintCtx {
+            spec,
+            signer_hint,
+            variant_fields,
+        }
+    }
+
+    /// Strip a leading `Variant.` prefix when it names a known variant:
+    /// `Active.pool` → `pool`; `accounts[i].cap` / `pool` → unchanged.
+    pub(crate) fn normalize_lhs(&self, lhs: &str) -> String {
+        if let Some(dot) = lhs.find('.') {
+            let head = &lhs[..dot];
+            if self.variant_fields.contains_key(head) {
+                return lhs[dot + 1..].to_string();
+            }
+        }
+        lhs.to_string()
+    }
+}
+
 /// Whole-word match: boundaries are start/end of string or any non-alphanumeric, non-underscore byte.
 pub(super) fn contains_word(haystack: &str, needle: &str) -> bool {
     for (i, _) in haystack.match_indices(needle) {
