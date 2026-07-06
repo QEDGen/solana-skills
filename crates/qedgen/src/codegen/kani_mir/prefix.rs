@@ -7,13 +7,10 @@ use super::*;
 /// File header: banner with the `tests/kani.rs` fingerprint hash.
 pub(crate) fn emit_header(out: &mut String, parsed: &ParsedSpec) {
     let fp = crate::fingerprint::compute_fingerprint(parsed);
-    let hash = fp
-        .file_hashes
-        .get("tests/kani.rs")
-        .cloned()
-        .unwrap_or_default();
-
-    out.push_str(&crate::banner::banner(None, &hash));
+    out.push_str(&crate::codegen_shared::marker_unlabeled(
+        &fp,
+        "tests/kani.rs",
+    ));
     out.push_str("//\n");
     out.push_str("// Self-contained Kani proof harnesses for the spec.\n");
     out.push_str("//\n");

@@ -76,16 +76,14 @@ pub(crate) fn emit_kani_impl_struct_framework(
     fw: &StructImplFramework,
 ) -> Result<()> {
     let fp = crate::fingerprint::compute_fingerprint(spec);
-    let hash = fp
-        .file_hashes
-        .get(fw.fingerprint_key)
-        .cloned()
-        .unwrap_or_default();
 
     let mut out = String::new();
 
     // ── File header ──────────────────────────────────────────────────────
-    out.push_str(&crate::banner::banner(None, &hash));
+    out.push_str(&crate::codegen_shared::marker_unlabeled(
+        &fp,
+        fw.fingerprint_key,
+    ));
     out.push_str("//\n");
     out.push_str(fw.intro);
     out.push_str("//\n");

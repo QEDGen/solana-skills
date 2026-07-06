@@ -28,16 +28,15 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     let mir = crate::mir::lower(&spec);
 
     let fp = crate::fingerprint::compute_fingerprint(&spec);
-    let hash = fp
-        .file_hashes
-        .get("src/tests.rs")
-        .cloned()
-        .unwrap_or_default();
 
     let is_multi = spec.account_types.len() > 1;
     let mut out = String::new();
 
-    out.push_str(&crate::banner::banner(Some("DO NOT EDIT"), &hash));
+    out.push_str(&crate::codegen_shared::marker(
+        "DO NOT EDIT",
+        &fp,
+        "src/tests.rs",
+    ));
     out.push_str("// Unit tests generated from qedspec.\n");
     out.push_str("// These test effects, guards, and properties on a plain state struct.\n");
     out.push_str("// No SVM or Quasar runtime required — just `cargo test`.\n\n");
