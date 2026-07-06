@@ -133,6 +133,46 @@ Ok(())
 }
 
 #[test]
+fn unparseable_source_fails_loudly_instead_of_under_inferring() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    // Missing closing brace: `syn::parse_file` fails. The old regex fallback
+    // would have silently under-inferred a partial profile from this file.
+    std::fs::write(
+        src.join("processor.rs"),
+        r#"
+pub fn process_transfer(accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    let [source, destination, authority, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    Ok(())
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("ok.rs"),
+        "pub fn process_ping(accounts: &[AccountInfo], data: &[u8]) -> ProgramResult { Ok(()) }\n",
+    )
+    .unwrap();
+
+    let err = infer_from_src_dir(&src).expect_err("unparseable Rust must be a hard error");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("unparseable Rust"),
+        "error should state that the source failed to parse: {message}"
+    );
+    assert!(
+        message.contains("processor.rs") && message.contains(&src.display().to_string()),
+        "error should name the offending file: {message}"
+    );
+    assert!(
+        !message.contains("ok.rs"),
+        "error should only name files that failed to parse: {message}"
+    );
+}
+
+#[test]
 fn skips_generated_kani_impl_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let src = dir.path().join("src");
