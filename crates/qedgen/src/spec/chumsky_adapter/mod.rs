@@ -399,43 +399,17 @@ impl<'a> TypeEnv<'a> {
 }
 
 /// Any `Expr::Old(_)` in the tree? Used by `classify_property_body` and the
-/// `vacuous_property_lowering` lint. Mirrors the shape of
-/// `quantifier::find_nested_quantifier` — same node set, different predicate.
+/// `vacuous_property_lowering` lint. Walks the shared `ast::for_each_child`
+/// spine (F2), keeping only the `Old` arm.
 pub(crate) fn expr_contains_old(node: &Node<Expr>) -> bool {
-    match &node.node {
-        Expr::Old(_) => true,
-        Expr::BoolOp { lhs, rhs, .. }
-        | Expr::Cmp { lhs, rhs, .. }
-        | Expr::Arith { lhs, rhs, .. } => expr_contains_old(lhs) || expr_contains_old(rhs),
-        Expr::Not(inner) | Expr::Paren(inner) => expr_contains_old(inner),
-        Expr::Sum { body, .. } | Expr::Quant { body, .. } => expr_contains_old(body),
-        Expr::MulDivFloor { a, b, d } | Expr::MulDivCeil { a, b, d } => {
-            expr_contains_old(a) || expr_contains_old(b) || expr_contains_old(d)
-        }
-        Expr::Match { scrutinee, arms } => {
-            expr_contains_old(scrutinee) || arms.iter().any(|arm| expr_contains_old(&arm.body))
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            expr_contains_old(cond)
-                || expr_contains_old(then_branch)
-                || expr_contains_old(else_branch)
-        }
-        Expr::Let { value, body, .. } => expr_contains_old(value) || expr_contains_old(body),
-        Expr::App { args, .. } => args.iter().any(expr_contains_old),
-        Expr::Field { base, .. } => expr_contains_old(base),
-        Expr::RecordLit(fs) => fs.iter().any(|(_, v)| expr_contains_old(v)),
-        Expr::RecordUpdate { base, updates } => {
-            expr_contains_old(base) || updates.iter().any(|(_, v)| expr_contains_old(v))
-        }
-        Expr::Ctor { payload, .. } => payload.as_ref().is_some_and(|p| expr_contains_old(p)),
-        Expr::IsVariant { scrutinee, .. } => expr_contains_old(scrutinee),
-        // Leaves
-        Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => false,
+    if matches!(node.node, Expr::Old(_)) {
+        return true;
     }
+    let mut found = false;
+    crate::ast::for_each_child(&node.node, |child| {
+        found = found || expr_contains_old(child);
+    });
+    found
 }
 
 /// Temporal shape of a property body: contains `Expr::Old(_)` ⇒ `Binary`,
