@@ -50,6 +50,20 @@ pub(crate) enum RuntimeOverride {
     Sbpf,
 }
 
+/// CLI override → probe runtime, 1:1 by name. Keeps the two dispatch
+/// sites (`--program` and `--fuzz --root`) from hand-mapping the enum.
+impl From<RuntimeOverride> for crate::probe::Runtime {
+    fn from(r: RuntimeOverride) -> Self {
+        match r {
+            RuntimeOverride::Pinocchio => Self::Pinocchio,
+            RuntimeOverride::Anchor => Self::Anchor,
+            RuntimeOverride::Quasar => Self::Quasar,
+            RuntimeOverride::Native => Self::Native,
+            RuntimeOverride::Sbpf => Self::Sbpf,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Commands {
     /// Generate Lean 4 proofs using Leanstral API

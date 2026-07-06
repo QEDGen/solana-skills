@@ -34,3 +34,71 @@ pub fn lint_with_opts(
     let spec = parse_spec_file_with_opts(spec_path, lock_mode, cache_opts)?;
     Ok(check_completeness(&spec))
 }
+
+/// `qedgen check --anchor-project <path>`: spec handler list vs the
+/// existing Anchor program — catches stale specs and uncovered handlers
+/// as a CI gate. Renders JSON or the human report; returns true when any
+/// finding fired (the caller gates the exit code). Parses the spec with
+/// default opts, as this stage always has — folding it into the caller's
+/// lock/cache-aware parse would change gating under `--frozen`. Moved
+/// out of the dispatch arm (T7c).
+pub fn render_anchor_project_report(
+    spec_path: &std::path::Path,
+    project_path: &std::path::Path,
+    json: bool,
+) -> Result<bool> {
+    let parsed = parse_spec_file(spec_path)?;
+    let findings = crate::anchor_check::check_anchor_coverage(&parsed, project_path)?;
+    let effect_findings = crate::anchor_check::check_effect_coverage(&parsed, project_path)?;
+    if json {
+        let payload = serde_json::json!({
+            "handler_coverage": findings
+                .iter()
+                .map(|f| serde_json::json!({
+                    "kind": format!("{:?}", f.kind),
+                    "handler": f.handler_name,
+                    "message": f.message(),
+                }))
+                .collect::<Vec<_>>(),
+            "effect_coverage": effect_findings
+                .iter()
+                .map(|f| serde_json::json!({
+                    "handler": f.handler,
+                    "field": f.field,
+                    "message": f.message(),
+                }))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        if findings.is_empty() {
+            eprintln!(
+                "Anchor cross-check (`{}`) — spec and program handler sets agree.",
+                project_path.display()
+            );
+        } else {
+            eprintln!(
+                "Anchor cross-check (`{}`) — {} handler-set disagreement(s):",
+                project_path.display(),
+                findings.len()
+            );
+            for f in &findings {
+                eprintln!("  ! {}", f.message());
+            }
+        }
+        if effect_findings.is_empty() {
+            eprintln!(
+                "Effect coverage — every spec effect has a matching mutation in the Rust body."
+            );
+        } else {
+            eprintln!(
+                "Effect coverage — {} unimplemented effect(s):",
+                effect_findings.len()
+            );
+            for f in &effect_findings {
+                eprintln!("  ! {}", f.message());
+            }
+        }
+    }
+    Ok(!findings.is_empty() || !effect_findings.is_empty())
+}

@@ -6,7 +6,7 @@
 
 use crate::run_helpers::*;
 use crate::*;
-use anyhow::{ensure, Context as _, Result};
+use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
 /// Top-level subcommand name for telemetry and the last-error log
 /// header. Aristotle's sub-verbs collapse to the single `"aristotle"`
@@ -48,12 +48,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             validate,
             mathlib,
         } => {
-            ensure!(passes > 0, "passes must be greater than 0");
-            ensure!(
-                (0.0..=2.0).contains(&temperature),
-                "temperature must be between 0.0 and 2.0"
-            );
-            ensure!(max_tokens > 0, "max_tokens must be greater than 0");
+            validate_dispatch_args(passes, temperature, max_tokens)?;
             if validate {
                 deps::require_lean()?;
             }
@@ -80,12 +75,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             validate,
             escalate,
         } => {
-            ensure!(passes > 0, "passes must be greater than 0");
-            ensure!(
-                (0.0..=2.0).contains(&temperature),
-                "temperature must be between 0.0 and 2.0"
-            );
-            ensure!(max_tokens > 0, "max_tokens must be greater than 0");
+            validate_dispatch_args(passes, temperature, max_tokens)?;
             if validate {
                 deps::require_lean()?;
             }
@@ -226,14 +216,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // audit subagent writes the reproducers.
             if let Some(prog_root) = &program {
                 let detected = probe::detect_runtime_public(prog_root);
-                let runtime_final = match runtime {
-                    Some(RuntimeOverride::Pinocchio) => probe::Runtime::Pinocchio,
-                    Some(RuntimeOverride::Anchor) => probe::Runtime::Anchor,
-                    Some(RuntimeOverride::Quasar) => probe::Runtime::Quasar,
-                    Some(RuntimeOverride::Native) => probe::Runtime::Native,
-                    Some(RuntimeOverride::Sbpf) => probe::Runtime::Sbpf,
-                    None => detected.clone(),
-                };
+                let runtime_final = runtime
+                    .map(probe::Runtime::from)
+                    .unwrap_or_else(|| detected.clone());
 
                 // Anchor/Quasar route through anchor_extractor for
                 // scaffold-to-spec interviews; no per-site findings yet
@@ -294,31 +279,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // --audit-dir: materialize the audit working set
                 // (interview.md, clusters.json, skeleton.qedspec).
                 if let (Some(dir), Some(clusters_ref)) = (audit_dir.as_ref(), clusters.as_ref()) {
-                    let program_name = prog_root
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("program")
-                        .to_string();
-                    let now_iso = time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Iso8601::DEFAULT)
-                        .unwrap_or_else(|_| "unknown".to_string());
-                    std::fs::create_dir_all(dir)?;
-                    let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
-                    std::fs::write(dir.join("interview.md"), md)?;
-                    // clusters.json — ratify looks up cluster_id → suggested_syntax here.
-                    let clusters_json = serde_json::to_string_pretty(clusters_ref)?;
-                    std::fs::write(dir.join("clusters.json"), clusters_json)?;
-                    // skeleton.qedspec — handler stubs only.
-                    let anchor_overrides = std::collections::HashMap::new();
-                    let adapter_config =
-                        adapt::AdapterConfig::new(&program_name, &anchor_overrides);
-                    let skeleton = adapt::render_skeleton_for_framework(
-                        program_model::ProgramFramework::Pinocchio,
+                    write_audit_working_set(
+                        dir,
                         prog_root,
-                        adapter_config,
+                        clusters_ref,
+                        program_model::ProgramFramework::Pinocchio,
+                        /*lenient_skeleton=*/ false,
                     )?;
-                    std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
-                    eprintln!("Wrote audit working set to {}", dir.display());
                 }
                 let output = probe::ProbeOutput {
                     version: probe::schema_version(),
@@ -379,14 +346,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     (None, Some(root_path)) => {
                         let resolved = crucible_brownfield::resolve_program_root(&root_path)?;
                         let detected = probe::detect_runtime_public(&resolved);
-                        let runtime_final = match runtime {
-                            Some(RuntimeOverride::Anchor) => probe::Runtime::Anchor,
-                            Some(RuntimeOverride::Quasar) => probe::Runtime::Quasar,
-                            Some(RuntimeOverride::Pinocchio) => probe::Runtime::Pinocchio,
-                            Some(RuntimeOverride::Native) => probe::Runtime::Native,
-                            Some(RuntimeOverride::Sbpf) => probe::Runtime::Sbpf,
-                            None => detected,
-                        };
+                        let runtime_final = runtime.map(probe::Runtime::from).unwrap_or(detected);
                         let synth = crucible_brownfield::synthesize_spec(&resolved, runtime_final)?;
                         (
                             synth.spec,
@@ -858,60 +818,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // the existing program; catches stale specs and uncovered
             // handlers as a CI gate.
             if let Some(ref project_path) = anchor_project {
-                let parsed = check::parse_spec_file(&spec)?;
-                let findings = anchor_check::check_anchor_coverage(&parsed, project_path)?;
-                let effect_findings = anchor_check::check_effect_coverage(&parsed, project_path)?;
-                if json {
-                    let payload = serde_json::json!({
-                        "handler_coverage": findings
-                            .iter()
-                            .map(|f| serde_json::json!({
-                                "kind": format!("{:?}", f.kind),
-                                "handler": f.handler_name,
-                                "message": f.message(),
-                            }))
-                            .collect::<Vec<_>>(),
-                        "effect_coverage": effect_findings
-                            .iter()
-                            .map(|f| serde_json::json!({
-                                "handler": f.handler,
-                                "field": f.field,
-                                "message": f.message(),
-                            }))
-                            .collect::<Vec<_>>(),
-                    });
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
-                } else {
-                    if findings.is_empty() {
-                        eprintln!(
-                            "Anchor cross-check (`{}`) — spec and program handler sets agree.",
-                            project_path.display()
-                        );
-                    } else {
-                        eprintln!(
-                            "Anchor cross-check (`{}`) — {} handler-set disagreement(s):",
-                            project_path.display(),
-                            findings.len()
-                        );
-                        for f in &findings {
-                            eprintln!("  ! {}", f.message());
-                        }
-                    }
-                    if effect_findings.is_empty() {
-                        eprintln!(
-                            "Effect coverage — every spec effect has a matching mutation in the Rust body."
-                        );
-                    } else {
-                        eprintln!(
-                            "Effect coverage — {} unimplemented effect(s):",
-                            effect_findings.len()
-                        );
-                        for f in &effect_findings {
-                            eprintln!("  ! {}", f.message());
-                        }
-                    }
-                }
-                if !findings.is_empty() || !effect_findings.is_empty() {
+                if check::render_anchor_project_report(&spec, project_path, json)? {
                     has_issues = true;
                 }
             }
@@ -920,74 +827,28 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // verification-status data layer for the agent to render; without
             // it the CLI prints the inline Markdown human fallback.
             if explain {
-                let results = check::check(&spec, &proofs)?;
-                let proven = results
-                    .iter()
-                    .filter(|r| r.status == check::Status::Proven)
-                    .count();
-                let sorry = results
-                    .iter()
-                    .filter(|r| r.status == check::Status::Sorry)
-                    .count();
-                let missing = results
-                    .iter()
-                    .filter(|r| r.status == check::Status::Missing)
-                    .count();
-                let total = results.len();
-
-                let (rendered, what) = if json {
-                    let payload = serde_json::json!({
-                        "spec": spec_name,
-                        "summary": {
-                            "proven": proven,
-                            "sorry": sorry,
-                            "missing": missing,
-                            "total": total,
-                        },
-                        "properties": results,
-                    });
-                    (serde_json::to_string_pretty(&payload)?, "report (JSON)")
-                } else {
-                    let mut md = format!("# {} Verification Report\n\n", spec_name);
-                    md.push_str(&format!(
-                        "**{}/{} properties verified** ({} sorry, {} missing)\n\n",
-                        proven, total, sorry, missing
-                    ));
-                    if proven == total {
-                        md.push_str("> All properties verified (sorry-free).\n\n");
-                    }
-                    md.push_str("## Properties\n\n");
-                    for r in &results {
-                        let (icon, label) = match r.status {
-                            check::Status::Proven => ("✓", "PROVEN"),
-                            check::Status::Sorry => ("✗", "SORRY"),
-                            check::Status::Missing => ("✗", "MISSING"),
-                        };
-                        md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
-                        if let Some(ref intent) = r.intent {
-                            md.push_str(&format!("**Intent:** {}\n\n", intent));
-                        }
-                        if r.status != check::Status::Proven {
-                            if let Some(ref suggestion) = r.suggestion {
-                                md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
-                            }
-                        }
-                    }
-                    (md, "report")
-                };
-
-                if let Some(ref path) = output {
-                    std::fs::write(path, &rendered)?;
-                    eprintln!("Wrote verification {} to {}", what, path.display());
-                } else {
-                    print!("{}", rendered);
-                }
+                check::render_explain_report(&spec, &spec_name, &proofs, json, output.as_deref())?;
             }
+
+            // One parse shared by every remaining ParsedSpec consumer
+            // (--coverage, the orphan scan, --code todo lints) — all use the
+            // same lock_mode/cache_opts. The --frozen proof-hash peek above
+            // keeps its own parse (it deliberately swallows parse errors),
+            // and --anchor-project keeps its default-opts parse inside
+            // `check::render_anchor_project_report` — folding it into this
+            // one would change gating under `--frozen`.
+            let parsed_shared = if coverage || proofs.exists() || code.is_some() {
+                Some(check::parse_spec_file_with_opts(
+                    &spec, lock_mode, cache_opts,
+                )?)
+            } else {
+                None
+            };
 
             // Coverage matrix (--coverage)
             if coverage {
-                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
-                let matrix = check::coverage_matrix(&parsed);
+                let parsed = parsed_shared.as_ref().expect("parsed under coverage guard");
+                let matrix = check::coverage_matrix(parsed);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&matrix)?);
                 } else {
@@ -998,8 +859,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // Orphan / missing preservation theorems in Proofs.lean — runs
             // whenever the proofs dir exists; no-op without obligations.
             if proofs.exists() {
-                let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
-                let findings = proofs_bootstrap::check_orphans(&parsed, &proofs)?;
+                let parsed = parsed_shared
+                    .as_ref()
+                    .expect("parsed under proofs-dir guard");
+                let findings = proofs_bootstrap::check_orphans(parsed, &proofs)?;
                 if !findings.is_empty() {
                     if json {
                         let as_json: Vec<serde_json::Value> = findings
@@ -1031,8 +894,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // user-owned handler bodies) only fire when --code is set.
                 // Merge them in here so JSON consumers see one combined list.
                 if let Some(ref code_dir) = code {
-                    let parsed = check::parse_spec_file_with_opts(&spec, lock_mode, cache_opts)?;
-                    warnings.extend(check::check_handler_todos(&parsed, code_dir)?);
+                    let parsed = parsed_shared.as_ref().expect("parsed under --code guard");
+                    warnings.extend(check::check_handler_todos(parsed, code_dir)?);
                 }
                 if json {
                     println!("{}", serde_json::to_string_pretty(&warnings)?);
@@ -1108,83 +971,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             // axiom discharge.
             if require_verified {
                 let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
-                let findings = check::collect_require_verified_findings(parsed);
-                if !findings.is_empty() {
-                    eprintln!(
-                        "--require-verified: {} unverified import(s) — every imported interface \
-                         with `ensures` clauses must ship a Lake-buildable proof package.",
-                        findings.len(),
-                    );
-                    for f in &findings {
-                        eprintln!("  [CRIT] {}: unverified callee", f.interface_name);
-                        eprintln!("         {}", f.fix_hint);
-                    }
-                    std::process::exit(1);
-                }
+                verify::require_verified_gate(parsed);
             }
 
-            // --recursive: `lake build` every imported proof package
-            // (resolver returns DFS-pre-order = bottom-up, cycle-detected).
-            // Keep walking on failure so every breakage shows; aggregate
-            // exit at the end. Empty list = no-op success.
+            // --recursive: `lake build` every imported proof package.
             if recursive {
                 let parsed = parsed_for_gates.as_ref().expect("parsed under gate guard");
-                if parsed.verified_proof_pkgs.is_empty() {
-                    eprintln!(
-                        "--recursive: no imported proof packages in this spec's dep graph; \
-                         nothing to walk."
-                    );
-                } else {
-                    eprintln!(
-                        "--recursive: walking {} verified provider proof package(s) bottom-up.",
-                        parsed.verified_proof_pkgs.len(),
-                    );
-                    let mut any_failed = false;
-                    for (idx, pkg_root) in parsed.verified_proof_pkgs.iter().enumerate() {
-                        eprintln!(
-                            "  [{}/{}] lake build — {}",
-                            idx + 1,
-                            parsed.verified_proof_pkgs.len(),
-                            pkg_root.display(),
-                        );
-                        match std::process::Command::new("lake")
-                            .arg("build")
-                            .current_dir(pkg_root)
-                            .output()
-                        {
-                            Ok(out) if out.status.success() => {
-                                eprintln!("       PASS");
-                            }
-                            Ok(out) => {
-                                any_failed = true;
-                                let stderr = String::from_utf8_lossy(&out.stderr);
-                                let stdout = String::from_utf8_lossy(&out.stdout);
-                                eprintln!("       FAIL");
-                                // First ~10 lines of each stream — the head
-                                // usually identifies the failure.
-                                for line in stderr.lines().take(10) {
-                                    eprintln!("         | {}", line);
-                                }
-                                for line in stdout.lines().take(10) {
-                                    eprintln!("         | {}", line);
-                                }
-                            }
-                            Err(e) => {
-                                any_failed = true;
-                                eprintln!("       ERROR: failed to spawn `lake build`: {}", e);
-                            }
-                        }
-                    }
-                    if any_failed {
-                        eprintln!(
-                            "--recursive: at least one provider's Lake build failed; the dep \
-                             graph is NOT fully proven. Fix the provider(s) above before \
-                             trusting this consumer's Stance-2 axioms."
-                        );
-                        std::process::exit(1);
-                    }
-                    eprintln!("--recursive: every imported proof package built clean.");
-                }
+                verify::recursive_lake_walk(parsed);
             }
 
             // --check-upstream diffs each pinned binary hash against the
@@ -1450,11 +1243,15 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             let is_pinocchio = matches!(target, Target::Pinocchio);
             let cwd = std::env::current_dir()?;
             let spec = init::resolve_spec_path(spec.as_deref(), &cwd)?;
+            // One parse + one MIR lowering, shared by every artifact stage
+            // below (the arm previously re-parsed per artifact).
+            let parsed = check::parse_spec_file(&spec)?;
+            let mir = mir::lower(&parsed);
             // sBPF specs model assembly, not a Rust state machine — every
             // Rust-shaped artifact is meaningless for them. Decide up front
             // so the scaffold's handlers gate can't fire before the Lean
             // branch (#88): assembly targets emit only `--lean` and `--ci`.
-            let is_assembly = check::parse_spec_file(&spec)?.is_assembly_target();
+            let is_assembly = parsed.is_assembly_target();
             if is_assembly {
                 eprintln!(
                     "note: sBPF spec — skipping Rust scaffold (assembly programs \
@@ -1462,8 +1259,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                      client-side tests)."
                 );
             } else {
-                let parsed = check::parse_spec_file(&spec)?;
-                let mir = mir::lower(&parsed);
                 codegen_mir::generate(&mir, &parsed, &spec, &output_dir, target)?;
             }
 
@@ -1473,11 +1268,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // meaningless Anchor-shaped harnesses. Skip.
                 if is_assembly {
                     if kani {
-                        eprintln!(
-                            "note: skipping Kani codegen for sBPF spec — assembly \
-                             programs are verified via Lean proofs; runtime checks \
-                             belong in client-side tests."
-                        );
+                        note_sbpf_skip("Kani");
                     }
                 } else {
                     // Codegen is pure text generation — the hard cargo-kani
@@ -1486,8 +1277,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     if let Err(e) = deps::require_kani() {
                         eprintln!("warning: {e}");
                     }
-                    let parsed = check::parse_spec_file(&spec)?;
-                    let mir = mir::lower(&parsed);
                     kani_mir::generate(&mir, &parsed, &kani_output)?;
                 }
             }
@@ -1502,7 +1291,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             let auto_impl_trigger = if is_assembly {
                 false
             } else {
-                let parsed = check::parse_spec_file(&spec)?;
                 kani_impl::spec_triggers_impl_harness(&parsed)
             };
             let want_kani_impl = !is_assembly && (kani_impl || (all && auto_impl_trigger));
@@ -1531,11 +1319,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // Meaningless for assembly targets (same rationale as Kani).
                 if is_assembly {
                     if test {
-                        eprintln!(
-                            "note: skipping unit-test codegen for sBPF spec — assembly \
-                             programs are verified via Lean proofs; runtime checks \
-                             belong in client-side tests."
-                        );
+                        note_sbpf_skip("unit-test");
                     }
                 } else {
                     unit_test::generate(&spec, &test_output)?;
@@ -1545,15 +1329,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // Meaningless for assembly targets (same rationale as Kani).
                 if is_assembly {
                     if proptest {
-                        eprintln!(
-                            "note: skipping proptest codegen for sBPF spec — assembly \
-                             programs are verified via Lean proofs; runtime checks \
-                             belong in client-side tests."
-                        );
+                        note_sbpf_skip("proptest");
                     }
                 } else {
-                    let parsed = check::parse_spec_file(&spec)?;
-                    let mir = mir::lower(&parsed);
                     proptest_gen_mir::generate(&mir, &parsed, &proptest_output)?;
                 }
             }
@@ -1562,14 +1340,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // meaningless for assembly targets.
                 if is_assembly {
                     if crucible {
-                        eprintln!(
-                            "note: skipping Crucible codegen for sBPF spec — assembly \
-                             programs are verified via Lean proofs; runtime checks \
-                             belong in client-side tests."
-                        );
+                        note_sbpf_skip("Crucible");
                     }
                 } else {
-                    let parsed = check::parse_spec_file(&spec)?;
                     crucible_gen::generate(
                         &parsed,
                         &crucible_output,
@@ -1580,11 +1353,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             if integration || all {
                 if is_assembly {
                     if integration {
-                        eprintln!(
-                            "note: skipping integration-test codegen for sBPF spec — \
-                             assembly programs are verified via Lean proofs; runtime \
-                             checks belong in client-side tests."
-                        );
+                        note_sbpf_skip("integration-test");
                     }
                 } else {
                     integration_test::generate(&spec, &integration_output)?;
@@ -1596,11 +1365,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 if let Err(e) = deps::require_lean() {
                     eprintln!("warning: {e}");
                 }
-                let parsed = check::parse_spec_file(&spec)?;
                 // `lean_gen_mir` handles every spec shape — single/multi-
                 // account, indexed records, ADTs, and sBPF (via the MIR
                 // `is_assembly` flag).
-                let mir = mir::lower(&parsed);
                 lean_gen_mir::generate(&mir, &parsed, &lean_output)?;
                 // Bootstrap Proofs.lean alongside Spec.lean. Never overwrites
                 // an existing file — the user-owned theorems survive regen.
@@ -1673,7 +1440,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!("         prompt-emission layer is redundant with the agent's own");
                 eprintln!("         file tools. Slated for hard-removal in v3.0; flag remains");
                 eprintln!("         functional for now to avoid breaking existing scripts.");
-                let parsed = check::parse_spec_file(&spec)?;
                 let opts = fill::FillOpts {
                     spec: &parsed,
                     spec_path: &spec,
@@ -1687,7 +1453,6 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 eprintln!("warning: `qedgen codegen --fill-tests` is deprecated.");
                 eprintln!("         The agent can fill integration-test `todo!()` sites directly.");
                 eprintln!("         Slated for hard-removal in v3.0; flag remains functional.");
-                let parsed = check::parse_spec_file(&spec)?;
                 let opts = fill::FillTestsOpts {
                     spec: &parsed,
                     spec_path: &spec,
@@ -1706,13 +1471,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 poll_interval,
             } => {
                 deps::require_lean()?;
-                if let Some(interval) = poll_interval {
-                    ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
-                    ensure!(
-                        interval <= 3600,
-                        "poll_interval must be at most 3600 seconds"
-                    );
-                }
+                validate_poll_interval(poll_interval)?;
                 let prompt = prompt.unwrap_or_else(|| {
                     "Fill in all sorry placeholders with valid proofs".to_string()
                 });
@@ -1726,13 +1485,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 poll_interval,
                 output_dir,
             } => {
-                if let Some(interval) = poll_interval {
-                    ensure!(interval >= 5, "poll_interval must be at least 5 seconds");
-                    ensure!(
-                        interval <= 3600,
-                        "poll_interval must be at most 3600 seconds"
-                    );
-                }
+                validate_poll_interval(poll_interval)?;
                 let project = aristotle::status(&project_id).await?;
                 println!("Project:  {}", project.project_id);
                 println!("Status:   {}", project.status);

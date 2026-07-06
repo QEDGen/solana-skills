@@ -39,6 +39,79 @@ pub fn check(spec_path: &Path, proofs_dir: &Path) -> Result<Vec<PropertyStatus>>
     Ok(results)
 }
 
+/// `qedgen check --explain`: render the verification-status report.
+/// `--json` emits the data layer for the agent to render; without it the
+/// CLI prints the inline Markdown human fallback. Written to `output`
+/// when set, stdout otherwise. Moved out of the dispatch arm (T7c).
+pub fn render_explain_report(
+    spec_path: &Path,
+    spec_name: &str,
+    proofs_dir: &Path,
+    json: bool,
+    output: Option<&Path>,
+) -> Result<()> {
+    let results = check(spec_path, proofs_dir)?;
+    let proven = results
+        .iter()
+        .filter(|r| r.status == Status::Proven)
+        .count();
+    let sorry = results.iter().filter(|r| r.status == Status::Sorry).count();
+    let missing = results
+        .iter()
+        .filter(|r| r.status == Status::Missing)
+        .count();
+    let total = results.len();
+
+    let (rendered, what) = if json {
+        let payload = serde_json::json!({
+            "spec": spec_name,
+            "summary": {
+                "proven": proven,
+                "sorry": sorry,
+                "missing": missing,
+                "total": total,
+            },
+            "properties": results,
+        });
+        (serde_json::to_string_pretty(&payload)?, "report (JSON)")
+    } else {
+        let mut md = format!("# {} Verification Report\n\n", spec_name);
+        md.push_str(&format!(
+            "**{}/{} properties verified** ({} sorry, {} missing)\n\n",
+            proven, total, sorry, missing
+        ));
+        if proven == total {
+            md.push_str("> All properties verified (sorry-free).\n\n");
+        }
+        md.push_str("## Properties\n\n");
+        for r in &results {
+            let (icon, label) = match r.status {
+                Status::Proven => ("✓", "PROVEN"),
+                Status::Sorry => ("✗", "SORRY"),
+                Status::Missing => ("✗", "MISSING"),
+            };
+            md.push_str(&format!("### {} {} — {}\n\n", icon, r.name, label));
+            if let Some(ref intent) = r.intent {
+                md.push_str(&format!("**Intent:** {}\n\n", intent));
+            }
+            if r.status != Status::Proven {
+                if let Some(ref suggestion) = r.suggestion {
+                    md.push_str(&format!("**Suggestion:** {}\n\n", suggestion));
+                }
+            }
+        }
+        (md, "report")
+    };
+
+    if let Some(path) = output {
+        std::fs::write(path, &rendered)?;
+        eprintln!("Wrote verification {} to {}", what, path.display());
+    } else {
+        print!("{}", rendered);
+    }
+    Ok(())
+}
+
 /// Expected properties as (property_name, intent_description, optional_suggestion).
 /// Works off unified `spec.handlers` across all target types.
 fn generate_properties(spec: &ParsedSpec) -> Vec<(String, String, Option<String>)> {
