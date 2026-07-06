@@ -125,11 +125,12 @@ fn vault_bounded(s: &State) -> bool {
 
 /// account_solvent: ∀ i : AccountIdx, s.accounts[i].active = 1 → (((s.accounts[i].capital) : Int)) + s.accounts[i].pnl ≥ (((0) : Int))
 fn account_solvent(_s: &State) -> bool {
-    // /* QEDGEN_UNSUPPORTED_QUANTIFIER: forall i : AccountIdx — lower at harness level */ — property uses a quantifier; not lowerable to a predicate.
+    // /* QEDGEN_UNSUPPORTED_QUANTIFIER: forall i : AccountIdx — lower at harness level */ — property uses a quantifier; lower at the harness level.
     true
 }
 
-/// account_solvent: per-slot check at `i: AccountIdx`
+/// account_solvent: per-slot check at `i: AccountIdx` (v2.20 forall lowering)
+#[allow(unused_variables)]
 fn account_solvent_at(s: &State, i: usize) -> bool {
     (!(s.accounts[(i) as usize].active == 1)) || (((((s.accounts[(i) as usize].capital) as i128) + ((s.accounts[(i) as usize].pnl) as i128)) as i128) >= ((0) as i128))
 }
