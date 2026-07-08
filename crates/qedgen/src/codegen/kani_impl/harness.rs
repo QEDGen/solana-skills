@@ -370,6 +370,10 @@ pub(crate) fn emit_brownfield_handler_harness(
     idx: usize,
     ensures: &crate::check::ParsedEnsures,
     spec: &ParsedSpec,
+    // `Some(struct_name)` when the file emitted a `symbolic_<struct>()` ctor
+    // (the State is fully constructible); the harness calls it instead of a
+    // construction `todo!()`. `None` keeps the agent-fill fallback.
+    state_struct: Option<&str>,
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
     // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
@@ -382,12 +386,37 @@ pub(crate) fn emit_brownfield_handler_harness(
         handler.name, idx
     ));
 
-    // 1. Symbolic state struct — agent-fill (needs the real struct name/fields).
-    out.push_str("    // AGENT-FILL (1/2): build a symbolic instance of the real `#[account]`\n");
-    out.push_str("    // struct this spec's `State` models. Fields the spec reasons about →\n");
-    out.push_str("    // `kani::any()`; the rest → concrete. Annotate the real type, e.g.:\n");
-    out.push_str("    //   let mut state: crate::<RealStateStruct> = todo!();\n");
-    out.push_str("    let mut state = todo!(\"build a symbolic state account struct\");\n\n");
+    // 1. Symbolic state struct. Generated from the spec's State when it fully
+    //    mirrors the real `#[account]` struct; otherwise an agent-fill `todo!()`.
+    match state_struct {
+        Some(struct_name) => {
+            out.push_str(&format!(
+                "    // Symbolic `{struct_name}` — fully generated from the spec's State\n"
+            ));
+            out.push_str("    // (every field `kani::any()`); assume pre-state validity so Kani\n");
+            out.push_str("    // explores only well-formed instances.\n");
+            out.push_str(&format!(
+                "    let mut state = {}();\n",
+                super::state_ctor::ctor_fn_name(struct_name)
+            ));
+            out.push_str("    kani::assume(state.invariant().is_ok());\n\n");
+        }
+        None => {
+            out.push_str(
+                "    // AGENT-FILL (1/2): build a symbolic instance of the real `#[account]`\n",
+            );
+            out.push_str(
+                "    // struct this spec's `State` models. Fields the spec reasons about →\n",
+            );
+            out.push_str(
+                "    // `kani::any()`; the rest → concrete. Annotate the real type, e.g.:\n",
+            );
+            out.push_str("    //   let mut state: crate::<RealStateStruct> = todo!();\n");
+            out.push_str(
+                "    let mut state = todo!(\"build a symbolic state account struct\");\n\n",
+            );
+        }
+    }
 
     // 2. Pre-snapshot — reuse the greenfield field set (modifies ∪ effects ∪
     //    CPI-binders ∪ requires/ensures fields) and `s.`→`pre.` guard lowering.

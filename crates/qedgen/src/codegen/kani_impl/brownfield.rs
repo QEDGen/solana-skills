@@ -10,12 +10,15 @@ use super::*;
 /// / call the real `invariant()`/helper → assert `ensures`) is the shape that
 /// actually works, validated by the two bundled brownfield harnesses.
 ///
-/// Phase 1 (this): the struct construction and effect application are
-/// `todo!()` agent-fill (they need the real struct name/fields — not in the
-/// spec). Everything else — the snapshot set (incl. the read-only-field fix),
-/// the requires-assume, the ensures-assert, the unwind hint — is generated.
-/// Phase 2 (#162 follow-on): thread the Anchor IDL in so the construction is
-/// generated too.
+/// Construction is generated from the spec's State when it fully mirrors the
+/// real `#[account]` struct (every field a scalar / `Pubkey` / `Option` / `Vec`
+/// / nested record — see `state_ctor`); the harness then calls the emitted
+/// `symbolic_<struct>()` and only the effect + validity gate stays agent-fill.
+/// When the State can't be fully constructed (a bare enum / `Map` field, or an
+/// ambiguous multi-account spec), construction falls back to an agent-fill
+/// `todo!()`. The scaffolding around both — snapshot set (incl. the
+/// read-only-field fix), requires-assume, ensures-assert, unwind hint — is
+/// always generated.
 pub(crate) fn emit_kani_impl_anchor_brownfield(
     spec: &ParsedSpec,
     output_path: &Path,
@@ -38,9 +41,11 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     out.push_str("// associated-fn handlers) — the greenfield `accounts.handler(...)` shape\n");
     out.push_str("// does not resolve against it.\n");
     out.push_str("//\n");
-    out.push_str("// Each proof has two AGENT-FILL sites: (1) construct the symbolic state\n");
-    out.push_str("// struct, (2) apply the real effect + validity gate. The snapshot /\n");
-    out.push_str("// assume / assert scaffolding around them is generated and correct.\n");
+    out.push_str("// Construction is generated from the spec's State when it fully mirrors\n");
+    out.push_str("// the real `#[account]` struct (a `symbolic_<struct>()` ctor below);\n");
+    out.push_str("// otherwise it falls back to an agent-fill `todo!()`. Applying the real\n");
+    out.push_str("// effect + validity gate is always agent-fill. The snapshot / assume /\n");
+    out.push_str("// assert scaffolding around them is generated and correct.\n");
     out.push_str("//\n");
     out.push_str("// PLACEMENT: this file must live INSIDE the program crate (e.g.\n");
     out.push_str("// `src/kani_impl.rs` + `#[cfg(kani)] mod kani_impl;` in lib.rs) — a\n");
@@ -65,10 +70,37 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         "// ============================================================================\n\n",
     );
 
+    // Symbolic-state constructor — emitted ONCE per file when the spec's State
+    // is fully constructible (every field a scalar / Pubkey / Option / Vec /
+    // nested record). Each harness then calls it instead of a construction
+    // `todo!()`. When the State isn't fully constructible (a bare enum / Map
+    // field, or an ambiguous multi-account spec), `state_struct` stays `None`
+    // and the harnesses fall back to the agent-fill `todo!()`.
+    let state_struct: Option<String> = match super::state_ctor::resolve_state_struct(spec) {
+        Some((name, fields)) => {
+            match super::state_ctor::emit_state_ctor(name, fields, &spec.records) {
+                Some(ctor) => {
+                    out.push_str(&ctor);
+                    out.push('\n');
+                    Some(name.to_string())
+                }
+                None => None,
+            }
+        }
+        None => None,
+    };
+
     let mut emitted_count = 0;
     for handler in emit_targets {
         for (idx, ensures) in handler.ensures.iter().enumerate() {
-            emit_brownfield_handler_harness(&mut out, handler, idx, ensures, spec)?;
+            emit_brownfield_handler_harness(
+                &mut out,
+                handler,
+                idx,
+                ensures,
+                spec,
+                state_struct.as_deref(),
+            )?;
             emitted_count += 1;
         }
     }

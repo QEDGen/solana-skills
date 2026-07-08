@@ -40,8 +40,8 @@ pub(crate) use crate::Target;
 mod brownfield;
 mod frameworks;
 mod harness;
-mod idl_ctor;
 mod pinocchio;
+mod state_ctor;
 
 pub(crate) use brownfield::*;
 pub(crate) use frameworks::*;
