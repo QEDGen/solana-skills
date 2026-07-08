@@ -207,7 +207,8 @@ pub(crate) fn emit_handler_harness(
     spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
-    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    // Greenfield doesn't emit the Pubkey stub → keep the memcmp-driven bound.
+    let (unwind, why) = suggested_unwind(handler, ensures, spec, /*abstract_pubkey=*/ false);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
     out.push_str("#[kani::solver(cadical)]\n");
     out.push_str(&format!(
@@ -364,30 +365,137 @@ pub(crate) fn emit_handler_harness(
 /// need the real source — constructing the struct and applying the effect —
 /// are left as `todo!()`. This is the shape both bundled brownfield harnesses
 /// (settings well-formedness, delegation conservation) were hand-written to.
+/// `true` when the spec's State declares `field` as a non-`Copy` type — a
+/// `Vec`/`Map` collection or a custom ADT/record (which derive `Clone`, not
+/// `Copy`). Such a field's harness snapshot must `.clone()` rather than move
+/// it out of `state`, else the subsequent `&mut state` method call sees a
+/// partially-moved value and fails to compile. The fixed-width integers,
+/// `Bool`, `Fin[N]` (→ integer) and `Pubkey` (→ `[u8; 32]`) are `Copy` and
+/// move freely. Requires the `state_struct` pragma (generated construction);
+/// otherwise the field types aren't known and we keep the move (agent-fill
+/// construction).
+fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
+    super::state_ctor::resolve_state_struct(spec)
+        .map(|(_, fields)| {
+            fields
+                .iter()
+                .any(|(n, t)| n == field && !is_copy_scalar_ty(t))
+        })
+        .unwrap_or(false)
+}
+
+/// The `Copy` scalar surface of the DSL as it lowers into a Kani harness:
+/// snapshotting one of these can move without `.clone()`. Everything else —
+/// `Vec`/`Map` and custom nominal types — is `Clone`-not-`Copy` and must be
+/// cloned (see [`state_field_needs_clone`]).
+fn is_copy_scalar_ty(t: &str) -> bool {
+    let t = t.trim();
+    t.starts_with("Fin")
+        || matches!(
+            t,
+            "U8" | "U16"
+                | "U32"
+                | "U64"
+                | "U128"
+                | "I8"
+                | "I16"
+                | "I32"
+                | "I64"
+                | "I128"
+                | "Bool"
+                | "Pubkey"
+        )
+}
+
 pub(crate) fn emit_brownfield_handler_harness(
     out: &mut String,
     handler: &ParsedHandler,
     idx: usize,
     ensures: &crate::check::ParsedEnsures,
     spec: &ParsedSpec,
+    // `Some(struct_name)` when the file emitted a `symbolic_<struct>()` ctor
+    // (the State is fully constructible); the harness calls it instead of a
+    // construction `todo!()`. `None` keeps the agent-fill fallback.
+    state_struct: Option<&str>,
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
     // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
     // 32-byte `memcmp` loop needing ≥ 34; a numeric-only harness closes at a
     // small bound and runs faster (`suggested_unwind`).
-    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    let abstract_pk = super::state_ctor::wants_pubkey_abstraction(spec);
+    let (unwind, why) = suggested_unwind(handler, ensures, spec, abstract_pk);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
+    // #182 Tier 1 — redirect Pubkey's derived `==` to the abstract wide-integer
+    // compare (no 32-byte memcmp loop). Sound (verified equivalent), so it can't
+    // change the result; needs `-Z stubbing`.
+    if abstract_pk {
+        out.push_str(super::state_ctor::pubkey_stub_attr());
+    }
+    // #182 Tier 2 — redirect PDA derivation to an opaque address (skip sha256).
+    if super::state_ctor::wants_pda_abstraction(spec) {
+        out.push_str(super::state_ctor::pda_stub_attr());
+    }
+    // G14 — the agent-fill effect calls a `Clock::get()`-reading method; stub it.
+    if super::state_ctor::wants_clock_stub(spec) {
+        out.push_str(
+            "#[kani::stub(anchor_lang::solana_program::clock::Clock::get, stub_clock_get)]\n",
+        );
+    }
+    // #182 Tier 4 — logging no-op + CPI success (opt-in).
+    if super::state_ctor::wants_log_stub(spec) {
+        out.push_str(super::state_ctor::log_stub_attr());
+    }
+    if super::state_ctor::wants_cpi_stub(spec) {
+        out.push_str(super::state_ctor::cpi_stub_attr());
+    }
     out.push_str(&format!(
         "fn verify_{}_impl_ensures_{}() {{\n",
         handler.name, idx
     ));
 
-    // 1. Symbolic state struct — agent-fill (needs the real struct name/fields).
-    out.push_str("    // AGENT-FILL (1/2): build a symbolic instance of the real `#[account]`\n");
-    out.push_str("    // struct this spec's `State` models. Fields the spec reasons about →\n");
-    out.push_str("    // `kani::any()`; the rest → concrete. Annotate the real type, e.g.:\n");
-    out.push_str("    //   let mut state: crate::<RealStateStruct> = todo!();\n");
-    out.push_str("    let mut state = todo!(\"build a symbolic state account struct\");\n\n");
+    // 1. Symbolic state struct. Generated from the spec's State when it fully
+    //    mirrors the real `#[account]` struct; otherwise an agent-fill `todo!()`.
+    match state_struct {
+        Some(struct_name) => {
+            out.push_str(&format!(
+                "    // Symbolic `{struct_name}` — fully generated from the spec's State\n"
+            ));
+            out.push_str("    // (every field `kani::any()`).\n");
+            out.push_str(&format!(
+                "    let mut state = {}();\n",
+                super::state_ctor::ctor_fn_name(struct_name)
+            ));
+            // Pre-state validity: `pragma state_invariant = <method>` (default
+            // `invariant`) → assume it so Kani explores only well-formed states.
+            // `= none` skips it — for a struct with no validity method, or a
+            // property that is independent of the invariant AND whose invariant
+            // has unwraps/arithmetic that panic on fully-symbolic input (the
+            // symbolic ctor is stricter than a scoped hand-written harness).
+            match super::state_ctor::invariant_method(spec) {
+                Some(m) => {
+                    out.push_str(&format!(
+                        "    kani::assume(state.{m}().is_ok()); // pre-state validity\n\n"
+                    ));
+                }
+                None => out.push('\n'),
+            }
+        }
+        None => {
+            out.push_str(
+                "    // AGENT-FILL (1/2): build a symbolic instance of the real `#[account]`\n",
+            );
+            out.push_str(
+                "    // struct this spec's `State` models. Fields the spec reasons about →\n",
+            );
+            out.push_str(
+                "    // `kani::any()`; the rest → concrete. Annotate the real type, e.g.:\n",
+            );
+            out.push_str("    //   let mut state: crate::<RealStateStruct> = todo!();\n");
+            out.push_str(
+                "    let mut state = todo!(\"build a symbolic state account struct\");\n\n",
+            );
+        }
+    }
 
     // 2. Pre-snapshot — reuse the greenfield field set (modifies ∪ effects ∪
     //    CPI-binders ∪ requires/ensures fields) and `s.`→`pre.` guard lowering.
@@ -399,17 +507,35 @@ pub(crate) fn emit_brownfield_handler_harness(
             "    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n",
         );
         for field in &snapshot_fields {
-            out.push_str(&format!("    let pre_{0} = state.{0};\n", field));
+            // A `Vec` field is non-Copy: moving it out here would break the
+            // `&mut state` method call below (partial move). Clone it (Copy
+            // fields — scalars, `Pubkey` — move/copy as before).
+            let rhs = if state_field_needs_clone(spec, field) {
+                format!("state.{field}.clone()")
+            } else {
+                format!("state.{field}")
+            };
+            out.push_str(&format!("    let pre_{field} = {rhs};\n"));
         }
     }
 
     // 3. Symbolic params + precondition (reads the pre-snapshots).
     for (pname, ptype) in &handler.takes_params {
-        out.push_str(&format!(
-            "    let {}: {} = kani::any();\n",
-            pname,
-            map_type(ptype, spec)?
-        ));
+        // Brownfield targets the REAL struct, so a `Pubkey` param stays a real
+        // `Pubkey` (matching the ctor + the struct's `Vec<Pubkey>` fields) — NOT
+        // the spec-model `[u8; 32]` lowering, which wouldn't unify with them.
+        if ptype == "Pubkey" {
+            out.push_str(&format!(
+                "    let {pname}: anchor_lang::prelude::Pubkey = \
+                 anchor_lang::prelude::Pubkey::new_from_array(kani::any());\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    let {}: {} = kani::any();\n",
+                pname,
+                map_type(ptype, spec)?
+            ));
+        }
     }
     if let Some(guard) = &guard_predot {
         out.push_str(&format!(
@@ -430,7 +556,14 @@ pub(crate) fn emit_brownfield_handler_harness(
     if !snapshot_fields.is_empty() {
         out.push_str("        // Post-state snapshot.\n");
         for field in &snapshot_fields {
-            out.push_str(&format!("        let post_{0} = state.{0};\n", field));
+            // Clone `Vec` fields so an ensures can read them more than once
+            // (a `.contains()` doesn't consume, but the snapshot move would).
+            let rhs = if state_field_needs_clone(spec, field) {
+                format!("state.{field}.clone()")
+            } else {
+                format!("state.{field}")
+            };
+            out.push_str(&format!("        let post_{field} = {rhs};\n"));
         }
     }
     let lowered = rewrite_pre_post_paths(&ensures.rust_expr_binary);
@@ -700,6 +833,9 @@ fn suggested_unwind(
     handler: &ParsedHandler,
     _ensures: &crate::check::ParsedEnsures,
     spec: &ParsedSpec,
+    // Only the brownfield path emits the Pubkey `==` stub, so only it may drop
+    // the memcmp-driven ≥34 bound. The greenfield path passes `false`.
+    abstract_pubkey: bool,
 ) -> (u32, &'static str) {
     // Impl-targeted harnesses CALL real code (the handler / `invariant()` /
     // helper), which operates on the WHOLE account struct — not just the fields
@@ -709,6 +845,17 @@ fn suggested_unwind(
     // only fully unwinds at N ≥ 34. Bias conservative: a too-low bound fails
     // with an "unwinding assertion" (the exact trial-and-error F2 removes),
     // whereas a too-high bound is merely slower.
+    // #182 Tier 1: when Pubkey `==` is abstracted (stubbed to a wide-integer
+    // compare), the 32-byte memcmp that forced ≥34 is gone — the remaining
+    // loops iterate `kani_vec_bound`-sized collections, so a small bound closes.
+    if abstract_pubkey {
+        let bound = super::state_ctor::vec_bound_of(spec) as u32 + 4;
+        return (
+            bound,
+            "Pubkey `==` abstracted (#182) — no memcmp; small bound",
+        );
+    }
+
     let param_touches_bytes = handler.takes_params.iter().any(|(_, t)| is_pubkey_type(t));
     let state_has_pubkey = !pubkey_state_field_names(spec).is_empty();
 

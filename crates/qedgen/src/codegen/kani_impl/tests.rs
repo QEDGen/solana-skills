@@ -258,6 +258,228 @@ handler set_threshold (new_threshold : U16) {
     );
 }
 
+/// #162 phase 2: when the spec declares its real on-chain struct via
+/// `pragma state_struct = <Name>` and every State field is constructible
+/// (scalar / `Pubkey` / `Option` / `Vec<record>` — the latter two landed with
+/// #173/#174), the brownfield harness emits a fully-generated
+/// `symbolic_<name>()` constructor and calls it — construction is NO LONGER
+/// agent-fill. Only the effect + validity gate (AGENT-FILL 2/2) remains.
+#[test]
+fn brownfield_generates_symbolic_state_ctor_from_pragma() {
+    let src = r#"spec SmartAccountProgram
+pragma state_struct = Settings
+type SmartAccountSigner = { key : Pubkey }
+state {
+  seed : U128,
+  settings_authority : Pubkey,
+  time_lock : U32,
+  archival_authority : Option Pubkey,
+  signers : Vec SmartAccountSigner,
+  threshold : U16
+}
+handler set_time_lock (new_time_lock : U32) {
+  modifies [time_lock]
+  ensures state.time_lock == new_time_lock
+  effect { time_lock := new_time_lock }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_ctor_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The ctor targets the pragma-named struct, NOT the synthetic `crate::State`.
+    assert!(
+        body.contains("fn symbolic_settings() -> crate::Settings")
+            && !body.contains("crate::State"),
+        "ctor builds the pragma-named `crate::Settings`; got:\n{body}"
+    );
+    // Every field constructed symbolically: scalars, Option (Some/None), Vec
+    // (bounded loop), and the nested record.
+    assert!(
+        body.contains("seed: kani::any()"),
+        "scalar field; got:\n{body}"
+    );
+    assert!(
+        body.contains("archival_authority: if kani::any() { Some(")
+            && body.contains(") } else { None }"),
+        "Option<Pubkey> field symbolic Some/None; got:\n{body}"
+    );
+    assert!(
+        body.contains("signers: vec![crate::SmartAccountSigner {")
+            && body.contains("key: anchor_lang::prelude::Pubkey::new_from_array(kani::any())")
+            && !body.contains("while "),
+        "Vec<record> is fixed-length vec![] with nested struct (no symbolic-length loop); got:\n{body}"
+    );
+    // The harness CALLS the ctor + assumes pre-state validity — construction is
+    // no longer agent-fill; only the effect gate (2/2) is.
+    assert!(
+        body.contains("let mut state = symbolic_settings();")
+            && body.contains("kani::assume(state.invariant().is_ok());"),
+        "harness calls the generated ctor + validity assume; got:\n{body}"
+    );
+    assert!(
+        !body.contains("AGENT-FILL (1/2)") && body.contains("AGENT-FILL (2/2)"),
+        "construction NOT agent-fill; only the effect gate is; got:\n{body}"
+    );
+}
+
+/// A brownfield harness whose `requires`/`ensures` use `is .Variant` + `len()`
+/// over a non-`Copy` ADT status field renders shape-correctly and compiles:
+///   - `is .StructVariant`  → `matches!(x, Enum::V { .. })` (resolved enum name,
+///     struct pattern) — NOT the old `/* ty */::V(..)` stub;
+///   - `is .UnitVariant`    → `matches!(x, Enum::V)` (no braces/parens);
+///   - `len(coll)`          → `(coll.len() as u64)`;
+///   - the non-`Copy` status snapshot `.clone()`s (a bare move would leave
+///     `state` partially moved before the `&mut state` call);
+///   - crate-level placement glob-imports `crate::*` so the bare enum name in
+///     the `matches!` resolves.
+///
+/// (Regression for migrating hand-written proposal-consensus vote-registration
+/// harnesses to the generated shape.)
+#[test]
+fn brownfield_isvariant_and_len_render_and_clone_nonstate_copy_field() {
+    let src = r#"spec Consensus
+pragma state_struct = Ballot
+pragma state_invariant = none
+type BallotStatus
+  | Open of { at : I64 }
+  | Carried of { at : I64 }
+  | Tallying
+type Error | NotOpen
+state {
+  status : BallotStatus,
+  votes : Vec Pubkey,
+  epoch : U8,
+}
+handler record (voter : Pubkey) (quorum : U64) {
+  requires state.status is .Open else NotOpen
+  modifies [status, votes]
+  ensures (state.status is .Carried) implies (len(state.votes) >= quorum)
+}
+handler begin_tally (dummy : U64) {
+  modifies [status]
+  ensures (state.status is .Tallying) implies (dummy >= 1)
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_isvar_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // No lingering placeholder / wrong-shape stub anywhere.
+    assert!(
+        !body.contains("/* ty */") && !body.contains("::Carried(..)"),
+        "IsVariant must resolve the enum + shape, not emit the stub; got:\n{body}"
+    );
+    // Struct variants → resolved enum name + `{ .. }` pattern.
+    assert!(
+        body.contains("matches!(pre_status, BallotStatus::Open { .. })")
+            && body.contains("matches!(post_status, BallotStatus::Carried { .. })"),
+        "struct-variant `is` → `Enum::V {{ .. }}`; got:\n{body}"
+    );
+    // Unit variant → bare `Enum::V`, no braces or parens.
+    assert!(
+        body.contains("matches!(post_status, BallotStatus::Tallying)")
+            && !body.contains("BallotStatus::Tallying {")
+            && !body.contains("BallotStatus::Tallying("),
+        "unit-variant `is` → `Enum::V` (no payload); got:\n{body}"
+    );
+    // `len(coll)` → `(coll.len() as u64)`.
+    assert!(
+        body.contains("(post_votes.len() as u64) >= quorum"),
+        "len(coll) → `(coll.len() as u64)`; got:\n{body}"
+    );
+    // Non-Copy ADT status field cloned in both snapshots (a move would break the
+    // subsequent `&mut state` method call); the Copy `epoch` field is not even
+    // snapshotted here, and the Vec is cloned as before.
+    assert!(
+        body.contains("let pre_status = state.status.clone();")
+            && body.contains("let post_status = state.status.clone();")
+            && body.contains("state.votes.clone()"),
+        "non-Copy status snapshot must `.clone()`; got:\n{body}"
+    );
+    // Crate-level placement glob-imports the crate root so the bare `BallotStatus`
+    // name in the `matches!` resolves; the ctor still qualifies with `crate::`.
+    assert!(
+        body.contains("use crate::*;") && body.contains("_ => crate::BallotStatus::Tallying"),
+        "crate-level harness imports `crate::*`; ctor unit arm has no braces; got:\n{body}"
+    );
+}
+
+/// #183 / G17b: an in-module brownfield harness (`pragma state_module`) whose
+/// mirrored State references types from a SECOND private module can't name them
+/// via `use super::*` alone. `pragma harness_use = <path>` (repeatable) injects
+/// the missing `use` lines verbatim — a `::*` glob or a single type path, in
+/// source order, under one `#[allow(unused_imports)]`.
+#[test]
+fn brownfield_harness_use_pragma_injects_extra_imports() {
+    let src = r#"spec HarnessUse
+pragma state_struct = Widget
+pragma state_module = state::widgets::widget
+pragma state_invariant = none
+pragma harness_use = crate::state::widgets::parts::*
+pragma harness_use = crate::core::traits::WidgetTrait
+state { size : U64, kind : Kind }
+type Kind | Small | Large
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_hu_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // In-module placement header, then the two requested `use` paths verbatim
+    // (glob + single type) in source order.
+    assert!(
+        body.contains("use super::*;"),
+        "state_module → in-module placement header; got:\n{body}"
+    );
+    assert!(
+        body.contains("use crate::state::widgets::parts::*;")
+            && body.contains("use crate::core::traits::WidgetTrait;"),
+        "harness_use paths emitted verbatim (glob + single type); got:\n{body}"
+    );
+    // Ordering: the glob line precedes the single-type line (source order).
+    let glob = body.find("crate::state::widgets::parts::*").unwrap();
+    let single = body.find("crate::core::traits::WidgetTrait").unwrap();
+    assert!(
+        glob < single,
+        "harness_use lines keep source order; got:\n{body}"
+    );
+}
+
 /// F2 (#167): the impl-harness unwind bound is computed, not fixed. A harness
 /// that snapshots or takes a `Pubkey` (→ `[u8; 32]`, a 32-byte `memcmp`)
 /// suggests `#[kani::unwind(34)]`; a numeric-only harness suggests a low bound
@@ -327,9 +549,15 @@ handler admin_bump (caller : Pubkey) (delta : U64) {
     .expect("emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
+    // With the #182 Tier-1 Pubkey abstraction ON (default), the brownfield
+    // harness stubs Pubkey `==` to a wide-integer compare and drops the
+    // memcmp-driven bound to a small value (the 34 is only needed with the
+    // abstraction OFF — see the opt-out case below).
     assert!(
-        body.contains("#[kani::unwind(34)]"),
-        "Pubkey param must lift the brownfield unwind bound to 34; got:\n{body}"
+        body.contains("fn pk_eq_abstract")
+            && body.contains("kani::stub(<anchor_lang::prelude::Pubkey")
+            && !body.contains("#[kani::unwind(34)]"),
+        "brownfield Pubkey harness abstracts `==` + drops the bound; got:\n{body}"
     );
 
     // (d) A Pubkey STATE field that is NEVER referenced in a guard/ensures (only
@@ -361,9 +589,40 @@ handler set_threshold (new_threshold : U16) {
     .expect("emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
+    // Abstraction ON (default): stubbed + small bound, even for the
+    // unreferenced-Pubkey settings-well-formedness shape.
     assert!(
-        body.contains("#[kani::unwind(34)]") && !body.contains("#[kani::unwind(4)]"),
-        "an unreferenced Pubkey state field must still lift the bound to 34; got:\n{body}"
+        body.contains("fn pk_eq_abstract") && !body.contains("#[kani::unwind(34)]"),
+        "unreferenced Pubkey field: abstracted + small bound; got:\n{body}"
+    );
+
+    // (e) Opt-out `pragma kani_abstract_pubkey = off` → no stub, memcmp bound 34.
+    let pk_optout = r#"spec SettingsishOff
+pragma kani_abstract_pubkey = off
+state { authority : Pubkey, threshold : U16, voters : U16 }
+handler set_threshold (new_threshold : U16) {
+  requires new_threshold <= state.voters else Bad
+  modifies [threshold]
+  ensures state.threshold <= state.voters
+  effect { threshold := new_threshold }
+}"#;
+    let spec = parse_str(pk_optout).expect("parse");
+    let tmp =
+        std::env::temp_dir().join(format!("kani_impl_unwind_optout_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        !body.contains("fn pk_eq_abstract") && body.contains("#[kani::unwind(34)]"),
+        "opt-out: no Pubkey stub, memcmp bound 34; got:\n{body}"
     );
 }
 

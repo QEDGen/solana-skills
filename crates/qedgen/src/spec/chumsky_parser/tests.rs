@@ -16,6 +16,42 @@ fn parse_ok(src: &str) -> Spec {
     }
 }
 
+/// `Option T` and `Vec <Record>` parse in State/record field positions
+/// (G9/G10 #173/#174) — needed so a State can mirror a real Anchor account
+/// struct (`Option<Pubkey>`, `Vec<SmartAccountSigner>`). Before the
+/// `type_ref` param rule these were parse errors.
+#[test]
+fn option_and_vec_record_fields_parse() {
+    let src = r#"spec ParamFields
+program_id "11111111111111111111111111111111"
+
+type Permissions = { mask : U8 }
+type Signer = { key : Pubkey, permissions : Permissions }
+
+type State
+  | Active of {
+      authority : Option Pubkey,
+      quota     : Option U64,
+      signers   : Vec Signer,
+      count     : U64,
+    }
+
+type Error
+  | E
+
+handler t : State.Active -> State.Active {
+  permissionless
+  effect {
+    count += 1
+  }
+}
+"#;
+    // Before the `type_ref` param rule, the `Option Pubkey` / `Option U64` /
+    // `Vec Signer` fields were parse errors; `parse_ok` panics on failure, so
+    // reaching here is the regression check.
+    let _ = parse_ok(src);
+}
+
 /// Index expressions inside a Map slot reference accept dotted
 /// state-field paths (`lsts[state.lst_count]`).
 #[test]

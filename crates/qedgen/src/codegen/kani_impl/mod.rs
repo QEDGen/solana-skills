@@ -41,6 +41,7 @@ mod brownfield;
 mod frameworks;
 mod harness;
 mod pinocchio;
+mod state_ctor;
 
 pub(crate) use brownfield::*;
 pub(crate) use frameworks::*;

@@ -1143,6 +1143,7 @@ fn expand_handler(
         records: base_env.records.clone(),
         params: h.params.iter().map(|f| (f.name.clone(), &f.ty)).collect(),
         aliases: base_env.aliases.clone(),
+        adts: base_env.adts.clone(),
     };
     let env = &env;
     let tcx = TreeCx::for_handler(h, env, consts, ghosts.clone());

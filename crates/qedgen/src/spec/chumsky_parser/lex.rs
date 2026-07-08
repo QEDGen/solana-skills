@@ -239,10 +239,21 @@ pub(super) fn type_ref<'a>() -> impl Parser<'a, &'a str, TypeRef, Err<'a>> + Clo
         .then_ignore(just(']'))
         .map(|bound| TypeRef::Fin { bound });
 
+    // `Vec T` / `Option T` — single-arg parameterized type; `T` is a named
+    // type (scalar or record). Recognised by a `Vec`/`Option` head ident so it
+    // can't shadow a user type like `Vector`. Nested args (`Vec (Option T)`)
+    // aren't modelled (`TypeRef::Param` carries name strings), which is enough
+    // to mirror real account fields (`Option<Pubkey>`, `Vec<Record>`).
+    let param_ty = non_keyword_ident()
+        .filter(|s: &String| s == "Vec" || s == "Option")
+        .then_ignore(wsc())
+        .then(non_keyword_ident())
+        .map(|(ctor, inner)| TypeRef::Param(ctor, inner));
+
     // Simple type: a single ident.
     let simple = non_keyword_ident().map(TypeRef::Named);
 
-    choice((map_ty, fin_ty, simple))
+    choice((map_ty, fin_ty, param_ty, simple))
 }
 
 // ----------------------------------------------------------------------------
