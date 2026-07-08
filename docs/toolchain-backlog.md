@@ -295,10 +295,15 @@ Anchor) mirrored on the Kani side. Tiers (prevalence from the Squads target):
   both green C proofs re-verified at unwind 5. `[u8;32]`/`[u8;64]` extend it.
 - **T2 trusted crypto** — PDA `find_program_address` (=sha256; 16 files), sha256/
   keccak/blake3, ed25519 verify. Axiomatize (uninterpreted + injectivity).
-- **T3 trusted serde** — Borsh `try_to_vec`/`try_from_slice` (35 files), `Pack`.
-  Stub round-trip → identity.
-- **T4 runtime/host** — CPI `invoke` (4), sysvars `Rent::get` etc. (18, like Clock),
-  `msg!`/`sol_log` (21, → no-op).
+- **T3 trusted serde** — 📐 METHODOLOGY (not an auto-stub). Borsh round-trip is a
+  confirmed bottleneck (times out at unwind 6 even bounded — memchr/memcmp), but a
+  sound generic stub is impractical (round-trip identity is stateful; try_from_slice
+  is generic/no-Arbitrary; multi-type event path). Fix = harness design: the
+  replicate-the-effect style AVOIDS serde (C/F/A5b never hit it). Escape hatch:
+  per-type deserialize stub → symbolic ctor, agent-wired. See #182.
+- **T4 runtime/host** — ✅ SHIPPED (`496b5c8`): `pragma kani_stub_log` (sol_log/
+  sol_log_data → no-op) + `pragma kani_stub_cpi` (invoke/invoke_signed → Ok(())).
+  Opt-in; validated on micro-harnesses. Rent/other sysvars extend the Clock pattern.
 - **T5 collections over opaque tokens** — `Vec<Pubkey>::contains`/`binary_search`
   (18 files). T1 kills inner cost; outer iteration needs a bounded model. **A5b
   (#181) sits here.** Prototype: T1 (Pubkey) — highest leverage, shrinks the A5b
