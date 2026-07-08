@@ -93,5 +93,6 @@ LEARNINGS_*.md
 .claude/*
 # ...but track shared path-scoped rules
 !.claude/rules/
+!.claude/agents/
 \n# Generated proof artifacts\nlean_project/\nqedgen_*/
 tests/kani.rs

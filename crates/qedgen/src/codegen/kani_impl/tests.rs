@@ -153,6 +153,220 @@ handler bump (delta : U64) {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// Regression: a read-only field named only in `requires`/`ensures`
+/// (never written, so absent from `modifies`/effects) must still be
+/// snapshotted, and the `requires` assume must read the `pre_<field>`
+/// snapshot — not the pure-model `s.<field>` accessor, which is unbound in
+/// the harness. `threshold <= num_voters` is the archetype: `num_voters` is
+/// read-only. Before the fix the harness referenced `s.num_voters` /
+/// `post_num_voters` without declaring them, failing to compile.
+#[test]
+fn read_only_requires_ensures_fields_are_snapshotted() {
+    let src = r#"spec WellFormed
+state { threshold : U16, num_voters : U16 }
+handler set_threshold (new_threshold : U16) {
+  requires new_threshold <= state.num_voters else BadThreshold
+  modifies [threshold]
+  ensures state.threshold <= state.num_voters
+  effect { threshold := new_threshold }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_readonly_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Quasar)
+        .expect("kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The read-only field is snapshotted on both sides of the call.
+    assert!(
+        body.contains("pre_num_voters") && body.contains("post_num_voters"),
+        "read-only field `num_voters` must be snapshotted pre and post; got:\n{body}"
+    );
+    // The `requires` assume reads the pre-snapshot, not the unbound `s.`
+    // accessor.
+    assert!(
+        body.contains("kani::assume(") && body.contains("new_threshold <= pre_num_voters"),
+        "requires assume must read `pre_num_voters`; got:\n{body}"
+    );
+    assert!(
+        !body.contains("s.num_voters"),
+        "the pure-model `s.<field>` accessor must not leak into the impl harness; got:\n{body}"
+    );
+}
+
+/// #162 phase 1: the brownfield-Anchor mode emits a state-struct harness
+/// (symbolic state → agent-fill effect → assert ensures), NOT the greenfield
+/// `Accounts` context + `accounts.handler(...)` shape that can't resolve
+/// against a pre-existing Anchor program. Snapshots read from `state.<field>`
+/// (incl. read-only requires/ensures fields), and only the struct
+/// construction + effect application are `todo!()` agent-fill.
+#[test]
+fn brownfield_anchor_emits_state_struct_harness() {
+    let src = r#"spec WellFormed
+state { threshold : U16, num_voters : U16 }
+handler set_threshold (new_threshold : U16) {
+  requires new_threshold <= state.num_voters else BadThreshold
+  modifies [threshold]
+  ensures state.threshold <= state.num_voters
+  effect { threshold := new_threshold }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_bf_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // Brownfield header, state-struct shape — NOT the greenfield Context shape.
+    assert!(
+        body.contains("BROWNFIELD Anchor"),
+        "header names the brownfield mode; got:\n{body}"
+    );
+    assert!(
+        !body.contains("mod symbolic_accounts") && !body.contains("let result = accounts.handler"),
+        "must NOT emit the greenfield Accounts context / accounts.handler shape; got:\n{body}"
+    );
+    // Snapshots read from `state.<field>`, incl. the read-only field.
+    assert!(
+        body.contains("let pre_num_voters = state.num_voters;")
+            && body.contains("let post_num_voters = state.num_voters;"),
+        "read-only field snapshotted from `state`; got:\n{body}"
+    );
+    // requires assume reads the pre-snapshot (not the unbound `s.` accessor).
+    assert!(
+        body.contains("new_threshold <= pre_num_voters") && !body.contains("s.num_voters"),
+        "requires assume reads `pre_num_voters`; got:\n{body}"
+    );
+    // Exactly the two genuine agent-fill sites + the unwind hint. This spec is
+    // numeric-only (no `Pubkey`), so the suggested bound is the low value —
+    // not the 32-byte-memcmp 34 (see `unwind_bound_tracks_pubkey_presence`).
+    assert!(
+        body.contains("AGENT-FILL (1/2)")
+            && body.contains("AGENT-FILL (2/2)")
+            && body.contains("#[kani::unwind(4)]"),
+        "two agent-fill sites + low unwind hint; got:\n{body}"
+    );
+}
+
+/// F2 (#167): the impl-harness unwind bound is computed, not fixed. A harness
+/// that snapshots or takes a `Pubkey` (→ `[u8; 32]`, a 32-byte `memcmp`)
+/// suggests `#[kani::unwind(34)]`; a numeric-only harness suggests a low bound
+/// (< 34) so it closes faster. Covers greenfield (Anchor) both ways plus
+/// brownfield Pubkey.
+#[test]
+fn unwind_bound_tracks_pubkey_presence() {
+    // (a) Pubkey STATE field compared in `ensures` → high bound.
+    let pk_state = r#"spec Registry
+state { authority : Pubkey, count : U64 }
+handler rotate (new_authority : Pubkey) {
+  modifies [authority]
+  ensures state.authority == new_authority
+  effect { authority := new_authority }
+}"#;
+    let spec = parse_str(pk_state).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_unwind_pk_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor).expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        body.contains("#[kani::unwind(34)]") && !body.contains("#[kani::unwind(4)]"),
+        "Pubkey-comparing harness must suggest unwind 34; got:\n{body}"
+    );
+
+    // (b) Numeric-only handler → low bound (< 34).
+    let numeric = r#"spec Counter
+state { count : U64, total : U64 }
+handler bump (delta : U64) {
+  requires delta > 0 else BadDelta
+  modifies [count]
+  ensures state.count == old(state.count) + delta
+  effect { count += delta }
+}"#;
+    let spec = parse_str(numeric).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_unwind_num_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor).expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        body.contains("#[kani::unwind(4)]") && !body.contains("#[kani::unwind(34)]"),
+        "numeric-only harness must suggest a low unwind bound; got:\n{body}"
+    );
+
+    // (c) Pubkey handler PARAM alone (no Pubkey state field) still lifts the
+    //     brownfield bound to 34.
+    let pk_param = r#"spec Guarded
+state { count : U64 }
+handler admin_bump (caller : Pubkey) (delta : U64) {
+  requires delta > 0 else BadDelta
+  modifies [count]
+  ensures state.count == old(state.count) + delta
+  effect { count += delta }
+}"#;
+    let spec = parse_str(pk_param).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_unwind_bfpk_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        body.contains("#[kani::unwind(34)]"),
+        "Pubkey param must lift the brownfield unwind bound to 34; got:\n{body}"
+    );
+
+    // (d) A Pubkey STATE field that is NEVER referenced in a guard/ensures (only
+    //     numeric fields are) must STILL lift the bound: impl harnesses call
+    //     real code over the whole struct, whose owner/has_one/dedup checks do a
+    //     32-byte memcmp. Regression for the settings well-formedness shape,
+    //     where `authority: Pubkey` drives `auth`/`has_one` but appears in no
+    //     guard/ensures expression — an intersection-with-snapshot heuristic
+    //     would wrongly pick 4 and re-introduce the unwinding-assertion failure.
+    let pk_unref = r#"spec Settingsish
+state { authority : Pubkey, threshold : U16, voters : U16 }
+handler set_threshold (new_threshold : U16) {
+  requires new_threshold <= state.voters else Bad
+  modifies [threshold]
+  ensures state.threshold <= state.voters
+  effect { threshold := new_threshold }
+}"#;
+    let spec = parse_str(pk_unref).expect("parse");
+    let tmp =
+        std::env::temp_dir().join(format!("kani_impl_unwind_unref_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        body.contains("#[kani::unwind(34)]") && !body.contains("#[kani::unwind(4)]"),
+        "an unreferenced Pubkey state field must still lift the bound to 34; got:\n{body}"
+    );
+}
+
 /// Slice 8 M3: Pinocchio emits a stack-allocated `AccountInfo`
 /// harness. Validates the deterministic scaffold + per-handler
 /// proof shape that the M2 reference
