@@ -412,8 +412,21 @@ fn emit_enum(name: &str, sum: &ParsedSumType, ctx: &CtorCtx, depth: usize) -> Op
     let tp = &ctx.type_path;
     let mut arms = Vec::with_capacity(n);
     for (i, v) in sum.variants.iter().enumerate() {
+        let is_tuple = !v.fields.is_empty()
+            && v.fields
+                .iter()
+                .all(|(fname, _)| fname.parse::<usize>().is_ok());
         let ctor = if v.fields.is_empty() {
             format!("{tp}{name}::{}", v.name) // unit variant
+        } else if is_tuple {
+            // Tuple (positional) variant — synthetic numeric field names ("0",
+            // "1", …) from `Custom of I64`; render `Enum::V(val, …)` (G13b).
+            let fs: Option<Vec<String>> = v
+                .fields
+                .iter()
+                .map(|(_, fty)| emit_value(&parse_ty(fty), ctx, depth + 1))
+                .collect();
+            format!("{tp}{name}::{}({})", v.name, fs?.join(", "))
         } else {
             // Named-payload struct variant — recurse per field.
             let fs: Option<Vec<String>> = v
@@ -610,6 +623,31 @@ mod tests {
                 && !e2.contains("OneTime {")
                 && e2.contains("_ => crate::P::Windowed { secs: kani::any() }"),
             "unit variant has no payload braces; got {e2}"
+        );
+    }
+
+    #[test]
+    fn enum_tuple_variant_positional_construction() {
+        // PeriodV2-shaped: unit variants + a TUPLE variant `Custom(i64)`. The
+        // parser names the positional field "0" (impossible for a real named
+        // field), so `emit_enum` renders `Enum::V(val)` not `Enum::V { 0: val }`
+        // nor `Enum::V { .. }`. G13b (#177 follow-on).
+        let sums = vec![sum(
+            "PeriodV2",
+            &[
+                ("OneTime", &[]),
+                ("Daily", &[]),
+                ("Custom", &[("0", "I64")]),
+            ],
+        )];
+        let e = emit_value(&parse_ty("PeriodV2"), &ctx(&[], &sums, 1), 0).unwrap();
+        assert!(
+            e.contains("_ => crate::PeriodV2::Custom(kani::any())"),
+            "tuple variant → positional `Enum::V(val)`; got {e}"
+        );
+        assert!(
+            !e.contains("Custom {"),
+            "tuple variant must NOT render braces; got {e}"
         );
     }
 

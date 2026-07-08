@@ -156,13 +156,26 @@ pub(super) fn variant<'a>() -> impl Parser<'a, &'a str, Variant, Err<'a>> + Clon
         .map(|n| n as u64)
         .then_ignore(wsc());
     let desc = string_lit().then_ignore(wsc());
-    let fields = just("of")
-        .then_ignore(wsc())
-        .ignore_then(just('{'))
+    // Payload: `of { named : T, … }` (struct variant) OR `of <Type>` (a
+    // single-field TUPLE variant, e.g. `Custom of I64` → Rust `Custom(i64)`).
+    // The tuple field gets the synthetic name "0" — impossible for a real field
+    // (whose grammar requires an identifier), so downstream codegen detects the
+    // numeric name and renders positional `Enum::V(val)` instead of
+    // `Enum::V { name: val }`. G13b (#177 follow-on).
+    let struct_body = just('{')
         .then_ignore(wsc())
         .ignore_then(typed_field_list())
         .then_ignore(wsc())
-        .then_ignore(just('}'))
+        .then_ignore(just('}'));
+    let tuple_body = type_ref().map(|ty| {
+        vec![TypedField {
+            name: "0".to_string(),
+            ty,
+        }]
+    });
+    let fields = just("of")
+        .then_ignore(wsc())
+        .ignore_then(choice((struct_body, tuple_body)))
         .then_ignore(wsc());
 
     just('|')

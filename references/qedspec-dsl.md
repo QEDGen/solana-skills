@@ -257,7 +257,9 @@ type Account = {
 ### Sum types (ADTs)
 
 ML-style sum types with optional payloads. Variants without payload are bare
-idents; payload variants use `of { ... }`.
+idents; **struct** variants use `of { named : T, … }`; a single-field **tuple**
+variant uses `of <Type>` (no braces) — mirroring a Rust tuple variant like
+`Custom(i64)`.
 
 ```fsharp
 // State ADT — variants with optional payloads
@@ -272,7 +274,18 @@ type State
     }
   | Draining
   | Resetting
+
+// Tuple variant — `Custom of I64` mirrors the real `PeriodV2::Custom(i64)`;
+// the State-driven Kani ctor builds it positionally as `PeriodV2::Custom(…)`.
+type PeriodV2
+  | OneTime
+  | Daily
+  | Custom of I64
 ```
+
+(Tuple variants are currently supported by the brownfield Kani construction
+path; the `is .Variant` test and the Lean ADT backend still assume unit/struct
+shapes.)
 
 Sum types used as `Map` values are emitted as proper Lean `inductive`
 declarations; state ADTs flatten for downstream transition codegen.
