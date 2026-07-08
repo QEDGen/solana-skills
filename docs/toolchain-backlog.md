@@ -216,22 +216,46 @@ shape: **C (Settings well-formedness) fully migrated** — `change_threshold` +
 families are a *different verification style* the generated shape doesn't yet
 cover; each surfaced a distinct gap (filed, not forced):
 
-### 🧩 G13 — enum (sum-type) State-field construction  [#177]
-`state_ctor` bails to `todo!()` on an enum field (only records resolve).
-`Proposal.status: ProposalStatus` (6 variants) and `SpendingLimitV2.period:
-PeriodV2` (4 unit + `Custom(i64)`) block construction. Fix: symbolic variant
-selection from the spec's `ParsedSumType`. Highest-leverage — unblocks F + Proposal.
+### ✅ G13a — enum (sum-type) State-field construction  [SHIPPED be8442c, #177]
+`state_ctor` bailed to `todo!()` on enum fields. Now emits symbolic variant
+selection (`match kani::any::<usize>() % N { … }`) from the spec's sum types
+(merged from `spec.sum_types` + `account_types`-with-variants). Unit + named-
+payload variants. Validated: the real `Proposal` (6-variant `ProposalStatus`)
+and the deeply-nested `SpendingLimitV2` (nested records + enum + Option) both
+generate complete, correct ctors. **G13b (open):** tuple variants
+(`PeriodV2::Custom(i64)`) need `of (T)` parser syntax + positional emission —
+required only by F's `reset_if_needed` (F's `decrement` uses a concrete period).
+
+### ✅ nested-field ensures — ALREADY SUPPORTED (not a gap)
+`state.usage.remaining_in_period == old(…) - amount` lowers correctly: the
+harness snapshots the top-level field (`let pre_usage = state.usage`) and
+preserves the dotted access in the requires-assume and post-assert. So G15's
+"method-postcondition arithmetic over nested fields" sub-item is already covered
+for the snapshot/assert side.
+
+### 🧩 G17 — harness placement / type paths for private-module types  [#180]
+The generated harness colocates at crate root and names types `crate::<Type>` —
+resolves only for crate-root-re-exported types. `SpendingLimitV2` & friends live
+in `state::policies::utils` behind a private `mod utils` (no re-export), so a
+crate-root harness gets 9 `cannot find type in crate root` errors. **Blocks F**
+(construction is correct; visibility isn't). Fix: place the harness inside the
+target module (`pragma state_module`) with `use super::*` + bare names, or emit
+the resolvable path when the module is pub-reachable. C + Proposal are
+re-exported to root, so they're unaffected.
 
 ### 🧩 G14 — sysvar/Clock stub emission in generated impl-Kani  [#178]
 `Clock::get()`-reading methods need `#[kani::stub(Clock::get, …)] -Z stubbing` +
 a symbolic-Clock stub; the harness emits none. Hand-written in A4/A5/reject-cancel
-(Proposal) and D.
+(Proposal) and D. Also: **Proposal has no `invariant()`**, so the harness's
+hardcoded `assume(state.invariant().is_ok())` won't compile for it — the pre-state
+validity assume must become optional (scenario preconditions instead).
 
 ### 🧩 G15 — properties beyond scalar-field ensures  [#179]
-Collection membership (`signer ∈ approved`), panic-freedom (`reset_if_needed`),
-and method-postcondition arithmetic (`remaining == old(remaining) - amount`) —
-none expressible as the single scalar `ensures` the harness asserts. The method
-CALL fits the AGENT-FILL (2/2) slot; the property language is the gap.
+Collection membership (`signer ∈ approved`) and panic-freedom (`reset_if_needed`
+— call the method, assert no panic, no value assertion) aren't expressible as the
+scalar `ensures` the harness asserts. (Method-postcond arithmetic over nested
+fields turned out to already work — see above.) The method CALL fits the
+AGENT-FILL (2/2) slot; the property language is the gap.
 
 ### 🧩 G16 (note) — D (account_tracking) is not a state-struct-mirror target
 D constructs raw `AccountInfo` + byte-packed SPL token accounts + a `Balances`
