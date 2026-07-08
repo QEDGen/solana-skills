@@ -76,9 +76,10 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     // `todo!()`. When the State isn't fully constructible (a bare enum / Map
     // field, or an ambiguous multi-account spec), `state_struct` stays `None`
     // and the harnesses fall back to the agent-fill `todo!()`.
+    let vec_bound = super::state_ctor::vec_bound_of(spec);
     let state_struct: Option<String> = match super::state_ctor::resolve_state_struct(spec) {
         Some((name, fields)) => {
-            match super::state_ctor::emit_state_ctor(name, fields, &spec.records) {
+            match super::state_ctor::emit_state_ctor(name, fields, &spec.records, vec_bound) {
                 Some(ctor) => {
                     out.push_str(&ctor);
                     out.push('\n');

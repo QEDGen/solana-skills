@@ -315,8 +315,10 @@ handler set_time_lock (new_time_lock : U32) {
         "Option<Pubkey> field symbolic Some/None; got:\n{body}"
     );
     assert!(
-        body.contains("kani::assume(n <= 3)") && body.contains("crate::SmartAccountSigner {"),
-        "Vec<record> field bounded + nested struct; got:\n{body}"
+        body.contains("signers: vec![crate::SmartAccountSigner {")
+            && body.contains("key: anchor_lang::prelude::Pubkey::new_from_array(kani::any())")
+            && !body.contains("while "),
+        "Vec<record> is fixed-length vec![] with nested struct (no symbolic-length loop); got:\n{body}"
     );
     // The harness CALLS the ctor + assumes pre-state validity — construction is
     // no longer agent-fill; only the effect gate (2/2) is.

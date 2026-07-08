@@ -6,8 +6,10 @@
 //! `Vec<Record>` fields landed with G9/G10 — #173/#174), is faithful and
 //! checked. Given the State's fields + the spec's record types, emit
 //! `symbolic_<state>()` whose every field is `kani::any()`: scalars direct,
-//! `Pubkey` from a symbolic byte array, `Option` symbolic Some/None, `Vec`
-//! bounded (≤ 3, matching the harness unwind budget), nested records recursed.
+//! `Pubkey` from a symbolic byte array, `Option` symbolic Some/None, `Vec` as a
+//! fixed-length-K `vec![…]` of symbolic elements (`pragma kani_vec_bound`,
+//! default 1 — a symbolic *length* OOMs CBMC; see `emit_value`), nested records
+//! recursed.
 //!
 //! The brownfield harness pairs this with
 //! `kani::assume(state.invariant().is_ok())` so Kani explores only well-formed
@@ -53,12 +55,15 @@ pub(crate) fn emit_state_ctor(
     struct_name: &str,
     fields: &[(String, String)],
     records: &[ParsedRecordType],
+    // Fixed length for symbolic `Vec` fields (`pragma kani_vec_bound`, default 1).
+    // See the `Vec` arm in `emit_value` for why this is fixed-length, not symbolic.
+    vec_bound: usize,
 ) -> Option<String> {
     // Build every field first: bail on the FIRST unconstructible one so we
     // never emit a partially-`todo!()` constructor.
     let mut field_lines = Vec::with_capacity(fields.len());
     for (name, ty_str) in fields {
-        let expr = emit_value(&parse_ty(ty_str), records, 0)?;
+        let expr = emit_value(&parse_ty(ty_str), records, 0, vec_bound)?;
         field_lines.push(format!("        {name}: {expr},"));
     }
 
@@ -87,7 +92,12 @@ pub(crate) fn ctor_fn_name(struct_name: &str) -> String {
 
 /// Recursive `Ty` → symbolic-construction expression. `None` = unconstructible
 /// without agent knowledge.
-fn emit_value(ty: &Ty, records: &[ParsedRecordType], depth: usize) -> Option<String> {
+fn emit_value(
+    ty: &Ty,
+    records: &[ParsedRecordType],
+    depth: usize,
+    vec_bound: usize,
+) -> Option<String> {
     if depth > 8 {
         return None; // recursion guard (mutually-recursive record types)
     }
@@ -101,23 +111,32 @@ fn emit_value(ty: &Ty, records: &[ParsedRecordType], depth: usize) -> Option<Str
             // (the MIR `Ty` enum has no first-class Option/Vec — see #173/#174);
             // the inner is a single named type (scalar or record).
             if let Some(inner) = s.strip_prefix("Option ") {
-                let inner_expr = emit_value(&parse_ty(inner.trim()), records, depth + 1)?;
+                let inner_expr =
+                    emit_value(&parse_ty(inner.trim()), records, depth + 1, vec_bound)?;
                 format!("if kani::any() {{ Some({inner_expr}) }} else {{ None }}")
             } else if let Some(inner) = s.strip_prefix("Vec ") {
-                let inner_expr = emit_value(&parse_ty(inner.trim()), records, depth + 1)?;
-                // Bounded symbolic Vec (≤ 3, matching the harness unwind budget).
-                format!(
-                    "{{ let mut v = Vec::new(); let n: usize = kani::any(); \
-                     kani::assume(n <= 3); let mut i = 0usize; \
-                     while i < n {{ v.push({inner_expr}); i += 1; }} v }}"
-                )
+                let inner_expr =
+                    emit_value(&parse_ty(inner.trim()), records, depth + 1, vec_bound)?;
+                // FIXED-LENGTH-K symbolic Vec — `vec![<elem>, …]` with K
+                // independent symbolic elements, NOT a symbolic-length `while`
+                // loop. A symbolic length forces CBMC to unwind the build loop
+                // (and the real `invariant()`'s own iteration over the field) to
+                // the harness `#[kani::unwind]` bound and to model Vec
+                // growth/realloc — which dominates (OOMs) the proof even for a
+                // property that never reads the collection. K = `pragma
+                // kani_vec_bound` (default 1). Raise it for a property that DOES
+                // read the collection; a bounded (BMC) length is the trade-off.
+                let elems = std::iter::repeat_n(inner_expr, vec_bound)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("vec![{elems}]")
             } else if let Some(rec) = records.iter().find(|r| &r.name == s) {
                 // Nested record — recurse into its fields.
                 let inner: Option<Vec<String>> = rec
                     .fields
                     .iter()
                     .map(|(fname, fty)| {
-                        let e = emit_value(&parse_ty(fty), records, depth + 1)?;
+                        let e = emit_value(&parse_ty(fty), records, depth + 1, vec_bound)?;
                         Some(format!("{fname}: {e}"))
                     })
                     .collect();
@@ -131,6 +150,16 @@ fn emit_value(ty: &Ty, records: &[ParsedRecordType], depth: usize) -> Option<Str
         // on-chain layout is a fixed array or a BTreeMap, spec-dependent).
         Ty::Map { .. } => return None,
     })
+}
+
+/// The fixed length used for symbolic `Vec` state fields: `pragma
+/// kani_vec_bound = <N>` if set (and parseable), else 1. Kept small by default
+/// because the real `invariant()`'s iteration over the field unwinds per
+/// element; raise it only for a property that reads into the collection.
+pub(crate) fn vec_bound_of(spec: &ParsedSpec) -> usize {
+    spec.pragma_value("kani_vec_bound")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
 }
 
 /// `Settings` → `settings`, `SmartAccount` → `smart_account`. Struct names are
@@ -183,24 +212,39 @@ mod tests {
         ];
         // Scalars + Pubkey.
         assert_eq!(
-            emit_value(&parse_ty("U64"), &records, 0).unwrap(),
+            emit_value(&parse_ty("U64"), &records, 0, 1).unwrap(),
             "kani::any()"
         );
         assert_eq!(
-            emit_value(&parse_ty("Pubkey"), &records, 0).unwrap(),
+            emit_value(&parse_ty("Pubkey"), &records, 0, 1).unwrap(),
             "anchor_lang::prelude::Pubkey::new_from_array(kani::any())"
         );
         // Option<Pubkey> → symbolic Some/None.
-        let opt = emit_value(&parse_ty("Option Pubkey"), &records, 0).unwrap();
+        let opt = emit_value(&parse_ty("Option Pubkey"), &records, 0, 1).unwrap();
         assert!(opt.contains("if kani::any()") && opt.contains("Some(") && opt.contains("None"));
-        // Vec<SmartAccountSigner> → bounded loop building the nested struct.
-        let v = emit_value(&parse_ty("Vec SmartAccountSigner"), &records, 0).unwrap();
-        assert!(v.contains("kani::assume(n <= 3)"), "bounded; got {v}");
+        // Vec<SmartAccountSigner> → FIXED-LENGTH-K `vec![…]` (no symbolic-length
+        // `while` loop — that OOMs CBMC), K nested symbolic structs.
+        let v = emit_value(&parse_ty("Vec SmartAccountSigner"), &records, 0, 2).unwrap();
         assert!(
-            v.contains("crate::SmartAccountSigner {") && v.contains("crate::Permissions {"),
-            "nested structs recursed; got {v}"
+            v.starts_with("vec![") && !v.contains("while") && !v.contains("kani::assume(n"),
+            "fixed-length vec![], no symbolic-length loop; got {v}"
         );
-        assert!(v.contains("mask:"), "leaf field present; got {v}");
+        assert_eq!(
+            v.matches("crate::SmartAccountSigner {").count(),
+            2,
+            "K=2 elements; got {v}"
+        );
+        assert!(
+            v.contains("crate::Permissions {") && v.contains("mask:"),
+            "nested; got {v}"
+        );
+        // K=1 (the default) → a single element.
+        let v1 = emit_value(&parse_ty("Vec SmartAccountSigner"), &records, 0, 1).unwrap();
+        assert_eq!(
+            v1.matches("crate::SmartAccountSigner {").count(),
+            1,
+            "K=1 element; got {v1}"
+        );
     }
 
     #[test]
@@ -219,10 +263,10 @@ mod tests {
             ("archival_authority".into(), "Option Pubkey".into()),
             ("signers".into(), "Vec SmartAccountSigner".into()),
         ];
-        let ctor = emit_state_ctor("Settings", &fields, &records).unwrap();
+        let ctor = emit_state_ctor("Settings", &fields, &records, 1).unwrap();
         assert!(ctor.contains("fn symbolic_settings() -> crate::Settings"));
         assert!(ctor.contains("settings_authority:") && ctor.contains("time_lock:"));
-        assert!(ctor.contains("crate::SmartAccountSigner {"));
+        assert!(ctor.contains("signers: vec![crate::SmartAccountSigner {"));
         assert!(!ctor.contains("todo!"), "no agent-fill; got:\n{ctor}");
     }
 
@@ -234,9 +278,9 @@ mod tests {
             ("ok".into(), "U64".into()),
             ("kind".into(), "SomeEnum".into()), // not a record → unconstructible
         ];
-        assert!(emit_state_ctor("Thing", &fields, &[]).is_none());
+        assert!(emit_state_ctor("Thing", &fields, &[], 1).is_none());
         // A `Map` field is likewise unconstructible here.
         let map_fields = vec![("book".into(), "Map[8] U64".into())];
-        assert!(emit_state_ctor("Thing", &map_fields, &[]).is_none());
+        assert!(emit_state_ctor("Thing", &map_fields, &[], 1).is_none());
     }
 }
