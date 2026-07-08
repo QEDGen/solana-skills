@@ -254,16 +254,22 @@ for Proposal (no `invariant()` method) AND for F-decrement (its `invariant()`
 panics under fully-symbolic input — the symbolic ctor is stricter than the scoped
 hand-written harness). Validated at codegen on the Proposal harness.
 
-### 🧩 G15a — collection membership in ensures/requires  [#179] — LAST Proposal blocker
-Proposal A5b asserts `signer ∈ approved` / `signer ∉ rejected`; A5a `len` unchanged.
-The scalar `ensures` can't express Vec membership. Plan: a `contains(coll, x)`
-builtin (NOT an `in` operator — `in` is a reserved keyword) → Rust
-`coll.contains(&x)`; a new `Expr::Contains` variant (updates every exhaustive
-`Expr` consumer per the no-`_`-arms discipline) + parser atom + Rust/Lean lowering.
-**Plus non-Copy Vec snapshots:** the pre-snapshot `let pre_rejected = state.rejected;`
-MOVES a `Vec` (breaks the subsequent `&mut` method call) — pre-snapshots of
-non-Copy fields must `.clone()` (type-aware). With these two, Proposal A5b is
-generatable + green (construction, stub, optional-invariant already done).
+### ✅ G15a — collection membership `contains(coll, elem)`  [SHIPPED 01b3117, #179]
+`contains(coll, elem)` in requires/ensures → Rust `coll.contains(&elem)`, Lean
+`elem ∈ coll`. AST `Expr::Contains` + MIR `ExprTree::Contains` threaded through
+every exhaustive consumer + parser atom; `Vec` snapshots `.clone()` (non-Copy);
+`Pubkey` params stay real `Pubkey`. Validated at codegen: the Proposal A5b
+harness is fully generated (construction + membership requires/ensures + Clock
+stub, only `approve()` agent-filled).
+
+### 🧩 G18 — Kani can't bound Vec-membership proofs  [#181] — A5b PROOF wall
+The A5b harness is codegen-complete + correct, but the PROOF fails: CBMC doesn't
+bound `.contains` over `Vec<Pubkey>` after the real `approve()`'s `insert`/`clone`
+(`Not unwinding loop … slice_contains … iteration N` at ANY unwind bound; ~39k
+VCCs; an explicit `len() <=` assume didn't help). Solver-modeling limit (same
+class as G12), NOT a codegen defect. C + F-decrement (scalar/arith) are green and
+unaffected. Options: fixed-capacity array model for vote sets, stub
+`.contains`/`binary_search`, or route Vec-membership to another backend.
 
 ### 🧩 G15b — panic-freedom property class  [#179]
 F's `reset_if_needed`: call the method, assert only that Kani finds no panic — no
