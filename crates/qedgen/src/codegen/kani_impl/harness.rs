@@ -404,6 +404,10 @@ pub(crate) fn emit_brownfield_handler_harness(
     if abstract_pk {
         out.push_str(super::state_ctor::pubkey_stub_attr());
     }
+    // #182 Tier 2 — redirect PDA derivation to an opaque address (skip sha256).
+    if super::state_ctor::wants_pda_abstraction(spec) {
+        out.push_str(super::state_ctor::pda_stub_attr());
+    }
     // G14 — the agent-fill effect calls a `Clock::get()`-reading method; stub it.
     if super::state_ctor::wants_clock_stub(spec) {
         out.push_str(

@@ -114,6 +114,14 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         out.push('\n');
     }
 
+    // Abstract PDA derivation support fn (#182 Tier 2) — emitted once; each
+    // proof carries the `#[kani::stub]` redirecting `find_program_address` so
+    // CBMC skips the sha256 bit-blast.
+    if super::state_ctor::wants_pda_abstraction(spec) {
+        out.push_str(&super::state_ctor::pda_stub_fn());
+        out.push('\n');
+    }
+
     // Clock stub (G14) — emitted once; each proof carries the `#[kani::stub]`.
     if super::state_ctor::wants_clock_stub(spec) {
         out.push_str(&super::state_ctor::clock_stub_fn());

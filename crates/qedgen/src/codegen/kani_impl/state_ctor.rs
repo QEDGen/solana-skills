@@ -155,6 +155,38 @@ pub(crate) fn pubkey_stub_attr() -> &'static str {
     "#[kani::stub(<anchor_lang::prelude::Pubkey as core::cmp::PartialEq>::eq, pk_eq_abstract)]\n"
 }
 
+/// `pragma kani_stub_pda = <anything>` → the agent-fill effect calls code that
+/// derives a PDA (`find_program_address` = sha256 + a bump search, which
+/// bit-blasts catastrophically). Opt-in (the derivation is inside called
+/// methods, not visible from the spec). #182 Tier 2.
+pub(crate) fn wants_pda_abstraction(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_pda").is_some()
+}
+
+/// The abstract PDA-derivation support fn (emitted once when
+/// `wants_pda_abstraction`). Returns an OPAQUE deterministic address, not the
+/// real sha256. Sound over-approximation for safety — the program must hold for
+/// ANY derived address; we never re-verify that sha256 is sha256.
+pub(crate) fn pda_stub_fn() -> String {
+    "// Abstract PDA derivation (#182 Tier 2): an OPAQUE address, NOT the real\n\
+     // sha256 + bump search (which bit-blasts catastrophically — the sha2\n\
+     // GenericArray fold doesn't even unwind). Sound over-approximation for\n\
+     // safety properties; verification-only.\n\
+     fn find_pda_abstract(\n\
+     \x20   _seeds: &[&[u8]],\n\
+     \x20   _program_id: &anchor_lang::prelude::Pubkey,\n\
+     ) -> (anchor_lang::prelude::Pubkey, u8) {\n\
+     \x20   (anchor_lang::prelude::Pubkey::new_from_array(kani::any()), kani::any())\n\
+     }\n"
+    .to_string()
+}
+
+/// The `#[kani::stub]` attribute redirecting `find_program_address` to the
+/// abstract (needs `-Z stubbing`).
+pub(crate) fn pda_stub_attr() -> &'static str {
+    "#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]\n"
+}
+
 /// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
 /// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
 /// status, which the membership/threshold properties don't constrain.
