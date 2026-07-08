@@ -862,6 +862,10 @@ pub enum Expr {
         coll: Box<Node<Expr>>,
         elem: Box<Node<Expr>>,
     },
+    /// `len(coll)` — collection length. Rust `coll.len()`, Lean `coll.length`.
+    /// Produces a `Nat`. For `Vec` state fields (`len(state.approved) >=
+    /// threshold`) in requires/ensures.
+    Len(Box<Node<Expr>>),
     /// Inline `match scrutinee with | Variant binder => body | Variant => body`.
     /// Dispatches on a sum-typed scrutinee's constructor. `binder` is `Some`
     /// when the variant carries a payload and the arm wants to name it;
@@ -986,6 +990,7 @@ pub fn for_each_child_with_binder<'a>(
             f(coll, None);
             f(elem, None);
         }
+        Expr::Len(inner) => f(inner, None),
         Expr::Match { scrutinee, arms } => {
             f(scrutinee, None);
             for arm in arms {

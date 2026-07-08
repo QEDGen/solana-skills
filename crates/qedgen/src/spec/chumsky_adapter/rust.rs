@@ -285,6 +285,12 @@ pub(super) fn expr_to_rust(
             expr_to_rust(&coll.node, ctx, consts, opts),
             expr_to_rust(&elem.node, ctx, consts, opts)
         ),
+        // `len(coll)` → `coll.len() as u64` — matches the common `u64` threshold
+        // operand (`len(state.approved) >= threshold`) without a widening cast.
+        Expr::Len(coll) => format!(
+            "({}.len() as u64)",
+            expr_to_rust(&coll.node, ctx, consts, opts)
+        ),
         Expr::Match { scrutinee, arms } => {
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             let mut out = format!("match {} {{", sc);
@@ -327,8 +333,29 @@ pub(super) fn expr_to_rust(
             format!("{} {{ {}, ..{} }}", "/* ty */", body, base_str)
         }
         Expr::IsVariant { scrutinee, variant } => {
+            // Resolve the scrutinee's enum type and the variant's shape so the
+            // `matches!` pattern is shape-correct: `Enum::V { .. }` for a
+            // struct variant (`Approved of { timestamp }`), `Enum::V` for a
+            // payload-free unit variant. A Path scrutinee (the common
+            // `state.status is .Approved`) resolves its enum via the type env;
+            // `resolve_variant` falls back to a global unique-name search.
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
-            format!("matches!({}, {}::{}(..))", sc, "/* ty */", variant)
+            let hint = match &scrutinee.node {
+                Expr::Path(p) => opts.env.path_type_name(p),
+                _ => None,
+            };
+            let (enum_name, is_struct) = match opts.env.resolve_variant(hint.as_deref(), variant) {
+                Some(pair) => pair,
+                // Unresolved shape: keep the enum hint if we have one and
+                // assume the struct shape (dominant for status enums).
+                None => (hint.unwrap_or_else(|| variant.clone()), true),
+            };
+            let pat = if is_struct {
+                format!("{}::{} {{ .. }}", enum_name, variant)
+            } else {
+                format!("{}::{}", enum_name, variant)
+            };
+            format!("matches!({}, {})", sc, pat)
         }
         Expr::App { func, args } => {
             // `now()` lowers to the on-chain clock read. `unwrap()` rather

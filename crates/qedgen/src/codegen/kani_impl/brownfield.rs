@@ -76,6 +76,13 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         // Bring the enclosing module's types (the ones the ctor names bare) into
         // scope. Required by the state_module in-module placement (G17).
         out.push_str("use super::*;\n");
+    } else {
+        // Crate-level placement: the ctor names types `crate::<Type>`, but an
+        // `is .Variant` test lowers to `matches!(x, <Enum>::<V> { .. })` with a
+        // BARE enum name (the DSL type name). Glob-import the crate root so
+        // those resolve. `allow(unused_imports)` because harnesses without a
+        // bare-named reference (e.g. `contains`-only ensures) wouldn't use it.
+        out.push_str("#[allow(unused_imports)]\nuse crate::*;\n");
     }
     out.push('\n');
 

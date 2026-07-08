@@ -103,6 +103,8 @@ pub(super) fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv
             expr_to_lean(&elem.node, ctx, consts, env),
             expr_to_lean(&coll.node, ctx, consts, env)
         ),
+        // `len(coll)` → Lean `coll.length`.
+        Expr::Len(coll) => format!("({}).length", expr_to_lean(&coll.node, ctx, consts, env)),
         Expr::Match { scrutinee, arms } => {
             // Render as Lean's `match ... with | Ctor binder? => body | ...`.
             // If the body doesn't reference the binder, emit `_` instead —

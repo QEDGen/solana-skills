@@ -93,6 +93,13 @@ struct TypeEnv<'a> {
     records: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     params: Vec<(String, &'a a::TypeRef)>,
     aliases: std::collections::BTreeMap<String, String>,
+    /// Sum-type registry: enum name → (variant name → is-struct-variant).
+    /// `true` = the variant carries named fields (`Approved of { … }` →
+    /// Rust `Enum::Approved { .. }`); `false` = a payload-free unit variant
+    /// (`Executing` → Rust `Enum::Executing`). Populated from every
+    /// `TopItem::Adt`. Consumed by [`Self::resolve_variant`] to render an
+    /// `is .Variant` test as a shape-correct `matches!` pattern.
+    adts: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
 }
 
 impl<'a> TypeEnv<'a> {
@@ -110,11 +117,14 @@ impl<'a> TypeEnv<'a> {
                 // ParsedSpec shape). The first variant carrying fields
                 // wins for name collisions. `Error`-shaped ADTs are skipped.
                 TopItem::Adt(a) if a.name != "Error" => {
+                    let mut shapes = std::collections::BTreeMap::new();
                     for variant in &a.variants {
+                        shapes.insert(variant.name.clone(), !variant.fields.is_empty());
                         for f in &variant.fields {
                             env.state_fields.entry(f.name.clone()).or_insert(&f.ty);
                         }
                     }
+                    env.adts.insert(a.name.clone(), shapes);
                 }
                 TopItem::TypeAlias(ta) => {
                     env.aliases
@@ -261,6 +271,34 @@ impl<'a> TypeEnv<'a> {
         }
     }
 
+    /// Resolve an `is .Variant` test to `(enum_name, is_struct_variant)` for
+    /// shape-correct Rust `matches!` rendering. `type_hint` is the scrutinee's
+    /// resolved type name (e.g. `state.status : ProposalStatus`) when known —
+    /// the enum is looked up there first. When the hint is absent or doesn't
+    /// carry the variant, fall back to a global search: a variant name unique
+    /// across all registered sum types resolves unambiguously; an ambiguous or
+    /// unknown name returns `None` (caller keeps a best-effort render).
+    fn resolve_variant(&self, type_hint: Option<&str>, variant: &str) -> Option<(String, bool)> {
+        if let Some(enum_name) = type_hint {
+            if let Some(shapes) = self.adts.get(enum_name) {
+                if let Some(&is_struct) = shapes.get(variant) {
+                    return Some((enum_name.to_string(), is_struct));
+                }
+            }
+        }
+        let mut hits = self
+            .adts
+            .iter()
+            .filter_map(|(name, shapes)| shapes.get(variant).map(|&s| (name.clone(), s)));
+        let first = hits.next()?;
+        // Ambiguous — the same variant name in two enums; can't disambiguate
+        // without the scrutinee type, so decline rather than guess wrong.
+        if hits.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
     /// Infer the kind of an Expr.
     fn infer(&self, e: &Expr) -> Kind {
         match e {
@@ -274,6 +312,7 @@ impl<'a> TypeEnv<'a> {
             Expr::Not(_) => Kind::Bool,
             Expr::Cmp { .. } => Kind::Bool,
             Expr::Contains { .. } => Kind::Bool,
+            Expr::Len(_) => Kind::Nat,
             Expr::Arith { lhs, rhs, .. } => {
                 let lk = self.infer(&lhs.node);
                 let rk = self.infer(&rhs.node);

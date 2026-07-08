@@ -365,19 +365,46 @@ pub(crate) fn emit_handler_harness(
 /// need the real source — constructing the struct and applying the effect —
 /// are left as `todo!()`. This is the shape both bundled brownfield harnesses
 /// (settings well-formedness, delegation conservation) were hand-written to.
-/// `true` when the spec's State declares `field` as a `Vec` — such a field is
-/// non-Copy, so its harness snapshot must `.clone()` rather than move it out of
-/// `state` (which would break the subsequent `&mut state` method call).
-/// Requires the `state_struct` pragma (generated construction); otherwise the
-/// field types aren't known and we keep the move (agent-fill construction).
-fn state_field_is_vec(spec: &ParsedSpec, field: &str) -> bool {
+/// `true` when the spec's State declares `field` as a non-`Copy` type — a
+/// `Vec`/`Map` collection or a custom ADT/record (which derive `Clone`, not
+/// `Copy`). Such a field's harness snapshot must `.clone()` rather than move
+/// it out of `state`, else the subsequent `&mut state` method call sees a
+/// partially-moved value and fails to compile. The fixed-width integers,
+/// `Bool`, `Fin[N]` (→ integer) and `Pubkey` (→ `[u8; 32]`) are `Copy` and
+/// move freely. Requires the `state_struct` pragma (generated construction);
+/// otherwise the field types aren't known and we keep the move (agent-fill
+/// construction).
+fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
     super::state_ctor::resolve_state_struct(spec)
         .map(|(_, fields)| {
             fields
                 .iter()
-                .any(|(n, t)| n == field && t.trim_start().starts_with("Vec "))
+                .any(|(n, t)| n == field && !is_copy_scalar_ty(t))
         })
         .unwrap_or(false)
+}
+
+/// The `Copy` scalar surface of the DSL as it lowers into a Kani harness:
+/// snapshotting one of these can move without `.clone()`. Everything else —
+/// `Vec`/`Map` and custom nominal types — is `Clone`-not-`Copy` and must be
+/// cloned (see [`state_field_needs_clone`]).
+fn is_copy_scalar_ty(t: &str) -> bool {
+    let t = t.trim();
+    t.starts_with("Fin")
+        || matches!(
+            t,
+            "U8" | "U16"
+                | "U32"
+                | "U64"
+                | "U128"
+                | "I8"
+                | "I16"
+                | "I32"
+                | "I64"
+                | "I128"
+                | "Bool"
+                | "Pubkey"
+        )
 }
 
 pub(crate) fn emit_brownfield_handler_harness(
@@ -483,7 +510,7 @@ pub(crate) fn emit_brownfield_handler_harness(
             // A `Vec` field is non-Copy: moving it out here would break the
             // `&mut state` method call below (partial move). Clone it (Copy
             // fields — scalars, `Pubkey` — move/copy as before).
-            let rhs = if state_field_is_vec(spec, field) {
+            let rhs = if state_field_needs_clone(spec, field) {
                 format!("state.{field}.clone()")
             } else {
                 format!("state.{field}")
@@ -531,7 +558,7 @@ pub(crate) fn emit_brownfield_handler_harness(
         for field in &snapshot_fields {
             // Clone `Vec` fields so an ensures can read them more than once
             // (a `.contains()` doesn't consume, but the snapshot move would).
-            let rhs = if state_field_is_vec(spec, field) {
+            let rhs = if state_field_needs_clone(spec, field) {
                 format!("state.{field}.clone()")
             } else {
                 format!("state.{field}")

@@ -197,6 +197,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
         | ExprTree::Contains { .. }
+        | ExprTree::Len(_)
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }

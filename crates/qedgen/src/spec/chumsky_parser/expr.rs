@@ -179,6 +179,19 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
         let mul_div_floor_atom = mdf_args("mul_div_floor", false);
         let mul_div_ceil_atom = mdf_args("mul_div_ceil", true);
 
+        // len(coll) — collection length → `Expr::Len`.
+        let len_atom = {
+            let ecoll = expr.clone();
+            bare_kw("len")
+                .then_ignore(wsc())
+                .ignore_then(just('('))
+                .then_ignore(wsc())
+                .ignore_then(ecoll)
+                .then_ignore(wsc())
+                .then_ignore(just(')'))
+                .map_with(|coll, e| Node::new(Expr::Len(Box::new(coll)), e.span().into_range()))
+        };
+
         // contains(coll, elem) — collection membership → `Expr::Contains`.
         // Built-in (not an `in` operator: `in` is a reserved keyword).
         let contains_atom = {
@@ -420,6 +433,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             mul_div_floor_atom,
             mul_div_ceil_atom,
             contains_atom,
+            len_atom,
             match_expr,
         ))
         .boxed();

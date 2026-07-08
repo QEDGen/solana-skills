@@ -244,10 +244,24 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
                 .map(|(n, v)| (n.clone(), build(&v.node, cx, shadow)))
                 .collect(),
         },
-        Expr::IsVariant { scrutinee, variant } => ExprTree::IsVariant {
-            scrutinee: boxed(scrutinee, cx, shadow),
-            variant: variant.clone(),
-        },
+        Expr::IsVariant { scrutinee, variant } => {
+            // Resolve the enum + variant shape now, while the TypeEnv is in
+            // scope: a Path scrutinee (`state.status is .Approved`) resolves
+            // its enum via the type env; `resolve_variant` falls back to a
+            // global unique-name search. Carried into the node for the
+            // env-less Rust renderer.
+            let hint = match &scrutinee.node {
+                Expr::Path(p) => cx.env.path_type_name(p),
+                _ => None,
+            };
+            let resolved = cx.env.resolve_variant(hint.as_deref(), variant);
+            ExprTree::IsVariant {
+                scrutinee: boxed(scrutinee, cx, shadow),
+                variant: variant.clone(),
+                enum_ty: resolved.as_ref().map(|(e, _)| e.clone()),
+                struct_variant: resolved.map(|(_, s)| s).unwrap_or(true),
+            }
+        }
         Expr::App { func, args } => ExprTree::App {
             func: func.clone(),
             args: args.iter().map(|n| build(&n.node, cx, shadow)).collect(),
@@ -257,6 +271,8 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             coll: Box::new(build(&coll.node, cx, shadow)),
             elem: Box::new(build(&elem.node, cx, shadow)),
         },
+        // `len(coll)` — collection length.
+        Expr::Len(coll) => ExprTree::Len(Box::new(build(&coll.node, cx, shadow))),
         Expr::Field { base, field } => ExprTree::Field {
             base: boxed(base, cx, shadow),
             field: field.clone(),

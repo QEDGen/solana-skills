@@ -95,6 +95,9 @@ pub enum ExprTree {
         coll: Box<ExprTree>,
         elem: Box<ExprTree>,
     },
+    /// `len(coll)` — collection length. Rust `coll.len()`, Lean `coll.length`.
+    /// Produces a `Nat`.
+    Len(Box<ExprTree>),
     /// `match scrutinee with | Variant binder => body | …`.
     Match {
         scrutinee: Box<ExprTree>,
@@ -116,6 +119,16 @@ pub enum ExprTree {
     IsVariant {
         scrutinee: Box<ExprTree>,
         variant: Symbol,
+        /// Resolved enum type name, for shape-correct Rust `matches!`
+        /// rendering (`RustCx` has no `TypeEnv` at emission time, so the
+        /// name is resolved once at build time and carried here). `None`
+        /// when unresolvable; the renderer then falls back to the scrutinee
+        /// Path leaf `Ty`.
+        enum_ty: Option<Symbol>,
+        /// `true` = struct variant → `Enum::V { .. }`; `false` = a
+        /// payload-free unit variant → `Enum::V`. Resolved from the
+        /// sum-type registry at build time.
+        struct_variant: bool,
     },
     /// `f(arg1, …)` — application of a spec-level helper (uninterpreted or
     /// `ref_impl`) or a builtin (`now()`, `current_epoch()`).
@@ -322,6 +335,7 @@ impl ExprTree {
             ExprTree::Not(_) => NumKind::Bool,
             ExprTree::Cmp { .. } => NumKind::Bool,
             ExprTree::Contains { .. } => NumKind::Bool,
+            ExprTree::Len(_) => NumKind::Nat,
             ExprTree::Arith { lhs, rhs, .. } => join(lhs, rhs),
             // Divisor kind doesn't promote — it's a scale.
             ExprTree::MulDivFloor { a, b, .. } | ExprTree::MulDivCeil { a, b, .. } => join(a, b),

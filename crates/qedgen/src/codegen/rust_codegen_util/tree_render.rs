@@ -231,6 +231,11 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             ),
             Prec::Atom,
         ),
+        // `len(coll)` → `coll.len() as u64`.
+        ExprTree::Len(coll) => (
+            format!("({}.len() as u64)", render(coll, cx, inside_old).0),
+            Prec::Atom,
+        ),
         ExprTree::Match { scrutinee, arms } => {
             let sc = render(scrutinee, cx, inside_old).0;
             let mut out = format!("match {} {{", sc);
@@ -278,12 +283,31 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                 Prec::Atom,
             )
         }
-        ExprTree::IsVariant { scrutinee, variant } => {
+        ExprTree::IsVariant {
+            scrutinee,
+            variant,
+            enum_ty,
+            struct_variant,
+        } => {
             let sc = render(scrutinee, cx, inside_old).0;
-            (
-                format!("matches!({}, {}::{}(..))", sc, "/* ty */", variant),
-                Prec::Atom,
-            )
+            // Enum name: the build-time-resolved `enum_ty`, else the
+            // scrutinee Path leaf `Ty::Custom` (the same source the Lean
+            // renderer uses).
+            let enum_name = enum_ty.clone().or_else(|| match scrutinee.as_ref() {
+                ExprTree::Path(p) => match &p.ty {
+                    Some(Ty::Custom(name)) => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let pat = match (enum_name, *struct_variant) {
+                (Some(e), true) => format!("{}::{} {{ .. }}", e, variant),
+                (Some(e), false) => format!("{}::{}", e, variant),
+                // Truly unresolved (non-Path scrutinee, untyped) — emit the
+                // struct shape on the bare variant as a last resort.
+                (None, _) => format!("{} {{ .. }}", variant),
+            };
+            (format!("matches!({}, {})", sc, pat), Prec::Atom)
         }
         ExprTree::App { func, args } => {
             // Builtins: `now()` reads the on-chain clock; `unwrap()` so the
@@ -515,7 +539,9 @@ fn render_quant(
 /// `rust_infer_kind` override.
 fn rust_num_kind(e: &ExprTree) -> NumKind {
     match e {
-        ExprTree::MulDivFloor { .. } | ExprTree::MulDivCeil { .. } => NumKind::Nat,
+        ExprTree::MulDivFloor { .. } | ExprTree::MulDivCeil { .. } | ExprTree::Len(_) => {
+            NumKind::Nat
+        }
         ExprTree::Old(inner) => rust_num_kind(inner),
         ExprTree::Int(_)
         | ExprTree::Bool(_)
@@ -558,6 +584,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
         | ExprTree::Contains { .. }
+        | ExprTree::Len(_)
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
         | ExprTree::Match { .. }
@@ -671,6 +698,7 @@ fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &s
         ExprTree::Old(inner) => render_pred_wrapped_term(inner, cx, true, wide),
         // A `Bool` predicate (not a numeric term to widen) — render plainly.
         ExprTree::Contains { .. } => render(e, cx, inside_old).0,
+        ExprTree::Len(_) => render(e, cx, inside_old).0,
         ExprTree::Arith {
             op: TreeArithOp::Add,
             lhs,
@@ -806,6 +834,7 @@ fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -
         ExprTree::Old(inner) => render_widened_term(inner, cx, true, wide),
         // A `Bool` predicate (not a numeric term to widen) — render plainly.
         ExprTree::Contains { .. } => render(e, cx, inside_old),
+        ExprTree::Len(_) => render(e, cx, inside_old),
         ExprTree::Arith { op, lhs, rhs } => {
             let l = render_widened_term(lhs, cx, inside_old, wide);
             let r = render_widened_term(rhs, cx, inside_old, wide);
@@ -944,6 +973,7 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
             for_each_path(coll, f);
             for_each_path(elem, f);
         }
+        ExprTree::Len(coll) => for_each_path(coll, f),
         ExprTree::Match { scrutinee, arms } => {
             for_each_path(scrutinee, f);
             for arm in arms {
@@ -1053,6 +1083,7 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Contains { coll, elem } => {
             contains_fallible_arith(coll) || contains_fallible_arith(elem)
         }
+        ExprTree::Len(coll) => contains_fallible_arith(coll),
         ExprTree::Match { scrutinee, arms } => {
             contains_fallible_arith(scrutinee)
                 || arms.iter().any(|a| contains_fallible_arith(&a.body))
