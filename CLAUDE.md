@@ -34,6 +34,10 @@ cd lean_solana && lake build                                    # Lean support l
 
 Snapshot suites (`tests/{mir,kani,codegen,proptest}_snapshot.rs`) gate every fixture against checked-in references; the shared harness lives in `tests/common/mod.rs` and rebuilds `qedgen` before driving it (no stale-binary footgun). Regenerate with `UPDATE_SNAPSHOTS=1 cargo test --test <suite>`. Full command + flag reference: [`references/cli.md`](references/cli.md).
 
+## Dogfooding → toolchain backlog (dev-mode loop)
+
+When you use QEDGen on a real target from this repo (verifying an audit program, a codegen bring-up, a spec at scale), close the loop as the **last step**: run the **`toolchain-scout`** agent (`.claude/agents/toolchain-scout.md`) on the session. It mines the run for friction — codegen bugs, missing modes/DSL constructs, DX papercuts, reusable techniques — and files evidence-backed, deduplicated entries to [`docs/toolchain-backlog.md`](docs/toolchain-backlog.md) plus one sanitized GitHub issue each. The scout **proposes**; the main loop fixes codegen bugs in source (never works around them) with a regression test. This lives here **only** — it is dev/maintainer tooling and must NOT go in `SKILL.md`, which ships to end users verifying their own programs.
+
 ## Crate map
 
 **`crates/qedgen-hash-core/`** — canonical spec/body hashing (`sha256_hex16`, `canonical_token_string`, `extract_handler_block`, `normalize_spec_block`, `spec_context_digest`, `scan_balanced_block`) shared by the CLI and the proc macro — agreement by construction, no hand-kept mirrors. `tests/stamp_crosscheck.rs` hard-asserts checked-in `#[qed(verified, hash = …)]` stamps.
