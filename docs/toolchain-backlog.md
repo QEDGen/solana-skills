@@ -320,7 +320,7 @@ attempted 3 round-2 advisory findings as FV targets. Four codegen bugs surfaced
 and were fixed in-session (all with regression coverage); one placement gap and
 one scope-boundary heuristic remain. Ranked most-leverage first.
 
-### 🩹 G17b — in-module brownfield harness can't name types in a *private sibling* module  [NEEDS-FIX]
+### 🩹 G17b — in-module brownfield harness can't name types in a *private sibling* module  [FIXED]
 
 The `pragma state_module` in-module placement (G17/#180) emits only `use super::*`
 as the import header (`kani_impl/brownfield.rs:75-86`). That reaches the placement
@@ -347,6 +347,14 @@ other types in another private module."
   program whose account struct pulls field types from a second private module —
   common in real Anchor `state::*` trees.
 - **Issue:** #183 (QEDGen/solana-skills)
+- **Fixed:** option (a) shipped. `pragma harness_use = <path>` (repeatable, one `use`
+  path per line — a `::*` glob or a single item; the parser's `path_value` now accepts
+  a `*` segment). `ParsedSpec::pragma_values(key)` collects all; `brownfield.rs` emits
+  each as `use <path>;` under one `#[allow(unused_imports)]`, after the placement
+  header, in source order. Test: `brownfield_harness_use_pragma_injects_extra_imports`
+  (`kani_impl/tests.rs`). Documented in `references/qedspec-dsl.md` §Pragmas. Option
+  (b) (auto-resolve the defining module) left open — the spec has only type names, so
+  (a) puts the one unknowable fact (the module path) in the author's hands.
 
 ### 🐞 B2 — `is .Variant` Rust lowering emitted non-compiling stub  [FIXED]
 

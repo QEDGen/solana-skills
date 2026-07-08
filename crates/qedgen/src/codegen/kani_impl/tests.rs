@@ -425,6 +425,61 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// #183 / G17b: an in-module brownfield harness (`pragma state_module`) whose
+/// mirrored State references types from a SECOND private module can't name them
+/// via `use super::*` alone. `pragma harness_use = <path>` (repeatable) injects
+/// the missing `use` lines verbatim — a `::*` glob or a single type path, in
+/// source order, under one `#[allow(unused_imports)]`.
+#[test]
+fn brownfield_harness_use_pragma_injects_extra_imports() {
+    let src = r#"spec HarnessUse
+pragma state_struct = Widget
+pragma state_module = state::widgets::widget
+pragma state_invariant = none
+pragma harness_use = crate::state::widgets::parts::*
+pragma harness_use = crate::core::traits::WidgetTrait
+state { size : U64, kind : Kind }
+type Kind | Small | Large
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_hu_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // In-module placement header, then the two requested `use` paths verbatim
+    // (glob + single type) in source order.
+    assert!(
+        body.contains("use super::*;"),
+        "state_module → in-module placement header; got:\n{body}"
+    );
+    assert!(
+        body.contains("use crate::state::widgets::parts::*;")
+            && body.contains("use crate::core::traits::WidgetTrait;"),
+        "harness_use paths emitted verbatim (glob + single type); got:\n{body}"
+    );
+    // Ordering: the glob line precedes the single-type line (source order).
+    let glob = body.find("crate::state::widgets::parts::*").unwrap();
+    let single = body.find("crate::core::traits::WidgetTrait").unwrap();
+    assert!(
+        glob < single,
+        "harness_use lines keep source order; got:\n{body}"
+    );
+}
+
 /// F2 (#167): the impl-harness unwind bound is computed, not fixed. A harness
 /// that snapshots or takes a `Pubkey` (→ `[u8; 32]`, a 32-byte `memcmp`)
 /// suggests `#[kani::unwind(34)]`; a numeric-only harness suggests a low bound

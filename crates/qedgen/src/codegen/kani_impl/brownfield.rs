@@ -84,6 +84,19 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         // bare-named reference (e.g. `contains`-only ensures) wouldn't use it.
         out.push_str("#[allow(unused_imports)]\nuse crate::*;\n");
     }
+    // `pragma harness_use = <path>` (repeatable, #183/G17b): in-module placement
+    // (`use super::*`) reaches only the placement module's declared + `pub use`
+    // items — NOT types in a *second* private module the mirrored State happens
+    // to reference (their bare names in the generated ctor won't resolve). The
+    // author names the missing paths (the one thing the spec — which carries
+    // type names, not their modules — can't infer); we emit them verbatim.
+    let extra_uses = spec.pragma_values("harness_use");
+    if !extra_uses.is_empty() {
+        out.push_str("#[allow(unused_imports)]\n");
+        for path in extra_uses {
+            out.push_str(&format!("use {};\n", path));
+        }
+    }
     out.push('\n');
 
     out.push_str(

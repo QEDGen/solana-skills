@@ -1239,6 +1239,22 @@ prefer it unless you specifically want the inductive sum-type modeling.
 > the State representation. The pragma makes it explicit. `WrongState` keeps its
 > independent role as the error returned on a variant-mismatch fallthrough.
 
+**`pragma harness_use = <path>`** (repeatable) — inject extra `use` lines into a
+generated **brownfield impl-Kani** harness. Needed when the harness is placed
+in-module (`pragma state_module`) and the mirrored `#[account]` State references
+a field type declared in a *second* private module: `use super::*` reaches only
+the placement module's own declared + `pub use` items, so the ctor's bare
+reference to that type won't resolve. Name each missing path (a `::*` glob or a
+single item — the module path is the one thing the spec can't infer from a type
+name); the paths are emitted verbatim under one `#[allow(unused_imports)]`, in
+source order:
+
+```fsharp
+pragma state_module = state::policies::implementations::foo_policy
+pragma harness_use  = crate::state::policies::utils::foo_types::*
+pragma harness_use  = crate::state::policies::policy_core::traits::FooTrait
+```
+
 ## Interface declarations
 
 Contracts for programs you CPI into. Uniform surface across three tiers:

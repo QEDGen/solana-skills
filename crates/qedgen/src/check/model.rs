@@ -879,6 +879,16 @@ impl ParsedSpec {
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }
+
+    /// All values for a repeatable pragma key, in source order. Used by
+    /// `pragma harness_use` (one `use` path per line — a spec may need several).
+    pub fn pragma_values(&self, key: &str) -> Vec<&str> {
+        self.pragma_assignments
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
 }
 
 /// `import Name from "key" [as Alias]` statement, captured before resolution.
