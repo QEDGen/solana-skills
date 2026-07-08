@@ -333,6 +333,98 @@ handler set_time_lock (new_time_lock : U32) {
     );
 }
 
+/// `pragma kani_reject` emits a guard-enforcement (reject) proof per target
+/// handler with a `requires`/`when` guard: it assumes the guard is VIOLATED and
+/// asserts the real handler returns `Err` (bound to `!ok`) — the converse of
+/// the ensures-preservation proof. Snapshots ONLY the guard's fields (not the
+/// effect/modifies set). Absent the pragma, no reject harness is emitted.
+#[test]
+fn brownfield_kani_reject_emits_guard_enforcement_harness() {
+    let src = r#"spec Guarded
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_reject = on
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  requires n <= state.cap else TooBig
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_reject_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The ensures-preservation harness is still emitted...
+    assert!(
+        body.contains("fn verify_resize_impl_ensures_0()"),
+        "ensures harness still emitted; got:\n{body}"
+    );
+    // ...plus a reject harness that assumes the guard is VIOLATED (negated) and
+    // asserts rejection.
+    assert!(
+        body.contains("fn verify_resize_rejects()"),
+        "reject harness emitted; got:\n{body}"
+    );
+    assert!(
+        body.contains("kani::assume(!((n <= pre_cap)));"),
+        "reject harness assumes the negated guard; got:\n{body}"
+    );
+    assert!(
+        body.contains("assert!(!ok, \"resize must reject"),
+        "reject harness asserts `!ok`; got:\n{body}"
+    );
+    // Snapshots the guard field (`cap`) — NOT the effect/modifies field (`size`).
+    assert!(
+        body.contains("let pre_cap = state.cap;"),
+        "reject snapshots the guard field; got:\n{body}"
+    );
+}
+
+/// Without `pragma kani_reject`, the reject harness is not emitted (default
+/// output is unchanged).
+#[test]
+fn brownfield_without_kani_reject_pragma_omits_reject_harness() {
+    let src = r#"spec Guarded
+pragma state_struct = Widget
+pragma state_invariant = none
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  requires n <= state.cap else TooBig
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_noreject_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        !body.contains("_rejects()") && !body.contains("Guard-enforcement"),
+        "no reject harness without the pragma; got:\n{body}"
+    );
+}
+
 /// A brownfield harness whose `requires`/`ensures` use `is .Variant` + `len()`
 /// over a non-`Copy` ADT status field renders shape-correctly and compiles:
 ///   - `is .StructVariant`  → `matches!(x, Enum::V { .. })` (resolved enum name,

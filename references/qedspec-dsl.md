@@ -1255,6 +1255,17 @@ pragma harness_use  = crate::state::policies::utils::foo_types::*
 pragma harness_use  = crate::state::policies::policy_core::traits::FooTrait
 ```
 
+**`pragma kani_reject = on`** — emit **guard-enforcement (reject) proofs** in the
+brownfield impl-Kani output. For each target handler with a `requires` / `when`
+guard, a `verify_<handler>_rejects` harness assumes the guard is **violated** and
+asserts the real handler returns `Err` — verifying the code *enforces* the guard
+the spec declares (the converse of the ensures-preservation proof, which checks
+what holds *after* a successful call). The agent-fill is the same real handler
+call as the ensures harness. Off by default. Example: a handler with
+`requires not contains(state.approved, signer) else AlreadyApproved` gets a
+reject proof that assumes `contains(state.approved, signer)` (signer already
+voted) and asserts the call rejects the duplicate.
+
 ## Interface declarations
 
 Contracts for programs you CPI into. Uniform surface across three tiers:

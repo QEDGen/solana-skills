@@ -208,7 +208,7 @@ pub(crate) fn emit_handler_harness(
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
     // Greenfield doesn't emit the Pubkey stub → keep the memcmp-driven bound.
-    let (unwind, why) = suggested_unwind(handler, ensures, spec, /*abstract_pubkey=*/ false);
+    let (unwind, why) = suggested_unwind(handler, spec, /*abstract_pubkey=*/ false);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
     out.push_str("#[kani::solver(cadical)]\n");
     out.push_str(&format!(
@@ -407,23 +407,17 @@ fn is_copy_scalar_ty(t: &str) -> bool {
         )
 }
 
-pub(crate) fn emit_brownfield_handler_harness(
-    out: &mut String,
-    handler: &ParsedHandler,
-    idx: usize,
-    ensures: &crate::check::ParsedEnsures,
-    spec: &ParsedSpec,
-    // `Some(struct_name)` when the file emitted a `symbolic_<struct>()` ctor
-    // (the State is fully constructible); the harness calls it instead of a
-    // construction `todo!()`. `None` keeps the agent-fill fallback.
-    state_struct: Option<&str>,
-) -> Result<()> {
+/// Emit the shared brownfield-harness proof attributes — `#[kani::proof]`, the
+/// computed `#[kani::unwind]`, and every opted-in #182 stub attr — up to (but
+/// not including) the `fn <name>() {` line. Shared by the ensures-preservation
+/// and reject (guard-enforcement) emitters so a new stub is wired in one place.
+fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     out.push_str("#[kani::proof]\n");
     // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
     // 32-byte `memcmp` loop needing ≥ 34; a numeric-only harness closes at a
     // small bound and runs faster (`suggested_unwind`).
     let abstract_pk = super::state_ctor::wants_pubkey_abstraction(spec);
-    let (unwind, why) = suggested_unwind(handler, ensures, spec, abstract_pk);
+    let (unwind, why) = suggested_unwind(handler, spec, abstract_pk);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
     // #182 Tier 1 — redirect Pubkey's derived `==` to the abstract wide-integer
     // compare (no 32-byte memcmp loop). Sound (verified equivalent), so it can't
@@ -448,13 +442,13 @@ pub(crate) fn emit_brownfield_handler_harness(
     if super::state_ctor::wants_cpi_stub(spec) {
         out.push_str(super::state_ctor::cpi_stub_attr());
     }
-    out.push_str(&format!(
-        "fn verify_{}_impl_ensures_{}() {{\n",
-        handler.name, idx
-    ));
+}
 
-    // 1. Symbolic state struct. Generated from the spec's State when it fully
-    //    mirrors the real `#[account]` struct; otherwise an agent-fill `todo!()`.
+/// Emit the shared symbolic-state construction: the generated
+/// `symbolic_<struct>()` ctor call + the `pragma state_invariant` pre-state
+/// validity assume, or the agent-fill construction `todo!()` when the State
+/// isn't fully constructible. Shared by the ensures and reject emitters.
+fn emit_symbolic_state(out: &mut String, spec: &ParsedSpec, state_struct: Option<&str>) {
     match state_struct {
         Some(struct_name) => {
             out.push_str(&format!(
@@ -496,6 +490,28 @@ pub(crate) fn emit_brownfield_handler_harness(
             );
         }
     }
+}
+
+pub(crate) fn emit_brownfield_handler_harness(
+    out: &mut String,
+    handler: &ParsedHandler,
+    idx: usize,
+    ensures: &crate::check::ParsedEnsures,
+    spec: &ParsedSpec,
+    // `Some(struct_name)` when the file emitted a `symbolic_<struct>()` ctor
+    // (the State is fully constructible); the harness calls it instead of a
+    // construction `todo!()`. `None` keeps the agent-fill fallback.
+    state_struct: Option<&str>,
+) -> Result<()> {
+    emit_impl_proof_attrs(out, handler, spec);
+    out.push_str(&format!(
+        "fn verify_{}_impl_ensures_{}() {{\n",
+        handler.name, idx
+    ));
+
+    // 1. Symbolic state struct. Generated from the spec's State when it fully
+    //    mirrors the real `#[account]` struct; otherwise an agent-fill `todo!()`.
+    emit_symbolic_state(out, spec, state_struct);
 
     // 2. Pre-snapshot — reuse the greenfield field set (modifies ∪ effects ∪
     //    CPI-binders ∪ requires/ensures fields) and `s.`→`pre.` guard lowering.
@@ -576,6 +592,85 @@ pub(crate) fn emit_brownfield_handler_harness(
     out.push_str("    }\n");
     out.push_str("}\n\n");
     Ok(())
+}
+
+/// Emit a guard-enforcement (reject) proof for a handler with a precondition:
+/// assume the `requires` / lifecycle `when` guard is VIOLATED and assert the
+/// real handler returns `Err`. This verifies the code ENFORCES the guard the
+/// spec declares — the converse of the ensures-preservation proof. Opt-in via
+/// `pragma kani_reject`. Returns `false` (emits nothing) for a guardless
+/// handler.
+pub(crate) fn emit_brownfield_reject_harness(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    state_struct: Option<&str>,
+) -> Result<bool> {
+    // Only a handler with a precondition (lifecycle `when` and/or `requires`)
+    // has a guard to enforce.
+    let Some(guard) = crate::rust_codegen_util::collect_full_guard(handler, false) else {
+        return Ok(false);
+    };
+    let guard_predot = rewrite_state_var_to_pre(&guard);
+
+    emit_impl_proof_attrs(out, handler, spec);
+    out.push_str(&format!("fn verify_{}_rejects() {{\n", handler.name));
+
+    emit_symbolic_state(out, spec, state_struct);
+
+    // Snapshot the fields the guard reads. The guard is evaluated pre-call on
+    // the unmutated state, so `pre_<field>` == `state.<field>` here.
+    let mut gfields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    collect_prefixed_fields(&guard_predot, "pre.", &mut gfields);
+    let gfields: Vec<String> = gfields.into_iter().collect();
+    if !gfields.is_empty() {
+        out.push_str("    // Pre-state snapshot — fields the `requires` guard reads.\n");
+        for field in &gfields {
+            let rhs = if state_field_needs_clone(spec, field) {
+                format!("state.{field}.clone()")
+            } else {
+                format!("state.{field}")
+            };
+            out.push_str(&format!("    let pre_{field} = {rhs};\n"));
+        }
+    }
+
+    // Symbolic params (same lowering as the ensures harness).
+    for (pname, ptype) in &handler.takes_params {
+        if ptype == "Pubkey" {
+            out.push_str(&format!(
+                "    let {pname}: anchor_lang::prelude::Pubkey = \
+                 anchor_lang::prelude::Pubkey::new_from_array(kani::any());\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    let {}: {} = kani::any();\n",
+                pname,
+                map_type(ptype, spec)?
+            ));
+        }
+    }
+
+    // The precondition is VIOLATED (at least one `requires`/`when` clause fails).
+    out.push_str(&format!(
+        "    kani::assume(!({}));\n",
+        rewrite_pre_post_paths(&guard_predot)
+    ));
+
+    // AGENT-FILL: the SAME real handler call as the ensures harness.
+    out.push_str(
+        "\n    // AGENT-FILL: call the real handler (same call as the ensures harness); bind\n",
+    );
+    out.push_str("    // whether it succeeded to `ok`.\n");
+    out.push_str("    let ok: bool = todo!(\"apply the real handler call → success?\");\n");
+
+    // Guard enforcement: a violated precondition MUST be rejected.
+    out.push_str(&format!(
+        "    assert!(!ok, \"{} must reject when its `requires`/`when` guard is violated\");\n",
+        handler.name
+    ));
+    out.push_str("}\n\n");
+    Ok(true)
 }
 
 /// Walk `handler.calls` and, for each CPI whose callee declares ensures,
@@ -831,7 +926,6 @@ fn pubkey_state_field_names(spec: &ParsedSpec) -> BTreeSet<String> {
 /// paths. Pinocchio computes its own bound in `pinocchio.rs`.
 fn suggested_unwind(
     handler: &ParsedHandler,
-    _ensures: &crate::check::ParsedEnsures,
     spec: &ParsedSpec,
     // Only the brownfield path emits the Pubkey `==` stub, so only it may drop
     // the memcmp-driven ≥34 bound. The greenfield path passes `false`.

@@ -441,6 +441,28 @@ for the fixed path*, not a refutation of the bypass.
   class needs before promising a repro. Cross-links #182 (tier map).
 - **Verdict:** ENCODE (skill/scout playbook). No issue.
 
+### 🧩 G20 — guard-enforcement (reject) harness mode  [FIXED]
+
+The "must-fail / should-reject" property class kept surfacing (A5a duplicate-vote
+rejection; the reject-half of the missing-invocation findings above): QEDGen could
+prove what holds *after* a successful call (ensures-preservation) but not that the
+code *rejects* a violated precondition. Shipped `pragma kani_reject = on` — for each
+brownfield target handler with a `requires`/`when` guard, emit a
+`verify_<handler>_rejects` proof that assumes the guard is VIOLATED
+(`kani::assume(!(guard))`) and asserts the real handler returns `Err`
+(`assert!(!ok, …)`). Same agent-fill (the real call) as the ensures harness; snapshots
+only the guard's fields. No new DSL syntax — reuses `requires … else E`.
+- **Evidence:** `kani_impl/harness.rs::emit_brownfield_reject_harness` (+ extracted
+  `emit_impl_proof_attrs` / `emit_symbolic_state` shared with the ensures emitter);
+  `brownfield.rs` gates on `pragma_value("kani_reject")`. Validated on A5a: the real
+  `Proposal::approve` binary_search dedup — `cargo kani` SUCCESSFUL (reject + ensures).
+- **Root cause / gap:** the ensures emitter was the only harness shape; a declared
+  `requires` had no enforcement proof.
+- **Verdict:** FILE→FIXED (gap). Partially operationalizes M3 (the "guard is SOUND"
+  half is now a first-class proof). Tests: `brownfield_kani_reject_emits_guard_enforcement_harness`,
+  `brownfield_without_kani_reject_pragma_omits_reject_harness`. Docs:
+  `references/qedspec-dsl.md` §Pragmas.
+
 ### 🩹 F3 — release build needs a manual `cp target/release/qedgen bin/qedgen` before codegen reflects a fix  [backlog-only]
 
 Codegen/interactive runs invoke `bin/qedgen`; a `cargo build --release` that forgets
