@@ -210,11 +210,16 @@ the SAT problem even for a property that never reads the collection.
 ## Harness-migration boundary (Squads FV, #162-p2 follow-on)
 
 Migrating the hand-written brownfield harnesses to the generated State-driven
-shape: **C (Settings well-formedness) fully migrated** — `change_threshold` +
-`set_time_lock`, generated construction (only the effect agent-filled), both
-`cargo kani` GREEN against the real `Settings::invariant()`. The remaining
-families are a *different verification style* the generated shape doesn't yet
-cover; each surfaced a distinct gap (filed, not forced):
+shape. **TWO families now generated + `cargo kani` GREEN against the real code:**
+- **C (Settings)** — `change_threshold` + `set_time_lock` (both proofs).
+- **F-decrement (SpendingLimitV2)** — `decrement` (22 VCCs), via the full new
+  feature stack below.
+
+Five features shipped this pass unblocked F and set up Proposal:
+`G13a` enum construction (`be8442c`), `G17` in-module placement +
+`::`-path pragma values (`7e1d503`), optional invariant-assume (`7e1d503`),
+`G14` Clock stub (`ecb22d6`). Also learned: **nested-field ensures already
+work**. Proposal has one feature left (G15a, below).
 
 ### ✅ G13a — enum (sum-type) State-field construction  [SHIPPED be8442c, #177]
 `state_ctor` bailed to `todo!()` on enum fields. Now emits symbolic variant
@@ -233,29 +238,37 @@ preserves the dotted access in the requires-assume and post-assert. So G15's
 "method-postcondition arithmetic over nested fields" sub-item is already covered
 for the snapshot/assert side.
 
-### 🧩 G17 — harness placement / type paths for private-module types  [#180]
-The generated harness colocates at crate root and names types `crate::<Type>` —
-resolves only for crate-root-re-exported types. `SpendingLimitV2` & friends live
-in `state::policies::utils` behind a private `mod utils` (no re-export), so a
-crate-root harness gets 9 `cannot find type in crate root` errors. **Blocks F**
-(construction is correct; visibility isn't). Fix: place the harness inside the
-target module (`pragma state_module`) with `use super::*` + bare names, or emit
-the resolvable path when the module is pub-reachable. C + Proposal are
-re-exported to root, so they're unaffected.
+### ✅ G17 — harness placement / type paths for private-module types  [SHIPPED 7e1d503, #180]
+`pragma state_module = <path>` → the ctor names types BARE + the harness gets a
+`use super::*` header and is placed INSIDE the defining module
+(`#[cfg(kani)] #[path=…] mod`). Unblocked F (`SpendingLimitV2` is behind a
+private `mod utils`, so `crate::<Type>` gave 9 "cannot find type" errors). Also
+extended `pragma` values to accept `::`-paths. C + Proposal are re-exported to
+root, so they keep the default `crate::`.
 
-### 🧩 G14 — sysvar/Clock stub emission in generated impl-Kani  [#178]
-`Clock::get()`-reading methods need `#[kani::stub(Clock::get, …)] -Z stubbing` +
-a symbolic-Clock stub; the harness emits none. Hand-written in A4/A5/reject-cancel
-(Proposal) and D. Also: **Proposal has no `invariant()`**, so the harness's
-hardcoded `assume(state.invariant().is_ok())` won't compile for it — the pre-state
-validity assume must become optional (scenario preconditions instead).
+### ✅ G14 + optional-invariant  [SHIPPED ecb22d6 / 7e1d503, #178]
+`pragma kani_stub_clock = <val>` emits `#[kani::stub(Clock::get, stub_clock_get)]`
+per proof + the stub fn (run `-Z stubbing`) — for `Proposal::approve`/`cancel`.
+`pragma state_invariant = none` skips the pre-state `assume(invariant())` — needed
+for Proposal (no `invariant()` method) AND for F-decrement (its `invariant()`
+panics under fully-symbolic input — the symbolic ctor is stricter than the scoped
+hand-written harness). Validated at codegen on the Proposal harness.
 
-### 🧩 G15 — properties beyond scalar-field ensures  [#179]
-Collection membership (`signer ∈ approved`) and panic-freedom (`reset_if_needed`
-— call the method, assert no panic, no value assertion) aren't expressible as the
-scalar `ensures` the harness asserts. (Method-postcond arithmetic over nested
-fields turned out to already work — see above.) The method CALL fits the
-AGENT-FILL (2/2) slot; the property language is the gap.
+### 🧩 G15a — collection membership in ensures/requires  [#179] — LAST Proposal blocker
+Proposal A5b asserts `signer ∈ approved` / `signer ∉ rejected`; A5a `len` unchanged.
+The scalar `ensures` can't express Vec membership. Plan: a `contains(coll, x)`
+builtin (NOT an `in` operator — `in` is a reserved keyword) → Rust
+`coll.contains(&x)`; a new `Expr::Contains` variant (updates every exhaustive
+`Expr` consumer per the no-`_`-arms discipline) + parser atom + Rust/Lean lowering.
+**Plus non-Copy Vec snapshots:** the pre-snapshot `let pre_rejected = state.rejected;`
+MOVES a `Vec` (breaks the subsequent `&mut` method call) — pre-snapshots of
+non-Copy fields must `.clone()` (type-aware). With these two, Proposal A5b is
+generatable + green (construction, stub, optional-invariant already done).
+
+### 🧩 G15b — panic-freedom property class  [#179]
+F's `reset_if_needed`: call the method, assert only that Kani finds no panic — no
+value assertion. Needs a `panic_free`/`total` property class (emit the call, no
+post-assert). Also needs G13b (tuple `PeriodV2::Custom`). Independent of G15a.
 
 ### 🧩 G16 (note) — D (account_tracking) is not a state-struct-mirror target
 D constructs raw `AccountInfo` + byte-packed SPL token accounts + a `Balances`
