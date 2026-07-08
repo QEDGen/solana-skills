@@ -12,13 +12,12 @@ use super::*;
 ///
 /// Construction is generated from the spec's State when it fully mirrors the
 /// real `#[account]` struct (every field a scalar / `Pubkey` / `Option` / `Vec`
-/// / nested record — see `state_ctor`); the harness then calls the emitted
-/// `symbolic_<struct>()` and only the effect + validity gate stays agent-fill.
-/// When the State can't be fully constructed (a bare enum / `Map` field, or an
-/// ambiguous multi-account spec), construction falls back to an agent-fill
-/// `todo!()`. The scaffolding around both — snapshot set (incl. the
-/// read-only-field fix), requires-assume, ensures-assert, unwind hint — is
-/// always generated.
+/// / nested record / enum sum-type — see `state_ctor`); the harness then calls
+/// the emitted `symbolic_<struct>()` and only the effect + validity gate stays
+/// agent-fill. When the State can't be fully constructed (an imported/unresolved
+/// type or a `Map` field), construction falls back to an agent-fill `todo!()`.
+/// The scaffolding around both — snapshot set (incl. the read-only-field fix),
+/// requires-assume, ensures-assert, unwind hint — is always generated.
 pub(crate) fn emit_kani_impl_anchor_brownfield(
     spec: &ParsedSpec,
     output_path: &Path,
@@ -76,18 +75,16 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     // `todo!()`. When the State isn't fully constructible (a bare enum / Map
     // field, or an ambiguous multi-account spec), `state_struct` stays `None`
     // and the harnesses fall back to the agent-fill `todo!()`.
-    let vec_bound = super::state_ctor::vec_bound_of(spec);
+    let ctor_ctx = super::state_ctor::CtorCtx::from_spec(spec);
     let state_struct: Option<String> = match super::state_ctor::resolve_state_struct(spec) {
-        Some((name, fields)) => {
-            match super::state_ctor::emit_state_ctor(name, fields, &spec.records, vec_bound) {
-                Some(ctor) => {
-                    out.push_str(&ctor);
-                    out.push('\n');
-                    Some(name.to_string())
-                }
-                None => None,
+        Some((name, fields)) => match super::state_ctor::emit_state_ctor(name, fields, &ctor_ctx) {
+            Some(ctor) => {
+                out.push_str(&ctor);
+                out.push('\n');
+                Some(name.to_string())
             }
-        }
+            None => None,
+        },
         None => None,
     };
 

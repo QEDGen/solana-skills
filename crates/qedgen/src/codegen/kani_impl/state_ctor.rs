@@ -9,7 +9,7 @@
 //! `Pubkey` from a symbolic byte array, `Option` symbolic Some/None, `Vec` as a
 //! fixed-length-K `vec![…]` of symbolic elements (`pragma kani_vec_bound`,
 //! default 1 — a symbolic *length* OOMs CBMC; see `emit_value`), nested records
-//! recursed.
+//! recursed, and enum (sum-type) fields via symbolic variant selection (#177).
 //!
 //! The brownfield harness pairs this with
 //! `kani::assume(state.invariant().is_ok())` so Kani explores only well-formed
@@ -22,8 +22,42 @@
 //! otherwise in the spec. A wrong name surfaces as a `crate::<Name>` not-found
 //! compile error, not silent wrong behaviour.
 
-use crate::check::{ParsedRecordType, ParsedSpec};
+use crate::check::{ParsedRecordType, ParsedSpec, ParsedSumType};
 use crate::mir::{parse_ty, Ty};
+
+/// Everything `emit_value` needs to recurse: the spec's record + sum-type
+/// tables (for nested-struct / enum construction) and the fixed `Vec` length.
+/// Bundled so the recursion carries one ref, not five positional args.
+pub(crate) struct CtorCtx<'a> {
+    pub records: &'a [ParsedRecordType],
+    /// Owned because sum types come from TWO places: `spec.sum_types` (only
+    /// Map-value sum types land there) and `spec.account_types` entries that
+    /// carry variants (a `type X | V of {…}` used as a plain field type routes
+    /// there). `from_spec` merges them so field-typed enums resolve.
+    pub sum_types: Vec<ParsedSumType>,
+    pub vec_bound: usize,
+}
+
+impl<'a> CtorCtx<'a> {
+    /// Build from a spec: records + merged sum types, `Vec` length from
+    /// `pragma kani_vec_bound` (default 1 — see `vec_bound_of`).
+    pub(crate) fn from_spec(spec: &'a ParsedSpec) -> Self {
+        let mut sum_types = spec.sum_types.clone();
+        for at in &spec.account_types {
+            if !at.variants.is_empty() {
+                sum_types.push(ParsedSumType {
+                    name: at.name.clone(),
+                    variants: at.variants.clone(),
+                });
+            }
+        }
+        CtorCtx {
+            records: &spec.records,
+            sum_types,
+            vec_bound: vec_bound_of(spec),
+        }
+    }
+}
 
 /// Resolve the real on-chain struct this brownfield spec's State mirrors, as
 /// `(struct_name, fields)`.
@@ -40,30 +74,38 @@ use crate::mir::{parse_ty, Ty};
 /// caller keeps its construction `todo!()` rather than guess the struct name.
 pub(crate) fn resolve_state_struct(spec: &ParsedSpec) -> Option<(&str, &[(String, String)])> {
     let name = spec.pragma_value("state_struct")?;
-    if spec.state_fields.is_empty() {
+    // The `state { … }` block lands in `records` as "State". Prefer it over
+    // `spec.state_fields`, which the adapter derives from `account_types.first()`
+    // — a field-typed enum (`type Status | …`, also an account-type ADT) can
+    // sort ahead of the state there and shadow it (its variant fields become
+    // `state_fields`). `records["State"]` is unaffected by that ordering.
+    let fields = spec
+        .records
+        .iter()
+        .find(|r| r.name == "State")
+        .map(|r| r.fields.as_slice())
+        .unwrap_or(spec.state_fields.as_slice());
+    if fields.is_empty() {
         return None;
     }
-    Some((name, spec.state_fields.as_slice()))
+    Some((name, fields))
 }
 
 /// Emit `fn symbolic_<snake(struct_name)>() -> crate::<struct_name> { … }` with
 /// every field constructed symbolically. Returns `None` when a field can't be
-/// built without agent knowledge (a bare enum / imported type, or a `Map`
+/// built without agent knowledge (an imported/unresolved type, or a `Map`
 /// field) — the caller keeps the `todo!()` fallback rather than emit a
 /// half-`todo!()` ctor that reads as "generated" but isn't.
 pub(crate) fn emit_state_ctor(
     struct_name: &str,
     fields: &[(String, String)],
-    records: &[ParsedRecordType],
-    // Fixed length for symbolic `Vec` fields (`pragma kani_vec_bound`, default 1).
-    // See the `Vec` arm in `emit_value` for why this is fixed-length, not symbolic.
-    vec_bound: usize,
+    ctx: &CtorCtx,
 ) -> Option<String> {
     // Build every field first: bail on the FIRST unconstructible one so we
     // never emit a partially-`todo!()` constructor.
     let mut field_lines = Vec::with_capacity(fields.len());
     for (name, ty_str) in fields {
-        let expr = emit_value(&parse_ty(ty_str), records, 0, vec_bound)?;
+        let expr = emit_value(&parse_ty(ty_str), ctx, 0)?;
         field_lines.push(format!("        {name}: {expr},"));
     }
 
@@ -92,14 +134,9 @@ pub(crate) fn ctor_fn_name(struct_name: &str) -> String {
 
 /// Recursive `Ty` → symbolic-construction expression. `None` = unconstructible
 /// without agent knowledge.
-fn emit_value(
-    ty: &Ty,
-    records: &[ParsedRecordType],
-    depth: usize,
-    vec_bound: usize,
-) -> Option<String> {
+fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
     if depth > 8 {
-        return None; // recursion guard (mutually-recursive record types)
+        return None; // recursion guard (mutually-recursive record/sum types)
     }
     Some(match ty {
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::I64 | Ty::I128 | Ty::Bool => {
@@ -111,12 +148,10 @@ fn emit_value(
             // (the MIR `Ty` enum has no first-class Option/Vec — see #173/#174);
             // the inner is a single named type (scalar or record).
             if let Some(inner) = s.strip_prefix("Option ") {
-                let inner_expr =
-                    emit_value(&parse_ty(inner.trim()), records, depth + 1, vec_bound)?;
+                let inner_expr = emit_value(&parse_ty(inner.trim()), ctx, depth + 1)?;
                 format!("if kani::any() {{ Some({inner_expr}) }} else {{ None }}")
             } else if let Some(inner) = s.strip_prefix("Vec ") {
-                let inner_expr =
-                    emit_value(&parse_ty(inner.trim()), records, depth + 1, vec_bound)?;
+                let inner_expr = emit_value(&parse_ty(inner.trim()), ctx, depth + 1)?;
                 // FIXED-LENGTH-K symbolic Vec — `vec![<elem>, …]` with K
                 // independent symbolic elements, NOT a symbolic-length `while`
                 // loop. A symbolic length forces CBMC to unwind the build loop
@@ -126,23 +161,26 @@ fn emit_value(
                 // property that never reads the collection. K = `pragma
                 // kani_vec_bound` (default 1). Raise it for a property that DOES
                 // read the collection; a bounded (BMC) length is the trade-off.
-                let elems = std::iter::repeat_n(inner_expr, vec_bound)
+                let elems = std::iter::repeat_n(inner_expr, ctx.vec_bound)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("vec![{elems}]")
-            } else if let Some(rec) = records.iter().find(|r| &r.name == s) {
+            } else if let Some(rec) = ctx.records.iter().find(|r| &r.name == s) {
                 // Nested record — recurse into its fields.
                 let inner: Option<Vec<String>> = rec
                     .fields
                     .iter()
                     .map(|(fname, fty)| {
-                        let e = emit_value(&parse_ty(fty), records, depth + 1, vec_bound)?;
+                        let e = emit_value(&parse_ty(fty), ctx, depth + 1)?;
                         Some(format!("{fname}: {e}"))
                     })
                     .collect();
                 format!("crate::{s} {{ {} }}", inner?.join(", "))
+            } else if let Some(sum) = ctx.sum_types.iter().find(|t| &t.name == s) {
+                // Enum (sum type) — symbolic variant selection (#177/G13).
+                emit_enum(s, sum, ctx, depth)?
             } else {
-                // Bare enum / imported / unresolved type — needs agent knowledge.
+                // Imported / unresolved type — needs agent knowledge.
                 return None;
             }
         }
@@ -150,6 +188,44 @@ fn emit_value(
         // on-chain layout is a fixed array or a BTreeMap, spec-dependent).
         Ty::Map { .. } => return None,
     })
+}
+
+/// Symbolic enum construction: pick a variant with `kani::any::<usize>() % N`
+/// and build its payload. Unit variants construct directly; named-payload
+/// variants (`Active of { timestamp : I64 }`) recurse per field. A single
+/// discriminant covers all N variants, so Kani explores every variant.
+fn emit_enum(name: &str, sum: &ParsedSumType, ctx: &CtorCtx, depth: usize) -> Option<String> {
+    let n = sum.variants.len();
+    if n == 0 {
+        return None;
+    }
+    let mut arms = Vec::with_capacity(n);
+    for (i, v) in sum.variants.iter().enumerate() {
+        let ctor = if v.fields.is_empty() {
+            format!("crate::{name}::{}", v.name) // unit variant
+        } else {
+            // Named-payload struct variant — recurse per field.
+            let fs: Option<Vec<String>> = v
+                .fields
+                .iter()
+                .map(|(fname, fty)| {
+                    let e = emit_value(&parse_ty(fty), ctx, depth + 1)?;
+                    Some(format!("{fname}: {e}"))
+                })
+                .collect();
+            format!("crate::{name}::{} {{ {} }}", v.name, fs?.join(", "))
+        };
+        // Map the last variant to the `_` catch-all (`% n` yields `0..n-1`).
+        if i + 1 == n {
+            arms.push(format!("_ => {ctor}"));
+        } else {
+            arms.push(format!("{i} => {ctor}"));
+        }
+    }
+    Some(format!(
+        "match kani::any::<usize>() % {n} {{ {} }}",
+        arms.join(", ")
+    ))
 }
 
 /// The fixed length used for symbolic `Vec` state fields: `pragma
@@ -194,6 +270,35 @@ mod tests {
         }
     }
 
+    /// A sum type from `(variant, [(field, ty)])` pairs; empty fields = unit.
+    fn sum(name: &str, variants: &[(&str, &[(&str, &str)])]) -> ParsedSumType {
+        ParsedSumType {
+            name: name.to_string(),
+            variants: variants
+                .iter()
+                .map(|(vn, fs)| crate::check::ParsedVariant {
+                    name: vn.to_string(),
+                    fields: fs
+                        .iter()
+                        .map(|(f, t)| (f.to_string(), t.to_string()))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    fn ctx<'a>(
+        records: &'a [ParsedRecordType],
+        sum_types: &[ParsedSumType],
+        vec_bound: usize,
+    ) -> CtorCtx<'a> {
+        CtorCtx {
+            records,
+            sum_types: sum_types.to_vec(),
+            vec_bound,
+        }
+    }
+
     #[test]
     fn pascal_to_snake_cases() {
         assert_eq!(pascal_to_snake("Settings"), "settings");
@@ -212,19 +317,24 @@ mod tests {
         ];
         // Scalars + Pubkey.
         assert_eq!(
-            emit_value(&parse_ty("U64"), &records, 0, 1).unwrap(),
+            emit_value(&parse_ty("U64"), &ctx(&records, &[], 1), 0).unwrap(),
             "kani::any()"
         );
         assert_eq!(
-            emit_value(&parse_ty("Pubkey"), &records, 0, 1).unwrap(),
+            emit_value(&parse_ty("Pubkey"), &ctx(&records, &[], 1), 0).unwrap(),
             "anchor_lang::prelude::Pubkey::new_from_array(kani::any())"
         );
         // Option<Pubkey> → symbolic Some/None.
-        let opt = emit_value(&parse_ty("Option Pubkey"), &records, 0, 1).unwrap();
+        let opt = emit_value(&parse_ty("Option Pubkey"), &ctx(&records, &[], 1), 0).unwrap();
         assert!(opt.contains("if kani::any()") && opt.contains("Some(") && opt.contains("None"));
         // Vec<SmartAccountSigner> → FIXED-LENGTH-K `vec![…]` (no symbolic-length
         // `while` loop — that OOMs CBMC), K nested symbolic structs.
-        let v = emit_value(&parse_ty("Vec SmartAccountSigner"), &records, 0, 2).unwrap();
+        let v = emit_value(
+            &parse_ty("Vec SmartAccountSigner"),
+            &ctx(&records, &[], 2),
+            0,
+        )
+        .unwrap();
         assert!(
             v.starts_with("vec![") && !v.contains("while") && !v.contains("kani::assume(n"),
             "fixed-length vec![], no symbolic-length loop; got {v}"
@@ -239,11 +349,55 @@ mod tests {
             "nested; got {v}"
         );
         // K=1 (the default) → a single element.
-        let v1 = emit_value(&parse_ty("Vec SmartAccountSigner"), &records, 0, 1).unwrap();
+        let v1 = emit_value(
+            &parse_ty("Vec SmartAccountSigner"),
+            &ctx(&records, &[], 1),
+            0,
+        )
+        .unwrap();
         assert_eq!(
             v1.matches("crate::SmartAccountSigner {").count(),
             1,
             "K=1 element; got {v1}"
+        );
+    }
+
+    #[test]
+    fn enum_symbolic_variant_selection() {
+        // ProposalStatus-shaped: all named-payload struct variants.
+        let sums = vec![sum(
+            "ProposalStatus",
+            &[
+                ("Draft", &[("timestamp", "I64")]),
+                ("Active", &[("timestamp", "I64")]),
+                ("Approved", &[("timestamp", "I64")]),
+            ],
+        )];
+        let e = emit_value(&parse_ty("ProposalStatus"), &ctx(&[], &sums, 1), 0).unwrap();
+        assert!(
+            e.starts_with("match kani::any::<usize>() % 3 {"),
+            "symbolic 3-way selection; got {e}"
+        );
+        assert!(
+            e.contains("0 => crate::ProposalStatus::Draft { timestamp: kani::any() }")
+                && e.contains("_ => crate::ProposalStatus::Approved { timestamp: kani::any() }"),
+            "named-payload arms, last is `_`; got {e}"
+        );
+        // A unit + payload mix (PeriodV2 minus the tuple variant).
+        let sums2 = vec![sum(
+            "P",
+            &[
+                ("OneTime", &[]),
+                ("Daily", &[]),
+                ("Windowed", &[("secs", "U32")]),
+            ],
+        )];
+        let e2 = emit_value(&parse_ty("P"), &ctx(&[], &sums2, 1), 0).unwrap();
+        assert!(
+            e2.contains("0 => crate::P::OneTime")
+                && !e2.contains("OneTime {")
+                && e2.contains("_ => crate::P::Windowed { secs: kani::any() }"),
+            "unit variant has no payload braces; got {e2}"
         );
     }
 
@@ -263,7 +417,7 @@ mod tests {
             ("archival_authority".into(), "Option Pubkey".into()),
             ("signers".into(), "Vec SmartAccountSigner".into()),
         ];
-        let ctor = emit_state_ctor("Settings", &fields, &records, 1).unwrap();
+        let ctor = emit_state_ctor("Settings", &fields, &ctx(&records, &[], 1)).unwrap();
         assert!(ctor.contains("fn symbolic_settings() -> crate::Settings"));
         assert!(ctor.contains("settings_authority:") && ctor.contains("time_lock:"));
         assert!(ctor.contains("signers: vec![crate::SmartAccountSigner {"));
@@ -272,15 +426,15 @@ mod tests {
 
     #[test]
     fn unconstructible_field_bails_to_none() {
-        // A bare enum / unresolved type (not in records) → whole ctor is None,
-        // so the caller keeps its `todo!()` rather than emit a half-built struct.
+        // An unresolved type (not a record or sum type) → whole ctor is None, so
+        // the caller keeps its `todo!()` rather than emit a half-built struct.
         let fields = vec![
             ("ok".into(), "U64".into()),
-            ("kind".into(), "SomeEnum".into()), // not a record → unconstructible
+            ("kind".into(), "MysteryType".into()), // unresolved → unconstructible
         ];
-        assert!(emit_state_ctor("Thing", &fields, &[], 1).is_none());
+        assert!(emit_state_ctor("Thing", &fields, &ctx(&[], &[], 1)).is_none());
         // A `Map` field is likewise unconstructible here.
         let map_fields = vec![("book".into(), "Map[8] U64".into())];
-        assert!(emit_state_ctor("Thing", &map_fields, &[], 1).is_none());
+        assert!(emit_state_ctor("Thing", &map_fields, &ctx(&[], &[], 1)).is_none());
     }
 }
