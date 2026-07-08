@@ -136,23 +136,34 @@ pub(crate) fn wants_pubkey_abstraction(spec: &ParsedSpec) -> bool {
 /// (machine-checked equivalent to `derive(PartialEq)`, #182); verification-only
 /// (`#[cfg(kani)]`), so the transmute never runs on-chain.
 pub(crate) fn pubkey_eq_abstract_fn() -> String {
-    "// Abstract Pubkey equality (#182 Tier 1): the 32 bytes as two u128 halves —\n\
-     // 2 word-comparisons, NOT a 32-byte memcmp loop (Kani unwind 2 vs >= 34).\n\
-     // Proven bit-for-bit equivalent to derive(PartialEq); the proofs stub\n\
-     // Pubkey `==` to this. Verification-only, so the transmute never runs on-chain.\n\
+    "// Abstract Pubkey equality + ordering (#182 Tier 1): the 32 bytes as two\n\
+     // u128 halves — word-comparisons, NOT a 32-byte memcmp/lex loop (Kani unwind\n\
+     // 2 vs >= 34). Both PROVEN bit-for-bit equivalent to derive(PartialEq/Ord);\n\
+     // the proofs stub `==` and `cmp` to these. Verification-only, so the\n\
+     // transmute never runs on-chain.\n\
      #[allow(clippy::missing_transmute_annotations)]\n\
      fn pk_eq_abstract(a: &anchor_lang::prelude::Pubkey, b: &anchor_lang::prelude::Pubkey) -> bool {\n\
      \x20   let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };\n\
      \x20   let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };\n\
      \x20   a[0] == b[0] && a[1] == b[1]\n\
+     }\n\
+     // Pubkey `Ord` is byte-lexicographic (index 0 most significant) = big-endian\n\
+     // u256; compare two big-endian u128 halves lexicographically (`binary_search`\n\
+     // / `sort` use this).\n\
+     #[allow(clippy::missing_transmute_annotations)]\n\
+     fn pk_cmp_abstract(a: &anchor_lang::prelude::Pubkey, b: &anchor_lang::prelude::Pubkey) -> core::cmp::Ordering {\n\
+     \x20   let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };\n\
+     \x20   let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };\n\
+     \x20   (a[0].swap_bytes(), a[1].swap_bytes()).cmp(&(b[0].swap_bytes(), b[1].swap_bytes()))\n\
      }\n"
         .to_string()
 }
 
-/// The `#[kani::stub]` attribute that redirects `Pubkey`'s derived `==` to
-/// `pk_eq_abstract` (needs `-Z stubbing`).
+/// The `#[kani::stub]` attributes that redirect `Pubkey`'s derived `==` and
+/// `cmp` to the abstract versions (needs `-Z stubbing`).
 pub(crate) fn pubkey_stub_attr() -> &'static str {
-    "#[kani::stub(<anchor_lang::prelude::Pubkey as core::cmp::PartialEq>::eq, pk_eq_abstract)]\n"
+    "#[kani::stub(<anchor_lang::prelude::Pubkey as core::cmp::PartialEq>::eq, pk_eq_abstract)]\n\
+     #[kani::stub(<anchor_lang::prelude::Pubkey as core::cmp::Ord>::cmp, pk_cmp_abstract)]\n"
 }
 
 /// `pragma kani_stub_pda = <anything>` → the agent-fill effect calls code that
