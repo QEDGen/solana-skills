@@ -48,6 +48,29 @@ fn map_type_anchor_uses_native_pubkey() {
     );
 }
 
+/// `Vec T` / `Option T` (G9/G10 #173/#174) wrap to Rust generics, recursing
+/// on the inner so it maps per-context.
+#[test]
+fn map_type_wraps_vec_and_option() {
+    let spec = empty_spec();
+    assert_eq!(map_type_standalone("Vec U64", &spec).unwrap(), "Vec<u64>");
+    assert_eq!(
+        map_type_anchor("Option Pubkey", &spec).unwrap(),
+        "Option<Pubkey>"
+    );
+    // Standalone lowers `Pubkey` to a byte array; the `Option` wrapper recurses.
+    assert_eq!(
+        map_type_standalone("Option Pubkey", &spec).unwrap(),
+        "Option<[u8; 32]>"
+    );
+    assert_eq!(
+        map_type_standalone("Option U64", &spec).unwrap(),
+        "Option<u64>"
+    );
+    // A named type like `Vector` is NOT matched as `Vec` (whitespace boundary).
+    assert!(map_type_standalone("Vector", &spec).is_err());
+}
+
 #[test]
 fn framework_surface_centralizes_target_snippets() {
     let anchor = FrameworkSurface::for_target(Target::Anchor);

@@ -545,6 +545,23 @@ pub(crate) fn map_type_with_context(
         }
     }
 
+    // `Vec T` → `Vec<T>`; `Option T` → `Option<T>` (from `TypeRef::Param`,
+    // rendered as a space-separated string). Recurse on the inner so it maps
+    // per-context (e.g. `Option Pubkey` → `Option<Pubkey>` on Anchor,
+    // `Option<[u8; 32]>` standalone). The whitespace boundary keeps `Vector` /
+    // `Optional` (named types) from matching.
+    for (kw, wrap) in [("Vec", "Vec"), ("Option", "Option")] {
+        if let Some(rest) = dsl_type.strip_prefix(kw) {
+            if rest.starts_with(char::is_whitespace) {
+                let inner = rest.trim();
+                if !inner.is_empty() {
+                    let inner_rust = map_type_with_context(inner, spec, context)?;
+                    return Ok(format!("{wrap}<{inner_rust}>"));
+                }
+            }
+        }
+    }
+
     // Primitive match — check first so `U8` etc. never hit the alias path.
     if let Some(rust) = primitive_map(dsl_type, context) {
         return Ok(rust.to_string());
