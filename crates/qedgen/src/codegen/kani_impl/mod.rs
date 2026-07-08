@@ -37,10 +37,12 @@ pub(crate) use crate::pinocchio_profile::{
 };
 pub(crate) use crate::Target;
 
+mod brownfield;
 mod frameworks;
 mod harness;
 mod pinocchio;
 
+pub(crate) use brownfield::*;
 pub(crate) use frameworks::*;
 pub(crate) use harness::*;
 pub(crate) use pinocchio::*;
@@ -99,6 +101,19 @@ fn auto_triggered_handlers(spec: &ParsedSpec) -> Vec<&str> {
 ///
 /// Per-handler emission is gated on the handler having at least one
 /// `ensures` clause — without ensures there's nothing to assert.
+/// Harness shape for the struct-based (Anchor / Quasar) targets.
+/// `Greenfield` (default) emits the `crate::<Pascal>` accounts context +
+/// `accounts.handler(param)` shape — correct for qedgen-generated code.
+/// `Brownfield` (Anchor only) emits a **state-struct** harness (symbolic
+/// state → apply the real effect / call the real invariant/helper → assert
+/// `ensures`) — the shape that actually matches an existing Anchor program,
+/// where handlers share one Accounts struct and take `Context<T>` + Args.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum KaniImplMode {
+    Greenfield,
+    Brownfield,
+}
+
 pub fn generate(
     spec_path: &Path,
     output_path: &Path,
@@ -106,7 +121,26 @@ pub fn generate(
     target: Target,
 ) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
-    generate_from_spec_with_context(&spec, output_path, explicit_flag, target, Some(spec_path))
+    generate_from_spec_with_context(
+        &spec,
+        output_path,
+        explicit_flag,
+        target,
+        Some(spec_path),
+        KaniImplMode::Greenfield,
+    )
+}
+
+/// `generate` with an explicit harness mode (the CLI's `--kani-impl-brownfield`).
+pub fn generate_with_mode(
+    spec_path: &Path,
+    output_path: &Path,
+    explicit_flag: bool,
+    target: Target,
+    mode: KaniImplMode,
+) -> Result<()> {
+    let spec = check::parse_spec_file(spec_path)?;
+    generate_from_spec_with_context(&spec, output_path, explicit_flag, target, Some(spec_path), mode)
 }
 
 /// Same as `generate` but takes a pre-parsed spec. Used by the CLI when
@@ -118,7 +152,26 @@ pub fn generate_from_spec(
     explicit_flag: bool,
     target: Target,
 ) -> Result<()> {
-    generate_from_spec_with_context(spec, output_path, explicit_flag, target, None)
+    generate_from_spec_with_context(
+        spec,
+        output_path,
+        explicit_flag,
+        target,
+        None,
+        KaniImplMode::Greenfield,
+    )
+}
+
+/// `generate_from_spec` with an explicit harness mode (brownfield tests).
+#[cfg(test)]
+pub fn generate_from_spec_with_mode(
+    spec: &ParsedSpec,
+    output_path: &Path,
+    explicit_flag: bool,
+    target: Target,
+    mode: KaniImplMode,
+) -> Result<()> {
+    generate_from_spec_with_context(spec, output_path, explicit_flag, target, None, mode)
 }
 
 fn generate_from_spec_with_context(
@@ -127,6 +180,7 @@ fn generate_from_spec_with_context(
     explicit_flag: bool,
     target: Target,
     spec_path: Option<&Path>,
+    mode: KaniImplMode,
 ) -> Result<()> {
     // Target gate. All three
     // targets now emit; only the harness body shape differs per framework
@@ -183,6 +237,9 @@ fn generate_from_spec_with_context(
     // emit-targets) is target-agnostic; only the harness body shape
     // differs per framework.
     match target {
+        Target::Anchor if mode == KaniImplMode::Brownfield => {
+            emit_kani_impl_anchor_brownfield(spec, output_path, &emit_targets, explicit_flag)
+        }
         Target::Anchor => emit_kani_impl_struct_framework(
             spec,
             output_path,

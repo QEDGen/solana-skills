@@ -1218,6 +1218,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             kani_output,
             kani_impl,
             kani_impl_output,
+            kani_impl_brownfield,
             test,
             test_output,
             proptest,
@@ -1293,7 +1294,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             } else {
                 kani_impl::spec_triggers_impl_harness(&parsed)
             };
-            let want_kani_impl = !is_assembly && (kani_impl || (all && auto_impl_trigger));
+            let want_kani_impl =
+                !is_assembly && (kani_impl || kani_impl_brownfield || (all && auto_impl_trigger));
             if want_kani_impl {
                 if let Err(e) = deps::require_kani() {
                     eprintln!("warning: {e}");
@@ -1307,11 +1309,17 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     kani_impl_output.clone()
                 };
-                kani_impl::generate(
+                let impl_mode = if kani_impl_brownfield {
+                    kani_impl::KaniImplMode::Brownfield
+                } else {
+                    kani_impl::KaniImplMode::Greenfield
+                };
+                kani_impl::generate_with_mode(
                     &spec,
                     &kani_impl_path,
-                    /*explicit_flag=*/ kani_impl,
+                    /*explicit_flag=*/ kani_impl || kani_impl_brownfield,
                     target,
+                    impl_mode,
                 )?;
             }
 

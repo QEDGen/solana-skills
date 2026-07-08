@@ -893,6 +893,15 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "./programs/tests/kani_impl.rs")]
         kani_impl_output: PathBuf,
 
+        /// Emit the BROWNFIELD Anchor impl-Kani shape (#162): a state-struct
+        /// harness (symbolic state → apply the real effect + validity gate →
+        /// assert `ensures`) instead of the greenfield `Accounts` context +
+        /// `accounts.handler(...)` shape, which does not resolve against a
+        /// pre-existing Anchor program (shared Accounts structs, `Context<T>`
+        /// + `Args`, associated-fn handlers). Anchor target only.
+        #[arg(long)]
+        kani_impl_brownfield: bool,
+
         /// Generate unit tests (plain Rust, cargo test)
         #[arg(long)]
         test: bool,

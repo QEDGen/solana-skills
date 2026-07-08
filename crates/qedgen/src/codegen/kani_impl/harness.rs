@@ -192,8 +192,9 @@ fn emit_account_field_skeleton(
 /// Emit one `#[kani::proof]` for a (handler, ensures) pair. Shape:
 ///   1. Build symbolic accounts context via the `symbolic_accounts` module.
 ///   2. Snapshot pre-state fields (the modifies set, plus any field the
-///      ensures' `rust_expr_binary` reads via `pre.<field>`).
-///   3. Declare symbolic params + `kani::assume` the handler's requires.
+///      requires/ensures read via `pre.<field>` / `post.<field>`).
+///   3. Declare symbolic params + `kani::assume` the handler's requires
+///      (state reads rewritten `s.<field>` → `pre_<field>` snapshots).
 ///   4. Call the user's real handler method.
 ///   5. On `Ok`, snapshot post-state fields, splice CPI ensures-as-fact
 ///      `kani::assume` lines for each `call Iface.foo(...)` whose callee
@@ -206,7 +207,8 @@ pub(crate) fn emit_handler_harness(
     spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
-    out.push_str("#[kani::unwind(2)]\n");
+    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
     out.push_str("#[kani::solver(cadical)]\n");
     out.push_str(&format!(
         "fn verify_{}_impl_ensures_{}() {{\n",
@@ -225,10 +227,25 @@ pub(crate) fn emit_handler_harness(
     //    state account is uniquely identifiable; otherwise the snapshot
     //    falls back to a `todo!()` placeholder for the agent.
     let state_acct = find_state_account_name(handler);
-    let snapshot_fields = collect_snapshot_fields(handler);
+
+    // The handler's `requires` clauses become the precondition
+    // `kani::assume(...)`. `collect_full_guard` renders state reads with the
+    // pure-model accessor `s.<field>`; in the impl harness those name the
+    // PRE-call state, so rewrite `s.<field>` → `pre.<field>` (flattened to a
+    // `pre_<field>` local by `rewrite_pre_post_paths` at emit time below).
+    let guard_predot = crate::rust_codegen_util::collect_full_guard(handler, false)
+        .map(|g| rewrite_state_var_to_pre(&g));
+
+    // Snapshot set: the modifies/effect/CPI-binder base, PLUS every state
+    // field the precondition (`pre.`) and this postcondition (`pre.`/`post.`)
+    // reference. Without the latter, a read-only field named in a
+    // `requires`/`ensures` but never written (e.g. `num_voters` in
+    // `threshold <= num_voters`) yields an unbound `pre_`/`post_` local and
+    // the harness fails to compile.
+    let snapshot_fields = collect_snapshot_fields(handler, guard_predot.as_deref(), ensures);
     if !snapshot_fields.is_empty() {
         out.push_str(
-            "    // Pre-state snapshot — fields the ensures clause reads via `pre.<x>`.\n",
+            "    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n",
         );
         for field in &snapshot_fields {
             match state_acct {
@@ -258,9 +275,13 @@ pub(crate) fn emit_handler_harness(
     }
     // Apply the handler's `requires` clauses as Kani assumptions so we
     // explore inputs the user's handler would actually accept (otherwise
-    // it returns Err and the ensures don't fire — vacuous pass).
-    if let Some(full_guard) = crate::rust_codegen_util::collect_full_guard(handler, false) {
-        out.push_str(&format!("    kani::assume({});\n", full_guard));
+    // it returns Err and the ensures don't fire — vacuous pass). State reads
+    // resolve to the `pre_<field>` snapshots taken above.
+    if let Some(guard) = &guard_predot {
+        out.push_str(&format!(
+            "    kani::assume({});\n",
+            rewrite_pre_post_paths(guard)
+        ));
     }
 
     // 4. Call the user's real handler. Anchor handler methods take
@@ -324,6 +345,96 @@ pub(crate) fn emit_handler_harness(
     out.push_str(&format!("        assert!(\n            {},\n", lowered));
     out.push_str(&format!(
         "            \"ensures clause {} on {} (impl) violated\"\n",
+        idx, handler.name
+    ));
+    out.push_str("        );\n");
+    out.push_str("    }\n");
+    out.push_str("}\n\n");
+    Ok(())
+}
+
+/// Brownfield-Anchor variant of `emit_handler_harness` (#162). Instead of a
+/// symbolic `Accounts` context + `accounts.handler(param)` — the greenfield
+/// convention that does not match real Anchor (handlers share one Accounts
+/// struct, take `Context<T>` + `Args`, are associated fns) — emit a
+/// **state-struct** harness: symbolic state → (agent-fill) apply the real
+/// effect + validity gate → assert `ensures`. Reuses the exact snapshot /
+/// requires-assume / ensures-assert lowering as the greenfield path (incl.
+/// the read-only-field snapshot fix), so only the two parts that genuinely
+/// need the real source — constructing the struct and applying the effect —
+/// are left as `todo!()`. This is the shape both bundled brownfield harnesses
+/// (settings well-formedness, delegation conservation) were hand-written to.
+pub(crate) fn emit_brownfield_handler_harness(
+    out: &mut String,
+    handler: &ParsedHandler,
+    idx: usize,
+    ensures: &crate::check::ParsedEnsures,
+    spec: &ParsedSpec,
+) -> Result<()> {
+    out.push_str("#[kani::proof]\n");
+    // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
+    // 32-byte `memcmp` loop needing ≥ 34; a numeric-only harness closes at a
+    // small bound and runs faster (`suggested_unwind`).
+    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
+    out.push_str(&format!(
+        "fn verify_{}_impl_ensures_{}() {{\n",
+        handler.name, idx
+    ));
+
+    // 1. Symbolic state struct — agent-fill (needs the real struct name/fields).
+    out.push_str("    // AGENT-FILL (1/2): build a symbolic instance of the real `#[account]`\n");
+    out.push_str("    // struct this spec's `State` models. Fields the spec reasons about →\n");
+    out.push_str("    // `kani::any()`; the rest → concrete. Annotate the real type, e.g.:\n");
+    out.push_str("    //   let mut state: crate::<RealStateStruct> = todo!();\n");
+    out.push_str("    let mut state = todo!(\"build a symbolic state account struct\");\n\n");
+
+    // 2. Pre-snapshot — reuse the greenfield field set (modifies ∪ effects ∪
+    //    CPI-binders ∪ requires/ensures fields) and `s.`→`pre.` guard lowering.
+    let guard_predot = crate::rust_codegen_util::collect_full_guard(handler, false)
+        .map(|g| rewrite_state_var_to_pre(&g));
+    let snapshot_fields = collect_snapshot_fields(handler, guard_predot.as_deref(), ensures);
+    if !snapshot_fields.is_empty() {
+        out.push_str("    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n");
+        for field in &snapshot_fields {
+            out.push_str(&format!("    let pre_{0} = state.{0};\n", field));
+        }
+    }
+
+    // 3. Symbolic params + precondition (reads the pre-snapshots).
+    for (pname, ptype) in &handler.takes_params {
+        out.push_str(&format!(
+            "    let {}: {} = kani::any();\n",
+            pname,
+            map_type(ptype, spec)?
+        ));
+    }
+    if let Some(guard) = &guard_predot {
+        out.push_str(&format!(
+            "    kani::assume({});\n",
+            rewrite_pre_post_paths(guard)
+        ));
+    }
+
+    // 4. Apply the real effect + validity gate — agent-fill.
+    out.push_str("\n    // AGENT-FILL (2/2): apply the real handler's state effect on `state`\n");
+    out.push_str("    // (call the real logic, or replicate the short mutation), then gate on\n");
+    out.push_str("    // the validity check the handler runs (e.g. `state.invariant()?`). Bind\n");
+    out.push_str("    // whether it succeeded to `ok`.\n");
+    out.push_str("    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n");
+
+    // 5. Post-snapshot + assert (same `ensures` lowering as greenfield).
+    out.push_str("    if ok {\n");
+    if !snapshot_fields.is_empty() {
+        out.push_str("        // Post-state snapshot.\n");
+        for field in &snapshot_fields {
+            out.push_str(&format!("        let post_{0} = state.{0};\n", field));
+        }
+    }
+    let lowered = rewrite_pre_post_paths(&ensures.rust_expr_binary);
+    out.push_str(&format!("        assert!(\n            {},\n", lowered));
+    out.push_str(&format!(
+        "            \"ensures clause {} on {} (impl, brownfield) violated\"\n",
         idx, handler.name
     ));
     out.push_str("        );\n");
@@ -430,10 +541,11 @@ fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
     }
 }
 
-/// The union of `modifies`, effect-LHS bare field names, and v2.27
-/// Track A state-binder caller fields — every field the ensures clause
-/// might read across the pre/post boundary. Used to drive snapshot
-/// emission.
+/// Every field the harness snapshots across the call: the `modifies` set,
+/// effect-LHS bare names, v2.27 Track A state-binder caller fields, PLUS
+/// every read-only field named by the precondition (`guard_predot`, in
+/// `pre.<field>` form) and this postcondition (`ensures.rust_expr_binary`,
+/// in `pre.<field>` / `post.<field>` form). Used to drive snapshot emission.
 ///
 /// Track A: when a `call X.y(state_binders { from_balance = state.X })`
 /// is present, the CPI assume splice references `pre.X` / `post.X`
@@ -441,7 +553,17 @@ fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
 /// `rewrite_pre_post_paths` flatten then turns those into `pre_X` /
 /// `post_X` locals — which only exist if the snapshot emitter
 /// captured `X`. Including binder caller fields here closes that loop.
-fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
+///
+/// The requires/ensures scan closes the same loop for plain read-only
+/// fields: `threshold <= num_voters` names `num_voters`, which is never
+/// written, so it is absent from `modifies`/effects but still referenced by
+/// the emitted `assume`/`assert`. Extracting from the rendered strings the
+/// assume/assert actually emit guarantees every named local is declared.
+fn collect_snapshot_fields(
+    handler: &ParsedHandler,
+    guard_predot: Option<&str>,
+    ensures: &crate::check::ParsedEnsures,
+) -> Vec<String> {
     let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(modifies) = &handler.modifies {
         for f in modifies {
@@ -462,7 +584,66 @@ fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
             fields.insert(binder.caller_field.clone());
         }
     }
+    // Read-only fields named by the precondition (`pre.`) and this
+    // postcondition (`pre.`/`post.`).
+    if let Some(guard) = guard_predot {
+        collect_prefixed_fields(guard, "pre.", &mut fields);
+    }
+    collect_prefixed_fields(&ensures.rust_expr_binary, "pre.", &mut fields);
+    collect_prefixed_fields(&ensures.rust_expr_binary, "post.", &mut fields);
     fields.into_iter().collect()
+}
+
+/// True for bytes that may appear inside a Rust identifier.
+fn is_ident_byte(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphanumeric()
+}
+
+/// Rewrite the pure-model state accessor `s.<field>` (as produced by
+/// `translate_guard_to_rust`) into `pre.<field>`, so a `requires` lowered for
+/// the impl harness reads the PRE-call snapshot. Token-aware: only a
+/// standalone `s` (at an identifier boundary) immediately followed by `.` is
+/// rewritten, so `accounts.`/`is_signer` and the like are untouched. Guard
+/// expressions are ASCII.
+fn rewrite_state_var_to_pre(expr: &str) -> String {
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut i = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || !is_ident_byte(bytes[i - 1]);
+        if bytes[i] == b's' && at_boundary && i + 1 < bytes.len() && bytes[i + 1] == b'.' {
+            out.push_str("pre");
+        } else {
+            out.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Collect the bare identifiers appearing as `<prefix><ident>` in `expr`
+/// (e.g. prefix `"post."` in `post.num_voters` → `num_voters`). Boundary-aware
+/// so a prefix embedded in a longer token is not matched.
+fn collect_prefixed_fields(
+    expr: &str,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    let bytes = expr.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = expr[search..].find(prefix) {
+        let start = search + rel;
+        let after = start + prefix.len();
+        let at_boundary = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let mut j = after;
+        while j < bytes.len() && is_ident_byte(bytes[j]) {
+            j += 1;
+        }
+        if at_boundary && j > after {
+            out.insert(expr[after..j].to_string());
+        }
+        search = after;
+    }
 }
 
 /// Rewrite `pre.<field>` → `pre_<field>` and `post.<field>` → `post_<field>`
@@ -472,4 +653,70 @@ fn collect_snapshot_fields(handler: &ParsedHandler) -> Vec<String> {
 /// string replace is safe.
 fn rewrite_pre_post_paths(expr: &str) -> String {
     expr.replace("pre.", "pre_").replace("post.", "post_")
+}
+
+/// True for the DSL `Pubkey` type. It lowers to `[u8; 32]` in the standalone
+/// harness (`map_type` Standalone context), so equality against it becomes a
+/// 32-byte `memcmp` loop that Kani must unwind past.
+fn is_pubkey_type(ty: &str) -> bool {
+    ty.trim() == "Pubkey"
+}
+
+/// Bare names of every `Pubkey`-typed state field across the spec's state
+/// shapes (flat `state_fields`, per-account types, and record / sum payloads).
+/// A snapshotted field in this set lowers to a `[u8; 32]` snapshot that the
+/// ensures may compare.
+fn pubkey_state_field_names(spec: &ParsedSpec) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut scan = |fields: &[(String, String)]| {
+        for (name, ty) in fields {
+            if is_pubkey_type(ty) {
+                names.insert(name.clone());
+            }
+        }
+    };
+    scan(&spec.state_fields);
+    for acct in &spec.account_types {
+        scan(&acct.fields);
+    }
+    for rec in &spec.records {
+        scan(&rec.fields);
+    }
+    for sum in &spec.sum_types {
+        for variant in &sum.variants {
+            scan(&variant.fields);
+        }
+    }
+    names
+}
+
+/// Suggest the `#[kani::unwind(N)]` bound for one impl harness. A `Pubkey`
+/// (→ `[u8; 32]`) field or param lowers to a 32-byte `memcmp` loop that Kani
+/// only fully unwinds at N ≥ 34 (32 bytes + slack); a harness that snapshots
+/// or takes no byte-array value closes at a small bound and runs faster.
+/// Returns `(bound, reason)` — `reason` becomes the trailing `//` comment.
+///
+/// Shared by both struct-framework (Anchor / Quasar) and brownfield emit
+/// paths. Pinocchio computes its own bound in `pinocchio.rs`.
+fn suggested_unwind(
+    handler: &ParsedHandler,
+    _ensures: &crate::check::ParsedEnsures,
+    spec: &ParsedSpec,
+) -> (u32, &'static str) {
+    // Impl-targeted harnesses CALL real code (the handler / `invariant()` /
+    // helper), which operates on the WHOLE account struct — not just the fields
+    // this harness snapshots. So a `Pubkey` anywhere in the model — a param, or
+    // ANY state field (snapshotted or not) — signals the callee likely does a
+    // 32-byte `memcmp` (owner / `has_one` / dedup / `windows` checks), which
+    // only fully unwinds at N ≥ 34. Bias conservative: a too-low bound fails
+    // with an "unwinding assertion" (the exact trial-and-error F2 removes),
+    // whereas a too-high bound is merely slower.
+    let param_touches_bytes = handler.takes_params.iter().any(|(_, t)| is_pubkey_type(t));
+    let state_has_pubkey = !pubkey_state_field_names(spec).is_empty();
+
+    if param_touches_bytes || state_has_pubkey {
+        (34, "Pubkey in state/params → callee does a 32-byte memcmp; needs ≥ 34")
+    } else {
+        (4, "no Pubkey fields — no 32-byte memcmp")
+    }
 }
