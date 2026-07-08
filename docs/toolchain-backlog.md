@@ -132,3 +132,21 @@ greenfield Context harness assumes a struct it can't construct for real Anchor.
   the real `validate()`/handler. Composes with #162 phase-2 (IDL layouts) + G4 (#165 sysvar stubs).
 - **Verdict:** FILE (feature). High leverage — authorization is why a multisig exists.
 - **Issue:** #169 (QEDGen/solana-skills)
+
+### 🧩 G6 — IDL-driven construction requires a fresh IDL  [#162-p2 prereq]
+
+A stale committed IDL (field renamed/added since generation) makes the generated
+struct-literal constructor reference non-existent fields → silent compile failure.
+Observed: a target's IDL had `reserved1/reserved2` where the source is
+`policy_seed: Option<u64>, _reserved2`.
+- **Proposed:** drift-check the IDL vs the source `#[account]` structs at codegen
+  time (hard error), or regenerate-on-build. "Complete qedspec has the IDL" = a *current* one.
+- **Issue:** #170 (QEDGen/solana-skills)
+
+### 🧩 G7 — IDL parser can't read Anchor-0.29 account struct bodies  [#162-p2 prereq]
+
+`spec/idl.rs::Idl` reads `types` + instruction account *references*, but not the
+top-level `accounts: [{name, type:{fields}}]` where Anchor 0.29 keeps account
+struct bodies — so the layout an IDL-driven constructor needs is unreachable for 0.29.
+- **Proposed:** add `accounts: Vec<IdlTypeDef>` (default `ty`); resolve fields from `accounts ∪ types`.
+- **Issue:** #171 (QEDGen/solana-skills)
