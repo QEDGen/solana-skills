@@ -391,6 +391,46 @@ handler resize (n : U64) {
     );
 }
 
+/// `pragma kani_panic_free` emits a call-only proof per handler: construct
+/// symbolic state, call the handler (agent-fill), no assertion — Kani's built-in
+/// checks verify panic-freedom. Emitted even for a claim-free handler (no
+/// ensures/effect), so the emitter must not bail early.
+#[test]
+fn brownfield_kani_panic_free_emits_call_only_proof() {
+    let src = r#"spec PanicFree
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_panic_free = on
+state { size : U64, cap : U64 }
+handler recompute (n : U64) {
+  modifies [size]
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pf_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn verify_recompute_panic_free()")
+            && body.contains("let mut state = symbolic_widget();"),
+        "panic-free harness constructs symbolic state; got:\n{body}"
+    );
+    // Call-only: no `assert!` and no ensures/reject scaffolding in this proof.
+    assert!(
+        !body.contains("assert!(") && !body.contains("_impl_ensures_"),
+        "panic-free proof asserts nothing (Kani checks panics); got:\n{body}"
+    );
+}
+
 /// A REQUIRES-ONLY handler (a guard, no `ensures`/`effect`) still gets a reject
 /// proof under `pragma kani_reject` — guard enforcement is exactly where a
 /// postcondition-free validator matters. The spec would otherwise emit nothing

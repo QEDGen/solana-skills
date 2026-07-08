@@ -673,6 +673,51 @@ pub(crate) fn emit_brownfield_reject_harness(
     Ok(true)
 }
 
+/// Emit a panic-freedom proof for a handler: construct symbolic state (with the
+/// pre-state invariant assumed) + symbolic params, then CALL the real handler
+/// with no assertion — Kani's built-in checks (unwrap / overflow / division /
+/// index / explicit panic) verify the call cannot panic on any symbolic input.
+/// Opt-in via `pragma kani_panic_free`. The natural shape for a `()`-returning
+/// method (e.g. `reset_if_needed`) whose only property is that it doesn't abort.
+pub(crate) fn emit_brownfield_panic_free_harness(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    state_struct: Option<&str>,
+) -> Result<()> {
+    emit_impl_proof_attrs(out, handler, spec);
+    out.push_str(&format!("fn verify_{}_panic_free() {{\n", handler.name));
+
+    emit_symbolic_state(out, spec, state_struct);
+
+    for (pname, ptype) in &handler.takes_params {
+        if ptype == "Pubkey" {
+            out.push_str(&format!(
+                "    let {pname}: anchor_lang::prelude::Pubkey = \
+                 anchor_lang::prelude::Pubkey::new_from_array(kani::any());\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    let {}: {} = kani::any();\n",
+                pname,
+                map_type(ptype, spec)?
+            ));
+        }
+    }
+
+    // AGENT-FILL: call the real handler as a statement (no bind, no assert) —
+    // Kani's built-in checks verify panic-freedom during the call.
+    out.push_str(
+        "\n    // AGENT-FILL: call the real handler here (a statement, e.g.\n\
+         \x20   //   state.<method>(<params>);\n\
+         \x20   // No assertion — Kani's built-in unwrap/overflow/div/index/panic\n\
+         \x20   // checks verify the call cannot abort on any symbolic input.\n",
+    );
+    out.push_str("    todo!(\"call the real handler (statement, no bind)\");\n");
+    out.push_str("}\n\n");
+    Ok(())
+}
+
 /// Walk `handler.calls` and, for each CPI whose callee declares ensures,
 /// emit a `// CPI ensures-as-fact (Iface.handler):` comment followed by one
 /// `kani::assume(<substituted_clause>);` per ensures clause. Tier-0 callees

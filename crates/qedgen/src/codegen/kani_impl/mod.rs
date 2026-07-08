@@ -217,22 +217,24 @@ fn generate_from_spec_with_context(
         .filter(|h| !h.ensures.is_empty() || !h.effects.is_empty())
         .collect();
 
-    // Brownfield guard-enforcement (`pragma kani_reject`) is a standalone
-    // obligation: a handler with a `requires`/`when` guard but NO ensures/effects
-    // still warrants a reject proof. When that mode is on and some handler is
-    // guarded, keep emitting even though `handlers_with_claims` / `emit_targets`
-    // (both ensures/effects-based, driving the ensures loop) may be empty.
-    let reject_mode = mode == KaniImplMode::Brownfield
-        && spec.pragma_value("kani_reject").is_some()
-        && spec
-            .handlers
-            .iter()
-            .any(|h| crate::rust_codegen_util::collect_full_guard(h, false).is_some());
+    // Brownfield guard-enforcement (`pragma kani_reject`) and panic-freedom
+    // (`pragma kani_panic_free`) are standalone obligations: a handler with a
+    // guard-but-no-ensures (reject), or any handler at all (panic-free), still
+    // warrants a proof. When either mode applies, keep emitting even though
+    // `handlers_with_claims` / `emit_targets` (both ensures/effects-based,
+    // driving the ensures loop) may be empty.
+    let extra_brownfield_mode = mode == KaniImplMode::Brownfield
+        && ((spec.pragma_value("kani_reject").is_some()
+            && spec
+                .handlers
+                .iter()
+                .any(|h| crate::rust_codegen_util::collect_full_guard(h, false).is_some()))
+            || spec.pragma_value("kani_panic_free").is_some());
 
     // No asserted clauses/effects anywhere → nothing meaningful to prove.
     // Auto-trigger could still fire (modifies-only fill without ensures is
     // its own lint), but the harness body needs a concrete postcondition.
-    if handlers_with_claims.is_empty() && !reject_mode {
+    if handlers_with_claims.is_empty() && !extra_brownfield_mode {
         return Ok(());
     }
 
@@ -247,7 +249,7 @@ fn generate_from_spec_with_context(
         .filter(|h| explicit_flag || handler_triggers_impl_harness(h))
         .collect();
 
-    if emit_targets.is_empty() && !reject_mode {
+    if emit_targets.is_empty() && !extra_brownfield_mode {
         return Ok(());
     }
 

@@ -1280,6 +1280,15 @@ call as the ensures harness. Off by default. Example: a handler with
 reject proof that assumes `contains(state.approved, signer)` (signer already
 voted) and asserts the call rejects the duplicate.
 
+**`pragma kani_panic_free = on`** — emit a **panic-freedom proof** per handler in
+the brownfield impl-Kani output: `verify_<handler>_panic_free` constructs
+symbolic state + params and CALLS the real handler (agent-fill) with **no
+assertion** — Kani's built-in checks (unwrap / overflow / division-by-zero /
+index / explicit panic) verify the call cannot abort on any symbolic input. The
+natural shape for a `()`-returning method whose only property is that it doesn't
+panic (e.g. a `reset_if_needed` doing unchecked-looking period arithmetic). Off
+by default; works on a handler with no `ensures`/`effect`.
+
 ## Interface declarations
 
 Contracts for programs you CPI into. Uniform surface across three tiers:
