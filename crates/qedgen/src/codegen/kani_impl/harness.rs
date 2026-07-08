@@ -705,6 +705,32 @@ pub(crate) fn emit_brownfield_panic_free_harness(
         }
     }
 
+    // Assume the handler's preconditions (`requires`/`when`) — panic-freedom is
+    // claimed UNDER them: e.g. `current >= last_reset` rules out a `checked_sub`
+    // underflow that a fully-symbolic `last_reset` would spuriously trigger but
+    // that can't arise on-chain. Snapshot the fields the guard reads (evaluated
+    // pre-call, so `pre_<field>` == the unmutated `state.<field>`).
+    if let Some(guard) = crate::rust_codegen_util::collect_full_guard(handler, false) {
+        let guard_predot = rewrite_state_var_to_pre(&guard);
+        let mut gfields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        collect_prefixed_fields(&guard_predot, "pre.", &mut gfields);
+        if !gfields.is_empty() {
+            out.push_str("    // Pre-state snapshot — fields the `requires` guard reads.\n");
+            for field in &gfields {
+                let rhs = if state_field_needs_clone(spec, field) {
+                    format!("state.{field}.clone()")
+                } else {
+                    format!("state.{field}")
+                };
+                out.push_str(&format!("    let pre_{field} = {rhs};\n"));
+            }
+        }
+        out.push_str(&format!(
+            "    kani::assume({});\n",
+            rewrite_pre_post_paths(&guard_predot)
+        ));
+    }
+
     // AGENT-FILL: call the real handler as a statement (no bind, no assert) —
     // Kani's built-in checks verify panic-freedom during the call.
     out.push_str(

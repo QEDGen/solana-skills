@@ -403,6 +403,7 @@ pragma state_invariant = none
 pragma kani_panic_free = on
 state { size : U64, cap : U64 }
 handler recompute (n : U64) {
+  requires n <= state.cap else TooBig
   modifies [size]
 }"#;
     let spec = parse_str(src).expect("parse");
@@ -423,6 +424,12 @@ handler recompute (n : U64) {
         body.contains("fn verify_recompute_panic_free()")
             && body.contains("let mut state = symbolic_widget();"),
         "panic-free harness constructs symbolic state; got:\n{body}"
+    );
+    // Panic-freedom is claimed UNDER the handler's preconditions — the `requires`
+    // guard is assumed (not asserted).
+    assert!(
+        body.contains("kani::assume((n <= pre_cap));"),
+        "panic-free harness assumes the `requires` guard; got:\n{body}"
     );
     // Call-only: no `assert!` and no ensures/reject scaffolding in this proof.
     assert!(
