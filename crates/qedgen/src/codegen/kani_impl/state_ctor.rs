@@ -198,6 +198,57 @@ pub(crate) fn pda_stub_attr() -> &'static str {
     "#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]\n"
 }
 
+/// `pragma kani_stub_log` → stub Solana logging (`msg!` / `sol_log` /
+/// `sol_log_data`) to no-ops — logging is a pure side-effect with zero
+/// verification value. #182 Tier 4.
+pub(crate) fn wants_log_stub(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_log").is_some()
+}
+
+pub(crate) fn log_stub_fn() -> String {
+    "// Logging no-ops (#182 Tier 4): a pure side-effect, zero verification value.\n\
+     fn stub_sol_log(_msg: &str) {}\n\
+     fn stub_sol_log_data(_data: &[&[u8]]) {}\n"
+        .to_string()
+}
+
+pub(crate) fn log_stub_attr() -> &'static str {
+    "#[kani::stub(solana_program::log::sol_log, stub_sol_log)]\n\
+     #[kani::stub(solana_program::log::sol_log_data, stub_sol_log_data)]\n"
+}
+
+/// `pragma kani_stub_cpi` → stub CPI (`invoke` / `invoke_signed`) to `Ok(())`.
+/// A cross-program call can't execute under Kani; assume it succeeds — its state
+/// effects are modeled by the agent-fill effect (the Kani mirror of the
+/// CPI-ensures-as-axiom the toolchain already does for Lean). #182 Tier 4.
+pub(crate) fn wants_cpi_stub(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_cpi").is_some()
+}
+
+pub(crate) fn cpi_stub_fn() -> String {
+    "// CPI stubs (#182 Tier 4): the cross-program call can't run under Kani —\n\
+     // assume success; its state effects are the agent-fill effect's job.\n\
+     fn stub_invoke(\n\
+     \x20   _i: &solana_program::instruction::Instruction,\n\
+     \x20   _a: &[anchor_lang::prelude::AccountInfo],\n\
+     ) -> solana_program::entrypoint::ProgramResult {\n\
+     \x20   Ok(())\n\
+     }\n\
+     fn stub_invoke_signed(\n\
+     \x20   _i: &solana_program::instruction::Instruction,\n\
+     \x20   _a: &[anchor_lang::prelude::AccountInfo],\n\
+     \x20   _s: &[&[&[u8]]],\n\
+     ) -> solana_program::entrypoint::ProgramResult {\n\
+     \x20   Ok(())\n\
+     }\n"
+    .to_string()
+}
+
+pub(crate) fn cpi_stub_attr() -> &'static str {
+    "#[kani::stub(solana_program::program::invoke, stub_invoke)]\n\
+     #[kani::stub(solana_program::program::invoke_signed, stub_invoke_signed)]\n"
+}
+
 /// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
 /// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
 /// status, which the membership/threshold properties don't constrain.

@@ -128,6 +128,18 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         out.push('\n');
     }
 
+    // Logging no-ops (#182 Tier 4) — emitted once when opted in.
+    if super::state_ctor::wants_log_stub(spec) {
+        out.push_str(&super::state_ctor::log_stub_fn());
+        out.push('\n');
+    }
+
+    // CPI stubs (#182 Tier 4) — emitted once when opted in.
+    if super::state_ctor::wants_cpi_stub(spec) {
+        out.push_str(&super::state_ctor::cpi_stub_fn());
+        out.push('\n');
+    }
+
     let mut emitted_count = 0;
     for handler in emit_targets {
         for (idx, ensures) in handler.ensures.iter().enumerate() {

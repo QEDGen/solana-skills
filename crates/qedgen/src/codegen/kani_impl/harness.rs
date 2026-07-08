@@ -414,6 +414,13 @@ pub(crate) fn emit_brownfield_handler_harness(
             "#[kani::stub(anchor_lang::solana_program::clock::Clock::get, stub_clock_get)]\n",
         );
     }
+    // #182 Tier 4 — logging no-op + CPI success (opt-in).
+    if super::state_ctor::wants_log_stub(spec) {
+        out.push_str(super::state_ctor::log_stub_attr());
+    }
+    if super::state_ctor::wants_cpi_stub(spec) {
+        out.push_str(super::state_ctor::cpi_stub_attr());
+    }
     out.push_str(&format!(
         "fn verify_{}_impl_ensures_{}() {{\n",
         handler.name, idx
