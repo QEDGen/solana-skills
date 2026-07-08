@@ -106,6 +106,14 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         None => None,
     };
 
+    // Abstract-Pubkey-equality support fn (#182 Tier 1) — emitted once; each
+    // proof carries the `#[kani::stub]` that redirects `Pubkey ==` to it, so
+    // CBMC compares keys as a wide integer instead of a 32-byte memcmp loop.
+    if super::state_ctor::wants_pubkey_abstraction(spec) {
+        out.push_str(&super::state_ctor::pubkey_eq_abstract_fn());
+        out.push('\n');
+    }
+
     // Clock stub (G14) — emitted once; each proof carries the `#[kani::stub]`.
     if super::state_ctor::wants_clock_stub(spec) {
         out.push_str(&super::state_ctor::clock_stub_fn());

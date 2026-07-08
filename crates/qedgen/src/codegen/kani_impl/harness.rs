@@ -207,7 +207,8 @@ pub(crate) fn emit_handler_harness(
     spec: &ParsedSpec,
 ) -> Result<()> {
     out.push_str("#[kani::proof]\n");
-    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    // Greenfield doesn't emit the Pubkey stub → keep the memcmp-driven bound.
+    let (unwind, why) = suggested_unwind(handler, ensures, spec, /*abstract_pubkey=*/ false);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
     out.push_str("#[kani::solver(cadical)]\n");
     out.push_str(&format!(
@@ -394,8 +395,15 @@ pub(crate) fn emit_brownfield_handler_harness(
     // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
     // 32-byte `memcmp` loop needing ≥ 34; a numeric-only harness closes at a
     // small bound and runs faster (`suggested_unwind`).
-    let (unwind, why) = suggested_unwind(handler, ensures, spec);
+    let abstract_pk = super::state_ctor::wants_pubkey_abstraction(spec);
+    let (unwind, why) = suggested_unwind(handler, ensures, spec, abstract_pk);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
+    // #182 Tier 1 — redirect Pubkey's derived `==` to the abstract wide-integer
+    // compare (no 32-byte memcmp loop). Sound (verified equivalent), so it can't
+    // change the result; needs `-Z stubbing`.
+    if abstract_pk {
+        out.push_str(super::state_ctor::pubkey_stub_attr());
+    }
     // G14 — the agent-fill effect calls a `Clock::get()`-reading method; stub it.
     if super::state_ctor::wants_clock_stub(spec) {
         out.push_str(
@@ -787,6 +795,9 @@ fn suggested_unwind(
     handler: &ParsedHandler,
     _ensures: &crate::check::ParsedEnsures,
     spec: &ParsedSpec,
+    // Only the brownfield path emits the Pubkey `==` stub, so only it may drop
+    // the memcmp-driven ≥34 bound. The greenfield path passes `false`.
+    abstract_pubkey: bool,
 ) -> (u32, &'static str) {
     // Impl-targeted harnesses CALL real code (the handler / `invariant()` /
     // helper), which operates on the WHOLE account struct — not just the fields
@@ -796,6 +807,17 @@ fn suggested_unwind(
     // only fully unwinds at N ≥ 34. Bias conservative: a too-low bound fails
     // with an "unwinding assertion" (the exact trial-and-error F2 removes),
     // whereas a too-high bound is merely slower.
+    // #182 Tier 1: when Pubkey `==` is abstracted (stubbed to a wide-integer
+    // compare), the 32-byte memcmp that forced ≥34 is gone — the remaining
+    // loops iterate `kani_vec_bound`-sized collections, so a small bound closes.
+    if abstract_pubkey {
+        let bound = super::state_ctor::vec_bound_of(spec) as u32 + 4;
+        return (
+            bound,
+            "Pubkey `==` abstracted (#182) — no memcmp; small bound",
+        );
+    }
+
     let param_touches_bytes = handler.takes_params.iter().any(|(_, t)| is_pubkey_type(t));
     let state_has_pubkey = !pubkey_state_field_names(spec).is_empty();
 

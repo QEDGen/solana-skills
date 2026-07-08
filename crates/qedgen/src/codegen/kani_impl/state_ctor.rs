@@ -105,6 +105,56 @@ pub(crate) fn wants_clock_stub(spec: &ParsedSpec) -> bool {
     spec.pragma_value("kani_stub_clock").is_some()
 }
 
+/// `true` when the harness touches `Pubkey` (a State/record field or a param,
+/// directly or inside `Option`/`Vec`) → the harness stubs `Pubkey`'s derived
+/// `==` with an abstract wide-integer compare (#182 Tier 1), so CBMC doesn't
+/// bit-blast a 32-byte `memcmp` loop (unwind 2 vs ≥34). The stub is proven
+/// bit-for-bit equivalent to `==`, so it can't change any result. Opt out with
+/// `pragma kani_abstract_pubkey = off`.
+pub(crate) fn wants_pubkey_abstraction(spec: &ParsedSpec) -> bool {
+    if spec.pragma_value("kani_abstract_pubkey") == Some("off") {
+        return false;
+    }
+    let mentions_pubkey = |t: &str| {
+        t.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "Pubkey")
+    };
+    spec.state_fields.iter().any(|(_, t)| mentions_pubkey(t))
+        || spec
+            .records
+            .iter()
+            .any(|r| r.fields.iter().any(|(_, t)| mentions_pubkey(t)))
+        || spec
+            .handlers
+            .iter()
+            .any(|h| h.takes_params.iter().any(|(_, t)| mentions_pubkey(t)))
+}
+
+/// The abstract-`Pubkey`-equality support fn (emitted once when
+/// `wants_pubkey_abstraction`). Reinterprets the 32 bytes as two `u128` halves
+/// and compares — 2 word-comparisons, not a 32-byte `memcmp` loop. Sound
+/// (machine-checked equivalent to `derive(PartialEq)`, #182); verification-only
+/// (`#[cfg(kani)]`), so the transmute never runs on-chain.
+pub(crate) fn pubkey_eq_abstract_fn() -> String {
+    "// Abstract Pubkey equality (#182 Tier 1): the 32 bytes as two u128 halves —\n\
+     // 2 word-comparisons, NOT a 32-byte memcmp loop (Kani unwind 2 vs >= 34).\n\
+     // Proven bit-for-bit equivalent to derive(PartialEq); the proofs stub\n\
+     // Pubkey `==` to this. Verification-only, so the transmute never runs on-chain.\n\
+     #[allow(clippy::missing_transmute_annotations)]\n\
+     fn pk_eq_abstract(a: &anchor_lang::prelude::Pubkey, b: &anchor_lang::prelude::Pubkey) -> bool {\n\
+     \x20   let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };\n\
+     \x20   let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };\n\
+     \x20   a[0] == b[0] && a[1] == b[1]\n\
+     }\n"
+        .to_string()
+}
+
+/// The `#[kani::stub]` attribute that redirects `Pubkey`'s derived `==` to
+/// `pk_eq_abstract` (needs `-Z stubbing`).
+pub(crate) fn pubkey_stub_attr() -> &'static str {
+    "#[kani::stub(<anchor_lang::prelude::Pubkey as core::cmp::PartialEq>::eq, pk_eq_abstract)]\n"
+}
+
 /// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
 /// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
 /// status, which the membership/threshold properties don't constrain.

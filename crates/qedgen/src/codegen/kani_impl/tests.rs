@@ -402,9 +402,15 @@ handler admin_bump (caller : Pubkey) (delta : U64) {
     .expect("emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
+    // With the #182 Tier-1 Pubkey abstraction ON (default), the brownfield
+    // harness stubs Pubkey `==` to a wide-integer compare and drops the
+    // memcmp-driven bound to a small value (the 34 is only needed with the
+    // abstraction OFF — see the opt-out case below).
     assert!(
-        body.contains("#[kani::unwind(34)]"),
-        "Pubkey param must lift the brownfield unwind bound to 34; got:\n{body}"
+        body.contains("fn pk_eq_abstract")
+            && body.contains("kani::stub(<anchor_lang::prelude::Pubkey")
+            && !body.contains("#[kani::unwind(34)]"),
+        "brownfield Pubkey harness abstracts `==` + drops the bound; got:\n{body}"
     );
 
     // (d) A Pubkey STATE field that is NEVER referenced in a guard/ensures (only
@@ -436,9 +442,40 @@ handler set_threshold (new_threshold : U16) {
     .expect("emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
+    // Abstraction ON (default): stubbed + small bound, even for the
+    // unreferenced-Pubkey settings-well-formedness shape.
     assert!(
-        body.contains("#[kani::unwind(34)]") && !body.contains("#[kani::unwind(4)]"),
-        "an unreferenced Pubkey state field must still lift the bound to 34; got:\n{body}"
+        body.contains("fn pk_eq_abstract") && !body.contains("#[kani::unwind(34)]"),
+        "unreferenced Pubkey field: abstracted + small bound; got:\n{body}"
+    );
+
+    // (e) Opt-out `pragma kani_abstract_pubkey = off` → no stub, memcmp bound 34.
+    let pk_optout = r#"spec SettingsishOff
+pragma kani_abstract_pubkey = off
+state { authority : Pubkey, threshold : U16, voters : U16 }
+handler set_threshold (new_threshold : U16) {
+  requires new_threshold <= state.voters else Bad
+  modifies [threshold]
+  ensures state.threshold <= state.voters
+  effect { threshold := new_threshold }
+}"#;
+    let spec = parse_str(pk_optout).expect("parse");
+    let tmp =
+        std::env::temp_dir().join(format!("kani_impl_unwind_optout_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    assert!(
+        !body.contains("fn pk_eq_abstract") && body.contains("#[kani::unwind(34)]"),
+        "opt-out: no Pubkey stub, memcmp bound 34; got:\n{body}"
     );
 }
 
