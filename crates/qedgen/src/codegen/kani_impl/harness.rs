@@ -381,6 +381,12 @@ pub(crate) fn emit_brownfield_handler_harness(
     // small bound and runs faster (`suggested_unwind`).
     let (unwind, why) = suggested_unwind(handler, ensures, spec);
     out.push_str(&format!("#[kani::unwind({unwind})] // {why}\n"));
+    // G14 — the agent-fill effect calls a `Clock::get()`-reading method; stub it.
+    if super::state_ctor::wants_clock_stub(spec) {
+        out.push_str(
+            "#[kani::stub(anchor_lang::solana_program::clock::Clock::get, stub_clock_get)]\n",
+        );
+    }
     out.push_str(&format!(
         "fn verify_{}_impl_ensures_{}() {{\n",
         handler.name, idx

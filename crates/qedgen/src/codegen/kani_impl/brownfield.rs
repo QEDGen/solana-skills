@@ -106,6 +106,12 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         None => None,
     };
 
+    // Clock stub (G14) — emitted once; each proof carries the `#[kani::stub]`.
+    if super::state_ctor::wants_clock_stub(spec) {
+        out.push_str(&super::state_ctor::clock_stub_fn());
+        out.push('\n');
+    }
+
     let mut emitted_count = 0;
     for handler in emit_targets {
         for (idx, ensures) in handler.ensures.iter().enumerate() {

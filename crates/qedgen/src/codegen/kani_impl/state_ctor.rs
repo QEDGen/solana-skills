@@ -96,6 +96,34 @@ pub(crate) fn invariant_method(spec: &ParsedSpec) -> Option<String> {
     }
 }
 
+/// `pragma kani_stub_clock = <anything>` → the agent-fill effect calls a method
+/// that reads `Clock::get()`; the harness must stub it (`-Z stubbing`) + emit
+/// the stub fn (G14, #178). Without it, `Clock::get()` aborts under Kani. Any
+/// value signals it (`true` is a reserved word, so callers write e.g.
+/// `= clock`).
+pub(crate) fn wants_clock_stub(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_clock").is_some()
+}
+
+/// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
+/// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
+/// status, which the membership/threshold properties don't constrain.
+pub(crate) fn clock_stub_fn() -> String {
+    "// G14: symbolic runs read `Clock::get()`; Kani stubs it (`-Z stubbing`).\n\
+     fn stub_clock_get(\n\
+     ) -> core::result::Result<anchor_lang::solana_program::clock::Clock, anchor_lang::solana_program::program_error::ProgramError>\n\
+     {\n\
+    \x20   Ok(anchor_lang::solana_program::clock::Clock {\n\
+    \x20       slot: 1,\n\
+    \x20       epoch_start_timestamp: 0,\n\
+    \x20       epoch: 0,\n\
+    \x20       leader_schedule_epoch: 0,\n\
+    \x20       unix_timestamp: 1_700_000_000,\n\
+    \x20   })\n\
+     }\n"
+        .to_string()
+}
+
 /// Resolve the real on-chain struct this brownfield spec's State mirrors, as
 /// `(struct_name, fields)`.
 ///
