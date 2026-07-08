@@ -1256,8 +1256,9 @@ pragma harness_use  = crate::state::policies::policy_core::traits::FooTrait
 ```
 
 **`pragma kani_reject = on`** — emit **guard-enforcement (reject) proofs** in the
-brownfield impl-Kani output. For each target handler with a `requires` / `when`
-guard, a `verify_<handler>_rejects` harness assumes the guard is **violated** and
+brownfield impl-Kani output. For **every** handler with a `requires` / `when`
+guard — including a postcondition-free validator (no `ensures`/`effect`) — a
+`verify_<handler>_rejects` harness assumes the guard is **violated** and
 asserts the real handler returns `Err` — verifying the code *enforces* the guard
 the spec declares (the converse of the ensures-preservation proof, which checks
 what holds *after* a successful call). The agent-fill is the same real handler

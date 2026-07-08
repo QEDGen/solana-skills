@@ -217,10 +217,22 @@ fn generate_from_spec_with_context(
         .filter(|h| !h.ensures.is_empty() || !h.effects.is_empty())
         .collect();
 
+    // Brownfield guard-enforcement (`pragma kani_reject`) is a standalone
+    // obligation: a handler with a `requires`/`when` guard but NO ensures/effects
+    // still warrants a reject proof. When that mode is on and some handler is
+    // guarded, keep emitting even though `handlers_with_claims` / `emit_targets`
+    // (both ensures/effects-based, driving the ensures loop) may be empty.
+    let reject_mode = mode == KaniImplMode::Brownfield
+        && spec.pragma_value("kani_reject").is_some()
+        && spec
+            .handlers
+            .iter()
+            .any(|h| crate::rust_codegen_util::collect_full_guard(h, false).is_some());
+
     // No asserted clauses/effects anywhere → nothing meaningful to prove.
     // Auto-trigger could still fire (modifies-only fill without ensures is
     // its own lint), but the harness body needs a concrete postcondition.
-    if handlers_with_claims.is_empty() {
+    if handlers_with_claims.is_empty() && !reject_mode {
         return Ok(());
     }
 
@@ -235,7 +247,7 @@ fn generate_from_spec_with_context(
         .filter(|h| explicit_flag || handler_triggers_impl_harness(h))
         .collect();
 
-    if emit_targets.is_empty() {
+    if emit_targets.is_empty() && !reject_mode {
         return Ok(());
     }
 

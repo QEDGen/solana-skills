@@ -176,19 +176,33 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     }
 
     // Guard-enforcement (reject) proofs — opt-in via `pragma kani_reject`. For
-    // each target handler with a `requires`/`when` guard, assume the guard is
-    // violated and assert the real handler rejects (the converse of the
-    // ensures-preservation proof above).
+    // EVERY handler with a `requires`/`when` guard (not just the ensures-bearing
+    // `emit_targets` — a requires-only handler is exactly where guard
+    // enforcement matters), assume the guard is violated and assert the real
+    // handler rejects (the converse of the ensures-preservation proof above).
+    // `emit_brownfield_reject_harness` returns `false` (emits nothing) for a
+    // guardless handler, so iterating all handlers self-filters.
     if spec.pragma_value("kani_reject").is_some() {
-        out.push_str(
-            "// ============================================================================\n",
-        );
-        out.push_str("// Guard-enforcement (reject) proofs — the code must reject a violated\n");
-        out.push_str("// `requires`/`when` precondition (`pragma kani_reject`).\n");
-        out.push_str(
-            "// ============================================================================\n\n",
-        );
-        for handler in emit_targets {
+        let mut header_emitted = false;
+        for handler in &spec.handlers {
+            // Peek: only emit the section header once, and only if at least one
+            // handler actually has a guard to enforce.
+            if crate::rust_codegen_util::collect_full_guard(handler, false).is_none() {
+                continue;
+            }
+            if !header_emitted {
+                out.push_str(
+                    "// ============================================================================\n",
+                );
+                out.push_str(
+                    "// Guard-enforcement (reject) proofs — the code must reject a violated\n",
+                );
+                out.push_str("// `requires`/`when` precondition (`pragma kani_reject`).\n");
+                out.push_str(
+                    "// ============================================================================\n\n",
+                );
+                header_emitted = true;
+            }
             if emit_brownfield_reject_harness(&mut out, handler, spec, state_struct.as_deref())? {
                 emitted_count += 1;
             }

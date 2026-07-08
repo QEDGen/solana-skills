@@ -391,6 +391,47 @@ handler resize (n : U64) {
     );
 }
 
+/// A REQUIRES-ONLY handler (a guard, no `ensures`/`effect`) still gets a reject
+/// proof under `pragma kani_reject` — guard enforcement is exactly where a
+/// postcondition-free validator matters. The spec would otherwise emit nothing
+/// (no ensures/effects to preserve), so the emitter must not bail early.
+#[test]
+fn brownfield_kani_reject_covers_requires_only_handler() {
+    let src = r#"spec ReqOnly
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_reject = on
+state { size : U64, cap : U64 }
+handler validate (n : U64) {
+  requires n <= state.cap else TooBig
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_reqonly_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn verify_validate_rejects()")
+            && body.contains("kani::assume(!((n <= pre_cap)));")
+            && body.contains("assert!(!ok, \"validate must reject"),
+        "requires-only handler gets a reject proof; got:\n{body}"
+    );
+    // No ensures harness for a postcondition-free handler.
+    assert!(
+        !body.contains("_impl_ensures_"),
+        "no ensures harness for a requires-only handler; got:\n{body}"
+    );
+}
+
 /// Without `pragma kani_reject`, the reject harness is not emitted (default
 /// output is unchanged).
 #[test]
