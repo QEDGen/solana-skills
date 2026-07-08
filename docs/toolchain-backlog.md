@@ -186,3 +186,23 @@ to a synthetic `State`. `pragma state_struct = <Name>` names it; `state_ctor` bu
 `crate::<Name>` from the canonical `state_fields`. The one thing only the user knows;
 absent → the harness keeps its construction `todo!()`.
 - **Issue:** #175 (QEDGen/solana-skills) — closing on merge.
+
+### ✅ G12 — symbolic-LENGTH Vec construction OOMs CBMC  [SHIPPED 3d6412f]
+
+State-driven construction emitted `Vec` fields as a symbolic-length build loop
+(`let n = any(); assume(n <= 3); while i < n { v.push(any_elem) }`). Under
+`#[kani::unwind(N)]` CBMC unwinds that loop AND the real `invariant()`'s own
+iteration over the field to N, and models Vec growth/realloc — dominating (OOM)
+the SAT problem even for a property that never reads the collection.
+- **Evidence:** Squads `Settings`/`set_time_lock` (the #162-p2 PoC) — 54,916 VCCs
+  → CBMC out of memory. `assume(n <= 1)` gave the IDENTICAL VCC count (the assume
+  prunes solutions, not formula size): it's the length symbolicity, not the
+  element count. Fixed-length `vec![elem]` → 12,731 VCCs, 11s, SUCCESSFUL against
+  the real `Settings::invariant()`.
+- **Fix:** emit fixed-length-K `vec![…]` of symbolic elements; K = `pragma
+  kani_vec_bound` (default 1). Raise for a property that reads the collection.
+- **Open follow-on:** the PoC's `set_time_lock` property is scalar-only, so K=1 is
+  sound; for a property that reads deep into a large collection, the BMC bound
+  under-covers silently. A lint (property references a `Vec` field ⇒ warn if
+  `kani_vec_bound` is low) would surface the trade-off. Not yet filed.
+- **Issue:** #176 (QEDGen/solana-skills) — closing on merge.
