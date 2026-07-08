@@ -478,3 +478,51 @@ edit). The snapshot harness already rebuilds (`tests/common/mod.rs`), but the ma
 - **Verdict:** dev-mode-only friction (end users install via the skill, never touch
   `bin/` vs `target/`). Backlog-only / doc-note — not a user-facing qedgen shape, so
   no issue. Flagged for a maintainer to fold into CLAUDE.md's build guidance.
+
+### 🧩 G20b — reject-mode covers requires-only handlers  [FIXED]
+
+`pragma kani_reject` initially only iterated the ensures-bearing `emit_targets`, so a
+handler with a guard but no `ensures`/`effect` (a pure validator — exactly where guard
+enforcement matters) got no reject proof. Now the reject loop iterates all handlers
+with a guard, and an `extra_brownfield_mode` bypass (`kani_impl/mod.rs`) keeps the
+emitter from bailing when the spec is guard-only. Test:
+`brownfield_kani_reject_covers_requires_only_handler`.
+
+### 🧩 G13b — tuple-variant construction (`of <Type>`)  [FIXED]
+
+The real `PeriodV2::Custom(i64)` is a Rust TUPLE variant the DSL couldn't express
+(only `of { named }` struct variants), so the State-driven Kani ctor couldn't build a
+symbolic period covering Custom. `of <Type>` now parses a single-field tuple variant;
+the positional field is named "0" (impossible for a real ident-named field →
+collision-safe marker), and `emit_enum` renders `Enum::V(val)`. Verified `Custom of I64`
+→ `PeriodV2::Custom(kani::any())`.
+- **Scope / follow-up:** Kani construction only. `is .Variant` and the Lean ADT backend
+  still assume unit/struct shapes; a tuple `is .Variant` needs a 3-way `VariantShape`
+  refactor of the `adts` registry + `resolve_variant` + `ExprTree::IsVariant` (deferred —
+  not needed for F's panic-free harness, and fails loudly rather than silently).
+
+### 🧩 G15b — panic-freedom harness mode (`pragma kani_panic_free`)  [FIXED]
+
+For `()`-returning methods whose only property is that they don't abort. Emits
+`verify_<handler>_panic_free`: construct symbolic state, assume the handler's
+`requires` guard, CALL the real method (agent-fill), no assertion — Kani's built-in
+unwrap/overflow/div/index/panic checks do the verification. Validated on
+`reset_if_needed`: `cargo kani` SUCCESSFUL for the standard periods.
+
+### 🩹 G15c — `invariant()` panics on symbolic input, so panic-free harnesses can't assume it  [NEEDS-TRIAGE]
+
+A panic-free proof of a method whose safety depends on the struct's `invariant()`
+can't `kani::assume(state.invariant().is_ok())` when `invariant()` itself panics on
+fully-symbolic input (e.g. `.unwrap()`s an `Option` field). Workaround used for F:
+reconstruct the needed invariant clauses as explicit handler `requires`
+(`0 <= last_reset <= now`). But the `PeriodV2::Custom(i64)` case needs "if period is
+Custom(s) then s > 0", which requires a tuple-variant `is .Custom` guard (blocked on
+G13b's deferred IsVariant shape). 
+- **Proposed:** (a) the tuple-variant `is .Variant` shape (unblocks expressing the
+  Custom>0 requires); and/or (b) a codegen mode that assumes each invariant *clause*
+  as a precondition without calling the composite (panicking) `invariant()`.
+- **Evidence:** `spending_limit_v2.rs` reset_if_needed + invariant; two Kani iterations
+  (checked_sub overflow on negative last_reset → added `last_reset >= 0`; then GREEN for
+  standard periods). See `formal_verification/VERIFICATION.md` F-reset note.
+- **Verdict:** FILE (gap). Leverage: any panic-free / precondition proof of a method
+  gated by a rich invariant with unwraps.
