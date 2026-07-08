@@ -393,13 +393,25 @@ pub(crate) fn emit_brownfield_handler_harness(
             out.push_str(&format!(
                 "    // Symbolic `{struct_name}` — fully generated from the spec's State\n"
             ));
-            out.push_str("    // (every field `kani::any()`); assume pre-state validity so Kani\n");
-            out.push_str("    // explores only well-formed instances.\n");
+            out.push_str("    // (every field `kani::any()`).\n");
             out.push_str(&format!(
                 "    let mut state = {}();\n",
                 super::state_ctor::ctor_fn_name(struct_name)
             ));
-            out.push_str("    kani::assume(state.invariant().is_ok());\n\n");
+            // Pre-state validity: `pragma state_invariant = <method>` (default
+            // `invariant`) → assume it so Kani explores only well-formed states.
+            // `= none` skips it — for a struct with no validity method, or a
+            // property that is independent of the invariant AND whose invariant
+            // has unwraps/arithmetic that panic on fully-symbolic input (the
+            // symbolic ctor is stricter than a scoped hand-written harness).
+            match super::state_ctor::invariant_method(spec) {
+                Some(m) => {
+                    out.push_str(&format!(
+                        "    kani::assume(state.{m}().is_ok()); // pre-state validity\n\n"
+                    ));
+                }
+                None => out.push('\n'),
+            }
         }
         None => {
             out.push_str(

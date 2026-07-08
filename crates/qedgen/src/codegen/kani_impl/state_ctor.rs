@@ -36,11 +36,18 @@ pub(crate) struct CtorCtx<'a> {
     /// there). `from_spec` merges them so field-typed enums resolve.
     pub sum_types: Vec<ParsedSumType>,
     pub vec_bound: usize,
+    /// Prefix for every constructed type name. `"crate::"` (default) when the
+    /// harness sits at the crate root and the types are re-exported there;
+    /// `""` (bare) when `pragma state_module` places the harness INSIDE the
+    /// module that defines them (a private `mod` can't be reached via
+    /// `crate::<Type>` — see #180/G17), so the harness uses `use super::*`.
+    pub type_path: String,
 }
 
 impl<'a> CtorCtx<'a> {
     /// Build from a spec: records + merged sum types, `Vec` length from
-    /// `pragma kani_vec_bound` (default 1 — see `vec_bound_of`).
+    /// `pragma kani_vec_bound` (default 1 — see `vec_bound_of`), and the type
+    /// prefix from `pragma state_module` (see `type_path`).
     pub(crate) fn from_spec(spec: &'a ParsedSpec) -> Self {
         let mut sum_types = spec.sum_types.clone();
         for at in &spec.account_types {
@@ -55,7 +62,37 @@ impl<'a> CtorCtx<'a> {
             records: &spec.records,
             sum_types,
             vec_bound: vec_bound_of(spec),
+            type_path: type_path_of(spec),
         }
+    }
+}
+
+/// `""` (bare, via `use super::*`) when `pragma state_module` is set — the
+/// in-module placement for private-module types; else `"crate::"`.
+pub(crate) fn type_path_of(spec: &ParsedSpec) -> String {
+    if spec.pragma_value("state_module").is_some() {
+        String::new()
+    } else {
+        "crate::".to_string()
+    }
+}
+
+/// True when the harness must be placed inside the target module (bare type
+/// names + `use super::*`) rather than at the crate root — driven by
+/// `pragma state_module`.
+pub(crate) fn is_in_module(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("state_module").is_some()
+}
+
+/// The pre-state validity method the harness assumes: `pragma state_invariant`
+/// (default `invariant`); `= none` returns `None` (skip the assume — the struct
+/// has no validity method, or its `invariant()` panics under fully-symbolic
+/// input for a property that doesn't need it).
+pub(crate) fn invariant_method(spec: &ParsedSpec) -> Option<String> {
+    match spec.pragma_value("state_invariant") {
+        Some("none") => None,
+        Some(m) => Some(m.to_string()),
+        None => Some("invariant".to_string()),
     }
 }
 
@@ -109,13 +146,14 @@ pub(crate) fn emit_state_ctor(
         field_lines.push(format!("        {name}: {expr},"));
     }
 
+    let tp = &ctx.type_path;
     let mut out = String::new();
     out.push_str(&format!(
         "/// Fully-symbolic `{struct_name}` — every field `kani::any()`; pair with\n\
          /// `kani::assume(state.invariant().is_ok())` to explore only valid states.\n",
     ));
     out.push_str(&format!(
-        "fn symbolic_{}() -> crate::{struct_name} {{\n    crate::{struct_name} {{\n",
+        "fn symbolic_{}() -> {tp}{struct_name} {{\n    {tp}{struct_name} {{\n",
         pascal_to_snake(struct_name),
     ));
     for line in field_lines {
@@ -175,7 +213,7 @@ fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
                         Some(format!("{fname}: {e}"))
                     })
                     .collect();
-                format!("crate::{s} {{ {} }}", inner?.join(", "))
+                format!("{}{s} {{ {} }}", ctx.type_path, inner?.join(", "))
             } else if let Some(sum) = ctx.sum_types.iter().find(|t| &t.name == s) {
                 // Enum (sum type) — symbolic variant selection (#177/G13).
                 emit_enum(s, sum, ctx, depth)?
@@ -199,10 +237,11 @@ fn emit_enum(name: &str, sum: &ParsedSumType, ctx: &CtorCtx, depth: usize) -> Op
     if n == 0 {
         return None;
     }
+    let tp = &ctx.type_path;
     let mut arms = Vec::with_capacity(n);
     for (i, v) in sum.variants.iter().enumerate() {
         let ctor = if v.fields.is_empty() {
-            format!("crate::{name}::{}", v.name) // unit variant
+            format!("{tp}{name}::{}", v.name) // unit variant
         } else {
             // Named-payload struct variant — recurse per field.
             let fs: Option<Vec<String>> = v
@@ -213,7 +252,7 @@ fn emit_enum(name: &str, sum: &ParsedSumType, ctx: &CtorCtx, depth: usize) -> Op
                     Some(format!("{fname}: {e}"))
                 })
                 .collect();
-            format!("crate::{name}::{} {{ {} }}", v.name, fs?.join(", "))
+            format!("{tp}{name}::{} {{ {} }}", v.name, fs?.join(", "))
         };
         // Map the last variant to the `_` catch-all (`% n` yields `0..n-1`).
         if i + 1 == n {
@@ -296,6 +335,7 @@ mod tests {
             records,
             sum_types: sum_types.to_vec(),
             vec_bound,
+            type_path: "crate::".to_string(),
         }
     }
 

@@ -46,10 +46,22 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     out.push_str("// effect + validity gate is always agent-fill. The snapshot / assume /\n");
     out.push_str("// assert scaffolding around them is generated and correct.\n");
     out.push_str("//\n");
-    out.push_str("// PLACEMENT: this file must live INSIDE the program crate (e.g.\n");
-    out.push_str("// `src/kani_impl.rs` + `#[cfg(kani)] mod kani_impl;` in lib.rs) — a\n");
-    out.push_str("// standalone harness crate hits cargo dependency-hell (spl-token-2022 vs\n");
-    out.push_str("// solana-program skew). See docs/toolchain-backlog.md G3.\n");
+    let in_module = super::state_ctor::is_in_module(spec);
+    if in_module {
+        // G17: types in a private module aren't reachable via `crate::<Type>`;
+        // the ctor names them BARE and this file is placed INSIDE that module.
+        out.push_str("// PLACEMENT (pragma state_module): this harness names types with BARE\n");
+        out.push_str("// identifiers via `use super::*` — place it INSIDE the module that\n");
+        out.push_str("// DEFINES them (append e.g.\n");
+        out.push_str("//   #[cfg(kani)] #[path = \"kani_impl.rs\"] mod kani_impl;\n");
+        out.push_str("// to that module's `.rs`), because a private `mod` is not reachable\n");
+        out.push_str("// via `crate::<Type>`. See docs/toolchain-backlog.md G17.\n");
+    } else {
+        out.push_str("// PLACEMENT: this file must live INSIDE the program crate (e.g.\n");
+        out.push_str("// `src/kani_impl.rs` + `#[cfg(kani)] mod kani_impl;` in lib.rs) — a\n");
+        out.push_str("// standalone harness crate hits cargo dependency-hell (spl-token-2022 vs\n");
+        out.push_str("// solana-program skew). See docs/toolchain-backlog.md G3.\n");
+    }
     if !explicit_flag {
         out.push_str("//\n");
         out.push_str("// Auto-triggered (a handler declares `modifies` fields absent from its\n");
@@ -59,7 +71,13 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
     out.push_str("//\n");
     out.push_str("// To run:  cargo kani -Z stubbing --harness <name>   (requires cargo-kani)\n");
     out.push_str("// ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----\n");
-    out.push_str("#![cfg(kani)]\n\n");
+    out.push_str("#![cfg(kani)]\n");
+    if in_module {
+        // Bring the enclosing module's types (the ones the ctor names bare) into
+        // scope. Required by the state_module in-module placement (G17).
+        out.push_str("use super::*;\n");
+    }
+    out.push('\n');
 
     out.push_str(
         "// ============================================================================\n",

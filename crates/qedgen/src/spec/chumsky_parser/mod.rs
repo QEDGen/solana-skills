@@ -71,12 +71,20 @@ fn pragma_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
 /// namespace form — disambiguated by `=` vs `{` at the call site. Unknown
 /// keys parse but are flagged at lint time, so new keys don't break specs.
 fn pragma_assign_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clone {
+    // Value is a `::`-joined path (`state::policies::utils::foo` for
+    // `pragma state_module`); a bare ident is just a length-1 path, so existing
+    // pragmas (`state_repr = adt`) are unaffected.
+    let path_value = non_keyword_ident()
+        .separated_by(just("::"))
+        .at_least(1)
+        .collect::<Vec<String>>()
+        .map(|parts| parts.join("::"));
     kw("pragma")
         .ignore_then(non_keyword_ident())
         .then_ignore(wsc())
         .then_ignore(just('='))
         .then_ignore(wsc())
-        .then(non_keyword_ident())
+        .then(path_value)
         .map(|(name, value)| TopItem::PragmaAssign { name, value })
 }
 
