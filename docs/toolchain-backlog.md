@@ -115,3 +115,20 @@ Preserve proofs (C) must be **mutation-tested** for non-vacuity (strict-`<` muta
 Falsify proofs (D) expect `VERIFICATION: FAILED` as the success signal.
 - **Evidence:** C mutation test; D fired counterexample.
 - **Proposed:** the skill/scout should require a non-vacuity check on every green preserve proof.
+
+### 🧩 G5 — impl-Kani can't reach instruction-level authorization gates
+
+impl-Kani verifies struct methods + internal helpers (state-struct / helper-target
+shapes), but NOT the `validate()` / `#[access_control]` gates that read
+`InterfaceAccount` / `Account` / `Signer` from a `Context<T>` — the status /
+permission / time-lock / signer checks that ARE the "no unauthorized execution"
+crown-jewel properties. The state-struct harness sidesteps accounts entirely; the
+greenfield Context harness assumes a struct it can't construct for real Anchor.
+- **Evidence:** the execute-gate property (succeeds ⇒ Approved + Execute permission
+  + time-lock elapsed) is unreachable by both current shapes.
+- **Root cause:** `codegen/kani_impl/` has no symbolic Anchor-`Context` construction path.
+- **Proposed:** a Context/instruction harness mode — symbolic `InterfaceAccount`/
+  `Account`/`Signer` (PDA-derived keys + `Pack`/Borsh-shaped `kani::any()` data) driving
+  the real `validate()`/handler. Composes with #162 phase-2 (IDL layouts) + G4 (#165 sysvar stubs).
+- **Verdict:** FILE (feature). High leverage — authorization is why a multisig exists.
+- **Issue:** #169 (QEDGen/solana-skills)
