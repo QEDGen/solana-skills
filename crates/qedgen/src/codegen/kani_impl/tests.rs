@@ -216,8 +216,14 @@ handler set_threshold (new_threshold : U16) {
 
     let tmp = std::env::temp_dir().join(format!("kani_impl_bf_{}.rs", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    generate_from_spec_with_mode(&spec, &tmp, /*explicit_flag=*/ true, Target::Anchor, KaniImplMode::Brownfield)
-        .expect("brownfield kani_impl must emit");
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
@@ -342,7 +348,8 @@ handler set_threshold (new_threshold : U16) {
   effect { threshold := new_threshold }
 }"#;
     let spec = parse_str(pk_unref).expect("parse");
-    let tmp = std::env::temp_dir().join(format!("kani_impl_unwind_unref_{}.rs", std::process::id()));
+    let tmp =
+        std::env::temp_dir().join(format!("kani_impl_unwind_unref_{}.rs", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     generate_from_spec_with_mode(
         &spec,

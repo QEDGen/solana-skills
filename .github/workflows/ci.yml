@@ -11,6 +11,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Free ~20GB of preinstalled bloat. The qedgen dep tree
+      # (solana / anchor / ark-bn254 …) plus `target/` overruns the
+      # runner's default disk, which surfaced as "No space left on device"
+      # during the cache restore.
+      - name: Free disk space
+        run: |
+          echo "before:"; df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/lib/node_modules
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          echo "after:"; df -h / | tail -1
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

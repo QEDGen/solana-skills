@@ -395,7 +395,9 @@ pub(crate) fn emit_brownfield_handler_harness(
         .map(|g| rewrite_state_var_to_pre(&g));
     let snapshot_fields = collect_snapshot_fields(handler, guard_predot.as_deref(), ensures);
     if !snapshot_fields.is_empty() {
-        out.push_str("    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n");
+        out.push_str(
+            "    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n",
+        );
         for field in &snapshot_fields {
             out.push_str(&format!("    let pre_{0} = state.{0};\n", field));
         }
@@ -624,11 +626,7 @@ fn rewrite_state_var_to_pre(expr: &str) -> String {
 /// Collect the bare identifiers appearing as `<prefix><ident>` in `expr`
 /// (e.g. prefix `"post."` in `post.num_voters` → `num_voters`). Boundary-aware
 /// so a prefix embedded in a longer token is not matched.
-fn collect_prefixed_fields(
-    expr: &str,
-    prefix: &str,
-    out: &mut std::collections::BTreeSet<String>,
-) {
+fn collect_prefixed_fields(expr: &str, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
     let bytes = expr.as_bytes();
     let mut search = 0;
     while let Some(rel) = expr[search..].find(prefix) {
@@ -715,7 +713,10 @@ fn suggested_unwind(
     let state_has_pubkey = !pubkey_state_field_names(spec).is_empty();
 
     if param_touches_bytes || state_has_pubkey {
-        (34, "Pubkey in state/params → callee does a 32-byte memcmp; needs ≥ 34")
+        (
+            34,
+            "Pubkey in state/params → callee does a 32-byte memcmp; needs ≥ 34",
+        )
     } else {
         (4, "no Pubkey fields — no 32-byte memcmp")
     }

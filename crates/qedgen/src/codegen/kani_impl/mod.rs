@@ -140,7 +140,14 @@ pub fn generate_with_mode(
     mode: KaniImplMode,
 ) -> Result<()> {
     let spec = check::parse_spec_file(spec_path)?;
-    generate_from_spec_with_context(&spec, output_path, explicit_flag, target, Some(spec_path), mode)
+    generate_from_spec_with_context(
+        &spec,
+        output_path,
+        explicit_flag,
+        target,
+        Some(spec_path),
+        mode,
+    )
 }
 
 /// Same as `generate` but takes a pre-parsed spec. Used by the CLI when
