@@ -40,7 +40,11 @@ replicate the short state effect / call the real helper).
 - **Proposed:** a brownfield-Anchor emitter that generates the state-struct harness
   (symbolic state + real invariant()/helper call) instead of the Context harness.
 - **Verdict:** FILE (feature). High leverage — it's the shape that actually works on brownfield.
-- **Status:** Phase 1 shipped — `--kani-impl-brownfield` emits the state-struct harness (2 `todo!()` agent-fill: struct construction + effect). Phase 2 (IDL-driven construction) open.
+- **Status:** Phase 1 + 2 shipped. `--kani-impl-brownfield` emits the state-struct
+  harness; construction is now **generated from the qedspec State** (`state_ctor.rs`,
+  `pragma state_struct = <Name>` + G9/G10 `Option`/`Vec` fields) — NOT the IDL. Only
+  the effect + validity gate stays agent-fill. Superseded the IDL-driven approach
+  (see G6/G7/G8 re-scope).
 - **Issue:** #162 (QEDGen/solana-skills)
 
 ### 🧩 G2 — helper-target harness mode (not just entrypoint handlers)
@@ -133,7 +137,14 @@ greenfield Context harness assumes a struct it can't construct for real Anchor.
 - **Verdict:** FILE (feature). High leverage — authorization is why a multisig exists.
 - **Issue:** #169 (QEDGen/solana-skills)
 
-### 🧩 G6 — IDL-driven construction requires a fresh IDL  [#162-p2 prereq]
+> **G6/G7/G8 RE-SCOPED (2026-07):** these were prereqs for an **IDL-driven**
+> constructor. That approach was abandoned — the IDL is the *lossy* layer (stale,
+> Anchor-0.29 format, strips leading underscores). Construction now comes from the
+> qedspec **State** (G1 phase 2, `state_ctor.rs`), which is faithful and checked.
+> G6/G7/G8 no longer block construction; they'd only matter if we later
+> auto-*derive* the State from the IDL. Left open, off the #162 critical path.
+
+### 🧩 G6 — IDL-driven construction requires a fresh IDL  [RE-SCOPED — off critical path]
 
 A stale committed IDL (field renamed/added since generation) makes the generated
 struct-literal constructor reference non-existent fields → silent compile failure.
@@ -143,10 +154,35 @@ Observed: a target's IDL had `reserved1/reserved2` where the source is
   time (hard error), or regenerate-on-build. "Complete qedspec has the IDL" = a *current* one.
 - **Issue:** #170 (QEDGen/solana-skills)
 
-### 🧩 G7 — IDL parser can't read Anchor-0.29 account struct bodies  [#162-p2 prereq]
+### 🧩 G7 — IDL parser can't read Anchor-0.29 account struct bodies  [RE-SCOPED — off critical path]
 
 `spec/idl.rs::Idl` reads `types` + instruction account *references*, but not the
 top-level `accounts: [{name, type:{fields}}]` where Anchor 0.29 keeps account
 struct bodies — so the layout an IDL-driven constructor needs is unreachable for 0.29.
 - **Proposed:** add `accounts: Vec<IdlTypeDef>` (default `ty`); resolve fields from `accounts ∪ types`.
 - **Issue:** #171 (QEDGen/solana-skills)
+
+### 🧩 G8 — Anchor IDL is a lossy layout source  [RE-SCOPED — off critical path]
+
+Even a fresh, parseable IDL strips leading underscores (`_reserved2` → `reserved2`)
+and elides `#[account]`-only types, so a constructor built from it references
+wrong field names. Root cause behind the State-driven pivot.
+- **Verdict:** confirms construction must come from the qedspec State, not the IDL.
+- **Issue:** #172 (QEDGen/solana-skills)
+
+### ✅ G9 / G10 — DSL `Option<T>` + `Vec<record>` in State fields  [SHIPPED f46a451]
+
+The record/ADT-variant field grammar rejected `Option T` and `Vec <Record>`, so a
+State couldn't mirror a real `#[account]` struct — the blocker for State-driven
+construction. Parser `param_ty` rule → `TypeRef::Param`; `map_type` renders
+`Option<T>` / `Vec<T>` per-context.
+- **Issues:** #173 (G9), #174 (G10) — closing on merge.
+
+### ✅ G11 — declare the real state struct name (`pragma state_struct = <Name>`)  [SHIPPED 37304d8]
+
+A brownfield `#[account]` struct's name (`Settings`, `SmartAccount`, …) isn't in the
+spec: greenfield naming is `<Program>Account` and the bare `state {}` sugar defaults
+to a synthetic `State`. `pragma state_struct = <Name>` names it; `state_ctor` builds
+`crate::<Name>` from the canonical `state_fields`. The one thing only the user knows;
+absent → the harness keeps its construction `todo!()`.
+- **Issue:** #175 (QEDGen/solana-skills) — closing on merge.
