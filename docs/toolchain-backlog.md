@@ -288,8 +288,10 @@ Reusable `#[kani::stub]` abstractions for common Solana types Kani wastefully
 bit-blasts, auto-emitted by the brownfield harness (like the Clock stub, G14).
 This IS the existing Lean "Trust (axioms)" boundary (SPL Token, PDA, CPI,
 Anchor) mirrored on the Kani side. Tiers (prevalence from the Squads target):
-- **T1 opaque-token equality** — `Pubkey` (32-byte memcmp → unwind ≥34; 44 files),
-  `[u8;32]` hashes, `[u8;64]` sigs. Stub `==` → 2×u128 compare (no byte loop).
+- **T1 opaque-token equality** — ✅ SHIPPED (`0c42ef2`): brownfield auto-emits
+  `pk_eq_abstract` + `#[kani::stub]` for any Pubkey-touching harness; unwind 34→
+  `vec_bound+4`; `pragma kani_abstract_pubkey = off` opts out. Kani-proven sound;
+  both green C proofs re-verified at unwind 5. `[u8;32]`/`[u8;64]` extend it.
 - **T2 trusted crypto** — PDA `find_program_address` (=sha256; 16 files), sha256/
   keccak/blake3, ed25519 verify. Axiomatize (uninterpreted + injectivity).
 - **T3 trusted serde** — Borsh `try_to_vec`/`try_from_slice` (35 files), `Pack`.
