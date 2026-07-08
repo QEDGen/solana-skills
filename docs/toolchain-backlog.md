@@ -262,14 +262,15 @@ every exhaustive consumer + parser atom; `Vec` snapshots `.clone()` (non-Copy);
 harness is fully generated (construction + membership requires/ensures + Clock
 stub, only `approve()` agent-filled).
 
-### 🧩 G18 — Kani can't bound Vec-membership proofs  [#181] — A5b PROOF wall
+### ✅ G18 — Vec-membership proofs  [RESOLVED by #182 T1, #181 closed]
 The A5b harness is codegen-complete + correct, but the PROOF fails: CBMC doesn't
 bound `.contains` over `Vec<Pubkey>` after the real `approve()`'s `insert`/`clone`
 (`Not unwinding loop … slice_contains … iteration N` at ANY unwind bound; ~39k
 VCCs; an explicit `len() <=` assume didn't help). Solver-modeling limit (same
 class as G12), NOT a codegen defect. C + F-decrement (scalar/arith) are green and
-unaffected. Options: fixed-capacity array model for vote sets, stub
-`.contains`/`binary_search`, or route Vec-membership to another backend.
+unaffected. **RESOLVED**: the wall was the 32-byte Pubkey memcmp forcing unwind >=34, not the
+Vec length. #182 T1 (Pubkey Eq+Ord abstraction, unwind→5) dissolved it — A5b now
+VERIFIES (2477 checks, non-vacuous). No collection remodel needed.
 
 ### 🧩 G15b — panic-freedom property class  [#179]
 F's `reset_if_needed`: call the method, assert only that Kani finds no panic — no
