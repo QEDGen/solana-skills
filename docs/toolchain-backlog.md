@@ -206,3 +206,35 @@ the SAT problem even for a property that never reads the collection.
   under-covers silently. A lint (property references a `Vec` field ⇒ warn if
   `kani_vec_bound` is low) would surface the trade-off. Not yet filed.
 - **Issue:** #176 (QEDGen/solana-skills) — closing on merge.
+
+## Harness-migration boundary (Squads FV, #162-p2 follow-on)
+
+Migrating the hand-written brownfield harnesses to the generated State-driven
+shape: **C (Settings well-formedness) fully migrated** — `change_threshold` +
+`set_time_lock`, generated construction (only the effect agent-filled), both
+`cargo kani` GREEN against the real `Settings::invariant()`. The remaining
+families are a *different verification style* the generated shape doesn't yet
+cover; each surfaced a distinct gap (filed, not forced):
+
+### 🧩 G13 — enum (sum-type) State-field construction  [#177]
+`state_ctor` bails to `todo!()` on an enum field (only records resolve).
+`Proposal.status: ProposalStatus` (6 variants) and `SpendingLimitV2.period:
+PeriodV2` (4 unit + `Custom(i64)`) block construction. Fix: symbolic variant
+selection from the spec's `ParsedSumType`. Highest-leverage — unblocks F + Proposal.
+
+### 🧩 G14 — sysvar/Clock stub emission in generated impl-Kani  [#178]
+`Clock::get()`-reading methods need `#[kani::stub(Clock::get, …)] -Z stubbing` +
+a symbolic-Clock stub; the harness emits none. Hand-written in A4/A5/reject-cancel
+(Proposal) and D.
+
+### 🧩 G15 — properties beyond scalar-field ensures  [#179]
+Collection membership (`signer ∈ approved`), panic-freedom (`reset_if_needed`),
+and method-postcondition arithmetic (`remaining == old(remaining) - amount`) —
+none expressible as the single scalar `ensures` the harness asserts. The method
+CALL fits the AGENT-FILL (2/2) slot; the property language is the gap.
+
+### 🧩 G16 (note) — D (account_tracking) is not a state-struct-mirror target
+D constructs raw `AccountInfo` + byte-packed SPL token accounts + a `Balances`
+tracker and checks conservation over them — a runtime-object harness, not an
+`#[account]`-struct mirror. Likely a separate generator, not this shape. Unfiled
+pending a decision on whether it's in scope.
