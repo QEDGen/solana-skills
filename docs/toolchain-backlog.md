@@ -281,3 +281,22 @@ D constructs raw `AccountInfo` + byte-packed SPL token accounts + a `Balances`
 tracker and checks conservation over them — a runtime-object harness, not an
 `#[account]`-struct mirror. Likely a separate generator, not this shape. Unfiled
 pending a decision on whether it's in scope.
+
+## Solana Kani abstraction library (capability, #182)
+
+Reusable `#[kani::stub]` abstractions for common Solana types Kani wastefully
+bit-blasts, auto-emitted by the brownfield harness (like the Clock stub, G14).
+This IS the existing Lean "Trust (axioms)" boundary (SPL Token, PDA, CPI,
+Anchor) mirrored on the Kani side. Tiers (prevalence from the Squads target):
+- **T1 opaque-token equality** — `Pubkey` (32-byte memcmp → unwind ≥34; 44 files),
+  `[u8;32]` hashes, `[u8;64]` sigs. Stub `==` → 2×u128 compare (no byte loop).
+- **T2 trusted crypto** — PDA `find_program_address` (=sha256; 16 files), sha256/
+  keccak/blake3, ed25519 verify. Axiomatize (uninterpreted + injectivity).
+- **T3 trusted serde** — Borsh `try_to_vec`/`try_from_slice` (35 files), `Pack`.
+  Stub round-trip → identity.
+- **T4 runtime/host** — CPI `invoke` (4), sysvars `Rent::get` etc. (18, like Clock),
+  `msg!`/`sol_log` (21, → no-op).
+- **T5 collections over opaque tokens** — `Vec<Pubkey>::contains`/`binary_search`
+  (18 files). T1 kills inner cost; outer iteration needs a bounded model. **A5b
+  (#181) sits here.** Prototype: T1 (Pubkey) — highest leverage, shrinks the A5b
+  formula that OOM'd z3.
