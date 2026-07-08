@@ -199,6 +199,14 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
         }
         // ceil(a*b/d) = (a*b + d - 1) / d for positive d (spec authors
         // assume d > 0; downstream proofs rely on it).
+        ExprTree::Contains { coll, elem } => (
+            format!(
+                "({} ∈ {})",
+                render(elem, cx, inside_old).0,
+                render(coll, cx, inside_old).0
+            ),
+            Prec::Atom,
+        ),
         ExprTree::MulDivCeil { a, b, d } => {
             let (a_str, b_str) = coerced_pair_strings(a, b, cx, inside_old);
             let d_str = render(d, cx, inside_old).0;
@@ -366,6 +374,7 @@ fn render_old(inner: &ExprTree, cx: LeanCx) -> (String, Prec) {
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
+        | ExprTree::Contains { .. }
         | ExprTree::Arith { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
@@ -518,6 +527,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         ExprTree::Old(inner) | ExprTree::Not(inner) => tree_mentions_ident(inner, name),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => {
             tree_mentions_ident(body, name)
+        }
+        ExprTree::Contains { coll, elem } => {
+            tree_mentions_ident(coll, name) || tree_mentions_ident(elem, name)
         }
         ExprTree::BoolOp { lhs, rhs, .. }
         | ExprTree::Cmp { lhs, rhs, .. }

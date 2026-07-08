@@ -89,6 +89,12 @@ pub enum ExprTree {
         b: Box<ExprTree>,
         d: Box<ExprTree>,
     },
+    /// `contains(coll, elem)` — collection membership. Rust `coll.contains(&elem)`,
+    /// Lean `elem ∈ coll`. Produces a `Bool`.
+    Contains {
+        coll: Box<ExprTree>,
+        elem: Box<ExprTree>,
+    },
     /// `match scrutinee with | Variant binder => body | …`.
     Match {
         scrutinee: Box<ExprTree>,
@@ -315,6 +321,7 @@ impl ExprTree {
             ExprTree::BoolOp { .. } => NumKind::Bool,
             ExprTree::Not(_) => NumKind::Bool,
             ExprTree::Cmp { .. } => NumKind::Bool,
+            ExprTree::Contains { .. } => NumKind::Bool,
             ExprTree::Arith { lhs, rhs, .. } => join(lhs, rhs),
             // Divisor kind doesn't promote — it's a scale.
             ExprTree::MulDivFloor { a, b, .. } | ExprTree::MulDivCeil { a, b, .. } => join(a, b),

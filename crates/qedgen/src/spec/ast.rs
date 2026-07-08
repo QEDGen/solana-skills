@@ -854,6 +854,14 @@ pub enum Expr {
         b: Box<Node<Expr>>,
         d: Box<Node<Expr>>,
     },
+    /// `contains(coll, elem)` — collection membership. Rust `coll.contains(&elem)`,
+    /// Lean `elem ∈ coll`. Produces a `Bool`. Built-in (not an `in` operator)
+    /// because `in` is a reserved keyword. Used for `Vec` state fields
+    /// (`contains(state.approved, signer)`) in requires/ensures.
+    Contains {
+        coll: Box<Node<Expr>>,
+        elem: Box<Node<Expr>>,
+    },
     /// Inline `match scrutinee with | Variant binder => body | Variant => body`.
     /// Dispatches on a sum-typed scrutinee's constructor. `binder` is `Some`
     /// when the variant carries a payload and the arm wants to name it;
@@ -973,6 +981,10 @@ pub fn for_each_child_with_binder<'a>(
             f(a, None);
             f(b, None);
             f(d, None);
+        }
+        Expr::Contains { coll, elem } => {
+            f(coll, None);
+            f(elem, None);
         }
         Expr::Match { scrutinee, arms } => {
             f(scrutinee, None);

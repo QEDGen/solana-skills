@@ -364,6 +364,21 @@ pub(crate) fn emit_handler_harness(
 /// need the real source — constructing the struct and applying the effect —
 /// are left as `todo!()`. This is the shape both bundled brownfield harnesses
 /// (settings well-formedness, delegation conservation) were hand-written to.
+/// `true` when the spec's State declares `field` as a `Vec` — such a field is
+/// non-Copy, so its harness snapshot must `.clone()` rather than move it out of
+/// `state` (which would break the subsequent `&mut state` method call).
+/// Requires the `state_struct` pragma (generated construction); otherwise the
+/// field types aren't known and we keep the move (agent-fill construction).
+fn state_field_is_vec(spec: &ParsedSpec, field: &str) -> bool {
+    super::state_ctor::resolve_state_struct(spec)
+        .map(|(_, fields)| {
+            fields
+                .iter()
+                .any(|(n, t)| n == field && t.trim_start().starts_with("Vec "))
+        })
+        .unwrap_or(false)
+}
+
 pub(crate) fn emit_brownfield_handler_harness(
     out: &mut String,
     handler: &ParsedHandler,
@@ -446,17 +461,35 @@ pub(crate) fn emit_brownfield_handler_harness(
             "    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n",
         );
         for field in &snapshot_fields {
-            out.push_str(&format!("    let pre_{0} = state.{0};\n", field));
+            // A `Vec` field is non-Copy: moving it out here would break the
+            // `&mut state` method call below (partial move). Clone it (Copy
+            // fields — scalars, `Pubkey` — move/copy as before).
+            let rhs = if state_field_is_vec(spec, field) {
+                format!("state.{field}.clone()")
+            } else {
+                format!("state.{field}")
+            };
+            out.push_str(&format!("    let pre_{field} = {rhs};\n"));
         }
     }
 
     // 3. Symbolic params + precondition (reads the pre-snapshots).
     for (pname, ptype) in &handler.takes_params {
-        out.push_str(&format!(
-            "    let {}: {} = kani::any();\n",
-            pname,
-            map_type(ptype, spec)?
-        ));
+        // Brownfield targets the REAL struct, so a `Pubkey` param stays a real
+        // `Pubkey` (matching the ctor + the struct's `Vec<Pubkey>` fields) — NOT
+        // the spec-model `[u8; 32]` lowering, which wouldn't unify with them.
+        if ptype == "Pubkey" {
+            out.push_str(&format!(
+                "    let {pname}: anchor_lang::prelude::Pubkey = \
+                 anchor_lang::prelude::Pubkey::new_from_array(kani::any());\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "    let {}: {} = kani::any();\n",
+                pname,
+                map_type(ptype, spec)?
+            ));
+        }
     }
     if let Some(guard) = &guard_predot {
         out.push_str(&format!(
@@ -477,7 +510,14 @@ pub(crate) fn emit_brownfield_handler_harness(
     if !snapshot_fields.is_empty() {
         out.push_str("        // Post-state snapshot.\n");
         for field in &snapshot_fields {
-            out.push_str(&format!("        let post_{0} = state.{0};\n", field));
+            // Clone `Vec` fields so an ensures can read them more than once
+            // (a `.contains()` doesn't consume, but the snapshot move would).
+            let rhs = if state_field_is_vec(spec, field) {
+                format!("state.{field}.clone()")
+            } else {
+                format!("state.{field}")
+            };
+            out.push_str(&format!("        let post_{field} = {rhs};\n"));
         }
     }
     let lowered = rewrite_pre_post_paths(&ensures.rust_expr_binary);

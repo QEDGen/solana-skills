@@ -986,6 +986,11 @@ fn collect_tree_bound_guards(
             let r = walk(rhs, conds);
             l || r
         }
+        ExprTree::Contains { coll, elem } => {
+            let l = walk(coll, conds);
+            let r = walk(elem, conds);
+            l || r
+        }
         ExprTree::Arith { op, lhs, rhs } => {
             let l = walk(lhs, conds);
             let r = walk(rhs, conds);

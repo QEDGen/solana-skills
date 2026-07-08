@@ -155,6 +155,10 @@ fn walk_expr(e: &Expr, scope: &CanonScope, shadow: &mut Vec<String>) -> Expr {
             b: boxed(b, scope, shadow),
             d: boxed(d, scope, shadow),
         },
+        Expr::Contains { coll, elem } => Expr::Contains {
+            coll: boxed(coll, scope, shadow),
+            elem: boxed(elem, scope, shadow),
+        },
         Expr::Match { scrutinee, arms } => Expr::Match {
             scrutinee: boxed(scrutinee, scope, shadow),
             arms: arms

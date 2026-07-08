@@ -97,6 +97,12 @@ pub(super) fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv
             let d_str = expr_to_lean(&d.node, ctx, consts, env);
             format!("((({}) * ({})) / ({}))", a_str, b_str, d_str)
         }
+        // `contains(coll, elem)` → Lean membership `elem ∈ coll` (List.Mem).
+        Expr::Contains { coll, elem } => format!(
+            "({} ∈ {})",
+            expr_to_lean(&elem.node, ctx, consts, env),
+            expr_to_lean(&coll.node, ctx, consts, env)
+        ),
         Expr::Match { scrutinee, arms } => {
             // Render as Lean's `match ... with | Ctor binder? => body | ...`.
             // If the body doesn't reference the binder, emit `_` instead —

@@ -252,6 +252,11 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             func: func.clone(),
             args: args.iter().map(|n| build(&n.node, cx, shadow)).collect(),
         },
+        // `contains(coll, elem)` — collection membership.
+        Expr::Contains { coll, elem } => ExprTree::Contains {
+            coll: Box::new(build(&coll.node, cx, shadow)),
+            elem: Box::new(build(&elem.node, cx, shadow)),
+        },
         Expr::Field { base, field } => ExprTree::Field {
             base: boxed(base, cx, shadow),
             field: field.clone(),

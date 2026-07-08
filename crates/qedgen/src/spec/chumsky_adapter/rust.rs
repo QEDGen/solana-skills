@@ -277,6 +277,14 @@ pub(super) fn expr_to_rust(
                 call
             }
         }
+        // `contains(coll, elem)` → `coll.contains(&elem)`. The pre/post path
+        // rewrite (`state.X` → `pre_X`/`post_X`) runs downstream on the string;
+        // a `Vec` `coll` snapshotted `pre_X` must be `.clone()`d (non-Copy).
+        Expr::Contains { coll, elem } => format!(
+            "{}.contains(&{})",
+            expr_to_rust(&coll.node, ctx, consts, opts),
+            expr_to_rust(&elem.node, ctx, consts, opts)
+        ),
         Expr::Match { scrutinee, arms } => {
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             let mut out = format!("match {} {{", sc);

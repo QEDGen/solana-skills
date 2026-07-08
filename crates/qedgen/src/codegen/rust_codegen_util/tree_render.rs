@@ -222,6 +222,15 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             render_mul_div("mul_div_ceil_u128", a, b, d, cx, inside_old),
             Prec::Atom,
         ),
+        // `contains(coll, elem)` → `coll.contains(&elem)`.
+        ExprTree::Contains { coll, elem } => (
+            format!(
+                "{}.contains(&{})",
+                render(coll, cx, inside_old).0,
+                render(elem, cx, inside_old).0
+            ),
+            Prec::Atom,
+        ),
         ExprTree::Match { scrutinee, arms } => {
             let sc = render(scrutinee, cx, inside_old).0;
             let mut out = format!("match {} {{", sc);
@@ -516,6 +525,7 @@ fn rust_num_kind(e: &ExprTree) -> NumKind {
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
+        | ExprTree::Contains { .. }
         | ExprTree::Arith { .. }
         | ExprTree::Match { .. }
         | ExprTree::Ctor { .. }
@@ -547,6 +557,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
+        | ExprTree::Contains { .. }
         | ExprTree::MulDivFloor { .. }
         | ExprTree::MulDivCeil { .. }
         | ExprTree::Match { .. }
@@ -658,6 +669,8 @@ fn render_cmp(
 fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -> String {
     match e {
         ExprTree::Old(inner) => render_pred_wrapped_term(inner, cx, true, wide),
+        // A `Bool` predicate (not a numeric term to widen) — render plainly.
+        ExprTree::Contains { .. } => render(e, cx, inside_old).0,
         ExprTree::Arith {
             op: TreeArithOp::Add,
             lhs,
@@ -791,6 +804,8 @@ fn render_pair_with_coercion(
 fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -> (String, Prec) {
     match e {
         ExprTree::Old(inner) => render_widened_term(inner, cx, true, wide),
+        // A `Bool` predicate (not a numeric term to widen) — render plainly.
+        ExprTree::Contains { .. } => render(e, cx, inside_old),
         ExprTree::Arith { op, lhs, rhs } => {
             let l = render_widened_term(lhs, cx, inside_old, wide);
             let r = render_widened_term(rhs, cx, inside_old, wide);
@@ -925,6 +940,10 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
             for_each_path(b, f);
             for_each_path(d, f);
         }
+        ExprTree::Contains { coll, elem } => {
+            for_each_path(coll, f);
+            for_each_path(elem, f);
+        }
         ExprTree::Match { scrutinee, arms } => {
             for_each_path(scrutinee, f);
             for arm in arms {
@@ -1030,6 +1049,9 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => contains_fallible_arith(body),
         ExprTree::BoolOp { lhs, rhs, .. } | ExprTree::Cmp { lhs, rhs, .. } => {
             contains_fallible_arith(lhs) || contains_fallible_arith(rhs)
+        }
+        ExprTree::Contains { coll, elem } => {
+            contains_fallible_arith(coll) || contains_fallible_arith(elem)
         }
         ExprTree::Match { scrutinee, arms } => {
             contains_fallible_arith(scrutinee)

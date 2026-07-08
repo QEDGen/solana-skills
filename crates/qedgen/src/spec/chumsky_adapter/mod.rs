@@ -273,6 +273,7 @@ impl<'a> TypeEnv<'a> {
             Expr::BoolOp { .. } => Kind::Bool,
             Expr::Not(_) => Kind::Bool,
             Expr::Cmp { .. } => Kind::Bool,
+            Expr::Contains { .. } => Kind::Bool,
             Expr::Arith { lhs, rhs, .. } => {
                 let lk = self.infer(&lhs.node);
                 let rk = self.infer(&rhs.node);
