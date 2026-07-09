@@ -588,14 +588,21 @@ handler begin_tally (dummy : U64) {
         body.contains("(post_votes.len() as u64) >= quorum"),
         "len(coll) → `(coll.len() as u64)`; got:\n{body}"
     );
-    // Non-Copy ADT status field cloned in both snapshots (a move would break the
-    // subsequent `&mut state` method call); the Copy `epoch` field is not even
-    // snapshotted here, and the Vec is cloned as before.
+    // Non-Copy ADT status field: the PRE-snapshot `.clone()`s (a move would leave
+    // `state` partially moved before the `&mut state` method call that follows),
+    // but the POST-snapshot MOVES (it's the last read of the field — the assert
+    // reads the `post_<x>` local, and no `&mut state` call follows). The Copy
+    // `epoch` field is not snapshotted here.
     assert!(
         body.contains("let pre_status = state.status.clone();")
-            && body.contains("let post_status = state.status.clone();")
-            && body.contains("state.votes.clone()"),
-        "non-Copy status snapshot must `.clone()`; got:\n{body}"
+            && body.contains("let pre_votes = state.votes.clone();"),
+        "non-Copy pre-snapshot must `.clone()`; got:\n{body}"
+    );
+    assert!(
+        body.contains("let post_status = state.status;")
+            && body.contains("let post_votes = state.votes;")
+            && !body.contains("let post_status = state.status.clone();"),
+        "non-Copy post-snapshot MOVES (no clone); got:\n{body}"
     );
     // Crate-level placement glob-imports the crate root so the bare `BallotStatus`
     // name in the `matches!` resolves; the ctor still qualifies with `crate::`.
@@ -673,6 +680,127 @@ handler check (auth : Pubkey) {
         body.contains("Option::Some(h) => (h.keys.iter().any(|k| k == auth))")
             && body.contains("Option::None => false"),
         "Option match binds Some's payload + composes with exists-in + field access; got:\n{body}"
+    );
+}
+
+/// `pragma kani_option_none = <field>` builds that `Option<_>` field as `None`
+/// — no `Some` payload construction — so a dead symbolic sub-state the property
+/// never reads costs nothing. Companion to `kani_vec_empty` for pruning
+/// nested-container construction that would otherwise blow up CBMC.
+#[test]
+fn brownfield_kani_option_none_prunes_payload() {
+    let src = r#"spec OptNone
+pragma state_struct = Pol
+pragma state_invariant = none
+pragma kani_option_none = pre_hook
+type Hook = { keys : Vec Pubkey }
+state { pre_hook : Option Hook, post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_optnone_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // `pre_hook` is `None` (no `Some(Hook { .. })` payload construction); the
+    // read `post_hook` still gets a full symbolic `if kani::any() { Some(..) }`.
+    assert!(
+        body.contains("pre_hook: None,") && body.contains("post_hook: if kani::any()"),
+        "kani_option_none field is `None`; the read Option stays symbolic; got:\n{body}"
+    );
+}
+
+/// The brownfield ensures harness snapshots a field on the side that actually
+/// reads it: a field read *only* via `post.<x>` gets a `post_<x>` clone and NO
+/// dead `pre_<x>` clone (which, for a non-`Copy` `Vec`, would deep-copy + drop
+/// the whole container and inflate CBMC's VCC count). Effect-participating
+/// fields (`modifies`) still snapshot on both sides for the old/new comparison.
+#[test]
+fn brownfield_snapshot_split_drops_dead_pre_clone() {
+    let src = r#"spec SnapSplit
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_snapsplit_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // `post_hook` is read only via `post.` → a `post_post_hook` snapshot but no
+    // dead `pre_post_hook` clone. `n` is in `modifies` → snapshotted both sides.
+    // The post-snapshot MOVES (no `.clone()`) — it's the last read of the field.
+    assert!(
+        body.contains("let post_post_hook = state.post_hook;")
+            && !body.contains("let post_post_hook = state.post_hook.clone();")
+            && !body.contains("let pre_post_hook"),
+        "post-only field gets a moved post_ snapshot and no dead pre_ clone; got:\n{body}"
+    );
+}
+
+/// The brownfield ensures post-snapshot MOVES the field out of `state` rather
+/// than `.clone()`-ing it: the assert reads the `post_<field>` local (never
+/// `state` again) and there is no CPI-assume splice, so the move is the last
+/// read. For a non-`Copy` nested container this avoids a deep copy+drop that
+/// would otherwise multiply CBMC's VCC count past the SAT/SMT resource wall.
+#[test]
+fn brownfield_post_snapshot_moves_not_clones() {
+    let src = r#"spec PostMove
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_postmove_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The owned snapshot local is matched by REFERENCE (`match &(...)`), so the
+    // moved container is not re-cloned inside the predicate either.
+    assert!(
+        body.contains("let post_post_hook = state.post_hook;")
+            && body.contains("match &(post_post_hook)"),
+        "post-snapshot moves + owned-local match is by-ref; got:\n{body}"
     );
 }
 

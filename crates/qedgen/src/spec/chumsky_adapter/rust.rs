@@ -321,12 +321,22 @@ pub(super) fn expr_to_rust(
                 Expr::Path(p) => opts.env.path_type_name(p),
                 _ => None,
             };
-            // `.clone()` the scrutinee so a payload binder is OWNED — a value
-            // binder (`Custom(s) => s > 0`) and a collection binder
-            // (`Pubkey(pks) => pks.contains(…)`) both work, and it can't "move
-            // out of a shared reference" when the scrutinee is a `&`-place
-            // (e.g. `c.field` under `.iter()`). Predicates are read-only.
-            let mut out = format!("match ({}).clone() {{", sc);
+            // Scrutinee ownership: an OWNED snapshot local (`pre.X` / `post.X`,
+            // which the downstream pre/post rewrite turns into a bare owned
+            // `pre_X` / `post_X`) is matched by REFERENCE — `match &(x)` — so a
+            // deep container (a snapshotted `Vec<Hook>` policy field) is NOT
+            // re-cloned. Its payload binders are read by-reference (field access,
+            // `.iter()`, `.contains()`), which is exactly what a snapshot's
+            // struct/collection payload wants. Any OTHER scrutinee (a `&`-place
+            // like `c.field` under `.iter()`, or a value used as a scalar binder
+            // `Custom(s) => s > 0`) keeps `.clone()` so the binder is OWNED and
+            // there's no "cannot move out of a shared reference".
+            let by_ref = scrutinee_is_owned_snapshot(&sc);
+            let mut out = if by_ref {
+                format!("match &({}) {{", sc)
+            } else {
+                format!("match ({}).clone() {{", sc)
+            };
             for arm in arms {
                 let pat = if arm.variant == "_" {
                     "_".to_string()
@@ -719,6 +729,28 @@ pub(super) fn is_map_value_sum_type(name: &str, spec: &a::Spec) -> bool {
         }
     }
     false
+}
+
+/// True when a rendered scrutinee is a single snapshot-local field access
+/// (`pre.<field>` / `post.<field>`) — the impl-Kani ensures form that the
+/// downstream pre/post rewrite turns into a bare OWNED local `pre_<field>` /
+/// `post_<field>`. Such a scrutinee can be matched by reference (`match &(x)`)
+/// without a defensive `.clone()`. Anything with further path segments
+/// (`post.a.b`), a `&`-place under `.iter()` (`c.field`), or a non-snapshot
+/// base returns `false` and keeps the clone.
+fn scrutinee_is_owned_snapshot(sc: &str) -> bool {
+    let rest = sc
+        .strip_prefix("pre.")
+        .or_else(|| sc.strip_prefix("post."));
+    match rest {
+        Some(field) => {
+            !field.is_empty()
+                && field
+                    .bytes()
+                    .all(|b| b == b'_' || b.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
 }
 
 pub(super) fn type_ref_to_string(t: &a::TypeRef) -> String {

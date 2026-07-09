@@ -630,3 +630,72 @@ nested-predicate feature + pure `invariant()`; E-B via T3. Ranked: E-A's
 nested-predicate DSL feature is worth building (broadly reusable); E-B waits on T3.
 - **Verdict:** FILE (methodology + two scoped feature asks). Leverage: nested-predicate
   navigation unlocks a whole class of "collection element violates P" audit properties.
+
+---
+
+## Session: E-A guard-enforcement harness — nested-container Kani tractability (2026-07-09)
+
+Continuing M4/E-A: **mirror the deep policy state and land the guard-enforcement
+(reject-shaped) harness** over the pure `invariant()`. The state mirror + nested
+predicate (`match state.<opt> with Some h => not (exists c in h.<vec>, match
+c.<enum> with Pubkey pks => contains(pks, CONST) | _ => false) | None => true`)
+GENERATE correctly through `state_struct` + `QuantIn` + Option/enum `match`. The
+obstacle was purely **verifier resource**: the naive harness was **69,545 VCC(s)**
+(1.55M program steps) — CBMC's SAT backend OOM'd and its SMT2 (z3) backend crashed.
+
+### 🧩 R1 — Nested-container Kani reductions (SHIPPED, 4 codegen features)  [FIXED]
+
+Root cause of the blowup: the impl-ensures harness DEEP-CLONES a non-`Copy`
+nested container (`Option<Hook>` carrying `Vec<AccountConstraint>` carrying
+`Vec<Pubkey>`) up to **three times** — a dead pre-snapshot, a live post-snapshot,
+and again inside the `match` scrutinee — each copy generating a `drop_in_place` /
+`RawVec` storm. Four mechanical, general codegen fixes (each with a regression
+test in `kani_impl/tests.rs`), measured on the same harness:
+
+1. **Snapshot pre/post split** (`collect_snapshot_fields_split`). A field read
+   only via `post.<x>` gets NO dead `pre_<x>` clone (and vice-versa); only
+   effect-participating fields snapshot both sides. Drops the dead pre-clone.
+2. **`pragma kani_option_none = <field>`** (`state_ctor`). Builds an `Option<_>`
+   field as `None` — no `Some` payload construction — pruning a symbolic
+   sub-state the property never reads (companion to `kani_vec_empty`).
+3. **Owned-snapshot `match &(...)`** (`chumsky_adapter/rust.rs`). A scrutinee that
+   is a snapshot local (`pre.X`/`post.X` → owned `pre_X`/`post_X`) is matched by
+   REFERENCE, not `.clone()` — its struct/collection payloads are read by-ref.
+   Non-snapshot `&`-places (`c.field` under `.iter()`) keep `.clone()`.
+4. **Post-snapshot move** (`emit_brownfield_handler_harness`). The post-snapshot
+   MOVES the field out of `state` (last read; no CPI-assume splice follows), not
+   `.clone()`.
+
+Cumulative effect (each roughly halves the instance): **69,545 → 50,847 → 35,590
+→ 20,322 VCC(s)** (9,097 after simplification), symex **217s → 20s**, program
+steps **1.55M → 464k** — a **5× reduction**. All snapshot suites + 1128 unit
+tests green. **Verdict: FIXED in source.**
+
+### 📐 R2 — CBMC/Kani wall on SYMBOLIC nested `Vec` containers  [FILE — upstream]
+
+Even at 9,097 VCC(s) the proof will not close, and the failure is **backend, not
+size**:
+- **z3 / SMT2:** `map::at: key not found` — a CBMC internal crash during
+  SSA→SMT2 conversion. Reproduces at 9k AND 21k AND 29k VCC(s), so it is
+  **construct-triggered, not size-triggered**: the `drop_in_place::<[T]>` /
+  `RawVecInner::deallocate` machinery emitted for symbolic-length nested `Vec`s
+  is what the SMT2 converter cannot lower.
+- **CaDiCaL / SAT:** no crash, but bit-blasting the symbolic-`Vec`/`Option`
+  combinatorics grinds indefinitely (>10 min, no verdict) once past the OOM
+  threshold at ~29k.
+
+So a property that navigates a **symbolic** heap-allocated nested container
+(`Vec<Struct{ Vec<_> }>`) is currently beyond CBMC's practical reach on BOTH
+backends — independent of QEDGen. The R1 reductions push the floor 5× lower but
+don't cross it. **Mitigations for a future pass:** (a) a `kani_vec_concrete` /
+fixed-shape ctor mode that builds the container with CONCRETE structure and only
+the *leaf value under test* symbolic (collapses the `drop_in_place`/RawVec
+symbolic machinery to a bounded, SMT2-convertible shape); (b) a concrete-witness
+harness (specific malicious element) — trivially closes but is redundant with the
+live client repro. **Verdict: FILE** — the reductions are the reusable win; the
+symbolic-nested-`Vec` close waits on a concrete-shape ctor mode or upstream CBMC.
+
+**E-A status:** state mirror ✅, nested predicate ✅, harness generates ✅ and is
+5× smaller ✅; symbolic CLOSE blocked by R2 (CBMC, upstream). Evidence stands on
+source analysis (`invariant()` structurally ignores hooks) + the live client
+repro; QEDGen's artifact is the regression-shaped harness + the R1 reductions.

@@ -528,12 +528,12 @@ pub(crate) fn emit_brownfield_handler_harness(
     //    CPI-binders ∪ requires/ensures fields) and `s.`→`pre.` guard lowering.
     let guard_predot = crate::rust_codegen_util::collect_full_guard(handler, false)
         .map(|g| rewrite_state_var_to_pre(&g));
-    let snapshot_fields = collect_snapshot_fields(handler, guard_predot.as_deref(), ensures);
-    if !snapshot_fields.is_empty() {
+    let snapshot = collect_snapshot_fields_split(handler, guard_predot.as_deref(), ensures);
+    if !snapshot.pre.is_empty() {
         out.push_str(
             "    // Pre-state snapshot — fields the requires/ensures read via `pre.<x>`.\n",
         );
-        for field in &snapshot_fields {
+        for field in &snapshot.pre {
             // A `Vec` field is non-Copy: moving it out here would break the
             // `&mut state` method call below (partial move). Clone it (Copy
             // fields — scalars, `Pubkey` — move/copy as before).
@@ -580,17 +580,18 @@ pub(crate) fn emit_brownfield_handler_harness(
 
     // 5. Post-snapshot + assert (same `ensures` lowering as greenfield).
     out.push_str("    if ok {\n");
-    if !snapshot_fields.is_empty() {
+    if !snapshot.post.is_empty() {
         out.push_str("        // Post-state snapshot.\n");
-        for field in &snapshot_fields {
-            // Clone `Vec` fields so an ensures can read them more than once
-            // (a `.contains()` doesn't consume, but the snapshot move would).
-            let rhs = if state_field_needs_clone(spec, field) {
-                format!("state.{field}.clone()")
-            } else {
-                format!("state.{field}")
-            };
-            out.push_str(&format!("        let post_{field} = {rhs};\n"));
+        for field in &snapshot.post {
+            // MOVE the field out of `state` — no `.clone()`. This is the LAST
+            // read of `state.<field>` (the assert below reads the `post_<field>`
+            // local, never `state` again; there is no CPI-assume splice in the
+            // brownfield emitter), so a move is sound and, for a non-`Copy`
+            // nested container (a `Vec<Hook>` policy field), avoids a deep
+            // copy+drop that multiplies CBMC's VCC count. A `Copy` scalar field
+            // copies; an owned local is still readable more than once by-ref
+            // (`.len()` / `.contains()` / `.iter()` all borrow).
+            out.push_str(&format!("        let post_{field} = state.{field};\n"));
         }
     }
     let lowered = rewrite_pre_post_paths(&ensures.rust_expr_binary);
@@ -876,34 +877,68 @@ fn collect_snapshot_fields(
     guard_predot: Option<&str>,
     ensures: &crate::check::ParsedEnsures,
 ) -> Vec<String> {
-    let mut fields: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let split = collect_snapshot_fields_split(handler, guard_predot, ensures);
+    let mut all: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    all.extend(split.pre);
+    all.extend(split.post);
+    all.into_iter().collect()
+}
+
+/// Snapshot field sets, split by which side (`pre_` / `post_`) actually reads
+/// them. A field read *only* via `post.<x>` needs no `pre_<x>` clone, and vice
+/// versa. This matters when the field is a non-`Copy` `Vec` (e.g. a nested
+/// `Vec<Hook>` policy field): the dead-side clone deep-copies + drops the whole
+/// container, which multiplies CBMC's VCC count and can push a nested-container
+/// harness over the SAT/SMT resource wall. Fields that participate in the
+/// effect (`modifies` ∪ `effects` ∪ CPI binders) stay on *both* sides — the
+/// ensures compares their post value against the `pre_` snapshot.
+struct SplitSnapshotFields {
+    pre: Vec<String>,
+    post: Vec<String>,
+}
+
+fn collect_snapshot_fields_split(
+    handler: &ParsedHandler,
+    guard_predot: Option<&str>,
+    ensures: &crate::check::ParsedEnsures,
+) -> SplitSnapshotFields {
+    // Effect-participating fields: the ensures reads both `pre.` and `post.`.
+    let mut both: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(modifies) = &handler.modifies {
         for f in modifies {
-            fields.insert(f.clone());
+            both.insert(f.clone());
         }
     }
     for eff in &handler.effects {
         let bare = crate::rust_codegen_util::effect_target_base(&eff.field);
-        fields.insert(bare.to_string());
+        both.insert(bare.to_string());
     }
-    // v2.27 Track A — pick up every caller-side field referenced by a
-    // state binder on any CPI call in this handler. Without this the
-    // CPI assume splice would reference `pre_X` / `post_X` locals the
-    // snapshot block never declared, producing a compile error in the
-    // generated harness.
+    // v2.27 Track A — caller-side fields bound by a CPI `state_binder` are read
+    // by the CPI assume splice on both sides; keep them in `both`.
     for call in &handler.calls {
         for binder in &call.state_binders {
-            fields.insert(binder.caller_field.clone());
+            both.insert(binder.caller_field.clone());
         }
     }
-    // Read-only fields named by the precondition (`pre.`) and this
-    // postcondition (`pre.`/`post.`).
+    // Pure read-only reads: the precondition and `old(...)` reads take `pre.`;
+    // the plain postcondition reads take `post.`. A field read on exactly one
+    // side (not effect-participating) is snapshotted on that side only.
+    let mut pre_only: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut post_only: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if let Some(guard) = guard_predot {
-        collect_prefixed_fields(guard, "pre.", &mut fields);
+        collect_prefixed_fields(guard, "pre.", &mut pre_only);
     }
-    collect_prefixed_fields(&ensures.rust_expr_binary, "pre.", &mut fields);
-    collect_prefixed_fields(&ensures.rust_expr_binary, "post.", &mut fields);
-    fields.into_iter().collect()
+    collect_prefixed_fields(&ensures.rust_expr_binary, "pre.", &mut pre_only);
+    collect_prefixed_fields(&ensures.rust_expr_binary, "post.", &mut post_only);
+
+    let mut pre = both.clone();
+    pre.extend(pre_only);
+    let mut post = both;
+    post.extend(post_only);
+    SplitSnapshotFields {
+        pre: pre.into_iter().collect(),
+        post: post.into_iter().collect(),
+    }
 }
 
 /// True for bytes that may appear inside a Rust identifier.
