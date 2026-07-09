@@ -200,9 +200,11 @@ mod tests {
     use super::*;
 
     /// The embedded `qedgen-kani-prelude` materializes with the dep-free
-    /// primitives the generated harness imports, the `#![cfg(kani)]` gate (so an
-    /// unconditional dep is free off-kani), and its own `[workspace]` (so it
-    /// stays out of the host program's workspace).
+    /// primitives the generated harness imports and the `#![cfg(kani)]` gate (so
+    /// an unconditional dep is free off-kani). It must carry NO `[workspace]`
+    /// table: it is delivered nested inside a host harness package that is often
+    /// itself a `[workspace]` root, and a second one collides as "multiple
+    /// workspace roots in the same workspace".
     #[test]
     fn write_kani_prelude_materializes_the_proven_crate() {
         let tmp = tempfile::tempdir().unwrap();
@@ -217,7 +219,12 @@ mod tests {
 
         let cargo = std::fs::read_to_string(base.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("name = \"qedgen-kani-prelude\""));
-        assert!(cargo.contains("[workspace]"));
+        // A `[workspace]` TABLE (not the word in a comment) collides with a host
+        // package that is itself a workspace root.
+        assert!(
+            !cargo.lines().any(|l| l.trim() == "[workspace]"),
+            "delivered prelude must not declare a [workspace] table (collides with host)"
+        );
     }
 
     /// Embed-list closure gate: every `import QEDGen.Solana.X` inside an
