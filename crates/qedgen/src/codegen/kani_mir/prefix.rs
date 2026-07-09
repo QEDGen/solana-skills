@@ -29,43 +29,24 @@ pub(crate) fn emit_header(out: &mut String, parsed: &ParsedSpec) {
     out.push_str("#![cfg(kani)]\n\n");
 }
 
-/// Math helpers (`mul_div_floor_u128` / `mul_div_ceil_u128`), inlined only
-/// when the spec's guards reference them, so the standalone harness
-/// compiles without depending on `src/math.rs`.
+/// Math helpers (`mul_div_floor_u128` / `mul_div_ceil_u128` /
+/// `mul_bps_floor_u128`) — imported from the soundness-proven
+/// `qedgen_kani_prelude` crate rather than re-inlined (#182), and only when the
+/// spec's guards reference them. Both the crate and this harness are
+/// `#![cfg(kani)]`, so the `use` compiles only under `cargo kani`; `run.rs`
+/// delivers the crate + path-dep when the emitted harness references it.
 pub(crate) fn emit_math_helpers(out: &mut String, parsed: &ParsedSpec) {
-    // The backslash-continuation strings deliberately drop per-line body
-    // indentation — that un-indented shape is what every committed kani.rs
-    // fixture/snapshot was generated against. Don't re-indent.
+    // `allow(unused_imports)`: the floor/ceil pair is imported together but a
+    // spec may reference only one (the old inline bodies carried `dead_code`).
     if crate::codegen_shared::guards_use_math_helpers(parsed) {
         out.push_str(
-            "#[allow(dead_code)]\n\
-#[inline]\n\
-fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {\n\
-    if d == 0 { return 0; }\n\
-    a.saturating_mul(b) / d\n\
-}\n\n\
-#[allow(dead_code)]\n\
-#[inline]\n\
-fn mul_div_ceil_u128(a: u128, b: u128, d: u128) -> u128 {\n\
-    if d == 0 { return 0; }\n\
-    let prod = a.saturating_mul(b);\n\
-    if prod % d == 0 { prod / d } else { (prod / d).saturating_add(1) }\n\
-}\n\n",
+            "#[allow(unused_imports)]\n\
+use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128};\n\n",
         );
     }
 
     if crate::rust_codegen_util::spec_uses_kani_bps_mul_div_helper(parsed) {
-        out.push_str(
-            "#[allow(dead_code)]\n\
-#[inline]\n\
-fn mul_bps_floor_u128(a: u128, bps: u128) -> u128 {\n\
-    if bps > 10000 { return u128::MAX; }\n\
-    let b = (bps as u16) as u128;\n\
-    let q = a / 10000;\n\
-    let r = a % 10000;\n\
-    q.wrapping_mul(b).wrapping_add(r.wrapping_mul(b) / 10000)\n\
-}\n\n",
-        );
+        out.push_str("use qedgen_kani_prelude::mul_bps_floor_u128;\n\n");
     }
 }
 

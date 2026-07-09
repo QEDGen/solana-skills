@@ -326,9 +326,16 @@ pending a decision on whether it's in scope.
 >   over-delivery gate, and the delivered crate's `[workspace]` colliding with
 >   the host ("multiple workspace roots") — prelude now carries no `[workspace]`,
 >   root workspace `exclude`s `kani_prelude/`.
-> - **Follow-up (chunk 3b, not blocking):** fold the `kani_mir/prefix.rs`
->   spec-model `mul_div_*` copy onto the crate too (separate path/file/snapshots;
->   the impl-path Pubkey/div — the headline — is done).
+> - **Chunk 3b — SHIPPED.** Folded the `kani_mir/prefix.rs` spec-model `mul_div_*`
+>   / `mul_bps_floor` copy onto the crate: `emit_math_helpers` now emits
+>   `use qedgen_kani_prelude::{…}` instead of inline `fn` bodies. Delivery gate
+>   factored to `run::deliver_prelude_if_referenced` (content-based) and wired at
+>   all three gen sites — impl (`--kani-impl`) + both spec-model (`--kani`) paths.
+>   `codegen_mir` / `proptest_gen_mir` keep their OWN inline copies (they run
+>   outside kani). One snapshot regen'd (def→`use`); verified end-to-end (harness
+>   imports the crate, crate delivered, dep injected). The spec-model `pubkey_eq`
+>   over `[u8;32]` model fields stays inline — a separate unrolled helper, not a
+>   memcmp wall.
 >
 > **DEFERRED (user, 2026-07-09):** the `kani.yml` CI job that would turn the
 > soundness proofs into a *standing* pin — the shape is unsettled; revisit now
