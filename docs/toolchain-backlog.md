@@ -530,3 +530,22 @@ Custom(s) then s > 0".
   alone can't reach the `Custom` payload, so the Custom>0 precondition is inexpressible.
 - **Verdict:** FILE (gap). Leverage: any panic-free / precondition proof of a method
   gated by a rich invariant with unwraps, or any property over an enum variant's payload.
+- **UPDATE — expressibility CLOSED, moved to a solver wall.** Variant payload binding
+  SHIPPED (`57a91fd`): `match state.period with | Custom s => s > 0 | _ => true` in a
+  requires renders `match pre_period { PeriodV2::Custom(s) => s > 0, _ => true }`
+  (enum-resolved, shape-correct arms + `_` wildcard). F's Custom precondition is now
+  fully expressible. But the Custom harness then divides `passed / reset_period` by a
+  SYMBOLIC `i64`, which stalls BOTH CaDiCaL (SAT bit-blasting) AND z3 (`pragma
+  kani_solver = z3`, `1219c00`) — z3 solved 5 checks in ~3s each then ground on the
+  division check for 22+ min at 99% CPU. So the remaining gap is **solver
+  tractability of symbolic `checked_div`**, not codegen. Next: abstract/bound the
+  division (same pattern as the #181 Pubkey-memcmp wall — e.g. a `#[kani::stub]` on the
+  divisor path, or bound the Custom period). Standard periods remain GREEN.
+
+### 🧩 G15d — `pragma kani_solver` bakes `#[kani::solver(z3)]` into the harness  [FIXED]
+
+A harness that divides/mods by a symbolic value blows up the default SAT backend;
+z3/cvc5 reason about bit-vector division natively. `pragma kani_solver = <solver>`
+emits `#[kani::solver(<solver>)]` after `#[kani::proof]` on every generated proof,
+so the solver requirement is baked in + reproducible without a `cargo kani --solver`
+flag (`1219c00`). Test: `brownfield_kani_solver_pragma_bakes_solver_attr`.
