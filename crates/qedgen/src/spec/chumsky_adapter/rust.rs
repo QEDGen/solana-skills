@@ -321,7 +321,12 @@ pub(super) fn expr_to_rust(
                 Expr::Path(p) => opts.env.path_type_name(p),
                 _ => None,
             };
-            let mut out = format!("match {} {{", sc);
+            // `.clone()` the scrutinee so a payload binder is OWNED — a value
+            // binder (`Custom(s) => s > 0`) and a collection binder
+            // (`Pubkey(pks) => pks.contains(…)`) both work, and it can't "move
+            // out of a shared reference" when the scrutinee is a `&`-place
+            // (e.g. `c.field` under `.iter()`). Predicates are read-only.
+            let mut out = format!("match ({}).clone() {{", sc);
             for arm in arms {
                 let pat = if arm.variant == "_" {
                     "_".to_string()

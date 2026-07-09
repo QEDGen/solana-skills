@@ -36,6 +36,9 @@ pub(crate) struct CtorCtx<'a> {
     /// there). `from_spec` merges them so field-typed enums resolve.
     pub sum_types: Vec<ParsedSumType>,
     pub vec_bound: usize,
+    /// Field names (`pragma kani_vec_empty`) whose `Vec` is built as `vec![]`
+    /// — no element construction, so the element type needn't be mirrored.
+    pub empty_vec_fields: std::collections::BTreeSet<String>,
     /// Prefix for every constructed type name. `"crate::"` (default) when the
     /// harness sits at the crate root and the types are re-exported there;
     /// `""` (bare) when `pragma state_module` places the harness INSIDE the
@@ -62,6 +65,11 @@ impl<'a> CtorCtx<'a> {
             records: &spec.records,
             sum_types,
             vec_bound: vec_bound_of(spec),
+            empty_vec_fields: spec
+                .pragma_values("kani_vec_empty")
+                .into_iter()
+                .map(String::from)
+                .collect(),
             type_path: type_path_of(spec),
         }
     }
@@ -354,7 +362,17 @@ pub(crate) fn emit_state_ctor(
     // never emit a partially-`todo!()` constructor.
     let mut field_lines = Vec::with_capacity(fields.len());
     for (name, ty_str) in fields {
-        let expr = emit_value(&parse_ty(ty_str), ctx, 0)?;
+        // `pragma kani_vec_empty = <field>` → build this `Vec` field as `vec![]`
+        // WITHOUT constructing its element type. Lets a harness mirror only the
+        // fields its property reads: a heavy/irrelevant `Vec<BigNestedType>`
+        // field costs nothing (no element ctor, no `Type` decl in the spec) and
+        // an irrelevant recursing `invariant()` over it is skipped.
+        let expr = if ty_str.trim_start().starts_with("Vec ") && ctx.empty_vec_fields.contains(name)
+        {
+            "vec![]".to_string()
+        } else {
+            emit_value(&parse_ty(ty_str), ctx, 0)?
+        };
         field_lines.push(format!("        {name}: {expr},"));
     }
 
@@ -560,6 +578,7 @@ mod tests {
             records,
             sum_types: sum_types.to_vec(),
             vec_bound,
+            empty_vec_fields: std::collections::BTreeSet::new(),
             type_path: "crate::".to_string(),
         }
     }

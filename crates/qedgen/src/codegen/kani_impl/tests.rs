@@ -605,6 +605,40 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `pragma kani_vec_empty = <field>` builds that `Vec` field as `vec![]` — no
+/// element construction — so a heavy/irrelevant `Vec<T>` field costs nothing and
+/// its element type `T` need not even be declared in the spec (only the field
+/// type name). Also lets a `match` bind a payload behind a `&` (via `.clone()`).
+#[test]
+fn brownfield_kani_vec_empty_skips_element_construction() {
+    let src = r#"spec VecEmpty
+pragma state_struct = Holder
+pragma state_invariant = none
+pragma kani_vec_empty = big
+state { big : Vec UndeclaredBigType, n : U8 }
+handler t (m : U8) { modifies [n] ensures state.n == m effect { n := m } }"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_vecempty_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The field is `vec![]` — `UndeclaredBigType` is never constructed (would
+    // otherwise bail the whole ctor since it isn't a declared record/sum type).
+    assert!(
+        body.contains("big: vec![],") && body.contains("fn symbolic_holder()"),
+        "kani_vec_empty field is `vec![]`, ctor still emitted; got:\n{body}"
+    );
+}
+
 /// `match` on an `Option` field binds `Some`'s payload and renders the builtin
 /// prelude variants shape-correctly (`Option::Some(h)` tuple / `Option::None`
 /// unit) — composing with `exists x in coll` + field access to navigate a nested

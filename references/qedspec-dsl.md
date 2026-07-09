@@ -1303,6 +1303,14 @@ reason about bit-vector division natively, where the default SAT backend
 (CaDiCaL) bit-blasts it and can blow up. Values: `z3`, `cvc5`, `bitwuzla`,
 `cadical`, `kissat`, `minisat`.
 
+**`pragma kani_vec_empty = <field>`** (repeatable) — build that State `Vec` field
+as `vec![]` (no element construction) in the brownfield ctor. Lets a harness
+mirror only the fields its property reads: a heavy/irrelevant `Vec<BigNestedType>`
+field costs nothing (its element type needn't even be declared as a spec `type` —
+only named in the field type), and a recursing `invariant()` over it is skipped
+(avoiding a symbolic-input panic in the element's own invariant). Essential for
+mirroring a large `#[account]` struct where the property only touches a few fields.
+
 **`pragma kani_abstract_div = on`** — the **#182 arithmetic tier**: replace
 `i64::checked_div` with `checked_div_abstract`, a fresh symbolic quotient pinned
 by division's *exact* contract (`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`,
