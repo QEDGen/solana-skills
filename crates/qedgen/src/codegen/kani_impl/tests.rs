@@ -605,6 +605,41 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `exists|forall x in <coll>, pred(x)` — a bounded quantifier over a collection
+/// value — lowers to `coll.iter().any|all(|x| pred)`, binding each element (with
+/// field access). The "some/every element of a collection satisfies P" primitive.
+#[test]
+fn brownfield_quant_in_collection_lowering() {
+    let src = r#"spec QuantIn
+pragma state_struct = Roster
+pragma state_invariant = none
+type Signer = { key : Pubkey, mask : U8 }
+state { signers : Vec Signer, cap : U8 }
+handler check (lo : U8) {
+  modifies [cap]
+  ensures forall s in state.signers, s.mask >= lo
+  effect { cap := lo }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_quantin_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains(".iter().all(|s| s.mask >= lo)"),
+        "forall-in → `.iter().all(|x| pred)` with element field access; got:\n{body}"
+    );
+}
+
 /// `pragma kani_abstract_div = on` emits the `checked_div_abstract` support fn
 /// once + a `#[kani::stub(i64::checked_div, checked_div_abstract)]` per proof —
 /// the #182 arithmetic tier that removes the symbolic-divisor circuit that

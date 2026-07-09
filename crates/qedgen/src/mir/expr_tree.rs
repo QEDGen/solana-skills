@@ -93,6 +93,15 @@ pub enum ExprTree {
         fin_bound: Option<Symbol>,
         body: Box<ExprTree>,
     },
+    /// `exists|forall x in coll, body` — bounded quantifier over a COLLECTION
+    /// value (a `Vec`), binding each element to `x`. Rust `coll.iter().any|all`,
+    /// Lean `∃|∀ x ∈ coll`.
+    QuantIn {
+        kind: QuantKind,
+        binder: Symbol,
+        coll: Box<ExprTree>,
+        body: Box<ExprTree>,
+    },
     BoolOp {
         op: TreeBoolOp,
         lhs: Box<ExprTree>,
@@ -370,6 +379,7 @@ impl ExprTree {
             ExprTree::Old(inner) => inner.num_kind(),
             ExprTree::Sum { body, .. } => body.num_kind(),
             ExprTree::Quant { .. } => NumKind::Bool,
+            ExprTree::QuantIn { .. } => NumKind::Bool,
             ExprTree::BoolOp { .. } => NumKind::Bool,
             ExprTree::Not(_) => NumKind::Bool,
             ExprTree::Cmp { .. } => NumKind::Bool,

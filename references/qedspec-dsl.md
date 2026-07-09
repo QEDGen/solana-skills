@@ -938,6 +938,12 @@ old(state.accounts[i].pnl)
 forall s : Pool.Active, s.total_deposits >= s.total_borrows
 exists l : Loan.Active, l.collateral > 0
 
+// Quantifiers over a COLLECTION value (a `Vec` field) — `in`, not `:`. Binds
+// each element; Rust `coll.iter().all|any(|x| body)`, Lean `∀|∃ x ∈ coll, body`.
+// The "some/every element of a collection satisfies P" primitive.
+forall s in state.signers, s.mask >= threshold
+exists c in state.destinations, c == authority
+
 // Quantifiers — multi-binder (desugars to nested single-binder forms)
 forall p1 p2 : Path, black_count(p1) == black_count(p2)
 

@@ -129,6 +129,35 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             })
         });
 
+        // forall / exists x in <collection>, body — a bounded quantifier over a
+        // COLLECTION value (a `Vec` field), not a type domain. Disambiguated from
+        // `quant` by `in` vs `:` after the (single) binder; tried first in the
+        // atom choice so `in` wins before `quant` consumes `:`.
+        let quant_in = choice((
+            just("forall").to(Quantifier::Forall),
+            just("exists").to(Quantifier::Exists),
+        ))
+        .then_ignore(wsc())
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(kw("in"))
+        .then(expr.clone())
+        .then_ignore(wsc())
+        .then_ignore(just(','))
+        .then_ignore(wsc())
+        .then(expr.clone())
+        .map_with(|(((kind, binder), coll), body), e| {
+            Node::new(
+                Expr::QuantIn {
+                    kind,
+                    binder,
+                    coll: Box::new(coll),
+                    body: Box::new(body),
+                },
+                e.span().into_range(),
+            )
+        });
+
         // Parenthesized sub-expression
         let paren = just('(')
             .then_ignore(wsc())
@@ -438,6 +467,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             let_in,
             if_then_else,
             sum,
+            quant_in,
             quant,
         ))
         .boxed();

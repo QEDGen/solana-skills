@@ -168,6 +168,20 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             fin_bound: cx.env.fin_bound(binder_ty),
             body: under(binder, body, cx, shadow),
         },
+        Expr::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => ExprTree::QuantIn {
+            kind: match kind {
+                a::Quantifier::Forall => QuantKind::Forall,
+                a::Quantifier::Exists => QuantKind::Exists,
+            },
+            binder: binder.clone(),
+            coll: boxed(coll, cx, shadow),
+            body: under(binder, body, cx, shadow),
+        },
         Expr::BoolOp { op, lhs, rhs } => ExprTree::BoolOp {
             op: match op {
                 a::BoolOp::And => TreeBoolOp::And,

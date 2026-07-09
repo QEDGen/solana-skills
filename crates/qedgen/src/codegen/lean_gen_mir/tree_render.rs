@@ -147,6 +147,28 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
                 Prec::Implies,
             )
         }
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // `∃|∀ x ∈ coll, body` — bounded quantifier over a List (Vec).
+            let sym = match kind {
+                QuantKind::Forall => "\u{2200}",
+                QuantKind::Exists => "\u{2203}",
+            };
+            (
+                format!(
+                    "({} {} \u{2208} {}, {})",
+                    sym,
+                    binder,
+                    render(coll, cx, inside_old).0,
+                    render(body, cx, inside_old).0
+                ),
+                Prec::Atom,
+            )
+        }
         ExprTree::BoolOp { op, lhs, rhs } => {
             let (sym, prec) = match op {
                 TreeBoolOp::And => (" \u{2227} ", Prec::And),
@@ -385,6 +407,7 @@ fn render_old(inner: &ExprTree, cx: LeanCx) -> (String, Prec) {
         | ExprTree::Old(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -542,6 +565,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         ExprTree::Old(inner) | ExprTree::Not(inner) => tree_mentions_ident(inner, name),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => {
             tree_mentions_ident(body, name)
+        }
+        ExprTree::QuantIn { coll, body, .. } => {
+            tree_mentions_ident(coll, name) || tree_mentions_ident(body, name)
         }
         ExprTree::Contains { coll, elem } => {
             tree_mentions_ident(coll, name) || tree_mentions_ident(elem, name)

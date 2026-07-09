@@ -978,7 +978,7 @@ fn collect_tree_bound_guards(
         ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => false,
         ExprTree::Old(inner) | ExprTree::Not(inner) => walk(inner, conds),
         // Binder-introducing bodies — out-of-scope identifiers in a guard.
-        ExprTree::Sum { .. } | ExprTree::Quant { .. } => false,
+        ExprTree::Sum { .. } | ExprTree::Quant { .. } | ExprTree::QuantIn { .. } => false,
         // Rust `&&` / `||` short-circuit: only the lhs is unconditional.
         ExprTree::BoolOp { lhs, .. } => walk(lhs, conds),
         ExprTree::Cmp { lhs, rhs, .. } => {

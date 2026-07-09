@@ -195,6 +195,28 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             render_quant(*kind, binder, binder_ty, fin_bound, body, cx, inside_old),
             Prec::Atom,
         ),
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // Bounded quantifier over a collection: `coll.iter().any|all(|x| …)`.
+            let method = match kind {
+                QuantKind::Forall => "all",
+                QuantKind::Exists => "any",
+            };
+            (
+                format!(
+                    "{}.iter().{}(|{}| {})",
+                    render(coll, cx, inside_old).0,
+                    method,
+                    binder,
+                    render(body, cx, inside_old).0
+                ),
+                Prec::Atom,
+            )
+        }
         // Bool ops parenthesize both operands unconditionally — matches the
         // legacy output byte-for-byte and sidesteps `&&`/`||` precedence.
         ExprTree::BoolOp { op, lhs, rhs } => {
@@ -568,6 +590,7 @@ fn rust_num_kind(e: &ExprTree) -> NumKind {
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -600,6 +623,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -742,6 +766,7 @@ fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &s
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -906,6 +931,7 @@ fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -978,6 +1004,10 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
         ExprTree::Int(_) | ExprTree::Bool(_) => {}
         ExprTree::Old(inner) | ExprTree::Not(inner) => for_each_path(inner, f),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => for_each_path(body, f),
+        ExprTree::QuantIn { coll, body, .. } => {
+            for_each_path(coll, f);
+            for_each_path(body, f);
+        }
         ExprTree::BoolOp { lhs, rhs, .. }
         | ExprTree::Cmp { lhs, rhs, .. }
         | ExprTree::Arith { lhs, rhs, .. } => {
@@ -1099,6 +1129,9 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => false,
         ExprTree::Old(inner) | ExprTree::Not(inner) => contains_fallible_arith(inner),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => contains_fallible_arith(body),
+        ExprTree::QuantIn { coll, body, .. } => {
+            contains_fallible_arith(coll) || contains_fallible_arith(body)
+        }
         ExprTree::BoolOp { lhs, rhs, .. } | ExprTree::Cmp { lhs, rhs, .. } => {
             contains_fallible_arith(lhs) || contains_fallible_arith(rhs)
         }

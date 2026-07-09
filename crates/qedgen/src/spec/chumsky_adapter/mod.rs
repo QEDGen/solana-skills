@@ -330,6 +330,7 @@ impl<'a> TypeEnv<'a> {
             Expr::Old(inner) => self.infer(&inner.node),
             Expr::Sum { body, .. } => self.infer(&body.node),
             Expr::Quant { .. } => Kind::Bool,
+            Expr::QuantIn { .. } => Kind::Bool,
             Expr::BoolOp { .. } => Kind::Bool,
             Expr::Not(_) => Kind::Bool,
             Expr::Cmp { .. } => Kind::Bool,

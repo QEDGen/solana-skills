@@ -866,6 +866,18 @@ pub enum Expr {
     /// Produces a `Nat`. For `Vec` state fields (`len(state.approved) >=
     /// threshold`) in requires/ensures.
     Len(Box<Node<Expr>>),
+    /// `exists x in coll, body` / `forall x in coll, body` — a bounded quantifier
+    /// over a COLLECTION value (a `Vec` field), binding each element to `x` in
+    /// `body`. Distinct from `Quant`, which quantifies over a TYPE domain
+    /// (`Fin[N]` / small int). Rust: `coll.iter().any|all(|x| body)`; Lean:
+    /// `∃|∀ x ∈ coll, body`. The vehicle for "some/every element of a collection
+    /// satisfies P" — e.g. `exists c in state.post_hook_accounts, c == authority`.
+    QuantIn {
+        kind: Quantifier,
+        binder: String,
+        coll: Box<Node<Expr>>,
+        body: Box<Node<Expr>>,
+    },
     /// Inline `match scrutinee with | Variant binder => body | Variant => body`.
     /// Dispatches on a sum-typed scrutinee's constructor. `binder` is `Some`
     /// when the variant carries a payload and the arm wants to name it;
@@ -975,6 +987,12 @@ pub fn for_each_child_with_binder<'a>(
         Expr::Int(_) | Expr::Bool(_) | Expr::Path(_) => {}
         Expr::Old(inner) | Expr::Not(inner) | Expr::Paren(inner) => f(inner, None),
         Expr::Sum { binder, body, .. } | Expr::Quant { binder, body, .. } => f(body, Some(binder)),
+        Expr::QuantIn {
+            binder, coll, body, ..
+        } => {
+            f(coll, None);
+            f(body, Some(binder));
+        }
         Expr::BoolOp { lhs, rhs, .. }
         | Expr::Cmp { lhs, rhs, .. }
         | Expr::Arith { lhs, rhs, .. } => {

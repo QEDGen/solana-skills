@@ -46,6 +46,25 @@ pub(super) fn expr_to_lean(e: &Expr, ctx: Ctx, consts: ConstTable, env: &TypeEnv
                 expr_to_lean(&body.node, ctx, consts, env)
             )
         }
+        Expr::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // `∃|∀ x ∈ coll, body` — a bounded quantifier over a List (Vec).
+            let sym = match kind {
+                a::Quantifier::Forall => "\u{2200}",
+                a::Quantifier::Exists => "\u{2203}",
+            };
+            format!(
+                "({} {} \u{2208} {}, {})",
+                sym,
+                binder,
+                expr_to_lean(&coll.node, ctx, consts, env),
+                expr_to_lean(&body.node, ctx, consts, env)
+            )
+        }
         Expr::BoolOp { op, lhs, rhs } => {
             let sym = match op {
                 a::BoolOp::And => " \u{2227} ",

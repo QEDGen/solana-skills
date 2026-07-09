@@ -166,6 +166,27 @@ pub(super) fn expr_to_rust(
                 rust_ty, rust_ty, method, binder, body_rust
             )
         }
+        Expr::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // Bounded quantifier over a collection value: `coll.iter().any|all(
+            // |x| body)`. `.iter()` yields `&Element`; field access / matches in
+            // the body auto-deref, so no clone needed for the common cases.
+            let method = match kind {
+                a::Quantifier::Forall => "all",
+                a::Quantifier::Exists => "any",
+            };
+            format!(
+                "{}.iter().{}(|{}| {})",
+                expr_to_rust(&coll.node, ctx, consts, opts),
+                method,
+                binder,
+                expr_to_rust(&body.node, ctx, consts, opts)
+            )
+        }
         Expr::BoolOp { op, lhs, rhs } => {
             let lhs_r = expr_to_rust(&lhs.node, ctx, consts, opts);
             let rhs_r = expr_to_rust(&rhs.node, ctx, consts, opts);

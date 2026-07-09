@@ -128,6 +128,17 @@ fn walk_expr(e: &Expr, scope: &CanonScope, shadow: &mut Vec<String>) -> Expr {
             binder_ty: binder_ty.clone(),
             body: walk_under(binder, body, scope, shadow),
         },
+        Expr::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => Expr::QuantIn {
+            kind: *kind,
+            binder: binder.clone(),
+            coll: boxed(coll, scope, shadow),
+            body: walk_under(binder, body, scope, shadow),
+        },
         Expr::BoolOp { op, lhs, rhs } => Expr::BoolOp {
             op: *op,
             lhs: boxed(lhs, scope, shadow),
