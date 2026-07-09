@@ -285,23 +285,45 @@ pending a decision on whether it's in scope.
 
 ## Solana Kani abstraction library (capability, #182)
 
-> **STATUS (graduating from backlog, 2026-07-09):** the T1/T2/T4 abstraction
-> bodies currently ship as *codegen-emitted string literals re-inlined per
-> harness* (`kani_impl/state_ctor.rs` + `kani_mir/prefix.rs`), and the T1
-> soundness proof (`pk_abstract_eq_agrees_with_std`) has only ever run *once, in
-> a throwaway audit workspace* — it is pinned nowhere. Extracting the bodies into
-> a single-source, soundness-proven `kani_prelude` (the Kani twin of
-> `lean_solana/`) is in progress. Chunks: (1) stand up the dep-free soundness
-> core + `#[kani::proof]`s, `cargo kani` green locally ← **active**; (2) vendor
-> delivery (`write_kani_prelude`, mirroring `write_lean_solana`) + resolve the
-> Shape-1 (importable crate dep) vs Shape-2 (vendored shared `#[path]` module)
-> fork — Shape-2 sidesteps the anchor-lang version-unification the Pubkey stubs
-> need; (3) rewire codegen emit-body → emit-`use`, fold the two inline copies
-> onto the one source; (4) acceptance = regen the smart-account FV workspace,
-> confirm E-A falsification + the two green class-C proofs still close at unwind
-> 5. **DEFERRED (user, 2026-07-09):** the `kani.yml` CI job that would turn the
+> **STATUS (graduating from backlog, 2026-07-09; branch `feat/kani-prelude-182`):**
+> the T1/T2/T4 abstraction bodies shipped as *codegen-emitted string literals
+> re-inlined per harness* (`kani_impl/state_ctor.rs` + `kani_mir/prefix.rs`), and
+> the T1 soundness proof had only ever run *once, in a throwaway audit workspace*
+> — pinned nowhere. Extraction into a single-source, soundness-proven
+> `kani_prelude/` (the Kani twin of `lean_solana/`) is underway.
+>
+> - **Chunk 1 — SHIPPED.** `kani_prelude/` crate: dependency-free, `#![cfg(kani)]`,
+>   standalone workspace. Public API is byte-level (`wide_eq_32` / `wide_cmp_32` /
+>   `checked_div_i64` + `mul_div_*`) so it names no Solana type — **Shape 1**
+>   (user chose importable crate over vendored `#[path]` module) *without* the
+>   anchor-lang version-unification hazard. `cargo kani`: 3/3 harnesses green
+>   (pubkey eq/cmp ≡ derived over `[u8;32]`; div ≡ `i64::checked_div` bounded to
+>   i8 — unbounded div/mul_div are nonlinear/divider BMC walls, deferred with the
+>   contract argument documented).
+> - **Chunk 2 — SHIPPED.** `project::write_kani_prelude` embeds (`include_str!`)
+>   and materializes the crate as `qedgen_kani_prelude/` beside a program;
+>   mirrors `write_lean_solana`. Unit-tested. Not yet hooked into codegen.
+> - **Chunk 3 — NEXT (atomic; do NOT split — a `use` without the delivered crate
+>   + dep yields non-compiling harnesses that snapshot tests won't catch):**
+>   (a) `state_ctor::pubkey_eq_abstract_fn` / `div_abstract_fn` → thin local
+>   adapters over `qedgen_kani_prelude::{wide_eq_32,wide_cmp_32,checked_div_i64}`
+>   + a one-time `use` (stub attrs in `harness.rs:433/454` and the over-approx
+>   PDA/log/CPI/clock stubs stay inline — they need solana types / have no crate
+>   home); (b) call `write_kani_prelude` at the harness-gen sites (`run.rs:630`
+>   +the `codegen` cmd path) and inject the `qedgen-kani-prelude` path-dep into
+>   the program `Cargo.toml` — **SUB-DECISION: greenfield = emit in
+>   `codegen_mir.rs` (~L230); brownfield = MERGE into the user's existing
+>   manifest, not overwrite** (this is the path the smart-account acceptance
+>   exercises); (c) update `kani_impl/tests.rs` asserts (`fn pk_eq_abstract` body
+>   → `use qedgen_kani_prelude` + adapter) and regen the `*.kani_impl.rs`
+>   snapshots; fold the `kani_mir/prefix.rs` spec-model copy onto the crate too.
+> - **Chunk 4 — acceptance:** regen the smart-account FV workspace, confirm the
+>   E-A hook-authority falsification + the two green class-C proofs still close at
+>   unwind 5 with crate-imported stubs.
+>
+> **DEFERRED (user, 2026-07-09):** the `kani.yml` CI job that would turn the
 > soundness proofs into a *standing* pin — the shape is unsettled; revisit after
-> chunks 1–4 ship. Until then the proofs are runnable in-repo (`cd kani_prelude
+> the chunks ship. Until then the proofs are runnable in-repo (`cd kani_prelude
 > && cargo kani`) but not gated in CI, which has no Kani today.
 
 Reusable `#[kani::stub]` abstractions for common Solana types Kani wastefully
