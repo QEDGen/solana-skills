@@ -570,3 +570,48 @@ z3/cvc5 reason about bit-vector division natively. `pragma kani_solver = <solver
 emits `#[kani::solver(<solver>)]` after `#[kani::proof]` on every generated proof,
 so the solver requirement is baked in + reproducible without a `cargo kani --solver`
 flag (`1219c00`). Test: `brownfield_kani_solver_pragma_bakes_solver_attr`.
+
+### 📐 M4 — E-A / E-B (round-2 policy findings): per-finding tractability, code-grounded  [NEEDS-TRIAGE]
+
+Traced both remaining novel findings to the exact code with the current toolchain
+(CPI/log/clock stubs, Pubkey/PDA abstraction, reject + panic-free harnesses, payload
+binding, `kani_abstract_div`). Neither is a same-session harness; each needs a
+specific, well-scoped new capability.
+
+**E-A (HIGH) — ProgramInteraction hook force-signs as `HOOK_AUTHORITY`.**
+`Hook::execute` (`program_interaction.rs:408`) marks any runtime hook account whose
+key `== HOOK_AUTHORITY_PUBKEY` as a signer and `invoke_signed`s. The guard
+`ProgramInteractionHookAuthorityCannotBePartOfHookAccounts` (`errors.rs:176`) is
+defined but wired nowhere. Two angles:
+- *Runtime angle* (drive `Hook::execute`): needs symbolic `AccountInfo[]` construction
+  (#182 T4) — the CPI call is stubbable now, but building the `AccountInfo` array to
+  pass in is the wall.
+- *State angle* (the better one): the hooks ARE in the policy state (`pre_hook` /
+  `post_hook: Option<Hook>`, each with `account_constraints: Vec<AccountConstraint>`,
+  `AccountConstraintType::Pubkey(Vec<Pubkey>)`), and `invariant()` is PURE — so a
+  guard-enforcement (reject) proof over `invariant()` could demonstrate the missing
+  guard with no `AccountInfo`. Blockers: (a) the guard predicate — "`post_hook`'s
+  account constraints include `HOOK_AUTHORITY`" — needs nested-structure predicate
+  navigation the DSL lacks: `Option` access + `exists` over a `Vec` + enum-payload
+  binding (`AccountConstraintType::Pubkey(v)`) + nested `contains`; (b) mirroring the
+  deep policy state (Option<Hook>, Vec<enum-with-Vec-payload>, Vec<SpendingLimitV2>).
+- **Proposed:** a nested-predicate DSL feature — `exists x in state.<vec>, <pred(x)>`
+  with `Option` access and enum-payload binding — is the reusable unlock (covers any
+  "some element of a collection violates P" property). Then E-A is a reject proof over
+  the pure `invariant()`. This is the highest-leverage next DSL feature.
+
+**E-B (MED) — `SettingsChange` doesn't persist.** `execute_payload`
+(`settings_change.rs`) mutates an in-memory `Account<Settings>` (from a remaining
+account) via `modify_with_action`, reallocs, logs — but never `settings.exit()` /
+serializes back, so the change is dropped on return. The property ("the account DATA
+BUFFER reflects the change") is inherently about Borsh serialize-on-exit — needs
+account-data-buffer + serialize/deserialize modeling (#182 T3 serde), which is the
+documented-intractable tier. No pure-fn angle (the bug is a missing side effect).
+- **Proposed:** T3 serde modeling, OR accept the live anchor-ts repro as the evidence.
+
+**Both:** the live anchor-ts repros are the correct, existing, sufficient evidence.
+QEDGen's contribution would be the fixed-behavior regression spec — E-A via the
+nested-predicate feature + pure `invariant()`; E-B via T3. Ranked: E-A's
+nested-predicate DSL feature is worth building (broadly reusable); E-B waits on T3.
+- **Verdict:** FILE (methodology + two scoped feature asks). Leverage: nested-predicate
+  navigation unlocks a whole class of "collection element violates P" audit properties.
