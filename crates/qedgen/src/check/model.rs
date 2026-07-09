@@ -872,6 +872,17 @@ impl ParsedSpec {
         self.pragma_value("state_repr") == Some("adt")
     }
 
+    /// A spec that mirrors a real on-chain `#[account]` struct — `pragma
+    /// state_struct = <Name>` (the struct's real name) and/or `pragma
+    /// state_module = <path>` (its module). Both are brownfield-only signals:
+    /// the program already exists, so codegen must NOT synthesize a greenfield
+    /// Rust scaffold for it. `codegen_mir` never reads these pragmas, so the
+    /// scaffold-skip they gate changes no scaffold output. Single source of
+    /// truth for the Codegen dispatch's scaffold decision.
+    pub fn is_struct_mirror(&self) -> bool {
+        self.pragma_value("state_struct").is_some() || self.pragma_value("state_module").is_some()
+    }
+
     /// Look up a `pragma <key> = <value>` assignment.
     pub fn pragma_value(&self, key: &str) -> Option<&str> {
         self.pragma_assignments

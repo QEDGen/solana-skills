@@ -734,6 +734,84 @@ fn generated_pinocchio_kani_impl_proves_with_cargo_kani() {
     smoke_pinocchio_generated_kani_impl("kani-generated-ping", "ping.qedspec", "verify_ping_impl");
 }
 
+/// A struct-mirror spec (`pragma state_struct = <RealStruct>`) describes a
+/// program that ALREADY EXISTS, so `codegen` must not synthesize a greenfield
+/// Anchor scaffold for it — under ANY invocation, not just
+/// `--kani-impl-brownfield`. Dropping the pragma re-enables the scaffold, which
+/// proves the pragma (not some incidental spec shape) is the deciding signal.
+/// Fast: inspects the generated tree, no cargo.
+#[test]
+fn struct_mirror_codegen_skips_greenfield_scaffold() {
+    const MIRROR_SPEC: &str = "spec MirrorSmoke
+pragma state_struct = Settings
+type Error | Bad
+state {
+  threshold : U16,
+  time_lock : U32,
+}
+handler bump (new_threshold : U16) {
+  requires new_threshold > 0 else Bad
+  modifies [threshold]
+  effect { threshold := new_threshold }
+}
+";
+
+    fn codegen_anchor(spec_body: &str) -> (bool, String, tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec_path = temp.path().join("spec.qedspec");
+        std::fs::write(&spec_path, spec_body).expect("write spec");
+        std::fs::create_dir(temp.path().join(".qed")).expect("create .qed");
+        run(Command::new("git").arg("init").current_dir(temp.path()));
+        let output_dir = temp.path().join("programs");
+        let out = Command::new(env!("CARGO_BIN_EXE_qedgen"))
+            .arg("codegen")
+            .arg("--spec")
+            .arg(&spec_path)
+            .arg("--target")
+            .arg("anchor")
+            .arg("--output-dir")
+            .arg(&output_dir)
+            .current_dir(temp.path())
+            .output()
+            .expect("spawn codegen");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "codegen should succeed, got {}\nstderr:\n{stderr}",
+            out.status
+        );
+        (out.status.success(), stderr, temp, output_dir)
+    }
+
+    // (1) Mirror spec -> scaffold skipped, note printed, no crate files anywhere.
+    let (_, stderr, temp, _out_dir) = codegen_anchor(MIRROR_SPEC);
+    assert!(
+        stderr.contains("skipping greenfield Rust scaffold"),
+        "expected a scaffold-skip note for a struct-mirror spec, got stderr:\n{stderr}"
+    );
+    let scaffold_files: Vec<PathBuf> = walk_files(temp.path())
+        .into_iter()
+        .filter(|p| {
+            matches!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some("Cargo.toml") | Some("lib.rs")
+            )
+        })
+        .collect();
+    assert!(
+        scaffold_files.is_empty(),
+        "struct-mirror spec must not emit a greenfield crate, found: {scaffold_files:?}"
+    );
+
+    // (2) Same spec WITHOUT the mirror pragma -> the scaffold IS emitted.
+    let plain = MIRROR_SPEC.replace("pragma state_struct = Settings\n", "");
+    let (_, _stderr, _temp2, out_dir2) = codegen_anchor(&plain);
+    assert!(
+        out_dir2.join("Cargo.toml").exists(),
+        "a non-mirror Anchor spec should still emit the greenfield scaffold Cargo.toml"
+    );
+}
+
 #[test]
 fn pinocchio_kani_profile_diversity_fixture_generates_expected_proofs() {
     smoke_pinocchio_kani_profile_diversity();

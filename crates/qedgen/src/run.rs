@@ -1259,15 +1259,21 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                      generate Lean proofs via --lean; runtime checks belong in \
                      client-side tests)."
                 );
-            } else if kani_impl_brownfield {
+            } else if kani_impl_brownfield || parsed.is_struct_mirror() {
                 // Brownfield: the program pre-exists, so the greenfield Rust
                 // scaffold is meaningless — and it would `map_type` the real
                 // struct's field types (enums, imported types) that a mirror
                 // State legitimately names but the scaffold isn't meant to
-                // synthesize. Emit only the impl-Kani harness below.
+                // synthesize. Emit only the impl-Kani harness below (if asked).
+                //
+                // Triggers on the `--kani-impl-brownfield` flag OR a spec that
+                // is a struct mirror by construction (`pragma state_struct` /
+                // `state_module`) — so a mirror spec never drops a throwaway
+                // crate under ANY invocation (default, `--kani-impl`, `--all`),
+                // not just when the flag is passed.
                 eprintln!(
-                    "note: brownfield impl-Kani — skipping greenfield Rust scaffold \
-                     (the program already exists; only the impl-Kani harness is generated)."
+                    "note: brownfield spec (pragma state_struct / --kani-impl-brownfield) \
+                     — skipping greenfield Rust scaffold; the program already exists."
                 );
             } else {
                 codegen_mir::generate(&mir, &parsed, &spec, &output_dir, target)?;
