@@ -1337,6 +1337,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     target,
                     impl_mode,
                 )?;
+
+                // #182 Shape-1: when the harness's Pubkey/div stubs call the
+                // soundness-proven `qedgen_kani_prelude`, deliver the crate beside
+                // the program and depend on it. Gated so the over-approximation
+                // stubs (PDA/log/CPI/clock) don't pull in an unused crate.
+                if kani_impl::harness_uses_kani_prelude(&parsed) {
+                    crate::project::deliver_kani_prelude_for_harness(&kani_impl_path)?;
+                }
             }
 
             if test || all {

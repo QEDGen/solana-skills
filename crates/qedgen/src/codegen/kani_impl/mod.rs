@@ -47,6 +47,8 @@ pub(crate) use brownfield::*;
 pub(crate) use frameworks::*;
 pub(crate) use harness::*;
 pub(crate) use pinocchio::*;
+// #182: codegen (run.rs) consults this to deliver + depend on `qedgen_kani_prelude`.
+pub(crate) use state_ctor::harness_uses_kani_prelude;
 
 /// A handler triggers auto-emission when its `modifies` clause lists a
 /// field that does NOT appear as any effect LHS — the signal that the
