@@ -2,63 +2,58 @@
 //!
 //! QEDGen's Kani harnesses replace a handful of Solana primitives that CBMC
 //! bit-blasts wastefully with cheaper, sound abstractions wired via
-//! `#[kani::stub]`. Historically each abstraction was emitted as a *string
-//! literal, re-inlined into every generated harness*, and its soundness was
-//! argued once in prose (or checked once in a throwaway workspace). This crate
-//! is the single source of truth: each abstraction lives here as real,
-//! compile-checked code, and — where it is an *exact* abstraction — carries a
-//! `#[kani::proof]` that machine-checks it against the primitive it replaces.
+//! `#[kani::stub]`. Historically each was emitted as a *string literal,
+//! re-inlined into every generated harness*, its soundness argued once in prose.
+//! This crate is the single source of truth: each abstraction lives here as
+//! real, compile-checked code, and — where it is an *exact* abstraction —
+//! carries a `#[kani::proof]` that machine-checks it against the primitive it
+//! replaces.
 //!
-//! ## Why a local `Pubkey` model is faithful
+//! ## A dependency-free, byte-level API
+//!
+//! The public surface is deliberately typed over `[u8; 32]` / `i64` / `u128`,
+//! never over `anchor_lang::prelude::Pubkey`. That is what makes this an
+//! *importable* crate rather than a per-target regenerated blob: because it
+//! names no Solana type, it needs no anchor-lang / solana-program dependency,
+//! so there is no version to unify against the program under test. The
+//! generated harness keeps its own `Pubkey`-typed stub target and calls in with
+//! a one-line adapter over the program's own type:
+//!
+//! ```ignore
+//! use qedgen_kani_prelude as kp;
+//! fn pk_eq_abstract(a: &Pubkey, b: &Pubkey) -> bool {
+//!     kp::wide_eq_32(a.to_bytes(), b.to_bytes())          // proven logic lives in the crate
+//! }
+//! #[kani::stub(<Pubkey as core::cmp::PartialEq>::eq, pk_eq_abstract)]
+//! ```
+//!
+//! ## Why proving over `[u8; 32]` covers the real `Pubkey`
 //!
 //! solana / anchor `Pubkey` is `#[repr(transparent)] struct Pubkey([u8; 32])`
-//! with **derived** `PartialEq`/`Eq`/`Ord` — i.e. elementwise-then-lexicographic
-//! `[u8; 32]` comparison, byte 0 most significant. `anchor_lang::prelude::Pubkey`
-//! re-exports exactly that type. The abstractions below never touch anything
-//! *but* those 32 bytes, so a lemma proved against the local [`Pubkey`] model
-//! transfers verbatim to the real type — and we stay dependency-free (no
-//! anchor-lang/solana-program in the graph, no version-unification, fast
-//! solving). The vendored harness bodies keep their `anchor_lang::prelude::`
-//! signatures; this crate proves the byte-level content those signatures wrap.
+//! with **derived** `Eq`/`Ord`, and a derive on a newtype delegates straight to
+//! the inner `[u8; 32]`'s own `==` / `cmp`. The proofs below check the
+//! abstraction against exactly those array operations, so the lemma transfers to
+//! `Pubkey` verbatim — while the crate stays dependency-free and fast to solve.
 //!
 //! ## Endianness
 //!
-//! Kani models a little-endian target (as does every Solana host). The
-//! ordering abstraction's `swap_bytes` reinterprets each little-endian `u128`
-//! half as big-endian so tuple-lexicographic `u128` comparison reproduces the
-//! big-endian / byte-lexicographic order of the derived `Ord`. Equality is
-//! endianness-independent (equal bytes ⟺ equal words either way).
+//! Kani models a little-endian target (as does every Solana host). `wide_cmp_32`
+//! `swap_bytes` reinterprets each little-endian `u128` half as big-endian so
+//! tuple-lexicographic `u128` comparison reproduces the byte-lexicographic order
+//! of the derived `Ord`. Equality is endianness-independent.
 //!
 //! ## Exact vs over-approximating
 //!
-//! `pk_eq_abstract` / `pk_cmp_abstract` / `checked_div_abstract` are **exact** —
-//! they agree with the real primitive on every input, proved below (sound in
-//! both directions, so they change no verification result). The PDA / log / CPI
-//! stubs (Tiers 2/4) are deliberately *over-approximating* (opaque symbolic
-//! address, no-op logging, assumed-success CPI): sound for safety properties by
-//! construction, with nothing to prove equal — they live with the vendor
-//! template, not here, since they need real solana-program types.
+//! `wide_eq_32` / `wide_cmp_32` / `checked_div_i64` are **exact** — proved equal
+//! to the primitive they replace on every input (sound both ways, so they change
+//! no verification result). The PDA / log / CPI stubs (Tiers 2/4) are
+//! deliberately *over-approximating* (opaque symbolic address, no-op logging,
+//! assumed-success CPI): sound for safety by construction, nothing to prove
+//! equal, and they need real solana-program types — so they live with the
+//! generated harness, not in this dependency-free crate.
 #![cfg(kani)]
 
 use core::cmp::Ordering;
-
-/// Faithful, dependency-free model of solana/anchor `Pubkey`: a 32-byte newtype
-/// with derived `Eq`/`Ord`. See the module docs for why proving against this
-/// transfers to `anchor_lang::prelude::Pubkey`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pubkey([u8; 32]);
-
-impl Pubkey {
-    #[inline]
-    pub fn new_from_array(bytes: [u8; 32]) -> Self {
-        Pubkey(bytes)
-    }
-
-    #[inline]
-    pub fn to_bytes(self) -> [u8; 32] {
-        self.0
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tier 1 — opaque-token equality / ordering (#182). Reinterpret the 32 bytes as
@@ -66,21 +61,24 @@ impl Pubkey {
 // unwind 2 vs >= 34). Verification-only, so the transmute never runs on-chain.
 // ---------------------------------------------------------------------------
 
-/// Abstract `Pubkey` equality. Proven bit-for-bit equivalent to the derived
-/// `==` by [`pk_eq_abstract_agrees_with_derive`].
+/// Abstract 32-byte equality — the reusable core of the `Pubkey ==` stub.
+/// Reinterprets the bytes as two `u128` halves and compares (equal bytes ⇔
+/// equal words, so endianness is irrelevant here). Proved equivalent to
+/// elementwise `[u8; 32]` equality by [`wide_eq_32_agrees_with_array`].
 #[allow(clippy::missing_transmute_annotations)]
-pub fn pk_eq_abstract(a: &Pubkey, b: &Pubkey) -> bool {
-    let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };
-    let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };
+pub fn wide_eq_32(a: [u8; 32], b: [u8; 32]) -> bool {
+    let a: [u128; 2] = unsafe { core::mem::transmute(a) };
+    let b: [u128; 2] = unsafe { core::mem::transmute(b) };
     a[0] == b[0] && a[1] == b[1]
 }
 
-/// Abstract `Pubkey` ordering (byte-lexicographic = big-endian u256). Proven
-/// equivalent to the derived `cmp` by [`pk_cmp_abstract_agrees_with_derive`].
+/// Abstract 32-byte lexicographic ordering (byte 0 most significant = big-endian
+/// u256) — the reusable core of the `Pubkey cmp` stub. Proved equivalent to the
+/// derived `[u8; 32]` `cmp` by [`wide_cmp_32_agrees_with_array`].
 #[allow(clippy::missing_transmute_annotations)]
-pub fn pk_cmp_abstract(a: &Pubkey, b: &Pubkey) -> Ordering {
-    let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };
-    let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };
+pub fn wide_cmp_32(a: [u8; 32], b: [u8; 32]) -> Ordering {
+    let a: [u128; 2] = unsafe { core::mem::transmute(a) };
+    let b: [u128; 2] = unsafe { core::mem::transmute(b) };
     (a[0].swap_bytes(), a[1].swap_bytes()).cmp(&(b[0].swap_bytes(), b[1].swap_bytes()))
 }
 
@@ -90,12 +88,14 @@ pub fn pk_cmp_abstract(a: &Pubkey, b: &Pubkey) -> Ordering {
 // it with a fresh symbolic quotient pinned by division's EXACT contract
 // (`a = q*b + r`, `|r| < |b|`, `sign(r) = sign(a)`, computed in i128 so the
 // contract math can't overflow) plus the two real `None` cases. The quotient is
-// unique for `b != 0`, so this is exact — proved by `checked_div_abstract_agrees_with_std`.
+// unique for `b != 0`, so this is exact — see `checked_div_i64_agrees_with_std_bounded`.
 // ---------------------------------------------------------------------------
 
-/// Abstract `i64::checked_div`. Proven equal to `a.checked_div(b)` on every
-/// input by [`checked_div_abstract_agrees_with_std`].
-pub fn checked_div_abstract(a: i64, b: i64) -> Option<i64> {
+/// Abstract `i64::checked_div` — the reusable core of the `checked_div` stub.
+/// Returns a fresh symbolic quotient constrained by truncating division's exact
+/// contract instead of invoking the divider circuit. Proved equal to
+/// `a.checked_div(b)` (bounded) by [`checked_div_i64_agrees_with_std_bounded`].
+pub fn checked_div_i64(a: i64, b: i64) -> Option<i64> {
     if b == 0 || (a == i64::MIN && b == -1) {
         return None; // the real `checked_div`'s two None cases
     }
@@ -110,7 +110,9 @@ pub fn checked_div_abstract(a: i64, b: i64) -> Option<i64> {
 // ---------------------------------------------------------------------------
 // Saturating `mul_div` helpers — emitted today by the spec-model path
 // (`kani_mir/prefix.rs`) when a guard references them. Not stubs of a std fn;
-// bounded-correctness proofs pin their `floor`/`ceil`/`bps` semantics.
+// correctness proofs are DEFERRED (their spec compares against a symbolic u128
+// divider — the same stall `checked_div_i64` sidesteps; a tractable proof needs
+// the same divider-free contract encoding).
 // ---------------------------------------------------------------------------
 
 /// `floor(a*b/d)` with saturation on overflow; `0` when `d == 0`.
@@ -151,55 +153,45 @@ pub fn mul_bps_floor_u128(a: u128, bps: u128) -> u128 {
 
 // ===========================================================================
 // Soundness proofs — each `exact` abstraction agrees with the primitive it
-// replaces on EVERY input. Run with `cargo kani` (in this directory).
+// replaces. Proved directly over `[u8; 32]` / `i64`, which (see module docs) is
+// exactly what the real `Pubkey` derives delegate to. Run with `cargo kani`.
 // ===========================================================================
 
-/// T1: abstract Pubkey equality ≡ derived `==`, for all byte pairs. The
-/// derived side is a 32-element array compare (a loop) — hence `unwind(33)`;
-/// the abstraction itself is unwind-free, which is the whole point.
+/// T1: `wide_eq_32` ≡ derived `[u8; 32]` equality (= `Pubkey ==`), for all byte
+/// pairs. The array `==` is a 32-element loop — hence `unwind(33)`; the
+/// abstraction itself is unwind-free, which is the whole point.
 #[kani::proof]
 #[kani::unwind(33)]
-fn pk_eq_abstract_agrees_with_derive() {
-    let a = Pubkey::new_from_array(kani::any());
-    let b = Pubkey::new_from_array(kani::any());
-    assert_eq!(pk_eq_abstract(&a, &b), a == b);
+fn wide_eq_32_agrees_with_array() {
+    let a: [u8; 32] = kani::any();
+    let b: [u8; 32] = kani::any();
+    assert_eq!(wide_eq_32(a, b), a == b);
 }
 
-/// T1: abstract Pubkey ordering ≡ derived `cmp`, for all byte pairs. Derived
-/// `Ord` on `[u8; 32]` is a lexicographic loop — `unwind(33)`.
+/// T1: `wide_cmp_32` ≡ derived `[u8; 32]` `cmp` (= `Pubkey cmp`), for all byte
+/// pairs. Array `Ord` is a lexicographic loop — `unwind(33)`.
 #[kani::proof]
 #[kani::unwind(33)]
-fn pk_cmp_abstract_agrees_with_derive() {
-    let a = Pubkey::new_from_array(kani::any());
-    let b = Pubkey::new_from_array(kani::any());
-    assert_eq!(pk_cmp_abstract(&a, &b), a.cmp(&b));
+fn wide_cmp_32_agrees_with_array() {
+    let a: [u8; 32] = kani::any();
+    let b: [u8; 32] = kani::any();
+    assert_eq!(wide_cmp_32(a, b), a.cmp(&b));
 }
 
-/// Arithmetic: abstract division ≡ `i64::checked_div`, BOUNDED to 8-bit
-/// operands. This is the most convincing form (direct equality against the real
-/// primitive), but comparing over full 64-bit values forces CBMC through the
-/// very divider circuit the abstraction exists to avoid; bounding `a`/`b` to
-/// `i8` range keeps it fast while still exercising every sign combination,
-/// truncation-toward-zero, and both `None` cases (`b == 0`, `MIN / -1`). The
+/// Arithmetic: `checked_div_i64` ≡ `i64::checked_div`, BOUNDED to 8-bit
+/// operands. The direct-equality form is the most convincing, but comparing over
+/// full 64-bit values forces CBMC through the very divider the abstraction
+/// avoids; bounding `a`/`b` to `i8` range keeps it fast while still exercising
+/// every sign combination, truncation-toward-zero, and both `None` cases. The
 /// UNBOUNDED proof is a nonlinear/divider BMC wall — the same wall the deferred
-/// `mul_div_*` proofs hit and the "Custom is a nonlinear-BMC wall (div
-/// abstracted, multiply-back residual)" note in docs/toolchain-backlog.md
-/// records — so unbounded soundness rests on the documented contract argument,
-/// not a machine check.
+/// `mul_div_*` proofs and the "Custom is a nonlinear-BMC wall" note in
+/// docs/toolchain-backlog.md record — so unbounded soundness rests on the
+/// documented contract argument, not a machine check.
 #[kani::proof]
-fn checked_div_abstract_agrees_with_std_bounded() {
+fn checked_div_i64_agrees_with_std_bounded() {
     let a: i64 = kani::any();
     let b: i64 = kani::any();
     kani::assume(a >= i8::MIN as i64 && a <= i8::MAX as i64);
     kani::assume(b >= i8::MIN as i64 && b <= i8::MAX as i64);
-    assert_eq!(checked_div_abstract(a, b), a.checked_div(b));
+    assert_eq!(checked_div_i64(a, b), a.checked_div(b));
 }
-
-// NOTE: correctness proofs for the `mul_div_*` helpers are DEFERRED. Their
-// spec (`== (a*b)/d`) compares against a *symbolic u128 division*, which forces
-// CBMC through the same 128-bit divider circuit that stalls the solver — the
-// very stall `checked_div_abstract` exists to sidestep (cf. the "Custom is a
-// nonlinear-BMC wall" note in docs/toolchain-backlog.md). A tractable proof
-// needs a divider-free contract encoding (fresh symbolic quotient pinned by
-// `q*d + r == a*b`, `r < d`), mirroring `checked_div_abstract`; tracked as a
-// follow-up so this crate's `cargo kani` stays fast and green.
