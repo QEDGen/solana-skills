@@ -285,6 +285,25 @@ pending a decision on whether it's in scope.
 
 ## Solana Kani abstraction library (capability, #182)
 
+> **STATUS (graduating from backlog, 2026-07-09):** the T1/T2/T4 abstraction
+> bodies currently ship as *codegen-emitted string literals re-inlined per
+> harness* (`kani_impl/state_ctor.rs` + `kani_mir/prefix.rs`), and the T1
+> soundness proof (`pk_abstract_eq_agrees_with_std`) has only ever run *once, in
+> a throwaway audit workspace* — it is pinned nowhere. Extracting the bodies into
+> a single-source, soundness-proven `kani_prelude` (the Kani twin of
+> `lean_solana/`) is in progress. Chunks: (1) stand up the dep-free soundness
+> core + `#[kani::proof]`s, `cargo kani` green locally ← **active**; (2) vendor
+> delivery (`write_kani_prelude`, mirroring `write_lean_solana`) + resolve the
+> Shape-1 (importable crate dep) vs Shape-2 (vendored shared `#[path]` module)
+> fork — Shape-2 sidesteps the anchor-lang version-unification the Pubkey stubs
+> need; (3) rewire codegen emit-body → emit-`use`, fold the two inline copies
+> onto the one source; (4) acceptance = regen the smart-account FV workspace,
+> confirm E-A falsification + the two green class-C proofs still close at unwind
+> 5. **DEFERRED (user, 2026-07-09):** the `kani.yml` CI job that would turn the
+> soundness proofs into a *standing* pin — the shape is unsettled; revisit after
+> chunks 1–4 ship. Until then the proofs are runnable in-repo (`cd kani_prelude
+> && cargo kani`) but not gated in CI, which has no Kani today.
+
 Reusable `#[kani::stub]` abstractions for common Solana types Kani wastefully
 bit-blasts, auto-emitted by the brownfield harness (like the Clock stub, G14).
 This IS the existing Lean "Trust (axioms)" boundary (SPL Token, PDA, CPI,
