@@ -236,11 +236,14 @@ handler set_threshold (new_threshold : U16) {
         !body.contains("mod symbolic_accounts") && !body.contains("let result = accounts.handler"),
         "must NOT emit the greenfield Accounts context / accounts.handler shape; got:\n{body}"
     );
-    // Snapshots read from `state.<field>`, incl. the read-only field.
+    // The `requires` field is pre-snapshotted; the ensures reads its post fields
+    // DIRECTLY off `state` by reference — no owned `post_` snapshot (the
+    // drop-suppression shape, backlog R2).
     assert!(
         body.contains("let pre_num_voters = state.num_voters;")
-            && body.contains("let post_num_voters = state.num_voters;"),
-        "read-only field snapshotted from `state`; got:\n{body}"
+            && !body.contains("let post_num_voters =")
+            && body.contains("state.threshold <= state.num_voters"),
+        "requires pre-snapshot; ensures reads post fields off `state`; got:\n{body}"
     );
     // requires assume reads the pre-snapshot (not the unbound `s.` accessor).
     assert!(
@@ -323,9 +326,9 @@ handler set_time_lock (new_time_lock : U32) {
     // The harness CALLS the ctor + assumes pre-state validity — construction is
     // no longer agent-fill; only the effect gate (2/2) is.
     assert!(
-        body.contains("let mut state = symbolic_settings();")
+        body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_settings());")
             && body.contains("kani::assume(state.invariant().is_ok());"),
-        "harness calls the generated ctor + validity assume; got:\n{body}"
+        "harness calls the generated ctor (ManuallyDrop-wrapped, R2) + validity assume; got:\n{body}"
     );
     assert!(
         !body.contains("AGENT-FILL (1/2)") && body.contains("AGENT-FILL (2/2)"),
@@ -422,8 +425,8 @@ handler recompute (n : U64) {
 
     assert!(
         body.contains("fn verify_recompute_panic_free()")
-            && body.contains("let mut state = symbolic_widget();"),
-        "panic-free harness constructs symbolic state; got:\n{body}"
+            && body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_widget());"),
+        "panic-free harness constructs symbolic state (ManuallyDrop-wrapped, R2); got:\n{body}"
     );
     // Panic-freedom is claimed UNDER the handler's preconditions — the `requires`
     // guard is assumed (not asserted).
@@ -570,39 +573,39 @@ handler begin_tally (dummy : U64) {
         !body.contains("/* ty */") && !body.contains("::Carried(..)"),
         "IsVariant must resolve the enum + shape, not emit the stub; got:\n{body}"
     );
-    // Struct variants → resolved enum name + `{ .. }` pattern.
+    // Struct variants → resolved enum name + `{ .. }` pattern. Post reads go
+    // through `state.<field>` directly (ManuallyDrop deref); pre reads its snapshot.
     assert!(
         body.contains("matches!(pre_status, BallotStatus::Open { .. })")
-            && body.contains("matches!(post_status, BallotStatus::Carried { .. })"),
+            && body.contains("matches!(state.status, BallotStatus::Carried { .. })"),
         "struct-variant `is` → `Enum::V {{ .. }}`; got:\n{body}"
     );
     // Unit variant → bare `Enum::V`, no braces or parens.
     assert!(
-        body.contains("matches!(post_status, BallotStatus::Tallying)")
+        body.contains("matches!(state.status, BallotStatus::Tallying)")
             && !body.contains("BallotStatus::Tallying {")
             && !body.contains("BallotStatus::Tallying("),
         "unit-variant `is` → `Enum::V` (no payload); got:\n{body}"
     );
-    // `len(coll)` → `(coll.len() as u64)`.
+    // `len(coll)` → `(coll.len() as u64)`, read off `state` for a post field.
     assert!(
-        body.contains("(post_votes.len() as u64) >= quorum"),
+        body.contains("(state.votes.len() as u64) >= quorum"),
         "len(coll) → `(coll.len() as u64)`; got:\n{body}"
     );
     // Non-Copy ADT status field: the PRE-snapshot `.clone()`s (a move would leave
-    // `state` partially moved before the `&mut state` method call that follows),
-    // but the POST-snapshot MOVES (it's the last read of the field — the assert
-    // reads the `post_<x>` local, and no `&mut state` call follows). The Copy
-    // `epoch` field is not snapshotted here.
+    // `state` partially moved before the effect that follows). The POST side is NOT
+    // snapshotted at all — the ensures reads `state.<field>` directly by reference
+    // (drop-suppression, R2), so no owned `post_status`/`post_votes` local exists.
     assert!(
         body.contains("let pre_status = state.status.clone();")
             && body.contains("let pre_votes = state.votes.clone();"),
         "non-Copy pre-snapshot must `.clone()`; got:\n{body}"
     );
     assert!(
-        body.contains("let post_status = state.status;")
-            && body.contains("let post_votes = state.votes;")
-            && !body.contains("let post_status = state.status.clone();"),
-        "non-Copy post-snapshot MOVES (no clone); got:\n{body}"
+        !body.contains("let post_status =")
+            && !body.contains("let post_votes =")
+            && body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_ballot());"),
+        "no owned post snapshot; state is ManuallyDrop-wrapped (R2); got:\n{body}"
     );
     // Crate-level placement glob-imports the crate root so the bare `BallotStatus`
     // name in the `matches!` resolves; the ctor still qualifies with `crate::`.
@@ -753,32 +756,37 @@ handler check (auth : Pubkey) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
-    // `post_hook` is read only via `post.` → a `post_post_hook` snapshot but no
-    // dead `pre_post_hook` clone. `n` is in `modifies` → snapshotted both sides.
-    // The post-snapshot MOVES (no `.clone()`) — it's the last read of the field.
+    // `post_hook` is read only via `post.` → no dead `pre_post_hook` clone (the
+    // pre/post split still holds), and — under drop-suppression (R2) — no owned
+    // `post_post_hook` snapshot either: the ensures reads `state.post_hook`
+    // directly by reference off the `ManuallyDrop`-wrapped state.
     assert!(
-        body.contains("let post_post_hook = state.post_hook;")
-            && !body.contains("let post_post_hook = state.post_hook.clone();")
-            && !body.contains("let pre_post_hook"),
-        "post-only field gets a moved post_ snapshot and no dead pre_ clone; got:\n{body}"
+        !body.contains("let post_post_hook")
+            && !body.contains("let pre_post_hook")
+            && body.contains("match &(state.post_hook)"),
+        "post-only field read off `state` by ref; no owned snapshot, no dead pre_ clone; got:\n{body}"
     );
 }
 
-/// The brownfield ensures post-snapshot MOVES the field out of `state` rather
-/// than `.clone()`-ing it: the assert reads the `post_<field>` local (never
-/// `state` again) and there is no CPI-assume splice, so the move is the last
-/// read. For a non-`Copy` nested container this avoids a deep copy+drop that
-/// would otherwise multiply CBMC's VCC count past the SAT/SMT resource wall.
+/// Drop-suppression (backlog R2): the brownfield ensures harness `ManuallyDrop`-
+/// wraps the symbolic state and reads `post.<field>` DIRECTLY off `state` by
+/// reference — no owned `post_<field>` snapshot is moved out, so the symbolic
+/// nested container is never dropped. That teardown machinery
+/// (`drop_in_place::<[T]>` / `RawVec::deallocate`), not the property, is what
+/// OOM'd CBMC's propositional reduction on deeply-nested state; suppressing it
+/// took a real E-A harness from 20,322 VCCs (OOM) to 2,395 (closes in seconds).
 #[test]
-fn brownfield_post_snapshot_moves_not_clones() {
+fn brownfield_drop_suppression_manually_drops_and_reads_by_ref() {
     let src = r#"spec PostMove
 pragma state_struct = Pol
 pragma state_invariant = none
-type Hook = { keys : Vec Pubkey }
+type Kind | Keys of Vec Pubkey | Other
+type Con = { kind : Kind }
+type Hook = { cons : Vec Con }
 state { post_hook : Option Hook, n : U8 }
 handler check (auth : Pubkey) {
   modifies [n]
-  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  ensures (match state.post_hook with | Some h => not (exists c in h.cons, (match c.kind with | Keys pks => contains(pks, auth) | _ => false)) | None => true)
   effect { n := 0 }
 }"#;
     let spec = parse_str(src).expect("parse");
@@ -795,12 +803,22 @@ handler check (auth : Pubkey) {
     let body = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
-    // The owned snapshot local is matched by REFERENCE (`match &(...)`), so the
-    // moved container is not re-cloned inside the predicate either.
+    // State is `ManuallyDrop`-wrapped; the ensures reads it by reference with no
+    // owned `post_post_hook` snapshot.
     assert!(
-        body.contains("let post_post_hook = state.post_hook;")
-            && body.contains("match &(post_post_hook)"),
-        "post-snapshot moves + owned-local match is by-ref; got:\n{body}"
+        body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_pol());")
+            && !body.contains("let post_post_hook"),
+        "ManuallyDrop state, no owned post snapshot; got:\n{body}"
+    );
+    // Both the outer snapshot match AND the inner `.iter()` enum match render by
+    // reference — NO defensive `.clone()` scrutinee survives, so the enum's `Vec`
+    // payloads never regenerate the `drop_in_place` teardown (the difference
+    // between a harness that times out and one that closes in seconds).
+    assert!(
+        body.contains("match &(state.post_hook)")
+            && body.contains("match &(c.kind)")
+            && !body.contains(").clone() {"),
+        "outer + inner matches by-ref; no clone-form scrutinee in the ensures; got:\n{body}"
     );
 }
 

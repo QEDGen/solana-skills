@@ -466,8 +466,19 @@ fn emit_symbolic_state(out: &mut String, spec: &ParsedSpec, state_struct: Option
                 "    // Symbolic `{struct_name}` — fully generated from the spec's State\n"
             ));
             out.push_str("    // (every field `kani::any()`).\n");
+            // Wrap in `ManuallyDrop` so the symbolic state's destructor —
+            // `drop_in_place::<[T]>` / `RawVec::deallocate` for nested `Vec`s — is
+            // NEVER emitted. That teardown machinery, not the property itself, is
+            // what blows CBMC's propositional reduction to an OOM on deeply-nested
+            // state (an `Option<Hook{ Vec<AccountConstraint{ Vec<Pubkey> }> }>`
+            // measured 20,322 VCCs → OOM; suppressing the drop → 2,395 VCCs, closes
+            // in seconds). Sound: skipping a destructor cannot affect a property
+            // checked before it, and the harness is `#[cfg(kani)]`-only (never runs
+            // on-chain). State is still read via `Deref`/`DerefMut` — method calls,
+            // field snapshots, and the by-reference `post.<field>` reads below all
+            // work unchanged. See docs/toolchain-backlog.md R2/R4.
             out.push_str(&format!(
-                "    let mut state = {}();\n",
+                "    let mut state = core::mem::ManuallyDrop::new({}());\n",
                 super::state_ctor::ctor_fn_name(struct_name)
             ));
             // Pre-state validity: `pragma state_invariant = <method>` (default
@@ -578,23 +589,17 @@ pub(crate) fn emit_brownfield_handler_harness(
     out.push_str("    // whether it succeeded to `ok`.\n");
     out.push_str("    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n");
 
-    // 5. Post-snapshot + assert (same `ensures` lowering as greenfield).
+    // 5. Assert the ensures. `post.<field>` reads the mutated-in-place state
+    //    field DIRECTLY (`state.<field>`, a place behind `ManuallyDrop`'s
+    //    `Deref`), matched by reference — NO owned `post_<field>` snapshot is
+    //    bound, so the symbolic nested container is never moved out of `state`
+    //    and never dropped. That is the drop-suppression that lets CBMC close on
+    //    deeply-nested state (backlog R2). Reading `state.<field>` at assert time
+    //    is the post-effect value (the AGENT-FILL mutates `state` in place), so it
+    //    is equivalent to the old post-snapshot. `pre.<field>` still reads its
+    //    pre-effect snapshot local.
     out.push_str("    if ok {\n");
-    if !snapshot.post.is_empty() {
-        out.push_str("        // Post-state snapshot.\n");
-        for field in &snapshot.post {
-            // MOVE the field out of `state` — no `.clone()`. This is the LAST
-            // read of `state.<field>` (the assert below reads the `post_<field>`
-            // local, never `state` again; there is no CPI-assume splice in the
-            // brownfield emitter), so a move is sound and, for a non-`Copy`
-            // nested container (a `Vec<Hook>` policy field), avoids a deep
-            // copy+drop that multiplies CBMC's VCC count. A `Copy` scalar field
-            // copies; an owned local is still readable more than once by-ref
-            // (`.len()` / `.contains()` / `.iter()` all borrow).
-            out.push_str(&format!("        let post_{field} = state.{field};\n"));
-        }
-    }
-    let lowered = rewrite_pre_post_paths(&ensures.rust_expr_binary);
+    let lowered = rewrite_ensures_post_to_state(&ensures.rust_expr_binary);
     out.push_str(&format!("        assert!(\n            {},\n", lowered));
     out.push_str(&format!(
         "            \"ensures clause {} on {} (impl, brownfield) violated\"\n",
@@ -996,6 +1001,29 @@ fn collect_prefixed_fields(expr: &str, prefix: &str, out: &mut std::collections:
 /// string replace is safe.
 fn rewrite_pre_post_paths(expr: &str) -> String {
     expr.replace("pre.", "pre_").replace("post.", "post_")
+}
+
+/// Ensures lowering for the `ManuallyDrop` brownfield handler harness. `pre.X`
+/// stays its pre-effect snapshot local (`pre_X`); `post.X` reads the mutated
+/// state field DIRECTLY (`state.X`, a place behind `ManuallyDrop`'s `Deref`),
+/// matched by reference. No owned `post_X` snapshot is bound, so the symbolic
+/// nested container is never moved out of `state` and never dropped — the
+/// drop-suppression that keeps CBMC from OOMing on deeply-nested state (R2).
+///
+/// Also strips the defensive `.clone()` the shared renderer puts on an inner
+/// `.iter()` match scrutinee (`match (c.kind).clone() {` → `match &(c.kind) {`).
+/// That clone materializes an OWNED enum whose `Vec` payloads regenerate the
+/// `drop_in_place`/`RawVec` teardown ManuallyDrop just suppressed — measured as
+/// the difference between a harness that TIMES OUT (clone kept) and one that
+/// closes in seconds (by-ref). Sound here because a brownfield ensures reads its
+/// match binders by reference (`.contains()`/`.iter()`/field access); the
+/// clone-form is preserved everywhere else (proptest, greenfield, `requires`
+/// guards) for the scalar-payload-binder case (`Custom(s) => s > 0`).
+fn rewrite_ensures_post_to_state(expr: &str) -> String {
+    expr.replace("pre.", "pre_")
+        .replace("post.", "state.")
+        .replace("match (", "match &(")
+        .replace(").clone() {", ") {")
 }
 
 /// True for the DSL `Pubkey` type. It lowers to `[u8; 32]` in the standalone

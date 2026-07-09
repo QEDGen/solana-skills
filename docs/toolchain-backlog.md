@@ -733,3 +733,37 @@ program that, by construction, already exists. That crate then carried
   both directions (pragma present → no scaffold; pragma dropped → scaffold
   returns). 1128+ unit tests + all snapshot suites green; fmt + clippy clean.
 - **Verdict: FIXED in source.**
+
+### 🧩 R4 — drop-suppression cracks the R2 CBMC wall (brownfield ManuallyDrop + by-ref)  [FIXED]
+
+R2 concluded a property navigating a symbolic nested `Vec` container was beyond
+CBMC on both backends. Re-running the shipped E-A harness (kani 0.67.0) confirmed
+it: **20,322 VCCs → OOM in propositional reduction**, the blowup entirely in
+`drop_in_place::<[AccountConstraint]>` / `RawVecInner::deallocate` — the symbolic
+state's **destructor**, not the property. So the fix is to never emit that
+teardown. Two changes to the brownfield handler emitter (`kani_impl/harness.rs`):
+
+1. **`ManuallyDrop` the symbolic state** (`emit_symbolic_state`) — the generated
+   `symbolic_<struct>()` is wrapped in `core::mem::ManuallyDrop::new(...)`, so its
+   nested-`Vec` destructor is never generated. Read unchanged via `Deref`/`DerefMut`.
+2. **By-reference post reads** (`rewrite_ensures_post_to_state`) — `post.<field>`
+   lowers to `state.<field>` (a place, matched by ref) instead of a moved-out
+   `post_<field>` snapshot, and the defensive `.clone()` on an inner `.iter()`
+   match scrutinee (`match (c.kind).clone()` → `match &(c.kind)`) is stripped.
+   No owned heap value is bound, so no `drop_in_place` is emitted anywhere.
+
+Sound: skipping a destructor cannot change a property checked before it, and the
+harness is `#[cfg(kani)]`-only. Both together take the E-A harness from **20,322
+VCCs / OOM** to **2,401 → 528 after simplification, symex 1.7s, closes in ~5s** —
+and the verdict flips from "no result" to a genuine **counterexample**: Kani finds
+a valid `ProgramInteractionPolicy` whose hook constrains `HOOK_AUTHORITY`, i.e. the
+guard-enforcement property is FALSE (Finding A, machine-checked; flips to PASS once
+the guard is wired — the regression gate).
+- **Evidence:** `hook_authority.qedspec` regenerated → `cargo kani` closes; before/after VCC + timing above.
+- **Scope:** brownfield handler-ensures harnesses only. Kept the clone-form everywhere
+  else (proptest, greenfield, `requires` guards) for the scalar-payload-binder case
+  (`Custom(s) => s > 0`). Regression: `brownfield_drop_suppression_manually_drops_and_reads_by_ref`
+  (nested `Option<Hook{Vec<Con{Kind}>}>` shape); 6 existing brownfield tests updated
+  off the superseded post-snapshot-move assertion. All suites + fmt + clippy green.
+- **Verdict: FIXED in source.** Supersedes the R1 post-snapshot-move optimization and
+  the R2 "FILE — upstream" verdict for the brownfield path.
