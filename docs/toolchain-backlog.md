@@ -541,6 +541,27 @@ Custom(s) then s > 0".
   tractability of symbolic `checked_div`**, not codegen. Next: abstract/bound the
   division (same pattern as the #181 Pubkey-memcmp wall — e.g. a `#[kani::stub]` on the
   divisor path, or bound the Custom period). Standard periods remain GREEN.
+- **UPDATE 2 — division abstracted (G15e), residual is the multiply-back.** `pragma
+  kani_abstract_div` SHIPPED (`9d24a89`) stubs `i64::checked_div` with an exact-contract
+  symbolic quotient — no divider circuit. The F Custom harness then advances PAST the
+  division check that stalled 22 min, but z3 next stalls ~8 min on the **multiply-back**
+  `periods_passed * reset_period` (symbolic × symbolic i64). A multiply, unlike a
+  divider circuit, has NO cheaper contract (a multiply's defining relation *is* a
+  multiply), so the div-abstraction trick doesn't transfer. F Custom is thus a *chain*
+  of nonlinear-symbolic-arithmetic walls: division cleared, multiply-back inherent.
+  Remaining options: bound the Custom period's bit-width (narrows the multiply, weaker
+  proof) or accept standard-periods-green + Custom-documented. Filed as G15e.
+
+### 🧩 G15e — abstract `i64::checked_div` (`pragma kani_abstract_div`)  [FIXED]
+
+A symbolic 64-bit divisor bit-blasts a sequential divider circuit that stalls both
+CaDiCaL and z3. `pragma kani_abstract_div = on` stubs `i64::checked_div` with
+`checked_div_abstract`: a fresh symbolic quotient pinned by division's EXACT contract
+(`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`, in i128; preserves the `b==0` /
+`MIN/-1` None cases). Exact (unique quotient) → sound both ways, like the #182
+Pubkey/PDA stubs; removes the divider circuit. Validated: the F reset Custom harness
+clears the division stall. Test: `brownfield_kani_abstract_div_emits_stub`. NOTE: only
+addresses division — a symbolic multiply is a separate wall (see G15c UPDATE 2).
 
 ### 🧩 G15d — `pragma kani_solver` bakes `#[kani::solver(z3)]` into the harness  [FIXED]
 
