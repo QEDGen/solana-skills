@@ -36,6 +36,15 @@ pub(crate) struct CtorCtx<'a> {
     /// there). `from_spec` merges them so field-typed enums resolve.
     pub sum_types: Vec<ParsedSumType>,
     pub vec_bound: usize,
+    /// Field names (`pragma kani_vec_empty`) whose `Vec` is built as `vec![]`
+    /// — no element construction, so the element type needn't be mirrored.
+    pub empty_vec_fields: std::collections::BTreeSet<String>,
+    /// Field names (`pragma kani_option_none`) whose `Option<_>` is built as
+    /// `None` — no `Some` payload construction. Prunes a symbolic sub-state the
+    /// property never reads (e.g. a dead `pre_hook: Option<Hook>` alongside the
+    /// `post_hook` the ensures actually inspects), which otherwise doubles the
+    /// nested-container construction CBMC must reason about.
+    pub none_option_fields: std::collections::BTreeSet<String>,
     /// Prefix for every constructed type name. `"crate::"` (default) when the
     /// harness sits at the crate root and the types are re-exported there;
     /// `""` (bare) when `pragma state_module` places the harness INSIDE the
@@ -62,6 +71,16 @@ impl<'a> CtorCtx<'a> {
             records: &spec.records,
             sum_types,
             vec_bound: vec_bound_of(spec),
+            empty_vec_fields: spec
+                .pragma_values("kani_vec_empty")
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            none_option_fields: spec
+                .pragma_values("kani_option_none")
+                .into_iter()
+                .map(String::from)
+                .collect(),
             type_path: type_path_of(spec),
         }
     }
@@ -249,6 +268,46 @@ pub(crate) fn cpi_stub_attr() -> &'static str {
      #[kani::stub(solana_program::program::invoke_signed, stub_invoke_signed)]\n"
 }
 
+/// `pragma kani_abstract_div` → abstract `i64::checked_div` (#182 arithmetic
+/// tier). A symbolic 64-bit divisor forces CBMC's SAT backend (and z3) to
+/// bit-blast a sequential divider circuit, which stalls; the abstraction
+/// replaces the division with a fresh symbolic quotient pinned by division's
+/// exact contract (no divider circuit — only cheaper multiplies). Opt-in
+/// because it's an abstraction with a soundness argument.
+pub(crate) fn wants_div_abstraction(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_abstract_div").is_some()
+}
+
+/// The abstract-`checked_div` support fn (emitted once when
+/// `wants_div_abstraction`). Returns a fresh symbolic quotient `q` constrained
+/// by the EXACT truncating-division contract `a = q*b + r, |r| < |b|,
+/// sign(r) = sign(a)` (computed in `i128` so the contract math can't overflow),
+/// and preserves the two `None` cases (`b == 0`, `MIN / -1` overflow). The
+/// quotient is unique for `b != 0`, so this is an *exact* abstraction — sound
+/// both ways, like the #182 Pubkey/PDA stubs — that removes the divider circuit.
+pub(crate) fn div_abstract_fn() -> String {
+    "// Abstract i64 division (#182 arithmetic tier): a fresh symbolic quotient\n\
+     // pinned by division's exact contract — no 64-bit divider circuit (which\n\
+     // stalls both CaDiCaL and z3 on a symbolic divisor). Verification-only.\n\
+     fn checked_div_abstract(a: i64, b: i64) -> Option<i64> {\n\
+     \x20   if b == 0 || (a == i64::MIN && b == -1) {\n\
+     \x20       return None; // the real `checked_div`'s two None cases\n\
+     \x20   }\n\
+     \x20   let q: i64 = kani::any();\n\
+     \x20   let (ai, bi, qi) = (a as i128, b as i128, q as i128);\n\
+     \x20   let r = ai - qi * bi; // remainder; i128 so it can't overflow\n\
+     \x20   kani::assume(r.abs() < bi.abs());\n\
+     \x20   kani::assume(r == 0 || (r > 0) == (ai > 0));\n\
+     \x20   Some(q)\n\
+     }\n"
+    .to_string()
+}
+
+/// The abstract-`checked_div` stub attr (per proof when `wants_div_abstraction`).
+pub(crate) fn div_stub_attr() -> &'static str {
+    "#[kani::stub(i64::checked_div, checked_div_abstract)]\n"
+}
+
 /// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
 /// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
 /// status, which the membership/threshold properties don't constrain.
@@ -314,7 +373,22 @@ pub(crate) fn emit_state_ctor(
     // never emit a partially-`todo!()` constructor.
     let mut field_lines = Vec::with_capacity(fields.len());
     for (name, ty_str) in fields {
-        let expr = emit_value(&parse_ty(ty_str), ctx, 0)?;
+        // `pragma kani_vec_empty = <field>` → build this `Vec` field as `vec![]`
+        // WITHOUT constructing its element type. Lets a harness mirror only the
+        // fields its property reads: a heavy/irrelevant `Vec<BigNestedType>`
+        // field costs nothing (no element ctor, no `Type` decl in the spec) and
+        // an irrelevant recursing `invariant()` over it is skipped.
+        let expr = if ty_str.trim_start().starts_with("Vec ") && ctx.empty_vec_fields.contains(name)
+        {
+            "vec![]".to_string()
+        } else if ty_str.trim_start().starts_with("Option") && ctx.none_option_fields.contains(name)
+        {
+            // `pragma kani_option_none = <field>` → build this `Option` as `None`
+            // (no `Some` payload construction). Prunes a dead symbolic sub-state.
+            "None".to_string()
+        } else {
+            emit_value(&parse_ty(ty_str), ctx, 0)?
+        };
         field_lines.push(format!("        {name}: {expr},"));
     }
 
@@ -412,8 +486,21 @@ fn emit_enum(name: &str, sum: &ParsedSumType, ctx: &CtorCtx, depth: usize) -> Op
     let tp = &ctx.type_path;
     let mut arms = Vec::with_capacity(n);
     for (i, v) in sum.variants.iter().enumerate() {
+        let is_tuple = !v.fields.is_empty()
+            && v.fields
+                .iter()
+                .all(|(fname, _)| fname.parse::<usize>().is_ok());
         let ctor = if v.fields.is_empty() {
             format!("{tp}{name}::{}", v.name) // unit variant
+        } else if is_tuple {
+            // Tuple (positional) variant — synthetic numeric field names ("0",
+            // "1", …) from `Custom of I64`; render `Enum::V(val, …)` (G13b).
+            let fs: Option<Vec<String>> = v
+                .fields
+                .iter()
+                .map(|(_, fty)| emit_value(&parse_ty(fty), ctx, depth + 1))
+                .collect();
+            format!("{tp}{name}::{}({})", v.name, fs?.join(", "))
         } else {
             // Named-payload struct variant — recurse per field.
             let fs: Option<Vec<String>> = v
@@ -507,6 +594,8 @@ mod tests {
             records,
             sum_types: sum_types.to_vec(),
             vec_bound,
+            empty_vec_fields: std::collections::BTreeSet::new(),
+            none_option_fields: std::collections::BTreeSet::new(),
             type_path: "crate::".to_string(),
         }
     }
@@ -610,6 +699,31 @@ mod tests {
                 && !e2.contains("OneTime {")
                 && e2.contains("_ => crate::P::Windowed { secs: kani::any() }"),
             "unit variant has no payload braces; got {e2}"
+        );
+    }
+
+    #[test]
+    fn enum_tuple_variant_positional_construction() {
+        // PeriodV2-shaped: unit variants + a TUPLE variant `Custom(i64)`. The
+        // parser names the positional field "0" (impossible for a real named
+        // field), so `emit_enum` renders `Enum::V(val)` not `Enum::V { 0: val }`
+        // nor `Enum::V { .. }`. G13b (#177 follow-on).
+        let sums = vec![sum(
+            "PeriodV2",
+            &[
+                ("OneTime", &[]),
+                ("Daily", &[]),
+                ("Custom", &[("0", "I64")]),
+            ],
+        )];
+        let e = emit_value(&parse_ty("PeriodV2"), &ctx(&[], &sums, 1), 0).unwrap();
+        assert!(
+            e.contains("_ => crate::PeriodV2::Custom(kani::any())"),
+            "tuple variant → positional `Enum::V(val)`; got {e}"
+        );
+        assert!(
+            !e.contains("Custom {"),
+            "tuple variant must NOT render braces; got {e}"
         );
     }
 

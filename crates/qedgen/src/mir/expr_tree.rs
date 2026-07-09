@@ -26,6 +26,39 @@
 
 use super::{Symbol, Ty};
 
+/// The Rust shape of an enum variant, for rendering an `is .Variant` test as a
+/// shape-correct `matches!` pattern: `Enum::V` (Unit), `Enum::V(..)` (Tuple —
+/// e.g. `Custom(i64)`), `Enum::V { .. }` (Struct — e.g. `Approved { timestamp }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantShape {
+    Unit,
+    Tuple,
+    Struct,
+}
+
+impl VariantShape {
+    /// The Rust `matches!` sub-pattern for `<enum>::<variant>` at this shape:
+    /// `Enum::V` (Unit), `Enum::V(..)` (Tuple), `Enum::V { .. }` (Struct).
+    pub fn match_pattern(self, enum_name: &str, variant: &str) -> String {
+        self.arm_pattern(enum_name, variant, None)
+    }
+
+    /// A `match`-arm pattern for `<enum>::<variant>`, binding a tuple payload to
+    /// `binder` when given: `Enum::V` (Unit), `Enum::V(b)` / `Enum::V(..)`
+    /// (Tuple, with/without a binder), `Enum::V { .. }` (Struct — a binder isn't
+    /// yet threaded into struct-variant field access).
+    pub fn arm_pattern(self, enum_name: &str, variant: &str, binder: Option<&str>) -> String {
+        match self {
+            VariantShape::Unit => format!("{enum_name}::{variant}"),
+            VariantShape::Tuple => match binder {
+                Some(b) => format!("{enum_name}::{variant}({b})"),
+                None => format!("{enum_name}::{variant}(..)"),
+            },
+            VariantShape::Struct => format!("{enum_name}::{variant} {{ .. }}"),
+        }
+    }
+}
+
 /// Closed expression tree. See module docs for invariants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprTree {
@@ -58,6 +91,15 @@ pub enum ExprTree {
         /// numeric literal or a `const` name. Resolved at build time so
         /// renderers don't need the alias table.
         fin_bound: Option<Symbol>,
+        body: Box<ExprTree>,
+    },
+    /// `exists|forall x in coll, body` — bounded quantifier over a COLLECTION
+    /// value (a `Vec`), binding each element to `x`. Rust `coll.iter().any|all`,
+    /// Lean `∃|∀ x ∈ coll`.
+    QuantIn {
+        kind: QuantKind,
+        binder: Symbol,
+        coll: Box<ExprTree>,
         body: Box<ExprTree>,
     },
     BoolOp {
@@ -102,6 +144,10 @@ pub enum ExprTree {
     Match {
         scrutinee: Box<ExprTree>,
         arms: Vec<TreeMatchArm>,
+        /// Resolved enum type name of the scrutinee, for shape-correct arm
+        /// patterns (`RustCx` has no `TypeEnv` at emission time). `None` when
+        /// unresolvable; the renderer falls back to the scrutinee Path leaf `Ty`.
+        enum_ty: Option<Symbol>,
     },
     /// `.Variant` / `.Variant payload` — sum-type constructor application.
     Ctor {
@@ -125,10 +171,10 @@ pub enum ExprTree {
         /// when unresolvable; the renderer then falls back to the scrutinee
         /// Path leaf `Ty`.
         enum_ty: Option<Symbol>,
-        /// `true` = struct variant → `Enum::V { .. }`; `false` = a
-        /// payload-free unit variant → `Enum::V`. Resolved from the
-        /// sum-type registry at build time.
-        struct_variant: bool,
+        /// The variant's Rust shape → its `matches!` pattern (`Enum::V` /
+        /// `Enum::V(..)` / `Enum::V { .. }`). Resolved from the sum-type
+        /// registry at build time.
+        shape: VariantShape,
     },
     /// `f(arg1, …)` — application of a spec-level helper (uninterpreted or
     /// `ref_impl`) or a builtin (`now()`, `current_epoch()`).
@@ -247,11 +293,13 @@ pub enum TreeArithOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeMatchArm {
-    /// Constructor name the arm matches on.
+    /// Constructor name the arm matches on; `"_"` = the catch-all wildcard.
     pub variant: Symbol,
-    /// Optional binder for the variant's payload.
+    /// Optional binder for the variant's payload (bound in the arm body).
     pub binder: Option<Symbol>,
     pub body: Box<ExprTree>,
+    /// The variant's Rust shape, for the arm's pattern (`Unit` for `"_"`).
+    pub shape: VariantShape,
 }
 
 /// Numeric kind for operator-coercion decisions — the tree-native
@@ -331,6 +379,7 @@ impl ExprTree {
             ExprTree::Old(inner) => inner.num_kind(),
             ExprTree::Sum { body, .. } => body.num_kind(),
             ExprTree::Quant { .. } => NumKind::Bool,
+            ExprTree::QuantIn { .. } => NumKind::Bool,
             ExprTree::BoolOp { .. } => NumKind::Bool,
             ExprTree::Not(_) => NumKind::Bool,
             ExprTree::Cmp { .. } => NumKind::Bool,

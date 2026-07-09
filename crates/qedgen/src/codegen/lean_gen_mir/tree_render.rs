@@ -147,6 +147,28 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
                 Prec::Implies,
             )
         }
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // `∃|∀ x ∈ coll, body` — bounded quantifier over a List (Vec).
+            let sym = match kind {
+                QuantKind::Forall => "\u{2200}",
+                QuantKind::Exists => "\u{2203}",
+            };
+            (
+                format!(
+                    "({} {} \u{2208} {}, {})",
+                    sym,
+                    binder,
+                    render(coll, cx, inside_old).0,
+                    render(body, cx, inside_old).0
+                ),
+                Prec::Atom,
+            )
+        }
         ExprTree::BoolOp { op, lhs, rhs } => {
             let (sym, prec) = match op {
                 TreeBoolOp::And => (" \u{2227} ", Prec::And),
@@ -222,7 +244,9 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
                 Prec::Atom,
             )
         }
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             // `match … with | .Ctor binder? => body`. A binder the body
             // never reads renders `_` — Lean's Decidable synthesis trips on
             // named-but-unused binders in Prop-valued arms. The check is
@@ -235,6 +259,12 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             out.push_str(" with");
             for arm in arms {
                 let body_str = render(&arm.body, cx, inside_old).0;
+                // `"_"` is the catch-all — Lean's wildcard is `| _`, not `| ._`.
+                if arm.variant == "_" {
+                    out.push_str("\n    | _ => ");
+                    out.push_str(&body_str);
+                    continue;
+                }
                 out.push_str(&format!("\n    | .{}", arm.variant));
                 if let Some(b) = &arm.binder {
                     out.push(' ');
@@ -377,6 +407,7 @@ fn render_old(inner: &ExprTree, cx: LeanCx) -> (String, Prec) {
         | ExprTree::Old(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -535,6 +566,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => {
             tree_mentions_ident(body, name)
         }
+        ExprTree::QuantIn { coll, body, .. } => {
+            tree_mentions_ident(coll, name) || tree_mentions_ident(body, name)
+        }
         ExprTree::Contains { coll, elem } => {
             tree_mentions_ident(coll, name) || tree_mentions_ident(elem, name)
         }
@@ -549,7 +583,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
                 || tree_mentions_ident(b, name)
                 || tree_mentions_ident(d, name)
         }
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             tree_mentions_ident(scrutinee, name)
                 || arms.iter().any(|a| tree_mentions_ident(&a.body, name))
         }

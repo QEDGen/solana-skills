@@ -441,6 +441,28 @@ for the fixed path*, not a refutation of the bypass.
   class needs before promising a repro. Cross-links #182 (tier map).
 - **Verdict:** ENCODE (skill/scout playbook). No issue.
 
+### 🧩 G20 — guard-enforcement (reject) harness mode  [FIXED]
+
+The "must-fail / should-reject" property class kept surfacing (A5a duplicate-vote
+rejection; the reject-half of the missing-invocation findings above): QEDGen could
+prove what holds *after* a successful call (ensures-preservation) but not that the
+code *rejects* a violated precondition. Shipped `pragma kani_reject = on` — for each
+brownfield target handler with a `requires`/`when` guard, emit a
+`verify_<handler>_rejects` proof that assumes the guard is VIOLATED
+(`kani::assume(!(guard))`) and asserts the real handler returns `Err`
+(`assert!(!ok, …)`). Same agent-fill (the real call) as the ensures harness; snapshots
+only the guard's fields. No new DSL syntax — reuses `requires … else E`.
+- **Evidence:** `kani_impl/harness.rs::emit_brownfield_reject_harness` (+ extracted
+  `emit_impl_proof_attrs` / `emit_symbolic_state` shared with the ensures emitter);
+  `brownfield.rs` gates on `pragma_value("kani_reject")`. Validated on A5a: the real
+  `Proposal::approve` binary_search dedup — `cargo kani` SUCCESSFUL (reject + ensures).
+- **Root cause / gap:** the ensures emitter was the only harness shape; a declared
+  `requires` had no enforcement proof.
+- **Verdict:** FILE→FIXED (gap). Partially operationalizes M3 (the "guard is SOUND"
+  half is now a first-class proof). Tests: `brownfield_kani_reject_emits_guard_enforcement_harness`,
+  `brownfield_without_kani_reject_pragma_omits_reject_harness`. Docs:
+  `references/qedspec-dsl.md` §Pragmas.
+
 ### 🩹 F3 — release build needs a manual `cp target/release/qedgen bin/qedgen` before codegen reflects a fix  [backlog-only]
 
 Codegen/interactive runs invoke `bin/qedgen`; a `cargo build --release` that forgets
@@ -456,3 +478,224 @@ edit). The snapshot harness already rebuilds (`tests/common/mod.rs`), but the ma
 - **Verdict:** dev-mode-only friction (end users install via the skill, never touch
   `bin/` vs `target/`). Backlog-only / doc-note — not a user-facing qedgen shape, so
   no issue. Flagged for a maintainer to fold into CLAUDE.md's build guidance.
+
+### 🧩 G20b — reject-mode covers requires-only handlers  [FIXED]
+
+`pragma kani_reject` initially only iterated the ensures-bearing `emit_targets`, so a
+handler with a guard but no `ensures`/`effect` (a pure validator — exactly where guard
+enforcement matters) got no reject proof. Now the reject loop iterates all handlers
+with a guard, and an `extra_brownfield_mode` bypass (`kani_impl/mod.rs`) keeps the
+emitter from bailing when the spec is guard-only. Test:
+`brownfield_kani_reject_covers_requires_only_handler`.
+
+### 🧩 G13b — tuple-variant construction (`of <Type>`)  [FIXED]
+
+The real `PeriodV2::Custom(i64)` is a Rust TUPLE variant the DSL couldn't express
+(only `of { named }` struct variants), so the State-driven Kani ctor couldn't build a
+symbolic period covering Custom. `of <Type>` now parses a single-field tuple variant;
+the positional field is named "0" (impossible for a real ident-named field →
+collision-safe marker), and `emit_enum` renders `Enum::V(val)`. Verified `Custom of I64`
+→ `PeriodV2::Custom(kani::any())`.
+- **Scope / follow-up:** Kani construction only. `is .Variant` and the Lean ADT backend
+  still assume unit/struct shapes; a tuple `is .Variant` needs a 3-way `VariantShape`
+  refactor of the `adts` registry + `resolve_variant` + `ExprTree::IsVariant` (deferred —
+  not needed for F's panic-free harness, and fails loudly rather than silently).
+
+### 🧩 G15b — panic-freedom harness mode (`pragma kani_panic_free`)  [FIXED]
+
+For `()`-returning methods whose only property is that they don't abort. Emits
+`verify_<handler>_panic_free`: construct symbolic state, assume the handler's
+`requires` guard, CALL the real method (agent-fill), no assertion — Kani's built-in
+unwrap/overflow/div/index/panic checks do the verification. Validated on
+`reset_if_needed`: `cargo kani` SUCCESSFUL for the standard periods.
+
+### 🩹 G15c — `invariant()` panics on symbolic input, so panic-free harnesses can't assume it  [NEEDS-TRIAGE]
+
+A panic-free proof of a method whose safety depends on the struct's `invariant()`
+can't `kani::assume(state.invariant().is_ok())` when `invariant()` itself panics on
+fully-symbolic input (e.g. `.unwrap()`s an `Option` field). Workaround used for F:
+reconstruct the needed invariant clauses as explicit handler `requires`
+(`0 <= last_reset <= now`). But the `PeriodV2::Custom(i64)` case needs "if period is
+Custom(s) then s > 0".
+- **Proposed:** (a) the tuple-variant `is .Variant` shape — SHIPPED (G13b, `64bf14b`),
+  but it's only a boolean is-test, NOT the payload. Excluding `Custom(0)` needs variant
+  **payload binding** (a `match state.period { Custom(s) => s > 0, _ => true }` or an
+  `is .Custom(s)` binder) to write `(period is .Custom(s)) implies s > 0` — a distinct
+  DSL feature (variant payload access) that is the real remaining unblock. And/or (b) a
+  codegen mode that assumes each invariant *clause* as a precondition without calling
+  the composite (panicking) `invariant()`.
+- **Evidence:** `spending_limit_v2.rs` reset_if_needed + invariant; two Kani iterations
+  (checked_sub overflow on negative last_reset → added `last_reset >= 0`; then GREEN for
+  standard periods). See `formal_verification/VERIFICATION.md` F-reset note. The is-test
+  alone can't reach the `Custom` payload, so the Custom>0 precondition is inexpressible.
+- **Verdict:** FILE (gap). Leverage: any panic-free / precondition proof of a method
+  gated by a rich invariant with unwraps, or any property over an enum variant's payload.
+- **UPDATE — expressibility CLOSED, moved to a solver wall.** Variant payload binding
+  SHIPPED (`57a91fd`): `match state.period with | Custom s => s > 0 | _ => true` in a
+  requires renders `match pre_period { PeriodV2::Custom(s) => s > 0, _ => true }`
+  (enum-resolved, shape-correct arms + `_` wildcard). F's Custom precondition is now
+  fully expressible. But the Custom harness then divides `passed / reset_period` by a
+  SYMBOLIC `i64`, which stalls BOTH CaDiCaL (SAT bit-blasting) AND z3 (`pragma
+  kani_solver = z3`, `1219c00`) — z3 solved 5 checks in ~3s each then ground on the
+  division check for 22+ min at 99% CPU. So the remaining gap is **solver
+  tractability of symbolic `checked_div`**, not codegen. Next: abstract/bound the
+  division (same pattern as the #181 Pubkey-memcmp wall — e.g. a `#[kani::stub]` on the
+  divisor path, or bound the Custom period). Standard periods remain GREEN.
+- **UPDATE 2 — division abstracted (G15e), residual is the multiply-back.** `pragma
+  kani_abstract_div` SHIPPED (`9d24a89`) stubs `i64::checked_div` with an exact-contract
+  symbolic quotient — no divider circuit. The F Custom harness then advances PAST the
+  division check that stalled 22 min, but z3 next stalls ~8 min on the **multiply-back**
+  `periods_passed * reset_period` (symbolic × symbolic i64). A multiply, unlike a
+  divider circuit, has NO cheaper contract (a multiply's defining relation *is* a
+  multiply), so the div-abstraction trick doesn't transfer. F Custom is thus a *chain*
+  of nonlinear-symbolic-arithmetic walls: division cleared, multiply-back inherent.
+  Remaining options: bound the Custom period's bit-width (narrows the multiply, weaker
+  proof) or accept standard-periods-green + Custom-documented. Filed as G15e.
+
+### 🧩 G15e — abstract `i64::checked_div` (`pragma kani_abstract_div`)  [FIXED]
+
+A symbolic 64-bit divisor bit-blasts a sequential divider circuit that stalls both
+CaDiCaL and z3. `pragma kani_abstract_div = on` stubs `i64::checked_div` with
+`checked_div_abstract`: a fresh symbolic quotient pinned by division's EXACT contract
+(`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`, in i128; preserves the `b==0` /
+`MIN/-1` None cases). Exact (unique quotient) → sound both ways, like the #182
+Pubkey/PDA stubs; removes the divider circuit. Validated: the F reset Custom harness
+clears the division stall. Test: `brownfield_kani_abstract_div_emits_stub`. NOTE: only
+addresses division — a symbolic multiply is a separate wall (see G15c UPDATE 2).
+
+### 🧩 G15d — `pragma kani_solver` bakes `#[kani::solver(z3)]` into the harness  [FIXED]
+
+A harness that divides/mods by a symbolic value blows up the default SAT backend;
+z3/cvc5 reason about bit-vector division natively. `pragma kani_solver = <solver>`
+emits `#[kani::solver(<solver>)]` after `#[kani::proof]` on every generated proof,
+so the solver requirement is baked in + reproducible without a `cargo kani --solver`
+flag (`1219c00`). Test: `brownfield_kani_solver_pragma_bakes_solver_attr`.
+
+### 📐 M4 — E-A / E-B (round-2 policy findings): per-finding tractability, code-grounded  [NEEDS-TRIAGE]
+
+Traced both remaining novel findings to the exact code with the current toolchain
+(CPI/log/clock stubs, Pubkey/PDA abstraction, reject + panic-free harnesses, payload
+binding, `kani_abstract_div`). Neither is a same-session harness; each needs a
+specific, well-scoped new capability.
+
+**E-A (HIGH) — ProgramInteraction hook force-signs as `HOOK_AUTHORITY`.**
+`Hook::execute` (`program_interaction.rs:408`) marks any runtime hook account whose
+key `== HOOK_AUTHORITY_PUBKEY` as a signer and `invoke_signed`s. The guard
+`ProgramInteractionHookAuthorityCannotBePartOfHookAccounts` (`errors.rs:176`) is
+defined but wired nowhere. Two angles:
+- *Runtime angle* (drive `Hook::execute`): needs symbolic `AccountInfo[]` construction
+  (#182 T4) — the CPI call is stubbable now, but building the `AccountInfo` array to
+  pass in is the wall.
+- *State angle* (the better one): the hooks ARE in the policy state (`pre_hook` /
+  `post_hook: Option<Hook>`, each with `account_constraints: Vec<AccountConstraint>`,
+  `AccountConstraintType::Pubkey(Vec<Pubkey>)`), and `invariant()` is PURE — so a
+  guard-enforcement (reject) proof over `invariant()` could demonstrate the missing
+  guard with no `AccountInfo`. Blockers: (a) the guard predicate — "`post_hook`'s
+  account constraints include `HOOK_AUTHORITY`" — needs nested-structure predicate
+  navigation the DSL lacks: `Option` access + `exists` over a `Vec` + enum-payload
+  binding (`AccountConstraintType::Pubkey(v)`) + nested `contains`; (b) mirroring the
+  deep policy state (Option<Hook>, Vec<enum-with-Vec-payload>, Vec<SpendingLimitV2>).
+- **Proposed:** a nested-predicate DSL feature — `exists x in state.<vec>, <pred(x)>`
+  with `Option` access and enum-payload binding — is the reusable unlock (covers any
+  "some element of a collection violates P" property). Then E-A is a reject proof over
+  the pure `invariant()`. This is the highest-leverage next DSL feature.
+- **UPDATE — nested-predicate feature SHIPPED (blocker (a) cleared).** `exists|forall x
+  in <coll>, pred` (`b1724c7`, `Expr`/`ExprTree::QuantIn` → `coll.iter().any|all`) +
+  `match`/`is` on `Option` fields (`5b22050`, builtin `Some`/`None`) now compose to the
+  exact E-A predicate: verified `match state.post_hook with | Some h => (exists k in
+  h.keys, k == auth) | None => false` renders `match … { Option::Some(h) =>
+  (h.keys.iter().any(|k| k == auth)), Option::None => false }` (enum-resolved, payload
+  bound, field access, `_`/None). Remaining for E-A is blocker (b) only — MECHANICAL, no
+  new DSL: (1) mirror the ~10-type policy state (`ProgramInteractionPolicy` →
+  `Option<Hook>` → `Vec<AccountConstraint>` → `AccountConstraintType` enum tuple-payload
+  → `Vec<Pubkey>`/`Vec<DataConstraint>`, plus `Vec<InstructionConstraint>`,
+  `Vec<SpendingLimitV2>`, `DataConstraint`) via `state_struct` — the ctor handles
+  Option/Vec/nested-record/enum/tuple-Vec-payload individually but is untested this deep;
+  (2) reference the external `HOOK_AUTHORITY_PUBKEY` const in the predicate; (3) it's a
+  reject harness whose FAILURE is the counterexample (the guard is missing). Left as a
+  scoped follow-on — the reusable DSL unlock is done and validated to reach the predicate.
+
+**E-B (MED) — `SettingsChange` doesn't persist.** `execute_payload`
+(`settings_change.rs`) mutates an in-memory `Account<Settings>` (from a remaining
+account) via `modify_with_action`, reallocs, logs — but never `settings.exit()` /
+serializes back, so the change is dropped on return. The property ("the account DATA
+BUFFER reflects the change") is inherently about Borsh serialize-on-exit — needs
+account-data-buffer + serialize/deserialize modeling (#182 T3 serde), which is the
+documented-intractable tier. No pure-fn angle (the bug is a missing side effect).
+- **Proposed:** T3 serde modeling, OR accept the live anchor-ts repro as the evidence.
+
+**Both:** the live anchor-ts repros are the correct, existing, sufficient evidence.
+QEDGen's contribution would be the fixed-behavior regression spec — E-A via the
+nested-predicate feature + pure `invariant()`; E-B via T3. Ranked: E-A's
+nested-predicate DSL feature is worth building (broadly reusable); E-B waits on T3.
+- **Verdict:** FILE (methodology + two scoped feature asks). Leverage: nested-predicate
+  navigation unlocks a whole class of "collection element violates P" audit properties.
+
+---
+
+## Session: E-A guard-enforcement harness — nested-container Kani tractability (2026-07-09)
+
+Continuing M4/E-A: **mirror the deep policy state and land the guard-enforcement
+(reject-shaped) harness** over the pure `invariant()`. The state mirror + nested
+predicate (`match state.<opt> with Some h => not (exists c in h.<vec>, match
+c.<enum> with Pubkey pks => contains(pks, CONST) | _ => false) | None => true`)
+GENERATE correctly through `state_struct` + `QuantIn` + Option/enum `match`. The
+obstacle was purely **verifier resource**: the naive harness was **69,545 VCC(s)**
+(1.55M program steps) — CBMC's SAT backend OOM'd and its SMT2 (z3) backend crashed.
+
+### 🧩 R1 — Nested-container Kani reductions (SHIPPED, 4 codegen features)  [FIXED]
+
+Root cause of the blowup: the impl-ensures harness DEEP-CLONES a non-`Copy`
+nested container (`Option<Hook>` carrying `Vec<AccountConstraint>` carrying
+`Vec<Pubkey>`) up to **three times** — a dead pre-snapshot, a live post-snapshot,
+and again inside the `match` scrutinee — each copy generating a `drop_in_place` /
+`RawVec` storm. Four mechanical, general codegen fixes (each with a regression
+test in `kani_impl/tests.rs`), measured on the same harness:
+
+1. **Snapshot pre/post split** (`collect_snapshot_fields_split`). A field read
+   only via `post.<x>` gets NO dead `pre_<x>` clone (and vice-versa); only
+   effect-participating fields snapshot both sides. Drops the dead pre-clone.
+2. **`pragma kani_option_none = <field>`** (`state_ctor`). Builds an `Option<_>`
+   field as `None` — no `Some` payload construction — pruning a symbolic
+   sub-state the property never reads (companion to `kani_vec_empty`).
+3. **Owned-snapshot `match &(...)`** (`chumsky_adapter/rust.rs`). A scrutinee that
+   is a snapshot local (`pre.X`/`post.X` → owned `pre_X`/`post_X`) is matched by
+   REFERENCE, not `.clone()` — its struct/collection payloads are read by-ref.
+   Non-snapshot `&`-places (`c.field` under `.iter()`) keep `.clone()`.
+4. **Post-snapshot move** (`emit_brownfield_handler_harness`). The post-snapshot
+   MOVES the field out of `state` (last read; no CPI-assume splice follows), not
+   `.clone()`.
+
+Cumulative effect (each roughly halves the instance): **69,545 → 50,847 → 35,590
+→ 20,322 VCC(s)** (9,097 after simplification), symex **217s → 20s**, program
+steps **1.55M → 464k** — a **5× reduction**. All snapshot suites + 1128 unit
+tests green. **Verdict: FIXED in source.**
+
+### 📐 R2 — CBMC/Kani wall on SYMBOLIC nested `Vec` containers  [FILE — upstream]
+
+Even at 9,097 VCC(s) the proof will not close, and the failure is **backend, not
+size**:
+- **z3 / SMT2:** `map::at: key not found` — a CBMC internal crash during
+  SSA→SMT2 conversion. Reproduces at 9k AND 21k AND 29k VCC(s), so it is
+  **construct-triggered, not size-triggered**: the `drop_in_place::<[T]>` /
+  `RawVecInner::deallocate` machinery emitted for symbolic-length nested `Vec`s
+  is what the SMT2 converter cannot lower.
+- **CaDiCaL / SAT:** no crash, but bit-blasting the symbolic-`Vec`/`Option`
+  combinatorics grinds indefinitely (>10 min, no verdict) once past the OOM
+  threshold at ~29k.
+
+So a property that navigates a **symbolic** heap-allocated nested container
+(`Vec<Struct{ Vec<_> }>`) is currently beyond CBMC's practical reach on BOTH
+backends — independent of QEDGen. The R1 reductions push the floor 5× lower but
+don't cross it. **Mitigations for a future pass:** (a) a `kani_vec_concrete` /
+fixed-shape ctor mode that builds the container with CONCRETE structure and only
+the *leaf value under test* symbolic (collapses the `drop_in_place`/RawVec
+symbolic machinery to a bounded, SMT2-convertible shape); (b) a concrete-witness
+harness (specific malicious element) — trivially closes but is redundant with the
+live client repro. **Verdict: FILE** — the reductions are the reusable win; the
+symbolic-nested-`Vec` close waits on a concrete-shape ctor mode or upstream CBMC.
+
+**E-A status:** state mirror ✅, nested predicate ✅, harness generates ✅ and is
+5× smaller ✅; symbolic CLOSE blocked by R2 (CBMC, upstream). Evidence stands on
+source analysis (`invariant()` structurally ignores hooks) + the live client
+repro; QEDGen's artifact is the regression-shaped harness + the R1 reductions.

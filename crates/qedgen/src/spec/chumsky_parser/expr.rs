@@ -129,6 +129,35 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             })
         });
 
+        // forall / exists x in <collection>, body — a bounded quantifier over a
+        // COLLECTION value (a `Vec` field), not a type domain. Disambiguated from
+        // `quant` by `in` vs `:` after the (single) binder; tried first in the
+        // atom choice so `in` wins before `quant` consumes `:`.
+        let quant_in = choice((
+            just("forall").to(Quantifier::Forall),
+            just("exists").to(Quantifier::Exists),
+        ))
+        .then_ignore(wsc())
+        .then(non_keyword_ident())
+        .then_ignore(wsc())
+        .then_ignore(kw("in"))
+        .then(expr.clone())
+        .then_ignore(wsc())
+        .then_ignore(just(','))
+        .then_ignore(wsc())
+        .then(expr.clone())
+        .map_with(|(((kind, binder), coll), body), e| {
+            Node::new(
+                Expr::QuantIn {
+                    kind,
+                    binder,
+                    coll: Box::new(coll),
+                    body: Box::new(body),
+                },
+                e.span().into_range(),
+            )
+        });
+
         // Parenthesized sub-expression
         let paren = just('(')
             .then_ignore(wsc())
@@ -259,8 +288,21 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
 
         // Inline `match scrutinee with | Variant binder? => body | ...`.
         // Distinct from the handler-clause `match` — this one has an explicit
-        // scrutinee and `with` keyword, producing a value.
-        let match_arm_pat = non_keyword_ident()
+        // scrutinee and `with` keyword, producing a value. A `_` arm is the
+        // catch-all (variant sentinel `"_"`, no binder) — lets a payload-binding
+        // match (`| Custom s => s > 0 | _ => true`) avoid enumerating every
+        // other variant.
+        let wildcard_arm = just('_')
+            .then_ignore(wsc())
+            .then_ignore(just("=>"))
+            .then_ignore(wsc())
+            .ignore_then(expr.clone())
+            .map(|body| MatchExprArm {
+                variant: "_".to_string(),
+                binder: None,
+                body: Box::new(body),
+            });
+        let named_arm = non_keyword_ident()
             .then_ignore(wsc())
             .then(non_keyword_ident().or_not())
             .then_ignore(wsc())
@@ -272,6 +314,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
                 binder,
                 body: Box::new(body),
             });
+        let match_arm_pat = choice((wildcard_arm.boxed(), named_arm.boxed()));
         let match_arm = just('|').then_ignore(wsc()).ignore_then(match_arm_pat);
         let match_expr = kw("match")
             .ignore_then(expr.clone())
@@ -424,6 +467,7 @@ pub(super) fn expr<'a>() -> impl Parser<'a, &'a str, Node<Expr>, Err<'a>> + Clon
             let_in,
             if_then_else,
             sum,
+            quant_in,
             quant,
         ))
         .boxed();

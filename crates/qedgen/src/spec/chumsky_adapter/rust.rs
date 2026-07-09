@@ -166,6 +166,27 @@ pub(super) fn expr_to_rust(
                 rust_ty, rust_ty, method, binder, body_rust
             )
         }
+        Expr::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // Bounded quantifier over a collection value: `coll.iter().any|all(
+            // |x| body)`. `.iter()` yields `&Element`; field access / matches in
+            // the body auto-deref, so no clone needed for the common cases.
+            let method = match kind {
+                a::Quantifier::Forall => "all",
+                a::Quantifier::Exists => "any",
+            };
+            format!(
+                "{}.iter().{}(|{}| {})",
+                expr_to_rust(&coll.node, ctx, consts, opts),
+                method,
+                binder,
+                expr_to_rust(&body.node, ctx, consts, opts)
+            )
+        }
         Expr::BoolOp { op, lhs, rhs } => {
             let lhs_r = expr_to_rust(&lhs.node, ctx, consts, opts);
             let rhs_r = expr_to_rust(&rhs.node, ctx, consts, opts);
@@ -292,16 +313,49 @@ pub(super) fn expr_to_rust(
             expr_to_rust(&coll.node, ctx, consts, opts)
         ),
         Expr::Match { scrutinee, arms } => {
+            // Resolve the scrutinee's enum so each arm's pattern is shape-correct
+            // (`Enum::Custom(s)` tuple / `Enum::OneTime` unit / `Enum::Active { .. }`
+            // struct), with a `_` catch-all. Mirrors the ExprTree renderer.
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
-            let mut out = format!("match {} {{", sc);
+            let hint = match &scrutinee.node {
+                Expr::Path(p) => opts.env.path_type_name(p),
+                _ => None,
+            };
+            // Scrutinee ownership: an OWNED snapshot local (`pre.X` / `post.X`,
+            // which the downstream pre/post rewrite turns into a bare owned
+            // `pre_X` / `post_X`) is matched by REFERENCE — `match &(x)` — so a
+            // deep container (a snapshotted `Vec<Hook>` policy field) is NOT
+            // re-cloned. Its payload binders are read by-reference (field access,
+            // `.iter()`, `.contains()`), which is exactly what a snapshot's
+            // struct/collection payload wants. Any OTHER scrutinee (a `&`-place
+            // like `c.field` under `.iter()`, or a value used as a scalar binder
+            // `Custom(s) => s > 0`) keeps `.clone()` so the binder is OWNED and
+            // there's no "cannot move out of a shared reference".
+            let by_ref = scrutinee_is_owned_snapshot(&sc);
+            let mut out = if by_ref {
+                format!("match &({}) {{", sc)
+            } else {
+                format!("match ({}).clone() {{", sc)
+            };
             for arm in arms {
-                out.push_str(&format!("\n    {}::{}", "/* ty */", arm.variant));
-                if let Some(b) = &arm.binder {
-                    out.push_str(&format!("({})", b));
-                }
-                out.push_str(" => ");
-                out.push_str(&expr_to_rust(&arm.body.node, ctx, consts, opts));
-                out.push(',');
+                let pat = if arm.variant == "_" {
+                    "_".to_string()
+                } else {
+                    let (enum_name, shape) =
+                        match opts.env.resolve_variant(hint.as_deref(), &arm.variant) {
+                            Some(pair) => pair,
+                            None => (
+                                hint.clone().unwrap_or_default(),
+                                crate::mir::VariantShape::Struct,
+                            ),
+                        };
+                    shape.arm_pattern(&enum_name, &arm.variant, arm.binder.as_deref())
+                };
+                out.push_str(&format!(
+                    "\n    {} => {},",
+                    pat,
+                    expr_to_rust(&arm.body.node, ctx, consts, opts)
+                ));
             }
             out.push_str("\n}");
             out
@@ -334,28 +388,30 @@ pub(super) fn expr_to_rust(
         }
         Expr::IsVariant { scrutinee, variant } => {
             // Resolve the scrutinee's enum type and the variant's shape so the
-            // `matches!` pattern is shape-correct: `Enum::V { .. }` for a
-            // struct variant (`Approved of { timestamp }`), `Enum::V` for a
-            // payload-free unit variant. A Path scrutinee (the common
-            // `state.status is .Approved`) resolves its enum via the type env;
-            // `resolve_variant` falls back to a global unique-name search.
+            // `matches!` pattern is shape-correct: `Enum::V { .. }` (struct,
+            // `Approved of { timestamp }`), `Enum::V(..)` (tuple, `Custom of I64`),
+            // `Enum::V` (unit). A Path scrutinee (the common `state.status is
+            // .Approved`) resolves its enum via the type env; `resolve_variant`
+            // falls back to a global unique-name search.
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
             let hint = match &scrutinee.node {
                 Expr::Path(p) => opts.env.path_type_name(p),
                 _ => None,
             };
-            let (enum_name, is_struct) = match opts.env.resolve_variant(hint.as_deref(), variant) {
+            let (enum_name, shape) = match opts.env.resolve_variant(hint.as_deref(), variant) {
                 Some(pair) => pair,
                 // Unresolved shape: keep the enum hint if we have one and
                 // assume the struct shape (dominant for status enums).
-                None => (hint.unwrap_or_else(|| variant.clone()), true),
+                None => (
+                    hint.unwrap_or_else(|| variant.clone()),
+                    crate::mir::VariantShape::Struct,
+                ),
             };
-            let pat = if is_struct {
-                format!("{}::{} {{ .. }}", enum_name, variant)
-            } else {
-                format!("{}::{}", enum_name, variant)
-            };
-            format!("matches!({}, {})", sc, pat)
+            format!(
+                "matches!({}, {})",
+                sc,
+                shape.match_pattern(&enum_name, variant)
+            )
         }
         Expr::App { func, args } => {
             // `now()` lowers to the on-chain clock read. `unwrap()` rather
@@ -673,6 +729,26 @@ pub(super) fn is_map_value_sum_type(name: &str, spec: &a::Spec) -> bool {
         }
     }
     false
+}
+
+/// True when a rendered scrutinee is a single snapshot-local field access
+/// (`pre.<field>` / `post.<field>`) — the impl-Kani ensures form that the
+/// downstream pre/post rewrite turns into a bare OWNED local `pre_<field>` /
+/// `post_<field>`. Such a scrutinee can be matched by reference (`match &(x)`)
+/// without a defensive `.clone()`. Anything with further path segments
+/// (`post.a.b`), a `&`-place under `.iter()` (`c.field`), or a non-snapshot
+/// base returns `false` and keeps the clone.
+fn scrutinee_is_owned_snapshot(sc: &str) -> bool {
+    let rest = sc.strip_prefix("pre.").or_else(|| sc.strip_prefix("post."));
+    match rest {
+        Some(field) => {
+            !field.is_empty()
+                && field
+                    .bytes()
+                    .all(|b| b == b'_' || b.is_ascii_alphanumeric())
+        }
+        None => false,
+    }
 }
 
 pub(super) fn type_ref_to_string(t: &a::TypeRef) -> String {

@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 /// replace the pre-rendered string fields on `Expr` (slices 1–4).
 pub mod expr_tree;
 
-pub use expr_tree::ExprTree;
+pub use expr_tree::{ExprTree, VariantShape};
 
 // ----------------------------------------------------------------------
 // Top-level

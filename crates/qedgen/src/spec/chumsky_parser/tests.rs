@@ -615,6 +615,41 @@ handler h (i : U16) (amount : U128) : State.Active -> State.Active {
 }
 
 #[test]
+fn parses_tuple_variant_of_bare_type() {
+    // `Custom of I64` (tuple variant) vs `Windowed of { secs : U32 }` (struct):
+    // the tuple form's positional field is named "0" (a marker downstream
+    // codegen renders as `Enum::V(val)`); the struct form keeps named fields.
+    let src = "spec T\ntype P | OneTime | Custom of I64 | Windowed of { secs : U32 }";
+    let s = parse_ok(src);
+    let adt = s
+        .items
+        .iter()
+        .find_map(|i| match &i.node {
+            TopItem::Adt(a) => Some(a),
+            _ => None,
+        })
+        .expect("adt");
+    let custom = adt.variants.iter().find(|v| v.name == "Custom").unwrap();
+    assert_eq!(
+        custom.fields.len(),
+        1,
+        "tuple variant has one positional field"
+    );
+    assert_eq!(custom.fields[0].name, "0", "positional field named \"0\"");
+    match &custom.fields[0].ty {
+        TypeRef::Named(n) => assert_eq!(n, "I64"),
+        o => panic!("expected Named(I64), got {o:?}"),
+    }
+    let oneshot = adt.variants.iter().find(|v| v.name == "OneTime").unwrap();
+    assert!(oneshot.fields.is_empty(), "unit variant has no fields");
+    let windowed = adt.variants.iter().find(|v| v.name == "Windowed").unwrap();
+    assert_eq!(
+        windowed.fields[0].name, "secs",
+        "struct variant keeps named fields"
+    );
+}
+
+#[test]
 fn parses_ctor_in_effect() {
     let src = r#"
 spec T

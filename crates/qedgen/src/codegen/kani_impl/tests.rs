@@ -333,6 +333,186 @@ handler set_time_lock (new_time_lock : U32) {
     );
 }
 
+/// `pragma kani_reject` emits a guard-enforcement (reject) proof per target
+/// handler with a `requires`/`when` guard: it assumes the guard is VIOLATED and
+/// asserts the real handler returns `Err` (bound to `!ok`) — the converse of
+/// the ensures-preservation proof. Snapshots ONLY the guard's fields (not the
+/// effect/modifies set). Absent the pragma, no reject harness is emitted.
+#[test]
+fn brownfield_kani_reject_emits_guard_enforcement_harness() {
+    let src = r#"spec Guarded
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_reject = on
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  requires n <= state.cap else TooBig
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_reject_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The ensures-preservation harness is still emitted...
+    assert!(
+        body.contains("fn verify_resize_impl_ensures_0()"),
+        "ensures harness still emitted; got:\n{body}"
+    );
+    // ...plus a reject harness that assumes the guard is VIOLATED (negated) and
+    // asserts rejection.
+    assert!(
+        body.contains("fn verify_resize_rejects()"),
+        "reject harness emitted; got:\n{body}"
+    );
+    assert!(
+        body.contains("kani::assume(!((n <= pre_cap)));"),
+        "reject harness assumes the negated guard; got:\n{body}"
+    );
+    assert!(
+        body.contains("assert!(!ok, \"resize must reject"),
+        "reject harness asserts `!ok`; got:\n{body}"
+    );
+    // Snapshots the guard field (`cap`) — NOT the effect/modifies field (`size`).
+    assert!(
+        body.contains("let pre_cap = state.cap;"),
+        "reject snapshots the guard field; got:\n{body}"
+    );
+}
+
+/// `pragma kani_panic_free` emits a call-only proof per handler: construct
+/// symbolic state, call the handler (agent-fill), no assertion — Kani's built-in
+/// checks verify panic-freedom. Emitted even for a claim-free handler (no
+/// ensures/effect), so the emitter must not bail early.
+#[test]
+fn brownfield_kani_panic_free_emits_call_only_proof() {
+    let src = r#"spec PanicFree
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_panic_free = on
+state { size : U64, cap : U64 }
+handler recompute (n : U64) {
+  requires n <= state.cap else TooBig
+  modifies [size]
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pf_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn verify_recompute_panic_free()")
+            && body.contains("let mut state = symbolic_widget();"),
+        "panic-free harness constructs symbolic state; got:\n{body}"
+    );
+    // Panic-freedom is claimed UNDER the handler's preconditions — the `requires`
+    // guard is assumed (not asserted).
+    assert!(
+        body.contains("kani::assume((n <= pre_cap));"),
+        "panic-free harness assumes the `requires` guard; got:\n{body}"
+    );
+    // Call-only: no `assert!` and no ensures/reject scaffolding in this proof.
+    assert!(
+        !body.contains("assert!(") && !body.contains("_impl_ensures_"),
+        "panic-free proof asserts nothing (Kani checks panics); got:\n{body}"
+    );
+}
+
+/// A REQUIRES-ONLY handler (a guard, no `ensures`/`effect`) still gets a reject
+/// proof under `pragma kani_reject` — guard enforcement is exactly where a
+/// postcondition-free validator matters. The spec would otherwise emit nothing
+/// (no ensures/effects to preserve), so the emitter must not bail early.
+#[test]
+fn brownfield_kani_reject_covers_requires_only_handler() {
+    let src = r#"spec ReqOnly
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_reject = on
+state { size : U64, cap : U64 }
+handler validate (n : U64) {
+  requires n <= state.cap else TooBig
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_reqonly_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn verify_validate_rejects()")
+            && body.contains("kani::assume(!((n <= pre_cap)));")
+            && body.contains("assert!(!ok, \"validate must reject"),
+        "requires-only handler gets a reject proof; got:\n{body}"
+    );
+    // No ensures harness for a postcondition-free handler.
+    assert!(
+        !body.contains("_impl_ensures_"),
+        "no ensures harness for a requires-only handler; got:\n{body}"
+    );
+}
+
+/// Without `pragma kani_reject`, the reject harness is not emitted (default
+/// output is unchanged).
+#[test]
+fn brownfield_without_kani_reject_pragma_omits_reject_harness() {
+    let src = r#"spec Guarded
+pragma state_struct = Widget
+pragma state_invariant = none
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  requires n <= state.cap else TooBig
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_noreject_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        !body.contains("_rejects()") && !body.contains("Guard-enforcement"),
+        "no reject harness without the pragma; got:\n{body}"
+    );
+}
+
 /// A brownfield harness whose `requires`/`ensures` use `is .Variant` + `len()`
 /// over a non-`Copy` ADT status field renders shape-correctly and compiles:
 ///   - `is .StructVariant`  → `matches!(x, Enum::V { .. })` (resolved enum name,
@@ -408,20 +588,414 @@ handler begin_tally (dummy : U64) {
         body.contains("(post_votes.len() as u64) >= quorum"),
         "len(coll) → `(coll.len() as u64)`; got:\n{body}"
     );
-    // Non-Copy ADT status field cloned in both snapshots (a move would break the
-    // subsequent `&mut state` method call); the Copy `epoch` field is not even
-    // snapshotted here, and the Vec is cloned as before.
+    // Non-Copy ADT status field: the PRE-snapshot `.clone()`s (a move would leave
+    // `state` partially moved before the `&mut state` method call that follows),
+    // but the POST-snapshot MOVES (it's the last read of the field — the assert
+    // reads the `post_<x>` local, and no `&mut state` call follows). The Copy
+    // `epoch` field is not snapshotted here.
     assert!(
         body.contains("let pre_status = state.status.clone();")
-            && body.contains("let post_status = state.status.clone();")
-            && body.contains("state.votes.clone()"),
-        "non-Copy status snapshot must `.clone()`; got:\n{body}"
+            && body.contains("let pre_votes = state.votes.clone();"),
+        "non-Copy pre-snapshot must `.clone()`; got:\n{body}"
+    );
+    assert!(
+        body.contains("let post_status = state.status;")
+            && body.contains("let post_votes = state.votes;")
+            && !body.contains("let post_status = state.status.clone();"),
+        "non-Copy post-snapshot MOVES (no clone); got:\n{body}"
     );
     // Crate-level placement glob-imports the crate root so the bare `BallotStatus`
     // name in the `matches!` resolves; the ctor still qualifies with `crate::`.
     assert!(
         body.contains("use crate::*;") && body.contains("_ => crate::BallotStatus::Tallying"),
         "crate-level harness imports `crate::*`; ctor unit arm has no braces; got:\n{body}"
+    );
+}
+
+/// `pragma kani_vec_empty = <field>` builds that `Vec` field as `vec![]` — no
+/// element construction — so a heavy/irrelevant `Vec<T>` field costs nothing and
+/// its element type `T` need not even be declared in the spec (only the field
+/// type name). Also lets a `match` bind a payload behind a `&` (via `.clone()`).
+#[test]
+fn brownfield_kani_vec_empty_skips_element_construction() {
+    let src = r#"spec VecEmpty
+pragma state_struct = Holder
+pragma state_invariant = none
+pragma kani_vec_empty = big
+state { big : Vec UndeclaredBigType, n : U8 }
+handler t (m : U8) { modifies [n] ensures state.n == m effect { n := m } }"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_vecempty_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The field is `vec![]` — `UndeclaredBigType` is never constructed (would
+    // otherwise bail the whole ctor since it isn't a declared record/sum type).
+    assert!(
+        body.contains("big: vec![],") && body.contains("fn symbolic_holder()"),
+        "kani_vec_empty field is `vec![]`, ctor still emitted; got:\n{body}"
+    );
+}
+
+/// `match` on an `Option` field binds `Some`'s payload and renders the builtin
+/// prelude variants shape-correctly (`Option::Some(h)` tuple / `Option::None`
+/// unit) — composing with `exists x in coll` + field access to navigate a nested
+/// `Option<Record>` with a `Vec` field (the E-A predicate shape).
+#[test]
+fn brownfield_option_match_composes_with_exists_in() {
+    let src = r#"spec OptMatch
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_optmatch_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("Option::Some(h) => (h.keys.iter().any(|k| k == auth))")
+            && body.contains("Option::None => false"),
+        "Option match binds Some's payload + composes with exists-in + field access; got:\n{body}"
+    );
+}
+
+/// `pragma kani_option_none = <field>` builds that `Option<_>` field as `None`
+/// — no `Some` payload construction — so a dead symbolic sub-state the property
+/// never reads costs nothing. Companion to `kani_vec_empty` for pruning
+/// nested-container construction that would otherwise blow up CBMC.
+#[test]
+fn brownfield_kani_option_none_prunes_payload() {
+    let src = r#"spec OptNone
+pragma state_struct = Pol
+pragma state_invariant = none
+pragma kani_option_none = pre_hook
+type Hook = { keys : Vec Pubkey }
+state { pre_hook : Option Hook, post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_optnone_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // `pre_hook` is `None` (no `Some(Hook { .. })` payload construction); the
+    // read `post_hook` still gets a full symbolic `if kani::any() { Some(..) }`.
+    assert!(
+        body.contains("pre_hook: None,") && body.contains("post_hook: if kani::any()"),
+        "kani_option_none field is `None`; the read Option stays symbolic; got:\n{body}"
+    );
+}
+
+/// The brownfield ensures harness snapshots a field on the side that actually
+/// reads it: a field read *only* via `post.<x>` gets a `post_<x>` clone and NO
+/// dead `pre_<x>` clone (which, for a non-`Copy` `Vec`, would deep-copy + drop
+/// the whole container and inflate CBMC's VCC count). Effect-participating
+/// fields (`modifies`) still snapshot on both sides for the old/new comparison.
+#[test]
+fn brownfield_snapshot_split_drops_dead_pre_clone() {
+    let src = r#"spec SnapSplit
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_snapsplit_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // `post_hook` is read only via `post.` → a `post_post_hook` snapshot but no
+    // dead `pre_post_hook` clone. `n` is in `modifies` → snapshotted both sides.
+    // The post-snapshot MOVES (no `.clone()`) — it's the last read of the field.
+    assert!(
+        body.contains("let post_post_hook = state.post_hook;")
+            && !body.contains("let post_post_hook = state.post_hook.clone();")
+            && !body.contains("let pre_post_hook"),
+        "post-only field gets a moved post_ snapshot and no dead pre_ clone; got:\n{body}"
+    );
+}
+
+/// The brownfield ensures post-snapshot MOVES the field out of `state` rather
+/// than `.clone()`-ing it: the assert reads the `post_<field>` local (never
+/// `state` again) and there is no CPI-assume splice, so the move is the last
+/// read. For a non-`Copy` nested container this avoids a deep copy+drop that
+/// would otherwise multiply CBMC's VCC count past the SAT/SMT resource wall.
+#[test]
+fn brownfield_post_snapshot_moves_not_clones() {
+    let src = r#"spec PostMove
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_postmove_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // The owned snapshot local is matched by REFERENCE (`match &(...)`), so the
+    // moved container is not re-cloned inside the predicate either.
+    assert!(
+        body.contains("let post_post_hook = state.post_hook;")
+            && body.contains("match &(post_post_hook)"),
+        "post-snapshot moves + owned-local match is by-ref; got:\n{body}"
+    );
+}
+
+/// `exists|forall x in <coll>, pred(x)` — a bounded quantifier over a collection
+/// value — lowers to `coll.iter().any|all(|x| pred)`, binding each element (with
+/// field access). The "some/every element of a collection satisfies P" primitive.
+#[test]
+fn brownfield_quant_in_collection_lowering() {
+    let src = r#"spec QuantIn
+pragma state_struct = Roster
+pragma state_invariant = none
+type Signer = { key : Pubkey, mask : U8 }
+state { signers : Vec Signer, cap : U8 }
+handler check (lo : U8) {
+  modifies [cap]
+  ensures forall s in state.signers, s.mask >= lo
+  effect { cap := lo }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_quantin_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains(".iter().all(|s| s.mask >= lo)"),
+        "forall-in → `.iter().all(|x| pred)` with element field access; got:\n{body}"
+    );
+}
+
+/// `pragma kani_abstract_div = on` emits the `checked_div_abstract` support fn
+/// once + a `#[kani::stub(i64::checked_div, checked_div_abstract)]` per proof —
+/// the #182 arithmetic tier that removes the symbolic-divisor circuit that
+/// stalls both SAT and SMT backends.
+#[test]
+fn brownfield_kani_abstract_div_emits_stub() {
+    let src = r#"spec DivAbs
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_abstract_div = on
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_divabs_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn checked_div_abstract(a: i64, b: i64) -> Option<i64>")
+            && body.contains("#[kani::stub(i64::checked_div, checked_div_abstract)]")
+            // the exact truncating-division contract (soundness):
+            && body.contains("kani::assume(r.abs() < bi.abs());"),
+        "kani_abstract_div emits the stub fn + attr + contract; got:\n{body}"
+    );
+}
+
+/// `pragma kani_solver = <solver>` bakes `#[kani::solver(<solver>)]` into every
+/// generated proof (right after `#[kani::proof]`), so a harness that needs an
+/// SMT solver (e.g. z3 for symbolic `checked_div`) is reproducible without a
+/// `--solver` flag.
+#[test]
+fn brownfield_kani_solver_pragma_bakes_solver_attr() {
+    let src = r#"spec SolverTest
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_solver = z3
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_solver_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("#[kani::proof]\n#[kani::solver(z3)]"),
+        "kani_solver pragma bakes `#[kani::solver(z3)]` after `#[kani::proof]`; got:\n{body}"
+    );
+}
+
+/// A `match` in `requires` binds a TUPLE variant's payload and renders a
+/// shape-correct, enum-resolved pattern with a `_` catch-all — the vehicle for
+/// "if period is Custom(s) then s > 0" preconditions (variant payload binding).
+#[test]
+fn brownfield_match_payload_binding_in_requires() {
+    let src = r#"spec PayloadMatch
+pragma state_struct = Timer
+pragma state_invariant = none
+type PeriodV2 | OneTime | Daily | Custom of I64
+state { period : PeriodV2, n : U64 }
+handler tick (m : U64) {
+  requires (match state.period with | Custom s => s > 0 | _ => true) else BadPeriod
+  modifies [n]
+  ensures state.n == m
+  effect { n := m }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pmatch_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // Enum resolved, tuple payload bound to `s`, wildcard catch-all — no stub.
+    assert!(
+        body.contains("PeriodV2::Custom(s) => s > 0")
+            && body.contains("_ => true")
+            && !body.contains("/* ty */"),
+        "match binds the tuple payload with a resolved enum + wildcard; got:\n{body}"
+    );
+}
+
+/// `is .Variant` renders the shape-correct `matches!` pattern for all three
+/// variant shapes (G13b IsVariant): TUPLE (`Custom of I64` → `Enum::V(..)`),
+/// UNIT (`Enum::V`), and STRUCT (`Enum::V { .. }`).
+#[test]
+fn brownfield_isvariant_tuple_unit_struct_patterns() {
+    let src = r#"spec ShapeTest
+pragma state_struct = Timer
+pragma state_invariant = none
+type PeriodV2 | OneTime | Custom of I64
+type Status | Active of { at : I64 } | Approved of { at : I64 }
+state { period : PeriodV2, status : Status, n : U64 }
+handler tick (m : U64) {
+  modifies [n]
+  ensures (state.period is .Custom) or (state.period is .OneTime) or (state.status is .Approved)
+  effect { n := m }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_shapes_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("PeriodV2::Custom(..)"),
+        "tuple variant → `Enum::V(..)`; got:\n{body}"
+    );
+    assert!(
+        body.contains("PeriodV2::OneTime")
+            && !body.contains("PeriodV2::OneTime(")
+            && !body.contains("PeriodV2::OneTime {"),
+        "unit variant → bare `Enum::V`; got:\n{body}"
+    );
+    assert!(
+        body.contains("Status::Approved { .. }"),
+        "struct variant → `Enum::V {{ .. }}`; got:\n{body}"
     );
 }
 

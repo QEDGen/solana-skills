@@ -160,6 +160,12 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         out.push('\n');
     }
 
+    // Abstract i64 division (#182 arithmetic tier) — emitted once when opted in.
+    if super::state_ctor::wants_div_abstraction(spec) {
+        out.push_str(&super::state_ctor::div_abstract_fn());
+        out.push('\n');
+    }
+
     let mut emitted_count = 0;
     for handler in emit_targets {
         for (idx, ensures) in handler.ensures.iter().enumerate() {
@@ -171,6 +177,59 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
                 spec,
                 state_struct.as_deref(),
             )?;
+            emitted_count += 1;
+        }
+    }
+
+    // Guard-enforcement (reject) proofs — opt-in via `pragma kani_reject`. For
+    // EVERY handler with a `requires`/`when` guard (not just the ensures-bearing
+    // `emit_targets` — a requires-only handler is exactly where guard
+    // enforcement matters), assume the guard is violated and assert the real
+    // handler rejects (the converse of the ensures-preservation proof above).
+    // `emit_brownfield_reject_harness` returns `false` (emits nothing) for a
+    // guardless handler, so iterating all handlers self-filters.
+    if spec.pragma_value("kani_reject").is_some() {
+        let mut header_emitted = false;
+        for handler in &spec.handlers {
+            // Peek: only emit the section header once, and only if at least one
+            // handler actually has a guard to enforce.
+            if crate::rust_codegen_util::collect_full_guard(handler, false).is_none() {
+                continue;
+            }
+            if !header_emitted {
+                out.push_str(
+                    "// ============================================================================\n",
+                );
+                out.push_str(
+                    "// Guard-enforcement (reject) proofs — the code must reject a violated\n",
+                );
+                out.push_str("// `requires`/`when` precondition (`pragma kani_reject`).\n");
+                out.push_str(
+                    "// ============================================================================\n\n",
+                );
+                header_emitted = true;
+            }
+            if emit_brownfield_reject_harness(&mut out, handler, spec, state_struct.as_deref())? {
+                emitted_count += 1;
+            }
+        }
+    }
+
+    // Panic-freedom proofs — opt-in via `pragma kani_panic_free`. Call each
+    // handler (agent-fill) with no assertion; Kani's built-in checks verify the
+    // call cannot abort on any symbolic input. Emitted for EVERY handler (a
+    // `()`-returning method's only property is that it doesn't panic).
+    if spec.pragma_value("kani_panic_free").is_some() {
+        out.push_str(
+            "// ============================================================================\n",
+        );
+        out.push_str("// Panic-freedom proofs — the handler must not abort on any symbolic\n");
+        out.push_str("// input (`pragma kani_panic_free`).\n");
+        out.push_str(
+            "// ============================================================================\n\n",
+        );
+        for handler in &spec.handlers {
+            emit_brownfield_panic_free_harness(&mut out, handler, spec, state_struct.as_deref())?;
             emitted_count += 1;
         }
     }

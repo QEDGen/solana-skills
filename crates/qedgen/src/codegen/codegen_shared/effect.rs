@@ -193,6 +193,7 @@ pub(crate) fn tree_bare_rhs(tree: &crate::mir::ExprTree) -> Option<String> {
         ExprTree::Old(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }

@@ -195,6 +195,28 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             render_quant(*kind, binder, binder_ty, fin_bound, body, cx, inside_old),
             Prec::Atom,
         ),
+        ExprTree::QuantIn {
+            kind,
+            binder,
+            coll,
+            body,
+        } => {
+            // Bounded quantifier over a collection: `coll.iter().any|all(|x| …)`.
+            let method = match kind {
+                QuantKind::Forall => "all",
+                QuantKind::Exists => "any",
+            };
+            (
+                format!(
+                    "{}.iter().{}(|{}| {})",
+                    render(coll, cx, inside_old).0,
+                    method,
+                    binder,
+                    render(body, cx, inside_old).0
+                ),
+                Prec::Atom,
+            )
+        }
         // Bool ops parenthesize both operands unconditionally — matches the
         // legacy output byte-for-byte and sidesteps `&&`/`||` precedence.
         ExprTree::BoolOp { op, lhs, rhs } => {
@@ -236,17 +258,37 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             format!("({}.len() as u64)", render(coll, cx, inside_old).0),
             Prec::Atom,
         ),
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee,
+            arms,
+            enum_ty,
+        } => {
             let sc = render(scrutinee, cx, inside_old).0;
-            let mut out = format!("match {} {{", sc);
+            // Enum name: the build-time-resolved `enum_ty`, else the scrutinee
+            // Path leaf `Ty::Custom`.
+            let enum_name = enum_ty.clone().or_else(|| match scrutinee.as_ref() {
+                ExprTree::Path(p) => match &p.ty {
+                    Some(Ty::Custom(name)) => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let en = enum_name.as_deref().unwrap_or("");
+            // `.clone()` the scrutinee → owned payload binders (works for value
+            // and collection uses; can't move out of a `&`-place under `.iter()`).
+            let mut out = format!("match ({}).clone() {{", sc);
             for arm in arms {
-                out.push_str(&format!("\n    {}::{}", "/* ty */", arm.variant));
-                if let Some(b) = &arm.binder {
-                    out.push_str(&format!("({})", b));
-                }
-                out.push_str(" => ");
-                out.push_str(&render(&arm.body, cx, inside_old).0);
-                out.push(',');
+                let pat = if arm.variant == "_" {
+                    "_".to_string()
+                } else {
+                    arm.shape
+                        .arm_pattern(en, &arm.variant, arm.binder.as_deref())
+                };
+                out.push_str(&format!(
+                    "\n    {} => {},",
+                    pat,
+                    render(&arm.body, cx, inside_old).0
+                ));
             }
             out.push_str("\n}");
             (out, Prec::Atom)
@@ -287,7 +329,7 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             scrutinee,
             variant,
             enum_ty,
-            struct_variant,
+            shape,
         } => {
             let sc = render(scrutinee, cx, inside_old).0;
             // Enum name: the build-time-resolved `enum_ty`, else the
@@ -300,12 +342,14 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                 },
                 _ => None,
             });
-            let pat = match (enum_name, *struct_variant) {
-                (Some(e), true) => format!("{}::{} {{ .. }}", e, variant),
-                (Some(e), false) => format!("{}::{}", e, variant),
+            let pat = match enum_name {
+                Some(e) => shape.match_pattern(&e, variant),
                 // Truly unresolved (non-Path scrutinee, untyped) — emit the
-                // struct shape on the bare variant as a last resort.
-                (None, _) => format!("{} {{ .. }}", variant),
+                // resolved shape on the bare variant name as a last resort.
+                None => shape
+                    .match_pattern("", variant)
+                    .trim_start_matches("::")
+                    .to_string(),
             };
             (format!("matches!({}, {})", sc, pat), Prec::Atom)
         }
@@ -548,6 +592,7 @@ fn rust_num_kind(e: &ExprTree) -> NumKind {
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -580,6 +625,7 @@ fn spine_has_arith(e: &ExprTree) -> bool {
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -722,6 +768,7 @@ fn render_pred_wrapped_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &s
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -886,6 +933,7 @@ fn render_widened_term(e: &ExprTree, cx: RustCx, inside_old: bool, wide: &str) -
         | ExprTree::Path(_)
         | ExprTree::Sum { .. }
         | ExprTree::Quant { .. }
+        | ExprTree::QuantIn { .. }
         | ExprTree::BoolOp { .. }
         | ExprTree::Not(_)
         | ExprTree::Cmp { .. }
@@ -958,6 +1006,10 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
         ExprTree::Int(_) | ExprTree::Bool(_) => {}
         ExprTree::Old(inner) | ExprTree::Not(inner) => for_each_path(inner, f),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => for_each_path(body, f),
+        ExprTree::QuantIn { coll, body, .. } => {
+            for_each_path(coll, f);
+            for_each_path(body, f);
+        }
         ExprTree::BoolOp { lhs, rhs, .. }
         | ExprTree::Cmp { lhs, rhs, .. }
         | ExprTree::Arith { lhs, rhs, .. } => {
@@ -974,7 +1026,9 @@ pub fn for_each_path(e: &ExprTree, f: &mut impl FnMut(&TreePath)) {
             for_each_path(elem, f);
         }
         ExprTree::Len(coll) => for_each_path(coll, f),
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             for_each_path(scrutinee, f);
             for arm in arms {
                 for_each_path(&arm.body, f);
@@ -1077,6 +1131,9 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
         ExprTree::Int(_) | ExprTree::Bool(_) | ExprTree::Path(_) => false,
         ExprTree::Old(inner) | ExprTree::Not(inner) => contains_fallible_arith(inner),
         ExprTree::Sum { body, .. } | ExprTree::Quant { body, .. } => contains_fallible_arith(body),
+        ExprTree::QuantIn { coll, body, .. } => {
+            contains_fallible_arith(coll) || contains_fallible_arith(body)
+        }
         ExprTree::BoolOp { lhs, rhs, .. } | ExprTree::Cmp { lhs, rhs, .. } => {
             contains_fallible_arith(lhs) || contains_fallible_arith(rhs)
         }
@@ -1084,7 +1141,9 @@ pub fn contains_fallible_arith(e: &ExprTree) -> bool {
             contains_fallible_arith(coll) || contains_fallible_arith(elem)
         }
         ExprTree::Len(coll) => contains_fallible_arith(coll),
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             contains_fallible_arith(scrutinee)
                 || arms.iter().any(|a| contains_fallible_arith(&a.body))
         }

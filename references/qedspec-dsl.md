@@ -257,7 +257,9 @@ type Account = {
 ### Sum types (ADTs)
 
 ML-style sum types with optional payloads. Variants without payload are bare
-idents; payload variants use `of { ... }`.
+idents; **struct** variants use `of { named : T, … }`; a single-field **tuple**
+variant uses `of <Type>` (no braces) — mirroring a Rust tuple variant like
+`Custom(i64)`.
 
 ```fsharp
 // State ADT — variants with optional payloads
@@ -272,7 +274,18 @@ type State
     }
   | Draining
   | Resetting
+
+// Tuple variant — `Custom of I64` mirrors the real `PeriodV2::Custom(i64)`;
+// the State-driven Kani ctor builds it positionally as `PeriodV2::Custom(…)`.
+type PeriodV2
+  | OneTime
+  | Daily
+  | Custom of I64
 ```
+
+(Tuple variants are supported by the brownfield Kani construction path and the
+`is .Variant` test — `state.period is .Custom` → `matches!(…, PeriodV2::Custom(..))`.
+The Lean ADT backend still assumes unit/struct shapes.)
 
 Sum types used as `Map` values are emitted as proper Lean `inductive`
 declarations; state ADTs flatten for downstream transition codegen.
@@ -925,6 +938,12 @@ old(state.accounts[i].pnl)
 forall s : Pool.Active, s.total_deposits >= s.total_borrows
 exists l : Loan.Active, l.collateral > 0
 
+// Quantifiers over a COLLECTION value (a `Vec` field) — `in`, not `:`. Binds
+// each element; Rust `coll.iter().all|any(|x| body)`, Lean `∀|∃ x ∈ coll, body`.
+// The "some/every element of a collection satisfies P" primitive.
+forall s in state.signers, s.mask >= threshold
+exists c in state.destinations, c == authority
+
 // Quantifiers — multi-binder (desugars to nested single-binder forms)
 forall p1 p2 : Path, black_count(p1) == black_count(p2)
 
@@ -1254,6 +1273,52 @@ pragma state_module = state::policies::implementations::foo_policy
 pragma harness_use  = crate::state::policies::utils::foo_types::*
 pragma harness_use  = crate::state::policies::policy_core::traits::FooTrait
 ```
+
+**`pragma kani_reject = on`** — emit **guard-enforcement (reject) proofs** in the
+brownfield impl-Kani output. For **every** handler with a `requires` / `when`
+guard — including a postcondition-free validator (no `ensures`/`effect`) — a
+`verify_<handler>_rejects` harness assumes the guard is **violated** and
+asserts the real handler returns `Err` — verifying the code *enforces* the guard
+the spec declares (the converse of the ensures-preservation proof, which checks
+what holds *after* a successful call). The agent-fill is the same real handler
+call as the ensures harness. Off by default. Example: a handler with
+`requires not contains(state.approved, signer) else AlreadyApproved` gets a
+reject proof that assumes `contains(state.approved, signer)` (signer already
+voted) and asserts the call rejects the duplicate.
+
+**`pragma kani_panic_free = on`** — emit a **panic-freedom proof** per handler in
+the brownfield impl-Kani output: `verify_<handler>_panic_free` constructs
+symbolic state + params and CALLS the real handler (agent-fill) with **no
+assertion** — Kani's built-in checks (unwrap / overflow / division-by-zero /
+index / explicit panic) verify the call cannot abort on any symbolic input. The
+natural shape for a `()`-returning method whose only property is that it doesn't
+panic (e.g. a `reset_if_needed` doing unchecked-looking period arithmetic). Off
+by default; works on a handler with no `ensures`/`effect`.
+
+**`pragma kani_solver = <solver>`** — bake `#[kani::solver(<solver>)]` into every
+generated proof (right after `#[kani::proof]`), so a harness that needs a
+specific solver is reproducible without a `cargo kani --solver` flag. Use an SMT
+solver (`z3`, `cvc5`) when the harness divides/mods by a *symbolic* value — they
+reason about bit-vector division natively, where the default SAT backend
+(CaDiCaL) bit-blasts it and can blow up. Values: `z3`, `cvc5`, `bitwuzla`,
+`cadical`, `kissat`, `minisat`.
+
+**`pragma kani_vec_empty = <field>`** (repeatable) — build that State `Vec` field
+as `vec![]` (no element construction) in the brownfield ctor. Lets a harness
+mirror only the fields its property reads: a heavy/irrelevant `Vec<BigNestedType>`
+field costs nothing (its element type needn't even be declared as a spec `type` —
+only named in the field type), and a recursing `invariant()` over it is skipped
+(avoiding a symbolic-input panic in the element's own invariant). Essential for
+mirroring a large `#[account]` struct where the property only touches a few fields.
+
+**`pragma kani_abstract_div = on`** — the **#182 arithmetic tier**: replace
+`i64::checked_div` with `checked_div_abstract`, a fresh symbolic quotient pinned
+by division's *exact* contract (`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`,
+plus the two `None` cases), via `#[kani::stub]`. A symbolic 64-bit divisor
+bit-blasts a sequential divider circuit that stalls both SAT (CaDiCaL) and SMT
+(z3); the abstraction removes the circuit while staying sound (the quotient is
+unique, so it's exact — no false proofs). Same discipline as the Pubkey/PDA
+stubs. Needs `-Z stubbing`.
 
 ## Interface declarations
 
