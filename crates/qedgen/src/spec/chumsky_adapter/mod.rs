@@ -285,6 +285,9 @@ impl<'a> TypeEnv<'a> {
     fn path_type_name(&self, p: &a::Path) -> Option<String> {
         match self.resolve_path_leaf(p, false)? {
             a::TypeRef::Named(n) => Some(n.clone()),
+            // `Option T` / `Vec T` etc. — the constructor names the enum for
+            // variant resolution (`Option` → `Some`/`None` in a `match`).
+            a::TypeRef::Param(ctor, _) => Some(ctor.clone()),
             _ => None,
         }
     }
@@ -301,6 +304,15 @@ impl<'a> TypeEnv<'a> {
         type_hint: Option<&str>,
         variant: &str,
     ) -> Option<(String, crate::mir::VariantShape)> {
+        use crate::mir::VariantShape;
+        // Builtin `Option` (prelude) — `Some(x)` is a tuple variant, `None` a
+        // unit variant; both usable as `Option::Some` / `Option::None`. Lets a
+        // predicate match an `Option` field (`match state.x with | Some h => …`).
+        match variant {
+            "Some" => return Some(("Option".to_string(), VariantShape::Tuple)),
+            "None" => return Some(("Option".to_string(), VariantShape::Unit)),
+            _ => {}
+        }
         if let Some(enum_name) = type_hint {
             if let Some(shapes) = self.adts.get(enum_name) {
                 if let Some(&shape) = shapes.get(variant) {

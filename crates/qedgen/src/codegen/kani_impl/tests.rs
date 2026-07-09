@@ -605,6 +605,43 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `match` on an `Option` field binds `Some`'s payload and renders the builtin
+/// prelude variants shape-correctly (`Option::Some(h)` tuple / `Option::None`
+/// unit) — composing with `exists x in coll` + field access to navigate a nested
+/// `Option<Record>` with a `Vec` field (the E-A predicate shape).
+#[test]
+fn brownfield_option_match_composes_with_exists_in() {
+    let src = r#"spec OptMatch
+pragma state_struct = Pol
+pragma state_invariant = none
+type Hook = { keys : Vec Pubkey }
+state { post_hook : Option Hook, n : U8 }
+handler check (auth : Pubkey) {
+  modifies [n]
+  ensures (match state.post_hook with | Some h => (exists k in h.keys, k == auth) | None => false)
+  effect { n := 0 }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_optmatch_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("Option::Some(h) => (h.keys.iter().any(|k| k == auth))")
+            && body.contains("Option::None => false"),
+        "Option match binds Some's payload + composes with exists-in + field access; got:\n{body}"
+    );
+}
+
 /// `exists|forall x in <coll>, pred(x)` — a bounded quantifier over a collection
 /// value — lowers to `coll.iter().any|all(|x| pred)`, binding each element (with
 /// field access). The "some/every element of a collection satisfies P" primitive.
