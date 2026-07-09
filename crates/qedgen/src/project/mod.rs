@@ -21,6 +21,14 @@ const SUPPORT_SPEC: &str = include_str!("../../../../lean_solana/QEDGen/Solana/S
 // the validation workspace fails to build (issue #71). No further deps.
 const SUPPORT_COMMAND_BUILDERS: &str =
     include_str!("../../../../lean_solana/QEDGen/Solana/CommandBuilders.lean");
+
+// The vendored `qedgen-kani-prelude` crate (#182): the soundness-proven,
+// dependency-free Kani abstraction library. Embedded so `write_kani_prelude`
+// can materialize it next to a program whose generated harness imports it
+// (`use qedgen_kani_prelude::…`), mirroring how `lean_solana/` is delivered.
+const KANI_PRELUDE_CARGO: &str = include_str!("../../../../kani_prelude/Cargo.toml");
+const KANI_PRELUDE_LIB: &str = include_str!("../../../../kani_prelude/src/lib.rs");
+const KANI_PRELUDE_README: &str = include_str!("../../../../kani_prelude/README.md");
 // Trimmed barrel import — only the modules we embed (no SBPF/Bridge/Guards)
 const SUPPORT_SOLANA_BASE: &str = "\
 import QEDGen.Solana.Account\n\
@@ -114,9 +122,48 @@ fn write_lean_solana(output_dir: &Path, mathlib: bool) -> Result<()> {
     Ok(())
 }
 
+/// Vendor the `qedgen-kani-prelude` crate (#182) into `program_dir` as
+/// `qedgen_kani_prelude/` so a generated Kani harness in the same package can
+/// `use qedgen_kani_prelude::…` (Shape 1 delivery). The crate is
+/// dependency-free and `#![cfg(kani)]`, so off-kani it compiles to an empty
+/// crate — an unconditional path-dependency on it costs a normal build nothing.
+/// Mirrors `write_lean_solana`; idempotent (overwrites in place).
+// Wired into the `--kani` codegen path by the follow-up harness rewire (#182
+// chunk 3); standalone until then.
+#[allow(dead_code)]
+pub fn write_kani_prelude(program_dir: &Path) -> Result<()> {
+    let crate_dir = program_dir.join("qedgen_kani_prelude");
+    std::fs::create_dir_all(crate_dir.join("src"))?;
+    std::fs::write(crate_dir.join("Cargo.toml"), KANI_PRELUDE_CARGO)?;
+    std::fs::write(crate_dir.join("src").join("lib.rs"), KANI_PRELUDE_LIB)?;
+    std::fs::write(crate_dir.join("README.md"), KANI_PRELUDE_README)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The embedded `qedgen-kani-prelude` materializes with the dep-free
+    /// primitives the generated harness imports, the `#![cfg(kani)]` gate (so an
+    /// unconditional dep is free off-kani), and its own `[workspace]` (so it
+    /// stays out of the host program's workspace).
+    #[test]
+    fn write_kani_prelude_materializes_the_proven_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_kani_prelude(tmp.path()).unwrap();
+        let base = tmp.path().join("qedgen_kani_prelude");
+
+        let lib = std::fs::read_to_string(base.join("src/lib.rs")).unwrap();
+        assert!(lib.contains("pub fn wide_eq_32"));
+        assert!(lib.contains("pub fn wide_cmp_32"));
+        assert!(lib.contains("pub fn checked_div_i64"));
+        assert!(lib.contains("#![cfg(kani)]"));
+
+        let cargo = std::fs::read_to_string(base.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("name = \"qedgen-kani-prelude\""));
+        assert!(cargo.contains("[workspace]"));
+    }
 
     /// Embed-list closure gate: every `import QEDGen.Solana.X` inside an
     /// embedded module must resolve to another embedded module (issue #71
