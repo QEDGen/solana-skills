@@ -739,9 +739,7 @@ pub(super) fn is_map_value_sum_type(name: &str, spec: &a::Spec) -> bool {
 /// (`post.a.b`), a `&`-place under `.iter()` (`c.field`), or a non-snapshot
 /// base returns `false` and keeps the clone.
 fn scrutinee_is_owned_snapshot(sc: &str) -> bool {
-    let rest = sc
-        .strip_prefix("pre.")
-        .or_else(|| sc.strip_prefix("post."));
+    let rest = sc.strip_prefix("pre.").or_else(|| sc.strip_prefix("post."));
     match rest {
         Some(field) => {
             !field.is_empty()
