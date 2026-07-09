@@ -292,16 +292,34 @@ pub(super) fn expr_to_rust(
             expr_to_rust(&coll.node, ctx, consts, opts)
         ),
         Expr::Match { scrutinee, arms } => {
+            // Resolve the scrutinee's enum so each arm's pattern is shape-correct
+            // (`Enum::Custom(s)` tuple / `Enum::OneTime` unit / `Enum::Active { .. }`
+            // struct), with a `_` catch-all. Mirrors the ExprTree renderer.
             let sc = expr_to_rust(&scrutinee.node, ctx, consts, opts);
+            let hint = match &scrutinee.node {
+                Expr::Path(p) => opts.env.path_type_name(p),
+                _ => None,
+            };
             let mut out = format!("match {} {{", sc);
             for arm in arms {
-                out.push_str(&format!("\n    {}::{}", "/* ty */", arm.variant));
-                if let Some(b) = &arm.binder {
-                    out.push_str(&format!("({})", b));
-                }
-                out.push_str(" => ");
-                out.push_str(&expr_to_rust(&arm.body.node, ctx, consts, opts));
-                out.push(',');
+                let pat = if arm.variant == "_" {
+                    "_".to_string()
+                } else {
+                    let (enum_name, shape) =
+                        match opts.env.resolve_variant(hint.as_deref(), &arm.variant) {
+                            Some(pair) => pair,
+                            None => (
+                                hint.clone().unwrap_or_default(),
+                                crate::mir::VariantShape::Struct,
+                            ),
+                        };
+                    shape.arm_pattern(&enum_name, &arm.variant, arm.binder.as_deref())
+                };
+                out.push_str(&format!(
+                    "\n    {} => {},",
+                    pat,
+                    expr_to_rust(&arm.body.node, ctx, consts, opts)
+                ));
             }
             out.push_str("\n}");
             out

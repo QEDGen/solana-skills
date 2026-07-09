@@ -222,7 +222,9 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
                 Prec::Atom,
             )
         }
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             // `match … with | .Ctor binder? => body`. A binder the body
             // never reads renders `_` — Lean's Decidable synthesis trips on
             // named-but-unused binders in Prop-valued arms. The check is
@@ -235,6 +237,12 @@ fn render(e: &ExprTree, cx: LeanCx, inside_old: bool) -> (String, Prec) {
             out.push_str(" with");
             for arm in arms {
                 let body_str = render(&arm.body, cx, inside_old).0;
+                // `"_"` is the catch-all — Lean's wildcard is `| _`, not `| ._`.
+                if arm.variant == "_" {
+                    out.push_str("\n    | _ => ");
+                    out.push_str(&body_str);
+                    continue;
+                }
                 out.push_str(&format!("\n    | .{}", arm.variant));
                 if let Some(b) = &arm.binder {
                     out.push(' ');
@@ -549,7 +557,9 @@ pub fn tree_mentions_ident(e: &ExprTree, name: &str) -> bool {
                 || tree_mentions_ident(b, name)
                 || tree_mentions_ident(d, name)
         }
-        ExprTree::Match { scrutinee, arms } => {
+        ExprTree::Match {
+            scrutinee, arms, ..
+        } => {
             tree_mentions_ident(scrutinee, name)
                 || arms.iter().any(|a| tree_mentions_ident(&a.body, name))
         }

@@ -213,20 +213,35 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
             b: boxed(b, cx, shadow),
             d: boxed(d, cx, shadow),
         },
-        Expr::Match { scrutinee, arms } => ExprTree::Match {
-            scrutinee: boxed(scrutinee, cx, shadow),
-            arms: arms
-                .iter()
-                .map(|arm| TreeMatchArm {
-                    variant: arm.variant.clone(),
-                    binder: arm.binder.clone(),
-                    body: match &arm.binder {
-                        Some(b) => under(b, &arm.body, cx, shadow),
-                        None => boxed(&arm.body, cx, shadow),
-                    },
-                })
-                .collect(),
-        },
+        Expr::Match { scrutinee, arms } => {
+            // Resolve the scrutinee's enum (a Path scrutinee resolves via the
+            // type env) so the arm patterns are shape-correct; each named arm's
+            // shape comes from `resolve_variant`. The `"_"` wildcard has no shape.
+            let enum_hint = match &scrutinee.node {
+                Expr::Path(p) => cx.env.path_type_name(p),
+                _ => None,
+            };
+            ExprTree::Match {
+                scrutinee: boxed(scrutinee, cx, shadow),
+                arms: arms
+                    .iter()
+                    .map(|arm| TreeMatchArm {
+                        variant: arm.variant.clone(),
+                        binder: arm.binder.clone(),
+                        body: match &arm.binder {
+                            Some(b) => under(b, &arm.body, cx, shadow),
+                            None => boxed(&arm.body, cx, shadow),
+                        },
+                        shape: cx
+                            .env
+                            .resolve_variant(enum_hint.as_deref(), &arm.variant)
+                            .map(|(_, s)| s)
+                            .unwrap_or(crate::mir::VariantShape::Struct),
+                    })
+                    .collect(),
+                enum_ty: enum_hint,
+            }
+        }
         Expr::Ctor { variant, payload } => ExprTree::Ctor {
             variant: variant.clone(),
             payload: payload.as_ref().map(|p| boxed(p, cx, shadow)),

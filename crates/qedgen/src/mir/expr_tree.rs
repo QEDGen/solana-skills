@@ -40,9 +40,20 @@ impl VariantShape {
     /// The Rust `matches!` sub-pattern for `<enum>::<variant>` at this shape:
     /// `Enum::V` (Unit), `Enum::V(..)` (Tuple), `Enum::V { .. }` (Struct).
     pub fn match_pattern(self, enum_name: &str, variant: &str) -> String {
+        self.arm_pattern(enum_name, variant, None)
+    }
+
+    /// A `match`-arm pattern for `<enum>::<variant>`, binding a tuple payload to
+    /// `binder` when given: `Enum::V` (Unit), `Enum::V(b)` / `Enum::V(..)`
+    /// (Tuple, with/without a binder), `Enum::V { .. }` (Struct — a binder isn't
+    /// yet threaded into struct-variant field access).
+    pub fn arm_pattern(self, enum_name: &str, variant: &str, binder: Option<&str>) -> String {
         match self {
             VariantShape::Unit => format!("{enum_name}::{variant}"),
-            VariantShape::Tuple => format!("{enum_name}::{variant}(..)"),
+            VariantShape::Tuple => match binder {
+                Some(b) => format!("{enum_name}::{variant}({b})"),
+                None => format!("{enum_name}::{variant}(..)"),
+            },
             VariantShape::Struct => format!("{enum_name}::{variant} {{ .. }}"),
         }
     }
@@ -124,6 +135,10 @@ pub enum ExprTree {
     Match {
         scrutinee: Box<ExprTree>,
         arms: Vec<TreeMatchArm>,
+        /// Resolved enum type name of the scrutinee, for shape-correct arm
+        /// patterns (`RustCx` has no `TypeEnv` at emission time). `None` when
+        /// unresolvable; the renderer falls back to the scrutinee Path leaf `Ty`.
+        enum_ty: Option<Symbol>,
     },
     /// `.Variant` / `.Variant payload` — sum-type constructor application.
     Ctor {
@@ -269,11 +284,13 @@ pub enum TreeArithOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeMatchArm {
-    /// Constructor name the arm matches on.
+    /// Constructor name the arm matches on; `"_"` = the catch-all wildcard.
     pub variant: Symbol,
-    /// Optional binder for the variant's payload.
+    /// Optional binder for the variant's payload (bound in the arm body).
     pub binder: Option<Symbol>,
     pub body: Box<ExprTree>,
+    /// The variant's Rust shape, for the arm's pattern (`Unit` for `"_"`).
+    pub shape: VariantShape,
 }
 
 /// Numeric kind for operator-coercion decisions — the tree-native

@@ -605,6 +605,45 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// A `match` in `requires` binds a TUPLE variant's payload and renders a
+/// shape-correct, enum-resolved pattern with a `_` catch-all — the vehicle for
+/// "if period is Custom(s) then s > 0" preconditions (variant payload binding).
+#[test]
+fn brownfield_match_payload_binding_in_requires() {
+    let src = r#"spec PayloadMatch
+pragma state_struct = Timer
+pragma state_invariant = none
+type PeriodV2 | OneTime | Daily | Custom of I64
+state { period : PeriodV2, n : U64 }
+handler tick (m : U64) {
+  requires (match state.period with | Custom s => s > 0 | _ => true) else BadPeriod
+  modifies [n]
+  ensures state.n == m
+  effect { n := m }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_pmatch_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // Enum resolved, tuple payload bound to `s`, wildcard catch-all — no stub.
+    assert!(
+        body.contains("PeriodV2::Custom(s) => s > 0")
+            && body.contains("_ => true")
+            && !body.contains("/* ty */"),
+        "match binds the tuple payload with a resolved enum + wildcard; got:\n{body}"
+    );
+}
+
 /// `is .Variant` renders the shape-correct `matches!` pattern for all three
 /// variant shapes (G13b IsVariant): TUPLE (`Custom of I64` → `Enum::V(..)`),
 /// UNIT (`Enum::V`), and STRUCT (`Enum::V { .. }`).
