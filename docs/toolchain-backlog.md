@@ -599,6 +599,21 @@ defined but wired nowhere. Two angles:
   with `Option` access and enum-payload binding — is the reusable unlock (covers any
   "some element of a collection violates P" property). Then E-A is a reject proof over
   the pure `invariant()`. This is the highest-leverage next DSL feature.
+- **UPDATE — nested-predicate feature SHIPPED (blocker (a) cleared).** `exists|forall x
+  in <coll>, pred` (`b1724c7`, `Expr`/`ExprTree::QuantIn` → `coll.iter().any|all`) +
+  `match`/`is` on `Option` fields (`5b22050`, builtin `Some`/`None`) now compose to the
+  exact E-A predicate: verified `match state.post_hook with | Some h => (exists k in
+  h.keys, k == auth) | None => false` renders `match … { Option::Some(h) =>
+  (h.keys.iter().any(|k| k == auth)), Option::None => false }` (enum-resolved, payload
+  bound, field access, `_`/None). Remaining for E-A is blocker (b) only — MECHANICAL, no
+  new DSL: (1) mirror the ~10-type policy state (`ProgramInteractionPolicy` →
+  `Option<Hook>` → `Vec<AccountConstraint>` → `AccountConstraintType` enum tuple-payload
+  → `Vec<Pubkey>`/`Vec<DataConstraint>`, plus `Vec<InstructionConstraint>`,
+  `Vec<SpendingLimitV2>`, `DataConstraint`) via `state_struct` — the ctor handles
+  Option/Vec/nested-record/enum/tuple-Vec-payload individually but is untested this deep;
+  (2) reference the external `HOOK_AUTHORITY_PUBKEY` const in the predicate; (3) it's a
+  reject harness whose FAILURE is the counterexample (the guard is missing). Left as a
+  scoped follow-on — the reusable DSL unlock is done and validated to reach the predicate.
 
 **E-B (MED) — `SettingsChange` doesn't persist.** `execute_payload`
 (`settings_change.rs`) mutates an in-memory `Account<Settings>` (from a remaining
