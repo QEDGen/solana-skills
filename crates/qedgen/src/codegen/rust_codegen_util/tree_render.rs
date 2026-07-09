@@ -287,7 +287,7 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
             scrutinee,
             variant,
             enum_ty,
-            struct_variant,
+            shape,
         } => {
             let sc = render(scrutinee, cx, inside_old).0;
             // Enum name: the build-time-resolved `enum_ty`, else the
@@ -300,12 +300,14 @@ fn render(e: &ExprTree, cx: RustCx, inside_old: bool) -> (String, Prec) {
                 },
                 _ => None,
             });
-            let pat = match (enum_name, *struct_variant) {
-                (Some(e), true) => format!("{}::{} {{ .. }}", e, variant),
-                (Some(e), false) => format!("{}::{}", e, variant),
+            let pat = match enum_name {
+                Some(e) => shape.match_pattern(&e, variant),
                 // Truly unresolved (non-Path scrutinee, untyped) — emit the
-                // struct shape on the bare variant as a last resort.
-                (None, _) => format!("{} {{ .. }}", variant),
+                // resolved shape on the bare variant name as a last resort.
+                None => shape
+                    .match_pattern("", variant)
+                    .trim_start_matches("::")
+                    .to_string(),
             };
             (format!("matches!({}, {})", sc, pat), Prec::Atom)
         }

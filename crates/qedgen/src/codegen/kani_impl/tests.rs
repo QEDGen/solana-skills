@@ -605,6 +605,52 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `is .Variant` renders the shape-correct `matches!` pattern for all three
+/// variant shapes (G13b IsVariant): TUPLE (`Custom of I64` → `Enum::V(..)`),
+/// UNIT (`Enum::V`), and STRUCT (`Enum::V { .. }`).
+#[test]
+fn brownfield_isvariant_tuple_unit_struct_patterns() {
+    let src = r#"spec ShapeTest
+pragma state_struct = Timer
+pragma state_invariant = none
+type PeriodV2 | OneTime | Custom of I64
+type Status | Active of { at : I64 } | Approved of { at : I64 }
+state { period : PeriodV2, status : Status, n : U64 }
+handler tick (m : U64) {
+  modifies [n]
+  ensures (state.period is .Custom) or (state.period is .OneTime) or (state.status is .Approved)
+  effect { n := m }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_shapes_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("PeriodV2::Custom(..)"),
+        "tuple variant → `Enum::V(..)`; got:\n{body}"
+    );
+    assert!(
+        body.contains("PeriodV2::OneTime")
+            && !body.contains("PeriodV2::OneTime(")
+            && !body.contains("PeriodV2::OneTime {"),
+        "unit variant → bare `Enum::V`; got:\n{body}"
+    );
+    assert!(
+        body.contains("Status::Approved { .. }"),
+        "struct variant → `Enum::V {{ .. }}`; got:\n{body}"
+    );
+}
+
 /// #183 / G17b: an in-module brownfield harness (`pragma state_module`) whose
 /// mirrored State references types from a SECOND private module can't name them
 /// via `use super::*` alone. `pragma harness_use = <path>` (repeatable) injects

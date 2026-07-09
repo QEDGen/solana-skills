@@ -259,7 +259,9 @@ fn build(e: &Expr, cx: &TreeCx, shadow: &mut Vec<String>) -> ExprTree {
                 scrutinee: boxed(scrutinee, cx, shadow),
                 variant: variant.clone(),
                 enum_ty: resolved.as_ref().map(|(e, _)| e.clone()),
-                struct_variant: resolved.map(|(_, s)| s).unwrap_or(true),
+                shape: resolved
+                    .map(|(_, s)| s)
+                    .unwrap_or(crate::mir::VariantShape::Struct),
             }
         }
         Expr::App { func, args } => ExprTree::App {

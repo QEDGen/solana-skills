@@ -283,9 +283,9 @@ type PeriodV2
   | Custom of I64
 ```
 
-(Tuple variants are currently supported by the brownfield Kani construction
-path; the `is .Variant` test and the Lean ADT backend still assume unit/struct
-shapes.)
+(Tuple variants are supported by the brownfield Kani construction path and the
+`is .Variant` test — `state.period is .Custom` → `matches!(…, PeriodV2::Custom(..))`.
+The Lean ADT backend still assumes unit/struct shapes.)
 
 Sum types used as `Map` values are emitted as proper Lean `inductive`
 declarations; state ADTs flatten for downstream transition codegen.

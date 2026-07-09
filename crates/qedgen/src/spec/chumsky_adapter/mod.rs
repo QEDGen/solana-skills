@@ -93,13 +93,31 @@ struct TypeEnv<'a> {
     records: std::collections::BTreeMap<String, std::collections::BTreeMap<String, &'a a::TypeRef>>,
     params: Vec<(String, &'a a::TypeRef)>,
     aliases: std::collections::BTreeMap<String, String>,
-    /// Sum-type registry: enum name → (variant name → is-struct-variant).
-    /// `true` = the variant carries named fields (`Approved of { … }` →
-    /// Rust `Enum::Approved { .. }`); `false` = a payload-free unit variant
-    /// (`Executing` → Rust `Enum::Executing`). Populated from every
-    /// `TopItem::Adt`. Consumed by [`Self::resolve_variant`] to render an
-    /// `is .Variant` test as a shape-correct `matches!` pattern.
-    adts: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
+    /// Sum-type registry: enum name → (variant name → its Rust
+    /// [`VariantShape`]). `Struct` (`Approved of { … }` → `Enum::Approved { .. }`),
+    /// `Tuple` (`Custom of I64` → `Enum::Custom(..)`), or `Unit` (`Executing` →
+    /// `Enum::Executing`). Populated from every `TopItem::Adt`. Consumed by
+    /// [`Self::resolve_variant`] to render an `is .Variant` test as a
+    /// shape-correct `matches!` pattern.
+    adts: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, crate::mir::VariantShape>,
+    >,
+}
+
+/// Classify a variant's declared fields into its Rust [`VariantShape`]. No
+/// fields → `Unit`; all-numeric field names (the parser's `"0"`, `"1"`, … tuple
+/// marker — a real field's grammar requires an identifier) → `Tuple`; otherwise
+/// named fields → `Struct`.
+fn variant_shape(fields: &[a::TypedField]) -> crate::mir::VariantShape {
+    use crate::mir::VariantShape;
+    if fields.is_empty() {
+        VariantShape::Unit
+    } else if fields.iter().all(|f| f.name.parse::<usize>().is_ok()) {
+        VariantShape::Tuple
+    } else {
+        VariantShape::Struct
+    }
 }
 
 impl<'a> TypeEnv<'a> {
@@ -119,7 +137,7 @@ impl<'a> TypeEnv<'a> {
                 TopItem::Adt(a) if a.name != "Error" => {
                     let mut shapes = std::collections::BTreeMap::new();
                     for variant in &a.variants {
-                        shapes.insert(variant.name.clone(), !variant.fields.is_empty());
+                        shapes.insert(variant.name.clone(), variant_shape(&variant.fields));
                         for f in &variant.fields {
                             env.state_fields.entry(f.name.clone()).or_insert(&f.ty);
                         }
@@ -278,11 +296,15 @@ impl<'a> TypeEnv<'a> {
     /// carry the variant, fall back to a global search: a variant name unique
     /// across all registered sum types resolves unambiguously; an ambiguous or
     /// unknown name returns `None` (caller keeps a best-effort render).
-    fn resolve_variant(&self, type_hint: Option<&str>, variant: &str) -> Option<(String, bool)> {
+    fn resolve_variant(
+        &self,
+        type_hint: Option<&str>,
+        variant: &str,
+    ) -> Option<(String, crate::mir::VariantShape)> {
         if let Some(enum_name) = type_hint {
             if let Some(shapes) = self.adts.get(enum_name) {
-                if let Some(&is_struct) = shapes.get(variant) {
-                    return Some((enum_name.to_string(), is_struct));
+                if let Some(&shape) = shapes.get(variant) {
+                    return Some((enum_name.to_string(), shape));
                 }
             }
         }

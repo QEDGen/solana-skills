@@ -26,6 +26,28 @@
 
 use super::{Symbol, Ty};
 
+/// The Rust shape of an enum variant, for rendering an `is .Variant` test as a
+/// shape-correct `matches!` pattern: `Enum::V` (Unit), `Enum::V(..)` (Tuple —
+/// e.g. `Custom(i64)`), `Enum::V { .. }` (Struct — e.g. `Approved { timestamp }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantShape {
+    Unit,
+    Tuple,
+    Struct,
+}
+
+impl VariantShape {
+    /// The Rust `matches!` sub-pattern for `<enum>::<variant>` at this shape:
+    /// `Enum::V` (Unit), `Enum::V(..)` (Tuple), `Enum::V { .. }` (Struct).
+    pub fn match_pattern(self, enum_name: &str, variant: &str) -> String {
+        match self {
+            VariantShape::Unit => format!("{enum_name}::{variant}"),
+            VariantShape::Tuple => format!("{enum_name}::{variant}(..)"),
+            VariantShape::Struct => format!("{enum_name}::{variant} {{ .. }}"),
+        }
+    }
+}
+
 /// Closed expression tree. See module docs for invariants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprTree {
@@ -125,10 +147,10 @@ pub enum ExprTree {
         /// when unresolvable; the renderer then falls back to the scrutinee
         /// Path leaf `Ty`.
         enum_ty: Option<Symbol>,
-        /// `true` = struct variant → `Enum::V { .. }`; `false` = a
-        /// payload-free unit variant → `Enum::V`. Resolved from the
-        /// sum-type registry at build time.
-        struct_variant: bool,
+        /// The variant's Rust shape → its `matches!` pattern (`Enum::V` /
+        /// `Enum::V(..)` / `Enum::V { .. }`). Resolved from the sum-type
+        /// registry at build time.
+        shape: VariantShape,
     },
     /// `f(arg1, …)` — application of a spec-level helper (uninterpreted or
     /// `ref_impl`) or a builtin (`now()`, `current_epoch()`).
