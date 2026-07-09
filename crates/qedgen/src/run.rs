@@ -1338,11 +1338,16 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     impl_mode,
                 )?;
 
-                // #182 Shape-1: when the harness's Pubkey/div stubs call the
-                // soundness-proven `qedgen_kani_prelude`, deliver the crate beside
-                // the program and depend on it. Gated so the over-approximation
-                // stubs (PDA/log/CPI/clock) don't pull in an unused crate.
-                if kani_impl::harness_uses_kani_prelude(&parsed) {
+                // #182 Shape-1: deliver + depend on the crate only when the
+                // generated harness actually references it. Whether the Pubkey/
+                // div abstraction is emitted is mode-dependent — the brownfield
+                // state-driven shape stubs `==`/`cmp`/`checked_div` through the
+                // crate, the greenfield symbolic-accounts shape keeps the memcmp
+                // bound — so gate on the emitted text, not a spec-level predicate.
+                let harness_refs_prelude = std::fs::read_to_string(&kani_impl_path)
+                    .map(|s| s.contains("qedgen_kani_prelude"))
+                    .unwrap_or(false);
+                if harness_refs_prelude {
                     crate::project::deliver_kani_prelude_for_harness(&kani_impl_path)?;
                 }
             }

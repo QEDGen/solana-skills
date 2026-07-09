@@ -270,16 +270,6 @@ pub(crate) fn wants_div_abstraction(spec: &ParsedSpec) -> bool {
     spec.pragma_value("kani_abstract_div").is_some()
 }
 
-/// True when the generated impl harness references the `qedgen_kani_prelude`
-/// crate — i.e. a Pubkey or division abstraction is active, so its stub bodies
-/// call `qedgen_kani_prelude::{wide_eq_32, wide_cmp_32, checked_div_i64}`.
-/// Codegen uses this to decide whether to deliver the crate next to the program
-/// and depend on it (#182 Shape-1). The over-approximation stubs (PDA/log/CPI/
-/// clock) stay inline and do NOT pull the crate in.
-pub(crate) fn harness_uses_kani_prelude(spec: &ParsedSpec) -> bool {
-    wants_pubkey_abstraction(spec) || wants_div_abstraction(spec)
-}
-
 /// The abstract-`checked_div` support fn (emitted once when
 /// `wants_div_abstraction`) — a thin adapter over the soundness-proven
 /// `qedgen_kani_prelude` crate (#182). The crate returns a fresh symbolic
