@@ -413,6 +413,13 @@ fn is_copy_scalar_ty(t: &str) -> bool {
 /// and reject (guard-enforcement) emitters so a new stub is wired in one place.
 fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     out.push_str("#[kani::proof]\n");
+    // `pragma kani_solver = <z3|cvc5|…>` bakes the solver into the harness
+    // (`#[kani::solver(z3)]`) so it's reproducible without a `--solver` flag.
+    // z3/cvc5 (SMT) reason about bit-vector division/modulo natively — much
+    // faster than CaDiCaL's SAT bit-blasting on symbolic `checked_div`.
+    if let Some(solver) = spec.pragma_value("kani_solver") {
+        out.push_str(&format!("#[kani::solver({solver})]\n"));
+    }
     // Unwind bound follows the harness: a `Pubkey` / byte-array compare is a
     // 32-byte `memcmp` loop needing ≥ 34; a numeric-only harness closes at a
     // small bound and runs faster (`suggested_unwind`).

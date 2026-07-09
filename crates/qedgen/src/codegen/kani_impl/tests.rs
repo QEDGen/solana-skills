@@ -605,6 +605,42 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `pragma kani_solver = <solver>` bakes `#[kani::solver(<solver>)]` into every
+/// generated proof (right after `#[kani::proof]`), so a harness that needs an
+/// SMT solver (e.g. z3 for symbolic `checked_div`) is reproducible without a
+/// `--solver` flag.
+#[test]
+fn brownfield_kani_solver_pragma_bakes_solver_attr() {
+    let src = r#"spec SolverTest
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_solver = z3
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_solver_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("#[kani::proof]\n#[kani::solver(z3)]"),
+        "kani_solver pragma bakes `#[kani::solver(z3)]` after `#[kani::proof]`; got:\n{body}"
+    );
+}
+
 /// A `match` in `requires` binds a TUPLE variant's payload and renders a
 /// shape-correct, enum-resolved pattern with a `_` catch-all — the vehicle for
 /// "if period is Custom(s) then s > 0" preconditions (variant payload binding).

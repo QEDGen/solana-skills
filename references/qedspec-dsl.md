@@ -1289,6 +1289,14 @@ natural shape for a `()`-returning method whose only property is that it doesn't
 panic (e.g. a `reset_if_needed` doing unchecked-looking period arithmetic). Off
 by default; works on a handler with no `ensures`/`effect`.
 
+**`pragma kani_solver = <solver>`** — bake `#[kani::solver(<solver>)]` into every
+generated proof (right after `#[kani::proof]`), so a harness that needs a
+specific solver is reproducible without a `cargo kani --solver` flag. Use an SMT
+solver (`z3`, `cvc5`) when the harness divides/mods by a *symbolic* value — they
+reason about bit-vector division natively, where the default SAT backend
+(CaDiCaL) bit-blasts it and can blow up. Values: `z3`, `cvc5`, `bitwuzla`,
+`cadical`, `kissat`, `minisat`.
+
 ## Interface declarations
 
 Contracts for programs you CPI into. Uniform surface across three tiers:
