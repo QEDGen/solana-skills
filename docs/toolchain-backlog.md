@@ -516,13 +516,17 @@ can't `kani::assume(state.invariant().is_ok())` when `invariant()` itself panics
 fully-symbolic input (e.g. `.unwrap()`s an `Option` field). Workaround used for F:
 reconstruct the needed invariant clauses as explicit handler `requires`
 (`0 <= last_reset <= now`). But the `PeriodV2::Custom(i64)` case needs "if period is
-Custom(s) then s > 0", which requires a tuple-variant `is .Custom` guard (blocked on
-G13b's deferred IsVariant shape). 
-- **Proposed:** (a) the tuple-variant `is .Variant` shape (unblocks expressing the
-  Custom>0 requires); and/or (b) a codegen mode that assumes each invariant *clause*
-  as a precondition without calling the composite (panicking) `invariant()`.
+Custom(s) then s > 0".
+- **Proposed:** (a) the tuple-variant `is .Variant` shape — SHIPPED (G13b, `64bf14b`),
+  but it's only a boolean is-test, NOT the payload. Excluding `Custom(0)` needs variant
+  **payload binding** (a `match state.period { Custom(s) => s > 0, _ => true }` or an
+  `is .Custom(s)` binder) to write `(period is .Custom(s)) implies s > 0` — a distinct
+  DSL feature (variant payload access) that is the real remaining unblock. And/or (b) a
+  codegen mode that assumes each invariant *clause* as a precondition without calling
+  the composite (panicking) `invariant()`.
 - **Evidence:** `spending_limit_v2.rs` reset_if_needed + invariant; two Kani iterations
   (checked_sub overflow on negative last_reset → added `last_reset >= 0`; then GREEN for
-  standard periods). See `formal_verification/VERIFICATION.md` F-reset note.
+  standard periods). See `formal_verification/VERIFICATION.md` F-reset note. The is-test
+  alone can't reach the `Custom` payload, so the Custom>0 precondition is inexpressible.
 - **Verdict:** FILE (gap). Leverage: any panic-free / precondition proof of a method
-  gated by a rich invariant with unwraps.
+  gated by a rich invariant with unwraps, or any property over an enum variant's payload.
