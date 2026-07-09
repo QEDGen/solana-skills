@@ -449,6 +449,10 @@ fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &Parse
     if super::state_ctor::wants_cpi_stub(spec) {
         out.push_str(super::state_ctor::cpi_stub_attr());
     }
+    // #182 arithmetic tier — abstract `i64::checked_div` (opt-in).
+    if super::state_ctor::wants_div_abstraction(spec) {
+        out.push_str(super::state_ctor::div_stub_attr());
+    }
 }
 
 /// Emit the shared symbolic-state construction: the generated

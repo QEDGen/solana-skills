@@ -160,6 +160,12 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         out.push('\n');
     }
 
+    // Abstract i64 division (#182 arithmetic tier) — emitted once when opted in.
+    if super::state_ctor::wants_div_abstraction(spec) {
+        out.push_str(&super::state_ctor::div_abstract_fn());
+        out.push('\n');
+    }
+
     let mut emitted_count = 0;
     for handler in emit_targets {
         for (idx, ensures) in handler.ensures.iter().enumerate() {

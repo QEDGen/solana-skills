@@ -249,6 +249,46 @@ pub(crate) fn cpi_stub_attr() -> &'static str {
      #[kani::stub(solana_program::program::invoke_signed, stub_invoke_signed)]\n"
 }
 
+/// `pragma kani_abstract_div` → abstract `i64::checked_div` (#182 arithmetic
+/// tier). A symbolic 64-bit divisor forces CBMC's SAT backend (and z3) to
+/// bit-blast a sequential divider circuit, which stalls; the abstraction
+/// replaces the division with a fresh symbolic quotient pinned by division's
+/// exact contract (no divider circuit — only cheaper multiplies). Opt-in
+/// because it's an abstraction with a soundness argument.
+pub(crate) fn wants_div_abstraction(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_abstract_div").is_some()
+}
+
+/// The abstract-`checked_div` support fn (emitted once when
+/// `wants_div_abstraction`). Returns a fresh symbolic quotient `q` constrained
+/// by the EXACT truncating-division contract `a = q*b + r, |r| < |b|,
+/// sign(r) = sign(a)` (computed in `i128` so the contract math can't overflow),
+/// and preserves the two `None` cases (`b == 0`, `MIN / -1` overflow). The
+/// quotient is unique for `b != 0`, so this is an *exact* abstraction — sound
+/// both ways, like the #182 Pubkey/PDA stubs — that removes the divider circuit.
+pub(crate) fn div_abstract_fn() -> String {
+    "// Abstract i64 division (#182 arithmetic tier): a fresh symbolic quotient\n\
+     // pinned by division's exact contract — no 64-bit divider circuit (which\n\
+     // stalls both CaDiCaL and z3 on a symbolic divisor). Verification-only.\n\
+     fn checked_div_abstract(a: i64, b: i64) -> Option<i64> {\n\
+     \x20   if b == 0 || (a == i64::MIN && b == -1) {\n\
+     \x20       return None; // the real `checked_div`'s two None cases\n\
+     \x20   }\n\
+     \x20   let q: i64 = kani::any();\n\
+     \x20   let (ai, bi, qi) = (a as i128, b as i128, q as i128);\n\
+     \x20   let r = ai - qi * bi; // remainder; i128 so it can't overflow\n\
+     \x20   kani::assume(r.abs() < bi.abs());\n\
+     \x20   kani::assume(r == 0 || (r > 0) == (ai > 0));\n\
+     \x20   Some(q)\n\
+     }\n"
+    .to_string()
+}
+
+/// The abstract-`checked_div` stub attr (per proof when `wants_div_abstraction`).
+pub(crate) fn div_stub_attr() -> &'static str {
+    "#[kani::stub(i64::checked_div, checked_div_abstract)]\n"
+}
+
 /// The `Clock::get` stub fn (emitted once when `wants_clock_stub`). Fixed,
 /// plausible fields — `approve`/`cancel` only read `unix_timestamp` into the
 /// status, which the membership/threshold properties don't constrain.

@@ -605,6 +605,45 @@ handler begin_tally (dummy : U64) {
     );
 }
 
+/// `pragma kani_abstract_div = on` emits the `checked_div_abstract` support fn
+/// once + a `#[kani::stub(i64::checked_div, checked_div_abstract)]` per proof —
+/// the #182 arithmetic tier that removes the symbolic-divisor circuit that
+/// stalls both SAT and SMT backends.
+#[test]
+fn brownfield_kani_abstract_div_emits_stub() {
+    let src = r#"spec DivAbs
+pragma state_struct = Widget
+pragma state_invariant = none
+pragma kani_abstract_div = on
+state { size : U64, cap : U64 }
+handler resize (n : U64) {
+  modifies [size]
+  ensures state.size == n
+  effect { size := n }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_divabs_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("fn checked_div_abstract(a: i64, b: i64) -> Option<i64>")
+            && body.contains("#[kani::stub(i64::checked_div, checked_div_abstract)]")
+            // the exact truncating-division contract (soundness):
+            && body.contains("kani::assume(r.abs() < bi.abs());"),
+        "kani_abstract_div emits the stub fn + attr + contract; got:\n{body}"
+    );
+}
+
 /// `pragma kani_solver = <solver>` bakes `#[kani::solver(<solver>)]` into every
 /// generated proof (right after `#[kani::proof]`), so a harness that needs an
 /// SMT solver (e.g. z3 for symbolic `checked_div`) is reproducible without a

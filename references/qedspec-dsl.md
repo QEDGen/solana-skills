@@ -1297,6 +1297,15 @@ reason about bit-vector division natively, where the default SAT backend
 (CaDiCaL) bit-blasts it and can blow up. Values: `z3`, `cvc5`, `bitwuzla`,
 `cadical`, `kissat`, `minisat`.
 
+**`pragma kani_abstract_div = on`** — the **#182 arithmetic tier**: replace
+`i64::checked_div` with `checked_div_abstract`, a fresh symbolic quotient pinned
+by division's *exact* contract (`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`,
+plus the two `None` cases), via `#[kani::stub]`. A symbolic 64-bit divisor
+bit-blasts a sequential divider circuit that stalls both SAT (CaDiCaL) and SMT
+(z3); the abstraction removes the circuit while staying sound (the quotient is
+unique, so it's exact — no false proofs). Same discipline as the Pubkey/PDA
+stubs. Needs `-Z stubbing`.
+
 ## Interface declarations
 
 Contracts for programs you CPI into. Uniform surface across three tiers:
