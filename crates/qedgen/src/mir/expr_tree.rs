@@ -322,7 +322,7 @@ pub fn ty_num_kind(ty: &Ty) -> NumKind {
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => NumKind::Nat,
         Ty::I64 | Ty::I128 => NumKind::Int,
         Ty::Bool => NumKind::Bool,
-        Ty::Pubkey => NumKind::Other,
+        Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 => NumKind::Other,
         Ty::Map { .. } => NumKind::Other,
         Ty::Custom(name) => match name.as_str() {
             "I8" | "I16" | "I32" => NumKind::Int,

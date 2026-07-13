@@ -207,6 +207,8 @@ pub(super) fn render_ty_indexed(ty: &crate::mir::Ty) -> String {
         Ty::I64 | Ty::I128 => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Pubkey => "Pubkey".to_string(),
+        Ty::Bytes32 => "Bytes32".to_string(),
+        Ty::Bytes64 => "Bytes64".to_string(),
         Ty::Custom(name) => name.clone(),
         Ty::Map { capacity, value } => {
             // The Map's inner type stays the literal surface type (e.g.
@@ -221,6 +223,8 @@ pub(super) fn render_ty_indexed(ty: &crate::mir::Ty) -> String {
                 Ty::I128 => "I128".to_string(),
                 Ty::Bool => "Bool".to_string(),
                 Ty::Pubkey => "Pubkey".to_string(),
+                Ty::Bytes32 => "Bytes32".to_string(),
+                Ty::Bytes64 => "Bytes64".to_string(),
                 Ty::Custom(n) => n.clone(),
                 Ty::Map { .. } => render_ty_indexed(value),
             };

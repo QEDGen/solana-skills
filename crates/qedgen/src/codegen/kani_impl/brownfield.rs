@@ -142,6 +142,18 @@ pub(crate) fn emit_kani_impl_anchor_brownfield(
         out.push('\n');
     }
 
+    // Abstract hash primitives (#189 Tier 2) — emitted once when opted in.
+    if super::state_ctor::wants_hash_stub(spec) {
+        out.push_str(&super::state_ctor::hash_stub_fn());
+        out.push('\n');
+    }
+
+    // Abstract secp256k1 recovery (#189 Tier 2) — emitted once when opted in.
+    if super::state_ctor::wants_secp256k1_stub(spec) {
+        out.push_str(&super::state_ctor::secp256k1_stub_fn());
+        out.push('\n');
+    }
+
     // Clock stub (G14) — emitted once; each proof carries the `#[kani::stub]`.
     if super::state_ctor::wants_clock_stub(spec) {
         out.push_str(&super::state_ctor::clock_stub_fn());

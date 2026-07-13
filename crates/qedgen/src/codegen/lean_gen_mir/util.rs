@@ -283,6 +283,11 @@ pub(super) fn render_ty(ty: &crate::mir::Ty) -> String {
         Ty::I64 | Ty::I128 => "Int".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Pubkey => "Pubkey".to_string(),
+        // Opaque byte tokens (#191): equality-only semantics, so both are
+        // Lean abbreviations over the same opaque carrier as `Pubkey`
+        // (`QEDGen.Solana.Account`). Width is a Rust-side concern.
+        Ty::Bytes32 => "Bytes32".to_string(),
+        Ty::Bytes64 => "Bytes64".to_string(),
         Ty::Custom(name) => name.clone(),
         Ty::Map { capacity: _, value } => {
             // Indexed-state has its own renderer; this codepath shouldn't

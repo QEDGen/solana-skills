@@ -136,6 +136,8 @@ fn infer_lean_type(
             let dsl_type = resolve_path_type(p, field_types, param_types);
             match dsl_type {
                 Some("Pubkey") => "Pubkey".to_string(),
+                Some("Bytes32") => "Bytes32".to_string(),
+                Some("Bytes64") => "Bytes64".to_string(),
                 Some("Bool") => "Bool".to_string(),
                 Some(t) if is_signed_int(t) => "Int".to_string(),
                 Some(_) => "Nat".to_string(),
@@ -403,15 +405,17 @@ fn check_effect_typed(
         Some(t) => t,
         None => return Ok(()),
     };
-    if lhs_type == "Pubkey" {
+    if matches!(lhs_type, "Pubkey" | "Bytes32" | "Bytes64") {
         if let Some(v) = numeric_literal_value(&stmt.rhs.node, const_literals) {
             anyhow::bail!(
-                "handler `{}` effect `{} := {}`: Pubkey field cannot be assigned a numeric literal. \
-                 The DSL has no Pubkey-literal syntax — use a handler parameter, a constant, \
-                 or the spec's `program_id` as the source pubkey.",
+                "handler `{}` effect `{} := {}`: {} field cannot be assigned a numeric literal. \
+                 The DSL has no {} literal syntax — use a handler parameter, a constant, \
+                 or the spec's `program_id` as the source value.",
                 handler_name,
                 render_path_human(&stmt.lhs),
-                v
+                v,
+                lhs_type,
+                lhs_type
             );
         }
     }
@@ -499,7 +503,7 @@ fn check_cmp_pair(
             _ => return None,
         };
         let t = resolve_path_type(path, field_types, param_types)?;
-        if t != "Pubkey" {
+        if !matches!(t, "Pubkey" | "Bytes32" | "Bytes64") {
             return None;
         }
         if let Some(v) = numeric_literal_value(i, const_literals) {

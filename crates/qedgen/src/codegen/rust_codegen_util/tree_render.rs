@@ -522,7 +522,7 @@ fn path_is_pod_field(p: &TreePath) -> bool {
         // model the narrow signed widths natively) but stays native:
         // alignment 1 already, no Pod companion.
         Some(Ty::Custom(name)) => matches!(name.as_str(), "I16" | "I32"),
-        Some(Ty::U8 | Ty::Pubkey | Ty::Map { .. }) => false,
+        Some(Ty::U8 | Ty::Pubkey | Ty::Bytes32 | Ty::Bytes64 | Ty::Map { .. }) => false,
         None => false,
     }
 }

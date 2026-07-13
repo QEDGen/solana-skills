@@ -650,6 +650,11 @@ pub(crate) fn primitive_map(dsl_type: &str, context: TypeMapContext) -> Option<&
             TypeMapContext::Anchor | TypeMapContext::Quasar => "Pubkey",
             TypeMapContext::Standalone => "[u8; 32]",
         },
+        // Opaque byte tokens (#191): hashes/digests (`Bytes32`) and
+        // signatures / recovered secp keys (`Bytes64`). No framework newtype
+        // exists, so they lower to raw arrays in EVERY context.
+        "Bytes32" => "[u8; 32]",
+        "Bytes64" => "[u8; 64]",
         "U8" => "u8",
         "U16" => "u16",
         "U32" => "u32",
@@ -730,8 +735,11 @@ pub(crate) fn default_value_for_type(dsl_type: &str, spec: &ParsedSpec) -> Optio
         return Some("0".to_string());
     }
 
-    if dsl_type == "Pubkey" {
+    if dsl_type == "Pubkey" || dsl_type == "Bytes32" {
         return Some("[0u8; 32]".to_string());
+    }
+    if dsl_type == "Bytes64" {
+        return Some("[0u8; 64]".to_string());
     }
 
     Some("0".to_string())

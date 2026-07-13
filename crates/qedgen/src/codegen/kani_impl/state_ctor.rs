@@ -231,28 +231,174 @@ pub(crate) fn wants_pda_abstraction(spec: &ParsedSpec) -> bool {
     spec.pragma_value("kani_stub_pda").is_some()
 }
 
-/// The abstract PDA-derivation support fn (emitted once when
-/// `wants_pda_abstraction`). Returns an OPAQUE deterministic address, not the
-/// real sha256. Sound over-approximation for safety — the program must hold for
-/// ANY derived address; we never re-verify that sha256 is sha256.
+/// The abstract PDA-derivation support fns (emitted once when
+/// `wants_pda_abstraction`). Uninterpreted functions over (seeds, program_id):
+/// DETERMINISTIC (same seeds → same address — the property programs rely on
+/// with derive-then-compare, machine-checked in the prelude) and INJECTIVE
+/// across the harness (collision-freedom axiom — mirrors trusting sha256
+/// collision resistance, exactly the Lean side's PDA axiom). #189 upgrade of
+/// the old fresh-`kani::any()` stub, which lost determinism.
 pub(crate) fn pda_stub_fn() -> String {
-    "// Abstract PDA derivation (#182 Tier 2): an OPAQUE address, NOT the real\n\
-     // sha256 + bump search (which bit-blasts catastrophically — the sha2\n\
-     // GenericArray fold doesn't even unwind). Sound over-approximation for\n\
-     // safety properties; verification-only.\n\
+    "// Abstract PDA derivation (#182 Tier 2, deterministic + injective — #189):\n\
+     // an uninterpreted function over (seeds, program_id), NOT the real sha256 +\n\
+     // bump search (which bit-blasts catastrophically — the sha2 GenericArray\n\
+     // fold doesn't even unwind). Same seeds → same address (memoized in the\n\
+     // prelude's UfMap; determinism machine-checked there); distinct seeds →\n\
+     // distinct addresses (collision-freedom AXIOM — the trust argument is in\n\
+     // the prelude's Tier 2 docs). The bump stays fully symbolic, and\n\
+     // `create_program_address` uses a separate domain (its bump-in-seeds\n\
+     // relationship to `find_program_address` is NOT modeled) and may\n\
+     // nondeterministically fail like the real off-curve check.\n\
+     // Verification-only.\n\
+     static QEDGEN_PDA_UF: qedgen_kani_prelude::UfCell32<8> =\n\
+     \x20   qedgen_kani_prelude::UfCell32::new();\n\
      fn find_pda_abstract(\n\
-     \x20   _seeds: &[&[u8]],\n\
-     \x20   _program_id: &anchor_lang::prelude::Pubkey,\n\
+     \x20   seeds: &[&[u8]],\n\
+     \x20   program_id: &anchor_lang::prelude::Pubkey,\n\
      ) -> (anchor_lang::prelude::Pubkey, u8) {\n\
-     \x20   (anchor_lang::prelude::Pubkey::new_from_array(kani::any()), kani::any())\n\
+     \x20   let mut key = qedgen_kani_prelude::UfKey::new().push(b\"find\");\n\
+     \x20   for seed in seeds {\n\
+     \x20       key = key.push(seed);\n\
+     \x20   }\n\
+     \x20   key = key.push(program_id.as_ref());\n\
+     \x20   let addr = QEDGEN_PDA_UF.apply(key);\n\
+     \x20   (anchor_lang::prelude::Pubkey::new_from_array(addr), kani::any())\n\
+     }\n\
+     fn create_pda_abstract(\n\
+     \x20   seeds: &[&[u8]],\n\
+     \x20   program_id: &anchor_lang::prelude::Pubkey,\n\
+     ) -> core::result::Result<anchor_lang::prelude::Pubkey, solana_program::pubkey::PubkeyError> {\n\
+     \x20   if kani::any() {\n\
+     \x20       // Nondeterministic failure keeps the real off-curve error path.\n\
+     \x20       return Err(solana_program::pubkey::PubkeyError::InvalidSeeds);\n\
+     \x20   }\n\
+     \x20   let mut key = qedgen_kani_prelude::UfKey::new().push(b\"create\");\n\
+     \x20   for seed in seeds {\n\
+     \x20       key = key.push(seed);\n\
+     \x20   }\n\
+     \x20   key = key.push(program_id.as_ref());\n\
+     \x20   Ok(anchor_lang::prelude::Pubkey::new_from_array(QEDGEN_PDA_UF.apply(key)))\n\
      }\n"
     .to_string()
 }
 
-/// The `#[kani::stub]` attribute redirecting `find_program_address` to the
-/// abstract (needs `-Z stubbing`).
+/// The `#[kani::stub]` attributes redirecting PDA derivation to the abstract
+/// uninterpreted functions (needs `-Z stubbing`).
 pub(crate) fn pda_stub_attr() -> &'static str {
-    "#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]\n"
+    "#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]\n\
+     #[kani::stub(solana_program::pubkey::Pubkey::create_program_address, create_pda_abstract)]\n"
+}
+
+/// `pragma kani_stub_hash = <anything>` → the agent-fill effect calls code
+/// that hashes (sha256 / keccak / blake3) — exhaustively bit-blasted by CBMC
+/// at zero verification value. Stub each to a deterministic uninterpreted
+/// function with the collision-freedom axiom (#189 Tier 2), the Kani mirror of
+/// the Lean side's hash axioms. Opt-in like `kani_stub_pda`: the hashing is
+/// inside called methods, not visible from the spec.
+pub(crate) fn wants_hash_stub(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_hash").is_some()
+}
+
+/// The abstract hash support fns (emitted once when `wants_hash_stub`). One
+/// UfMap per primitive (domain separation by static); `hash(x)` and
+/// `hashv(&[x])` share a key construction, so they agree by construction —
+/// matching the real functions.
+pub(crate) fn hash_stub_fn() -> String {
+    "// Abstract sha256 / keccak / blake3 (#189 Tier 2): deterministic\n\
+     // uninterpreted functions + collision-freedom axiom, per primitive — NOT\n\
+     // the real compression functions (which bit-blast catastrophically). The\n\
+     // trust argument lives in the prelude's Tier 2 docs; verification-only.\n\
+     static QEDGEN_SHA256_UF: qedgen_kani_prelude::UfCell32<8> =\n\
+     \x20   qedgen_kani_prelude::UfCell32::new();\n\
+     static QEDGEN_KECCAK_UF: qedgen_kani_prelude::UfCell32<8> =\n\
+     \x20   qedgen_kani_prelude::UfCell32::new();\n\
+     static QEDGEN_BLAKE3_UF: qedgen_kani_prelude::UfCell32<8> =\n\
+     \x20   qedgen_kani_prelude::UfCell32::new();\n\
+     fn qedgen_uf_key(vals: &[&[u8]]) -> qedgen_kani_prelude::UfKey {\n\
+     \x20   let mut key = qedgen_kani_prelude::UfKey::new();\n\
+     \x20   for v in vals {\n\
+     \x20       key = key.push(v);\n\
+     \x20   }\n\
+     \x20   key\n\
+     }\n\
+     fn sha256_abstract(val: &[u8]) -> solana_program::hash::Hash {\n\
+     \x20   sha256v_abstract(&[val])\n\
+     }\n\
+     fn sha256v_abstract(vals: &[&[u8]]) -> solana_program::hash::Hash {\n\
+     \x20   solana_program::hash::Hash::new_from_array(QEDGEN_SHA256_UF.apply(qedgen_uf_key(vals)))\n\
+     }\n\
+     fn keccak_abstract(val: &[u8]) -> solana_program::keccak::Hash {\n\
+     \x20   keccakv_abstract(&[val])\n\
+     }\n\
+     fn keccakv_abstract(vals: &[&[u8]]) -> solana_program::keccak::Hash {\n\
+     \x20   solana_program::keccak::Hash(QEDGEN_KECCAK_UF.apply(qedgen_uf_key(vals)))\n\
+     }\n\
+     fn blake3_abstract(val: &[u8]) -> solana_program::blake3::Hash {\n\
+     \x20   blake3v_abstract(&[val])\n\
+     }\n\
+     fn blake3v_abstract(vals: &[&[u8]]) -> solana_program::blake3::Hash {\n\
+     \x20   solana_program::blake3::Hash(QEDGEN_BLAKE3_UF.apply(qedgen_uf_key(vals)))\n\
+     }\n"
+    .to_string()
+}
+
+/// The `#[kani::stub]` attributes for the hash primitives (needs `-Z stubbing`).
+pub(crate) fn hash_stub_attr() -> &'static str {
+    "#[kani::stub(solana_program::hash::hash, sha256_abstract)]\n\
+     #[kani::stub(solana_program::hash::hashv, sha256v_abstract)]\n\
+     #[kani::stub(solana_program::keccak::hash, keccak_abstract)]\n\
+     #[kani::stub(solana_program::keccak::hashv, keccakv_abstract)]\n\
+     #[kani::stub(solana_program::blake3::hash, blake3_abstract)]\n\
+     #[kani::stub(solana_program::blake3::hashv, blake3v_abstract)]\n"
+}
+
+/// `pragma kani_stub_secp256k1 = <anything>` → the agent-fill effect calls
+/// `secp256k1_recover` (the one in-program signature primitive — ed25519
+/// verification is a precompile reached via instruction introspection and has
+/// no stubbable in-program entry point). Stub it to a deterministic
+/// uninterpreted function over (hash, recovery_id, signature) with the
+/// collision-freedom axiom, plus a NONDETERMINISTIC failure branch so the real
+/// invalid-signature error path stays explored (#189 Tier 2).
+pub(crate) fn wants_secp256k1_stub(spec: &ParsedSpec) -> bool {
+    spec.pragma_value("kani_stub_secp256k1").is_some()
+}
+
+/// The abstract `secp256k1_recover` support fn (emitted once when
+/// `wants_secp256k1_stub`).
+pub(crate) fn secp256k1_stub_fn() -> String {
+    "// Abstract secp256k1 recovery (#189 Tier 2): a deterministic uninterpreted\n\
+     // function over (hash, recovery_id, signature) — same inputs recover the\n\
+     // same 64-byte pubkey, distinct inputs recover distinct pubkeys\n\
+     // (collision-freedom axiom; trust argument in the prelude's Tier 2 docs).\n\
+     // The `if kani::any()` failure branch keeps the real invalid-input error\n\
+     // path explored. Verification-only.\n\
+     static QEDGEN_SECP_UF: qedgen_kani_prelude::UfCell64<8> =\n\
+     \x20   qedgen_kani_prelude::UfCell64::new();\n\
+     fn secp256k1_recover_abstract(\n\
+     \x20   hash: &[u8],\n\
+     \x20   recovery_id: u8,\n\
+     \x20   signature: &[u8],\n\
+     ) -> core::result::Result<\n\
+     \x20   solana_program::secp256k1_recover::Secp256k1Pubkey,\n\
+     \x20   solana_program::secp256k1_recover::Secp256k1RecoverError,\n\
+     > {\n\
+     \x20   if kani::any() {\n\
+     \x20       return Err(solana_program::secp256k1_recover::Secp256k1RecoverError::InvalidSignature);\n\
+     \x20   }\n\
+     \x20   let key = qedgen_kani_prelude::UfKey::new()\n\
+     \x20       .push(hash)\n\
+     \x20       .push(&[recovery_id])\n\
+     \x20       .push(signature);\n\
+     \x20   Ok(solana_program::secp256k1_recover::Secp256k1Pubkey(\n\
+     \x20       QEDGEN_SECP_UF.apply(key),\n\
+     \x20   ))\n\
+     }\n"
+    .to_string()
+}
+
+/// The `#[kani::stub]` attribute for `secp256k1_recover` (needs `-Z stubbing`).
+pub(crate) fn secp256k1_stub_attr() -> &'static str {
+    "#[kani::stub(solana_program::secp256k1_recover::secp256k1_recover, secp256k1_recover_abstract)]\n"
 }
 
 /// `pragma kani_stub_log` → stub Solana logging (`msg!` / `sol_log` /
@@ -457,6 +603,9 @@ fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
             "kani::any()".to_string()
         }
         Ty::Pubkey => "anchor_lang::prelude::Pubkey::new_from_array(kani::any())".to_string(),
+        // Opaque byte tokens (#191) — raw `[u8; N]` in the real struct;
+        // arrays are `kani::any()`-constructible const-generically.
+        Ty::Bytes32 | Ty::Bytes64 => "kani::any()".to_string(),
         Ty::Custom(s) => {
             // `Option T` / `Vec T` ride as `Ty::Custom("Option T")` / `"Vec T"`
             // (the MIR `Ty` enum has no first-class Option/Vec — see #173/#174);
@@ -564,6 +713,85 @@ pub(crate) fn vec_bound_of(spec: &ParsedSpec) -> usize {
     spec.pragma_value("kani_vec_bound")
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(1)
+}
+
+/// #192 lint: a property that READS INTO a `Vec` state field (membership,
+/// aggregation, per-element invariants) is silently under-covered when the
+/// fixed symbolic length is left at the default 1 — the proof is green while
+/// exploring only 1-element collections. Fires one warning per (surface,
+/// field) at Kani codegen time; pure spec analysis, no new codegen paths.
+///
+/// Deliberately quiet when `pragma kani_vec_bound` is set to ANY value: an
+/// explicit bound is a conscious BMC trade-off, and second-guessing the
+/// number would train users to ignore the lint. Scalar-only properties over
+/// specs with Vec fields stay silent (the default-1 trade-off is exactly
+/// right for them).
+pub(crate) fn vec_bound_undercoverage_warnings(spec: &ParsedSpec) -> Vec<String> {
+    if spec.pragma_value("kani_vec_bound").is_some() {
+        return Vec::new();
+    }
+    // Vec-typed fields across the spec's state shapes.
+    let mut vec_fields: Vec<String> = Vec::new();
+    let mut scan = |fields: &[(String, String)]| {
+        for (name, ty) in fields {
+            let t = ty.trim_start();
+            // Both spellings reach here: canonical `Vec T` and `Option Vec T`.
+            if t.starts_with("Vec ") || t.contains(" Vec ") {
+                vec_fields.push(name.clone());
+            }
+        }
+    };
+    scan(&spec.state_fields);
+    for acct in &spec.account_types {
+        scan(&acct.fields);
+    }
+    if vec_fields.is_empty() {
+        return Vec::new();
+    }
+    vec_fields.sort_unstable();
+    vec_fields.dedup();
+
+    // Property surfaces that could read into a collection: handler ensures,
+    // named invariants, and standalone properties (Rust renderings — the
+    // forms Kani harnesses actually assert).
+    let mut surfaces: Vec<(String, String)> = Vec::new();
+    for h in &spec.handlers {
+        for e in &h.ensures {
+            surfaces.push((format!("handler `{}` ensures", h.name), e.rust_expr.clone()));
+        }
+    }
+    for inv in &spec.invariants {
+        if let Some(expr) = &inv.rust_expr {
+            surfaces.push((format!("invariant `{}`", inv.name), expr.clone()));
+        }
+    }
+    for prop in &spec.properties {
+        if let Some(expr) = &prop.rust_expression {
+            surfaces.push((format!("property `{}`", prop.name), expr.clone()));
+        }
+    }
+
+    let word_mentions = |expr: &str, field: &str| {
+        expr.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|w| w == field)
+    };
+
+    let mut warnings = Vec::new();
+    for field in &vec_fields {
+        for (surface, expr) in &surfaces {
+            if word_mentions(expr, field) {
+                warnings.push(format!(
+                    "{surface} reads Vec state field `{field}`, but `pragma kani_vec_bound` is \
+                     unset (default 1) — the Kani harness explores ONLY 1-element collections, \
+                     so membership/aggregation behavior is silently under-covered. Set `pragma \
+                     kani_vec_bound = <N>` to the smallest N the property distinguishes \
+                     (usually 2-3)."
+                ));
+                break; // one warning per field, not per surface
+            }
+        }
+    }
+    warnings
 }
 
 /// `Settings` → `settings`, `SmartAccount` → `smart_account`. Struct names are

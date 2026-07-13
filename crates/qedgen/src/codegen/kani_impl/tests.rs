@@ -3811,3 +3811,229 @@ handler poke (v : U64) {
         );
     }
 }
+
+/// #191: `Bytes64` anywhere in state/params forces the 66 unwind floor — a
+/// raw `[u8; 64]` compare is a 64-iteration memcmp loop that Kani cannot
+/// stub (generic core impl, kani#1997), so the bound must cover it even
+/// though the Pubkey abstraction is active for the Pubkey field.
+#[test]
+fn bytes64_forces_unwind_floor_over_pubkey_abstraction() {
+    let src = r#"spec SigRegistry
+pragma state_struct = Registry
+state { authority : Pubkey, last_sig : Bytes64, nonce : U64 }
+handler record_sig (sig : Bytes64) {
+  modifies [last_sig, nonce]
+  ensures state.nonce == old(state.nonce) + 1
+  effect {
+    last_sig := sig
+    nonce += 1
+  }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_b64_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("#[kani::unwind(66)]"),
+        "Bytes64 present → 66 floor, NOT the abstracted-Pubkey small bound; got:\n{body}"
+    );
+    // The symbolic ctor builds the raw array directly — no Pubkey wrapper.
+    assert!(
+        body.contains("last_sig: kani::any(),"),
+        "Bytes64 field constructs as a plain `kani::any()` array; got:\n{body}"
+    );
+}
+
+/// #191: `Bytes32` (hash/digest) keeps the 34 memcmp floor; without any byte
+/// token the same spec closes at the abstracted small bound (control is
+/// covered by existing unwind tests).
+#[test]
+fn bytes32_forces_unwind_34() {
+    let src = r#"spec MerkleGate
+pragma state_struct = Gate
+state { root : Bytes32, epoch : U64 }
+handler set_root (new_root : Bytes32) {
+  modifies [root, epoch]
+  ensures state.epoch == old(state.epoch) + 1
+  effect {
+    root := new_root
+    epoch += 1
+  }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_b32_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("#[kani::unwind(34)]"),
+        "Bytes32 present → 34 memcmp floor; got:\n{body}"
+    );
+}
+
+/// #189: `pragma kani_stub_pda` emits the deterministic uninterpreted-function
+/// PDA stub (UfMap-backed, `find` + `create` domains) and the unwind bound
+/// covers the CAP=8 memo scan even for a numeric-only spec.
+#[test]
+fn pda_stub_is_deterministic_ufmap() {
+    let src = r#"spec VaultInit
+pragma state_struct = Vault
+pragma kani_stub_pda = derive
+state { total : U64 }
+handler deposit (amount : U64) {
+  requires amount > 0 else BadAmount
+  modifies [total]
+  ensures state.total == old(state.total) + amount
+  effect { total += amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_ufpda_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("static QEDGEN_PDA_UF: qedgen_kani_prelude::UfCell32<8>")
+            && body.contains("fn find_pda_abstract(")
+            && body.contains("fn create_pda_abstract("),
+        "PDA stub is the UfMap-backed deterministic pair; got:\n{body}"
+    );
+    assert!(
+        body.contains("#[kani::stub(solana_program::pubkey::Pubkey::find_program_address, find_pda_abstract)]")
+            && body.contains("#[kani::stub(solana_program::pubkey::Pubkey::create_program_address, create_pda_abstract)]"),
+        "both PDA entry points are stubbed; got:\n{body}"
+    );
+    assert!(
+        body.contains("#[kani::unwind(10)]"),
+        "UfMap memo scan floors the unwind at 10; got:\n{body}"
+    );
+}
+
+/// #189: `pragma kani_stub_hash` / `pragma kani_stub_secp256k1` emit the
+/// per-primitive uninterpreted-function stubs + their `#[kani::stub]` attrs.
+#[test]
+fn hash_and_secp256k1_stub_pragmas_emit() {
+    let src = r#"spec HashGate
+pragma state_struct = Gate
+pragma kani_stub_hash = on
+pragma kani_stub_secp256k1 = on
+state { total : U64 }
+handler bump (amount : U64) {
+  modifies [total]
+  ensures state.total == old(state.total) + amount
+  effect { total += amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+
+    let tmp = std::env::temp_dir().join(format!("kani_impl_hash_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // One UfMap per hash primitive (domain separation) + hash/hashv agreement
+    // by shared key construction.
+    for needle in [
+        "static QEDGEN_SHA256_UF:",
+        "static QEDGEN_KECCAK_UF:",
+        "static QEDGEN_BLAKE3_UF:",
+        "#[kani::stub(solana_program::hash::hash, sha256_abstract)]",
+        "#[kani::stub(solana_program::hash::hashv, sha256v_abstract)]",
+        "#[kani::stub(solana_program::keccak::hash, keccak_abstract)]",
+        "#[kani::stub(solana_program::blake3::hash, blake3_abstract)]",
+        "static QEDGEN_SECP_UF: qedgen_kani_prelude::UfCell64<8>",
+        "#[kani::stub(solana_program::secp256k1_recover::secp256k1_recover, secp256k1_recover_abstract)]",
+    ] {
+        assert!(body.contains(needle), "missing `{needle}` in:\n{body}");
+    }
+}
+
+/// #192: a property that reads into a `Vec` state field with the bound at its
+/// silent default warns (naming the field + pragma); an explicit
+/// `kani_vec_bound` or a scalar-only property stays silent.
+#[test]
+fn vec_bound_undercoverage_lint() {
+    // (a) ensures reads the Vec field, bound unset → warns.
+    let reads = r#"spec Council
+pragma state_struct = Council
+type Member = { key : Pubkey }
+state { members : Vec Member, quorum : U16 }
+handler noop (x : U16) {
+  modifies [quorum]
+  ensures state.members == old(state.members)
+  effect { quorum := x }
+}"#;
+    let spec = parse_str(reads).expect("parse");
+    let warnings = state_ctor::vec_bound_undercoverage_warnings(&spec);
+    assert_eq!(warnings.len(), 1, "one warning per Vec field: {warnings:?}");
+    assert!(
+        warnings[0].contains("members") && warnings[0].contains("kani_vec_bound"),
+        "warning names the field and the pragma; got: {}",
+        warnings[0]
+    );
+
+    // (b) explicit bound (even a low one) → conscious trade-off, silent.
+    let bounded = reads.replace(
+        "pragma state_struct = Council",
+        "pragma state_struct = Council\npragma kani_vec_bound = 1",
+    );
+    let spec = parse_str(&bounded).expect("parse");
+    assert!(
+        state_ctor::vec_bound_undercoverage_warnings(&spec).is_empty(),
+        "explicit kani_vec_bound silences the lint"
+    );
+
+    // (c) scalar-only property over a spec WITH a Vec field → silent (the
+    // default-1 trade-off is exactly right there).
+    let scalar = r#"spec Council
+pragma state_struct = Council
+type Member = { key : Pubkey }
+state { members : Vec Member, quorum : U16 }
+handler noop (x : U16) {
+  modifies [quorum]
+  ensures state.quorum == x
+  effect { quorum := x }
+}"#;
+    let spec = parse_str(scalar).expect("parse");
+    assert!(
+        state_ctor::vec_bound_undercoverage_warnings(&spec).is_empty(),
+        "scalar-only ensures stays silent"
+    );
+}

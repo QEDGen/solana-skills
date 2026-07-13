@@ -218,6 +218,13 @@ fn generate_from_spec_with_context(
         return Ok(());
     }
 
+    // #192: warn when a property reads into a Vec state field but the
+    // symbolic-length bound is at its silent default (see
+    // `vec_bound_undercoverage_warnings` for the trade-off).
+    for warning in state_ctor::vec_bound_undercoverage_warnings(spec) {
+        eprintln!("warning: {warning}");
+    }
+
     let handlers_with_claims: Vec<&ParsedHandler> = spec
         .handlers
         .iter()

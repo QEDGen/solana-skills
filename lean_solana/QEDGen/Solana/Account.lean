@@ -9,6 +9,16 @@ namespace QEDGen.Solana.Account
     and `Pubkey.ne_iff` come from `SVM.Pubkey` too. -/
 abbrev Pubkey := SVM.Pubkey
 
+/-- Opaque 32-byte token (hash / digest / merkle root) — DSL `Bytes32` (#191).
+    Equality-only semantics, so it shares `Pubkey`'s opaque carrier: the
+    spec-level meaning is "an unforgeable token compared for equality"; the
+    32-vs-64-byte width is a Rust-side layout concern the proofs never see. -/
+abbrev Bytes32 := SVM.Pubkey
+
+/-- Opaque 64-byte token (signature / recovered secp pubkey) — DSL `Bytes64`
+    (#191). Same opaque carrier as `Bytes32`; see its docstring. -/
+abbrev Bytes64 := SVM.Pubkey
+
 abbrev U64 := Nat
 abbrev U128 := Nat
 abbrev I128 := Int
