@@ -1,0 +1,58 @@
+# Standing pin for the qedgen-kani-prelude soundness proofs (#188).
+#
+# Every generated Kani harness leans on this crate's abstractions via
+# `#[kani::stub]`; their soundness argument is machine-checked here
+# (`kani_prelude/`, dependency-free — see its README). Path-filtered: the
+# proofs can only change when the crate (or this workflow) changes, because
+# the delivered copy is `include_str!`-embedded from these exact files.
+name: Kani
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kani_prelude/**'
+      - '.github/workflows/kani.yml'
+  pull_request:
+    paths:
+      - 'kani_prelude/**'
+      - '.github/workflows/kani.yml'
+  workflow_dispatch:
+
+env:
+  # Keep in lock step with the version the prelude was developed against
+  # (kani_prelude/README.md). Bump deliberately, with a green local run.
+  KANI_VERSION: 0.67.0
+
+jobs:
+  prelude-soundness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ~/.kani holds the toolchain + solver bundle `cargo kani setup`
+      # downloads (~200MB); the two binaries come from `cargo install`.
+      # Keyed on the pinned version only — the prelude is dependency-free,
+      # so nothing else affects the install.
+      - name: Cache Kani install
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/kani
+            ~/.cargo/bin/cargo-kani
+            ~/.kani
+          key: ${{ runner.os }}-kani-${{ env.KANI_VERSION }}
+
+      - name: Install Kani (pinned)
+        run: |
+          if ! command -v cargo-kani >/dev/null 2>&1; then
+            cargo install --locked kani-verifier --version "$KANI_VERSION"
+          fi
+          cargo kani setup
+
+      - name: Prelude soundness proofs
+        working-directory: kani_prelude
+        run: cargo kani
