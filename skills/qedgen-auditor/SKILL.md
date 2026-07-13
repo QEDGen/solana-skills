@@ -250,9 +250,9 @@ on a default budget, expect surface-level pattern matching only.
      this shape happen here?"
    - Classify: real-vulnerability / spec-gap / suppressed.
 
-   **Five cross-cutting passes MUST run alongside the per-category walk.**
+   **Six cross-cutting passes MUST run alongside the per-category walk.**
    These catch primitives the per-category checklist misses on a cold
-   read. 3a, 3b, 3d, and 3e run on every audit; 3c runs only when the
+   read. 3a, 3b, 3d, 3e, and 3f run on every audit; 3c runs only when the
    program leans on a small security-critical dep (see its "When to run
    it" gate).
 
@@ -447,6 +447,36 @@ on a default budget, expect surface-level pattern matching only.
    caller-supplied signer without any on-curve / signable check (2026 bench,
    firm-rated but repeatedly missed on cold reads).
 
+   **3f. Dead-guard / unwired-error-variant sweep.** An error variant that
+   is *defined* but wired into no guard is a named intention the code never
+   enforces — the maintainer named the check (the variant often spells out
+   the invariant) but no call site ever fires it, so the path it was meant
+   to protect proceeds unchecked. This class is invisible to the per-category
+   catalog and to 3a–3e: there IS no guard to find a coverage gap against;
+   the guard exists in name only. Run it on every audit — it is mechanical
+   and high signal.
+
+   1. **Enumerate the program's error enum.** List every variant of the
+      `errors.rs` (or equivalent) error type.
+   2. **Grep each variant for an enforcement call-site** in the program
+      tree: `require!` / `require_*!` / `err!` / `return Err(.. Variant ..)`
+      / a `match` arm that returns it. Auto-generated SDK / IDL / TypeScript
+      / doc references do NOT count — they mirror the enum, they don't
+      enforce it. Restrict the grep to the program crate's `src/`.
+   3. **Any variant with zero enforcement call-sites is a candidate.** Read
+      the variant name and the handler/path it was evidently meant to guard,
+      then ask: is the missing enforcement exploitable? A dead variant whose
+      invariant is load-bearing (a signer/authority/limit the path assumes)
+      is a real finding; a dead variant that a *different* guard already
+      covers redundantly is INFO.
+
+   High signal-to-noise: a named-but-unused error is a strong signal that an
+   intended check was dropped or never wired. Corpus: a defined-but-never-
+   referenced authority guard let a privileged CPI path sign as a global
+   authority with no check (2026 bench, advisory-rated HIGH) — missed by
+   every comparison-direction / store-without-validate pass precisely because
+   the bug is the *absence* of the guard the enum already names.
+
 4. **Escalate every real-vuln finding before writing it up.** This is
    where the bear-hug lives — finding the kill-chain, not just the
    primitive. For each finding classified as "real vulnerability",
@@ -543,8 +573,9 @@ on a default budget, expect surface-level pattern matching only.
 
    - **Producer B — read-driven discovery.** §3c trust-surface walk,
      §3d comparison-direction / inverted-guard sweep, §3e
-     store-without-validate sweep, intent-drift sweep, authority ×
-     invariant matrix. Producer B also
+     store-without-validate sweep, §3f dead-guard / unwired-error-variant
+     sweep, intent-drift sweep, authority × invariant matrix. Producer B
+     also
      hypothesizes internal intent (invariants / state machine /
      authority graph / threat model) from code + comments + docstrings
      *without* prompting the user — these hypotheses feed Phase 2.
