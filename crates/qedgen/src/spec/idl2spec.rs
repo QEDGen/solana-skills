@@ -48,7 +48,26 @@ fn map_type(value: &serde_json::Value) -> String {
                     return name.to_string();
                 }
             }
-            // Complex types (option, vec, array, etc.) — fallback
+            // Container types → the DSL's `Option T` / `Vec T` field forms
+            // (G9/G10). Anchor IDLs use `{"option"|"vec": <inner>}` and
+            // `{"array": [<inner>, N]}`; the Codama normalizer emits the same
+            // shapes. Recurse into the element so `Option<Pubkey>` renders
+            // `Option Pubkey` (not the old lossy `U64` — which silently
+            // mistyped e.g. a mint's `Option<Pubkey>` authority field).
+            if let Some(inner) = obj.get("option") {
+                return format!("Option {}", map_type(inner));
+            }
+            if let Some(inner) = obj.get("vec") {
+                return format!("Vec {}", map_type(inner));
+            }
+            if let Some(serde_json::Value::Array(parts)) = obj.get("array") {
+                // Fixed-length arrays have no DSL type; degrade to `Vec T`
+                // (element type preserved, length dropped — better than U64).
+                if let Some(inner) = parts.first() {
+                    return format!("Vec {}", map_type(inner));
+                }
+            }
+            // Genuinely unknown object shape — last-resort scalar.
             "U64".into()
         }
         _ => "U64".into(),
@@ -638,8 +657,24 @@ mod tests {
     }
 
     #[test]
-    fn map_type_complex_fallback() {
-        assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "U64");
+    fn map_type_container_types() {
+        // Container shapes recurse into the element (#197 real-world fidelity
+        // from p-token: an `Option<Pubkey>` authority field was mistyped U64).
+        assert_eq!(map_type(&serde_json::json!({"vec": "u8"})), "Vec U8");
+        assert_eq!(
+            map_type(&serde_json::json!({"option": "publicKey"})),
+            "Option Pubkey"
+        );
+        assert_eq!(
+            map_type(&serde_json::json!({"array": ["u8", 32]})),
+            "Vec U8"
+        );
+        assert_eq!(
+            map_type(&serde_json::json!({"option": {"defined": "Hook"}})),
+            "Option Hook"
+        );
+        // A genuinely unknown object shape still degrades to a scalar.
+        assert_eq!(map_type(&serde_json::json!({"mystery": 1})), "U64");
     }
 
     #[test]
@@ -762,7 +797,7 @@ mod tests {
                 "name": "settings",
                 "isWritable": true,
                 "isSigner": false,
-                "defaultValue": { "kind": "pdaValueNode" }
+                "defaultValue": { "kind": "pdaValueNode", "pda": { "kind": "pdaLinkNode", "name": "settings" } }
               },
               { "kind": "instructionAccountNode", "name": "admin", "isSigner": true, "isWritable": false }
             ]
@@ -785,7 +820,24 @@ mod tests {
         "errors": [
           { "kind": "errorNode", "name": "notActive", "code": 6000, "message": "settings not active" }
         ],
-        "pdas": []
+        "pdas": [
+          {
+            "kind": "pdaNode",
+            "name": "settings",
+            "seeds": [
+              {
+                "kind": "constantPdaSeedNode",
+                "type": { "kind": "stringTypeNode", "encoding": "utf8" },
+                "value": { "kind": "stringValueNode", "string": "settings" }
+              },
+              {
+                "kind": "variablePdaSeedNode",
+                "name": "admin",
+                "type": { "kind": "publicKeyTypeNode" }
+              }
+            ]
+          }
+        ]
       }
     }"#;
 
@@ -816,7 +868,16 @@ mod tests {
         assert_eq!(ix.args[0].name, "new_threshold");
         assert_eq!(ix.args[0].ty, serde_json::json!("u64"));
         let settings = &ix.accounts[0];
-        assert!(settings.writable && !settings.signer && settings.pda.is_some());
+        assert!(settings.writable && !settings.signer);
+        // #200: the pdaLinkNode resolved through program.pdas[] to real seeds.
+        let pda = settings.pda.as_ref().unwrap();
+        assert_eq!(pda.seeds.len(), 2);
+        assert_eq!(
+            pda.seeds[0].value,
+            Some(serde_json::json!([115, 101, 116, 116, 105, 110, 103, 115])),
+            "const string seed lowered to utf8 bytes"
+        );
+        assert_eq!(pda.seeds[1].path.as_deref(), Some("admin"));
         let admin = &ix.accounts[1];
         assert!(admin.signer && !admin.writable);
         // accountNode data struct exposed as a state-layout candidate.
@@ -844,5 +905,36 @@ mod tests {
             "Codama program.publicKey becomes the program_id:\n{spec}"
         );
         assert!(spec.contains("NotActive"), "error surfaced:\n{spec}");
+        // #200: seeds mined from program.pdas[] — a real declaration, no TODO.
+        assert!(
+            spec.contains("pda settings [\"settings\", admin]"),
+            "resolved PDA declaration:\n{spec}"
+        );
+        assert!(
+            !spec.contains("IDL carries no seeds"),
+            "no seedless TODO when seeds resolve:\n{spec}"
+        );
+    }
+
+    /// #200 negative: a `pdaValueNode` whose link has no matching
+    /// `program.pdas[]` definition keeps the seedless marker → the
+    /// scaffold degrades to the TODO comment (never unparseable `pda x []`).
+    #[test]
+    fn codama_dangling_pda_link_degrades_to_todo() {
+        let dangling = CODAMA_IDL.replace(
+            r#""pda": { "kind": "pdaLinkNode", "name": "settings" }"#,
+            r#""pda": { "kind": "pdaLinkNode", "name": "missing" }"#,
+        );
+        let tmp = std::env::temp_dir().join(format!("codama_d_{}.json", std::process::id()));
+        std::fs::write(&tmp, dangling).unwrap();
+        let (idl, analyses) = idl::parse_idl(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        let spec = render(&idl, &analyses);
+        assert!(
+            // Line-anchored: the TODO's own example text mentions
+            // `pda settings [`, but only inside a `//` comment.
+            spec.contains("IDL carries no seeds") && !spec.contains("\npda settings ["),
+            "dangling link degrades to the TODO comment:\n{spec}"
+        );
     }
 }

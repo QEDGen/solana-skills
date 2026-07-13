@@ -223,6 +223,54 @@ fn codama_type_label(node: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Lower a Codama `pdaNode`'s `seeds[]` to the Anchor-shaped seed array
+/// `IdlPda` deserializes (#200):
+/// - `constantPdaSeedNode` with a `stringValueNode` → `{"kind":"const",
+///   "value":[<utf8 bytes>]}` (what `render_pda_seeds` decodes back to a
+///   string literal); other constant value kinds keep an empty value →
+///   the `"const"` placeholder.
+/// - `variablePdaSeedNode { name }` → `{"kind":"variable","path":<snake>}`
+///   (an account/arg reference).
+fn codama_pda_seeds(pda_node: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    let seeds: Vec<serde_json::Value> = pda_node
+        .get("seeds")
+        .and_then(|s| s.as_array())
+        .map(|seeds| {
+            seeds
+                .iter()
+                .filter_map(|seed| {
+                    let kind = seed.get("kind").and_then(|k| k.as_str())?;
+                    match kind {
+                        "constantPdaSeedNode" => {
+                            let bytes: Vec<serde_json::Value> = seed
+                                .get("value")
+                                .filter(|v| {
+                                    v.get("kind").and_then(|k| k.as_str())
+                                        == Some("stringValueNode")
+                                })
+                                .and_then(|v| v.get("string"))
+                                .and_then(|s| s.as_str())
+                                .map(|s| s.bytes().map(|b| json!(b)).collect())
+                                .unwrap_or_default();
+                            Some(json!({ "kind": "const", "value": bytes }))
+                        }
+                        "variablePdaSeedNode" => {
+                            let name = seed.get("name").and_then(|n| n.as_str())?;
+                            Some(json!({
+                                "kind": "variable",
+                                "path": camel_to_snake(name),
+                            }))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!(seeds)
+}
+
 /// Codama struct fields (`structTypeNode.fields[]` of
 /// `structFieldTypeNode { name, type }`) → Anchor-shaped field list.
 fn codama_struct_fields(struct_node: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -252,8 +300,10 @@ fn codama_struct_fields(struct_node: &serde_json::Value) -> Vec<serde_json::Valu
 ///   `defaultValueStrategy: "omitted"` args — a single-byte
 ///   `numberValueNode` default among them becomes the `discriminator`);
 ///   account `isSigner`/`isWritable` → `signer`/`writable`; a `pda` object
-///   or `pdaValueNode` default marks the account PDA. Codama has no
-///   `has_one`, so `relations` stays empty.
+///   or `pdaValueNode` default marks the account PDA, and a `pdaLinkNode`
+///   under it resolves through `program.pdas[]` to real seeds (#200) —
+///   only a link with no matching definition degrades to the seedless
+///   TODO marker. Codama has no `has_one`, so `relations` stays empty.
 /// - `definedTypes[]` AND `accounts[]` (account-state structs live under
 ///   `accountNode.data` in Codama) → `types[]`, so state-layout inference
 ///   sees them exactly like Anchor `types`.
@@ -268,6 +318,21 @@ fn codama_to_idl(root: &serde_json::Value) -> Result<Idl> {
         .and_then(|n| n.as_str())
         .unwrap_or("program");
     let address = program.get("publicKey").and_then(|k| k.as_str());
+
+    // `program.pdas[]` seed definitions, keyed by pdaNode name — resolved
+    // when an instruction account's `pdaValueNode` links to one (#200).
+    let pda_defs: std::collections::HashMap<String, serde_json::Value> = program
+        .get("pdas")
+        .and_then(|v| v.as_array())
+        .map(|pdas| {
+            pdas.iter()
+                .filter_map(|p| {
+                    let pname = p.get("name").and_then(|n| n.as_str())?;
+                    Some((pname.to_string(), codama_pda_seeds(p)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let instructions: Vec<serde_json::Value> = program
         .get("instructions")
@@ -332,18 +397,36 @@ fn codama_to_idl(root: &serde_json::Value) -> Result<Idl> {
                                         .or_else(|| a.get("writable"))
                                         .and_then(|b| b.as_bool())
                                         .unwrap_or(false);
-                                    let is_pda = a.get("pda").is_some()
-                                        || a.get("defaultValue")
-                                            .and_then(|d| d.get("kind"))
-                                            .and_then(|k| k.as_str())
-                                            == Some("pdaValueNode");
+                                    let default = a.get("defaultValue");
+                                    let is_pda_value = default
+                                        .and_then(|d| d.get("kind"))
+                                        .and_then(|k| k.as_str())
+                                        == Some("pdaValueNode");
                                     let mut acct = json!({
                                         "name": camel_to_snake(acct_name),
                                         "signer": signer,
                                         "writable": writable,
                                     });
-                                    if is_pda {
-                                        acct["pda"] = json!({ "seeds": [] });
+                                    if a.get("pda").is_some() || is_pda_value {
+                                        // Resolve the pdaLinkNode through
+                                        // `program.pdas[]` (#200); an inline
+                                        // pdaNode carries its own seeds; a
+                                        // dangling link keeps the seedless
+                                        // marker (→ scaffold TODO).
+                                        let seeds = default
+                                            .and_then(|d| d.get("pda"))
+                                            .and_then(|link| {
+                                                match link.get("kind").and_then(|k| k.as_str()) {
+                                                    Some("pdaNode") => Some(codama_pda_seeds(link)),
+                                                    _ => link
+                                                        .get("name")
+                                                        .and_then(|n| n.as_str())
+                                                        .and_then(|n| pda_defs.get(n))
+                                                        .cloned(),
+                                                }
+                                            })
+                                            .unwrap_or_else(|| json!([]));
+                                        acct["pda"] = json!({ "seeds": seeds });
                                     }
                                     Some(acct)
                                 })
