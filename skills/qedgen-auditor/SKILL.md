@@ -764,6 +764,30 @@ Each category has a **spec-aware predicate** (CLI-emitted via
 cover **Anchor and native Rust only** — sBPF/assembly is out of scope
 (see the "NOT supported" note above).
 
+### Passes are primary; these categories are their evidence
+
+Some categories below are the per-shape *predicate* for a cross-cutting pass
+(§3a–§3h): the **pass is the read-driven primary surface**, the catalog entry
+is where its exact recognition signals and corpus line live. Run the pass;
+open the category entry for detail. Do NOT treat a pass and its category as two
+separate checklists — that double-counts effort and is how the two lists drift.
+One home per class:
+
+| Pass | Primary for these categories |
+|---|---|
+| §3b per-role identity-anchoring | `token_account_role_anchoring`, `field_chain_missing_root_anchor`, `init_config_field_unanchored` |
+| §3f dead-guard / unwired-error-variant | `generated_guard_bypass`, `stored_field_never_written` |
+| §3g lifecycle-transition soundness | `permissionless_create_account_dos`, `lifecycle_one_shot_violation`, `init_without_is_initialized`, `missing_rent_exemption_check_on_init`, `pda_lifecycle_reuse_after_close` |
+| §3h zero / sentinel asymmetry | `sentinel_null_key_array_short_circuit` |
+
+Every other category stands alone as its own primary lens (`missing_signer`,
+`arbitrary_cpi`, the DeFi-specific set, …). **§3a** (coverage-of-safe-utility)
+and **§3c** (trust-surface dep walk) are meta-passes with no single owned
+category. **§3d** (comparison-direction) and **§3e** (store-without-validate)
+have *no* category twin on purpose — they cover classes the catalog never had,
+which is why they were added; there is nothing to cross-link, only net-new
+coverage.
+
 ### `missing_signer` — CRITICAL
 Spec-aware: handler has no `auth X` clause and is not marked
 `permissionless` (the CLI surfaces this directly).
