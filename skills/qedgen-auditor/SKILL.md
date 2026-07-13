@@ -250,11 +250,11 @@ on a default budget, expect surface-level pattern matching only.
      this shape happen here?"
    - Classify: real-vulnerability / spec-gap / suppressed.
 
-   **Three cross-cutting passes MUST run alongside the per-category walk.**
+   **Six cross-cutting passes MUST run alongside the per-category walk.**
    These catch primitives the per-category checklist misses on a cold
-   read. 3a and 3b run on every audit; 3c runs only when the program
-   leans on a small security-critical dep (see its "When to run it"
-   gate).
+   read. 3a, 3b, 3d, 3e, and 3f run on every audit; 3c runs only when the
+   program leans on a small security-critical dep (see its "When to run
+   it" gate).
 
    **3a. Coverage-of-safe-utility walk.** For every protective
    helper that the codebase defines — names of the shape
@@ -389,6 +389,94 @@ on a default budget, expect surface-level pattern matching only.
    threshold is "small library, niche claim, security property the
    program rests on, not yet a battle-tested standard."
 
+   **3d. Comparison-direction / inverted-guard sweep.** A guard can be
+   present, syntactically fine, and still enforce the *opposite* of its
+   intent: `<` where `>` was meant, operands swapped, `+=` where `-=`
+   belonged, an accumulator advanced with the wrong sign. The per-category
+   catalog and the arithmetic-symbol probe both walk PAST this class — the
+   probe keys off the operator *symbol* (saturating vs checked), not
+   whether the comparison *direction* matches intent. Direction-correctness
+   needs intent, so no static scanner can flag it without over-firing
+   (it cannot know whether `<` should be `>`); this is therefore a **read
+   discipline**, not a probe.
+
+   Run it on every guard that gates a security-relevant quantity — a
+   spending / withdrawal limit, a balance or delta check, a threshold /
+   quorum / vote count, an expiry or time window, a fee or allowance
+   accumulation. For each such guard, do two steps in order:
+
+   1. **State the intended direction in one sentence** from the field's
+      role alone, before reading the comparison ("spending must be
+      REJECTED when `spent + amount > limit`"; "activation must require
+      `now >= start`").
+   2. **Read the actual comparison and confirm it matches.** If flipping
+      the operator (or the operand order, or the accumulation sign) would
+      still compile and still look plausible, the guard is a candidate —
+      derive the input that satisfies the wrong direction and hand it to a
+      repro. When the intent is captured in a `.qedspec`, this becomes a
+      falsifiable Kani/proptest property (the reproducible path); absent a
+      spec, the fired Mollusk repro is the evidence.
+
+   Recognition signals: a comparison or `checked_add/sub` on a field whose
+   role is a limit / balance / threshold / count, especially inside an
+   `evaluate_*` / `check_*` / `validate_*` accumulation loop. Corpus: an
+   inverted accumulation guard that let a spending limit be bypassed
+   (2026 bench) — missed by two separate audit runs precisely because the
+   guard looked present and reasonable.
+
+   **3e. Store-without-validate sweep.** A handler that persists an
+   externally-supplied account or `Pubkey` into program state — add-signer,
+   add-member, set-authority, register-*, whitelist / allowlist insert —
+   without validating it lets later logic trust a value that was never
+   checked at write time. Run this on every state write of an account- or
+   `Pubkey`-typed instruction argument.
+
+   For each such write ask: **what predicate constrained this value before
+   it was stored?** Expected validations, by intent: on-curve (a real
+   Ed25519 point, not an unspendable off-curve key), system-owned /
+   ownership check, a signer check on the value itself, canonical
+   PDA-derivation, or non-default (`!= Pubkey::default()`). A write reached
+   with none of these is a candidate finding — the exploit is realized in
+   whichever *later* handler reads the field and trusts it.
+
+   This is distinct from 3b: 3b asks whether a role parameter used *in this
+   handler* is anchored; 3e asks whether a value being *persisted for future
+   handlers* was validated at write time. A key can pass 3b (it plays no
+   role in the storing handler) yet be a live finding under 3e (a later
+   handler treats it as trusted). Corpus: an add-signer path that stored a
+   caller-supplied signer without any on-curve / signable check (2026 bench,
+   firm-rated but repeatedly missed on cold reads).
+
+   **3f. Dead-guard / unwired-error-variant sweep.** An error variant that
+   is *defined* but wired into no guard is a named intention the code never
+   enforces — the maintainer named the check (the variant often spells out
+   the invariant) but no call site ever fires it, so the path it was meant
+   to protect proceeds unchecked. This class is invisible to the per-category
+   catalog and to 3a–3e: there IS no guard to find a coverage gap against;
+   the guard exists in name only. Run it on every audit — it is mechanical
+   and high signal.
+
+   1. **Enumerate the program's error enum.** List every variant of the
+      `errors.rs` (or equivalent) error type.
+   2. **Grep each variant for an enforcement call-site** in the program
+      tree: `require!` / `require_*!` / `err!` / `return Err(.. Variant ..)`
+      / a `match` arm that returns it. Auto-generated SDK / IDL / TypeScript
+      / doc references do NOT count — they mirror the enum, they don't
+      enforce it. Restrict the grep to the program crate's `src/`.
+   3. **Any variant with zero enforcement call-sites is a candidate.** Read
+      the variant name and the handler/path it was evidently meant to guard,
+      then ask: is the missing enforcement exploitable? A dead variant whose
+      invariant is load-bearing (a signer/authority/limit the path assumes)
+      is a real finding; a dead variant that a *different* guard already
+      covers redundantly is INFO.
+
+   High signal-to-noise: a named-but-unused error is a strong signal that an
+   intended check was dropped or never wired. Corpus: a defined-but-never-
+   referenced authority guard let a privileged CPI path sign as a global
+   authority with no check (2026 bench, advisory-rated HIGH) — missed by
+   every comparison-direction / store-without-validate pass precisely because
+   the bug is the *absence* of the guard the enum already names.
+
 4. **Escalate every real-vuln finding before writing it up.** This is
    where the bear-hug lives — finding the kill-chain, not just the
    primitive. For each finding classified as "real vulnerability",
@@ -484,7 +572,10 @@ on a default budget, expect surface-level pattern matching only.
      See [probe orchestration runbook](references/probe_orchestration.md).
 
    - **Producer B — read-driven discovery.** §3c trust-surface walk,
-     intent-drift sweep, authority × invariant matrix. Producer B also
+     §3d comparison-direction / inverted-guard sweep, §3e
+     store-without-validate sweep, §3f dead-guard / unwired-error-variant
+     sweep, intent-drift sweep, authority × invariant matrix. Producer B
+     also
      hypothesizes internal intent (invariants / state machine /
      authority graph / threat model) from code + comments + docstrings
      *without* prompting the user — these hypotheses feed Phase 2.
@@ -535,6 +626,36 @@ on a default budget, expect surface-level pattern matching only.
    authority graph. Same event-driven surfacing. Stop on user signal,
    budget exhaustion, or N consecutive units of work without a new
    finding.
+
+   ### High-stakes mode — N-run union (opt-in)
+
+   A single audit pass under-samples: independent runs against the same
+   target at the same commit catch *different* subsets of the ground
+   truth (observed repeatedly on the bench — the union of two runs beat
+   either single run on recall). For a high-stakes audit or a benchmark
+   score, don't trust one pass.
+
+   Trigger this mode when the user asks for a thorough / exhaustive /
+   "don't miss anything" audit, or when running under the benchmark
+   skill. Otherwise stay single-run (N-run multiplies cost; routine
+   one-target audits don't need it).
+
+   Protocol:
+
+   1. Run Phases 1–3 **N independent times** (default N=3; N=5 for a
+      calibration-grade sweep), each as a fresh session with no shared
+      context — spawn N subagents pointed at the same target and this
+      SKILL.md, or run N sequential clean passes.
+   2. **Union then dedup.** Merge every run's findings; collapse
+      duplicates by `(category, file:line)` overlap, keeping the
+      highest-confidence / most-specific instance of each cluster. A
+      finding surfaced by *any* run is kept (union recall).
+   3. **Preserve the variance signal.** Record which runs caught each
+      finding; a finding only one of N runs caught is real but
+      under-sampled — note it so the reader sees the run-to-run spread.
+
+   The fired-repro contract is unchanged: a unioned CRIT/HIGH still
+   needs a fired or inconclusive repro, never structural-only.
 
    ### Spec-aware mode (when `.qedspec` already exists)
 
@@ -1755,6 +1876,31 @@ Use the chain's ceiling, not the primitive's:
 
 If you can't articulate a concrete attacker capability for the
 severity you assigned, downgrade.
+
+**Precondition-gated findings — rate the ceiling, note the gate.**
+The downgrade rule above filters findings with NO real capability; it
+must not be used to discount a capability that is merely *gated*. A
+gated exploit is still a real exploit. Separate two axes that are easy
+to conflate:
+
+- **Impact ceiling** — the worst outcome assuming the precondition
+  holds (a specific policy/config state, a prior privileged action, a
+  particular account arrangement).
+- **Reachability** — how easily an attacker reaches that precondition.
+
+Grade on the impact ceiling, and record the gate as a *qualifier* on
+the finding ("HIGH, gated on the SpendingLimit policy being active"),
+not as a reason to drop a level. Fold reachability into priority /
+ordering, not into severity. The failure mode this corrects is rating
+a gated fund-loss as LOW/MEDIUM because the gate felt unlikely —
+"hard to reach" is not "low impact." Only downgrade for the gate when
+the precondition is genuinely unreachable by any user (then it's a
+spec-gap or INFO, not a discounted HIGH). Calibration (2026 bench):
+two gated findings were each under-rated by a level — a state-sequencing
+bug rated LOW where ground truth was MEDIUM, and a gated authority bypass
+rated MEDIUM where ground truth was HIGH — both because the
+precondition-gate was discounted into the severity instead of being
+noted alongside the impact ceiling.
 
 ### Real vulnerability
 The impl genuinely has the bug. Action: surface as a finding with
