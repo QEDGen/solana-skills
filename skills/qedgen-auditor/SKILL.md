@@ -477,14 +477,11 @@ on a default budget, expect surface-level pattern matching only.
    every comparison-direction / store-without-validate pass precisely because
    the bug is the *absence* of the guard the enum already names.
 
-   **Severity — inherit the unguarded path's ceiling.** A dead guard is
-   rated by the impact of the path it fails to protect, not a "just a dead
-   variant" floor: if the missing guard would have prevented fund movement,
-   authority escalation, or DoS, rate the finding at that ceiling (gate
-   noted), exactly as §3d/§3e findings are. The corpus example above was
-   mis-rated LOW/INFO on cold reads even though the unguarded CPI signs as a
-   *global* authority (advisory-HIGH) — rate it HIGH. Only a dead variant a
-   *different* guard already covers redundantly stays INFO.
+   **Severity:** a dead guard inherits the impact ceiling of the path it
+   fails to protect — grade it per the Severity procedure (Classification
+   rules → step 4), NOT at a dead-variant floor. The bench mis-rated an
+   unwired global-authority guard LOW/INFO when the unguarded CPI signs as a
+   *global* authority (HIGH).
 
    **3g. State-machine / lifecycle-transition soundness sweep.** A lifecycle
    step whose precondition handling is wrong is invisible to the guard-shape
@@ -1929,49 +1926,53 @@ keyed off attacker capability — not category label.
 
 ### Severity grading (attacker-capability rubric)
 
-Use the chain's ceiling, not the primitive's:
+Severity is keyed off attacker CAPABILITY and the chain's ceiling — not the
+category label. The levels fix the scale; the **procedure** fixes the
+*consistency* (on cold reads the same finding gets rated a level apart, so
+run the steps in order, every finding — this is the single most important
+part of grading).
 
-- **CRITICAL** — direct fund loss, total state takeover, unbounded
-  mint, or permanent denial-of-service to all users. Attacker
-  capability: any user, any tx, repeatable. No special preconditions.
-- **HIGH** — conditional fund loss (requires victim action, specific
-  market state, or favorable timing), griefing of all users, or
-  partial state takeover. Attacker capability: any user, but bounded
-  by economic preconditions, victim cooperation, or competition.
-- **MEDIUM** — exploit possible but bounded by attacker's own
-  economic stake or narrow precondition; partial DoS; data leak that
-  doesn't immediately translate to fund loss.
-- **LOW** — surface anomaly that doesn't compose into a real attack.
-  Surface as informational. **A LOW that composes to CRIT is reported
-  as CRIT** — never let a chain's ceiling escape.
+**Levels:**
 
-If you can't articulate a concrete attacker capability for the
-severity you assigned, downgrade.
+- **CRITICAL** — direct fund loss, total state takeover, unbounded mint, or
+  permanent DoS to all users. Attacker: any user, any tx, repeatable, no
+  special precondition.
+- **HIGH** — conditional fund loss (needs victim action, market state, or
+  timing), griefing of all users, or partial state takeover.
+- **MEDIUM** — exploit bounded by the attacker's own economic stake or a
+  narrow precondition; partial DoS; data leak not immediately fund-loss.
+- **LOW** — surface anomaly that doesn't compose into a real attack;
+  surface as informational.
 
-**Precondition-gated findings — rate the ceiling, note the gate.**
-The downgrade rule above filters findings with NO real capability; it
-must not be used to discount a capability that is merely *gated*. A
-gated exploit is still a real exploit. Separate two axes that are easy
-to conflate:
+**The procedure — apply to every finding, in order:**
 
-- **Impact ceiling** — the worst outcome assuming the precondition
-  holds (a specific policy/config state, a prior privileged action, a
-  particular account arrangement).
-- **Reachability** — how easily an attacker reaches that precondition.
+1. **Rate the impact ceiling.** State the worst outcome *assuming the
+   precondition holds* (a specific policy/config state, a prior privileged
+   action, a particular account arrangement), then pick the level from that
+   outcome — fund movement / authority escalation / DoS. That is the
+   severity.
+2. **Record the gate as a qualifier, not a discount.** Note the precondition
+   inline ("HIGH, gated on the SpendingLimit policy being active"). Fold how
+   *hard* the gate is to reach into priority / ordering — never into the
+   severity level. "Hard to reach" is not "low impact"; a gated exploit is
+   still a real exploit.
+3. **Downgrade only for two reasons:** (a) you cannot articulate any concrete
+   attacker capability at all → drop it or INFO; (b) the precondition is
+   genuinely unreachable by any user → spec-gap / INFO, not a discounted
+   HIGH. Never downgrade because the gate merely "felt unlikely."
+4. **Special cases:**
+   - **A LOW that composes to CRIT is reported as CRIT** — never let a
+     chain's ceiling escape via its weakest primitive.
+   - **A dead guard (§3f) inherits the unguarded path's ceiling** — rate it
+     by step 1 applied to the path it *fails to protect*, not a
+     "just a dead variant" floor. Only a dead variant a *different* guard
+     already covers redundantly stays INFO.
 
-Grade on the impact ceiling, and record the gate as a *qualifier* on
-the finding ("HIGH, gated on the SpendingLimit policy being active"),
-not as a reason to drop a level. Fold reachability into priority /
-ordering, not into severity. The failure mode this corrects is rating
-a gated fund-loss as LOW/MEDIUM because the gate felt unlikely —
-"hard to reach" is not "low impact." Only downgrade for the gate when
-the precondition is genuinely unreachable by any user (then it's a
-spec-gap or INFO, not a discounted HIGH). Calibration (2026 bench):
-two gated findings were each under-rated by a level — a state-sequencing
-bug rated LOW where ground truth was MEDIUM, and a gated authority bypass
-rated MEDIUM where ground truth was HIGH — both because the
-precondition-gate was discounted into the severity instead of being
-noted alongside the impact ceiling.
+Calibration (2026 bench): the failures this procedure corrects — gated
+findings mis-rated a level low (the gate discounted *into* severity instead
+of noted *alongside* the ceiling), and a dead-guard finding rated at the
+dead-variant floor though the path it fails to protect is HIGH. Every miss
+was a step-1/step-4 violation.
 
 ### Real vulnerability
 The impl genuinely has the bug. Action: surface as a finding with
@@ -2035,6 +2036,7 @@ inconsistent with reality. Fixed in PR #32.
 **Location:** `programs/<crate>/src/<file>:<line>`
 **Mode:** spec-less (no .qedspec at audit time)
 **Runtime:** Anchor
+**Surfaced by:** `§3d` | `§3f` | `category:unvalidated_remaining_accounts` | `probe:arithmetic_symbol`
 **Standalone severity:** HIGH (chain promotes to CRIT)
 **Kill-chain:** <category> + <other primitive in this codebase> = <impact>
 
@@ -2089,6 +2091,13 @@ ExternalAccountLamportSpend; finding is structural only.")
 Category `<category-name>` Corpus line — name the public incident or
 recurring audit-firm pattern this finding shares a shape with.
 ```
+
+**`Surfaced by:` is mandatory** — the single pass (`§3a`–`§3h`), catalog
+`category:<name>`, or `probe:<name>` that actually turned up this finding.
+It is the standing signal for which parts of this skill earn their keep: the
+bench aggregates it into a per-pass / per-category fire rate, so the
+long-tail catalog can be pruned on data rather than guesswork. One tag, the
+proximate cause — not every lens that *could* have found it.
 
 ### Digest (returned to orchestrator)
 
