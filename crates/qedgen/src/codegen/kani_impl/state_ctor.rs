@@ -149,31 +149,23 @@ pub(crate) fn wants_pubkey_abstraction(spec: &ParsedSpec) -> bool {
             .any(|h| h.takes_params.iter().any(|(_, t)| mentions_pubkey(t)))
 }
 
-/// The abstract-`Pubkey`-equality support fn (emitted once when
-/// `wants_pubkey_abstraction`). Reinterprets the 32 bytes as two `u128` halves
-/// and compares — 2 word-comparisons, not a 32-byte `memcmp` loop. Sound
-/// (machine-checked equivalent to `derive(PartialEq)`, #182); verification-only
-/// (`#[cfg(kani)]`), so the transmute never runs on-chain.
+/// The abstract-`Pubkey`-equality support fns (emitted once when
+/// `wants_pubkey_abstraction`) — thin adapters over the soundness-proven
+/// `qedgen_kani_prelude` crate (#182). The wide-integer compare logic lives and
+/// is machine-checked equivalent to the derived `==`/`cmp` in the crate; here we
+/// only bridge the program's own `Pubkey` type to the crate's byte-level API, so
+/// there is no anchor-lang version to unify. Verification-only (`#[cfg(kani)]`).
 pub(crate) fn pubkey_eq_abstract_fn() -> String {
-    "// Abstract Pubkey equality + ordering (#182 Tier 1): the 32 bytes as two\n\
-     // u128 halves — word-comparisons, NOT a 32-byte memcmp/lex loop (Kani unwind\n\
-     // 2 vs >= 34). Both PROVEN bit-for-bit equivalent to derive(PartialEq/Ord);\n\
-     // the proofs stub `==` and `cmp` to these. Verification-only, so the\n\
-     // transmute never runs on-chain.\n\
-     #[allow(clippy::missing_transmute_annotations)]\n\
+    "// Abstract Pubkey equality + ordering (#182 Tier 1) — thin adapters over the\n\
+     // soundness-proven `qedgen_kani_prelude` crate: compare the 32 bytes as two\n\
+     // u128 halves (word-comparisons, NOT a 32-byte memcmp/lex loop; Kani unwind\n\
+     // 2 vs >= 34). The crate machine-checks these equivalent to the derived\n\
+     // ==/cmp, so the stubs can't change any result; verification-only.\n\
      fn pk_eq_abstract(a: &anchor_lang::prelude::Pubkey, b: &anchor_lang::prelude::Pubkey) -> bool {\n\
-     \x20   let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };\n\
-     \x20   let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };\n\
-     \x20   a[0] == b[0] && a[1] == b[1]\n\
+     \x20   qedgen_kani_prelude::wide_eq_32(a.to_bytes(), b.to_bytes())\n\
      }\n\
-     // Pubkey `Ord` is byte-lexicographic (index 0 most significant) = big-endian\n\
-     // u256; compare two big-endian u128 halves lexicographically (`binary_search`\n\
-     // / `sort` use this).\n\
-     #[allow(clippy::missing_transmute_annotations)]\n\
      fn pk_cmp_abstract(a: &anchor_lang::prelude::Pubkey, b: &anchor_lang::prelude::Pubkey) -> core::cmp::Ordering {\n\
-     \x20   let a: [u128; 2] = unsafe { core::mem::transmute(a.to_bytes()) };\n\
-     \x20   let b: [u128; 2] = unsafe { core::mem::transmute(b.to_bytes()) };\n\
-     \x20   (a[0].swap_bytes(), a[1].swap_bytes()).cmp(&(b[0].swap_bytes(), b[1].swap_bytes()))\n\
+     \x20   qedgen_kani_prelude::wide_cmp_32(a.to_bytes(), b.to_bytes())\n\
      }\n"
         .to_string()
 }
@@ -279,26 +271,18 @@ pub(crate) fn wants_div_abstraction(spec: &ParsedSpec) -> bool {
 }
 
 /// The abstract-`checked_div` support fn (emitted once when
-/// `wants_div_abstraction`). Returns a fresh symbolic quotient `q` constrained
-/// by the EXACT truncating-division contract `a = q*b + r, |r| < |b|,
-/// sign(r) = sign(a)` (computed in `i128` so the contract math can't overflow),
-/// and preserves the two `None` cases (`b == 0`, `MIN / -1` overflow). The
-/// quotient is unique for `b != 0`, so this is an *exact* abstraction — sound
-/// both ways, like the #182 Pubkey/PDA stubs — that removes the divider circuit.
+/// `wants_div_abstraction`) — a thin adapter over the soundness-proven
+/// `qedgen_kani_prelude` crate (#182). The crate returns a fresh symbolic
+/// quotient pinned by truncating division's exact contract (removing the divider
+/// circuit that stalls the solver) and is machine-checked (bounded) equal to
+/// `i64::checked_div`. Verification-only.
 pub(crate) fn div_abstract_fn() -> String {
-    "// Abstract i64 division (#182 arithmetic tier): a fresh symbolic quotient\n\
-     // pinned by division's exact contract — no 64-bit divider circuit (which\n\
+    "// Abstract i64 division (#182 arithmetic tier) — thin adapter over the\n\
+     // soundness-proven `qedgen_kani_prelude` crate: a fresh symbolic quotient\n\
+     // pinned by division's exact contract, no 64-bit divider circuit (which\n\
      // stalls both CaDiCaL and z3 on a symbolic divisor). Verification-only.\n\
      fn checked_div_abstract(a: i64, b: i64) -> Option<i64> {\n\
-     \x20   if b == 0 || (a == i64::MIN && b == -1) {\n\
-     \x20       return None; // the real `checked_div`'s two None cases\n\
-     \x20   }\n\
-     \x20   let q: i64 = kani::any();\n\
-     \x20   let (ai, bi, qi) = (a as i128, b as i128, q as i128);\n\
-     \x20   let r = ai - qi * bi; // remainder; i128 so it can't overflow\n\
-     \x20   kani::assume(r.abs() < bi.abs());\n\
-     \x20   kani::assume(r == 0 || (r > 0) == (ai > 0));\n\
-     \x20   Some(q)\n\
+     \x20   qedgen_kani_prelude::checked_div_i64(a, b)\n\
      }\n"
     .to_string()
 }
@@ -460,12 +444,12 @@ fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
                     })
                     .collect();
                 format!("{}{s} {{ {} }}", ctx.type_path, inner?.join(", "))
-            } else if let Some(sum) = ctx.sum_types.iter().find(|t| &t.name == s) {
-                // Enum (sum type) — symbolic variant selection (#177/G13).
-                emit_enum(s, sum, ctx, depth)?
             } else {
-                // Imported / unresolved type — needs agent knowledge.
-                return None;
+                // Enum (sum type) — symbolic variant selection (#177/G13).
+                // Imported / unresolved types miss the lookup → None
+                // (they need agent knowledge).
+                let sum = ctx.sum_types.iter().find(|t| &t.name == s)?;
+                emit_enum(s, sum, ctx, depth)?
             }
         }
         // A `Map[N] T` state field has no faithful symbolic default here (the

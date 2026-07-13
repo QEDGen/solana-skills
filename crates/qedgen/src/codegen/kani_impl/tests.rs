@@ -890,9 +890,9 @@ handler resize (n : U64) {
     assert!(
         body.contains("fn checked_div_abstract(a: i64, b: i64) -> Option<i64>")
             && body.contains("#[kani::stub(i64::checked_div, checked_div_abstract)]")
-            // the exact truncating-division contract (soundness):
-            && body.contains("kani::assume(r.abs() < bi.abs());"),
-        "kani_abstract_div emits the stub fn + attr + contract; got:\n{body}"
+            // #182 Shape-1: the exact-contract logic lives in the proven crate.
+            && body.contains("qedgen_kani_prelude::checked_div_i64(a, b)"),
+        "kani_abstract_div emits the stub fn + attr, delegating to qedgen_kani_prelude; got:\n{body}"
     );
 }
 
@@ -1147,9 +1147,13 @@ handler admin_bump (caller : Pubkey) (delta : U64) {
     // abstraction OFF — see the opt-out case below).
     assert!(
         body.contains("fn pk_eq_abstract")
+            // #182 Shape-1: the wide-compare logic lives in the proven crate;
+            // the harness only bridges its own Pubkey to the byte-level API.
+            && body.contains("qedgen_kani_prelude::wide_eq_32(a.to_bytes(), b.to_bytes())")
+            && body.contains("qedgen_kani_prelude::wide_cmp_32(a.to_bytes(), b.to_bytes())")
             && body.contains("kani::stub(<anchor_lang::prelude::Pubkey")
             && !body.contains("#[kani::unwind(34)]"),
-        "brownfield Pubkey harness abstracts `==` + drops the bound; got:\n{body}"
+        "brownfield Pubkey harness abstracts `==`/`cmp` via qedgen_kani_prelude + drops the bound; got:\n{body}"
     );
 
     // (d) A Pubkey STATE field that is NEVER referenced in a guard/ensures (only

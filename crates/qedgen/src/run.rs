@@ -8,6 +8,22 @@ use crate::run_helpers::*;
 use crate::*;
 use anyhow::{Context as _, Result};
 use std::path::{Path, PathBuf};
+
+/// #182 Shape-1: deliver the `qedgen_kani_prelude` crate beside a just-generated
+/// Kani harness and depend on it — but only when the harness actually references
+/// it. The Pubkey/div stubs (impl path) and the `mul_div` imports (spec-model
+/// path) are emitted conditionally, so gating on the emitted text is precise
+/// across every harness shape.
+fn deliver_prelude_if_referenced(harness_path: &Path) -> Result<()> {
+    let refs_prelude = std::fs::read_to_string(harness_path)
+        .map(|s| s.contains("qedgen_kani_prelude"))
+        .unwrap_or(false);
+    if refs_prelude {
+        crate::project::deliver_kani_prelude_for_harness(harness_path)?;
+    }
+    Ok(())
+}
+
 /// Top-level subcommand name for telemetry and the last-error log
 /// header. Aristotle's sub-verbs collapse to the single `"aristotle"`
 /// label — that's the user-facing surface they invoked.
@@ -628,6 +644,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 // Kani harnesses are framework-neutral (pure spec-derived
                 // state model).
                 kani_mir::generate(&mir, &parsed, &kani_path)?;
+                // #182: spec-model harness imports mul_div from the crate when
+                // its guards use them — deliver + depend if so.
+                deliver_prelude_if_referenced(&kani_path)?;
 
                 // Unit tests are framework-neutral too.
                 let test_path = program_dir.join("src/tests.rs");
@@ -1295,6 +1314,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                         eprintln!("warning: {e}");
                     }
                     kani_mir::generate(&mir, &parsed, &kani_output)?;
+                    // #182: deliver + depend on the crate if the spec-model
+                    // harness imports mul_div from it.
+                    deliver_prelude_if_referenced(&kani_output)?;
                 }
             }
 
@@ -1337,6 +1359,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     target,
                     impl_mode,
                 )?;
+
+                // #182 Shape-1: the brownfield state-driven shape stubs
+                // Pubkey/div through the crate (greenfield symbolic-accounts does
+                // not) — deliver + depend only if the emitted harness references it.
+                deliver_prelude_if_referenced(&kani_impl_path)?;
             }
 
             if test || all {

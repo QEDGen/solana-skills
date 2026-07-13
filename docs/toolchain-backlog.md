@@ -285,6 +285,63 @@ pending a decision on whether it's in scope.
 
 ## Solana Kani abstraction library (capability, #182)
 
+> **STATUS (graduating from backlog, 2026-07-09; branch `feat/kani-prelude-182`):**
+> the T1/T2/T4 abstraction bodies shipped as *codegen-emitted string literals
+> re-inlined per harness* (`kani_impl/state_ctor.rs` + `kani_mir/prefix.rs`), and
+> the T1 soundness proof had only ever run *once, in a throwaway audit workspace*
+> — pinned nowhere. Extraction into a single-source, soundness-proven
+> `kani_prelude/` (the Kani twin of `lean_solana/`) is underway.
+>
+> - **Chunk 1 — SHIPPED.** `kani_prelude/` crate: dependency-free, `#![cfg(kani)]`,
+>   standalone workspace. Public API is byte-level (`wide_eq_32` / `wide_cmp_32` /
+>   `checked_div_i64` + `mul_div_*`) so it names no Solana type — **Shape 1**
+>   (user chose importable crate over vendored `#[path]` module) *without* the
+>   anchor-lang version-unification hazard. `cargo kani`: 3/3 harnesses green
+>   (pubkey eq/cmp ≡ derived over `[u8;32]`; div ≡ `i64::checked_div` bounded to
+>   i8 — unbounded div/mul_div are nonlinear/divider BMC walls, deferred with the
+>   contract argument documented).
+> - **Chunk 2 — SHIPPED.** `project::write_kani_prelude` embeds (`include_str!`)
+>   and materializes the crate as `qedgen_kani_prelude/` beside a program;
+>   mirrors `write_lean_solana`. Unit-tested. Not yet hooked into codegen.
+> - **Chunk 3 — SHIPPED.** `state_ctor::pubkey_eq_abstract_fn` / `div_abstract_fn`
+>   now emit thin adapters over `qedgen_kani_prelude::{wide_eq_32,wide_cmp_32,
+>   checked_div_i64}` (fully-qualified paths — no `use` needed; stub attrs
+>   unchanged, they target the local adapter names). The over-approx
+>   PDA/log/CPI/clock stubs stay inline. `run.rs` delivers the crate beside the
+>   program + injects the path-dep, **gated on the emitted harness text
+>   containing `qedgen_kani_prelude`** (not a spec predicate — the abstraction is
+>   emitted only by the brownfield state-driven shape, NOT greenfield
+>   symbolic-accounts, so a spec-level gate over-delivered). Brownfield manifest
+>   injection reuses the existing `merge_cargo_toml`/idempotent text-insert.
+> - **Chunk 4 — SHIPPED (acceptance).** The smart-account `kani/src/lib.rs` is a
+>   hand-curated `c_proofs` module at unwind 40 that does NOT use T1, so a
+>   destructive "regen" was the wrong test. Instead, verified end-to-end
+>   NON-destructively (scratch dirs; smart-account repo untouched): (i) artifact
+>   check — greenfield emits no crate ref / no delivery, brownfield emits the
+>   adapter + delivers the crate + injects the dep; (ii) **real `cargo kani`** on
+>   a crate-backed `#[kani::stub]` proof nested in a `[workspace]` host —
+>   `crate_backed_stub_passes_at_unwind_2` green, proving the path-dep resolves,
+>   `wide_eq_32` is callable under kani, and the stub is applied (the derived
+>   32-byte `==` loop can't pass at unwind 2). Two bugs caught + fixed: the
+>   over-delivery gate, and the delivered crate's `[workspace]` colliding with
+>   the host ("multiple workspace roots") — prelude now carries no `[workspace]`,
+>   root workspace `exclude`s `kani_prelude/`.
+> - **Chunk 3b — SHIPPED.** Folded the `kani_mir/prefix.rs` spec-model `mul_div_*`
+>   / `mul_bps_floor` copy onto the crate: `emit_math_helpers` now emits
+>   `use qedgen_kani_prelude::{…}` instead of inline `fn` bodies. Delivery gate
+>   factored to `run::deliver_prelude_if_referenced` (content-based) and wired at
+>   all three gen sites — impl (`--kani-impl`) + both spec-model (`--kani`) paths.
+>   `codegen_mir` / `proptest_gen_mir` keep their OWN inline copies (they run
+>   outside kani). One snapshot regen'd (def→`use`); verified end-to-end (harness
+>   imports the crate, crate delivered, dep injected). The spec-model `pubkey_eq`
+>   over `[u8;32]` model fields stays inline — a separate unrolled helper, not a
+>   memcmp wall.
+>
+> **DEFERRED (user, 2026-07-09):** the `kani.yml` CI job that would turn the
+> soundness proofs into a *standing* pin — the shape is unsettled; revisit now
+> that chunks 1–4 have shipped. Until then the proofs are runnable in-repo
+> (`cd kani_prelude && cargo kani`) but not gated in CI, which has no Kani today.
+
 Reusable `#[kani::stub]` abstractions for common Solana types Kani wastefully
 bit-blasts, auto-emitted by the brownfield harness (like the Clock stub, G14).
 This IS the existing Lean "Trust (axioms)" boundary (SPL Token, PDA, CPI,

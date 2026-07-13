@@ -14,15 +14,7 @@
 // ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ---- ----
 #![cfg(kani)]
 
-#[allow(dead_code)]
-#[inline]
-fn mul_bps_floor_u128(a: u128, bps: u128) -> u128 {
-if bps > 10000 { return u128::MAX; }
-let b = (bps as u16) as u128;
-let q = a / 10000;
-let r = a % 10000;
-q.wrapping_mul(b).wrapping_add(r.wrapping_mul(b) / 10000)
-}
+use qedgen_kani_prelude::mul_bps_floor_u128;
 
 #[allow(dead_code)]
 fn pubkey_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {

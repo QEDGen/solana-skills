@@ -67,10 +67,7 @@ fn nearest_manifest_dir(file: &Path) -> Option<PathBuf> {
         if cur.join("Cargo.toml").exists() {
             return Some(cur);
         }
-        match cur.parent() {
-            Some(p) => cur = p.to_path_buf(),
-            None => return None,
-        }
+        cur = cur.parent()?.to_path_buf();
     }
 }
 

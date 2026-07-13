@@ -11,6 +11,10 @@ exclude = [
     "examples/rust/lending",
     "examples/rust/multisig",
     "examples/rust/brownfield-onboarding/program",
+    # #182: the vendored Kani prelude carries no `[workspace]` (it is delivered
+    # nested inside host harness packages); exclude it here so a standalone
+    # `cd kani_prelude && cargo kani` still resolves it.
+    "kani_prelude",
 ]
 resolver = "2"
 

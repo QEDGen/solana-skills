@@ -1,0 +1,28 @@
+# qedgen-kani-prelude — the soundness core for QEDGen's Kani abstractions (#182).
+#
+# The Kani twin of `lean_solana/`: a single source of truth for the reusable,
+# spec-INDEPENDENT abstractions that `qedgen codegen --kani`/`--kani-impl` today
+# re-inline into every harness (Pubkey `==`/`cmp`, `checked_div`, the `mul_div`
+# helpers, and the PDA / log / CPI over-approximation stubs). Here they are
+# written ONCE and machine-checked sound, so downstream harnesses can import
+# rather than regenerate them.
+#
+# NO `[workspace]` table here — this crate is DELIVERED nested inside a host
+# harness package (which is itself often a `[workspace]` root, e.g. to opt out
+# of an Anchor workspace); a `[workspace]` here would collide as "multiple
+# workspace roots in the same workspace". In-repo, the root Cargo.toml's
+# `exclude` list keeps `kani_prelude/` out of the qedgen workspace so
+# `cd kani_prelude && cargo kani` still resolves it standalone. Verification-
+# only: `#![cfg(kani)]` makes a plain `cargo build`/`cargo test` compile an empty
+# crate; the bodies + proofs exist only under `cargo kani`. Deliberately
+# DEPENDENCY-FREE — the soundness lemmas are byte-level (`Pubkey` is a `[u8; 32]`
+# newtype), so no anchor-lang / solana-program in the graph, no
+# version-unification, and a fast solver run.
+[package]
+name = "qedgen-kani-prelude"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["lib"]

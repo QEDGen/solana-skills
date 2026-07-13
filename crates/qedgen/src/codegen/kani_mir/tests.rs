@@ -486,11 +486,11 @@ fn compound_effect_rhs_and_arith_predicates_render_soundly() {
         "ML `then` keyword leaked into the harness:\n{out}"
     );
 
-    // #145 — helper emitted for a ref_impl-only use, body narrowed to the
-    // declared U64 return.
+    // #145 — helper referenced for a ref_impl-only use; #182 — imported from the
+    // soundness-proven crate rather than inlined.
     assert!(
-        out.contains("fn mul_div_floor_u128(a: u128, b: u128, d: u128) -> u128 {"),
-        "mul_div_floor_u128 definition must be emitted:\n{out}"
+        out.contains("use qedgen_kani_prelude::{mul_div_ceil_u128, mul_div_floor_u128};"),
+        "mul_div helpers must be imported from qedgen_kani_prelude:\n{out}"
     );
     assert!(
         out.contains(
