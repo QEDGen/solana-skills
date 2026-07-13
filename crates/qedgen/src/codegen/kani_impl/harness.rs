@@ -404,6 +404,8 @@ fn is_copy_scalar_ty(t: &str) -> bool {
                 | "I128"
                 | "Bool"
                 | "Pubkey"
+                | "Bytes32"
+                | "Bytes64"
         )
 }
 
@@ -432,9 +434,18 @@ pub(crate) fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, s
     if abstract_pk {
         out.push_str(super::state_ctor::pubkey_stub_attr());
     }
-    // #182 Tier 2 — redirect PDA derivation to an opaque address (skip sha256).
+    // #182 Tier 2 — redirect PDA derivation to a deterministic uninterpreted
+    // function (skip the sha256 + bump-search bit-blast; #189).
     if super::state_ctor::wants_pda_abstraction(spec) {
         out.push_str(super::state_ctor::pda_stub_attr());
+    }
+    // #189 Tier 2 — hash primitives and secp256k1 recovery as deterministic
+    // uninterpreted functions (opt-in).
+    if super::state_ctor::wants_hash_stub(spec) {
+        out.push_str(super::state_ctor::hash_stub_attr());
+    }
+    if super::state_ctor::wants_secp256k1_stub(spec) {
+        out.push_str(super::state_ctor::secp256k1_stub_attr());
     }
     // G14 — the agent-fill effect calls a `Clock::get()`-reading method; stub it.
     if super::state_ctor::wants_clock_stub(spec) {
@@ -1172,32 +1183,79 @@ fn suggested_unwind(
 ) -> (u32, &'static str) {
     // Impl-targeted harnesses CALL real code (the handler / `invariant()` /
     // helper), which operates on the WHOLE account struct — not just the fields
-    // this harness snapshots. So a `Pubkey` anywhere in the model — a param, or
-    // ANY state field (snapshotted or not) — signals the callee likely does a
-    // 32-byte `memcmp` (owner / `has_one` / dedup / `windows` checks), which
-    // only fully unwinds at N ≥ 34. Bias conservative: a too-low bound fails
-    // with an "unwinding assertion" (the exact trial-and-error F2 removes),
-    // whereas a too-high bound is merely slower.
-    // #182 Tier 1: when Pubkey `==` is abstracted (stubbed to a wide-integer
-    // compare), the 32-byte memcmp that forced ≥34 is gone — the remaining
-    // loops iterate `kani_vec_bound`-sized collections, so a small bound closes.
-    if abstract_pubkey {
-        let bound = super::state_ctor::vec_bound_of(spec) as u32 + 4;
-        return (
-            bound,
+    // this harness snapshots. So a byte-token anywhere in the model — a param,
+    // or ANY state field (snapshotted or not) — signals the callee likely does
+    // a byte-array `memcmp` (owner / `has_one` / dedup / `windows` checks),
+    // which only fully unwinds at N ≥ width + 2. Bias conservative: a too-low
+    // bound fails with an "unwinding assertion" (the exact trial-and-error F2
+    // removes), whereas a too-high bound is merely slower.
+    //
+    // #182 Tier 1 covers `Pubkey` (a NEWTYPE, so its derived `==` is a
+    // stubbable named impl). `Bytes32`/`Bytes64` (#191) lower to raw
+    // `[u8; N]`, whose `PartialEq` is a generic core impl Kani cannot stub
+    // (model-checking/kani#1997) — so a Bytes field keeps the memcmp floor
+    // even when the Pubkey abstraction is active.
+    let (base, why) = if spec_mentions_type(spec, handler, "Bytes64") {
+        (
+            66u32,
+            "Bytes64 in state/params → raw [u8; 64] memcmp (unstubbable, kani#1997); needs ≥ 66",
+        )
+    } else if spec_mentions_type(spec, handler, "Bytes32") {
+        (
+            34,
+            "Bytes32 in state/params → raw [u8; 32] memcmp (unstubbable, kani#1997); needs ≥ 34",
+        )
+    } else if abstract_pubkey {
+        // #182 Tier 1: when Pubkey `==` is abstracted (stubbed to a
+        // wide-integer compare), the 32-byte memcmp that forced ≥34 is gone —
+        // the remaining loops iterate `kani_vec_bound`-sized collections.
+        (
+            super::state_ctor::vec_bound_of(spec) as u32 + 4,
             "Pubkey `==` abstracted (#182) — no memcmp; small bound",
-        );
-    }
-
-    let param_touches_bytes = handler.takes_params.iter().any(|(_, t)| is_pubkey_type(t));
-    let state_has_pubkey = !pubkey_state_field_names(spec).is_empty();
-
-    if param_touches_bytes || state_has_pubkey {
+        )
+    } else if handler.takes_params.iter().any(|(_, t)| is_pubkey_type(t))
+        || !pubkey_state_field_names(spec).is_empty()
+    {
         (
             34,
             "Pubkey in state/params → callee does a 32-byte memcmp; needs ≥ 34",
         )
     } else {
-        (4, "no Pubkey fields — no 32-byte memcmp")
+        (4, "no byte-token fields — no memcmp")
+    };
+
+    // #189: the PDA / hash / secp256k1 uninterpreted-function stubs scan a
+    // CAP=8 memo table per call — the harness bound must cover that loop.
+    let uses_ufmap_stub = super::state_ctor::wants_pda_abstraction(spec)
+        || super::state_ctor::wants_hash_stub(spec)
+        || super::state_ctor::wants_secp256k1_stub(spec);
+    if uses_ufmap_stub && base < 10 {
+        return (10, "UfMap memo scan (CAP 8) in a #189 stub; needs ≥ 10");
     }
+    (base, why)
+}
+
+/// True when any state field, record / sum payload, or handler param mentions
+/// the given DSL type name (word-boundary match, so `Option Bytes32` /
+/// `Vec Bytes64` count). The byte-token analogue of the `Pubkey` scans above.
+fn spec_mentions_type(spec: &ParsedSpec, handler: &ParsedHandler, type_name: &str) -> bool {
+    let mentions = |t: &str| {
+        t.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == type_name)
+    };
+    spec.state_fields.iter().any(|(_, t)| mentions(t))
+        || spec
+            .account_types
+            .iter()
+            .any(|a| a.fields.iter().any(|(_, t)| mentions(t)))
+        || spec
+            .records
+            .iter()
+            .any(|r| r.fields.iter().any(|(_, t)| mentions(t)))
+        || spec.sum_types.iter().any(|s| {
+            s.variants
+                .iter()
+                .any(|v| v.fields.iter().any(|(_, t)| mentions(t)))
+        })
+        || handler.takes_params.iter().any(|(_, t)| mentions(t))
 }

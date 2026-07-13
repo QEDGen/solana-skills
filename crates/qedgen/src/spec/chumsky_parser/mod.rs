@@ -76,7 +76,14 @@ fn pragma_assign_decl<'a>() -> impl Parser<'a, &'a str, TopItem, Err<'a>> + Clon
     // pragmas (`state_repr = adt`) are unaffected. A `*` segment is accepted so
     // `pragma harness_use = crate::foo::bar::*` can request a glob import
     // (`state_module` values never contain `*`, so this is backward-compatible).
-    let path_seg = choice((non_keyword_ident(), just("*").to("*".to_string())));
+    // A bare integer segment is accepted so numeric-valued pragmas parse —
+    // before #192 the grammar REJECTED them, making the documented
+    // `pragma kani_vec_bound = <N>` unusable.
+    let path_seg = choice((
+        non_keyword_ident(),
+        just("*").to("*".to_string()),
+        text::int(10).map(|s: &str| s.to_string()),
+    ));
     let path_value = path_seg
         .separated_by(just("::"))
         .at_least(1)

@@ -430,6 +430,8 @@ pub(super) fn check_map_and_subscript(spec: &ParsedSpec) -> Vec<CompletenessWarn
                             | "I64"
                             | "I128"
                             | "Pubkey"
+                            | "Bytes32"
+                            | "Bytes64"
                     );
                 if !is_known {
                     warnings.push(warn("map_value_unknown", Severity::Error, 0, format!(

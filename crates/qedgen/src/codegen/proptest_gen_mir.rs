@@ -39,6 +39,10 @@ fn strategy_for_type(dsl_type: &str) -> &str {
         "I128" => "any::<i128>()",
         "Bool" => "any::<bool>()",
         "Pubkey" => "prop::array::uniform32(0u8..)",
+        // Byte tokens (#191): `uniform32` maxes out at 32, so Bytes64 uses
+        // proptest's const-generic array `Arbitrary` (proptest ≥ 1.0).
+        "Bytes32" => "prop::array::uniform32(0u8..)",
+        "Bytes64" => "any::<[u8; 64]>()",
         // Fin[N] arrives here with the wrapper stripped; modelled as a small
         // usize range since real usage is as an index.
         "Fin" => "0usize..=1024usize",
@@ -62,6 +66,10 @@ fn boundary_strategy_for_type(dsl_type: &str) -> &str {
         "I128" => "any::<i128>()",
         "Bool" => "any::<bool>()",
         "Pubkey" => "prop::array::uniform32(0u8..1u8)",
+        "Bytes32" => "prop::array::uniform32(0u8..1u8)",
+        "Bytes64" => {
+            "prop::collection::vec(0u8..1u8, 64).prop_map(|v| <[u8; 64]>::try_from(v).unwrap())"
+        }
         "Fin" => "prop_oneof![0usize..=3usize, 1020usize..=1024usize]",
         _ => "prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]",
     }

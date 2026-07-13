@@ -316,8 +316,8 @@ for subscripting a `Map[N] T` field.
 
 ### Parameterised and map types
 
-Type expressions: `Pubkey`, `U8`, `U16`, `U64`, `U128`, `I128`, `Vec U64`,
-`Option Pubkey`, `Map[N] T`, `Fin[N]`.
+Type expressions: `Pubkey`, `Bytes32`, `Bytes64`, `U8`, `U16`, `U64`, `U128`,
+`I128`, `Vec U64`, `Option Pubkey`, `Map[N] T`, `Fin[N]`.
 
 ```fsharp
 accounts : Map[MAX_ACCOUNTS] Account
@@ -331,6 +331,20 @@ state fields lower to `[u8; 32]` automatically — the structurally-
 equivalent byte array that proptest's `prop::array::uniform32(0u8..)`
 strategy already generates. P6 fires at `Info` severity as a note,
 not as a `Warning`; no spec-side action is required.
+
+**`Bytes32` / `Bytes64` — opaque byte tokens (#191):** hashes / digests /
+merkle roots (`Bytes32`, `[u8; 32]`) and signatures / recovered secp keys
+(`Bytes64`, `[u8; 64]`). Equality-only semantics like `Pubkey`, but with **no
+framework newtype** — they lower to raw byte arrays in *every* Rust backend
+(Anchor structs included) and to an opaque token in Lean. Needed to mirror a
+brownfield `#[account]` struct with `merkle_root: [u8; 32]` or
+`last_sig: [u8; 64]` fields, which `Pubkey` can't cover (its ctor emits the
+newtype). Kani note: a raw byte-array compare is a real memcmp loop Kani
+**cannot stub** (generic core impl — model-checking/kani#1997), so a
+`Bytes32`/`Bytes64` field raises the suggested `#[kani::unwind]` to 34/66 even
+when the Pubkey wide-compare abstraction is active. The prelude ships
+`wide_eq_64`/`wide_cmp_64` (machine-checked, like the 32-byte pair) for
+hand-written adapters over *named* 64-byte newtypes, which are stubbable.
 
 ### `state` (sugar)
 
@@ -1343,6 +1357,44 @@ bit-blasts a sequential divider circuit that stalls both SAT (CaDiCaL) and SMT
 (z3); the abstraction removes the circuit while staying sound (the quotient is
 unique, so it's exact — no false proofs). Same discipline as the Pubkey/PDA
 stubs. Needs `-Z stubbing`.
+
+**`pragma kani_stub_hash = on`** — the **#189 Tier-2 trusted-crypto stubs**:
+replace `solana_program::{hash,keccak,blake3}::{hash,hashv}` with
+*deterministic uninterpreted functions* backed by the prelude's `UfMap32` —
+same input ⇒ same digest (memoized; determinism machine-checked in the
+prelude), distinct inputs ⇒ distinct digests (**collision-freedom axiom** —
+the Kani mirror of trusting sha256 collision resistance, exactly the Lean
+side's hash axioms). One map per primitive (domain separation); `hash(x)` and
+`hashv(&[x])` agree by shared key construction. Without the stub, CBMC
+bit-blasts the real compression function at zero verification value. Opt-in
+like `kani_stub_pda` (the hashing is inside called methods, invisible to the
+spec). Needs `-Z stubbing`.
+
+**`pragma kani_stub_secp256k1 = on`** — #189: stub
+`solana_program::secp256k1_recover::secp256k1_recover` to a deterministic
+uninterpreted function over `(hash, recovery_id, signature)` (UfMap64-backed,
+collision-freedom axiom), with a *nondeterministic* failure branch so the
+real invalid-input error path stays explored. This is the one in-program
+signature primitive; **ed25519 verification has no stubbable in-program
+entry point** (it's a precompile reached via instruction introspection).
+Needs `-Z stubbing`.
+
+> The pre-existing `pragma kani_stub_pda` (#182 Tier 2) is upgraded by #189:
+> `find_program_address` / `create_program_address` now route through the same
+> deterministic + injective UfMap machinery instead of returning a fresh
+> `kani::any()` address per call — restoring the derive-then-compare
+> determinism real programs rely on. The bump stays fully symbolic; the two
+> entry points use separate domains (the bump-in-seeds relationship between
+> them is not modeled). Any harness using a #189 UfMap stub gets its suggested
+> `#[kani::unwind]` floored at 10 to cover the CAP=8 memo scan.
+
+**Vec under-coverage lint (#192)** — at Kani codegen time, a handler
+`ensures`, `invariant`, or `property` that reads a `Vec`-typed state field
+while `pragma kani_vec_bound` is **unset** (default 1) emits a warning naming
+the field and the pragma: the harness would explore only 1-element
+collections, silently under-covering membership/aggregation behavior. Setting
+the pragma to any explicit value — including 1 — silences it (an explicit
+bound is a conscious BMC trade-off). Scalar-only properties stay silent.
 
 ## Interface declarations
 

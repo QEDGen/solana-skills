@@ -561,6 +561,13 @@ pub enum Ty {
     I128,
     Bool,
     Pubkey,
+    /// Opaque 32-byte token (`[u8; 32]`): hash / digest / merkle root.
+    /// Equality-only semantics, like `Pubkey`, but lowers to a raw byte
+    /// array in every Rust-facing backend (#191).
+    Bytes32,
+    /// Opaque 64-byte token (`[u8; 64]`): ed25519/secp256k1 signature,
+    /// recovered secp pubkey. Equality-only semantics (#191).
+    Bytes64,
     /// User-declared type name (a record, sum type, or imported type).
     Custom(Symbol),
     /// Bounded map keyed by `Pubkey`; capacity carried verbatim as a string —
@@ -1704,6 +1711,8 @@ pub(crate) fn parse_ty(s: &str) -> Ty {
         "I128" => Ty::I128,
         "Bool" => Ty::Bool,
         "Pubkey" => Ty::Pubkey,
+        "Bytes32" => Ty::Bytes32,
+        "Bytes64" => Ty::Bytes64,
         other => {
             // `Map[N] T`: numeric literal or constant-name capacity, passed
             // through as a string (see `Ty::Map`). Gated on the strict
