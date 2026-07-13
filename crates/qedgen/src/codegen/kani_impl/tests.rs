@@ -1,6 +1,24 @@
 use super::*;
 use crate::chumsky_adapter::parse_str;
 
+/// Run a test body on a thread with a large stack. A couple of the
+/// nested-container brownfield specs below lower a deeply-recursive ensures
+/// (e.g. `Option<Hook{ Vec<Con{Kind}> }>` under a nested `match`/`exists`), and
+/// the unoptimized recursion overflows the default 2 MB test-thread stack on
+/// some platforms (macOS in particular). This is a test-harness stack budget,
+/// NOT a codegen defect: the generator terminates correctly — release builds
+/// and a larger stack both pass. `resume_unwind` re-raises the original panic
+/// so assertion failures still surface with their real message.
+fn with_big_stack(f: impl FnOnce() + Send + 'static) {
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn test thread");
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 /// A conservation ensures (`post.X == pre.X + delta`) must NOT classify
 /// `X` as unchanged: the rendered string contains `post.X==pre.X` as a
 /// substring, and an unanchored match emits an equality assertion that
@@ -777,7 +795,8 @@ handler check (auth : Pubkey) {
 /// took a real E-A harness from 20,322 VCCs (OOM) to 2,395 (closes in seconds).
 #[test]
 fn brownfield_drop_suppression_manually_drops_and_reads_by_ref() {
-    let src = r#"spec PostMove
+    with_big_stack(|| {
+        let src = r#"spec PostMove
 pragma state_struct = Pol
 pragma state_invariant = none
 type Kind | Keys of Vec Pubkey | Other
@@ -789,37 +808,39 @@ handler check (auth : Pubkey) {
   ensures (match state.post_hook with | Some h => not (exists c in h.cons, (match c.kind with | Keys pks => contains(pks, auth) | _ => false)) | None => true)
   effect { n := 0 }
 }"#;
-    let spec = parse_str(src).expect("parse");
-    let tmp = std::env::temp_dir().join(format!("kani_impl_postmove_{}.rs", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    generate_from_spec_with_mode(
-        &spec,
-        &tmp,
-        /*explicit_flag=*/ true,
-        Target::Anchor,
-        KaniImplMode::Brownfield,
-    )
-    .expect("brownfield kani_impl must emit");
-    let body = std::fs::read_to_string(&tmp).unwrap();
-    let _ = std::fs::remove_file(&tmp);
+        let spec = parse_str(src).expect("parse");
+        let tmp =
+            std::env::temp_dir().join(format!("kani_impl_postmove_{}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec_with_mode(
+            &spec,
+            &tmp,
+            /*explicit_flag=*/ true,
+            Target::Anchor,
+            KaniImplMode::Brownfield,
+        )
+        .expect("brownfield kani_impl must emit");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
 
-    // State is `ManuallyDrop`-wrapped; the ensures reads it by reference with no
-    // owned `post_post_hook` snapshot.
-    assert!(
-        body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_pol());")
-            && !body.contains("let post_post_hook"),
-        "ManuallyDrop state, no owned post snapshot; got:\n{body}"
-    );
-    // Both the outer snapshot match AND the inner `.iter()` enum match render by
-    // reference — NO defensive `.clone()` scrutinee survives, so the enum's `Vec`
-    // payloads never regenerate the `drop_in_place` teardown (the difference
-    // between a harness that times out and one that closes in seconds).
-    assert!(
-        body.contains("match &(state.post_hook)")
-            && body.contains("match &(c.kind)")
-            && !body.contains(").clone() {"),
-        "outer + inner matches by-ref; no clone-form scrutinee in the ensures; got:\n{body}"
-    );
+        // State is `ManuallyDrop`-wrapped; the ensures reads it by reference with no
+        // owned `post_post_hook` snapshot.
+        assert!(
+            body.contains("let mut state = core::mem::ManuallyDrop::new(symbolic_pol());")
+                && !body.contains("let post_post_hook"),
+            "ManuallyDrop state, no owned post snapshot; got:\n{body}"
+        );
+        // Both the outer snapshot match AND the inner `.iter()` enum match render by
+        // reference — NO defensive `.clone()` scrutinee survives, so the enum's `Vec`
+        // payloads never regenerate the `drop_in_place` teardown (the difference
+        // between a harness that times out and one that closes in seconds).
+        assert!(
+            body.contains("match &(state.post_hook)")
+                && body.contains("match &(c.kind)")
+                && !body.contains(").clone() {"),
+            "outer + inner matches by-ref; no clone-form scrutinee in the ensures; got:\n{body}"
+        );
+    });
 }
 
 /// `exists|forall x in <coll>, pred(x)` — a bounded quantifier over a collection
