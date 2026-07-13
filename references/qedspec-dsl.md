@@ -1311,6 +1311,30 @@ only named in the field type), and a recursing `invariant()` over it is skipped
 (avoiding a symbolic-input panic in the element's own invariant). Essential for
 mirroring a large `#[account]` struct where the property only touches a few fields.
 
+**`pragma kani_target = <handler>::<method>[::<kind>]`** (repeatable) — the
+handler's real logic is a **state-struct method**, so the brownfield impl-Kani
+harnesses can GENERATE the effect call instead of leaving it agent-fill (#163):
+the ensures/reject harnesses bind `ok` to `state.<method>(<params>)` and the
+panic-free harness calls it as a statement. The optional `<kind>` segment names
+the return shape the spec can't otherwise know: `result` (default —
+`.is_ok()`), `bool` (used directly), `unit` (a non-panicking return is
+success). With a generated ctor (`pragma state_struct`) this makes the whole
+harness **zero agent-fill**. Free functions / non-state receivers stay
+agent-fill — their call shape is real-source knowledge.
+
+```fsharp
+pragma state_struct = SpendingLimit
+pragma kani_target  = decrement::try_decrement          -- Result-returning
+pragma kani_target  = reset::reset_if_needed::unit      -- ()-returning
+```
+
+**`pragma context_struct = <Struct>` / `= <handler>::<Struct>`** (repeatable) —
+name the real `#[derive(Accounts)]` struct the **Context/instruction** harness
+(`--kani-impl-context`, #169) drives through `try_accounts`. The two-segment
+form binds per handler; the bare form is the spec-wide default; absent both,
+the name defaults to `PascalCase(handler)` — the dominant Anchor convention
+(`fn execute_transaction(ctx: Context<ExecuteTransaction>, …)`).
+
 **`pragma kani_abstract_div = on`** — the **#182 arithmetic tier**: replace
 `i64::checked_div` with `checked_div_abstract`, a fresh symbolic quotient pinned
 by division's *exact* contract (`a = q·b + r`, `|r| < |b|`, `sign(r) = sign(a)`,

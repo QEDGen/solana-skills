@@ -3654,3 +3654,139 @@ handler sweep {
         "program accounts are executable; got:\n{body}"
     );
 }
+
+/// #179(c): `old()` over a NESTED field path (`old(state.window.remaining)`)
+/// lowers correctly in the brownfield harness — the parent record is
+/// snapshotted (cloned, non-`Copy`), the requires/ensures read
+/// `pre_window.remaining`, and the post side reads the mutated
+/// `state.window.remaining` in place. Pins the method-postcondition
+/// arithmetic shape from the Squads migration (G15).
+#[test]
+fn brownfield_old_over_nested_field_path() {
+    let src = r#"spec NestedOld
+pragma state_struct = SpendingLimit
+type Window = { remaining : U64, resets_at : I64 }
+state { authority : Pubkey, window : Window }
+handler decrement (amount : U64) {
+  requires amount <= state.window.remaining else Exceeded
+  modifies [window]
+  ensures state.window.remaining == old(state.window.remaining) - amount
+  effect { window.remaining := window.remaining - amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_nold_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    assert!(
+        body.contains("let pre_window = state.window.clone();"),
+        "nested-old parent record snapshotted via clone; got:\n{body}"
+    );
+    assert!(
+        body.contains("kani::assume((amount <= pre_window.remaining));"),
+        "requires reads the nested pre-snapshot path; got:\n{body}"
+    );
+    assert!(
+        body.contains("state.window.remaining == pre_window.remaining - amount"),
+        "ensures compares post in-place read vs nested pre-snapshot; got:\n{body}"
+    );
+}
+
+/// #163/G2: `pragma kani_target = <handler>::<method>` mechanizes the effect
+/// call — the ensures/reject harnesses bind `ok` to the REAL state-struct
+/// method call (`.is_ok()` for the default `result` kind) and the panic-free
+/// harness calls it as a statement. No AGENT-FILL effect site remains.
+#[test]
+fn kani_target_mechanizes_effect_call() {
+    let src = r#"spec Targeted
+pragma state_struct = SpendingLimit
+pragma kani_target = decrement::try_decrement
+pragma kani_reject = on
+pragma kani_panic_free = on
+state { remaining : U64 }
+handler decrement (amount : U64) {
+  requires amount <= state.remaining else Exceeded
+  modifies [remaining]
+  ensures state.remaining == old(state.remaining) - amount
+  effect { remaining := remaining - amount }
+}"#;
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!("kani_impl_tgt_{}.rs", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Brownfield,
+    )
+    .expect("brownfield kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+
+    // Ensures + reject harnesses: the ok-binding is the generated method call.
+    assert_eq!(
+        body.matches("let ok: bool = state.try_decrement(amount).is_ok();")
+            .count(),
+        2,
+        "ensures + reject bind ok to the generated call; got:\n{body}"
+    );
+    // Panic-free harness: statement call, `let _ =` to swallow #[must_use].
+    assert!(
+        body.contains("let _ = state.try_decrement(amount);"),
+        "panic-free calls the target as a statement; got:\n{body}"
+    );
+    // No agent-fill effect todo remains anywhere (the header PROSE mentions
+    // `todo!()` as the fallback; only real call sites carry a message string).
+    assert!(
+        !body.contains("todo!(\""),
+        "kani_target leaves NO agent-fill todo; got:\n{body}"
+    );
+}
+
+/// #163: the optional third segment maps the return shape — `bool` gates on
+/// the value directly, `unit` treats a non-panicking return as success.
+#[test]
+fn kani_target_kind_segment_maps_return_shape() {
+    let base = r#"spec Targeted
+pragma state_struct = Gauge
+pragma kani_target = poke::poke_impl::KIND
+state { n : U64 }
+handler poke (v : U64) {
+  modifies [n]
+  ensures state.n == v
+  effect { n := v }
+}"#;
+    for (kind, expect) in [
+        ("bool", "let ok: bool = state.poke_impl(v);"),
+        ("unit", "state.poke_impl(v);\n    let ok: bool = true;"),
+    ] {
+        let spec = parse_str(&base.replace("KIND", kind)).expect("parse");
+        let tmp =
+            std::env::temp_dir().join(format!("kani_impl_tgtk_{}_{kind}.rs", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        generate_from_spec_with_mode(
+            &spec,
+            &tmp,
+            /*explicit_flag=*/ true,
+            Target::Anchor,
+            KaniImplMode::Brownfield,
+        )
+        .expect("brownfield kani_impl must emit");
+        let body = std::fs::read_to_string(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            body.contains(expect),
+            "kind `{kind}` maps the return shape; got:\n{body}"
+        );
+    }
+}

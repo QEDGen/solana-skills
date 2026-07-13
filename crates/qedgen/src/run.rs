@@ -883,6 +883,13 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                     .expect("parsed under proofs-dir guard");
                 let findings = proofs_bootstrap::check_orphans(parsed, &proofs)?;
                 if !findings.is_empty() {
+                    // A foreign Proofs.lean (generated from a DIFFERENT spec,
+                    // #166) is informational — a Kani-first workflow may
+                    // legitimately never regenerate Lean — so it must not
+                    // fail the check. Real same-spec drift still does.
+                    let only_foreign = findings.iter().all(|f| {
+                        matches!(f, proofs_bootstrap::OrphanFinding::ForeignProofs { .. })
+                    });
                     if json {
                         let as_json: Vec<serde_json::Value> = findings
                             .iter()
@@ -893,6 +900,14 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                                 proofs_bootstrap::OrphanFinding::Missing(n) => {
                                     serde_json::json!({"kind": "missing", "theorem": n})
                                 }
+                                proofs_bootstrap::OrphanFinding::ForeignProofs {
+                                    declared,
+                                    expected,
+                                } => serde_json::json!({
+                                    "kind": "foreign_proofs",
+                                    "declared": declared,
+                                    "expected": expected,
+                                }),
                             })
                             .collect();
                         println!("{}", serde_json::to_string_pretty(&as_json)?);
@@ -902,7 +917,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                             eprintln!("  {}", f);
                         }
                     }
-                    has_issues = true;
+                    if !only_foreign {
+                        has_issues = true;
+                    }
                 }
             }
 

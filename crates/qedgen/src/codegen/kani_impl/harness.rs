@@ -582,12 +582,10 @@ pub(crate) fn emit_brownfield_handler_harness(
         ));
     }
 
-    // 4. Apply the real effect + validity gate — agent-fill.
-    out.push_str("\n    // AGENT-FILL (2/2): apply the real handler's state effect on `state`\n");
-    out.push_str("    // (call the real logic, or replicate the short mutation), then gate on\n");
-    out.push_str("    // the validity check the handler runs (e.g. `state.invariant()?`). Bind\n");
-    out.push_str("    // whether it succeeded to `ok`.\n");
-    out.push_str("    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n");
+    // 4. Apply the real effect + validity gate — generated from
+    //    `pragma kani_target` when the real logic is a state-struct method
+    //    (#163/G2); agent-fill otherwise.
+    emit_effect_call_binding(out, handler, spec, EffectCallSite::Ensures);
 
     // 5. Assert the ensures. `post.<field>` reads the mutated-in-place state
     //    field DIRECTLY (`state.<field>`, a place behind `ManuallyDrop`'s
@@ -674,12 +672,9 @@ pub(crate) fn emit_brownfield_reject_harness(
         rewrite_pre_post_paths(&guard_predot)
     ));
 
-    // AGENT-FILL: the SAME real handler call as the ensures harness.
-    out.push_str(
-        "\n    // AGENT-FILL: call the real handler (same call as the ensures harness); bind\n",
-    );
-    out.push_str("    // whether it succeeded to `ok`.\n");
-    out.push_str("    let ok: bool = todo!(\"apply the real handler call → success?\");\n");
+    // The SAME real handler call as the ensures harness — generated from
+    // `pragma kani_target` when declared (#163/G2), agent-fill otherwise.
+    emit_effect_call_binding(out, handler, spec, EffectCallSite::Reject);
 
     // Guard enforcement: a violated precondition MUST be rejected.
     out.push_str(&format!(
@@ -748,17 +743,116 @@ pub(crate) fn emit_brownfield_panic_free_harness(
         ));
     }
 
-    // AGENT-FILL: call the real handler as a statement (no bind, no assert) —
-    // Kani's built-in checks verify panic-freedom during the call.
-    out.push_str(
-        "\n    // AGENT-FILL: call the real handler here (a statement, e.g.\n\
-         \x20   //   state.<method>(<params>);\n\
-         \x20   // No assertion — Kani's built-in unwrap/overflow/div/index/panic\n\
-         \x20   // checks verify the call cannot abort on any symbolic input.\n",
-    );
-    out.push_str("    todo!(\"call the real handler (statement, no bind)\");\n");
+    // Call the real handler as a statement (no bind, no assert) — Kani's
+    // built-in checks verify panic-freedom during the call. Generated from
+    // `pragma kani_target` when declared (#163/G2), agent-fill otherwise.
+    match super::state_ctor::kani_target_of(spec, &handler.name) {
+        Some(target) => {
+            out.push_str(
+                "\n    // Call generated from `pragma kani_target` — no assertion; Kani's\n\
+                 \x20   // built-in unwrap/overflow/div/index/panic checks verify the call\n\
+                 \x20   // cannot abort on any symbolic input.\n",
+            );
+            // `let _ =` swallows a `#[must_use]` Result/bool return uniformly.
+            out.push_str(&format!(
+                "    let _ = {};\n",
+                kani_target_call_expr(&target, handler)
+            ));
+        }
+        None => {
+            out.push_str(
+                "\n    // AGENT-FILL: call the real handler here (a statement, e.g.\n\
+                 \x20   //   state.<method>(<params>);\n\
+                 \x20   // No assertion — Kani's built-in unwrap/overflow/div/index/panic\n\
+                 \x20   // checks verify the call cannot abort on any symbolic input.\n",
+            );
+            out.push_str("    todo!(\"call the real handler (statement, no bind)\");\n");
+        }
+    }
     out.push_str("}\n\n");
     Ok(())
+}
+
+/// Which harness shape an effect-call binding is emitted for — only the
+/// agent-fill comment text differs.
+#[derive(Clone, Copy)]
+enum EffectCallSite {
+    Ensures,
+    Reject,
+}
+
+/// The generated `state.<method>(<params>)` call expression for a resolved
+/// `pragma kani_target` (#163/G2). `state` is behind `ManuallyDrop`, whose
+/// `DerefMut` makes the method call transparent.
+fn kani_target_call_expr(
+    target: &super::state_ctor::KaniTarget,
+    handler: &ParsedHandler,
+) -> String {
+    let args: Vec<&str> = handler
+        .takes_params
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    format!("state.{}({})", target.method, args.join(", "))
+}
+
+/// Emit the `let ok: bool = …;` effect-call binding: generated from
+/// `pragma kani_target` when the handler's real logic is a state-struct
+/// method, agent-fill `todo!()` otherwise. The target's `kind` segment maps
+/// the return shape to the success gate (`result` → `.is_ok()`, `bool` →
+/// direct, `unit` → call-then-true).
+fn emit_effect_call_binding(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    site: EffectCallSite,
+) {
+    match super::state_ctor::kani_target_of(spec, &handler.name) {
+        Some(target) => {
+            out.push_str(
+                "\n    // Effect call generated from `pragma kani_target` — the real\n\
+                 \x20   // state-struct method; no agent-fill.\n",
+            );
+            let call = kani_target_call_expr(&target, handler);
+            match target.kind {
+                super::state_ctor::KaniTargetKind::Result => {
+                    out.push_str(&format!("    let ok: bool = {call}.is_ok();\n"));
+                }
+                super::state_ctor::KaniTargetKind::Bool => {
+                    out.push_str(&format!("    let ok: bool = {call};\n"));
+                }
+                super::state_ctor::KaniTargetKind::Unit => {
+                    out.push_str(&format!("    {call};\n    let ok: bool = true;\n"));
+                }
+            }
+        }
+        None => match site {
+            EffectCallSite::Ensures => {
+                out.push_str(
+                    "\n    // AGENT-FILL (2/2): apply the real handler's state effect on `state`\n",
+                );
+                out.push_str(
+                    "    // (call the real logic, or replicate the short mutation), then gate on\n",
+                );
+                out.push_str(
+                    "    // the validity check the handler runs (e.g. `state.invariant()?`). Bind\n",
+                );
+                out.push_str("    // whether it succeeded to `ok`.\n");
+                out.push_str(
+                    "    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n",
+                );
+            }
+            EffectCallSite::Reject => {
+                out.push_str(
+                    "\n    // AGENT-FILL: call the real handler (same call as the ensures harness); bind\n",
+                );
+                out.push_str("    // whether it succeeded to `ok`.\n");
+                out.push_str(
+                    "    let ok: bool = todo!(\"apply the real handler call → success?\");\n",
+                );
+            }
+        },
+    }
 }
 
 /// Walk `handler.calls` and, for each CPI whose callee declares ensures,
