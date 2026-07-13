@@ -136,6 +136,24 @@ greenfield Context harness assumes a struct it can't construct for real Anchor.
   the real `validate()`/handler. Composes with #162 phase-2 (IDL layouts) + G4 (#165 sysvar stubs).
 - **Verdict:** FILE (feature). High leverage — authorization is why a multisig exists.
 - **Issue:** #169 (QEDGen/solana-skills)
+- **Status: SHIPPED (branch `feat/kani-context-harness-169`).** `--kani-impl-context`
+  (`KaniImplMode::Context`, `kani_impl/context.rs`) drives the REAL
+  `<Ctx>::try_accounts` over symbolic `AccountInfo`s with `Box::leak`ed 'static
+  backing (dissolves the lifetime wall), stubs `<T>::try_deserialize` to the
+  spec-generated symbolic ctor (the T3 escape hatch — data buffers tiny + unread),
+  and generates per-spec-`signer` **signer-gate asserts** + the ensures. The real
+  struct name comes from `pragma context_struct = <Struct>` (or
+  `<handler>::<Struct>` per handler; default `PascalCase(handler)`). One agent-fill
+  site: the instruction fn through `Context::new`. De-risked under real `cargo
+  kani` 0.67 / anchor 0.32.1 (6-harness matrix): stubbed-deser gate proof 27s @
+  unwind 40, 20s @ unwind 6 with the T1 Pubkey stub; REAL Borsh over a
+  fixed-length symbolic buffer also closes (266s — 10x the stub, kept as
+  documented fallback); full handler-through-`Context::new` 21.5s; both mutants
+  correctly FAIL (negated gate refuted = non-vacuous; `UncheckedAccount`-bug
+  variant fires the signer assert). End-to-end acceptance: spec → codegen →
+  prelude delivery/dep-injection → one-line fill → generated harness GREEN
+  (23s, cover satisfied), and injecting the missing-`Signer` bug into the
+  program turns exactly the generated signer-gate assert RED.
 
 > **G6/G7/G8 RE-SCOPED (2026-07):** these were prereqs for an **IDL-driven**
 > constructor. That approach was abandoned — the IDL is the *lossy* layer (stale,

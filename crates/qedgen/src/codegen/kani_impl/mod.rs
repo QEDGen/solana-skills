@@ -38,12 +38,14 @@ pub(crate) use crate::pinocchio_profile::{
 pub(crate) use crate::Target;
 
 mod brownfield;
+mod context;
 mod frameworks;
 mod harness;
 mod pinocchio;
 mod state_ctor;
 
 pub(crate) use brownfield::*;
+pub(crate) use context::*;
 pub(crate) use frameworks::*;
 pub(crate) use harness::*;
 pub(crate) use pinocchio::*;
@@ -109,10 +111,14 @@ fn auto_triggered_handlers(spec: &ParsedSpec) -> Vec<&str> {
 /// state → apply the real effect / call the real invariant/helper → assert
 /// `ensures`) — the shape that actually matches an existing Anchor program,
 /// where handlers share one Accounts struct and take `Context<T>` + Args.
+/// `Context` (Anchor only, #169) drives the REAL `try_accounts` constraint
+/// gate with symbolic `AccountInfo`s + the real instruction fn (agent-fill) —
+/// the instruction-level authorization surface neither other shape reaches.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum KaniImplMode {
     Greenfield,
     Brownfield,
+    Context,
 }
 
 pub fn generate(
@@ -261,6 +267,9 @@ fn generate_from_spec_with_context(
     match target {
         Target::Anchor if mode == KaniImplMode::Brownfield => {
             emit_kani_impl_anchor_brownfield(spec, output_path, &emit_targets, explicit_flag)
+        }
+        Target::Anchor if mode == KaniImplMode::Context => {
+            emit_kani_impl_anchor_context(spec, output_path, &emit_targets, explicit_flag)
         }
         Target::Anchor => emit_kani_impl_struct_framework(
             spec,

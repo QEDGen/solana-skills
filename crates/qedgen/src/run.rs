@@ -1238,6 +1238,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             kani_impl,
             kani_impl_output,
             kani_impl_brownfield,
+            kani_impl_context,
             test,
             test_output,
             proptest,
@@ -1278,7 +1279,7 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                      generate Lean proofs via --lean; runtime checks belong in \
                      client-side tests)."
                 );
-            } else if kani_impl_brownfield || parsed.is_struct_mirror() {
+            } else if kani_impl_brownfield || kani_impl_context || parsed.is_struct_mirror() {
                 // Brownfield: the program pre-exists, so the greenfield Rust
                 // scaffold is meaningless — and it would `map_type` the real
                 // struct's field types (enums, imported types) that a mirror
@@ -1332,8 +1333,11 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
             } else {
                 kani_impl::spec_triggers_impl_harness(&parsed)
             };
-            let want_kani_impl =
-                !is_assembly && (kani_impl || kani_impl_brownfield || (all && auto_impl_trigger));
+            let want_kani_impl = !is_assembly
+                && (kani_impl
+                    || kani_impl_brownfield
+                    || kani_impl_context
+                    || (all && auto_impl_trigger));
             if want_kani_impl {
                 if let Err(e) = deps::require_kani() {
                     eprintln!("warning: {e}");
@@ -1347,7 +1351,9 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 } else {
                     kani_impl_output.clone()
                 };
-                let impl_mode = if kani_impl_brownfield {
+                let impl_mode = if kani_impl_context {
+                    kani_impl::KaniImplMode::Context
+                } else if kani_impl_brownfield {
                     kani_impl::KaniImplMode::Brownfield
                 } else {
                     kani_impl::KaniImplMode::Greenfield
@@ -1355,7 +1361,8 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 kani_impl::generate_with_mode(
                     &spec,
                     &kani_impl_path,
-                    /*explicit_flag=*/ kani_impl || kani_impl_brownfield,
+                    /*explicit_flag=*/
+                    kani_impl || kani_impl_brownfield || kani_impl_context,
                     target,
                     impl_mode,
                 )?;

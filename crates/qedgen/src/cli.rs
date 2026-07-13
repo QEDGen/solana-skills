@@ -902,6 +902,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         kani_impl_brownfield: bool,
 
+        /// Emit the CONTEXT/instruction impl-Kani shape (#169): drive the real
+        /// `#[derive(Accounts)]` constraint gate (`try_accounts`) with symbolic
+        /// `AccountInfo`s + the real instruction fn through a `Context`
+        /// (agent-fill), and assert the instruction-level authorization
+        /// property (signer / has_one / owner / seeds) that the state-struct
+        /// shape cannot reach. Anchor target only.
+        #[arg(long)]
+        kani_impl_context: bool,
+
         /// Generate unit tests (plain Rust, cargo test)
         #[arg(long)]
         test: bool,

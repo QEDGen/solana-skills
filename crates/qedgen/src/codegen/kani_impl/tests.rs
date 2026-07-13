@@ -3509,3 +3509,148 @@ handler set (amt : U64) {
              (no overflow risk, nothing for Kani to catch)"
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Context/instruction mode (#169)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The spec used across the Context-mode tests — mirrors the #169 de-risk
+/// program (a `Settings` state account behind a `has_one`-style gate with a
+/// signer): validated end-to-end under real `cargo kani` (E1–E5).
+const CONTEXT_SPEC: &str = r#"spec CtxGate
+pragma state_struct = Settings
+pragma context_struct = set_threshold::Gate
+state { admin : Pubkey, status : U8, threshold : U64 }
+handler set_threshold (new_threshold : U64) {
+  accounts {
+    settings : writable
+    admin : signer
+  }
+  requires state.status == 1 else NotActive
+  modifies [threshold]
+  ensures state.threshold == new_threshold
+  effect { threshold := new_threshold }
+}"#;
+
+fn generate_context_mode(src: &str) -> String {
+    let spec = parse_str(src).expect("parse");
+    let tmp = std::env::temp_dir().join(format!(
+        "kani_impl_ctx_{}_{}.rs",
+        std::process::id(),
+        src.len()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    generate_from_spec_with_mode(
+        &spec,
+        &tmp,
+        /*explicit_flag=*/ true,
+        Target::Anchor,
+        KaniImplMode::Context,
+    )
+    .expect("context kani_impl must emit");
+    let body = std::fs::read_to_string(&tmp).unwrap();
+    let _ = std::fs::remove_file(&tmp);
+    body
+}
+
+/// #169: the Context harness drives the REAL `try_accounts` constraint gate —
+/// leaked-backing AccountInfos, the pragma-named `Gate` struct, its generated
+/// `GateBumps`, and the T3-escape-hatch deserialize stub wired to the
+/// generated symbolic ctor.
+#[test]
+fn context_mode_emits_try_accounts_gate() {
+    let body = generate_context_mode(CONTEXT_SPEC);
+
+    assert!(
+        body.contains("CONTEXT/instruction mode (#169)"),
+        "header names the mode; got:\n{body}"
+    );
+    // The account-info plumbing + the real constraint gate call.
+    assert!(
+        body.contains("fn leak_account_info(")
+            && body.contains("<crate::Gate as anchor_lang::Accounts<_>>::try_accounts(")
+            && body.contains("let mut bumps = crate::GateBumps::default();"),
+        "leaked AccountInfos + real try_accounts on the pragma-named struct; got:\n{body}"
+    );
+    // T3 escape hatch: try_deserialize stubbed to the generated symbolic ctor.
+    assert!(
+        body.contains("fn symbolic_settings() -> crate::Settings")
+            && body.contains("fn stub_try_deserialize_settings(")
+            && body.contains("Ok(symbolic_settings())")
+            && body.contains(
+                "#[kani::stub(crate::Settings::try_deserialize, stub_try_deserialize_settings)]"
+            ),
+        "deserialize stub wired to the symbolic ctor; got:\n{body}"
+    );
+    // The signer flag is SYMBOLIC and the signer-gate assert is GENERATED —
+    // the crown-jewel "no unauthorized execution" property.
+    assert!(
+        body.contains("let admin_signer: bool = kani::any();")
+            && body.contains(
+                "assert!(admin_signer, \"instruction succeeded without `admin`'s signature\");"
+            ),
+        "symbolic signer flag + generated signer-gate assert; got:\n{body}"
+    );
+    // Requires lowers to a pre-snapshot assume; ensures reads the deserialized
+    // state account in place (`ctx_accounts.settings.<field>`).
+    assert!(
+        body.contains("let pre_status = ctx_accounts.settings.status;")
+            && body.contains("kani::assume((pre_status == 1));")
+            && body.contains("ctx_accounts.settings.threshold == new_threshold"),
+        "requires assume off the pre-snapshot; ensures reads ctx_accounts.<state>; got:\n{body}"
+    );
+    // The instruction-fn call is the ONE agent-fill site; non-vacuity cover
+    // is generated.
+    assert!(
+        body.contains("todo!(\"call the real instruction fn via Context::new\")")
+            && body.contains("kani::cover!(true, \"instruction success path reachable"),
+        "agent-fill instruction call + non-vacuity cover; got:\n{body}"
+    );
+}
+
+/// Without `pragma context_struct`, the struct name defaults to the Anchor
+/// convention: `PascalCase(handler)`.
+#[test]
+fn context_mode_defaults_struct_name_to_pascal() {
+    let src = CONTEXT_SPEC.replace("pragma context_struct = set_threshold::Gate\n", "");
+    let body = generate_context_mode(&src);
+    assert!(
+        body.contains("<crate::SetThreshold as anchor_lang::Accounts<_>>::try_accounts(")
+            && body.contains("crate::SetThresholdBumps::default()"),
+        "struct name defaults to PascalCase(handler); got:\n{body}"
+    );
+}
+
+/// Program accounts get their well-known id (`token` → anchor_spl) and
+/// `executable: true`; an unknown program id is a fail-loud `todo!()` (a
+/// symbolic id would make `Program::try_accounts` always fail → vacuous).
+#[test]
+fn context_mode_program_accounts_well_known_or_fail_loud() {
+    let src = r#"spec CtxProgs
+pragma state_struct = Pool
+state { total : U64 }
+handler sweep {
+  accounts {
+    pool : writable
+    admin : signer
+    token_program : program, type token
+    oracle_program : program
+  }
+  modifies [total]
+  ensures state.total == 0
+  effect { total := 0 }
+}"#;
+    let body = generate_context_mode(src);
+    assert!(
+        body.contains("anchor_spl::token::ID"),
+        "token program uses its well-known id; got:\n{body}"
+    );
+    assert!(
+        body.contains("todo!(\"real program id for `oracle_program`\")"),
+        "unknown program id is fail-loud, never symbolic; got:\n{body}"
+    );
+    assert!(
+        body.contains("/*executable=*/ true"),
+        "program accounts are executable; got:\n{body}"
+    );
+}

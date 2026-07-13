@@ -374,7 +374,7 @@ pub(crate) fn emit_handler_harness(
 /// move freely. Requires the `state_struct` pragma (generated construction);
 /// otherwise the field types aren't known and we keep the move (agent-fill
 /// construction).
-fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
+pub(crate) fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
     super::state_ctor::resolve_state_struct(spec)
         .map(|(_, fields)| {
             fields
@@ -411,7 +411,7 @@ fn is_copy_scalar_ty(t: &str) -> bool {
 /// computed `#[kani::unwind]`, and every opted-in #182 stub attr — up to (but
 /// not including) the `fn <name>() {` line. Shared by the ensures-preservation
 /// and reject (guard-enforcement) emitters so a new stub is wired in one place.
-fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
+pub(crate) fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     out.push_str("#[kani::proof]\n");
     // `pragma kani_solver = <z3|cvc5|…>` bakes the solver into the harness
     // (`#[kani::solver(z3)]`) so it's reproducible without a `--solver` flag.
@@ -840,7 +840,7 @@ fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &
 /// mints / token accounts are separate). Returns `None` when the heuristic
 /// can't pick a unique state account — the harness then emits per-field
 /// `todo!()` snapshot placeholders for the agent to resolve.
-fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
+pub(crate) fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
     let candidates: Vec<&crate::check::ParsedHandlerAccount> = handler
         .accounts
         .iter()
@@ -897,12 +897,12 @@ fn collect_snapshot_fields(
 /// harness over the SAT/SMT resource wall. Fields that participate in the
 /// effect (`modifies` ∪ `effects` ∪ CPI binders) stay on *both* sides — the
 /// ensures compares their post value against the `pre_` snapshot.
-struct SplitSnapshotFields {
-    pre: Vec<String>,
-    post: Vec<String>,
+pub(crate) struct SplitSnapshotFields {
+    pub(crate) pre: Vec<String>,
+    pub(crate) post: Vec<String>,
 }
 
-fn collect_snapshot_fields_split(
+pub(crate) fn collect_snapshot_fields_split(
     handler: &ParsedHandler,
     guard_predot: Option<&str>,
     ensures: &crate::check::ParsedEnsures,
@@ -957,7 +957,7 @@ fn is_ident_byte(b: u8) -> bool {
 /// standalone `s` (at an identifier boundary) immediately followed by `.` is
 /// rewritten, so `accounts.`/`is_signer` and the like are untouched. Guard
 /// expressions are ASCII.
-fn rewrite_state_var_to_pre(expr: &str) -> String {
+pub(crate) fn rewrite_state_var_to_pre(expr: &str) -> String {
     let bytes = expr.as_bytes();
     let mut out = String::with_capacity(expr.len() + 8);
     let mut i = 0;
@@ -999,7 +999,7 @@ fn collect_prefixed_fields(expr: &str, prefix: &str, out: &mut std::collections:
 /// `state.x` / `old(state.x)` into exactly `post.x` / `pre.x` in the
 /// binary-mode form — no other source produces these tokens — so a plain
 /// string replace is safe.
-fn rewrite_pre_post_paths(expr: &str) -> String {
+pub(crate) fn rewrite_pre_post_paths(expr: &str) -> String {
     expr.replace("pre.", "pre_").replace("post.", "post_")
 }
 
