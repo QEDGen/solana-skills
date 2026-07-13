@@ -96,11 +96,12 @@ fn auto_triggered_handlers(spec: &ParsedSpec) -> Vec<&str> {
         .collect()
 }
 
-/// Emit `programs/tests/kani_impl.rs` against the user's real Anchor
-/// handlers. `explicit_flag` is true when `--kani-impl` was passed; auto-
-/// triggered emission stamps a header comment naming the triggering
-/// handlers. Non-Anchor targets (Quasar, Pinocchio) are a clean no-op
-/// (no file written) — see the target gate in `generate_from_spec`.
+/// Emit `programs/tests/kani_impl.rs` against the user's real handlers.
+/// `explicit_flag` is true when `--kani-impl` was passed; auto-triggered
+/// emission stamps a header comment naming the triggering handlers.
+/// Every target emits — Anchor/Quasar the struct-framework shape,
+/// Pinocchio its `#[repr(C)]` stack-`AccountInfo` shape — only the
+/// harness body differs (see the `match target` dispatch below).
 ///
 /// Per-handler emission is gated on the handler having at least one
 /// `ensures` clause — without ensures there's nothing to assert.

@@ -16,9 +16,9 @@ pub(crate) struct Cli {
 }
 
 /// Solana program framework target for greenfield codegen
-/// (`qedgen init --target ...`). `anchor` and `quasar` are wired
-/// end-to-end; `pinocchio` reserves the CLI surface but is not yet
-/// implemented — selecting it errors at the init dispatcher.
+/// (`qedgen init --target ...`). All three targets are wired
+/// end-to-end (`codegen_mir` dispatch): full scaffold + spec-model
+/// Kani/proptest + per-target impl-Kani shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(crate) enum Target {
     /// Anchor-compatible Rust program. `use anchor_lang::prelude::*`,
@@ -487,10 +487,9 @@ pub(crate) enum Commands {
         mathlib: bool,
 
         /// Also generate the program crate + Kani harnesses for the
-        /// named framework target. `anchor` and `quasar` are fully
-        /// implemented; `pinocchio` reserves the CLI surface but its
-        /// codegen branch is not yet implemented and errors cleanly
-        /// when selected. Omit to skip program scaffolding entirely.
+        /// named framework target (`anchor`, `quasar`, or `pinocchio` —
+        /// all fully implemented). Omit to skip program scaffolding
+        /// entirely.
         #[arg(long, value_enum)]
         target: Option<Target>,
 
@@ -852,10 +851,12 @@ pub(crate) enum Commands {
         #[arg(long)]
         spec: Option<PathBuf>,
 
-        /// Framework target for the Rust program crate. `anchor` is
-        /// fully implemented (default); `quasar` is fully implemented
-        /// (Blueshift's `quasar_lang`); `pinocchio` reserves the CLI
-        /// surface but its codegen branch is not yet implemented.
+        /// Framework target for the Rust program crate: `anchor`
+        /// (default), `quasar` (Blueshift's `quasar_lang`), or
+        /// `pinocchio` — all fully implemented. Known per-target gaps
+        /// (generic CPI on Quasar/Pinocchio, imported account mirrors
+        /// on Pinocchio) surface as `todo!()` breadcrumbs or a clean
+        /// error, never silent wrong output.
         #[arg(long, value_enum, default_value_t = Target::Anchor)]
         target: Target,
 
@@ -882,7 +883,9 @@ pub(crate) enum Commands {
         /// emission is auto-triggered when any handler has `modifies`
         /// listing fields absent from its `effect` block (the v2.25 LP-
         /// shape signal indicating the impl is expected to fill those
-        /// fields). Anchor target only in v2.26.
+        /// fields). Per-target shapes: Anchor/Quasar drive the accounts
+        /// struct; Pinocchio uses its `#[repr(C)]` stack-`AccountInfo`
+        /// shape. The brownfield/context modes below are Anchor-only.
         #[arg(long)]
         kani_impl: bool,
 

@@ -1,9 +1,19 @@
-//! Anchor IDL parsing and pattern inference.
+//! IDL parsing and pattern inference.
 //!
-//! Decodes Anchor IDL JSON to typed structs and infers patterns (signers,
+//! Decodes IDL JSON to typed structs and infers patterns (signers,
 //! writable accounts, PDAs, has_one relations, token-program presence, close
 //! semantics, numeric args). Consumed by `idl2spec` (IDL → `.qedspec`
 //! scaffolder) and `interface_gen` (IDL → spec interface block).
+//!
+//! Two wire formats are accepted (#197):
+//! - **Anchor** (pre-0.30 and 0.30+) — parsed directly into [`Idl`].
+//! - **Codama IR** (`{"kind":"rootNode","program":{...}}`, the IDL format
+//!   Pinocchio programs ship) — normalized into the same Anchor-shaped
+//!   [`Idl`] by [`codama_to_idl`], so `qedgen spec --idl` and
+//!   `qedgen interface --idl` work identically for both. Names are
+//!   snake_cased (Codama uses camelCase), type nodes are lowered to the
+//!   Anchor labels `idl2spec::map_type` understands, and `omitted`
+//!   discriminator arguments become the instruction `discriminator`.
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -136,10 +146,281 @@ pub(crate) struct InstructionAnalysis {
 
 pub(crate) fn parse_idl(idl_path: &Path) -> Result<(Idl, Vec<InstructionAnalysis>)> {
     let idl_source = std::fs::read_to_string(idl_path)?;
-    let idl: Idl = serde_json::from_str(&idl_source)?;
+    let raw: serde_json::Value = serde_json::from_str(&idl_source)?;
+    // Codama IR carries the program under a `program` envelope; an Anchor
+    // IDL never has one. Normalize Codama into the Anchor-shaped `Idl`.
+    let idl: Idl = if raw
+        .get("program")
+        .is_some_and(|p| p.get("instructions").is_some())
+    {
+        codama_to_idl(&raw)?
+    } else {
+        serde_json::from_str(&idl_source)?
+    };
     let analyses: Vec<InstructionAnalysis> =
         idl.instructions.iter().map(analyze_instruction).collect();
     Ok((idl, analyses))
+}
+
+/// camelCase → snake_case (Codama names instructions/accounts/args in
+/// camelCase; qedspec conventions and Anchor 0.30 IDLs are snake_case).
+fn camel_to_snake(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Lower a Codama type node to the Anchor-style label `idl2spec::map_type`
+/// and `interface_gen` understand. Recognized nodes map precisely; anything
+/// else falls back to the node's `kind` string — the same
+/// fail-visible-not-silent behavior unknown Anchor types get.
+fn codama_type_label(node: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    // Anchor string shorthand may appear nested inside Codama trees.
+    if node.is_string() {
+        return node.clone();
+    }
+    let kind = node.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+    match kind {
+        "numberTypeNode" => node.get("format").cloned().unwrap_or_else(|| json!("u64")),
+        "publicKeyTypeNode" => json!("pubkey"),
+        "booleanTypeNode" => json!("bool"),
+        "stringTypeNode" => json!("string"),
+        "bytesTypeNode" => json!("bytes"),
+        "optionTypeNode" | "zeroableOptionTypeNode" => {
+            let inner = node
+                .get("item")
+                .map(codama_type_label)
+                .unwrap_or_else(|| json!("u64"));
+            json!({ "option": inner })
+        }
+        "definedTypeLinkNode" => {
+            let name = node.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            json!({ "defined": name })
+        }
+        "arrayTypeNode" => {
+            let inner = node
+                .get("item")
+                .map(codama_type_label)
+                .unwrap_or_else(|| json!("u8"));
+            let count = node
+                .get("count")
+                .and_then(|c| c.get("value"))
+                .cloned()
+                .unwrap_or_else(|| json!(0));
+            json!({ "array": [inner, count] })
+        }
+        other => json!(other),
+    }
+}
+
+/// Codama struct fields (`structTypeNode.fields[]` of
+/// `structFieldTypeNode { name, type }`) → Anchor-shaped field list.
+fn codama_struct_fields(struct_node: &serde_json::Value) -> Vec<serde_json::Value> {
+    struct_node
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|f| {
+                    let name = f.get("name").and_then(|n| n.as_str())?;
+                    let ty = f.get("type").map(codama_type_label)?;
+                    Some(serde_json::json!({ "name": camel_to_snake(name), "type": ty }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Normalize a Codama IR root into the Anchor-shaped [`Idl`] (#197). Builds
+/// an Anchor-form JSON value and reuses the existing serde derives, so the
+/// two formats can never drift in what downstream consumers see.
+///
+/// Mapping:
+/// - `program.name` → `metadata.name`; `program.publicKey` → `address`.
+/// - `instructions[]`: `arguments[]` → `args[]` (dropping
+///   `defaultValueStrategy: "omitted"` args — a single-byte
+///   `numberValueNode` default among them becomes the `discriminator`);
+///   account `isSigner`/`isWritable` → `signer`/`writable`; a `pda` object
+///   or `pdaValueNode` default marks the account PDA. Codama has no
+///   `has_one`, so `relations` stays empty.
+/// - `definedTypes[]` AND `accounts[]` (account-state structs live under
+///   `accountNode.data` in Codama) → `types[]`, so state-layout inference
+///   sees them exactly like Anchor `types`.
+/// - `errors[]` (`message`) → `errors[]` (`msg`).
+fn codama_to_idl(root: &serde_json::Value) -> Result<Idl> {
+    use serde_json::json;
+    let program = root
+        .get("program")
+        .expect("caller checked program presence");
+    let name = program
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("program");
+    let address = program.get("publicKey").and_then(|k| k.as_str());
+
+    let instructions: Vec<serde_json::Value> = program
+        .get("instructions")
+        .and_then(|v| v.as_array())
+        .map(|ixs| {
+            ixs.iter()
+                .filter_map(|ix| {
+                    let ix_name = ix.get("name").and_then(|n| n.as_str())?;
+                    let mut discriminator: Vec<u8> = Vec::new();
+                    let args: Vec<serde_json::Value> = ix
+                        .get("arguments")
+                        .and_then(|a| a.as_array())
+                        .map(|args| {
+                            args.iter()
+                                .filter_map(|a| {
+                                    let omitted =
+                                        a.get("defaultValueStrategy").and_then(|s| s.as_str())
+                                            == Some("omitted");
+                                    if omitted {
+                                        // A fixed single-byte default among the
+                                        // omitted args IS the discriminator.
+                                        if let Some(n) = a
+                                            .get("defaultValue")
+                                            .filter(|d| {
+                                                d.get("kind").and_then(|k| k.as_str())
+                                                    == Some("numberValueNode")
+                                            })
+                                            .and_then(|d| d.get("number"))
+                                            .and_then(|n| n.as_u64())
+                                        {
+                                            if discriminator.is_empty() && n <= u8::MAX as u64 {
+                                                discriminator.push(n as u8);
+                                            }
+                                        }
+                                        return None;
+                                    }
+                                    let arg_name = a.get("name").and_then(|n| n.as_str())?;
+                                    let ty = a.get("type").map(codama_type_label)?;
+                                    Some(json!({
+                                        "name": camel_to_snake(arg_name),
+                                        "type": ty,
+                                    }))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let accounts: Vec<serde_json::Value> = ix
+                        .get("accounts")
+                        .and_then(|a| a.as_array())
+                        .map(|accts| {
+                            accts
+                                .iter()
+                                .filter_map(|a| {
+                                    let acct_name = a.get("name").and_then(|n| n.as_str())?;
+                                    let signer = a
+                                        .get("isSigner")
+                                        .or_else(|| a.get("signer"))
+                                        .and_then(|b| b.as_bool())
+                                        .unwrap_or(false);
+                                    let writable = a
+                                        .get("isWritable")
+                                        .or_else(|| a.get("writable"))
+                                        .and_then(|b| b.as_bool())
+                                        .unwrap_or(false);
+                                    let is_pda = a.get("pda").is_some()
+                                        || a.get("defaultValue")
+                                            .and_then(|d| d.get("kind"))
+                                            .and_then(|k| k.as_str())
+                                            == Some("pdaValueNode");
+                                    let mut acct = json!({
+                                        "name": camel_to_snake(acct_name),
+                                        "signer": signer,
+                                        "writable": writable,
+                                    });
+                                    if is_pda {
+                                        acct["pda"] = json!({ "seeds": [] });
+                                    }
+                                    Some(acct)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(json!({
+                        "name": camel_to_snake(ix_name),
+                        "docs": ix.get("docs").cloned().unwrap_or_else(|| json!([])),
+                        "accounts": accounts,
+                        "args": args,
+                        "discriminator": discriminator,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // State-layout candidates: Codama's `definedTypes[]` plus the struct
+    // under each `accountNode.data` — both become Anchor-shaped `types[]`.
+    let mut types: Vec<serde_json::Value> = Vec::new();
+    if let Some(dts) = program.get("definedTypes").and_then(|v| v.as_array()) {
+        for dt in dts {
+            let Some(tname) = dt.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(ty) = dt.get("type") else { continue };
+            types.push(json!({
+                "name": snake_to_title(&camel_to_snake(tname)).replace(' ', ""),
+                "type": { "kind": "struct", "fields": codama_struct_fields(ty) },
+            }));
+        }
+    }
+    if let Some(accts) = program.get("accounts").and_then(|v| v.as_array()) {
+        for acct in accts {
+            let Some(aname) = acct.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(data) = acct.get("data") else {
+                continue;
+            };
+            types.push(json!({
+                "name": snake_to_title(&camel_to_snake(aname)).replace(' ', ""),
+                "type": { "kind": "struct", "fields": codama_struct_fields(data) },
+            }));
+        }
+    }
+
+    let errors: Vec<serde_json::Value> = program
+        .get("errors")
+        .and_then(|v| v.as_array())
+        .map(|errs| {
+            errs.iter()
+                .filter_map(|e| {
+                    let ename = e.get("name").and_then(|n| n.as_str())?;
+                    let msg = e
+                        .get("message")
+                        .or_else(|| e.get("msg"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("");
+                    Some(json!({
+                        "name": snake_to_title(&camel_to_snake(ename)).replace(' ', ""),
+                        "msg": msg,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let anchor_shaped = json!({
+        "metadata": { "name": name },
+        "address": address,
+        "instructions": instructions,
+        "types": types,
+        "errors": errors,
+    });
+    Ok(serde_json::from_value(anchor_shaped)?)
 }
 
 pub(crate) fn analyze_instruction(ix: &IdlInstruction) -> InstructionAnalysis {

@@ -276,14 +276,10 @@ pub(crate) async fn dispatch(cmd: Commands) -> Result<()> {
                 }
                 let catalogue = pinocchio_probe::scan_program(prog_root)?;
                 let mut findings = pinocchio_probe::findings_from_catalogue(&catalogue);
-                // Arithmetic-symbol catalog: runtime-agnostic source-scan
-                // findings merge into the same envelope.
-                findings.extend(arithmetic_symbol_probe::scan_program(prog_root)?);
-                // Paired-validator asymmetry across files.
-                findings.extend(paired_validator_probe::scan_program(prog_root)?);
-                // Lifecycle catalog: pairs authority-conferring CPI grants
-                // with close handlers that don't tear them down.
-                findings.extend(lifecycle_probe::scan_program(prog_root)?);
+                // Runtime-agnostic source scanners (arithmetic-symbol,
+                // paired-validator, lifecycle) — same set every runtime
+                // branch merges (#196).
+                findings.extend(run_helpers::runtime_agnostic_findings(prog_root)?);
                 // --emit-spec-candidates: lift findings into proto-clauses,
                 // then cluster.
                 let clusters = if emit_spec_candidates {

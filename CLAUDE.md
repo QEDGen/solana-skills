@@ -85,6 +85,7 @@ See `examples/rust/escrow/formal_verification/VERIFICATION_SCOPE.md`.
 - [`references/sbpf.md`](references/sbpf.md) — sBPF workflow, `wp_exec`/`wp_step`, memory disjointness, simp-performance rules
 - [`references/support-library.md`](references/support-library.md) — `QEDGen.Solana` API
 - [`docs/design/`](docs/design/) — codegen / MIR architecture
+- [`docs/framework-support.md`](docs/framework-support.md) — per-framework capability matrix (Anchor / Quasar / Pinocchio / native / sBPF), gate-verified
 - [`docs/RELEASING.md`](docs/RELEASING.md) — **pre-release checklist (run before any tag)**
 - `SKILL.md` — the user-facing proof/verification workflow
 - `.claude/rules/lean-proofs.md` — Lean gotchas, auto-loaded when editing `.lean` files
