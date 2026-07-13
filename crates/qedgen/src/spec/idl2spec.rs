@@ -332,6 +332,19 @@ pub(crate) fn render(idl: &Idl, analyses: &[InstructionAnalysis]) -> String {
         writeln!(s).unwrap();
     }
 
+    // ── Enum defined types (#202) ────────────────────────────────────────
+    // `enumTypeNode` (Codama) / `{"kind":"enum"}` (Anchor) defined types render
+    // as DSL sum types carrying their real variants (e.g. authorityType,
+    // accountState) — not the generic lifecycle state a fieldless struct falls
+    // into. Data-carrying variants degrade to name-only (see IdlTypeBody).
+    for ty in idl.types.iter().filter(|t| t.ty.kind == "enum") {
+        writeln!(s, "type {}", ty.name).unwrap();
+        for v in &ty.ty.variants {
+            writeln!(s, "  | {}", v.name).unwrap();
+        }
+        writeln!(s).unwrap();
+    }
+
     // ── PDA declarations ─────────────────────────────────────────────────
     seen_pdas.clear();
     for ix in &idl.instructions {
@@ -816,7 +829,20 @@ mod tests {
             }
           }
         ],
-        "definedTypes": [],
+        "definedTypes": [
+          {
+            "kind": "definedTypeNode",
+            "name": "accountState",
+            "type": {
+              "kind": "enumTypeNode",
+              "variants": [
+                { "kind": "enumEmptyVariantTypeNode", "name": "uninitialized" },
+                { "kind": "enumEmptyVariantTypeNode", "name": "initialized" },
+                { "kind": "enumEmptyVariantTypeNode", "name": "frozen" }
+              ]
+            }
+          }
+        ],
         "errors": [
           { "kind": "errorNode", "name": "notActive", "code": 6000, "message": "settings not active" }
         ],
@@ -913,6 +939,52 @@ mod tests {
         assert!(
             !spec.contains("IDL carries no seeds"),
             "no seedless TODO when seeds resolve:\n{spec}"
+        );
+    }
+
+    /// #202: an `enumTypeNode` defined type renders as a DSL sum type carrying
+    /// its real variants — not the generic `Uninitialized | Active` lifecycle a
+    /// fieldless struct falls into (the old bug: `codama_struct_fields` read zero
+    /// fields, so the render stamped a synthesized state).
+    #[test]
+    fn codama_enum_defined_type_renders_real_variants() {
+        let tmp = std::env::temp_dir().join(format!("codama_e_{}.json", std::process::id()));
+        std::fs::write(&tmp, CODAMA_IDL).unwrap();
+        let (idl, analyses) = idl::parse_idl(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        // Normalized: the enum defined type carries variants, not zero fields.
+        let acct_state = idl.types.iter().find(|t| t.name == "AccountState").unwrap();
+        assert_eq!(acct_state.ty.kind, "enum", "enumTypeNode stamped as enum");
+        assert!(
+            acct_state.ty.fields.is_empty(),
+            "no phantom struct fields for an enum type"
+        );
+        let variants: Vec<_> = acct_state
+            .ty
+            .variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(
+            variants,
+            vec!["Uninitialized", "Initialized", "Frozen"],
+            "camelCase variant names PascalCased and preserved in order"
+        );
+
+        // Rendered: a sum type with the real variants. `Initialized` / `Frozen`
+        // exist ONLY on the real enum — the generic lifecycle synthesis never
+        // emits them — so their presence is the regression signal.
+        let spec = render(&idl, &analyses);
+        assert!(
+            spec.contains("type AccountState"),
+            "enum type emitted:\n{spec}"
+        );
+        assert!(
+            spec.contains("| Uninitialized")
+                && spec.contains("| Initialized")
+                && spec.contains("| Frozen"),
+            "real enum variants rendered, not the generic Uninitialized|Active lifecycle:\n{spec}"
         );
     }
 
