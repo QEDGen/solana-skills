@@ -250,11 +250,11 @@ on a default budget, expect surface-level pattern matching only.
      this shape happen here?"
    - Classify: real-vulnerability / spec-gap / suppressed.
 
-   **Six cross-cutting passes MUST run alongside the per-category walk.**
+   **Eight cross-cutting passes MUST run alongside the per-category walk.**
    These catch primitives the per-category checklist misses on a cold
-   read. 3a, 3b, 3d, 3e, and 3f run on every audit; 3c runs only when the
-   program leans on a small security-critical dep (see its "When to run
-   it" gate).
+   read. 3a, 3b, 3d, 3e, 3f, 3g, and 3h run on every audit; 3c runs only
+   when the program leans on a small security-critical dep (see its "When
+   to run it" gate).
 
    **3a. Coverage-of-safe-utility walk.** For every protective
    helper that the codebase defines — names of the shape
@@ -477,6 +477,70 @@ on a default budget, expect surface-level pattern matching only.
    every comparison-direction / store-without-validate pass precisely because
    the bug is the *absence* of the guard the enum already names.
 
+   **Severity — inherit the unguarded path's ceiling.** A dead guard is
+   rated by the impact of the path it fails to protect, not a "just a dead
+   variant" floor: if the missing guard would have prevented fund movement,
+   authority escalation, or DoS, rate the finding at that ceiling (gate
+   noted), exactly as §3d/§3e findings are. The corpus example above was
+   mis-rated LOW/INFO on cold reads even though the unguarded CPI signs as a
+   *global* authority (advisory-HIGH) — rate it HIGH. Only a dead variant a
+   *different* guard already covers redundantly stays INFO.
+
+   **3g. State-machine / lifecycle-transition soundness sweep.** A lifecycle
+   step whose precondition handling is wrong is invisible to the guard-shape
+   passes: the thing that's wrong isn't a comparison, a store, or a named
+   error — it's a *missing completeness or robustness check* on a transition.
+   Two shapes; run both on every audit:
+
+   1. **Premature transition (completeness).** A container or multi-part
+      object (a batch, a proposal bundle, a multi-step init) can be advanced
+      to an "active / finalized / executable" state before all its
+      constituent parts are added — and once advanced, the parts can no
+      longer be added. For every status transition (`Draft → Active`,
+      `Pending → Ready`, `Building → Sealed`), find the completeness
+      invariant the type implies (a `size` / `count` / `expected_total`
+      field, an "all children present" relation) and confirm the transition
+      is gated on it. If any privileged actor other than the creator can
+      trigger the transition, the exposure is a cross-actor grief (lock the
+      object incomplete) — rate on that.
+   2. **Bricked creation (permissionless-create robustness).** A
+      permissionless `create` / `init` that *reverts* when the target
+      address already holds lamports above the expected rent-exempt minimum
+      lets an attacker pre-fund the address to brick creation forever. For
+      every permissionless account creation, check it *tops up to* the rent
+      floor rather than asserting equality with it / `create_account`-ing an
+      address an attacker can front-fund.
+
+   Corpus: a batch container activatable before all its transactions are
+   added (firm MED, missed by every guard-shape pass); a PDA an attacker
+   over-funds beyond rent-exempt to permanently block its creation (firm
+   HIGH). Both are lifecycle soundness, not guard direction or coverage.
+
+   **3h. Zero / sentinel-value asymmetry sweep.** A sentinel value —
+   commonly `0`, `u64::MAX`, `Pubkey::default()`, an empty `Vec` — that one
+   handler *rejects* as invalid while another *accepts* as meaningful (`0` =
+   "no expiry / unlimited / never", empty = "any") is a cross-handler
+   contradiction that strands funds or over-permits. For every field with a
+   behavioral sentinel, diff how each handler treats it:
+
+   1. Identify sentinel-bearing fields — expiry/deadline (`0` = never),
+      limit/cap (`u64::MAX` = unlimited), an allowlist/destination set
+      (empty = any), an optional authority (`default()` = none).
+   2. For each, list every handler that reads or validates it and record
+      whether it *rejects*, *accepts-as-special*, or *treats-as-literal* the
+      sentinel. Divergence across handlers on the same field is the finding:
+      creation that rejects a value a downstream path honors as a valid
+      sentinel (or vice-versa) is a live inconsistency.
+
+   Also flag a **one-sided bound**: a window or range guarded on only one
+   end (an expiry / upper-bound check with no symmetric start / lower-bound
+   check, so an action can land before the window opens) — the missing-bound
+   cousin of §3d's wrong-direction guard.
+
+   Corpus: creation rejects a zero expiry that the transfer path honors as
+   "never expires" (two firm MEDs); a recurring transfer permitted before
+   its start time for lack of a lower-bound check (firm HIGH).
+
 4. **Escalate every real-vuln finding before writing it up.** This is
    where the bear-hug lives — finding the kill-chain, not just the
    primitive. For each finding classified as "real vulnerability",
@@ -574,8 +638,9 @@ on a default budget, expect surface-level pattern matching only.
    - **Producer B — read-driven discovery.** §3c trust-surface walk,
      §3d comparison-direction / inverted-guard sweep, §3e
      store-without-validate sweep, §3f dead-guard / unwired-error-variant
-     sweep, intent-drift sweep, authority × invariant matrix. Producer B
-     also
+     sweep, §3g state-machine / lifecycle-transition soundness sweep, §3h
+     zero / sentinel-value asymmetry sweep, intent-drift sweep, authority ×
+     invariant matrix. Producer B also
      hypothesizes internal intent (invariants / state machine /
      authority graph / threat model) from code + comments + docstrings
      *without* prompting the user — these hypotheses feed Phase 2.
@@ -630,15 +695,21 @@ on a default budget, expect surface-level pattern matching only.
    ### High-stakes mode — N-run union (opt-in)
 
    A single audit pass under-samples: independent runs against the same
-   target at the same commit catch *different* subsets of the ground
-   truth (observed repeatedly on the bench — the union of two runs beat
-   either single run on recall). For a high-stakes audit or a benchmark
-   score, don't trust one pass.
+   target at the same commit catch *different* subsets of the ground truth —
+   and not just at the margin. On the bench, two runs of the same target
+   surfaced *different top findings* (one caught the firm HIGHs, the other
+   caught a novel HIGH the first missed entirely; one caught an inverted
+   guard the other's sweep walked past). The variance is large enough that a
+   single pass is a coin-flip on any given finding. So the bar for N-run is
+   low.
 
-   Trigger this mode when the user asks for a thorough / exhaustive /
-   "don't miss anything" audit, or when running under the benchmark
-   skill. Otherwise stay single-run (N-run multiplies cost; routine
-   one-target audits don't need it).
+   **Default to N-run union for any audit where a miss is costly** — a
+   program that holds or moves user funds, anything mainnet-bound or
+   pre-deploy, an explicit "thorough / don't-miss-anything" request, or a
+   benchmark run. Drop to single-run only for a genuinely low-stakes quick
+   check (a scratch program, a "does this look roughly ok" glance) where the
+   N× cost isn't worth it. When unsure, run N-run — the recall gain on real
+   targets outweighs the cost.
 
    Protocol:
 
