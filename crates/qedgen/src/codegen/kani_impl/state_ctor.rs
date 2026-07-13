@@ -444,12 +444,12 @@ fn emit_value(ty: &Ty, ctx: &CtorCtx, depth: usize) -> Option<String> {
                     })
                     .collect();
                 format!("{}{s} {{ {} }}", ctx.type_path, inner?.join(", "))
-            } else if let Some(sum) = ctx.sum_types.iter().find(|t| &t.name == s) {
-                // Enum (sum type) — symbolic variant selection (#177/G13).
-                emit_enum(s, sum, ctx, depth)?
             } else {
-                // Imported / unresolved type — needs agent knowledge.
-                return None;
+                // Enum (sum type) — symbolic variant selection (#177/G13).
+                // Imported / unresolved types miss the lookup → None
+                // (they need agent knowledge).
+                let sum = ctx.sum_types.iter().find(|t| &t.name == s)?;
+                emit_enum(s, sum, ctx, depth)?
             }
         }
         // A `Map[N] T` state field has no faithful symbolic default here (the
