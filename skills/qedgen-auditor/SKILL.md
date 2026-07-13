@@ -689,7 +689,7 @@ on a default budget, expect surface-level pattern matching only.
    budget exhaustion, or N consecutive units of work without a new
    finding.
 
-   ### High-stakes mode — N-run union (opt-in)
+   ### High-stakes mode — adaptive N-run union (opt-in)
 
    A single audit pass under-samples: independent runs against the same
    target at the same commit catch *different* subsets of the ground truth —
@@ -708,21 +708,33 @@ on a default budget, expect surface-level pattern matching only.
    N× cost isn't worth it. When unsure, run N-run — the recall gain on real
    targets outweighs the cost.
 
-   Protocol:
+   Protocol — an **adaptive loop, not a fixed batch**. A run is cheap
+   relative to a missed bug, so let the *outcome* drive how many you spawn:
 
-   1. Run Phases 1–3 **N independent times** (default N=3; N=5 for a
-      calibration-grade sweep), each as a fresh session with no shared
-      context — spawn N subagents pointed at the same target and this
-      SKILL.md, or run N sequential clean passes.
-   2. **Union then dedup.** Merge every run's findings; collapse
-      duplicates by `(category, file:line)` overlap, keeping the
-      highest-confidence / most-specific instance of each cluster. A
-      finding surfaced by *any* run is kept (union recall).
-   3. **Preserve the variance signal.** Record which runs caught each
-      finding; a finding only one of N runs caught is real but
-      under-sampled — note it so the reader sees the run-to-run spread.
+   1. **Spawn a run; surface the instant it fires.** Start one clean pass
+      (fresh session, no shared context). The moment it produces a MED+
+      finding, PRESENT it immediately (the Phase-1 event-driven rule) — don't
+      wait for a batch. Finding a bug is NOT a stop signal.
+   2. **Found something → present it, and keep running behind the scenes.** A
+      run that found one bug has almost certainly under-sampled the rest (the
+      variance is large — see above; runs routinely catch *different* top
+      findings). So after surfacing, spawn the next run(s) in the background
+      and keep merging — union-then-dedup by `(category, file:line)`, keeping
+      the most-specific instance of each cluster — surfacing each new distinct
+      finding as it lands. The user gets the first result fast and a growing
+      list as more runs complete.
+   3. **Found nothing → run again.** A dry run is under-sampling evidence, not
+      an all-clear — the coin came up tails. Spawn another; never conclude
+      "clean" from a single empty pass.
+   4. **Stop on convergence, not a fixed count.** Keep spawning until **K
+      consecutive runs add nothing new** (loop-until-dry; K=2 is a reasonable
+      default), the token budget is hit, or the user says enough. N is a
+      floor, not a ceiling: run at least 2–3, and keep going while runs are
+      still turning up distinct findings.
 
-   The fired-repro contract is unchanged: a unioned CRIT/HIGH still
+   Throughout, **preserve the variance signal** — record which run caught each
+   finding; one only a single run caught is real but under-sampled, note the
+   spread. The fired-repro contract is unchanged: a unioned CRIT/HIGH still
    needs a fired or inconclusive repro, never structural-only.
 
    ### Spec-aware mode (when `.qedspec` already exists)
