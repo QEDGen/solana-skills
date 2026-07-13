@@ -105,6 +105,19 @@ pub(crate) struct IdlTypeBody {
     pub kind: String,
     #[serde(default)]
     pub fields: Vec<IdlField>,
+    // Enum defined types (`kind == "enum"`): the sum-type variants. Empty for
+    // struct types. Anchor IDLs carry `{"kind":"enum","variants":[{"name":..}]}`
+    // natively; the Codama normalizer synthesizes the same shape from an
+    // `enumTypeNode`. Variant data payloads are intentionally not modeled —
+    // account-state / authority-type enums are fieldless, and a name-only sum
+    // type is the correct fidelity fix (#202); data variants degrade to name-only.
+    #[serde(default)]
+    pub variants: Vec<IdlEnumVariant>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct IdlEnumVariant {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +303,29 @@ fn codama_struct_fields(struct_node: &serde_json::Value) -> Vec<serde_json::Valu
         .unwrap_or_default()
 }
 
+/// Codama `enumTypeNode.variants[]` → Anchor-shaped variant list
+/// (`[{"name": "<PascalCase>"}]`). Each variant node
+/// (`enumEmptyVariantTypeNode` / `enumStructVariantTypeNode` /
+/// `enumTupleVariantTypeNode`) carries a `name`; variant data payloads are not
+/// modeled (#202 renders a name-only sum type). Names are PascalCased to match
+/// DSL variant convention (`uninitialized` → `Uninitialized`).
+fn codama_enum_variants(enum_node: &serde_json::Value) -> Vec<serde_json::Value> {
+    enum_node
+        .get("variants")
+        .and_then(|v| v.as_array())
+        .map(|variants| {
+            variants
+                .iter()
+                .filter_map(|v| {
+                    let name = v.get("name").and_then(|n| n.as_str())?;
+                    let pascal = snake_to_title(&camel_to_snake(name)).replace(' ', "");
+                    Some(serde_json::json!({ "name": pascal }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Normalize a Codama IR root into the Anchor-shaped [`Idl`] (#197). Builds
 /// an Anchor-form JSON value and reuses the existing serde derives, so the
 /// two formats can never drift in what downstream consumers see.
@@ -454,9 +490,17 @@ fn codama_to_idl(root: &serde_json::Value) -> Result<Idl> {
                 continue;
             };
             let Some(ty) = dt.get("type") else { continue };
+            // #202: an `enumTypeNode` defined type carries variants, not fields.
+            // Stamp it as an enum sum type so the render keeps the real variants
+            // instead of yielding zero fields → generic lifecycle state.
+            let type_body = if ty.get("kind").and_then(|k| k.as_str()) == Some("enumTypeNode") {
+                json!({ "kind": "enum", "variants": codama_enum_variants(ty) })
+            } else {
+                json!({ "kind": "struct", "fields": codama_struct_fields(ty) })
+            };
             types.push(json!({
                 "name": snake_to_title(&camel_to_snake(tname)).replace(' ', ""),
-                "type": { "kind": "struct", "fields": codama_struct_fields(ty) },
+                "type": type_body,
             }));
         }
     }
