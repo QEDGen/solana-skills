@@ -68,7 +68,7 @@ First-class verification features — one-line orientation; full mechanics in [`
 - **First-class interfaces** — `interface` participates across Lean / Kani / verify. Bundled SPL + System + Metaplex stdlib in `crates/qedgen/data/interfaces/`; `verify --check-upstream` promotes pin mismatches to CRIT.
 - **State-aware contracts** — callee `ensures` over abstract `state.X`; callers map via per-call-site `state_binders {}`; verified-callee composition imports `.qed/proofs/<Iface>.lean`.
 - **`pragma state_repr = adt`** — explicit opt-in to inductive multi-variant `State` (default is flat `structure State` + `status`). Single source: `ParsedSpec::state_repr_is_adt()` → `Mir::adt_state`. `cross-program-vault` is the sole bundled ADT example.
-- **Impl-targeted Kani (`--kani-impl`)** — `kani_impl.rs` exercises the real Anchor handler against a symbolic `Accounts` context; auto-triggers on `modifies ⊋ effect.lhs` or unbounded `ref_impl` arithmetic. Anchor only.
+- **Impl-targeted Kani (`--kani-impl`)** — `kani_impl.rs` exercises the real Anchor handler against a symbolic `Accounts` context; auto-triggers on `modifies ⊋ effect.lhs` or unbounded `ref_impl` arithmetic. Anchor only. Brownfield shapes: `--kani-impl-brownfield` (state-struct harness, #162) and `--kani-impl-context` (real `try_accounts` + instruction fn over symbolic `AccountInfo`s — instruction-level authorization gates, #169; `pragma context_struct`).
 
 ## Verification scope
 

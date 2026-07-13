@@ -176,6 +176,11 @@ pub fn reconcile(spec_path: &Path, code_dir: &Path, proofs_dir: &Path) -> Result
                         snippet,
                     });
                 }
+                // #166: a Proofs.lean from a DIFFERENT spec is a workspace-
+                // hygiene note, not per-theorem drift — surface as a warning.
+                f @ OrphanFinding::ForeignProofs { .. } => {
+                    warnings.push(f.to_string());
+                }
             }
         }
         (orphans, missing)

@@ -115,6 +115,52 @@ pub(crate) fn invariant_method(spec: &ParsedSpec) -> Option<String> {
     }
 }
 
+/// How a `pragma kani_target` method's return value maps to the harness's
+/// `ok: bool` success gate. `Result` (the default) gates on `.is_ok()`;
+/// `Bool` uses the value directly; `Unit` treats any non-panicking return as
+/// success (the shape of a `()`-returning mutator).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum KaniTargetKind {
+    Result,
+    Bool,
+    Unit,
+}
+
+/// A resolved `pragma kani_target = <handler>::<method>[::<kind>]` binding
+/// (#163/G2): the handler's real logic is a **state-struct method**, so the
+/// harness can GENERATE the effect call — `state.<method>(<params>)` — instead
+/// of leaving it agent-fill. `kind` (optional third segment: `result` |
+/// `bool` | `unit`, default `result`) names the return shape, which the spec
+/// can't otherwise know. Free functions / non-state receivers stay agent-fill
+/// (their call shape is real-source knowledge).
+pub(crate) struct KaniTarget {
+    pub method: String,
+    pub kind: KaniTargetKind,
+}
+
+/// Resolve the `kani_target` binding for one handler, if declared.
+pub(crate) fn kani_target_of(spec: &ParsedSpec, handler_name: &str) -> Option<KaniTarget> {
+    for v in spec.pragma_values("kani_target") {
+        let mut segs = v.split("::");
+        let (Some(h), Some(m)) = (segs.next(), segs.next()) else {
+            continue;
+        };
+        if h != handler_name {
+            continue;
+        }
+        let kind = match segs.next() {
+            Some("bool") => KaniTargetKind::Bool,
+            Some("unit") => KaniTargetKind::Unit,
+            _ => KaniTargetKind::Result,
+        };
+        return Some(KaniTarget {
+            method: m.to_string(),
+            kind,
+        });
+    }
+    None
+}
+
 /// `pragma kani_stub_clock = <anything>` → the agent-fill effect calls a method
 /// that reads `Clock::get()`; the harness must stub it (`-Z stubbing`) + emit
 /// the stub fn (G14, #178). Without it, `Clock::get()` aborts under Kani. Any

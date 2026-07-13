@@ -89,6 +89,16 @@ pub fn bootstrap_if_missing(spec: &ParsedSpec, proofs_dir: &Path) -> Result<bool
 pub enum OrphanFinding {
     Orphan(String),
     Missing(String),
+    /// `Proofs.lean` carries preservation theorems, but NONE match this
+    /// spec's obligations — it was generated from a *different* spec (a
+    /// leftover in a reused workspace, the #166 repro). One informational
+    /// note replaces the full orphan+missing noise, and it does not fail
+    /// the check: a Kani-first workflow may legitimately never regenerate
+    /// Lean. `declared`/`expected` are the disjoint counts.
+    ForeignProofs {
+        declared: usize,
+        expected: usize,
+    },
 }
 
 impl std::fmt::Display for OrphanFinding {
@@ -103,6 +113,15 @@ impl std::fmt::Display for OrphanFinding {
                 f,
                 "missing theorem `{}` — spec declares this obligation; add a stub:\n  theorem {} ... := by sorry",
                 name, name
+            ),
+            OrphanFinding::ForeignProofs { declared, expected } => write!(
+                f,
+                "Proofs.lean holds {} preservation theorem(s), none matching this \
+                 spec's {} obligation(s) — it was generated from a different spec. \
+                 Regenerate with `qedgen codegen --lean`, or point --proofs at the \
+                 right directory. (Informational — not a failure; Kani-only \
+                 workflows can ignore it.)",
+                declared, expected
             ),
         }
     }
@@ -127,6 +146,23 @@ pub fn check_orphans(spec: &ParsedSpec, proofs_dir: &Path) -> Result<Vec<OrphanF
 
     let pat = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*_preserved_by_[A-Za-z_][A-Za-z0-9_]*$").unwrap();
     let mut findings = Vec::new();
+
+    // Foreign-proofs gate (#166): preservation theorems exist on BOTH sides
+    // with ZERO overlap → this Proofs.lean belongs to a different spec (a
+    // stale leftover in a reused workspace). Emitting the full orphan+missing
+    // list would be pure noise — every theorem lands on both lists — so
+    // collapse it to one informational note. Same-spec evolution (any
+    // overlap at all, or an empty side) keeps the precise drift findings.
+    let declared_preservation: Vec<&String> = declared.iter().filter(|t| pat.is_match(t)).collect();
+    if !declared_preservation.is_empty()
+        && !expected.is_empty()
+        && !declared_preservation.iter().any(|t| expected.contains(*t))
+    {
+        return Ok(vec![OrphanFinding::ForeignProofs {
+            declared: declared_preservation.len(),
+            expected: expected.len(),
+        }]);
+    }
 
     // Orphans: preservation-shaped theorems in Proofs.lean the spec doesn't
     // ask for. Non-preservation helper lemmas are ignored.
@@ -167,6 +203,80 @@ end Foo
         assert!(names.contains("a_preserved_by_x"));
         assert!(names.contains("b_preserved_by_y"));
         assert_eq!(names.len(), 2);
+    }
+
+    fn spec_with_obligation(prop: &str, handler: &str) -> ParsedSpec {
+        let mut spec = ParsedSpec::default();
+        spec.properties.push(crate::check::ParsedProperty {
+            name: prop.to_string(),
+            expression: None,
+            rust_expression: None,
+            rust_expression_pod: None,
+            rust_expression_math: None,
+            preserved_by: vec![handler.to_string()],
+            per_slot: None,
+            quantifier_lint: None,
+            class: crate::check::PropertyClass::Unary,
+            ast_body: None,
+            tree: None,
+        });
+        spec
+    }
+
+    fn push_obligation(spec: &mut ParsedSpec, prop: &str, handler: &str) {
+        let extra = spec_with_obligation(prop, handler)
+            .properties
+            .pop()
+            .unwrap();
+        spec.properties.push(extra);
+    }
+
+    /// #166: a Proofs.lean whose preservation theorems share ZERO overlap
+    /// with the spec's obligations is a leftover from a DIFFERENT spec —
+    /// one informational `ForeignProofs` note, not the full orphan+missing
+    /// noise (which would name every theorem twice).
+    #[test]
+    fn foreign_proofs_collapse_to_one_note() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Proofs.lean"),
+            "theorem old_prop_preserved_by_old_handler : True := by trivial\n",
+        )
+        .unwrap();
+        let spec = spec_with_obligation("solvency", "deposit");
+        let findings = check_orphans(&spec, dir.path()).unwrap();
+        assert_eq!(
+            findings,
+            vec![OrphanFinding::ForeignProofs {
+                declared: 1,
+                expected: 1
+            }],
+            "disjoint theorem sets collapse to one foreign-proofs note"
+        );
+    }
+
+    /// Same-spec evolution — ANY overlap — keeps the precise per-theorem
+    /// drift findings (the foreign gate must not swallow real drift).
+    #[test]
+    fn partial_overlap_keeps_precise_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Proofs.lean"),
+            "theorem solvency_preserved_by_deposit : True := by trivial\n\
+             theorem stale_preserved_by_removed : True := by trivial\n",
+        )
+        .unwrap();
+        let mut spec = spec_with_obligation("solvency", "deposit");
+        push_obligation(&mut spec, "conservation", "withdraw");
+        let findings = check_orphans(&spec, dir.path()).unwrap();
+        assert!(
+            findings.contains(&OrphanFinding::Orphan(
+                "stale_preserved_by_removed".to_string()
+            )) && findings.contains(&OrphanFinding::Missing(
+                "conservation_preserved_by_withdraw".to_string()
+            )),
+            "overlap keeps per-theorem orphan+missing findings; got {findings:?}"
+        );
     }
 
     #[test]

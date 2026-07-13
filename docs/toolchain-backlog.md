@@ -56,6 +56,14 @@ handler-scoped harness that abstracts CPI. Many Solana bugs live in shared helpe
 - **Proposed:** let a spec/harness target an internal fn or invariant helper.
 - **Verdict:** FILE (feature). Generalizes beyond this program.
 - **Issue:** #163 (QEDGen/solana-skills)
+- **Status: SHIPPED (PR #193).** `pragma kani_target = <handler>::<method>[::<kind>]`
+  mechanizes the effect call in all three brownfield harness shapes: the
+  ensures/reject harnesses bind `ok` to the generated `state.<method>(<params>)`
+  (`result` kind → `.is_ok()`, `bool` → direct, `unit` → call-then-true) and the
+  panic-free harness calls it as a statement — for state-struct-method targets,
+  the harness is now **zero agent-fill** (validated: spec → codegen → `cargo
+  kani` green with no hand edit). Free fns / non-state receivers keep the
+  agent-fill site (their call shape is real-source knowledge).
 
 ### 🧩 G3 — Kani brownfield scaffolding generator
 
@@ -68,6 +76,12 @@ program crate (standalone crates hit spl-token-2022 vs solana-program dep-hell),
 - **Proposed:** `qedgen` emits this scaffolding for a brownfield target (or a `qedgen kani-scaffold`).
 - **Verdict:** FILE (feature). Turns a multi-hour bring-up into minutes.
 - **Issue:** #164 (QEDGen/solana-skills)
+- **Status: CLOSED (dissolved, 2026-07-13).** Every piece shipped as its own
+  mechanism: colocation → generated PLACEMENT headers + `state_module`/
+  `harness_use` (G17/G17b); Clock stub → G14 (+ log/CPI/PDA, #182); unwind →
+  F2 `suggested_unwind`; symbolic account construction → the Context mode's
+  `try_deserialize`-stub path (#169), which obsoletes the `Pack` builder. SPL
+  token-account layout modeling, if ever needed, is a scoped #169 follow-on.
 
 ### 🧩 G4 — reusable Kani stub library for Solana sysvars
 
@@ -88,6 +102,13 @@ Running `qedgen check` on a new spec reported drift against the workspace's old
 - **Proposed:** per-spec proof dirs, or a `--kani-only` / backend-scoped check mode.
 - **Verdict:** FILE (DX).
 - **Issue:** #166 (QEDGen/solana-skills)
+- **Status: SHIPPED (PR #193), root-cause form — no new flag.** `check_orphans`
+  now detects the foreign-Proofs.lean case directly: preservation theorems on
+  both sides with ZERO overlap ⇒ the file came from a different spec, so the
+  full orphan+missing list (every theorem named twice) collapses to one
+  informational `ForeignProofs` note that does NOT fail the check. Any overlap
+  at all keeps the precise per-theorem drift. `reconcile` surfaces the same
+  note as a warning.
 
 ### 🩹 F2 — auto-suggest the unwind bound
 
@@ -136,6 +157,24 @@ greenfield Context harness assumes a struct it can't construct for real Anchor.
   the real `validate()`/handler. Composes with #162 phase-2 (IDL layouts) + G4 (#165 sysvar stubs).
 - **Verdict:** FILE (feature). High leverage — authorization is why a multisig exists.
 - **Issue:** #169 (QEDGen/solana-skills)
+- **Status: SHIPPED (branch `feat/kani-context-harness-169`).** `--kani-impl-context`
+  (`KaniImplMode::Context`, `kani_impl/context.rs`) drives the REAL
+  `<Ctx>::try_accounts` over symbolic `AccountInfo`s with `Box::leak`ed 'static
+  backing (dissolves the lifetime wall), stubs `<T>::try_deserialize` to the
+  spec-generated symbolic ctor (the T3 escape hatch — data buffers tiny + unread),
+  and generates per-spec-`signer` **signer-gate asserts** + the ensures. The real
+  struct name comes from `pragma context_struct = <Struct>` (or
+  `<handler>::<Struct>` per handler; default `PascalCase(handler)`). One agent-fill
+  site: the instruction fn through `Context::new`. De-risked under real `cargo
+  kani` 0.67 / anchor 0.32.1 (6-harness matrix): stubbed-deser gate proof 27s @
+  unwind 40, 20s @ unwind 6 with the T1 Pubkey stub; REAL Borsh over a
+  fixed-length symbolic buffer also closes (266s — 10x the stub, kept as
+  documented fallback); full handler-through-`Context::new` 21.5s; both mutants
+  correctly FAIL (negated gate refuted = non-vacuous; `UncheckedAccount`-bug
+  variant fires the signer assert). End-to-end acceptance: spec → codegen →
+  prelude delivery/dep-injection → one-line fill → generated harness GREEN
+  (23s, cover satisfied), and injecting the missing-`Signer` bug into the
+  program turns exactly the generated signer-gate assert RED.
 
 > **G6/G7/G8 RE-SCOPED (2026-07):** these were prereqs for an **IDL-driven**
 > constructor. That approach was abandoned — the IDL is the *lossy* layer (stale,

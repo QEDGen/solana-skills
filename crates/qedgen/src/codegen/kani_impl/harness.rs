@@ -374,7 +374,7 @@ pub(crate) fn emit_handler_harness(
 /// move freely. Requires the `state_struct` pragma (generated construction);
 /// otherwise the field types aren't known and we keep the move (agent-fill
 /// construction).
-fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
+pub(crate) fn state_field_needs_clone(spec: &ParsedSpec, field: &str) -> bool {
     super::state_ctor::resolve_state_struct(spec)
         .map(|(_, fields)| {
             fields
@@ -411,7 +411,7 @@ fn is_copy_scalar_ty(t: &str) -> bool {
 /// computed `#[kani::unwind]`, and every opted-in #182 stub attr — up to (but
 /// not including) the `fn <name>() {` line. Shared by the ensures-preservation
 /// and reject (guard-enforcement) emitters so a new stub is wired in one place.
-fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
+pub(crate) fn emit_impl_proof_attrs(out: &mut String, handler: &ParsedHandler, spec: &ParsedSpec) {
     out.push_str("#[kani::proof]\n");
     // `pragma kani_solver = <z3|cvc5|…>` bakes the solver into the harness
     // (`#[kani::solver(z3)]`) so it's reproducible without a `--solver` flag.
@@ -582,12 +582,10 @@ pub(crate) fn emit_brownfield_handler_harness(
         ));
     }
 
-    // 4. Apply the real effect + validity gate — agent-fill.
-    out.push_str("\n    // AGENT-FILL (2/2): apply the real handler's state effect on `state`\n");
-    out.push_str("    // (call the real logic, or replicate the short mutation), then gate on\n");
-    out.push_str("    // the validity check the handler runs (e.g. `state.invariant()?`). Bind\n");
-    out.push_str("    // whether it succeeded to `ok`.\n");
-    out.push_str("    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n");
+    // 4. Apply the real effect + validity gate — generated from
+    //    `pragma kani_target` when the real logic is a state-struct method
+    //    (#163/G2); agent-fill otherwise.
+    emit_effect_call_binding(out, handler, spec, EffectCallSite::Ensures);
 
     // 5. Assert the ensures. `post.<field>` reads the mutated-in-place state
     //    field DIRECTLY (`state.<field>`, a place behind `ManuallyDrop`'s
@@ -674,12 +672,9 @@ pub(crate) fn emit_brownfield_reject_harness(
         rewrite_pre_post_paths(&guard_predot)
     ));
 
-    // AGENT-FILL: the SAME real handler call as the ensures harness.
-    out.push_str(
-        "\n    // AGENT-FILL: call the real handler (same call as the ensures harness); bind\n",
-    );
-    out.push_str("    // whether it succeeded to `ok`.\n");
-    out.push_str("    let ok: bool = todo!(\"apply the real handler call → success?\");\n");
+    // The SAME real handler call as the ensures harness — generated from
+    // `pragma kani_target` when declared (#163/G2), agent-fill otherwise.
+    emit_effect_call_binding(out, handler, spec, EffectCallSite::Reject);
 
     // Guard enforcement: a violated precondition MUST be rejected.
     out.push_str(&format!(
@@ -748,17 +743,116 @@ pub(crate) fn emit_brownfield_panic_free_harness(
         ));
     }
 
-    // AGENT-FILL: call the real handler as a statement (no bind, no assert) —
-    // Kani's built-in checks verify panic-freedom during the call.
-    out.push_str(
-        "\n    // AGENT-FILL: call the real handler here (a statement, e.g.\n\
-         \x20   //   state.<method>(<params>);\n\
-         \x20   // No assertion — Kani's built-in unwrap/overflow/div/index/panic\n\
-         \x20   // checks verify the call cannot abort on any symbolic input.\n",
-    );
-    out.push_str("    todo!(\"call the real handler (statement, no bind)\");\n");
+    // Call the real handler as a statement (no bind, no assert) — Kani's
+    // built-in checks verify panic-freedom during the call. Generated from
+    // `pragma kani_target` when declared (#163/G2), agent-fill otherwise.
+    match super::state_ctor::kani_target_of(spec, &handler.name) {
+        Some(target) => {
+            out.push_str(
+                "\n    // Call generated from `pragma kani_target` — no assertion; Kani's\n\
+                 \x20   // built-in unwrap/overflow/div/index/panic checks verify the call\n\
+                 \x20   // cannot abort on any symbolic input.\n",
+            );
+            // `let _ =` swallows a `#[must_use]` Result/bool return uniformly.
+            out.push_str(&format!(
+                "    let _ = {};\n",
+                kani_target_call_expr(&target, handler)
+            ));
+        }
+        None => {
+            out.push_str(
+                "\n    // AGENT-FILL: call the real handler here (a statement, e.g.\n\
+                 \x20   //   state.<method>(<params>);\n\
+                 \x20   // No assertion — Kani's built-in unwrap/overflow/div/index/panic\n\
+                 \x20   // checks verify the call cannot abort on any symbolic input.\n",
+            );
+            out.push_str("    todo!(\"call the real handler (statement, no bind)\");\n");
+        }
+    }
     out.push_str("}\n\n");
     Ok(())
+}
+
+/// Which harness shape an effect-call binding is emitted for — only the
+/// agent-fill comment text differs.
+#[derive(Clone, Copy)]
+enum EffectCallSite {
+    Ensures,
+    Reject,
+}
+
+/// The generated `state.<method>(<params>)` call expression for a resolved
+/// `pragma kani_target` (#163/G2). `state` is behind `ManuallyDrop`, whose
+/// `DerefMut` makes the method call transparent.
+fn kani_target_call_expr(
+    target: &super::state_ctor::KaniTarget,
+    handler: &ParsedHandler,
+) -> String {
+    let args: Vec<&str> = handler
+        .takes_params
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    format!("state.{}({})", target.method, args.join(", "))
+}
+
+/// Emit the `let ok: bool = …;` effect-call binding: generated from
+/// `pragma kani_target` when the handler's real logic is a state-struct
+/// method, agent-fill `todo!()` otherwise. The target's `kind` segment maps
+/// the return shape to the success gate (`result` → `.is_ok()`, `bool` →
+/// direct, `unit` → call-then-true).
+fn emit_effect_call_binding(
+    out: &mut String,
+    handler: &ParsedHandler,
+    spec: &ParsedSpec,
+    site: EffectCallSite,
+) {
+    match super::state_ctor::kani_target_of(spec, &handler.name) {
+        Some(target) => {
+            out.push_str(
+                "\n    // Effect call generated from `pragma kani_target` — the real\n\
+                 \x20   // state-struct method; no agent-fill.\n",
+            );
+            let call = kani_target_call_expr(&target, handler);
+            match target.kind {
+                super::state_ctor::KaniTargetKind::Result => {
+                    out.push_str(&format!("    let ok: bool = {call}.is_ok();\n"));
+                }
+                super::state_ctor::KaniTargetKind::Bool => {
+                    out.push_str(&format!("    let ok: bool = {call};\n"));
+                }
+                super::state_ctor::KaniTargetKind::Unit => {
+                    out.push_str(&format!("    {call};\n    let ok: bool = true;\n"));
+                }
+            }
+        }
+        None => match site {
+            EffectCallSite::Ensures => {
+                out.push_str(
+                    "\n    // AGENT-FILL (2/2): apply the real handler's state effect on `state`\n",
+                );
+                out.push_str(
+                    "    // (call the real logic, or replicate the short mutation), then gate on\n",
+                );
+                out.push_str(
+                    "    // the validity check the handler runs (e.g. `state.invariant()?`). Bind\n",
+                );
+                out.push_str("    // whether it succeeded to `ok`.\n");
+                out.push_str(
+                    "    let ok: bool = todo!(\"apply effect + validity gate → success?\");\n",
+                );
+            }
+            EffectCallSite::Reject => {
+                out.push_str(
+                    "\n    // AGENT-FILL: call the real handler (same call as the ensures harness); bind\n",
+                );
+                out.push_str("    // whether it succeeded to `ok`.\n");
+                out.push_str(
+                    "    let ok: bool = todo!(\"apply the real handler call → success?\");\n",
+                );
+            }
+        },
+    }
 }
 
 /// Walk `handler.calls` and, for each CPI whose callee declares ensures,
@@ -840,7 +934,7 @@ fn emit_cpi_ensures_as_assume(out: &mut String, handler: &ParsedHandler, spec: &
 /// mints / token accounts are separate). Returns `None` when the heuristic
 /// can't pick a unique state account — the harness then emits per-field
 /// `todo!()` snapshot placeholders for the agent to resolve.
-fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
+pub(crate) fn find_state_account_name(handler: &ParsedHandler) -> Option<&str> {
     let candidates: Vec<&crate::check::ParsedHandlerAccount> = handler
         .accounts
         .iter()
@@ -897,12 +991,12 @@ fn collect_snapshot_fields(
 /// harness over the SAT/SMT resource wall. Fields that participate in the
 /// effect (`modifies` ∪ `effects` ∪ CPI binders) stay on *both* sides — the
 /// ensures compares their post value against the `pre_` snapshot.
-struct SplitSnapshotFields {
-    pre: Vec<String>,
-    post: Vec<String>,
+pub(crate) struct SplitSnapshotFields {
+    pub(crate) pre: Vec<String>,
+    pub(crate) post: Vec<String>,
 }
 
-fn collect_snapshot_fields_split(
+pub(crate) fn collect_snapshot_fields_split(
     handler: &ParsedHandler,
     guard_predot: Option<&str>,
     ensures: &crate::check::ParsedEnsures,
@@ -957,7 +1051,7 @@ fn is_ident_byte(b: u8) -> bool {
 /// standalone `s` (at an identifier boundary) immediately followed by `.` is
 /// rewritten, so `accounts.`/`is_signer` and the like are untouched. Guard
 /// expressions are ASCII.
-fn rewrite_state_var_to_pre(expr: &str) -> String {
+pub(crate) fn rewrite_state_var_to_pre(expr: &str) -> String {
     let bytes = expr.as_bytes();
     let mut out = String::with_capacity(expr.len() + 8);
     let mut i = 0;
@@ -999,7 +1093,7 @@ fn collect_prefixed_fields(expr: &str, prefix: &str, out: &mut std::collections:
 /// `state.x` / `old(state.x)` into exactly `post.x` / `pre.x` in the
 /// binary-mode form — no other source produces these tokens — so a plain
 /// string replace is safe.
-fn rewrite_pre_post_paths(expr: &str) -> String {
+pub(crate) fn rewrite_pre_post_paths(expr: &str) -> String {
     expr.replace("pre.", "pre_").replace("post.", "post_")
 }
 
