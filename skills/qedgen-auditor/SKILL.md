@@ -1762,6 +1762,18 @@ codegen-target dep referenced by `qedgen init --target ...`),
 the program is split into codegen-owned and user-owned files.
 This changes how the catalog applies:
 
+> **Brownfield / third-party audits skip this whole section.** The four
+> categories filed here — `spec_impl_drift_user_owned`, `generated_guard_bypass`,
+> `stored_field_never_written`, `qed_hash_drift_or_forgery` — fire ONLY on
+> qedgen-*generated* code; they are structurally impossible on a hand-written
+> program (there is no codegen boundary, generated guard, or content-pin to
+> drift). The bench confirms it: **zero fires across the entire audit corpus**
+> (non-DeFi + DeFi lending/vault), because every audit target is brownfield. So
+> unless the runtime is qedgen-codegen, do NOT spend the per-category walk on
+> them — they live down here, out of the always-scanned Category catalog, for
+> exactly that reason. (Fire-rate analysis: they were the *only* categories that
+> never fired once a domain-diverse corpus exercised the rest.)
+
 - **Codegen-owned** (`Cargo.toml`, `state.rs`, `errors.rs`,
   `events.rs`, `instructions/<h>/guards.rs`, the `lib.rs` Anchor
   wrapping, `formal_verification/Spec.lean`,
